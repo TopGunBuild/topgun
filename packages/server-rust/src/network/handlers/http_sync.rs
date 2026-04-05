@@ -48,11 +48,12 @@ impl IntoResponse for ClientAuthError {
     fn into_response(self) -> axum::response::Response {
         // The handler uses Option<ClientClaims>, so axum converts Err to None
         // and this impl is only invoked if ClientClaims is used directly (non-optional).
-        // For completeness, return 401 for all error variants.
+        // Always return a generic message here since this impl has no access to config.
+        // The enforce_auth function (used by the HTTP sync handler) applies the
+        // insecure_forward_auth_errors flag when constructing the response.
         let json = match &self {
             Self::MissingToken => r#"{"code":401,"message":"authentication required"}"#.to_string(),
-            Self::InvalidToken(_) => r#"{"code":401,"message":"invalid or expired token"}"#.to_string(),
-            Self::NotConfigured => r#"{"code":401,"message":"authentication not configured"}"#.to_string(),
+            Self::InvalidToken(_) | Self::NotConfigured => r#"{"code":401,"message":"Authentication failed"}"#.to_string(),
         };
         (
             StatusCode::UNAUTHORIZED,
@@ -195,10 +196,16 @@ fn wall_clock_timestamp() -> Timestamp {
 
 /// Checks auth requirements and returns an error response if authentication fails.
 /// Returns `None` when the request is authorized to proceed.
+///
+/// When `insecure_forward_auth_errors` is `false` (the default), invalid-token
+/// failures return the generic "Authentication failed" message rather than
+/// implementation details. Missing-token responses always say "authentication required"
+/// since that is standard HTTP semantics, not an information leak.
 fn enforce_auth(
     require_auth: bool,
     token_presence: TokenPresence,
     claims: Option<&ClientClaims>,
+    insecure_forward_auth_errors: bool,
 ) -> Option<axum::response::Response> {
     if !require_auth {
         return None;
@@ -212,7 +219,12 @@ fn enforce_auth(
             )
         }
         TokenPresence::Present if claims.is_none() => {
-            let json = r#"{"code":401,"message":"invalid or expired token"}"#.to_string();
+            let message = if insecure_forward_auth_errors {
+                "invalid or expired token"
+            } else {
+                "Authentication failed"
+            };
+            let json = format!(r#"{{"code":401,"message":"{message}"}}"#);
             Some(
                 (StatusCode::UNAUTHORIZED, [("content-type", "application/json")], json.into_bytes())
                     .into_response(),
@@ -737,7 +749,7 @@ pub async fn http_sync_handler(
         .is_some_and(|sc| sc.load().security.require_auth);
 
     // Authentication enforcement: reject unauthenticated requests when required.
-    if let Some(err_response) = enforce_auth(require_auth, token_presence, claims.as_ref()) {
+    if let Some(err_response) = enforce_auth(require_auth, token_presence, claims.as_ref(), state.config.insecure_forward_auth_errors) {
         return err_response;
     }
 
@@ -1027,7 +1039,7 @@ mod tests {
         );
     }
 
-    /// AC2: Present-but-invalid token + require_auth=true → HTTP 401 "invalid or expired token".
+    /// AC2: Present-but-invalid token + require_auth=true → HTTP 401 with generic message (default mode).
     #[tokio::test]
     async fn auth_invalid_token_rejected_when_required() {
         let state = test_state_with_auth(true);
@@ -1048,9 +1060,41 @@ mod tests {
         );
         let body_bytes = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
         let body_str = std::str::from_utf8(&body_bytes).unwrap();
+        // Default mode (insecure_forward_auth_errors=false) returns a generic message.
+        assert!(
+            body_str.contains("Authentication failed"),
+            "response body must contain 'Authentication failed' in default mode, got: {body_str}"
+        );
+    }
+
+    /// AC2 (insecure mode): Present-but-invalid token + require_auth=true + insecure flag → detailed message.
+    #[tokio::test]
+    async fn auth_invalid_token_insecure_mode_shows_detail() {
+        use crate::network::config::NetworkConfig;
+        use crate::service::config::ServerConfig;
+        use std::sync::Arc;
+
+        let mut base_state = test_state_with_auth(true);
+        base_state.config = Arc::new(NetworkConfig {
+            insecure_forward_auth_errors: true,
+            ..NetworkConfig::default()
+        });
+
+        let body = Bytes::from_static(b"");
+        let response = http_sync_handler(
+            State(base_state),
+            None,
+            axum::Extension(TokenPresence::Present),
+            body,
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+        let body_bytes = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+        let body_str = std::str::from_utf8(&body_bytes).unwrap();
         assert!(
             body_str.contains("invalid or expired token"),
-            "response body must contain 'invalid or expired token', got: {body_str}"
+            "insecure mode must return detailed message, got: {body_str}"
         );
     }
 
