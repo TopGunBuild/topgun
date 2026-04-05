@@ -187,6 +187,16 @@ export abstract class BaseAuthProvider implements AuthProvider {
     };
   }
 
+  /**
+   * Clear the cached token and expiry so the next getToken() call fetches fresh.
+   * Subclasses call this when the external session changes (e.g., Firebase onIdTokenChanged).
+   */
+  protected invalidateCache(): void {
+    this.cachedToken = null;
+    this.cachedTokenExpiry = 0;
+    this.clearRefreshTimer();
+  }
+
   protected emit(event: AuthEvent): void {
     for (const listener of this.listeners) {
       try {

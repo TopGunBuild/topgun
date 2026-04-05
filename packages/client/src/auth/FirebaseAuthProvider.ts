@@ -31,6 +31,7 @@ export class FirebaseAuthProvider extends BaseAuthProvider {
   initialize(): void {
     if (this.firebaseAuth.onIdTokenChanged) {
       this.unsubscribeTokenChanged = this.firebaseAuth.onIdTokenChanged((user) => {
+        this.invalidateCache();
         if (user) {
           this.emit({ type: 'token:refreshed' });
         } else {
