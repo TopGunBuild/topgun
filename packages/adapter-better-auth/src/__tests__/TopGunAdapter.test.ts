@@ -1,4 +1,4 @@
-import { topGunAdapter } from '../TopGunAdapter';
+import { topGunAdapter, TopGunDBAdapter } from '../TopGunAdapter';
 import { TopGunClient } from '@topgunbuild/client';
 import { IStorageAdapter, OpLogEntry } from '@topgunbuild/client';
 import { LWWRecord, ORMapRecord } from '@topgunbuild/core';
@@ -420,6 +420,129 @@ describe('cold start handling', () => {
 
     // start() should not be called when waitForReady is false
     expect(mockClient.start).not.toHaveBeenCalled();
+  });
+});
+
+describe('findManyWithCursor', () => {
+  let client: TopGunClient;
+  let adapter: TopGunDBAdapter;
+
+  // IDs are chosen so their lexicographic order matches the expected page order:
+  // user-a < user-b < user-c < user-d < user-e
+  const users = [
+    { id: 'user-a', email: 'a@test.com', name: 'User A' },
+    { id: 'user-b', email: 'b@test.com', name: 'User B' },
+    { id: 'user-c', email: 'c@test.com', name: 'User C' },
+    { id: 'user-d', email: 'd@test.com', name: 'User D' },
+    { id: 'user-e', email: 'e@test.com', name: 'User E' },
+  ];
+
+  beforeEach(async () => {
+    const storage = new MemoryStorageAdapter();
+    client = new TopGunClient({
+      serverUrl: 'ws://fake-url',
+      storage,
+      nodeId: 'test-cursor-node'
+    });
+    await client.start();
+
+    adapter = topGunAdapter({ client })({} as BetterAuthOptions) as TopGunDBAdapter;
+
+    // Create 5 users in the adapter
+    for (const user of users) {
+      await adapter.create({ model: 'user', data: user });
+    }
+  });
+
+  it('returns first page of 2 users with a non-null nextCursor', async () => {
+    const result = await adapter.findManyWithCursor({ model: 'user', limit: 2 });
+
+    expect(result.data).toHaveLength(2);
+    expect(result.nextCursor).not.toBeNull();
+  });
+
+  it('returns results sorted by id asc on the first page', async () => {
+    const result = await adapter.findManyWithCursor({ model: 'user', limit: 5 });
+
+    expect(result.data).toHaveLength(5);
+    const ids = result.data.map(r => r['id'] as string);
+    // Verify ascending order
+    for (let i = 1; i < ids.length; i++) {
+      expect(ids[i] > ids[i - 1]).toBe(true);
+    }
+    // Verify matches expected sorted order
+    expect(ids).toEqual(['user-a', 'user-b', 'user-c', 'user-d', 'user-e']);
+  });
+
+  it('returns next 2 users with no duplicates or gaps when cursor is provided', async () => {
+    const page1 = await adapter.findManyWithCursor({ model: 'user', limit: 2 });
+    expect(page1.data).toHaveLength(2);
+    expect(page1.nextCursor).not.toBeNull();
+
+    const page2 = await adapter.findManyWithCursor({
+      model: 'user',
+      limit: 2,
+      cursor: page1.nextCursor!,
+    });
+
+    expect(page2.data).toHaveLength(2);
+
+    // No overlap between pages
+    const page1Ids = new Set(page1.data.map(r => r['id'] as string));
+    const page2Ids = page2.data.map(r => r['id'] as string);
+    for (const id of page2Ids) {
+      expect(page1Ids.has(id)).toBe(false);
+    }
+
+    // All page 2 IDs are greater than the cursor (which is the last ID on page 1)
+    for (const id of page2Ids) {
+      expect(id > page1.nextCursor!).toBe(true);
+    }
+  });
+
+  it('returns nextCursor: null on the last page when fewer records than limit', async () => {
+    // Page 1: records 1-2, cursor = user-b
+    const page1 = await adapter.findManyWithCursor({ model: 'user', limit: 2 });
+    // Page 2: records 3-4, cursor = user-d
+    const page2 = await adapter.findManyWithCursor({
+      model: 'user',
+      limit: 2,
+      cursor: page1.nextCursor!,
+    });
+    // Page 3: record 5 only (fewer than limit=2), so nextCursor should be null
+    const page3 = await adapter.findManyWithCursor({
+      model: 'user',
+      limit: 2,
+      cursor: page2.nextCursor!,
+    });
+
+    expect(page3.data).toHaveLength(1);
+    expect(page3.nextCursor).toBeNull();
+  });
+
+  it('returns all 5 users across three pages with no missing records', async () => {
+    const allIds: string[] = [];
+
+    const page1 = await adapter.findManyWithCursor({ model: 'user', limit: 2 });
+    allIds.push(...page1.data.map(r => r['id'] as string));
+
+    const page2 = await adapter.findManyWithCursor({
+      model: 'user',
+      limit: 2,
+      cursor: page1.nextCursor!,
+    });
+    allIds.push(...page2.data.map(r => r['id'] as string));
+
+    const page3 = await adapter.findManyWithCursor({
+      model: 'user',
+      limit: 2,
+      cursor: page2.nextCursor!,
+    });
+    allIds.push(...page3.data.map(r => r['id'] as string));
+
+    // All 5 users found, sorted by id asc, no duplicates
+    expect(allIds).toHaveLength(5);
+    expect(allIds).toEqual(['user-a', 'user-b', 'user-c', 'user-d', 'user-e']);
   });
 });
 

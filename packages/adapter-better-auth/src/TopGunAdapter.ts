@@ -161,7 +161,9 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): ((options: 
           const handle = client.query<T>(mapName, filter);
           const unsubscribe = handle.subscribe((results: T[]) => {
             unsubscribe();
-            resolve(results);
+            // Apply limit client-side — the query engine may not enforce it in all environments
+            const limited = limit !== undefined ? results.slice(0, limit) : results;
+            resolve(limited);
           });
         });
       }
@@ -408,7 +410,11 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): ((options: 
        */
       async findManyWithCursor({ model, where, limit, cursor }) {
         await ensureReady();
-        const results = await runQuery<AuthRecord>(model, where, undefined, limit, undefined, cursor);
+        // Pass empty string as cursor for first page — empty string sorts before all IDs lexicographically,
+        // so greaterThan('id', '') returns all records. This ensures the cursor code path always enforces
+        // id asc sort and limit enforcement regardless of whether a cursor was provided.
+        const effectiveCursor = cursor !== undefined ? cursor : '';
+        const results = await runQuery<AuthRecord>(model, where, undefined, limit, undefined, effectiveCursor);
         const data = results as unknown as Record<string, unknown>[];
         const nextCursor = limit !== undefined && results.length < limit
           ? null
