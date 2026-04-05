@@ -358,16 +358,17 @@ fn decode_http_cursor(cursor: &str) -> Option<HttpCursorData> {
 ///
 /// The `value` parameter is an `rmpv::Value` (from the store), while `cursor.last_sort_value`
 /// is a `serde_json::Value` (from JSON round-tripping). Comparison converts both to f64 for
-/// numbers or compares string representations to avoid needing rmpv<->serde_json conversion.
+/// numbers or compares string representations to avoid needing rmpv<->`serde_json` conversion.
 fn is_after_cursor(key: &str, value: &rmpv::Value, cursor: &HttpCursorData) -> bool {
+    use topgun_core::messages::base::SortDirection;
+
     // Extract the sort field value from the rmpv record if a sort field is specified.
     let sort_val: &rmpv::Value = match &cursor.sort_field {
         Some(field) => match value {
             rmpv::Value::Map(pairs) => pairs
                 .iter()
                 .find(|(k, _)| k.as_str() == Some(field.as_str()))
-                .map(|(_, v)| v)
-                .unwrap_or(&rmpv::Value::Nil),
+                .map_or(&rmpv::Value::Nil, |(_, v)| v),
             _ => &rmpv::Value::Nil,
         },
         // No sort field: ordering is by key only; use Nil as sort value.
@@ -376,7 +377,6 @@ fn is_after_cursor(key: &str, value: &rmpv::Value, cursor: &HttpCursorData) -> b
 
     let cmp = compare_rmpv_to_json(sort_val, &cursor.last_sort_value);
 
-    use topgun_core::messages::base::SortDirection;
     match cursor.sort_direction {
         SortDirection::Asc => {
             // After cursor: sort_val > last_sort_value, or equal with key > last_key
@@ -406,15 +406,15 @@ fn compare_rmpv_to_json(rmpv_val: &rmpv::Value, json_val: &serde_json::Value) ->
         (rmpv::Value::Integer(i), serde_json::Value::Number(n)) => {
             let a = i.as_f64().unwrap_or(f64::NAN);
             let b = n.as_f64().unwrap_or(f64::NAN);
-            a.partial_cmp(&b).map(|o| o.into_i32_sign()).unwrap_or(0)
+            a.partial_cmp(&b).map_or(0, OrderingExt::into_i32_sign)
         }
         (rmpv::Value::F32(a), serde_json::Value::Number(n)) => {
             let b = n.as_f64().unwrap_or(f64::NAN);
-            (*a as f64).partial_cmp(&b).map(|o| o.into_i32_sign()).unwrap_or(0)
+            f64::from(*a).partial_cmp(&b).map_or(0, OrderingExt::into_i32_sign)
         }
         (rmpv::Value::F64(a), serde_json::Value::Number(n)) => {
             let b = n.as_f64().unwrap_or(f64::NAN);
-            a.partial_cmp(&b).map(|o| o.into_i32_sign()).unwrap_or(0)
+            a.partial_cmp(&b).map_or(0, OrderingExt::into_i32_sign)
         }
         // Type mismatch: compare by type tag string for stable ordering
         _ => {
@@ -429,8 +429,7 @@ fn rmpv_type_tag(v: &rmpv::Value) -> &'static str {
     match v {
         rmpv::Value::Nil => "nil",
         rmpv::Value::Boolean(_) => "bool",
-        rmpv::Value::Integer(_) => "number",
-        rmpv::Value::F32(_) | rmpv::Value::F64(_) => "number",
+        rmpv::Value::Integer(_) | rmpv::Value::F32(_) | rmpv::Value::F64(_) => "number",
         rmpv::Value::String(_) => "string",
         rmpv::Value::Binary(_) => "binary",
         rmpv::Value::Array(_) => "array",
@@ -461,13 +460,11 @@ fn rmpv_to_json_value(v: &rmpv::Value) -> Option<serde_json::Value> {
         rmpv::Value::Integer(i) => {
             if let Some(n) = i.as_i64() {
                 Some(serde_json::Value::Number(serde_json::Number::from(n)))
-            } else if let Some(n) = i.as_u64() {
-                Some(serde_json::Value::Number(serde_json::Number::from(n)))
             } else {
-                None
+                i.as_u64().map(|n| serde_json::Value::Number(serde_json::Number::from(n)))
             }
         }
-        rmpv::Value::F32(f) => serde_json::Number::from_f64(*f as f64)
+        rmpv::Value::F32(f) => serde_json::Number::from_f64(f64::from(*f))
             .map(serde_json::Value::Number),
         rmpv::Value::F64(f) => serde_json::Number::from_f64(*f)
             .map(serde_json::Value::Number),
@@ -499,6 +496,7 @@ impl OrderingExt for std::cmp::Ordering {
 /// (`has_policies()` and `evaluate()`) on `PolicyEvaluator` are async. The store
 /// scanning and `execute_query` call are synchronous. The CPU-bound portion is short
 /// enough that `spawn_blocking` is not needed.
+#[allow(clippy::too_many_lines)]
 async fn dispatch_queries(
     queries: Vec<HttpQueryRequest>,
     store_factory: &RecordStoreFactory,
@@ -576,26 +574,26 @@ async fn dispatch_queries(
         filtered.sort_by(|a, b| a.key.cmp(&b.key));
 
         // Current timestamp for cursor generation and expiry validation.
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
+        let now_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+        )
+        .unwrap_or(i64::MAX);
 
         // Determine pagination strategy: cursor takes precedence over offset.
         let (page_entries, has_more, next_cursor) = if let Some(ref cursor_str) = q.cursor {
             // --- Cursor-based pagination ---
-            let cursor_data = match decode_http_cursor(cursor_str) {
-                Some(c) => c,
-                None => {
-                    // Malformed cursor: return a 400 error and skip this query.
-                    let errors = response.errors.get_or_insert_with(Vec::new);
-                    errors.push(HttpSyncError {
-                        code: 400,
-                        message: "invalid or expired cursor".into(),
-                        context: Some(q.query_id.clone()),
-                    });
-                    continue;
-                }
+            let Some(cursor_data) = decode_http_cursor(cursor_str) else {
+                // Malformed cursor: return a 400 error and skip this query.
+                let errors = response.errors.get_or_insert_with(Vec::new);
+                errors.push(HttpSyncError {
+                    code: 400,
+                    message: "invalid or expired cursor".into(),
+                    context: Some(q.query_id.clone()),
+                });
+                continue;
             };
 
             // Validate cursor expiry: cursors older than 10 minutes are rejected.
@@ -1354,53 +1352,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // R5: Cursor-based pagination tests
     // -----------------------------------------------------------------------
-
-    /// Helper: seeds records with key and integer `score` field, sorted by key.
-    async fn state_with_scored_data(map_name: &str, records: Vec<(&str, i64)>) -> AppState {
-        let factory = Arc::new(RecordStoreFactory::new(
-            StorageConfig::default(),
-            Arc::new(NullDataStore),
-            Vec::new(),
-        ));
-        let store = factory.get_or_create(map_name, 0);
-        for (key, score) in records {
-            store
-                .put(
-                    key,
-                    StoreRecordValue::Lww {
-                        value: TgValue::Map(
-                            [("score".to_string(), TgValue::Int(score))]
-                                .into_iter()
-                                .collect(),
-                        ),
-                        timestamp: HlcTimestamp {
-                            millis: 1_000_000,
-                            counter: 0,
-                            node_id: "node-1".to_string(),
-                        },
-                    },
-                    ExpiryPolicy::NONE,
-                    CallerProvenance::Client,
-                )
-                .await
-                .expect("seeding store should not fail");
-        }
-        AppState {
-            registry: Arc::new(crate::network::ConnectionRegistry::new()),
-            shutdown: Arc::new(crate::network::ShutdownController::new()),
-            config: Arc::new(crate::network::NetworkConfig::default()),
-            start_time: Instant::now(),
-            observability: None,
-            operation_service: None,
-            dispatcher: None,
-            jwt_secret: None,
-            cluster_state: None,
-            store_factory: Some(factory),
-            server_config: None,
-            policy_store: None,
-            auth_providers: Arc::new(vec![]),
-        }
-    }
 
     /// R5 test 1: Two-page cursor traversal returns all records without duplicates.
     ///
