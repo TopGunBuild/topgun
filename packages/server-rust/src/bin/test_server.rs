@@ -265,11 +265,19 @@ async fn main() -> anyhow::Result<()> {
 
     let (classify_svc, dispatcher, connection_registry) = cluster_state_for_services;
 
+    // Allow integration test environments to opt in to detailed auth errors.
+    let insecure_forward_auth_errors = std::env::var("INSECURE_FORWARD_AUTH_ERRORS")
+        .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"))
+        .unwrap_or(false);
+
     let shutdown = Arc::new(ShutdownController::new());
     let state = AppState {
         registry: connection_registry,
         shutdown: Arc::clone(&shutdown),
-        config: Arc::new(NetworkConfig::default()),
+        config: Arc::new(NetworkConfig {
+            insecure_forward_auth_errors,
+            ..NetworkConfig::default()
+        }),
         start_time: Instant::now(),
         observability: None,
         operation_service: Some(classify_svc),
