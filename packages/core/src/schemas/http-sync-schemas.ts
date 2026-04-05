@@ -29,6 +29,7 @@ export const HttpQueryRequestSchema = z.object({
   filter: z.any(),
   limit: z.number().optional(),
   offset: z.number().optional(),
+  cursor: z.string().optional(),
 });
 export type HttpQueryRequest = z.infer<typeof HttpQueryRequestSchema>;
 

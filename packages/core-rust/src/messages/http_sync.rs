@@ -65,6 +65,10 @@ pub struct HttpQueryRequest {
     /// Number of results to skip for pagination.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub offset: Option<u32>,
+    /// Opaque cursor string for cursor-based pagination. When provided, results
+    /// start after the cursor position. Takes precedence over `offset`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cursor: Option<String>,
 }
 
 impl Default for HttpQueryRequest {
@@ -75,6 +79,7 @@ impl Default for HttpQueryRequest {
             filter: rmpv::Value::Nil,
             limit: None,
             offset: None,
+            cursor: None,
         }
     }
 }
@@ -333,6 +338,7 @@ mod tests {
             )]),
             limit: Some(50),
             offset: Some(10),
+            cursor: Some("cursor-abc".into()),
         };
         let bytes = rmp_serde::to_vec_named(&req).expect("serialize");
         let decoded: HttpQueryRequest = rmp_serde::from_slice(&bytes).expect("deserialize");
@@ -347,6 +353,7 @@ mod tests {
             filter: rmpv::Value::Nil,
             limit: None,
             offset: None,
+            cursor: None,
         };
         let bytes = rmp_serde::to_vec_named(&req).expect("serialize");
         let decoded: HttpQueryRequest = rmp_serde::from_slice(&bytes).expect("deserialize");
@@ -359,6 +366,48 @@ mod tests {
         assert_eq!(req.filter, rmpv::Value::Nil);
         assert!(req.limit.is_none());
         assert!(req.offset.is_none());
+        assert!(req.cursor.is_none());
+    }
+
+    #[test]
+    fn http_query_request_cursor_omitted_when_none() {
+        // cursor=None must not produce a 'cursor' key in MsgPack (wire compactness)
+        let req = HttpQueryRequest {
+            query_id: "q-cursor-test".into(),
+            map_name: "m".into(),
+            filter: rmpv::Value::Nil,
+            limit: None,
+            offset: None,
+            cursor: None,
+        };
+        let bytes = rmp_serde::to_vec_named(&req).expect("serialize");
+        let raw: rmpv::Value =
+            rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
+        let map = raw.as_map().expect("should be map");
+        let cursor_keys: Vec<_> = map
+            .iter()
+            .filter(|(k, _)| k.as_str() == Some("cursor"))
+            .collect();
+        assert!(
+            cursor_keys.is_empty(),
+            "cursor=None should not produce a 'cursor' key in MsgPack"
+        );
+    }
+
+    #[test]
+    fn http_query_request_cursor_roundtrip() {
+        let req = HttpQueryRequest {
+            query_id: "q-cursor".into(),
+            map_name: "items".into(),
+            filter: rmpv::Value::Nil,
+            limit: Some(10),
+            offset: None,
+            cursor: Some("eyJsYXN0S2V5IjoiYWJjIn0".into()),
+        };
+        let bytes = rmp_serde::to_vec_named(&req).expect("serialize");
+        let decoded: HttpQueryRequest = rmp_serde::from_slice(&bytes).expect("deserialize");
+        assert_eq!(req, decoded);
+        assert_eq!(decoded.cursor.as_deref(), Some("eyJsYXN0S2V5IjoiYWJjIn0"));
     }
 
     // ---- HttpSearchRequest ----
@@ -670,6 +719,7 @@ mod tests {
             filter: rmpv::Value::Nil,
             limit: None,
             offset: None,
+            cursor: None,
         };
 
         let bytes = rmp_serde::to_vec_named(&req).expect("serialize");
@@ -694,6 +744,15 @@ mod tests {
             offset_keys.is_empty(),
             "offset=None should not produce an 'offset' key"
         );
+
+        let cursor_keys: Vec<_> = map
+            .iter()
+            .filter(|(k, _)| k.as_str() == Some("cursor"))
+            .collect();
+        assert!(
+            cursor_keys.is_empty(),
+            "cursor=None should not produce a 'cursor' key"
+        );
     }
 
     #[test]
@@ -704,6 +763,7 @@ mod tests {
             filter: rmpv::Value::Nil,
             limit: Some(10),
             offset: Some(5),
+            cursor: Some("test-cursor".into()),
         };
 
         let bytes = rmp_serde::to_vec_named(&req).expect("serialize");
@@ -722,5 +782,11 @@ mod tests {
             .find(|(k, _)| k.as_str() == Some("offset"))
             .expect("offset=Some should produce an 'offset' key");
         assert_eq!(offset_key.1.as_u64(), Some(5));
+
+        let cursor_key = map
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("cursor"))
+            .expect("cursor=Some should produce a 'cursor' key");
+        assert_eq!(cursor_key.1.as_str(), Some("test-cursor"));
     }
 }
