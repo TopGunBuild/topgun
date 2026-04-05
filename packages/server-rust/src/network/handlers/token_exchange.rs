@@ -69,6 +69,7 @@ struct ExchangeJwtClaims {
 /// - Named provider not found (400)
 /// - All providers fail verification (401)
 /// - Token signing fails (500)
+#[allow(clippy::too_many_lines)]
 pub async fn token_exchange_handler(
     State(state): State<AppState>,
     Json(req): Json<TokenExchangeRequest>,
