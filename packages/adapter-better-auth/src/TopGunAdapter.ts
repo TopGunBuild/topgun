@@ -416,11 +416,13 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): ((options: 
         const effectiveCursor = cursor !== undefined ? cursor : '';
         const results = await runQuery<AuthRecord>(model, where, undefined, limit, undefined, effectiveCursor);
         const data = results as unknown as Record<string, unknown>[];
-        const nextCursor = limit !== undefined && results.length < limit
+        // nextCursor is null when: no results, fewer results than limit (last page),
+        // or limit is undefined (pagination without a page size is meaningless)
+        const nextCursor = limit === undefined
           ? null
-          : results.length > 0
-            ? String(results[results.length - 1].id)
-            : null;
+          : results.length < limit
+            ? null
+            : String(results[results.length - 1].id);
         return { data, nextCursor };
       },
     } as TopGunDBAdapter;

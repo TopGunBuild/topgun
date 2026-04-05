@@ -149,13 +149,15 @@ describe('BetterAuth Integration', () => {
       }
     });
 
-    it('creates a user and account via signUpEmail', async () => {
-      if (!betterAuthAvailable || !auth) {
-        console.warn('Skipping: BetterAuth not available in this test environment');
-        return;
-      }
+    // Conditionally skip tests when BetterAuth is not available (ESM-only package
+    // cannot be dynamically imported in all Jest CJS configs). Using a conditional
+    // wrapper so Jest reports these as "skipped" rather than false-positive "passed".
+    const itIfBetterAuth = (...args: Parameters<typeof it>) => {
+      return betterAuthAvailable ? it(...args) : it.skip(...args);
+    };
 
-      const result = await auth.api.signUpEmail({
+    itIfBetterAuth('creates a user and account via signUpEmail', async () => {
+      const result = await auth!.api.signUpEmail({
         body: { email: TEST_EMAIL, password: TEST_PASSWORD, name: TEST_NAME },
       });
 
@@ -166,13 +168,8 @@ describe('BetterAuth Integration', () => {
       expect(result.token).toBeDefined();
     });
 
-    it('creates a session record in the TopGun map after signUpEmail', async () => {
-      if (!betterAuthAvailable || !auth) {
-        console.warn('Skipping: BetterAuth not available in this test environment');
-        return;
-      }
-
-      const result = await auth.api.signUpEmail({
+    itIfBetterAuth('creates a session record in the TopGun map after signUpEmail', async () => {
+      const result = await auth!.api.signUpEmail({
         body: { email: `session-check-${Date.now()}@example.com`, password: TEST_PASSWORD, name: TEST_NAME },
       });
 
@@ -187,14 +184,9 @@ describe('BetterAuth Integration', () => {
       expect(found).not.toBeNull();
     });
 
-    it('retrieves user by email after signup', async () => {
-      if (!betterAuthAvailable || !auth) {
-        console.warn('Skipping: BetterAuth not available in this test environment');
-        return;
-      }
-
+    itIfBetterAuth('retrieves user by email after signup', async () => {
       const uniqueEmail = `lookup-${Date.now()}@example.com`;
-      await auth.api.signUpEmail({
+      await auth!.api.signUpEmail({
         body: { email: uniqueEmail, password: TEST_PASSWORD, name: TEST_NAME },
       });
 
@@ -208,14 +200,9 @@ describe('BetterAuth Integration', () => {
       expect((found as Record<string, unknown>)?.['name']).toBe(TEST_NAME);
     });
 
-    it('deletes a session record via adapter.delete', async () => {
-      if (!betterAuthAvailable || !auth) {
-        console.warn('Skipping: BetterAuth not available in this test environment');
-        return;
-      }
-
+    itIfBetterAuth('deletes a session record via adapter.delete', async () => {
       const uniqueEmail = `session-del-${Date.now()}@example.com`;
-      const signupResult = await auth.api.signUpEmail({
+      const signupResult = await auth!.api.signUpEmail({
         body: { email: uniqueEmail, password: TEST_PASSWORD, name: TEST_NAME },
       });
 
