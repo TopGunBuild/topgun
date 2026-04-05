@@ -47,6 +47,10 @@ pub struct NetworkConfig {
     /// `module.rs`; the Serialize/Deserialize derives on `AuthProviderConfig`
     /// are included for future config-file support.
     pub auth_providers: Vec<AuthProviderConfig>,
+    /// When `true`, detailed auth error messages are forwarded to clients.
+    /// Defaults to `false` (production-safe: generic "Authentication failed" is returned).
+    /// Set `INSECURE_FORWARD_AUTH_ERRORS=true` in the environment for development debugging.
+    pub insecure_forward_auth_errors: bool,
 }
 
 impl Default for NetworkConfig {
@@ -65,6 +69,7 @@ impl Default for NetworkConfig {
             rate_limit_per_ip: 100,
             rate_limit_burst: 50,
             auth_providers: vec![],
+            insecure_forward_auth_errors: false,
         }
     }
 }
@@ -129,6 +134,8 @@ mod tests {
         assert_eq!(config.jwt_clock_skew_secs, 60);
         assert_eq!(config.rate_limit_per_ip, 100);
         assert_eq!(config.rate_limit_burst, 50);
+        // Default is false — production-safe by default.
+        assert!(!config.insecure_forward_auth_errors);
     }
 
     #[test]
