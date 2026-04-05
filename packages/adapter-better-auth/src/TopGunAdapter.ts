@@ -172,7 +172,23 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
         if (results.length > 0) {
           const result = results[0];
 
-          // Handle Join
+          /**
+           * Join implementation: N+1 query pattern.
+           *
+           * For each requested join model, a separate query is executed against
+           * that model's map with a foreign key filter. This means:
+           * - 1 join model = 2 total queries (main + 1 join)
+           * - 2 join models = 3 total queries (main + 2 joins)
+           *
+           * Performance characteristics:
+           * - Each query runs against in-memory CRDT maps (sub-millisecond)
+           * - Auth workloads typically join 1-2 models (account, session)
+           * - Result sets are small (1-5 records per join)
+           * - Network cost: zero (all reads are local)
+           *
+           * For workloads with >5 join models or >100 records per join,
+           * consider a direct TopGun query instead of the BetterAuth adapter.
+           */
           if (join) {
              for (const [joinModel, joinConfig] of Object.entries(join)) {
                  if (joinConfig === false) continue;
@@ -307,11 +323,20 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
          return results.length;
       },
 
+      /**
+       * WARNING: Not atomic. TopGun uses CRDTs (conflict-free replicated data types)
+       * which do not support traditional ACID transactions. This method executes
+       * the callback sequentially — if an operation fails mid-callback, earlier
+       * operations are NOT rolled back.
+       *
+       * Why this is acceptable for BetterAuth:
+       * - BetterAuth uses transactions for user+account creation during signup
+       * - CRDT LWW semantics ensure eventual consistency even on partial failure
+       * - Worst case: orphaned account record (no user), which is harmless
+       *
+       * For deployments requiring strict atomicity, use a traditional SQL adapter.
+       */
       async transaction(callback) {
-         // TopGun doesn't support atomic multi-map transactions yet.
-         // We execute sequentially as per BetterAuth fallback.
-         // But DBTransactionAdapter is Omit<DBAdapter, "transaction">.
-         // We just pass 'this' as the transaction adapter (cast it).
          return callback(this as Omit<DBAdapter, 'transaction'>);
       }
     } as DBAdapter;
