@@ -125,6 +125,11 @@ impl AuthHandler {
     /// Tokens expired within this window are still accepted to handle clock
     /// drift between clients and the server.
     ///
+    /// When `insecure_forward_auth_errors` is `false` (the default), the
+    /// `AUTH_FAIL` message sent to the client contains only a generic
+    /// "Authentication failed" string. Detailed reasons are always logged at
+    /// `warn` level regardless of this flag.
+    ///
     /// # Errors
     ///
     /// Returns `AuthError::InvalidToken` if the JWT is invalid or expired.
@@ -135,6 +140,7 @@ impl AuthHandler {
         auth_msg: &AuthMessage,
         tx: &mpsc::Sender<OutboundMessage>,
         leeway: u64,
+        insecure_forward_auth_errors: bool,
     ) -> Result<Principal, AuthError> {
         let (algorithm, key) = decode_jwt_key(&self.jwt_secret)
             .map_err(|reason| AuthError::InvalidToken { reason })?;
@@ -150,15 +156,21 @@ impl AuthHandler {
                 // Reject tokens without a subject claim — anonymous identity is
                 // not permitted; callers must always provide a `sub` field.
                 let Some(user_id) = token_data.claims.sub else {
+                    let detail = "missing sub claim in JWT";
                     warn!("JWT accepted by signature but missing required `sub` claim");
+                    let client_error = if insecure_forward_auth_errors {
+                        detail.to_string()
+                    } else {
+                        "Authentication failed".to_string()
+                    };
                     let fail_msg = Message::AuthFail(AuthFailData {
-                        error: Some("missing sub claim in JWT".to_string()),
+                        error: Some(client_error),
                         ..Default::default()
                     });
                     let bytes = rmp_serde::to_vec_named(&fail_msg)?;
                     tx.send(OutboundMessage::Binary(bytes)).await?;
                     return Err(AuthError::InvalidToken {
-                        reason: "missing sub claim in JWT".to_string(),
+                        reason: detail.to_string(),
                     });
                 };
 
@@ -174,9 +186,16 @@ impl AuthHandler {
                 let reason = format!("{e}");
                 warn!(error = %reason, "JWT verification failed");
 
-                // Send AUTH_FAIL with error description via outbound channel
+                let client_error = if insecure_forward_auth_errors {
+                    reason.clone()
+                } else {
+                    "Authentication failed".to_string()
+                };
+
+                // Send AUTH_FAIL via outbound channel. Detailed reason is logged
+                // above; only the client-facing message is controlled by the flag.
                 let fail_msg = Message::AuthFail(AuthFailData {
-                    error: Some(reason.clone()),
+                    error: Some(client_error),
                     ..Default::default()
                 });
                 let bytes = rmp_serde::to_vec_named(&fail_msg)?;
@@ -247,7 +266,7 @@ mod tests {
         let (handler, tx, _rx) = setup();
         let token = make_token(Some("user-1"), 3600);
         let auth_msg = AuthMessage { token, protocol_version: None };
-        let result = handler.handle_auth(&auth_msg, &tx, 60).await;
+        let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         let principal = result.unwrap();
         assert_eq!(principal.id, "user-1");
@@ -259,7 +278,7 @@ mod tests {
         let (handler, tx, mut rx) = setup();
         let token = make_token(Some("user-1"), -3600);
         let auth_msg = AuthMessage { token, protocol_version: None };
-        let result = handler.handle_auth(&auth_msg, &tx, 60).await;
+        let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(result.is_err(), "expected Err for expired token");
         // AUTH_FAIL must have been sent on the channel (AC12 for expired path)
         assert!(
@@ -274,7 +293,7 @@ mod tests {
         let (handler, tx, _rx) = setup();
         let token = make_token(Some("user-1"), -30);
         let auth_msg = AuthMessage { token, protocol_version: None };
-        let result = handler.handle_auth(&auth_msg, &tx, 60).await;
+        let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(
             result.is_ok(),
             "token 30s expired should be accepted within 60s leeway, got {result:?}"
@@ -287,7 +306,7 @@ mod tests {
         let (handler, tx, mut rx) = setup();
         let token = make_token(Some("user-1"), -90);
         let auth_msg = AuthMessage { token, protocol_version: None };
-        let result = handler.handle_auth(&auth_msg, &tx, 60).await;
+        let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(
             result.is_err(),
             "token 90s expired should be rejected with 60s leeway"
@@ -304,7 +323,7 @@ mod tests {
         let (handler, tx, mut rx) = setup();
         let token = make_token(None, 3600);
         let auth_msg = AuthMessage { token, protocol_version: None };
-        let result = handler.handle_auth(&auth_msg, &tx, 60).await;
+        let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(result.is_err(), "expected Err when sub is missing");
         match result.unwrap_err() {
             AuthError::InvalidToken { reason } => {
@@ -405,7 +424,7 @@ RQIDAQAB
         let handler = AuthHandler::new(TEST_RSA_PUBLIC_PEM.to_owned());
         let (tx, _rx) = mpsc::channel(8);
         let auth_msg = AuthMessage { token, protocol_version: None };
-        let result = handler.handle_auth(&auth_msg, &tx, 60).await;
+        let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(result.is_ok(), "RS256 token with matching public key should be accepted, got {result:?}");
         assert_eq!(result.unwrap().id, "rs-user-1");
     }
@@ -419,7 +438,7 @@ RQIDAQAB
         let handler = AuthHandler::new(TEST_RSA2_PUBLIC_PEM.to_owned());
         let (tx, mut rx) = mpsc::channel(8);
         let auth_msg = AuthMessage { token, protocol_version: None };
-        let result = handler.handle_auth(&auth_msg, &tx, 60).await;
+        let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(result.is_err(), "RS256 token with wrong public key should be rejected");
         assert!(rx.try_recv().is_ok(), "AUTH_FAIL should be sent on rejection");
     }
@@ -440,6 +459,69 @@ RQIDAQAB
         assert!(result.is_ok(), "plain secret should always succeed");
         let (algo, _key) = result.unwrap();
         assert_eq!(algo, Algorithm::HS256, "plain string should be detected as HS256");
+    }
+
+    // Default mode: AUTH_FAIL error field contains generic message for expired token.
+    #[tokio::test]
+    async fn opaque_mode_generic_error_on_expired_token() {
+        let (handler, tx, mut rx) = setup();
+        let token = make_token(Some("user-1"), -3600);
+        let auth_msg = AuthMessage { token, protocol_version: None };
+        let _ = handler.handle_auth(&auth_msg, &tx, 60, false).await;
+        let msg = rx.try_recv().expect("AUTH_FAIL should be sent");
+        let OutboundMessage::Binary(bytes) = msg else {
+            panic!("expected Binary message");
+        };
+        let tg_msg: topgun_core::messages::Message =
+            rmp_serde::from_slice(&bytes).expect("should deserialize");
+        if let topgun_core::messages::Message::AuthFail(data) = tg_msg {
+            let error_text = data.error.expect("error field should be Some");
+            assert_eq!(error_text, "Authentication failed", "opaque mode should return generic message");
+        } else {
+            panic!("expected AuthFail message");
+        }
+    }
+
+    // Insecure mode: AUTH_FAIL error field contains detailed message for expired token.
+    #[tokio::test]
+    async fn insecure_mode_detailed_error_on_expired_token() {
+        let (handler, tx, mut rx) = setup();
+        let token = make_token(Some("user-1"), -3600);
+        let auth_msg = AuthMessage { token, protocol_version: None };
+        let _ = handler.handle_auth(&auth_msg, &tx, 60, true).await;
+        let msg = rx.try_recv().expect("AUTH_FAIL should be sent");
+        let OutboundMessage::Binary(bytes) = msg else {
+            panic!("expected Binary message");
+        };
+        let tg_msg: topgun_core::messages::Message =
+            rmp_serde::from_slice(&bytes).expect("should deserialize");
+        if let topgun_core::messages::Message::AuthFail(data) = tg_msg {
+            let error_text = data.error.expect("error field should be Some");
+            assert_ne!(error_text, "Authentication failed", "insecure mode should return detailed message");
+        } else {
+            panic!("expected AuthFail message");
+        }
+    }
+
+    // Default mode: AUTH_FAIL contains generic message when sub claim is missing.
+    #[tokio::test]
+    async fn opaque_mode_generic_error_on_missing_sub() {
+        let (handler, tx, mut rx) = setup();
+        let token = make_token(None, 3600);
+        let auth_msg = AuthMessage { token, protocol_version: None };
+        let _ = handler.handle_auth(&auth_msg, &tx, 60, false).await;
+        let msg = rx.try_recv().expect("AUTH_FAIL should be sent");
+        let OutboundMessage::Binary(bytes) = msg else {
+            panic!("expected Binary message");
+        };
+        let tg_msg: topgun_core::messages::Message =
+            rmp_serde::from_slice(&bytes).expect("should deserialize");
+        if let topgun_core::messages::Message::AuthFail(data) = tg_msg {
+            let error_text = data.error.expect("error field should be Some");
+            assert_eq!(error_text, "Authentication failed", "opaque mode should return generic message for missing sub");
+        } else {
+            panic!("expected AuthFail message");
+        }
     }
 
     // normalize_pem replaces escaped backslash-n with real newlines.
