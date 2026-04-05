@@ -145,11 +145,16 @@ pub async fn token_exchange_handler(
                     &EncodingKey::from_secret(jwt_secret.as_bytes()),
                 )
                 .map_err(|e| {
+                    let message = if state.config.insecure_forward_auth_errors {
+                        format!("token signing failed: {e}")
+                    } else {
+                        "Internal server error".to_string()
+                    };
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(ErrorResponse {
                             code: 500,
-                            message: format!("token signing failed: {e}"),
+                            message,
                             field: None,
                         }),
                     )
@@ -166,12 +171,18 @@ pub async fn token_exchange_handler(
         }
     }
 
-    // No provider succeeded.
+    // No provider succeeded. Detailed reason logged above by the provider; only
+    // forward to client when insecure mode is explicitly enabled.
+    let auth_fail_message = if state.config.insecure_forward_auth_errors {
+        format!("token verification failed: {last_error}")
+    } else {
+        "Authentication failed".to_string()
+    };
     Err((
         StatusCode::UNAUTHORIZED,
         Json(ErrorResponse {
             code: 401,
-            message: format!("token verification failed: {last_error}"),
+            message: auth_fail_message,
             field: None,
         }),
     ))
