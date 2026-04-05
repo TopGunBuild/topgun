@@ -87,6 +87,14 @@ pub enum PredicateOp {
     IsNull,
     #[serde(rename = "isNotNull")]
     IsNotNull,
+    #[serde(rename = "containsAll")]
+    ContainsAll,
+    #[serde(rename = "containsAny")]
+    ContainsAny,
+    #[serde(rename = "startsWith")]
+    StartsWith,
+    #[serde(rename = "endsWith")]
+    EndsWith,
 }
 
 /// Sort direction for query ordering.
@@ -287,6 +295,10 @@ mod tests {
             PredicateOp::Between,
             PredicateOp::IsNull,
             PredicateOp::IsNotNull,
+            PredicateOp::ContainsAll,
+            PredicateOp::ContainsAny,
+            PredicateOp::StartsWith,
+            PredicateOp::EndsWith,
         ];
         for v in &variants {
             assert_eq!(&roundtrip_named(v), v);
