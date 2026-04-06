@@ -8,6 +8,7 @@ use anyhow::bail;
 use async_trait::async_trait;
 use sqlx::PgPool;
 
+use crate::network::handlers::{RefreshGrant, RefreshGrantStore};
 use crate::storage::map_data_store::MapDataStore;
 use crate::storage::record::RecordValue;
 
@@ -361,6 +362,172 @@ impl MapDataStore for PostgresDataStore {
 
     fn reset(&self) {
         // No-op for write-through: all data is already persisted
+    }
+}
+
+// ── PostgresRefreshGrantStore ─────────────────────────────────────────────────
+
+/// PostgreSQL-backed [`RefreshGrantStore`] implementation.
+///
+/// Stores refresh grants in the `topgun_refresh_grants` table. Raw refresh
+/// tokens are never persisted; only their SHA-256 hashes.
+///
+/// # Construction
+///
+/// ```ignore
+/// let store = PostgresRefreshGrantStore::new(pool, 2_592_000); // 30 days
+/// store.initialize().await?;
+/// ```
+pub struct PostgresRefreshGrantStore {
+    pool: PgPool,
+    grant_duration_secs: u64,
+}
+
+impl PostgresRefreshGrantStore {
+    /// Create a new grant store.
+    ///
+    /// `grant_duration_secs` is returned by `grant_duration_secs()` and used
+    /// by callers when computing grant expiry. 2_592_000 (30 days) is the
+    /// recommended default.
+    pub fn new(pool: PgPool, grant_duration_secs: u64) -> Self {
+        Self { pool, grant_duration_secs }
+    }
+
+    /// Run the schema migration (CREATE TABLE + indices).
+    ///
+    /// Idempotent: uses `IF NOT EXISTS` so calling multiple times is safe.
+    /// Must be called once after construction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the SQL statements fail.
+    pub async fn initialize(&self) -> anyhow::Result<()> {
+        sqlx::query(
+            r"
+            CREATE TABLE IF NOT EXISTS topgun_refresh_grants (
+                id          TEXT    PRIMARY KEY,
+                sub         TEXT    NOT NULL,
+                roles       JSONB   NOT NULL,
+                token_hash  TEXT    NOT NULL UNIQUE,
+                created_at  BIGINT  NOT NULL,
+                expires_at  BIGINT  NOT NULL
+            )
+            ",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_refresh_grants_token_hash \
+             ON topgun_refresh_grants(token_hash)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_refresh_grants_expires_at \
+             ON topgun_refresh_grants(expires_at)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl RefreshGrantStore for PostgresRefreshGrantStore {
+    fn grant_duration_secs(&self) -> u64 {
+        self.grant_duration_secs
+    }
+
+    async fn insert_grant(&self, grant: &RefreshGrant) -> anyhow::Result<()> {
+        let roles_json = serde_json::to_value(&grant.roles)?;
+        // BIGINT columns use i64 on the wire; u64 values fit in i64 for all
+        // realistic timestamps (before year 292_277_026_596).
+        #[allow(clippy::cast_possible_wrap)]
+        let created_at = grant.created_at as i64;
+        #[allow(clippy::cast_possible_wrap)]
+        let expires_at = grant.expires_at as i64;
+
+        sqlx::query(
+            r"
+            INSERT INTO topgun_refresh_grants (id, sub, roles, token_hash, created_at, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ",
+        )
+        .bind(&grant.id)
+        .bind(&grant.sub)
+        .bind(roles_json)
+        .bind(&grant.token_hash)
+        .bind(created_at)
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn consume_grant(&self, token_hash: &str) -> anyhow::Result<Option<RefreshGrant>> {
+        use std::time::SystemTime;
+
+        #[allow(clippy::cast_possible_wrap)]
+        let now_secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        // Atomically consume the grant with DELETE ... RETURNING.
+        // The AND expires_at > $2 check ensures expired grants are rejected
+        // without a separate SELECT.
+        let row: Option<(String, String, serde_json::Value, String, i64, i64)> =
+            sqlx::query_as(
+                r"
+                DELETE FROM topgun_refresh_grants
+                WHERE token_hash = $1 AND expires_at > $2
+                RETURNING id, sub, roles, token_hash, created_at, expires_at
+                ",
+            )
+            .bind(token_hash)
+            .bind(now_secs)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        match row {
+            None => Ok(None),
+            Some((id, sub, roles_val, th, created_at, expires_at)) => {
+                let roles: Vec<String> = serde_json::from_value(roles_val)?;
+                Ok(Some(RefreshGrant {
+                    id,
+                    sub,
+                    roles,
+                    token_hash: th,
+                    #[allow(clippy::cast_sign_loss)]
+                    created_at: created_at as u64,
+                    #[allow(clippy::cast_sign_loss)]
+                    expires_at: expires_at as u64,
+                }))
+            }
+        }
+    }
+
+    async fn delete_expired_grants(&self) -> anyhow::Result<u64> {
+        use std::time::SystemTime;
+
+        #[allow(clippy::cast_possible_wrap)]
+        let now_secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let result = sqlx::query(
+            "DELETE FROM topgun_refresh_grants WHERE expires_at <= $1",
+        )
+        .bind(now_secs)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
     }
 }
 
