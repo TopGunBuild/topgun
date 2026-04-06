@@ -1,8 +1,10 @@
 import type { AuthProvider, AuthEvent, AuthEventType, TokenExchangeConfig, TokenExchangeResponse } from './types';
+import type { IStorageAdapter } from '../IStorageAdapter';
 
 export interface BaseAuthProviderConfig {
   tokenExchangeConfig?: TokenExchangeConfig;
   refreshMarginMs?: number;
+  storageAdapter?: IStorageAdapter;
 }
 
 /**
@@ -16,8 +18,9 @@ export abstract class BaseAuthProvider implements AuthProvider {
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private listeners: Array<(event: AuthEvent) => void> = [];
   private inflightPromise: Promise<string | null> | null = null;
-  /** Opaque refresh token from the server. Stored in memory only. */
   private refreshTokenValue: string | null = null;
+  private readonly storageAdapter?: IStorageAdapter;
+  private restored = false;
 
   protected readonly tokenExchangeConfig?: TokenExchangeConfig;
   protected readonly refreshMarginMs: number;
@@ -25,6 +28,7 @@ export abstract class BaseAuthProvider implements AuthProvider {
   constructor(config?: BaseAuthProviderConfig) {
     this.tokenExchangeConfig = config?.tokenExchangeConfig;
     this.refreshMarginMs = config?.refreshMarginMs ?? 60_000;
+    this.storageAdapter = config?.storageAdapter;
   }
 
   /**
@@ -58,8 +62,26 @@ export abstract class BaseAuthProvider implements AuthProvider {
     }
   }
 
+  private async restoreRefreshToken(): Promise<void> {
+    if (!this.storageAdapter || !this.tokenExchangeConfig?.enableRefresh) return;
+    try {
+      const stored = await this.storageAdapter.getMeta('topgun:refreshToken');
+      if (typeof stored === 'string' && stored.length > 0) {
+        this.refreshTokenValue = stored;
+      }
+    } catch {
+      // Storage read failure is non-fatal
+    }
+  }
+
   private async refreshToken(): Promise<string | null> {
     try {
+      // Restore refresh token from storage on first call
+      if (!this.restored) {
+        this.restored = true;
+        await this.restoreRefreshToken();
+      }
+
       // Attempt server-issued refresh before calling the external provider.
       // This avoids a round-trip to the external provider when a refresh token
       // from a previous exchange is still valid.
@@ -135,6 +157,7 @@ export abstract class BaseAuthProvider implements AuthProvider {
       if (!response.ok) {
         // Clear the stale refresh token so the next attempt uses external fetch.
         this.refreshTokenValue = null;
+        this.storageAdapter?.setMeta('topgun:refreshToken', null).catch(() => {});
         return null;
       }
 
@@ -144,6 +167,7 @@ export abstract class BaseAuthProvider implements AuthProvider {
 
       if (!newAccessToken) {
         this.refreshTokenValue = null;
+        this.storageAdapter?.setMeta('topgun:refreshToken', null).catch(() => {});
         return null;
       }
 
@@ -151,6 +175,7 @@ export abstract class BaseAuthProvider implements AuthProvider {
       this.cachedToken = newAccessToken;
       this.cachedTokenExpiry = this.extractExpiry(newAccessToken);
       this.refreshTokenValue = newRefreshToken;
+      this.storageAdapter?.setMeta('topgun:refreshToken', newRefreshToken).catch(() => {});
 
       this.scheduleRefresh();
       this.emit({ type: 'token:refreshed' });
@@ -159,6 +184,7 @@ export abstract class BaseAuthProvider implements AuthProvider {
     } catch {
       // Network error or JSON parse failure -- fall back to external fetch.
       this.refreshTokenValue = null;
+      this.storageAdapter?.setMeta('topgun:refreshToken', null).catch(() => {});
       return null;
     }
   }
@@ -191,6 +217,7 @@ export abstract class BaseAuthProvider implements AuthProvider {
     // Store the refresh token when the server returns one and refresh is enabled.
     if (enableRefresh && data.refreshToken) {
       this.refreshTokenValue = data.refreshToken;
+      this.storageAdapter?.setMeta('topgun:refreshToken', data.refreshToken).catch(() => {});
     }
 
     return data.token ?? null;
@@ -271,6 +298,7 @@ export abstract class BaseAuthProvider implements AuthProvider {
     this.cachedToken = null;
     this.cachedTokenExpiry = 0;
     this.refreshTokenValue = null;
+    this.storageAdapter?.setMeta('topgun:refreshToken', null).catch(() => {});
     this.clearRefreshTimer();
   }
 
@@ -290,6 +318,7 @@ export abstract class BaseAuthProvider implements AuthProvider {
     this.cachedToken = null;
     this.cachedTokenExpiry = 0;
     this.refreshTokenValue = null;
+    this.storageAdapter?.setMeta('topgun:refreshToken', null).catch(() => {});
     this.inflightPromise = null;
   }
 }
