@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::admin_types::ErrorResponse;
-use super::AppState;
+use super::{AppState, RefreshGrant, RefreshGrantStore};
 
 /// Request body for POST /api/auth/refresh.
 #[derive(Debug, Deserialize)]
@@ -39,6 +39,72 @@ pub struct RefreshResponse {
     pub refresh_expires_at: u64,
 }
 
+/// JWT claims for the access token issued by the refresh endpoint.
+#[derive(serde::Serialize)]
+struct AccessJwtClaims {
+    sub: String,
+    roles: Vec<String>,
+    exp: u64,
+    iat: u64,
+}
+
+/// Generate a new refresh grant (rotation) and sign a new access JWT.
+///
+/// Returns `(access_token, access_expires_at, raw_refresh_token, refresh_expires_at)`
+/// on success, or an error message on failure.
+async fn rotate_grant_and_sign(
+    store: &dyn RefreshGrantStore,
+    grant: &RefreshGrant,
+    jwt_secret: &str,
+) -> Result<(String, u64, String, u64), String> {
+    use std::time::SystemTime;
+
+    // Generate a new refresh token: 32 random bytes, hex-encoded (64 chars).
+    let mut new_token_bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut new_token_bytes);
+    let new_refresh_token = hex::encode(new_token_bytes);
+
+    // Hash the new refresh token before storage.
+    let mut hasher = Sha256::new();
+    hasher.update(new_refresh_token.as_bytes());
+    let new_token_hash = hex::encode(hasher.finalize());
+
+    // Compute timestamps.
+    let now_secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let refresh_expires_at = now_secs + store.grant_duration_secs();
+
+    // Create the rotated grant in the store.
+    let new_grant = RefreshGrant {
+        id: uuid::Uuid::new_v4().to_string(),
+        sub: grant.sub.clone(),
+        roles: grant.roles.clone(),
+        token_hash: new_token_hash,
+        created_at: now_secs,
+        expires_at: refresh_expires_at,
+    };
+    store
+        .insert_grant(&new_grant)
+        .await
+        .map_err(|e| format!("Failed to insert rotated grant: {e}"))?;
+
+    // Sign a new access JWT (1-hour expiry, HS256).
+    let access_expires_at = now_secs + 3600;
+    let claims = AccessJwtClaims {
+        sub: grant.sub.clone(),
+        roles: grant.roles.clone(),
+        exp: access_expires_at,
+        iat: now_secs,
+    };
+    let encoding_key = EncodingKey::from_secret(jwt_secret.as_bytes());
+    let access_token = jsonwebtoken::encode(&Header::default(), &claims, &encoding_key)
+        .map_err(|e| format!("JWT signing failed: {e}"))?;
+
+    Ok((access_token, access_expires_at, new_refresh_token, refresh_expires_at))
+}
+
 /// POST /api/auth/refresh handler.
 ///
 /// Validates the presented refresh token against the grant store, rotates the
@@ -47,30 +113,22 @@ pub async fn refresh_handler(
     State(state): State<AppState>,
     Json(body): Json<RefreshRequest>,
 ) -> impl IntoResponse {
-    use std::time::SystemTime;
-
     // Return 404 when refresh grants are not configured (refresh disabled).
-    let store = match state.refresh_grant_store.as_ref() {
-        Some(s) => s,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse { code: 404, message: "Not found".to_string(), field: None }),
-            )
-                .into_response();
-        }
+    let Some(store) = state.refresh_grant_store.as_ref() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse { code: 404, message: "Not found".to_string(), field: None }),
+        )
+            .into_response();
     };
 
     // JWT secret must be present to sign a new access token.
-    let jwt_secret = match state.jwt_secret.as_deref() {
-        Some(s) => s.to_string(),
-        None => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { code: 500, message: "Server misconfiguration".to_string(), field: None }),
-            )
-                .into_response();
-        }
+    let Some(jwt_secret) = state.jwt_secret.as_deref() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { code: 500, message: "Server misconfiguration".to_string(), field: None }),
+        )
+            .into_response();
     };
 
     // Hash the incoming refresh token with SHA-256.
@@ -84,16 +142,12 @@ pub async fn refresh_handler(
     let grant = match store.consume_grant(&token_hash).await {
         Ok(Some(g)) => g,
         Ok(None) => {
-            // Grant not found or already consumed -- opaque auth error.
             let msg = if state.config.insecure_forward_auth_errors {
                 "Refresh grant not found or expired".to_string()
             } else {
                 "Authentication failed".to_string()
             };
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse { code: 401, message: msg, field: None }),
-            )
+            return (StatusCode::UNAUTHORIZED, Json(ErrorResponse { code: 401, message: msg, field: None }))
                 .into_response();
         }
         Err(e) => {
@@ -102,95 +156,28 @@ pub async fn refresh_handler(
             } else {
                 "Authentication failed".to_string()
             };
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse { code: 401, message: msg, field: None }),
-            )
+            return (StatusCode::UNAUTHORIZED, Json(ErrorResponse { code: 401, message: msg, field: None }))
                 .into_response();
         }
     };
 
-    // Generate a new refresh token: 32 random bytes, hex-encoded (64 chars).
-    let mut new_token_bytes = [0u8; 32];
-    rand::rng().fill_bytes(&mut new_token_bytes);
-    let new_refresh_token = hex::encode(new_token_bytes);
-
-    // Hash the new refresh token before storage.
-    let mut hasher2 = Sha256::new();
-    hasher2.update(new_refresh_token.as_bytes());
-    let new_token_hash = hex::encode(hasher2.finalize());
-
-    // Compute timestamps.
-    let now_secs = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let grant_duration = store.grant_duration_secs();
-    let refresh_expires_at = now_secs + grant_duration;
-
-    // Create the rotated grant in the store.
-    let new_grant = super::RefreshGrant {
-        id: uuid::Uuid::new_v4().to_string(),
-        sub: grant.sub.clone(),
-        roles: grant.roles.clone(),
-        token_hash: new_token_hash,
-        created_at: now_secs,
-        expires_at: refresh_expires_at,
-    };
-    if let Err(e) = store.insert_grant(&new_grant).await {
-        let msg = if state.config.insecure_forward_auth_errors {
-            format!("Failed to insert rotated grant: {e}")
-        } else {
-            "Authentication failed".to_string()
-        };
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { code: 500, message: msg, field: None }),
-        )
-            .into_response();
+    // Rotate the grant and sign a new access JWT.
+    match rotate_grant_and_sign(store.as_ref(), &grant, jwt_secret).await {
+        Ok((access_token, access_expires_at, new_refresh_token, refresh_expires_at)) => {
+            Json(RefreshResponse {
+                token: access_token,
+                expires_at: access_expires_at,
+                refresh_token: new_refresh_token,
+                refresh_expires_at,
+            })
+            .into_response()
+        }
+        Err(detail) => {
+            let msg = if state.config.insecure_forward_auth_errors { detail } else { "Authentication failed".to_string() };
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { code: 500, message: msg, field: None }))
+                .into_response()
+        }
     }
-
-    // Sign a new access JWT (1-hour expiry, HS256).
-    let access_expires_at = now_secs + 3600;
-    let claims = AccessJwtClaims {
-        sub: grant.sub.clone(),
-        roles: grant.roles.clone(),
-        exp: access_expires_at,
-        iat: now_secs,
-    };
-    let encoding_key = EncodingKey::from_secret(jwt_secret.as_bytes());
-    let new_access_token = match jsonwebtoken::encode(&Header::default(), &claims, &encoding_key) {
-        Ok(t) => t,
-        Err(e) => {
-            let msg = if state.config.insecure_forward_auth_errors {
-                format!("JWT signing failed: {e}")
-            } else {
-                "Authentication failed".to_string()
-            };
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { code: 500, message: msg, field: None }),
-            )
-                .into_response();
-        }
-    };
-
-    Json(RefreshResponse {
-        token: new_access_token,
-        expires_at: access_expires_at,
-        refresh_token: new_refresh_token,
-        refresh_expires_at,
-    })
-    .into_response()
-}
-
-/// JWT claims for the access token issued by the refresh endpoint.
-#[derive(serde::Serialize)]
-struct AccessJwtClaims {
-    sub: String,
-    roles: Vec<String>,
-    exp: u64,
-    iat: u64,
 }
 
 #[cfg(test)]
@@ -206,7 +193,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::network::handlers::{AppState, RefreshGrant, RefreshGrantStore};
+    use crate::network::handlers::AppState;
     use crate::network::{ConnectionRegistry, NetworkConfig, ShutdownController};
 
     // ── In-memory test store ─────────────────────────────────────────────────

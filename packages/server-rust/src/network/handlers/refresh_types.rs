@@ -11,7 +11,7 @@ use async_trait::async_trait;
 /// Internal type -- not serialized over the wire.
 #[derive(Debug, Clone)]
 pub struct RefreshGrant {
-    /// Unique grant identifier (UUIDv4).
+    /// Unique grant identifier (`UUIDv4`).
     pub id: String,
     /// Subject (user ID) this grant belongs to.
     pub sub: String,
@@ -27,12 +27,12 @@ pub struct RefreshGrant {
 
 /// Storage trait for refresh grants.
 ///
-/// Implementations wrap a backing store (e.g., PostgreSQL) and are injected
+/// Implementations wrap a backing store (e.g., `PostgreSQL`) and are injected
 /// into `AppState` as `Option<Arc<dyn RefreshGrantStore>>`. When `None`,
 /// the refresh endpoint returns 404 (refresh disabled).
 #[async_trait]
 pub trait RefreshGrantStore: Send + Sync + 'static {
-    /// Refresh token grant duration in seconds (e.g., 30 days = 2_592_000).
+    /// Refresh token grant duration in seconds (e.g., 30 days = `2_592_000`).
     ///
     /// Implementations return the value they were constructed with.
     fn grant_duration_secs(&self) -> u64;
