@@ -293,6 +293,7 @@ mod tests {
             policy_store: None,
             auth_providers: Arc::new(vec![]),
             refresh_grant_store: None,
+            auth_validator: None,
         }
     }
 

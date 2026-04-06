@@ -168,6 +168,7 @@ async fn main() {
                 policy_store: None,
                 auth_providers: Arc::new(vec![]),
                 refresh_grant_store: None,
+            auth_validator: None,
             };
 
             let ws_handler = get(topgun_server::network::handlers::ws_upgrade_handler);

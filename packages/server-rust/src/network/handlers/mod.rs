@@ -9,6 +9,7 @@ pub mod admin_auth;
 pub mod admin_types;
 pub mod auth;
 pub mod auth_provider;
+pub mod auth_validator;
 pub mod health;
 pub mod http_sync;
 pub mod metrics_endpoint;
@@ -33,6 +34,7 @@ use arc_swap::ArcSwap;
 use super::{ConnectionRegistry, NetworkConfig, ShutdownController};
 use crate::cluster::state::ClusterState;
 use crate::network::handlers::auth_provider::AuthProvider;
+use crate::network::handlers::auth_validator::AuthValidator;
 use crate::service::classify::OperationService;
 use crate::service::config::ServerConfig;
 use crate::service::dispatch::PartitionDispatcher;
@@ -97,4 +99,7 @@ pub struct AppState {
     ///
     /// `None` when refresh tokens are disabled (token exchange returns access-only).
     pub refresh_grant_store: Option<Arc<dyn RefreshGrantStore>>,
+    /// Custom post-JWT-verification validator.
+    /// `None` when no custom validation is configured (default: accept all valid JWTs).
+    pub auth_validator: Option<Arc<dyn AuthValidator>>,
 }

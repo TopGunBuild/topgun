@@ -289,6 +289,7 @@ async fn main() -> anyhow::Result<()> {
         policy_store: Some(policy_store),
         auth_providers: Arc::new(vec![]),
         refresh_grant_store: None,
+            auth_validator: None,
     };
 
     // Build the axum router with state.

@@ -350,6 +350,7 @@ fn build_app(
         policy_store,
         auth_providers: Arc::new(auth_providers),
         refresh_grant_store: None,
+            auth_validator: None,
     };
 
     // Build a per-IP rate limiter for admin and login endpoints.
