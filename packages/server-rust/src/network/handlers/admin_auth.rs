@@ -12,7 +12,6 @@ use axum::Json;
 use jsonwebtoken::Validation;
 
 use super::admin_types::ErrorResponse;
-use super::auth::JwtClaims;
 use super::auth_validator::AuthValidationContext;
 use super::AppState;
 

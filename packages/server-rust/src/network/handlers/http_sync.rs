@@ -21,7 +21,6 @@ use topgun_core::messages::{HttpQueryRequest, HttpQueryResult, HttpSyncAck, Http
 use topgun_core::Timestamp;
 
 use super::AppState;
-use super::auth::JwtClaims;
 use super::auth_validator::AuthValidationContext;
 use crate::service::dispatch::PartitionDispatcher;
 use crate::service::domain::predicate::{execute_query, value_to_rmpv};
