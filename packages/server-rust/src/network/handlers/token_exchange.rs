@@ -12,10 +12,12 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use jsonwebtoken::{EncodingKey, Header};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::admin_types::ErrorResponse;
-use super::AppState;
+use super::{AppState, RefreshGrant};
 
 // ── Request / Response types ──────────────────────────────────────────────────
 
@@ -38,6 +40,12 @@ pub struct TokenExchangeResponse {
     pub token: String,
     /// Token expiry as seconds since Unix epoch.
     pub expires_at: u64,
+    /// Opaque refresh token (64-char hex). Present only when refresh grants are enabled.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub refresh_token: Option<String>,
+    /// Refresh token expiry as seconds since Unix epoch.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub refresh_expires_at: Option<u64>,
 }
 
 // ── Internal JWT claims struct ────────────────────────────────────────────────
@@ -161,9 +169,45 @@ pub async fn token_exchange_handler(
                     )
                 })?;
 
+                // Optionally create a refresh grant when a grant store is configured.
+                let (refresh_token, refresh_expires_at) =
+                    if let Some(store) = state.refresh_grant_store.as_ref() {
+                        // Generate a 32-byte random refresh token, hex-encoded.
+                        let mut raw_bytes = [0u8; 32];
+                        rand::rng().fill_bytes(&mut raw_bytes);
+                        let raw_token = hex::encode(raw_bytes);
+
+                        // Hash the token before storage; raw token is returned to client.
+                        let mut hasher = Sha256::new();
+                        hasher.update(raw_token.as_bytes());
+                        let token_hash = hex::encode(hasher.finalize());
+
+                        let refresh_exp = now + store.grant_duration_secs();
+                        let grant = RefreshGrant {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            sub: claims.sub.clone(),
+                            roles: claims.roles.clone(),
+                            token_hash,
+                            created_at: now,
+                            expires_at: refresh_exp,
+                        };
+
+                        // Insert grant -- log but don't fail the token exchange on error.
+                        if let Err(e) = store.insert_grant(&grant).await {
+                            tracing::warn!("Failed to insert refresh grant: {e}");
+                            (None, None)
+                        } else {
+                            (Some(raw_token), Some(refresh_exp))
+                        }
+                    } else {
+                        (None, None)
+                    };
+
                 return Ok(Json(TokenExchangeResponse {
                     token,
                     expires_at: exp,
+                    refresh_token,
+                    refresh_expires_at,
                 }));
             }
             Err(e) => {
@@ -379,5 +423,99 @@ mod tests {
         let (status, body) = post_exchange(app, json!({ "token": "any" })).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["token"].as_str().is_some());
+    }
+
+    // ── Refresh grant integration tests ───────────────────────────────────────
+
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct InMemoryGrantStore {
+        grants: Mutex<HashMap<String, crate::network::handlers::RefreshGrant>>,
+        duration: u64,
+    }
+
+    impl InMemoryGrantStore {
+        fn new(duration: u64) -> Self {
+            Self { grants: Mutex::new(HashMap::new()), duration }
+        }
+    }
+
+    #[async_trait]
+    impl crate::network::handlers::RefreshGrantStore for InMemoryGrantStore {
+        fn grant_duration_secs(&self) -> u64 {
+            self.duration
+        }
+
+        async fn insert_grant(
+            &self,
+            grant: &crate::network::handlers::RefreshGrant,
+        ) -> anyhow::Result<()> {
+            self.grants.lock().unwrap().insert(grant.token_hash.clone(), grant.clone());
+            Ok(())
+        }
+
+        async fn consume_grant(
+            &self,
+            token_hash: &str,
+        ) -> anyhow::Result<Option<crate::network::handlers::RefreshGrant>> {
+            let mut map = self.grants.lock().unwrap();
+            Ok(map.remove(token_hash))
+        }
+
+        async fn delete_expired_grants(&self) -> anyhow::Result<u64> {
+            Ok(0)
+        }
+    }
+
+    /// AC1: token exchange with refresh store returns refreshToken and refreshExpiresAt.
+    #[tokio::test]
+    async fn token_exchange_with_refresh_store_returns_refresh_token() {
+        use std::time::Instant;
+        let provider: Arc<dyn AuthProvider> = Arc::new(AlwaysSucceed {
+            name: "hmac".to_string(),
+            sub: "user-1".to_string(),
+            roles: vec!["admin".to_string()],
+        });
+        let store = Arc::new(InMemoryGrantStore::new(2_592_000));
+        let state = AppState {
+            registry: Arc::new(crate::network::ConnectionRegistry::new()),
+            shutdown: Arc::new(crate::network::ShutdownController::new()),
+            config: Arc::new(crate::network::NetworkConfig::default()),
+            start_time: Instant::now(),
+            observability: None,
+            operation_service: None,
+            dispatcher: None,
+            jwt_secret: Some("signing-secret".to_string()),
+            cluster_state: None,
+            store_factory: None,
+            server_config: None,
+            policy_store: None,
+            auth_providers: Arc::new(vec![provider]),
+            refresh_grant_store: Some(store as Arc<dyn crate::network::handlers::RefreshGrantStore>),
+        };
+        let app = make_app(state);
+        let (status, body) = post_exchange(app, json!({ "token": "any" })).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["token"].as_str().is_some(), "access token must be present");
+        assert!(body["expiresAt"].as_u64().is_some(), "expiresAt must be present");
+        assert!(body["refreshToken"].as_str().is_some(), "refreshToken must be present when store is configured");
+        assert!(body["refreshExpiresAt"].as_u64().is_some(), "refreshExpiresAt must be present");
+    }
+
+    /// AC2: token exchange without refresh store omits refresh fields.
+    #[tokio::test]
+    async fn token_exchange_without_refresh_store_omits_refresh_fields() {
+        let provider: Arc<dyn AuthProvider> = Arc::new(AlwaysSucceed {
+            name: "hmac".to_string(),
+            sub: "user-1".to_string(),
+            roles: vec![],
+        });
+        let app = make_app(make_state(vec![provider], Some("secret")));
+        let (status, body) = post_exchange(app, json!({ "token": "any" })).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.get("refreshToken").is_none(), "refreshToken must be absent when store is not configured");
+        assert!(body.get("refreshExpiresAt").is_none(), "refreshExpiresAt must be absent");
     }
 }

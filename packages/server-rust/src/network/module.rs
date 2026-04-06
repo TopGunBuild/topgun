@@ -31,7 +31,7 @@ use super::handlers::admin::{
 use super::handlers::auth_provider::{AuthProvider, AuthProviderConfig, HmacProvider, JwksProvider, OidcProvider};
 use super::handlers::{
     health_handler, http_sync_handler, liveness_handler, metrics_handler, readiness_handler,
-    token_exchange_handler, ws_upgrade_handler, AppState,
+    refresh_handler, token_exchange_handler, ws_upgrade_handler, AppState,
 };
 use super::middleware::build_http_layers;
 use super::openapi::AdminApiDoc;
@@ -387,6 +387,7 @@ fn build_app(
     let rate_limited_routes = Router::new()
         .route("/api/auth/login", post(login))
         .route("/api/auth/token", post(token_exchange_handler))
+        .route("/api/auth/refresh", post(refresh_handler))
         .route("/api/admin/cluster/status", get(cluster_status))
         .route("/api/admin/maps", get(list_maps))
         .route("/api/admin/settings", get(get_settings).put(update_settings))
