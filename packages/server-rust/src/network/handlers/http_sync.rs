@@ -903,6 +903,7 @@ mod tests {
             server_config: None,
             policy_store: None,
             auth_providers: Arc::new(vec![]),
+            refresh_grant_store: None,
         }
     }
 
@@ -929,6 +930,7 @@ mod tests {
             server_config: Some(Arc::new(ArcSwap::from_pointee(server_cfg))),
             policy_store: None,
             auth_providers: Arc::new(vec![]),
+            refresh_grant_store: None,
         }
     }
 
@@ -1231,6 +1233,7 @@ mod tests {
             server_config: None,
             policy_store: None,
             auth_providers: Arc::new(vec![]),
+            refresh_grant_store: None,
         }
     }
 

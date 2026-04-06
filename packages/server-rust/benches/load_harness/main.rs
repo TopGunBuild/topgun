@@ -165,6 +165,9 @@ async fn main() {
                 cluster_state: None,
                 store_factory: None,
                 server_config: None,
+                policy_store: None,
+                auth_providers: Arc::new(vec![]),
+                refresh_grant_store: None,
             };
 
             let ws_handler = get(topgun_server::network::handlers::ws_upgrade_handler);

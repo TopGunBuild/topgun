@@ -12,12 +12,16 @@ pub mod auth_provider;
 pub mod health;
 pub mod http_sync;
 pub mod metrics_endpoint;
+pub mod refresh;
+pub mod refresh_types;
 pub mod token_exchange;
 pub mod websocket;
 
 pub use health::{health_handler, liveness_handler, readiness_handler};
 pub use http_sync::http_sync_handler;
 pub use metrics_endpoint::metrics_handler;
+pub use refresh::refresh_handler;
+pub use refresh_types::{RefreshGrant, RefreshGrantStore};
 pub use token_exchange::token_exchange_handler;
 pub use websocket::ws_upgrade_handler;
 
@@ -89,4 +93,8 @@ pub struct AppState {
     /// External auth providers for token exchange at POST /api/auth/token.
     /// Empty when token exchange is not configured (endpoint returns 404).
     pub auth_providers: Arc<Vec<Arc<dyn AuthProvider>>>,
+    /// Refresh grant store for POST /api/auth/refresh.
+    ///
+    /// `None` when refresh tokens are disabled (token exchange returns access-only).
+    pub refresh_grant_store: Option<Arc<dyn RefreshGrantStore>>,
 }

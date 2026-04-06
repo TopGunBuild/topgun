@@ -76,6 +76,7 @@ mod tests {
             server_config: None,
             policy_store: None,
             auth_providers: Arc::new(vec![]),
+            refresh_grant_store: None,
         }
     }
 
