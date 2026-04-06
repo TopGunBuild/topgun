@@ -5,6 +5,8 @@
 //!   - `send_auth_required`: sends on the raw `axum::extract::ws::WebSocket` before split
 //!   - `handle_auth`: sends via `mpsc::Sender<OutboundMessage>` after split
 
+use std::sync::Arc;
+
 use axum::extract::ws::WebSocket;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
@@ -13,6 +15,7 @@ use topgun_core::messages::{AuthFailData, AuthMessage, AuthRequiredMessage, Mess
 use topgun_core::Principal;
 use tracing::{debug, warn};
 
+use super::auth_validator::{AuthValidationContext, AuthValidator};
 use crate::network::OutboundMessage;
 
 /// Normalize a PEM string received from environment variables.
@@ -81,13 +84,16 @@ pub struct JwtClaims {
 /// JWT verification uses HS256 algorithm with the configured secret.
 pub struct AuthHandler {
     jwt_secret: String,
+    /// Optional custom post-JWT-verification validator.
+    /// `None` means accept all valid JWTs (default behavior).
+    auth_validator: Option<Arc<dyn AuthValidator>>,
 }
 
 impl AuthHandler {
-    /// Create a new `AuthHandler` with the given JWT secret.
+    /// Create a new `AuthHandler` with the given JWT secret and optional validator.
     #[must_use]
-    pub fn new(jwt_secret: String) -> Self {
-        Self { jwt_secret }
+    pub fn new(jwt_secret: String, auth_validator: Option<Arc<dyn AuthValidator>>) -> Self {
+        Self { jwt_secret, auth_validator }
     }
 
     /// Send `AUTH_REQUIRED` message to the client.
@@ -151,11 +157,13 @@ impl AuthHandler {
         validation.validate_aud = false;
         validation.leeway = leeway;
 
-        match jsonwebtoken::decode::<JwtClaims>(&auth_msg.token, &key, &validation) {
+        match jsonwebtoken::decode::<serde_json::Value>(&auth_msg.token, &key, &validation) {
             Ok(token_data) => {
+                let raw_claims = token_data.claims.clone();
+
                 // Reject tokens without a subject claim — anonymous identity is
                 // not permitted; callers must always provide a `sub` field.
-                let Some(user_id) = token_data.claims.sub else {
+                let Some(user_id) = raw_claims["sub"].as_str().map(str::to_owned) else {
                     let detail = "missing sub claim in JWT";
                     warn!("JWT accepted by signature but missing required `sub` claim");
                     let client_error = if insecure_forward_auth_errors {
@@ -174,7 +182,39 @@ impl AuthHandler {
                     });
                 };
 
-                let roles = token_data.claims.roles.unwrap_or_default();
+                let roles: Vec<String> = raw_claims["roles"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                // Call custom validator after signature verification if configured.
+                if let Some(ref validator) = self.auth_validator {
+                    let ctx = AuthValidationContext {
+                        user_id: user_id.clone(),
+                        roles: roles.clone(),
+                        raw_claims,
+                    };
+                    if let Err(reason) = validator.validate(&ctx).await {
+                        warn!(user_id = %user_id, reason = %reason, "custom auth validator rejected token");
+                        let client_error = if insecure_forward_auth_errors {
+                            reason.clone()
+                        } else {
+                            "Authentication failed".to_string()
+                        };
+                        let fail_msg = Message::AuthFail(AuthFailData {
+                            error: Some(client_error),
+                            ..Default::default()
+                        });
+                        let bytes = rmp_serde::to_vec_named(&fail_msg)?;
+                        tx.send(OutboundMessage::Binary(bytes)).await?;
+                        return Err(AuthError::InvalidToken { reason });
+                    }
+                }
+
                 debug!(user_id = %user_id, ?roles, "JWT verified successfully");
 
                 Ok(Principal {
@@ -255,7 +295,7 @@ mod tests {
 
     /// Create an `AuthHandler` and a channel pair for testing.
     fn setup() -> (AuthHandler, mpsc::Sender<OutboundMessage>, mpsc::Receiver<OutboundMessage>) {
-        let handler = AuthHandler::new(TEST_SECRET.to_owned());
+        let handler = AuthHandler::new(TEST_SECRET.to_owned(), None);
         let (tx, rx) = mpsc::channel(8);
         (handler, tx, rx)
     }
@@ -421,7 +461,7 @@ RQIDAQAB
     #[tokio::test]
     async fn rs256_valid_token_accepted() {
         let token = make_rs256_token("rs-user-1", 3600, TEST_RSA_PRIVATE_PEM);
-        let handler = AuthHandler::new(TEST_RSA_PUBLIC_PEM.to_owned());
+        let handler = AuthHandler::new(TEST_RSA_PUBLIC_PEM.to_owned(), None);
         let (tx, _rx) = mpsc::channel(8);
         let auth_msg = AuthMessage { token, protocol_version: None };
         let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
@@ -435,7 +475,7 @@ RQIDAQAB
     async fn rs256_invalid_signature_rejected() {
         let token = make_rs256_token("rs-user-2", 3600, TEST_RSA_PRIVATE_PEM);
         // Use the second key pair's public key — signature will not match.
-        let handler = AuthHandler::new(TEST_RSA2_PUBLIC_PEM.to_owned());
+        let handler = AuthHandler::new(TEST_RSA2_PUBLIC_PEM.to_owned(), None);
         let (tx, mut rx) = mpsc::channel(8);
         let auth_msg = AuthMessage { token, protocol_version: None };
         let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
@@ -537,5 +577,99 @@ RQIDAQAB
             !normalized.contains("\\n"),
             "normalized string should not contain escaped newlines"
         );
+    }
+
+    // AC1 (SPEC-189): A rejecting AuthValidator causes handle_auth to return Err
+    // and send AUTH_FAIL on the channel.
+    #[tokio::test]
+    async fn rejecting_validator_causes_auth_fail() {
+        let validator = Arc::new(|_ctx: &super::super::auth_validator::AuthValidationContext| {
+            Err("revoked".to_string())
+        });
+        let handler = AuthHandler::new(TEST_SECRET.to_owned(), Some(validator));
+        let (tx, mut rx) = mpsc::channel(8);
+        let token = make_token(Some("user-1"), 3600);
+        let auth_msg = AuthMessage { token, protocol_version: None };
+        let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
+        assert!(result.is_err(), "expected Err when validator rejects");
+        match result.unwrap_err() {
+            AuthError::InvalidToken { reason } => {
+                assert_eq!(reason, "revoked", "reason should match validator message");
+            }
+            e => panic!("expected InvalidToken, got {e:?}"),
+        }
+        assert!(rx.try_recv().is_ok(), "AUTH_FAIL should be sent when validator rejects");
+    }
+
+    // AC4 (SPEC-189): When auth_validator is None, valid token is accepted (no regression).
+    #[tokio::test]
+    async fn no_validator_accepts_valid_token() {
+        let handler = AuthHandler::new(TEST_SECRET.to_owned(), None);
+        let (tx, _rx) = mpsc::channel(8);
+        let token = make_token(Some("user-99"), 3600);
+        let auth_msg = AuthMessage { token, protocol_version: None };
+        let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
+        assert!(result.is_ok(), "expected Ok when no validator configured, got {result:?}");
+        assert_eq!(result.unwrap().id, "user-99");
+    }
+
+    // AC7 (SPEC-189): Rejecting validator with insecure_forward_auth_errors=false
+    // sends generic "Authentication failed" message to client.
+    #[tokio::test]
+    async fn rejecting_validator_opaque_error_mode() {
+        let validator = Arc::new(|_ctx: &super::super::auth_validator::AuthValidationContext| {
+            Err("tenant not found".to_string())
+        });
+        let handler = AuthHandler::new(TEST_SECRET.to_owned(), Some(validator));
+        let (tx, mut rx) = mpsc::channel(8);
+        let token = make_token(Some("user-1"), 3600);
+        let auth_msg = AuthMessage { token, protocol_version: None };
+        let _ = handler.handle_auth(&auth_msg, &tx, 60, false).await;
+        let msg = rx.try_recv().expect("AUTH_FAIL should be sent");
+        let OutboundMessage::Binary(bytes) = msg else {
+            panic!("expected Binary message");
+        };
+        let tg_msg: topgun_core::messages::Message =
+            rmp_serde::from_slice(&bytes).expect("should deserialize");
+        if let topgun_core::messages::Message::AuthFail(data) = tg_msg {
+            let error_text = data.error.expect("error field should be Some");
+            assert_eq!(
+                error_text,
+                "Authentication failed",
+                "opaque mode should send generic message for validator rejection"
+            );
+        } else {
+            panic!("expected AuthFail message");
+        }
+    }
+
+    // AC7 (SPEC-189): Rejecting validator with insecure_forward_auth_errors=true
+    // sends detailed reason to client.
+    #[tokio::test]
+    async fn rejecting_validator_insecure_error_mode() {
+        let validator = Arc::new(|_ctx: &super::super::auth_validator::AuthValidationContext| {
+            Err("tenant not found".to_string())
+        });
+        let handler = AuthHandler::new(TEST_SECRET.to_owned(), Some(validator));
+        let (tx, mut rx) = mpsc::channel(8);
+        let token = make_token(Some("user-1"), 3600);
+        let auth_msg = AuthMessage { token, protocol_version: None };
+        let _ = handler.handle_auth(&auth_msg, &tx, 60, true).await;
+        let msg = rx.try_recv().expect("AUTH_FAIL should be sent");
+        let OutboundMessage::Binary(bytes) = msg else {
+            panic!("expected Binary message");
+        };
+        let tg_msg: topgun_core::messages::Message =
+            rmp_serde::from_slice(&bytes).expect("should deserialize");
+        if let topgun_core::messages::Message::AuthFail(data) = tg_msg {
+            let error_text = data.error.expect("error field should be Some");
+            assert_eq!(
+                error_text,
+                "tenant not found",
+                "insecure mode should forward validator rejection reason"
+            );
+        } else {
+            panic!("expected AuthFail message");
+        }
     }
 }

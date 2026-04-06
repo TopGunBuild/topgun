@@ -495,6 +495,7 @@ mod tests {
             policy_store: None,
             auth_providers: Arc::new(vec![provider]),
             refresh_grant_store: Some(store as Arc<dyn crate::network::handlers::RefreshGrantStore>),
+            auth_validator: None,
         };
         let app = make_app(state);
         let (status, body) = post_exchange(app, json!({ "token": "any" })).await;

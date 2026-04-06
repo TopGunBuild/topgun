@@ -13,6 +13,7 @@ use jsonwebtoken::Validation;
 
 use super::admin_types::ErrorResponse;
 use super::auth::JwtClaims;
+use super::auth_validator::AuthValidationContext;
 use super::AppState;
 
 /// Error type returned when admin authentication fails.
@@ -96,21 +97,45 @@ impl FromRequestParts<AppState> for AdminClaims {
         validation.validate_aud = false;
         validation.leeway = state.config.jwt_clock_skew_secs;
 
-        let token_data = jsonwebtoken::decode::<JwtClaims>(token, &key, &validation)
+        // Decode into serde_json::Value to obtain raw_claims for AuthValidationContext.
+        let token_data = jsonwebtoken::decode::<serde_json::Value>(token, &key, &validation)
             .map_err(|e| AdminAuthError::InvalidToken(e.to_string()))?;
+
+        let raw_claims = token_data.claims.clone();
 
         // Reject tokens without a subject claim — anonymous identity is not
         // permitted for admin endpoints.
-        let user_id = token_data
-            .claims
-            .sub
+        let user_id = raw_claims["sub"]
+            .as_str()
+            .map(str::to_owned)
             .ok_or_else(|| AdminAuthError::InvalidToken("missing sub claim in JWT".to_string()))?;
 
-        let roles = token_data.claims.roles.unwrap_or_default();
+        let roles: Vec<String> = raw_claims["roles"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
 
-        // Verify admin role
+        // Verify admin role before calling custom validator.
         if !roles.iter().any(|r| r == "admin") {
             return Err(AdminAuthError::Forbidden);
+        }
+
+        // Call custom validator after signature verification if configured.
+        // Admin endpoints are internal-facing — always forward the full reason string.
+        if let Some(ref validator) = state.auth_validator {
+            let ctx = AuthValidationContext {
+                user_id: user_id.clone(),
+                roles: roles.clone(),
+                raw_claims,
+            };
+            if let Err(reason) = validator.validate(&ctx).await {
+                tracing::warn!(user_id = %user_id, reason = %reason, "custom auth validator rejected admin token");
+                return Err(AdminAuthError::InvalidToken(reason));
+            }
         }
 
         Ok(AdminClaims { user_id, roles })
@@ -368,5 +393,62 @@ CQIDAQAB
         let claims = result.unwrap();
         assert_eq!(claims.user_id, "admin-rsa-user");
         assert!(claims.roles.contains(&"admin".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // AuthValidator integration tests (SPEC-189 AC3, AC4)
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal AppState for testing with an optional validator.
+    fn test_state_with_validator(validator: Option<Arc<dyn crate::network::handlers::auth_validator::AuthValidator>>) -> AppState {
+        let mut config = NetworkConfig::default();
+        config.jwt_clock_skew_secs = 60;
+        AppState {
+            registry: Arc::new(ConnectionRegistry::new()),
+            shutdown: Arc::new(ShutdownController::new()),
+            config: Arc::new(config),
+            start_time: Instant::now(),
+            observability: None,
+            operation_service: None,
+            dispatcher: None,
+            jwt_secret: Some(TEST_SECRET.to_owned()),
+            cluster_state: None,
+            store_factory: None,
+            server_config: None,
+            policy_store: None,
+            auth_providers: Arc::new(vec![]),
+            refresh_grant_store: None,
+            auth_validator: validator,
+        }
+    }
+
+    /// AC3 (SPEC-189): A rejecting AuthValidator causes AdminClaims extractor to return Err(InvalidToken).
+    #[tokio::test]
+    async fn rejecting_validator_returns_invalid_token() {
+        let validator = Arc::new(|_ctx: &crate::network::handlers::auth_validator::AuthValidationContext| {
+            Err("ip not allowlisted".to_string())
+        });
+        let state = test_state_with_validator(Some(validator));
+        let token = make_token(Some("admin-user"), 3600);
+        let mut parts = parts_with_bearer(&token);
+        let result = AdminClaims::from_request_parts(&mut parts, &state).await;
+        assert!(result.is_err(), "expected Err when validator rejects");
+        match result.unwrap_err() {
+            AdminAuthError::InvalidToken(reason) => {
+                assert_eq!(reason, "ip not allowlisted", "admin path should forward full reason");
+            }
+            e => panic!("expected InvalidToken, got {e:?}"),
+        }
+    }
+
+    /// AC4 (SPEC-189): When auth_validator is None, valid admin token is accepted (no regression).
+    #[tokio::test]
+    async fn no_validator_accepts_valid_admin_token() {
+        let state = test_state_with_validator(None);
+        let token = make_token(Some("admin-user"), 3600);
+        let mut parts = parts_with_bearer(&token);
+        let result = AdminClaims::from_request_parts(&mut parts, &state).await;
+        assert!(result.is_ok(), "no validator should accept valid admin token, got {result:?}");
+        assert_eq!(result.unwrap().user_id, "admin-user");
     }
 }

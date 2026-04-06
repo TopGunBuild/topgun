@@ -22,6 +22,7 @@ use topgun_core::Timestamp;
 
 use super::AppState;
 use super::auth::JwtClaims;
+use super::auth_validator::AuthValidationContext;
 use crate::service::dispatch::PartitionDispatcher;
 use crate::service::domain::predicate::{execute_query, value_to_rmpv};
 use crate::service::operation::CallerOrigin;
@@ -148,16 +149,39 @@ impl OptionalFromRequestParts<AppState> for ClientClaims {
         validation.validate_aud = false;
         validation.leeway = state.config.jwt_clock_skew_secs;
 
-        let Ok(token_data) = jsonwebtoken::decode::<JwtClaims>(token, &key, &validation) else {
+        // Decode into serde_json::Value to obtain raw_claims for AuthValidationContext.
+        let Ok(token_data) = jsonwebtoken::decode::<serde_json::Value>(token, &key, &validation) else {
             return Ok(None);
         };
+
+        let raw_claims = token_data.claims.clone();
 
         // Require sub claim — anonymous identity is not permitted.
-        let Some(user_id) = token_data.claims.sub else {
+        let Some(user_id) = raw_claims["sub"].as_str().map(str::to_owned) else {
             return Ok(None);
         };
 
-        let roles = token_data.claims.roles.unwrap_or_default();
+        let roles: Vec<String> = raw_claims["roles"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Call custom validator after signature verification if configured.
+        if let Some(ref validator) = state.auth_validator {
+            let ctx = AuthValidationContext {
+                user_id: user_id.clone(),
+                roles: roles.clone(),
+                raw_claims,
+            };
+            if let Err(reason) = validator.validate(&ctx).await {
+                tracing::warn!(user_id = %user_id, reason = %reason, "custom auth validator rejected token");
+                return Ok(None);
+            }
+        }
 
         Ok(Some(ClientClaims { user_id, roles }))
     }
@@ -1595,5 +1619,73 @@ mod tests {
         assert_eq!(qr.results.len(), 2, "offset=2 limit=2 must return 2 records");
         assert_eq!(qr.has_more, Some(true), "has_more must be true (5 > 2+2)");
         assert!(response.errors.is_none(), "offset pagination must not produce errors");
+    }
+
+    // -----------------------------------------------------------------------
+    // AuthValidator integration tests (SPEC-189 AC2, AC4)
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a minimal AppState with a jwt_secret and optional validator.
+    fn test_state_with_validator(validator: Option<std::sync::Arc<dyn crate::network::handlers::auth_validator::AuthValidator>>) -> AppState {
+        let mut config = crate::network::config::NetworkConfig::default();
+        config.jwt_clock_skew_secs = 60;
+        AppState {
+            registry: Arc::new(ConnectionRegistry::new()),
+            shutdown: Arc::new(crate::network::shutdown::ShutdownController::new()),
+            config: Arc::new(config),
+            start_time: std::time::Instant::now(),
+            observability: None,
+            operation_service: None,
+            dispatcher: None,
+            jwt_secret: Some(TEST_SECRET.to_owned()),
+            cluster_state: None,
+            store_factory: None,
+            server_config: None,
+            policy_store: None,
+            auth_providers: Arc::new(vec![]),
+            refresh_grant_store: None,
+            auth_validator: validator,
+        }
+    }
+
+    /// AC2 (SPEC-189): A rejecting AuthValidator causes ClientClaims extractor to return None.
+    #[tokio::test]
+    async fn client_claims_rejecting_validator_returns_none() {
+        use axum::extract::OptionalFromRequestParts;
+        use axum::http::{header, Request};
+
+        let validator = Arc::new(|_ctx: &crate::network::handlers::auth_validator::AuthValidationContext| {
+            Err("revoked".to_string())
+        });
+        let state = test_state_with_validator(Some(validator));
+        let token = make_token(Some("user-revoked"), 3600);
+        let req = Request::builder()
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(())
+            .expect("request construction should not fail");
+        let (mut parts, _) = req.into_parts();
+        let result = <ClientClaims as axum::extract::OptionalFromRequestParts<AppState>>::from_request_parts(&mut parts, &state).await;
+        assert!(result.is_ok(), "extractor should be infallible");
+        assert!(result.unwrap().is_none(), "rejecting validator should cause None");
+    }
+
+    /// AC4 (SPEC-189): When auth_validator is None, valid token is accepted (no regression).
+    #[tokio::test]
+    async fn client_claims_no_validator_accepts_valid_token() {
+        use axum::extract::OptionalFromRequestParts;
+        use axum::http::{header, Request};
+
+        let state = test_state_with_validator(None);
+        let token = make_token(Some("user-ok"), 3600);
+        let req = Request::builder()
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(())
+            .expect("request construction should not fail");
+        let (mut parts, _) = req.into_parts();
+        let result = <ClientClaims as axum::extract::OptionalFromRequestParts<AppState>>::from_request_parts(&mut parts, &state).await;
+        assert!(result.is_ok(), "extractor should be infallible");
+        let claims = result.unwrap();
+        assert!(claims.is_some(), "no validator should accept valid token");
+        assert_eq!(claims.unwrap().user_id, "user-ok");
     }
 }

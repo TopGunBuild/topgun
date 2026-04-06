@@ -81,7 +81,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     // Send AUTH_REQUIRED before splitting the socket, so the client
     // knows to authenticate before sending any other messages.
     if let Some(ref secret) = state.jwt_secret {
-        let auth_handler = AuthHandler::new(secret.clone());
+        let auth_handler = AuthHandler::new(secret.clone(), state.auth_validator.clone());
         if let Err(e) = auth_handler.send_auth_required(&mut socket).await {
             warn!(
                 "failed to send AUTH_REQUIRED to {:?}: {}",
@@ -127,7 +127,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
                     if let TopGunMessage::Auth(ref auth_msg) = tg_msg {
                         if let Some(ref secret) = state.jwt_secret {
-                            let auth_handler = AuthHandler::new(secret.clone());
+                            let auth_handler = AuthHandler::new(secret.clone(), state.auth_validator.clone());
                             match auth_handler.handle_auth(auth_msg, &handle.tx, state.config.jwt_clock_skew_secs, state.config.insecure_forward_auth_errors).await {
                                 Ok(principal) => {
                                     // Store principal in metadata so domain services can read it.
