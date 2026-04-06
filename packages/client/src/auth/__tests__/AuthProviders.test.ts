@@ -242,5 +242,116 @@ describe('AuthProviders', () => {
       expect(result2).toBe(token);
       expect(getTokenFn).toHaveBeenCalledTimes(1);
     });
+
+    // ── Refresh token flow (AC8, AC9) ────────────────────────────────────────
+
+    it('AC8: stores refresh token from token exchange response when enableRefresh is true', async () => {
+      const externalToken = createMockJwt(Math.floor(Date.now() / 1000) + 3600);
+      const topgunToken = createMockJwt(Math.floor(Date.now() / 1000) + 7200);
+      const refreshToken = 'a'.repeat(64); // opaque 64-char hex
+
+      const getTokenFn = jest.fn().mockResolvedValue(externalToken);
+      const provider = new CustomAuthProvider(getTokenFn, {
+        tokenExchangeConfig: {
+          serverUrl: 'http://localhost:8080',
+          enableRefresh: true,
+        },
+      });
+
+      const mockFetch = jest.fn().mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ token: topgunToken, refreshToken, refreshExpiresAt: 9999999 }),
+      });
+      global.fetch = mockFetch;
+
+      await provider.getToken();
+
+      // Force expiry of cached token so next call triggers a refresh.
+      // At this point the stored refresh token should be used before
+      // falling back to fetchExternalToken.
+      const newAccessToken = createMockJwt(Math.floor(Date.now() / 1000) + 7200);
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ token: newAccessToken, refreshToken: 'b'.repeat(64) }),
+      });
+
+      // Expire the cached token.
+      (provider as any).cachedToken = null;
+      (provider as any).cachedTokenExpiry = 0;
+
+      const result = await provider.getToken();
+      expect(result).toBe(newAccessToken);
+      // fetchExternalToken should NOT have been called a second time because
+      // the server refresh succeeded.
+      expect(getTokenFn).toHaveBeenCalledTimes(1);
+      // Second fetch call was to /api/auth/refresh
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(mockFetch.mock.calls[1][0]).toBe('http://localhost:8080/api/auth/refresh');
+    });
+
+    it('AC9: falls back to fetchExternalToken when server refresh returns 401', async () => {
+      const externalToken = createMockJwt(Math.floor(Date.now() / 1000) + 3600);
+      const topgunToken = createMockJwt(Math.floor(Date.now() / 1000) + 7200);
+      const refreshToken = 'c'.repeat(64);
+
+      const getTokenFn = jest.fn().mockResolvedValue(externalToken);
+      const provider = new CustomAuthProvider(getTokenFn, {
+        tokenExchangeConfig: {
+          serverUrl: 'http://localhost:8080',
+          enableRefresh: true,
+        },
+      });
+
+      // First call: successful token exchange that stores a refresh token.
+      const mockFetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ token: topgunToken, refreshToken }),
+        })
+        // Second call: server refresh returns 401 (consumed or expired).
+        .mockResolvedValueOnce({ ok: false, status: 401 })
+        // Third call: token exchange after fallback to fetchExternalToken.
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ token: topgunToken }),
+        });
+      global.fetch = mockFetch;
+
+      await provider.getToken();
+
+      // Expire the cached token.
+      (provider as any).cachedToken = null;
+      (provider as any).cachedTokenExpiry = 0;
+
+      const result = await provider.getToken();
+      expect(result).toBe(topgunToken);
+      // fetchExternalToken was called twice: initial + fallback after 401.
+      expect(getTokenFn).toHaveBeenCalledTimes(2);
+    });
+
+    it('token exchange without enableRefresh does not store refresh token', async () => {
+      const externalToken = createMockJwt(Math.floor(Date.now() / 1000) + 3600);
+      const topgunToken = createMockJwt(Math.floor(Date.now() / 1000) + 7200);
+      const refreshToken = 'd'.repeat(64);
+
+      const getTokenFn = jest.fn().mockResolvedValue(externalToken);
+      const provider = new CustomAuthProvider(getTokenFn, {
+        tokenExchangeConfig: {
+          serverUrl: 'http://localhost:8080',
+          // enableRefresh not set (defaults to false/undefined)
+        },
+      });
+
+      const mockFetch = jest.fn().mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ token: topgunToken, refreshToken }),
+      });
+      global.fetch = mockFetch;
+
+      await provider.getToken();
+
+      // refreshTokenValue should remain null even though server returned one.
+      expect((provider as any).refreshTokenValue).toBeNull();
+    });
   });
 });

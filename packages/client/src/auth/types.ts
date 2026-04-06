@@ -36,4 +36,23 @@ export interface TokenExchangeConfig {
   serverUrl: string;
   /** Provider name hint sent to server (e.g., 'clerk', 'firebase') */
   providerName?: string;
+  /**
+   * Enable the server-issued refresh token flow.
+   * When true, the provider stores the refresh token returned by /api/auth/token
+   * and uses it to renew the access JWT before falling back to fetchExternalToken().
+   * The server must have refresh grants configured (PostgresRefreshGrantStore).
+   * Default: false.
+   */
+  enableRefresh?: boolean;
+}
+
+/**
+ * Shape of the token exchange response body from POST /api/auth/token.
+ * The refresh fields are present only when the server has refresh grants enabled.
+ */
+export interface TokenExchangeResponse {
+  token: string;
+  expiresAt: number;
+  refreshToken?: string;
+  refreshExpiresAt?: number;
 }

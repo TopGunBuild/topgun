@@ -1,4 +1,4 @@
-import type { AuthProvider, AuthEvent, AuthEventType, TokenExchangeConfig } from './types';
+import type { AuthProvider, AuthEvent, AuthEventType, TokenExchangeConfig, TokenExchangeResponse } from './types';
 
 export interface BaseAuthProviderConfig {
   tokenExchangeConfig?: TokenExchangeConfig;
@@ -16,6 +16,8 @@ export abstract class BaseAuthProvider implements AuthProvider {
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private listeners: Array<(event: AuthEvent) => void> = [];
   private inflightPromise: Promise<string | null> | null = null;
+  /** Opaque refresh token from the server. Stored in memory only. */
+  private refreshTokenValue: string | null = null;
 
   protected readonly tokenExchangeConfig?: TokenExchangeConfig;
   protected readonly refreshMarginMs: number;
@@ -58,6 +60,18 @@ export abstract class BaseAuthProvider implements AuthProvider {
 
   private async refreshToken(): Promise<string | null> {
     try {
+      // Attempt server-issued refresh before calling the external provider.
+      // This avoids a round-trip to the external provider when a refresh token
+      // from a previous exchange is still valid.
+      if (
+        this.refreshTokenValue &&
+        this.tokenExchangeConfig?.enableRefresh
+      ) {
+        const refreshed = await this.attemptServerRefresh(this.refreshTokenValue);
+        if (refreshed) return refreshed;
+        // Fall through to external token fetch if server refresh fails.
+      }
+
       let token = await this.fetchExternalToken();
 
       if (!token) {
@@ -98,10 +112,65 @@ export abstract class BaseAuthProvider implements AuthProvider {
   }
 
   /**
+   * Attempt to renew the access token using the stored server refresh token.
+   *
+   * On success: updates cachedToken, cachedTokenExpiry, and refreshTokenValue,
+   * then returns the new access token.
+   * On failure (401, network error, or missing server URL): clears the stored
+   * refresh token and returns null so the caller falls through to fetchExternalToken().
+   */
+  private async attemptServerRefresh(refreshToken: string): Promise<string | null> {
+    if (!this.tokenExchangeConfig) return null;
+
+    const { serverUrl } = this.tokenExchangeConfig;
+    const url = `${serverUrl.replace(/\/$/, '')}/api/auth/refresh`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refreshToken }),
+      });
+
+      if (!response.ok) {
+        // Clear the stale refresh token so the next attempt uses external fetch.
+        this.refreshTokenValue = null;
+        return null;
+      }
+
+      const data = await response.json();
+      const newAccessToken: string | null = data.token ?? null;
+      const newRefreshToken: string | null = data.refreshToken ?? null;
+
+      if (!newAccessToken) {
+        this.refreshTokenValue = null;
+        return null;
+      }
+
+      // Update cached state with the new token pair.
+      this.cachedToken = newAccessToken;
+      this.cachedTokenExpiry = this.extractExpiry(newAccessToken);
+      this.refreshTokenValue = newRefreshToken;
+
+      this.scheduleRefresh();
+      this.emit({ type: 'token:refreshed' });
+
+      return newAccessToken;
+    } catch {
+      // Network error or JSON parse failure -- fall back to external fetch.
+      this.refreshTokenValue = null;
+      return null;
+    }
+  }
+
+  /**
    * Exchange an external provider token for a TopGun JWT via POST /api/auth/token.
+   *
+   * When the server response includes a refresh token (and enableRefresh is true),
+   * stores it for use on the next token renewal.
    */
   private async exchangeToken(externalToken: string): Promise<string | null> {
-    const { serverUrl, providerName } = this.tokenExchangeConfig!;
+    const { serverUrl, providerName, enableRefresh } = this.tokenExchangeConfig!;
     const url = `${serverUrl.replace(/\/$/, '')}/api/auth/token`;
 
     const response = await fetch(url, {
@@ -117,7 +186,13 @@ export abstract class BaseAuthProvider implements AuthProvider {
       throw new Error(`Token exchange failed: ${response.status} ${response.statusText}`);
     }
 
-    const data = await response.json();
+    const data: TokenExchangeResponse = await response.json();
+
+    // Store the refresh token when the server returns one and refresh is enabled.
+    if (enableRefresh && data.refreshToken) {
+      this.refreshTokenValue = data.refreshToken;
+    }
+
     return data.token ?? null;
   }
 
@@ -188,12 +263,14 @@ export abstract class BaseAuthProvider implements AuthProvider {
   }
 
   /**
-   * Clear the cached token and expiry so the next getToken() call fetches fresh.
+   * Clear the cached token, expiry, and stored refresh token so the next
+   * getToken() call fetches fresh from the external provider.
    * Subclasses call this when the external session changes (e.g., Firebase onIdTokenChanged).
    */
   protected invalidateCache(): void {
     this.cachedToken = null;
     this.cachedTokenExpiry = 0;
+    this.refreshTokenValue = null;
     this.clearRefreshTimer();
   }
 
@@ -212,6 +289,7 @@ export abstract class BaseAuthProvider implements AuthProvider {
     this.listeners = [];
     this.cachedToken = null;
     this.cachedTokenExpiry = 0;
+    this.refreshTokenValue = null;
     this.inflightPromise = null;
   }
 }
