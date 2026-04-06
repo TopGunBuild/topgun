@@ -3,6 +3,32 @@ import { ClerkAuthProvider } from '../ClerkAuthProvider';
 import { FirebaseAuthProvider } from '../FirebaseAuthProvider';
 import { BetterAuthProvider } from '../BetterAuthProvider';
 import type { AuthEvent } from '../types';
+import type { IStorageAdapter } from '../../IStorageAdapter';
+
+function createMockStorageAdapter(): IStorageAdapter & { store: Map<string, any> } {
+  const store = new Map<string, any>();
+  return {
+    store,
+    initialize: jest.fn().mockResolvedValue(undefined),
+    get: jest.fn().mockResolvedValue(undefined),
+    put: jest.fn().mockResolvedValue(undefined),
+    delete: jest.fn().mockResolvedValue(undefined),
+    getAll: jest.fn().mockResolvedValue([]),
+    query: jest.fn().mockResolvedValue([]),
+    getMeta: jest.fn().mockImplementation((key: string) => Promise.resolve(store.get(key))),
+    setMeta: jest.fn().mockImplementation((key: string, value: any) => {
+      if (value === null || value === undefined) {
+        store.delete(key);
+      } else {
+        store.set(key, value);
+      }
+      return Promise.resolve();
+    }),
+    appendOpLog: jest.fn().mockResolvedValue(undefined),
+    getOpLog: jest.fn().mockResolvedValue([]),
+    clearOpLog: jest.fn().mockResolvedValue(undefined),
+  } as any;
+}
 
 /**
  * Create a mock JWT with the given expiry time (seconds since epoch).
@@ -233,7 +259,8 @@ describe('AuthProviders', () => {
       const promise1 = provider.getToken();
       const promise2 = provider.getToken();
 
-      // Resolve the token
+      // Allow pending microtasks to settle before resolving the token
+      await Promise.resolve();
       resolveToken!(token);
 
       const [result1, result2] = await Promise.all([promise1, promise2]);
@@ -327,6 +354,210 @@ describe('AuthProviders', () => {
       expect(result).toBe(topgunToken);
       // fetchExternalToken was called twice: initial + fallback after 401.
       expect(getTokenFn).toHaveBeenCalledTimes(2);
+    });
+
+    it('persists refresh token to storage on exchange', async () => {
+      const storage = createMockStorageAdapter();
+      const externalToken = createMockJwt(Math.floor(Date.now() / 1000) + 3600);
+      const topgunToken = createMockJwt(Math.floor(Date.now() / 1000) + 7200);
+      const refreshToken = 'persist-me-' + 'x'.repeat(53);
+
+      const getTokenFn = jest.fn().mockResolvedValue(externalToken);
+      const provider = new CustomAuthProvider(getTokenFn, {
+        tokenExchangeConfig: {
+          serverUrl: 'http://localhost:8080',
+          enableRefresh: true,
+        },
+        storageAdapter: storage,
+      });
+
+      global.fetch = jest.fn().mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ token: topgunToken, refreshToken }),
+      });
+
+      await provider.getToken();
+
+      expect(storage.setMeta).toHaveBeenCalledWith('topgun:refreshToken', refreshToken);
+      expect(storage.store.get('topgun:refreshToken')).toBe(refreshToken);
+    });
+
+    it('restores refresh token from storage on first getToken()', async () => {
+      const storage = createMockStorageAdapter();
+      const storedRefresh = 'stored-refresh-' + 'y'.repeat(49);
+      storage.store.set('topgun:refreshToken', storedRefresh);
+
+      const externalToken = createMockJwt(Math.floor(Date.now() / 1000) + 3600);
+      const newAccessToken = createMockJwt(Math.floor(Date.now() / 1000) + 7200);
+
+      const getTokenFn = jest.fn().mockResolvedValue(externalToken);
+      const provider = new CustomAuthProvider(getTokenFn, {
+        tokenExchangeConfig: {
+          serverUrl: 'http://localhost:8080',
+          enableRefresh: true,
+        },
+        storageAdapter: storage,
+      });
+
+      // Server refresh succeeds using the restored token
+      global.fetch = jest.fn().mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ token: newAccessToken, refreshToken: 'rotated' }),
+      });
+
+      const result = await provider.getToken();
+      expect(result).toBe(newAccessToken);
+      // fetchExternalToken should NOT have been called because server refresh succeeded
+      expect(getTokenFn).not.toHaveBeenCalled();
+      // The refresh endpoint was called with the stored token
+      expect(global.fetch).toHaveBeenCalledWith(
+        'http://localhost:8080/api/auth/refresh',
+        expect.objectContaining({
+          body: JSON.stringify({ refreshToken: storedRefresh }),
+        })
+      );
+    });
+
+    it('clears refresh token from storage on invalidateCache()', async () => {
+      const storage = createMockStorageAdapter();
+      const externalToken = createMockJwt(Math.floor(Date.now() / 1000) + 3600);
+      const topgunToken = createMockJwt(Math.floor(Date.now() / 1000) + 7200);
+
+      const getTokenFn = jest.fn().mockResolvedValue(externalToken);
+      const provider = new CustomAuthProvider(getTokenFn, {
+        tokenExchangeConfig: {
+          serverUrl: 'http://localhost:8080',
+          enableRefresh: true,
+        },
+        storageAdapter: storage,
+      });
+
+      global.fetch = jest.fn().mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ token: topgunToken, refreshToken: 'to-clear' }),
+      });
+
+      await provider.getToken();
+      expect(storage.store.has('topgun:refreshToken')).toBe(true);
+
+      // invalidateCache is protected, access via cast
+      (provider as any).invalidateCache();
+      expect(storage.setMeta).toHaveBeenCalledWith('topgun:refreshToken', null);
+    });
+
+    it('clears refresh token from storage on destroy()', async () => {
+      const storage = createMockStorageAdapter();
+      const externalToken = createMockJwt(Math.floor(Date.now() / 1000) + 3600);
+      const topgunToken = createMockJwt(Math.floor(Date.now() / 1000) + 7200);
+
+      const getTokenFn = jest.fn().mockResolvedValue(externalToken);
+      const provider = new CustomAuthProvider(getTokenFn, {
+        tokenExchangeConfig: {
+          serverUrl: 'http://localhost:8080',
+          enableRefresh: true,
+        },
+        storageAdapter: storage,
+      });
+
+      global.fetch = jest.fn().mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ token: topgunToken, refreshToken: 'to-destroy' }),
+      });
+
+      await provider.getToken();
+      provider.destroy();
+      expect(storage.setMeta).toHaveBeenCalledWith('topgun:refreshToken', null);
+    });
+
+    it('clears refresh token from storage on refresh failure', async () => {
+      const storage = createMockStorageAdapter();
+      const externalToken = createMockJwt(Math.floor(Date.now() / 1000) + 3600);
+      const topgunToken = createMockJwt(Math.floor(Date.now() / 1000) + 7200);
+
+      const getTokenFn = jest.fn().mockResolvedValue(externalToken);
+      const provider = new CustomAuthProvider(getTokenFn, {
+        tokenExchangeConfig: {
+          serverUrl: 'http://localhost:8080',
+          enableRefresh: true,
+        },
+        storageAdapter: storage,
+      });
+
+      const mockFetch = jest.fn()
+        // First call: exchange succeeds with refresh token
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ token: topgunToken, refreshToken: 'will-fail' }),
+        })
+        // Second call: refresh returns 401
+        .mockResolvedValueOnce({ ok: false, status: 401 })
+        // Third call: re-exchange after fallback
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ token: topgunToken }),
+        });
+      global.fetch = mockFetch;
+
+      await provider.getToken();
+      expect(storage.store.has('topgun:refreshToken')).toBe(true);
+
+      // Expire cached token to force refresh attempt
+      (provider as any).cachedToken = null;
+      (provider as any).cachedTokenExpiry = 0;
+
+      await provider.getToken();
+      // After 401, the stored token should have been cleared
+      expect(storage.setMeta).toHaveBeenCalledWith('topgun:refreshToken', null);
+    });
+
+    it('storage errors are non-fatal', async () => {
+      const storage = createMockStorageAdapter();
+      storage.setMeta = jest.fn().mockRejectedValue(new Error('IndexedDB quota exceeded'));
+      storage.getMeta = jest.fn().mockRejectedValue(new Error('IndexedDB unavailable'));
+
+      const externalToken = createMockJwt(Math.floor(Date.now() / 1000) + 3600);
+      const topgunToken = createMockJwt(Math.floor(Date.now() / 1000) + 7200);
+
+      const getTokenFn = jest.fn().mockResolvedValue(externalToken);
+      const provider = new CustomAuthProvider(getTokenFn, {
+        tokenExchangeConfig: {
+          serverUrl: 'http://localhost:8080',
+          enableRefresh: true,
+        },
+        storageAdapter: storage,
+      });
+
+      global.fetch = jest.fn().mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ token: topgunToken, refreshToken: 'wont-persist' }),
+      });
+
+      // Should not throw despite storage failures
+      const result = await provider.getToken();
+      expect(result).toBe(topgunToken);
+    });
+
+    it('no adapter means memory-only behavior (existing tests unaffected)', async () => {
+      const externalToken = createMockJwt(Math.floor(Date.now() / 1000) + 3600);
+      const topgunToken = createMockJwt(Math.floor(Date.now() / 1000) + 7200);
+
+      const getTokenFn = jest.fn().mockResolvedValue(externalToken);
+      // No storageAdapter provided
+      const provider = new CustomAuthProvider(getTokenFn, {
+        tokenExchangeConfig: {
+          serverUrl: 'http://localhost:8080',
+          enableRefresh: true,
+        },
+      });
+
+      global.fetch = jest.fn().mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ token: topgunToken, refreshToken: 'memory-only' }),
+      });
+
+      const result = await provider.getToken();
+      expect(result).toBe(topgunToken);
+      // No crash, behavior is identical to before
     });
 
     it('token exchange without enableRefresh does not store refresh token', async () => {
