@@ -14,7 +14,7 @@ use tower::Service;
 
 use topgun_core::messages::{
     ClientOp, ClientOpMessage, Message, OpAckMessage, OpAckPayload,
-    OpBatchMessage, ServerEventPayload, ServerEventType,
+    OpBatchMessage, ServerEventPayload, ServerEventType, WriteConcern,
 };
 use topgun_core::types::Value;
 use topgun_core::{hash_to_partition, LWWRecord, Timestamp};
@@ -200,7 +200,8 @@ impl CrdtService {
             OpAckMessage {
                 payload: OpAckPayload {
                     last_id,
-                    achieved_level: None,
+                    // CRDT merge succeeded in memory — report APPLIED durability
+                    achieved_level: Some(WriteConcern::APPLIED),
                     results: None,
                 },
             },
@@ -270,7 +271,8 @@ impl CrdtService {
             OpAckMessage {
                 payload: OpAckPayload {
                     last_id,
-                    achieved_level: None,
+                    // All ops in the batch merged successfully in memory — report APPLIED
+                    achieved_level: Some(WriteConcern::APPLIED),
                     results: None,
                 },
             },
@@ -1949,5 +1951,103 @@ mod tests {
         assert_eq!(map.len(), 1, "projected value should have only 1 field");
         assert_eq!(map[0].0.as_str().unwrap(), "name");
         assert_eq!(map[0].1.as_str().unwrap(), "Alice");
+    }
+
+    // -- achieved_level reporting --
+
+    #[tokio::test]
+    async fn single_op_ack_reports_applied_level() {
+        let svc = make_service();
+        let record = topgun_core::LWWRecord {
+            value: Some(rmpv::Value::String("Alice".into())),
+            timestamp: make_timestamp(),
+            ttl_ms: None,
+        };
+        let op = Operation::ClientOp {
+            ctx: make_ctx(),
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some("op-ack-level".to_string()),
+                    map_name: "users".to_string(),
+                    key: "user-1".to_string(),
+                    op_type: None,
+                    record: Some(Some(record)),
+                    or_record: None,
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+
+        let resp = svc.oneshot(op).await.unwrap();
+        match resp {
+            OperationResponse::Message(msg) => match *msg {
+                Message::OpAck(ack) => {
+                    assert_eq!(
+                        ack.payload.achieved_level,
+                        Some(WriteConcern::APPLIED),
+                        "single-op ack must report APPLIED after successful CRDT merge"
+                    );
+                }
+                other => panic!("expected OpAck, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn op_batch_ack_reports_applied_level() {
+        let svc = make_service();
+        let ops = vec![
+            topgun_core::messages::base::ClientOp {
+                id: Some("batch-op-1".to_string()),
+                map_name: "items".to_string(),
+                key: "item-1".to_string(),
+                op_type: None,
+                record: None,
+                or_record: None,
+                or_tag: None,
+                write_concern: None,
+                timeout: None,
+            },
+            topgun_core::messages::base::ClientOp {
+                id: Some("batch-op-2".to_string()),
+                map_name: "items".to_string(),
+                key: "item-2".to_string(),
+                op_type: None,
+                record: None,
+                or_record: None,
+                or_tag: None,
+                write_concern: None,
+                timeout: None,
+            },
+        ];
+
+        let op = Operation::OpBatch {
+            ctx: make_ctx(),
+            payload: topgun_core::messages::sync::OpBatchMessage {
+                payload: topgun_core::messages::sync::OpBatchPayload {
+                    ops,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+
+        let resp = svc.oneshot(op).await.unwrap();
+        match resp {
+            OperationResponse::Message(msg) => match *msg {
+                Message::OpAck(ack) => {
+                    assert_eq!(
+                        ack.payload.achieved_level,
+                        Some(WriteConcern::APPLIED),
+                        "batch ack must report APPLIED after all ops merged successfully"
+                    );
+                }
+                other => panic!("expected OpAck, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        }
     }
 }
