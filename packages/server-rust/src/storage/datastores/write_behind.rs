@@ -363,19 +363,62 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
 
 #[async_trait]
 impl MapDataStore for WriteBehindDataStore {
-    // S1: Delegating methods implemented here.
-    // S2: Core buffering methods (add, remove, load, etc.) will be added in Wave 3.
-
     async fn add(
         &self,
-        _map: &str,
-        _key: &str,
-        _value: &RecordValue,
-        _expiration_time: i64,
-        _now: i64,
+        map: &str,
+        key: &str,
+        value: &RecordValue,
+        expiration_time: i64,
+        now: i64,
     ) -> anyhow::Result<()> {
-        // Placeholder -- implemented in G4 (Wave 3)
-        todo!("G4: add")
+        // Check capacity before insertion to avoid partial state on rejection
+        if self.config.capacity != 0 {
+            let current = self.pending_count.load(Ordering::Relaxed);
+            // Only reject if this would be a NEW key (not a coalesce).
+            // We check the staging area as a fast pre-check; the definitive
+            // check happens via PartitionQueue::insert return value.
+            let is_new_key = !self.staging.contains_key(&(map.to_string(), key.to_string()));
+            if is_new_key && current >= self.config.capacity {
+                anyhow::bail!("Write-behind capacity exceeded");
+            }
+        }
+
+        let partition_id = partition_for(map, key);
+        let entry = DelayedEntry {
+            map: map.to_string(),
+            key: key.to_string(),
+            operation: DelayedOp::Store {
+                value: value.clone(),
+                expiration_time,
+            },
+            store_time: now,
+            sequence: self.next_sequence(),
+            retry_count: 0,
+        };
+
+        // Insert into partition queue, preserving original store_time on coalesce
+        let mut queue = self
+            .queues
+            .entry(partition_id)
+            .or_insert_with(PartitionQueue::default);
+
+        // If coalescing, preserve the original store_time
+        let staging_key = (map.to_string(), key.to_string());
+        if let Some(existing) = queue.value_mut().remove(map, key) {
+            let mut coalesced = entry;
+            coalesced.store_time = existing.store_time;
+            let _ = queue.value_mut().insert(coalesced);
+            // No pending_count change on coalesce
+        } else {
+            let _ = queue.value_mut().insert(entry);
+            // New key -- increment pending count
+            self.pending_count.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // Update staging area for read-your-writes
+        self.staging.insert(staging_key, Some(value.clone()));
+
+        Ok(())
     }
 
     async fn add_backup(
@@ -388,12 +431,51 @@ impl MapDataStore for WriteBehindDataStore {
     ) -> anyhow::Result<()> {
         // Backups pass through directly -- backup replication has its own
         // consistency guarantees
-        self.inner.add_backup(map, key, value, expiration_time, now).await
+        self.inner
+            .add_backup(map, key, value, expiration_time, now)
+            .await
     }
 
-    async fn remove(&self, _map: &str, _key: &str, _now: i64) -> anyhow::Result<()> {
-        // Placeholder -- implemented in G4 (Wave 3)
-        todo!("G4: remove")
+    async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+        // Check capacity before insertion
+        if self.config.capacity != 0 {
+            let current = self.pending_count.load(Ordering::Relaxed);
+            let is_new_key = !self.staging.contains_key(&(map.to_string(), key.to_string()));
+            if is_new_key && current >= self.config.capacity {
+                anyhow::bail!("Write-behind capacity exceeded");
+            }
+        }
+
+        let partition_id = partition_for(map, key);
+        let entry = DelayedEntry {
+            map: map.to_string(),
+            key: key.to_string(),
+            operation: DelayedOp::Remove,
+            store_time: now,
+            sequence: self.next_sequence(),
+            retry_count: 0,
+        };
+
+        let mut queue = self
+            .queues
+            .entry(partition_id)
+            .or_insert_with(PartitionQueue::default);
+
+        let staging_key = (map.to_string(), key.to_string());
+        if let Some(existing) = queue.value_mut().remove(map, key) {
+            let mut coalesced = entry;
+            coalesced.store_time = existing.store_time;
+            let _ = queue.value_mut().insert(coalesced);
+            // No pending_count change on coalesce
+        } else {
+            let _ = queue.value_mut().insert(entry);
+            self.pending_count.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // Pending delete marker in staging
+        self.staging.insert(staging_key, None);
+
+        Ok(())
     }
 
     async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
@@ -401,23 +483,98 @@ impl MapDataStore for WriteBehindDataStore {
         self.inner.remove_backup(map, key, now).await
     }
 
-    async fn load(&self, _map: &str, _key: &str) -> anyhow::Result<Option<RecordValue>> {
-        // Placeholder -- implemented in G4 (Wave 3)
-        todo!("G4: load")
+    async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+        let staging_key = (map.to_string(), key.to_string());
+
+        // Check staging first for read-your-writes consistency
+        if let Some(entry) = self.staging.get(&staging_key) {
+            return match entry.value() {
+                Some(value) => Ok(Some(value.clone())),
+                // Pending delete -- do not consult inner store
+                None => Ok(None),
+            };
+        }
+
+        // Not in staging -- delegate to inner store
+        self.inner.load(map, key).await
     }
 
     async fn load_all(
         &self,
-        _map: &str,
-        _keys: &[String],
+        map: &str,
+        keys: &[String],
     ) -> anyhow::Result<Vec<(String, RecordValue)>> {
-        // Placeholder -- implemented in G4 (Wave 3)
-        todo!("G4: load_all")
+        let mut results = Vec::new();
+        let mut inner_keys = Vec::new();
+
+        for key in keys {
+            let staging_key = (map.to_string(), key.clone());
+            if let Some(entry) = self.staging.get(&staging_key) {
+                match entry.value() {
+                    Some(value) => results.push((key.clone(), value.clone())),
+                    // Pending delete -- skip entirely, do not fetch from inner
+                    None => {}
+                }
+            } else {
+                inner_keys.push(key.clone());
+            }
+        }
+
+        // Batch-load remaining keys from the inner store
+        if !inner_keys.is_empty() {
+            let inner_results = self.inner.load_all(map, &inner_keys).await?;
+            results.extend(inner_results);
+        }
+
+        Ok(results)
     }
 
-    async fn remove_all(&self, _map: &str, _keys: &[String]) -> anyhow::Result<()> {
-        // Placeholder -- implemented in G4 (Wave 3)
-        todo!("G4: remove_all")
+    async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+
+        for key in keys {
+            // Check capacity before each insertion
+            if self.config.capacity != 0 {
+                let current = self.pending_count.load(Ordering::Relaxed);
+                let is_new_key =
+                    !self.staging.contains_key(&(map.to_string(), key.clone()));
+                if is_new_key && current >= self.config.capacity {
+                    anyhow::bail!("Write-behind capacity exceeded");
+                }
+            }
+
+            let partition_id = partition_for(map, key);
+            let entry = DelayedEntry {
+                map: map.to_string(),
+                key: key.clone(),
+                operation: DelayedOp::Remove,
+                store_time: now,
+                sequence: self.next_sequence(),
+                retry_count: 0,
+            };
+
+            let mut queue = self
+                .queues
+                .entry(partition_id)
+                .or_insert_with(PartitionQueue::default);
+
+            let staging_key = (map.to_string(), key.clone());
+            if let Some(existing) = queue.value_mut().remove(map, key) {
+                let mut coalesced = entry;
+                coalesced.store_time = existing.store_time;
+                let _ = queue.value_mut().insert(coalesced);
+            } else {
+                let _ = queue.value_mut().insert(entry);
+                self.pending_count.fetch_add(1, Ordering::Relaxed);
+            }
+
+            self.staging.insert(staging_key, None);
+        }
+
+        Ok(())
     }
 
     fn is_loadable(&self, _key: &str) -> bool {
@@ -430,24 +587,67 @@ impl MapDataStore for WriteBehindDataStore {
     }
 
     async fn soft_flush(&self) -> anyhow::Result<u64> {
-        // Placeholder -- implemented in G4 (Wave 3)
-        todo!("G4: soft_flush")
+        // Notify the background task to flush immediately
+        self.flush_notify.notify_one();
+        Ok(self.sequence.load(Ordering::Relaxed))
     }
 
     async fn hard_flush(&self) -> anyhow::Result<()> {
-        // Placeholder -- implemented in G4 (Wave 3)
-        todo!("G4: hard_flush")
+        // Loop until all pending entries are drained, with a 30-second timeout
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+
+        loop {
+            if self.pending_count.load(Ordering::Relaxed) == 0 {
+                return Ok(());
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "hard_flush timed out after 30s with {} entries remaining",
+                    self.pending_count.load(Ordering::Relaxed)
+                );
+            }
+
+            // Signal the flush loop and yield briefly
+            self.flush_notify.notify_one();
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
     }
 
     async fn flush_key(
         &self,
-        _map: &str,
-        _key: &str,
-        _value: &RecordValue,
-        _is_backup: bool,
+        map: &str,
+        key: &str,
+        value: &RecordValue,
+        is_backup: bool,
     ) -> anyhow::Result<()> {
-        // Placeholder -- implemented in G4 (Wave 3)
-        todo!("G4: flush_key")
+        if is_backup {
+            // Backup flush passes through directly
+            return self.inner.flush_key(map, key, value, is_backup).await;
+        }
+
+        // Remove the key from the partition queue if present
+        let partition_id = partition_for(map, key);
+        let removed = if let Some(mut queue) = self.queues.get_mut(&partition_id) {
+            queue.remove(map, key)
+        } else {
+            None
+        };
+
+        // Remove from staging
+        self.staging.remove(&(map.to_string(), key.to_string()));
+
+        // Decrement pending count if the key was actually in the queue
+        if removed.is_some() {
+            self.pending_count.fetch_sub(1, Ordering::Relaxed);
+        }
+
+        // Persist the caller-provided value directly to the inner store
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        self.inner.add(map, key, value, 0, now).await
     }
 
     fn reset(&self) {
