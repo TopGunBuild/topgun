@@ -4,14 +4,13 @@
 //! in per-partition coalesced queues and flushing them on a configurable schedule.
 
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
 use tokio::sync::{watch, Notify};
+use topgun_core::{fnv1a_hash, PARTITION_COUNT};
 use tracing::warn;
 
 use crate::storage::map_data_store::MapDataStore;
@@ -162,9 +161,6 @@ impl PartitionQueue {
 // Partition assignment
 // ---------------------------------------------------------------------------
 
-/// Number of virtual partitions matching the existing `PartitionDispatcher`.
-const NUM_PARTITIONS: u32 = 271;
-
 /// Current wall-clock time as millis since epoch.
 fn now_millis() -> i64 {
     i64::try_from(
@@ -176,13 +172,10 @@ fn now_millis() -> i64 {
     .unwrap_or(i64::MAX)
 }
 
-/// Deterministic partition assignment from (map, key) via hashing.
+/// Deterministic partition assignment from (map, key) via `fnv1a_hash`.
 fn partition_for(map: &str, key: &str) -> u32 {
-    let mut hasher = DefaultHasher::new();
-    map.hash(&mut hasher);
-    key.hash(&mut hasher);
-    #[allow(clippy::cast_possible_truncation)]
-    { (hasher.finish() % u64::from(NUM_PARTITIONS)) as u32 }
+    let combined = format!("{map}:{key}");
+    fnv1a_hash(&combined) % PARTITION_COUNT
 }
 
 // ---------------------------------------------------------------------------
