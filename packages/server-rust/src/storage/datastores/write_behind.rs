@@ -662,3 +662,461 @@ impl MapDataStore for WriteBehindDataStore {
         false
     }
 }
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    use topgun_core::hlc::Timestamp;
+    use topgun_core::types::Value;
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    fn dummy_value() -> RecordValue {
+        RecordValue::Lww {
+            value: Value::Null,
+            timestamp: Timestamp {
+                millis: 0,
+                counter: 0,
+                node_id: String::new(),
+            },
+        }
+    }
+
+    fn dummy_value_with(millis: u64) -> RecordValue {
+        RecordValue::Lww {
+            value: Value::Null,
+            timestamp: Timestamp {
+                millis,
+                counter: 0,
+                node_id: String::new(),
+            },
+        }
+    }
+
+    fn short_delay_config() -> WriteBehindConfig {
+        WriteBehindConfig {
+            write_delay_ms: 10,
+            flush_interval_ms: 10,
+            batch_size: 100,
+            max_retries: 3,
+            backoff_base_ms: 10,
+            backoff_cap_ms: 100,
+            capacity: 0,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // SpyDataStore
+    // -----------------------------------------------------------------------
+
+    /// Records which calls were made to the inner store, for test assertions.
+    #[derive(Debug, Clone)]
+    enum SpyCall {
+        Add {
+            map: String,
+            key: String,
+        },
+        Remove {
+            map: String,
+            key: String,
+        },
+    }
+
+    /// Test-only data store that records calls and optionally returns pre-seeded values.
+    struct SpyDataStore {
+        calls: Arc<Mutex<Vec<SpyCall>>>,
+        /// Pre-seeded values returned by `load()`.
+        seeded: DashMap<(String, String), RecordValue>,
+    }
+
+    impl SpyDataStore {
+        fn new() -> Self {
+            Self {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                seeded: DashMap::new(),
+            }
+        }
+
+        fn calls(&self) -> Arc<Mutex<Vec<SpyCall>>> {
+            Arc::clone(&self.calls)
+        }
+
+        /// Pre-seed a value so `load()` returns it (simulates persisted data).
+        fn seed(&self, map: &str, key: &str, value: RecordValue) {
+            self.seeded
+                .insert((map.to_string(), key.to_string()), value);
+        }
+    }
+
+    #[async_trait]
+    impl MapDataStore for SpyDataStore {
+        async fn add(
+            &self,
+            map: &str,
+            key: &str,
+            _value: &RecordValue,
+            _expiration_time: i64,
+            _now: i64,
+        ) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push(SpyCall::Add {
+                map: map.to_string(),
+                key: key.to_string(),
+            });
+            Ok(())
+        }
+
+        async fn add_backup(
+            &self,
+            _map: &str,
+            _key: &str,
+            _value: &RecordValue,
+            _expiration_time: i64,
+            _now: i64,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn remove(&self, map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push(SpyCall::Remove {
+                map: map.to_string(),
+                key: key.to_string(),
+            });
+            Ok(())
+        }
+
+        async fn remove_backup(&self, _map: &str, _key: &str, _now: i64) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+            Ok(self
+                .seeded
+                .get(&(map.to_string(), key.to_string()))
+                .map(|v| v.value().clone()))
+        }
+
+        async fn load_all(
+            &self,
+            map: &str,
+            keys: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            let mut results = Vec::new();
+            for key in keys {
+                if let Some(v) = self
+                    .seeded
+                    .get(&(map.to_string(), key.clone()))
+                {
+                    results.push((key.clone(), v.value().clone()));
+                }
+            }
+            Ok(results)
+        }
+
+        async fn remove_all(&self, _map: &str, _keys: &[String]) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn is_loadable(&self, _key: &str) -> bool {
+            true
+        }
+
+        fn pending_operation_count(&self) -> u64 {
+            0
+        }
+
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            Ok(0)
+        }
+
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn flush_key(
+            &self,
+            _map: &str,
+            _key: &str,
+            _value: &RecordValue,
+            _is_backup: bool,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn reset(&self) {}
+
+        fn is_null(&self) -> bool {
+            false
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 1: enqueue_and_load_returns_staged_value
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn enqueue_and_load_returns_staged_value() {
+        let inner: Arc<dyn MapDataStore> = Arc::new(SpyDataStore::new());
+        let config = WriteBehindConfig {
+            // Long delay so the flush loop never fires during the test
+            write_delay_ms: 60_000,
+            flush_interval_ms: 60_000,
+            ..WriteBehindConfig::default()
+        };
+        let store = WriteBehindDataStore::new(inner, config);
+
+        let val = dummy_value();
+        store.add("map1", "key1", &val, 0, 1000).await.unwrap();
+
+        // load() should return the staged value immediately
+        let loaded = store.load("map1", "key1").await.unwrap();
+        assert!(loaded.is_some(), "Staged value should be returned by load()");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 2: coalescing_preserves_store_time
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn coalescing_preserves_store_time() {
+        let inner: Arc<dyn MapDataStore> = Arc::new(SpyDataStore::new());
+        let config = WriteBehindConfig {
+            write_delay_ms: 60_000,
+            flush_interval_ms: 60_000,
+            ..WriteBehindConfig::default()
+        };
+        let store = WriteBehindDataStore::new(inner, config);
+
+        let val1 = dummy_value_with(1);
+        let val2 = dummy_value_with(2);
+
+        // First write at store_time=1000
+        store.add("map1", "key1", &val1, 0, 1000).await.unwrap();
+        // Second write at store_time=2000 (coalesces)
+        store.add("map1", "key1", &val2, 0, 2000).await.unwrap();
+
+        // Only one pending entry (coalesced)
+        assert_eq!(
+            store.pending_operation_count(),
+            1,
+            "Coalesced writes should count as one pending entry"
+        );
+
+        // Verify the queue has the original store_time but latest value
+        let partition_id = partition_for("map1", "key1");
+        let queue = store.queues.get(&partition_id).unwrap();
+        let entry = queue
+            .entries
+            .get(&("map1".to_string(), "key1".to_string()))
+            .unwrap();
+        assert_eq!(
+            entry.store_time, 1000,
+            "Coalesced entry should preserve original store_time"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 3: flush_persists_to_inner
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn flush_persists_to_inner() {
+        let spy = Arc::new(SpyDataStore::new());
+        let calls = spy.calls();
+        let inner: Arc<dyn MapDataStore> = spy;
+        let config = short_delay_config();
+        let store = WriteBehindDataStore::new(inner, config);
+
+        let val = dummy_value();
+        store.add("map1", "key1", &val, 0, 1000).await.unwrap();
+
+        // Wait for the flush loop to process the entry
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let recorded = calls.lock().unwrap();
+        assert!(
+            recorded.iter().any(|c| matches!(c, SpyCall::Add { map, key } if map == "map1" && key == "key1")),
+            "Inner store should have received the add call after flush"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 4: pending_count_tracks_operations
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn pending_count_tracks_operations() {
+        let inner: Arc<dyn MapDataStore> = Arc::new(SpyDataStore::new());
+        let config = short_delay_config();
+        let store = WriteBehindDataStore::new(inner, config);
+
+        let val = dummy_value();
+        store.add("map1", "a", &val, 0, 1000).await.unwrap();
+        store.add("map1", "b", &val, 0, 1000).await.unwrap();
+        store.add("map1", "c", &val, 0, 1000).await.unwrap();
+
+        assert_eq!(store.pending_operation_count(), 3);
+
+        // Flush all entries
+        store.hard_flush().await.unwrap();
+
+        assert_eq!(store.pending_operation_count(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 5: capacity_limit_rejects_excess
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn capacity_limit_rejects_excess() {
+        let inner: Arc<dyn MapDataStore> = Arc::new(SpyDataStore::new());
+        let config = WriteBehindConfig {
+            capacity: 2,
+            write_delay_ms: 60_000,
+            flush_interval_ms: 60_000,
+            ..WriteBehindConfig::default()
+        };
+        let store = WriteBehindDataStore::new(inner, config);
+
+        let val = dummy_value();
+        store.add("map1", "a", &val, 0, 1000).await.unwrap();
+        store.add("map1", "b", &val, 0, 1000).await.unwrap();
+
+        // Third key should be rejected
+        let result = store.add("map1", "c", &val, 0, 1000).await;
+        assert!(
+            result.is_err(),
+            "Should reject writes exceeding capacity"
+        );
+
+        // Queue still contains exactly 2 entries
+        assert_eq!(store.pending_operation_count(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 6: hard_flush_drains_all
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn hard_flush_drains_all() {
+        let inner: Arc<dyn MapDataStore> = Arc::new(SpyDataStore::new());
+        let config = short_delay_config();
+        let store = WriteBehindDataStore::new(inner, config);
+
+        let val = dummy_value();
+        for i in 0..5 {
+            store
+                .add("map1", &format!("key{i}"), &val, 0, 1000)
+                .await
+                .unwrap();
+        }
+
+        store.hard_flush().await.unwrap();
+        assert_eq!(store.pending_operation_count(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 7: remove_enqueues_delete_op
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn remove_enqueues_delete_op() {
+        let spy = Arc::new(SpyDataStore::new());
+        // Pre-seed the inner store so it would return a value if consulted
+        spy.seed("map1", "key1", dummy_value());
+        let inner: Arc<dyn MapDataStore> = spy;
+
+        let config = WriteBehindConfig {
+            write_delay_ms: 60_000,
+            flush_interval_ms: 60_000,
+            ..WriteBehindConfig::default()
+        };
+        let store = WriteBehindDataStore::new(inner, config);
+
+        let val = dummy_value();
+        store.add("map1", "key1", &val, 0, 1000).await.unwrap();
+        store.remove("map1", "key1", 2000).await.unwrap();
+
+        // load() should return None because staging has a pending delete marker,
+        // NOT falling through to the inner store (which has a pre-seeded value)
+        let loaded = store.load("map1", "key1").await.unwrap();
+        assert!(
+            loaded.is_none(),
+            "Pending delete should cause load() to return None without consulting inner store"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8: flush_key_persists_immediately
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn flush_key_persists_immediately() {
+        let spy = Arc::new(SpyDataStore::new());
+        let calls = spy.calls();
+        let inner: Arc<dyn MapDataStore> = spy;
+
+        let config = WriteBehindConfig {
+            write_delay_ms: 60_000,
+            flush_interval_ms: 60_000,
+            ..WriteBehindConfig::default()
+        };
+        let store = WriteBehindDataStore::new(inner, config);
+
+        let val = dummy_value();
+        store.add("map1", "key1", &val, 0, 1000).await.unwrap();
+        assert_eq!(store.pending_operation_count(), 1);
+
+        // flush_key with is_backup=false should persist immediately
+        let flush_val = dummy_value_with(42);
+        store
+            .flush_key("map1", "key1", &flush_val, false)
+            .await
+            .unwrap();
+
+        // Staging should be cleared
+        assert!(
+            store.staging.get(&("map1".to_string(), "key1".to_string())).is_none(),
+            "Staging should be cleared after flush_key"
+        );
+
+        // Pending count should be decremented
+        assert_eq!(store.pending_operation_count(), 0);
+
+        // Inner store should have received an add call
+        let recorded = calls.lock().unwrap();
+        assert!(
+            recorded.iter().any(|c| matches!(c, SpyCall::Add { map, key } if map == "map1" && key == "key1")),
+            "Inner store should have received the flush_key add call"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9: soft_flush_returns_sequence
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn soft_flush_returns_sequence() {
+        let inner: Arc<dyn MapDataStore> = Arc::new(SpyDataStore::new());
+        let config = WriteBehindConfig {
+            write_delay_ms: 60_000,
+            flush_interval_ms: 60_000,
+            ..WriteBehindConfig::default()
+        };
+        let store = WriteBehindDataStore::new(inner, config);
+
+        let val = dummy_value();
+        store.add("map1", "a", &val, 0, 1000).await.unwrap();
+        store.add("map1", "b", &val, 0, 1000).await.unwrap();
+
+        let seq = store.soft_flush().await.unwrap();
+        assert!(seq > 0, "Sequence should be > 0 after enqueuing entries");
+    }
+}
