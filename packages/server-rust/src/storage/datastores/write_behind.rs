@@ -142,7 +142,7 @@ impl PartitionQueue {
 
     /// Re-inserts entries that failed flush and need retry.
     ///
-    /// Preserves original store_time so the entry retains its flush priority.
+    /// Preserves original `store_time` so the entry retains its flush priority.
     pub fn reinsert_front(&mut self, entries: Vec<DelayedEntry>) {
         for entry in entries {
             let key = (entry.map.clone(), entry.key.clone());
@@ -152,6 +152,7 @@ impl PartitionQueue {
     }
 
     /// Returns the number of entries in this partition queue.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -161,15 +162,27 @@ impl PartitionQueue {
 // Partition assignment
 // ---------------------------------------------------------------------------
 
-/// Number of virtual partitions matching the existing PartitionDispatcher.
+/// Number of virtual partitions matching the existing `PartitionDispatcher`.
 const NUM_PARTITIONS: u32 = 271;
+
+/// Current wall-clock time as millis since epoch.
+fn now_millis() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(i64::MAX)
+}
 
 /// Deterministic partition assignment from (map, key) via hashing.
 fn partition_for(map: &str, key: &str) -> u32 {
     let mut hasher = DefaultHasher::new();
     map.hash(&mut hasher);
     key.hash(&mut hasher);
-    (hasher.finish() % NUM_PARTITIONS as u64) as u32
+    #[allow(clippy::cast_possible_truncation)]
+    { (hasher.finish() % u64::from(NUM_PARTITIONS)) as u32 }
 }
 
 // ---------------------------------------------------------------------------
@@ -248,8 +261,8 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
     loop {
         // Wait for flush interval or early wake, checking shutdown
         tokio::select! {
-            _ = tokio::time::sleep(interval) => {}
-            _ = store.flush_notify.notified() => {}
+            () = tokio::time::sleep(interval) => {}
+            () = store.flush_notify.notified() => {}
             result = shutdown_rx.changed() => {
                 if result.is_err() || *shutdown_rx.borrow() {
                     // Sender dropped or shutdown signalled -- exit loop
@@ -263,11 +276,9 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
             return;
         }
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
-        let deadline = now - store.config.write_delay_ms as i64;
+        let now = now_millis();
+        #[allow(clippy::cast_possible_wrap)]
+        let deadline = now.saturating_sub(store.config.write_delay_ms as i64);
 
         // Collect eligible entries from all partition queues
         let mut ready_entries = Vec::new();
@@ -327,7 +338,7 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                             let mut queue = store
                                 .queues
                                 .entry(partition_id)
-                                .or_insert_with(PartitionQueue::default);
+                                .or_default();
                             queue.reinsert_front(vec![retry_entry]);
 
                             // Backoff before processing next retry-eligible entry
@@ -400,7 +411,7 @@ impl MapDataStore for WriteBehindDataStore {
         let mut queue = self
             .queues
             .entry(partition_id)
-            .or_insert_with(PartitionQueue::default);
+            .or_default();
 
         // If coalescing, preserve the original store_time
         let staging_key = (map.to_string(), key.to_string());
@@ -459,7 +470,7 @@ impl MapDataStore for WriteBehindDataStore {
         let mut queue = self
             .queues
             .entry(partition_id)
-            .or_insert_with(PartitionQueue::default);
+            .or_default();
 
         let staging_key = (map.to_string(), key.to_string());
         if let Some(existing) = queue.value_mut().remove(map, key) {
@@ -510,11 +521,10 @@ impl MapDataStore for WriteBehindDataStore {
         for key in keys {
             let staging_key = (map.to_string(), key.clone());
             if let Some(entry) = self.staging.get(&staging_key) {
-                match entry.value() {
-                    Some(value) => results.push((key.clone(), value.clone())),
-                    // Pending delete -- skip entirely, do not fetch from inner
-                    None => {}
+                if let Some(value) = entry.value() {
+                    results.push((key.clone(), value.clone()));
                 }
+                // Pending delete (None) -- skip entirely, do not fetch from inner
             } else {
                 inner_keys.push(key.clone());
             }
@@ -530,10 +540,7 @@ impl MapDataStore for WriteBehindDataStore {
     }
 
     async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
+        let now = now_millis();
 
         for key in keys {
             // Check capacity before each insertion
@@ -559,7 +566,7 @@ impl MapDataStore for WriteBehindDataStore {
             let mut queue = self
                 .queues
                 .entry(partition_id)
-                .or_insert_with(PartitionQueue::default);
+                .or_default();
 
             let staging_key = (map.to_string(), key.clone());
             if let Some(existing) = queue.value_mut().remove(map, key) {
@@ -643,10 +650,7 @@ impl MapDataStore for WriteBehindDataStore {
         }
 
         // Persist the caller-provided value directly to the inner store
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
+        let now = now_millis();
         self.inner.add(map, key, value, 0, now).await
     }
 
