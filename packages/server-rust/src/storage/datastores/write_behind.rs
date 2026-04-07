@@ -4,7 +4,17 @@
 //! in per-partition coalesced queues and flushing them on a configurable schedule.
 
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
+use async_trait::async_trait;
+use dashmap::DashMap;
+use tokio::sync::{watch, Notify};
+use tracing::warn;
+
+use crate::storage::map_data_store::MapDataStore;
 use crate::storage::record::RecordValue;
 
 // ---------------------------------------------------------------------------
@@ -144,5 +154,311 @@ impl PartitionQueue {
     /// Returns the number of entries in this partition queue.
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Partition assignment
+// ---------------------------------------------------------------------------
+
+/// Number of virtual partitions matching the existing PartitionDispatcher.
+const NUM_PARTITIONS: u32 = 271;
+
+/// Deterministic partition assignment from (map, key) via hashing.
+fn partition_for(map: &str, key: &str) -> u32 {
+    let mut hasher = DefaultHasher::new();
+    map.hash(&mut hasher);
+    key.hash(&mut hasher);
+    (hasher.finish() % NUM_PARTITIONS as u64) as u32
+}
+
+// ---------------------------------------------------------------------------
+// WriteBehindDataStore
+// ---------------------------------------------------------------------------
+
+/// Write-behind buffering layer that wraps any [`MapDataStore`].
+///
+/// Buffers `add`/`remove` calls in per-partition coalesced queues and flushes
+/// them to the inner store on a configurable schedule. Reads check the staging
+/// area first to provide read-your-writes consistency.
+pub struct WriteBehindDataStore {
+    /// The wrapped persistence store.
+    inner: Arc<dyn MapDataStore>,
+    /// Configuration controlling flush timing, retries, and capacity.
+    config: WriteBehindConfig,
+    /// Per-partition write queues, keyed by partition id.
+    queues: DashMap<u32, PartitionQueue>,
+    /// Staging area for read-your-writes consistency.
+    /// `Some(value)` = pending write, `None` = pending delete.
+    staging: DashMap<(String, String), Option<RecordValue>>,
+    /// Monotonically increasing operation counter for ordering.
+    sequence: AtomicU64,
+    /// Node-wide count of pending entries across all partition queues.
+    pending_count: AtomicU64,
+    /// Signal to wake the flush loop for immediate processing.
+    flush_notify: Arc<Notify>,
+    /// Shutdown signal sender for the background flush task.
+    _shutdown: watch::Sender<bool>,
+}
+
+impl WriteBehindDataStore {
+    /// Creates a new write-behind data store wrapping `inner`.
+    ///
+    /// Spawns a background flush task that runs until the returned `Arc` (and
+    /// all clones) are dropped or shutdown is signalled.
+    pub fn new(inner: Arc<dyn MapDataStore>, config: WriteBehindConfig) -> Arc<Self> {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let flush_notify = Arc::new(Notify::new());
+
+        let store = Arc::new(Self {
+            inner,
+            config,
+            queues: DashMap::new(),
+            staging: DashMap::new(),
+            sequence: AtomicU64::new(0),
+            pending_count: AtomicU64::new(0),
+            flush_notify: flush_notify.clone(),
+            _shutdown: shutdown_tx,
+        });
+
+        // Spawn background flush loop with a clone of the Arc
+        let store_clone = Arc::clone(&store);
+        tokio::spawn(flush_loop(store_clone, shutdown_rx));
+
+        store
+    }
+
+    /// Returns the next sequence number for ordering.
+    fn next_sequence(&self) -> u64 {
+        self.sequence.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Background flush loop (R3)
+// ---------------------------------------------------------------------------
+
+/// Background task that periodically flushes eligible entries to the inner store.
+///
+/// Runs until the shutdown signal is received. Wakes on either the configured
+/// interval or an explicit notify (from `soft_flush`/`hard_flush`).
+async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Receiver<bool>) {
+    let interval = tokio::time::Duration::from_millis(store.config.flush_interval_ms);
+
+    loop {
+        // Wait for flush interval or early wake, checking shutdown
+        tokio::select! {
+            _ = tokio::time::sleep(interval) => {}
+            _ = store.flush_notify.notified() => {}
+            result = shutdown_rx.changed() => {
+                if result.is_err() || *shutdown_rx.borrow() {
+                    // Sender dropped or shutdown signalled -- exit loop
+                    return;
+                }
+            }
+        }
+
+        // Check shutdown before doing work
+        if *shutdown_rx.borrow() {
+            return;
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let deadline = now - store.config.write_delay_ms as i64;
+
+        // Collect eligible entries from all partition queues
+        let mut ready_entries = Vec::new();
+        for mut queue_ref in store.queues.iter_mut() {
+            let drained = queue_ref.value_mut().drain_ready(deadline);
+            ready_entries.extend(drained);
+        }
+
+        if ready_entries.is_empty() {
+            continue;
+        }
+
+        // Sort by store_time then sequence for fairness
+        ready_entries.sort_by(|a, b| {
+            a.store_time
+                .cmp(&b.store_time)
+                .then(a.sequence.cmp(&b.sequence))
+        });
+
+        // Process in batches
+        for batch in ready_entries.chunks(store.config.batch_size as usize) {
+            for entry in batch {
+                let result = match &entry.operation {
+                    DelayedOp::Store {
+                        value,
+                        expiration_time,
+                    } => {
+                        store
+                            .inner
+                            .add(&entry.map, &entry.key, value, *expiration_time, entry.store_time)
+                            .await
+                    }
+                    DelayedOp::Remove => {
+                        store
+                            .inner
+                            .remove(&entry.map, &entry.key, entry.store_time)
+                            .await
+                    }
+                };
+
+                match result {
+                    Ok(()) => {
+                        // Successfully flushed -- remove from staging and decrement count
+                        store
+                            .staging
+                            .remove(&(entry.map.clone(), entry.key.clone()));
+                        store.pending_count.fetch_sub(1, Ordering::Relaxed);
+                    }
+                    Err(err) => {
+                        let new_retry = entry.retry_count + 1;
+                        if new_retry < store.config.max_retries {
+                            // Reinsert with incremented retry count
+                            let mut retry_entry = entry.clone();
+                            retry_entry.retry_count = new_retry;
+
+                            let partition_id = partition_for(&entry.map, &entry.key);
+                            let mut queue = store
+                                .queues
+                                .entry(partition_id)
+                                .or_insert_with(PartitionQueue::default);
+                            queue.reinsert_front(vec![retry_entry]);
+
+                            // Backoff before processing next retry-eligible entry
+                            let backoff = std::cmp::min(
+                                store.config.backoff_base_ms * 2u64.pow(new_retry),
+                                store.config.backoff_cap_ms,
+                            );
+                            tokio::time::sleep(tokio::time::Duration::from_millis(backoff)).await;
+                        } else {
+                            // Max retries exceeded -- discard and log
+                            warn!(
+                                map = %entry.map,
+                                key = %entry.key,
+                                retries = new_retry,
+                                error = %err,
+                                "Write-behind entry discarded after max retries"
+                            );
+                            store
+                                .staging
+                                .remove(&(entry.map.clone(), entry.key.clone()));
+                            store.pending_count.fetch_sub(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MapDataStore trait implementation -- Segment S1 (delegating methods)
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl MapDataStore for WriteBehindDataStore {
+    // S1: Delegating methods implemented here.
+    // S2: Core buffering methods (add, remove, load, etc.) will be added in Wave 3.
+
+    async fn add(
+        &self,
+        _map: &str,
+        _key: &str,
+        _value: &RecordValue,
+        _expiration_time: i64,
+        _now: i64,
+    ) -> anyhow::Result<()> {
+        // Placeholder -- implemented in G4 (Wave 3)
+        todo!("G4: add")
+    }
+
+    async fn add_backup(
+        &self,
+        map: &str,
+        key: &str,
+        value: &RecordValue,
+        expiration_time: i64,
+        now: i64,
+    ) -> anyhow::Result<()> {
+        // Backups pass through directly -- backup replication has its own
+        // consistency guarantees
+        self.inner.add_backup(map, key, value, expiration_time, now).await
+    }
+
+    async fn remove(&self, _map: &str, _key: &str, _now: i64) -> anyhow::Result<()> {
+        // Placeholder -- implemented in G4 (Wave 3)
+        todo!("G4: remove")
+    }
+
+    async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+        // Backups pass through directly
+        self.inner.remove_backup(map, key, now).await
+    }
+
+    async fn load(&self, _map: &str, _key: &str) -> anyhow::Result<Option<RecordValue>> {
+        // Placeholder -- implemented in G4 (Wave 3)
+        todo!("G4: load")
+    }
+
+    async fn load_all(
+        &self,
+        _map: &str,
+        _keys: &[String],
+    ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+        // Placeholder -- implemented in G4 (Wave 3)
+        todo!("G4: load_all")
+    }
+
+    async fn remove_all(&self, _map: &str, _keys: &[String]) -> anyhow::Result<()> {
+        // Placeholder -- implemented in G4 (Wave 3)
+        todo!("G4: remove_all")
+    }
+
+    fn is_loadable(&self, _key: &str) -> bool {
+        // Staging area handles consistency, so always loadable
+        true
+    }
+
+    fn pending_operation_count(&self) -> u64 {
+        self.pending_count.load(Ordering::Relaxed)
+    }
+
+    async fn soft_flush(&self) -> anyhow::Result<u64> {
+        // Placeholder -- implemented in G4 (Wave 3)
+        todo!("G4: soft_flush")
+    }
+
+    async fn hard_flush(&self) -> anyhow::Result<()> {
+        // Placeholder -- implemented in G4 (Wave 3)
+        todo!("G4: hard_flush")
+    }
+
+    async fn flush_key(
+        &self,
+        _map: &str,
+        _key: &str,
+        _value: &RecordValue,
+        _is_backup: bool,
+    ) -> anyhow::Result<()> {
+        // Placeholder -- implemented in G4 (Wave 3)
+        todo!("G4: flush_key")
+    }
+
+    fn reset(&self) {
+        self.queues.clear();
+        self.staging.clear();
+        self.sequence.store(0, Ordering::Relaxed);
+        self.pending_count.store(0, Ordering::Relaxed);
+        self.inner.reset();
+    }
+
+    fn is_null(&self) -> bool {
+        false
     }
 }
