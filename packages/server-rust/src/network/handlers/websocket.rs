@@ -22,7 +22,7 @@ use futures_util::sink::SinkExt;
 use futures_util::stream::{SplitSink, StreamExt};
 use tokio::sync::mpsc;
 use topgun_core::messages::{
-    AuthAckData, ErrorPayload, OpAckMessage, OpAckPayload, Message as TopGunMessage,
+    AuthAckData, ErrorPayload, OpAckMessage, OpAckPayload, Message as TopGunMessage, WriteConcern,
 };
 use topgun_core::hash_to_partition;
 use tracing::{debug, warn};
@@ -535,9 +535,12 @@ async fn dispatch_op_batch(
     }
 
     // All sub-batches succeeded — send one OP_ACK with the original batch's lastId.
+    // Sub-batch responses are discarded; set APPLIED explicitly on the aggregated ack
+    // because each sub-batch's CRDT merge succeeded in memory.
     let ack = TopGunMessage::OpAck(OpAckMessage {
         payload: OpAckPayload {
             last_id,
+            achieved_level: Some(WriteConcern::APPLIED),
             ..Default::default()
         },
     });
