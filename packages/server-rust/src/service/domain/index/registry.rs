@@ -147,6 +147,24 @@ impl IndexRegistry {
             })
             .collect()
     }
+
+    /// Removes the index for `attribute`, clearing all its data.
+    ///
+    /// Returns `true` if an index was removed, `false` if none existed.
+    pub fn remove_index(&self, attribute: &str) -> bool {
+        if let Some((_, index)) = self.indexes.remove(attribute) {
+            index.clear();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns `true` if an index is registered for `attribute`.
+    #[must_use]
+    pub fn has_index(&self, attribute: &str) -> bool {
+        self.indexes.contains_key(attribute)
+    }
 }
 
 impl Default for IndexRegistry {

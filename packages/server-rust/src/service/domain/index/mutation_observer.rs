@@ -16,7 +16,7 @@ use crate::storage::factory::ObserverFactory;
 use crate::storage::mutation_observer::MutationObserver;
 use crate::storage::record::{Record, RecordValue};
 
-use super::registry::IndexRegistry;
+use super::registry::{IndexRegistry, IndexStats};
 
 // ---------------------------------------------------------------------------
 // IndexMutationObserver
@@ -185,6 +185,19 @@ impl IndexObserverFactory {
         self.registries
             .get(map_name)
             .map(|r| Arc::clone(r.value()))
+    }
+
+    /// Returns a snapshot of all indexes across all maps.
+    ///
+    /// Each entry is `(map_name, Vec<IndexStats>)`. Maps with no registered
+    /// indexes are excluded from the result.
+    #[must_use]
+    pub fn all_index_stats(&self) -> Vec<(String, Vec<IndexStats>)> {
+        self.registries
+            .iter()
+            .map(|r| (r.key().clone(), r.value().stats()))
+            .filter(|(_, stats)| !stats.is_empty())
+            .collect()
     }
 }
 
