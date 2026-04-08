@@ -29,6 +29,7 @@ describe('ClientMessageHandlers', () => {
         entryProcessorClient: { handleEntryProcessResponse: jest.fn(), handleEntryProcessBatchResponse: jest.fn() },
         conflictResolverClient: { handleRegisterResponse: jest.fn(), handleUnregisterResponse: jest.fn(), handleListResponse: jest.fn(), handleMergeRejected: jest.fn() },
         searchClient: { handleSearchResponse: jest.fn() },
+        sqlClient: { handleSqlQueryResponse: jest.fn() },
 
         merkleSyncHandler: { handleSyncRespRoot: jest.fn(), handleSyncRespBuckets: jest.fn(), handleSyncRespLeaf: jest.fn(), handleSyncResetRequired: jest.fn() },
         orMapSyncHandler: { handleORMapSyncRespRoot: jest.fn(), handleORMapSyncRespBuckets: jest.fn(), handleORMapSyncRespLeaf: jest.fn(), handleORMapDiffResponse: jest.fn() },
@@ -70,6 +71,7 @@ describe('ClientMessageHandlers', () => {
         entryProcessorClient: { handleEntryProcessResponse: jest.fn(), handleEntryProcessBatchResponse: jest.fn() },
         conflictResolverClient: { handleRegisterResponse: jest.fn(), handleUnregisterResponse: jest.fn(), handleListResponse: jest.fn(), handleMergeRejected: jest.fn() },
         searchClient: { handleSearchResponse: jest.fn() },
+        sqlClient: { handleSqlQueryResponse: jest.fn() },
 
         merkleSyncHandler: { handleSyncRespRoot: jest.fn(), handleSyncRespBuckets: jest.fn(), handleSyncRespLeaf: jest.fn(), handleSyncResetRequired: jest.fn() },
         orMapSyncHandler: { handleORMapSyncRespRoot: jest.fn(), handleORMapSyncRespBuckets: jest.fn(), handleORMapSyncRespLeaf: jest.fn(), handleORMapDiffResponse: jest.fn() },
@@ -106,6 +108,7 @@ describe('ClientMessageHandlers', () => {
         entryProcessorClient: { handleEntryProcessResponse: jest.fn(), handleEntryProcessBatchResponse: jest.fn() },
         conflictResolverClient: { handleRegisterResponse: jest.fn(), handleUnregisterResponse: jest.fn(), handleListResponse: jest.fn(), handleMergeRejected: jest.fn() },
         searchClient: { handleSearchResponse: jest.fn() },
+        sqlClient: { handleSqlQueryResponse: jest.fn() },
 
         merkleSyncHandler: { handleSyncRespRoot: jest.fn(), handleSyncRespBuckets: jest.fn(), handleSyncRespLeaf: jest.fn(), handleSyncResetRequired: jest.fn() },
         orMapSyncHandler: { handleORMapSyncRespRoot: jest.fn(), handleORMapSyncRespBuckets: jest.fn(), handleORMapSyncRespLeaf: jest.fn(), handleORMapDiffResponse: jest.fn() },
@@ -141,6 +144,7 @@ describe('ClientMessageHandlers', () => {
         entryProcessorClient: { handleEntryProcessResponse: jest.fn(), handleEntryProcessBatchResponse: jest.fn() },
         conflictResolverClient: { handleRegisterResponse: jest.fn(), handleUnregisterResponse: jest.fn(), handleListResponse: jest.fn(), handleMergeRejected: jest.fn() },
         searchClient: { handleSearchResponse: jest.fn() },
+        sqlClient: { handleSqlQueryResponse: jest.fn() },
 
         merkleSyncHandler: { handleSyncRespRoot: jest.fn(), handleSyncRespBuckets: jest.fn(), handleSyncRespLeaf: jest.fn(), handleSyncResetRequired: jest.fn() },
         orMapSyncHandler: { handleORMapSyncRespRoot: jest.fn(), handleORMapSyncRespBuckets: jest.fn(), handleORMapSyncRespLeaf: jest.fn(), handleORMapDiffResponse: jest.fn() },
@@ -160,8 +164,8 @@ describe('ClientMessageHandlers', () => {
   });
 
   describe('CLIENT_MESSAGE_TYPES', () => {
-    it('should contain 33 message types', () => {
-      expect(CLIENT_MESSAGE_TYPES.length).toBe(33);
+    it('should contain 34 message types', () => {
+      expect(CLIENT_MESSAGE_TYPES.length).toBe(34);
     });
 
     it('should include all auth types', () => {

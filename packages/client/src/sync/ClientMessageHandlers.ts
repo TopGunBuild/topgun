@@ -15,7 +15,6 @@ import type {
   ServerBatchEventMessage,
   GcPruneMessage,
   SearchRespPayload,
-  SqlQueryRespPayload,
   SyncRespRootPayload,
   SyncRespBucketsPayload,
   SyncRespLeafPayload,
@@ -78,7 +77,12 @@ export interface ManagerDelegates {
     handleSearchResponse(payload: SearchRespPayload): void;
   };
   sqlClient: {
-    handleSqlQueryResponse(payload: SqlQueryRespPayload): void;
+    handleSqlQueryResponse(payload: {
+      queryId: string;
+      columns: string[];
+      rows: unknown[][];
+      error?: string;
+    }): void;
   };
   merkleSyncHandler: {
     handleSyncRespRoot(payload: SyncRespRootPayload): void;
