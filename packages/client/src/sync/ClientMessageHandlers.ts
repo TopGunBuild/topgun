@@ -15,6 +15,7 @@ import type {
   ServerBatchEventMessage,
   GcPruneMessage,
   SearchRespPayload,
+  SqlQueryRespPayload,
   SyncRespRootPayload,
   SyncRespBucketsPayload,
   SyncRespLeafPayload,
@@ -76,6 +77,9 @@ export interface ManagerDelegates {
   searchClient: {
     handleSearchResponse(payload: SearchRespPayload): void;
   };
+  sqlClient: {
+    handleSqlQueryResponse(payload: SqlQueryRespPayload): void;
+  };
   merkleSyncHandler: {
     handleSyncRespRoot(payload: SyncRespRootPayload): void;
     handleSyncRespBuckets(payload: SyncRespBucketsPayload): void;
@@ -109,6 +113,7 @@ export const CLIENT_MESSAGE_TYPES = [
   'ENTRY_PROCESS_RESPONSE', 'ENTRY_PROCESS_BATCH_RESPONSE',
   'REGISTER_RESOLVER_RESPONSE', 'UNREGISTER_RESOLVER_RESPONSE', 'LIST_RESOLVERS_RESPONSE', 'MERGE_REJECTED',
   'SEARCH_RESP', 'SEARCH_UPDATE',
+  'SQL_QUERY_RESP',
 ] as const;
 
 /**
@@ -212,6 +217,11 @@ export function registerClientMessageHandlers(
     },
     'SEARCH_UPDATE': () => {
       // SEARCH_UPDATE is handled by SearchHandle via emitMessage, no-op here
+    },
+
+    // SQL handlers
+    'SQL_QUERY_RESP': (msg) => {
+      managers.sqlClient.handleSqlQueryResponse(msg.payload);
     },
   });
 }
