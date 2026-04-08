@@ -24,6 +24,9 @@ export * from './client-message-schemas';
 // HTTP sync schemas (stateless request/response for serverless environments)
 export * from './http-sync-schemas';
 
+// SQL query schemas (server-side DataFusion execution)
+export * from './sql-schemas';
+
 // Union MessageSchema (combines all message types)
 import { z } from 'zod';
 import { AuthMessageSchema, AuthRequiredMessageSchema } from './base-schemas';
@@ -115,6 +118,7 @@ import {
   LockReleasedMessageSchema,
   SyncResetRequiredMessageSchema,
 } from './client-message-schemas';
+import { SqlQueryMessageSchema, SqlQueryRespMessageSchema } from './sql-schemas';
 export const MessageSchema = z.discriminatedUnion('type', [
   // --- Base ---
   AuthMessageSchema,
@@ -195,6 +199,9 @@ export const MessageSchema = z.discriminatedUnion('type', [
   MergeRejectedMessageSchema,
   ListResolversRequestSchema,
   ListResolversResponseSchema,
+  // --- SQL Query ---
+  SqlQueryMessageSchema,
+  SqlQueryRespMessageSchema,
   // --- Server-to-Client ---
   ServerEventMessageSchema,
   ServerBatchEventMessageSchema,
