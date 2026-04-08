@@ -7,7 +7,13 @@
 //! - `GET /api/admin/settings` -- current server configuration (admin only)
 //! - `PUT /api/admin/settings` -- update hot-reloadable settings (admin only)
 //! - `POST /api/auth/login` -- admin login (returns JWT)
+//! - `POST /api/admin/indexes` -- create a secondary index (admin only)
+//! - `GET /api/admin/indexes` -- list all indexes across all maps (admin only)
+//! - `DELETE /api/admin/indexes/:map/:attr` -- remove an index (admin only)
+//! - `GET /api/admin/indexes/:map/:attr/status` -- backfill progress (admin only)
 
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use axum::extract::{Path, State};
@@ -22,13 +28,16 @@ use tracing_subscriber::EnvFilter;
 
 use super::admin_auth::AdminClaims;
 use super::admin_types::{
-    self, ClusterStatusResponse, CreatePolicyRequest, ErrorResponse, LoginRequest, LoginResponse,
-    MapInfo, MapsListResponse, NodeStatus, PartitionInfo, PolicyListResponse, PolicyResponse,
-    ServerMode, ServerStatusResponse, SettingsResponse, SettingsUpdateRequest,
+    self, BackfillProgress, BackfillStatusResponse, ClusterStatusResponse, CreateIndexRequest,
+    CreatePolicyRequest, ErrorResponse, IndexInfoResponse, IndexListResponse, IndexTypeParam,
+    LoginRequest, LoginResponse, MapInfo, MapsListResponse, NodeStatus, PartitionInfo,
+    PolicyListResponse, PolicyResponse, ServerMode, ServerStatusResponse, SettingsResponse,
+    SettingsUpdateRequest,
 };
 use super::AppState;
 
 use crate::cluster::types::NodeState;
+use crate::service::domain::index::IndexType;
 use crate::service::policy::{expr_parser::parse_permission_expr, PermissionPolicy};
 
 /// JWT claims for token generation (encoding).
@@ -707,4 +716,274 @@ pub async fn delete_policy(
     })?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Index admin endpoints ─────────────────────────────────────────────
+
+/// Creates a secondary index on a map attribute and starts async backfill.
+///
+/// If an index already exists for the (map, attribute) pair, returns 409 Conflict.
+/// On success, spawns a background task to populate the index from existing records
+/// and returns 201 with the index info.
+///
+/// # Errors
+///
+/// Returns 409 if the index already exists, 503 if the index observer factory
+/// is not configured.
+pub async fn create_index(
+    _claims: AdminClaims,
+    State(state): State<AppState>,
+    Json(req): Json<CreateIndexRequest>,
+) -> Result<(StatusCode, Json<IndexInfoResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let factory = state.index_observer_factory.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                code: 503,
+                message: "index observer factory not configured".to_string(),
+                field: None,
+            }),
+        )
+    })?;
+
+    let registry = factory.register_map(&req.map_name);
+
+    if registry.has_index(&req.attribute) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                code: 409,
+                message: format!(
+                    "index already exists for map '{}' attribute '{}'",
+                    req.map_name, req.attribute
+                ),
+                field: None,
+            }),
+        ));
+    }
+
+    match req.index_type {
+        IndexTypeParam::Hash => registry.add_hash_index(&req.attribute),
+        IndexTypeParam::Navigable => registry.add_navigable_index(&req.attribute),
+        IndexTypeParam::Inverted => registry.add_inverted_index(&req.attribute),
+    }
+
+    // Spawn a background backfill task to populate the new index with existing records.
+    if let Some(store_factory) = state.store_factory.clone() {
+        let backfill_progress = Arc::clone(&state.backfill_progress);
+        let map_name = req.map_name.clone();
+        let attribute = req.attribute.clone();
+        let registry_clone = Arc::clone(&registry);
+
+        let progress = Arc::new(BackfillProgress {
+            total: std::sync::atomic::AtomicU64::new(0),
+            processed: std::sync::atomic::AtomicU64::new(0),
+            done: std::sync::atomic::AtomicBool::new(false),
+        });
+        backfill_progress.insert((map_name.clone(), attribute.clone()), Arc::clone(&progress));
+
+        tokio::spawn(async move {
+            let stores = store_factory.get_all_for_map(&map_name);
+
+            // Count total records across all partition stores.
+            let total: u64 = stores.iter().map(|s| s.size() as u64).sum();
+            progress.total.store(total, Ordering::Relaxed);
+
+            // Iterate each record and insert into the index.
+            for store in &stores {
+                store.for_each_boxed(
+                    &mut |key, record| {
+                        if let crate::storage::record::RecordValue::Lww { ref value, .. } =
+                            record.value
+                        {
+                            let rmpv_val = crate::service::domain::predicate::value_to_rmpv(value);
+                            if let Some(idx) = registry_clone.get_index(&attribute) {
+                                idx.insert(key, &rmpv_val);
+                            }
+                        }
+                        progress.processed.fetch_add(1, Ordering::Relaxed);
+                    },
+                    false,
+                );
+            }
+
+            progress.done.store(true, Ordering::Relaxed);
+            info!(map = %map_name, attribute = %attribute, total = total, "index backfill complete");
+        });
+    }
+
+    let response = IndexInfoResponse {
+        map_name: req.map_name,
+        attribute: req.attribute,
+        index_type: req.index_type,
+        entry_count: 0,
+    };
+
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+/// Lists all secondary indexes across all maps with their entry counts and types.
+///
+/// Returns 200 with an `IndexListResponse`.
+pub async fn list_indexes(
+    _claims: AdminClaims,
+    State(state): State<AppState>,
+) -> Result<Json<IndexListResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let factory = state.index_observer_factory.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                code: 503,
+                message: "index observer factory not configured".to_string(),
+                field: None,
+            }),
+        )
+    })?;
+
+    let all_stats = factory.all_index_stats();
+    let indexes: Vec<IndexInfoResponse> = all_stats
+        .into_iter()
+        .flat_map(|(map_name, stats)| {
+            stats.into_iter().map(move |s| {
+                let index_type = match s.index_type {
+                    IndexType::Hash => IndexTypeParam::Hash,
+                    IndexType::Navigable => IndexTypeParam::Navigable,
+                    IndexType::Inverted => IndexTypeParam::Inverted,
+                };
+                IndexInfoResponse {
+                    map_name: map_name.clone(),
+                    attribute: s.attribute,
+                    index_type,
+                    entry_count: s.entry_count,
+                }
+            })
+        })
+        .collect();
+
+    Ok(Json(IndexListResponse { indexes }))
+}
+
+/// Removes a secondary index for the specified map and attribute.
+///
+/// Also removes the corresponding backfill progress entry to prevent stale state.
+/// Returns 404 if no index exists for the (map, attribute) pair.
+///
+/// # Errors
+///
+/// Returns 404 if the index does not exist, 503 if the index observer factory
+/// is not configured.
+pub async fn remove_index_handler(
+    _claims: AdminClaims,
+    State(state): State<AppState>,
+    Path((map_name, attribute)): Path<(String, String)>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let factory = state.index_observer_factory.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                code: 503,
+                message: "index observer factory not configured".to_string(),
+                field: None,
+            }),
+        )
+    })?;
+
+    let registry = factory.get_registry(&map_name).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                code: 404,
+                message: format!("no indexes registered for map '{map_name}'"),
+                field: None,
+            }),
+        )
+    })?;
+
+    if !registry.has_index(&attribute) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                code: 404,
+                message: format!(
+                    "no index found for map '{map_name}' attribute '{attribute}'"
+                ),
+                field: None,
+            }),
+        ));
+    }
+
+    registry.remove_index(&attribute);
+
+    // Remove stale backfill progress entry to avoid indefinitely accumulating entries.
+    state
+        .backfill_progress
+        .remove(&(map_name.clone(), attribute.clone()));
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Returns the backfill progress for a specific (map, attribute) index.
+///
+/// If no backfill entry exists but the index does exist, the index was created
+/// without a backfill (or backfill was not tracked) — returns `done: true` with
+/// zero counts. Returns 404 if neither a backfill entry nor the index exist.
+///
+/// # Errors
+///
+/// Returns 404 if the index does not exist and no backfill entry is present,
+/// 503 if the index observer factory is not configured.
+pub async fn index_backfill_status(
+    _claims: AdminClaims,
+    State(state): State<AppState>,
+    Path((map_name, attribute)): Path<(String, String)>,
+) -> Result<Json<BackfillStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Check for an in-progress or completed backfill entry first.
+    if let Some(progress) = state.backfill_progress.get(&(map_name.clone(), attribute.clone())) {
+        return Ok(Json(BackfillStatusResponse {
+            map_name,
+            attribute,
+            total: progress.total.load(Ordering::Relaxed),
+            processed: progress.processed.load(Ordering::Relaxed),
+            done: progress.done.load(Ordering::Relaxed),
+        }));
+    }
+
+    // No backfill entry: check if the index exists.
+    let factory = state.index_observer_factory.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                code: 503,
+                message: "index observer factory not configured".to_string(),
+                field: None,
+            }),
+        )
+    })?;
+
+    let index_exists = factory
+        .get_registry(&map_name)
+        .map(|r| r.has_index(&attribute))
+        .unwrap_or(false);
+
+    if index_exists {
+        // Index exists but has no backfill record: treat as already done.
+        return Ok(Json(BackfillStatusResponse {
+            map_name,
+            attribute,
+            total: 0,
+            processed: 0,
+            done: true,
+        }));
+    }
+
+    Err((
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            code: 404,
+            message: format!(
+                "no index found for map '{map_name}' attribute '{attribute}'"
+            ),
+            field: None,
+        }),
+    ))
 }

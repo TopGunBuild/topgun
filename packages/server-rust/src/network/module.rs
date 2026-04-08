@@ -25,8 +25,9 @@ use utoipa::OpenApi;
 use super::config::NetworkConfig;
 use super::connection::{ConnectionRegistry, OutboundMessage};
 use super::handlers::admin::{
-    cluster_status, create_policy, delete_policy, get_settings, list_maps, list_policies, login,
-    server_status, update_settings,
+    cluster_status, create_index, create_policy, delete_policy, get_settings, index_backfill_status,
+    list_indexes, list_maps, list_policies, login, remove_index_handler, server_status,
+    update_settings,
 };
 use super::handlers::auth_provider::{AuthProvider, AuthProviderConfig, HmacProvider, JwksProvider, OidcProvider};
 use super::handlers::{
@@ -38,6 +39,7 @@ use super::openapi::AdminApiDoc;
 use super::shutdown::ShutdownController;
 use crate::cluster::state::ClusterState;
 use crate::service::config::ServerConfig;
+use crate::service::domain::index::mutation_observer::IndexObserverFactory;
 use crate::service::middleware::ObservabilityHandle;
 use crate::service::policy::PolicyStore;
 use crate::storage::factory::RecordStoreFactory;
@@ -61,6 +63,7 @@ pub struct NetworkModule {
     store_factory: Option<Arc<RecordStoreFactory>>,
     server_config: Option<Arc<ArcSwap<ServerConfig>>>,
     policy_store: Option<Arc<dyn PolicyStore>>,
+    index_observer_factory: Option<Arc<IndexObserverFactory>>,
 }
 
 impl NetworkModule {
@@ -80,6 +83,7 @@ impl NetworkModule {
             store_factory: None,
             server_config: None,
             policy_store: None,
+            index_observer_factory: None,
         }
     }
 
@@ -110,6 +114,11 @@ impl NetworkModule {
     /// Configures the policy store for permission policy admin endpoints.
     pub fn set_policy_store(&mut self, store: Arc<dyn PolicyStore>) {
         self.policy_store = Some(store);
+    }
+
+    /// Configures the index observer factory for admin index management endpoints.
+    pub fn set_index_observer_factory(&mut self, factory: Arc<IndexObserverFactory>) {
+        self.index_observer_factory = Some(factory);
     }
 
     /// Returns a shared reference to the connection registry.
@@ -148,6 +157,7 @@ impl NetworkModule {
                 store_factory: self.store_factory.clone(),
                 server_config: self.server_config.clone(),
                 policy_store: self.policy_store.clone(),
+                index_observer_factory: self.index_observer_factory.clone(),
             },
         )
     }
@@ -215,6 +225,7 @@ impl NetworkModule {
                 store_factory: self.store_factory,
                 server_config: self.server_config,
                 policy_store: self.policy_store,
+                index_observer_factory: self.index_observer_factory,
             },
         );
 
@@ -239,6 +250,7 @@ struct AppServices {
     store_factory: Option<Arc<RecordStoreFactory>>,
     server_config: Option<Arc<ArcSwap<ServerConfig>>>,
     policy_store: Option<Arc<dyn PolicyStore>>,
+    index_observer_factory: Option<Arc<IndexObserverFactory>>,
 }
 
 /// Builds the complete application router with all routes and middleware.
@@ -258,6 +270,7 @@ fn build_app(
         store_factory,
         server_config,
         policy_store,
+        index_observer_factory,
     } = services;
     let layers = build_http_layers(&config);
 
@@ -350,7 +363,9 @@ fn build_app(
         policy_store,
         auth_providers: Arc::new(auth_providers),
         refresh_grant_store: None,
-            auth_validator: None,
+        auth_validator: None,
+        index_observer_factory,
+        backfill_progress: Arc::new(dashmap::DashMap::new()),
     };
 
     // Build a per-IP rate limiter for admin and login endpoints.
@@ -397,6 +412,15 @@ fn build_app(
             get(list_policies).post(create_policy),
         )
         .route("/api/admin/policies/{id}", delete(delete_policy))
+        .route("/api/admin/indexes", get(list_indexes).post(create_index))
+        .route(
+            "/api/admin/indexes/{map}/{attr}",
+            delete(remove_index_handler),
+        )
+        .route(
+            "/api/admin/indexes/{map}/{attr}/status",
+            get(index_backfill_status),
+        )
         .route_layer(governor_layer);
 
     Router::new()

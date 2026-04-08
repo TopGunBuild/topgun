@@ -30,14 +30,17 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use arc_swap::ArcSwap;
+use dashmap::DashMap;
 
 use super::{ConnectionRegistry, NetworkConfig, ShutdownController};
 use crate::cluster::state::ClusterState;
+use crate::network::handlers::admin_types::BackfillProgress;
 use crate::network::handlers::auth_provider::AuthProvider;
 use crate::network::handlers::auth_validator::AuthValidator;
 use crate::service::classify::OperationService;
 use crate::service::config::ServerConfig;
 use crate::service::dispatch::PartitionDispatcher;
+use crate::service::domain::index::mutation_observer::IndexObserverFactory;
 use crate::service::middleware::ObservabilityHandle;
 use crate::service::policy::PolicyStore;
 use crate::storage::factory::RecordStoreFactory;
@@ -102,4 +105,10 @@ pub struct AppState {
     /// Custom post-JWT-verification validator.
     /// `None` when no custom validation is configured (default: accept all valid JWTs).
     pub auth_validator: Option<Arc<dyn AuthValidator>>,
+    /// Index observer factory for admin index management.
+    /// `None` when indexing is not configured.
+    pub index_observer_factory: Option<Arc<IndexObserverFactory>>,
+    /// Backfill progress tracking for async index creation.
+    /// Keyed by (map_name, attribute).
+    pub backfill_progress: Arc<DashMap<(String, String), Arc<BackfillProgress>>>,
 }
