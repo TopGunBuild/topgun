@@ -714,6 +714,72 @@ export interface ISearchClient {
   close(error?: Error): void;
 }
 
+// ============================================
+// SqlClient Types
+// ============================================
+
+/**
+ * Result of a server-side SQL query execution.
+ */
+export interface SqlQueryResult {
+  columns: string[];
+  rows: unknown[][];
+}
+
+/**
+ * Interface for server-side SQL query execution via DataFusion.
+ * Handles one-shot request/response queries over the existing WebSocket connection.
+ */
+export interface ISqlClient {
+  /**
+   * Execute a SQL query on the server.
+   * @param query SQL query string
+   * @returns Promise resolving to { columns, rows }
+   */
+  sql(query: string): Promise<SqlQueryResult>;
+
+  /**
+   * Handle SQL query response from server.
+   * Called by SyncEngine for SQL_QUERY_RESP messages.
+   * @param payload Response payload
+   */
+  handleSqlQueryResponse(payload: {
+    queryId: string;
+    columns: string[];
+    rows: unknown[][];
+    error?: string;
+  }): void;
+
+  /**
+   * Clean up resources (cancel pending requests).
+   * @param error - Error to reject pending promises with
+   */
+  close(error?: Error): void;
+}
+
+/**
+ * Configuration for SqlClient.
+ */
+export interface SqlClientConfig {
+  /**
+   * Callback to send messages via SyncEngine/WebSocketManager.
+   * @param message - Message to send
+   * @returns true if sent successfully
+   */
+  sendMessage: (message: any) => boolean;
+
+  /**
+   * Callback to check if authenticated.
+   */
+  isAuthenticated: () => boolean;
+
+  /**
+   * Timeout for SQL query requests in milliseconds.
+   * Default: 30000 (30 seconds)
+   */
+  timeoutMs?: number;
+}
+
 /**
  * Configuration for SearchClient.
  */
