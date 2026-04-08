@@ -3,6 +3,8 @@
 //! All types derive [`ToSchema`] for `OpenAPI` documentation and use
 //! `#[serde(rename_all = "camelCase")]` for consistent JSON field naming.
 
+use std::sync::atomic::{AtomicBool, AtomicU64};
+
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -194,6 +196,73 @@ pub struct PolicyResponse {
 #[serde(rename_all = "camelCase")]
 pub struct PolicyListResponse {
     pub policies: Vec<PolicyResponse>,
+}
+
+// ---------------------------------------------------------------------------
+// Index admin types
+// ---------------------------------------------------------------------------
+
+/// Index strategy discriminant for index admin endpoints.
+#[derive(Deserialize, Serialize, ToSchema, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum IndexTypeParam {
+    Hash,
+    Navigable,
+    Inverted,
+}
+
+/// Request body for creating a new secondary index on a map attribute.
+#[derive(Deserialize, ToSchema, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateIndexRequest {
+    /// Map name to create the index on (e.g., "users").
+    pub map_name: String,
+    /// Attribute name to index (e.g., "email").
+    pub attribute: String,
+    /// Index type: "hash", "navigable", or "inverted".
+    pub index_type: IndexTypeParam,
+}
+
+/// A single index entry as returned by the admin list indexes endpoint.
+#[derive(Serialize, ToSchema, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexInfoResponse {
+    pub map_name: String,
+    pub attribute: String,
+    pub index_type: IndexTypeParam,
+    pub entry_count: u64,
+}
+
+/// Response body for the list indexes endpoint.
+#[derive(Serialize, ToSchema, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexListResponse {
+    pub indexes: Vec<IndexInfoResponse>,
+}
+
+/// Response body for the backfill status endpoint.
+#[derive(Serialize, ToSchema, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct BackfillStatusResponse {
+    pub map_name: String,
+    pub attribute: String,
+    /// Total records to backfill.
+    pub total: u64,
+    /// Records processed so far.
+    pub processed: u64,
+    /// Whether backfill is complete.
+    pub done: bool,
+}
+
+/// Tracks async backfill progress for a single (map, attribute) index.
+///
+/// Stored in `AppState.backfill_progress` keyed by `(map_name, attribute)`.
+/// All fields use atomics so the background task and HTTP handler can access
+/// progress concurrently without a mutex.
+pub struct BackfillProgress {
+    pub total: AtomicU64,
+    pub processed: AtomicU64,
+    pub done: AtomicBool,
 }
 
 #[cfg(test)]
