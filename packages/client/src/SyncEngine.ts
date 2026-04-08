@@ -33,8 +33,8 @@ import { ConflictResolverClient } from './ConflictResolverClient';
 import { WebSocketManager, BackpressureController, QueryManager, TopicManager, LockManager, WriteConcernManager, CounterManager, EntryProcessorClient, SearchClient, SqlClient, MerkleSyncHandler, ORMapSyncHandler, MessageRouter, registerClientMessageHandlers } from './sync';
 import type { SearchResult, SqlQueryResult, IMessageRouter } from './sync';
 
-// Re-export SearchResult from sync module for backwards compatibility
-export type { SearchResult } from './sync';
+// Re-export SearchResult and SqlQueryResult from sync module for backwards compatibility
+export type { SearchResult, SqlQueryResult } from './sync';
 
 export interface OpLogEntry {
   id: string; // Unique ID for the operation

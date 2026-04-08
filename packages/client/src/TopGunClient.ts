@@ -2,7 +2,7 @@ import { LWWMap, ORMap } from '@topgunbuild/core';
 import type { ORMapRecord, LWWRecord, EntryProcessorDef, EntryProcessorResult, SearchOptions } from '@topgunbuild/core';
 import type { IStorageAdapter } from './IStorageAdapter';
 import { SyncEngine } from './SyncEngine';
-import type { BackoffConfig } from './SyncEngine';
+import type { BackoffConfig, SqlQueryResult } from './SyncEngine';
 import type { AuthProvider } from './auth/types';
 import { QueryHandle } from './QueryHandle';
 import type { QueryFilter } from './QueryHandle';
@@ -632,6 +632,33 @@ export class TopGunClient {
     matchedTerms: string[];
   }>> {
     return this.syncEngine.search<T>(mapName, query, options);
+  }
+
+  // ============================================
+  // SQL Query API
+  // ============================================
+
+  /**
+   * Execute a SQL query on the server via DataFusion.
+   *
+   * Queries are executed server-side against registered maps.
+   * Map names are table names in SQL. Requires the server to have
+   * the DataFusion feature enabled and maps registered with schemas.
+   *
+   * @param query SQL query string (e.g., "SELECT * FROM users WHERE age > 21")
+   * @returns Promise resolving to { columns, rows }
+   *
+   * @example
+   * ```typescript
+   * const result = await client.sql('SELECT name, age FROM users WHERE age > 21 ORDER BY age');
+   * console.log(result.columns); // ['name', 'age']
+   * for (const row of result.rows) {
+   *   console.log(row[0], row[1]); // name, age
+   * }
+   * ```
+   */
+  public async sql(query: string): Promise<SqlQueryResult> {
+    return this.syncEngine.sql(query);
   }
 
   // ============================================

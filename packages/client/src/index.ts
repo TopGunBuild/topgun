@@ -57,6 +57,9 @@ export type { ResolverInfo, RegisterResult } from './ConflictResolverClient';
 // Full-Text Search exports
 export type { SearchResult } from './SyncEngine';
 
+// SQL Query exports
+export type { SqlQueryResult } from './SyncEngine';
+
 // Live Search exports
 export { SearchHandle } from './SearchHandle';
 export type { SearchResultsCallback } from './SearchHandle';
