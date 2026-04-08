@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(idx.entry_count(), 1);
 
         // Remove the index — data must be cleared.
-        registry.remove_index("name");
+        let _ = registry.remove_index("name");
 
         // The index should no longer exist in the registry.
         assert!(registry.get_index("name").is_none(), "index should be gone after remove");
@@ -408,7 +408,7 @@ mod tests {
         registry.add_hash_index("status");
         assert!(registry.has_index("status"), "should be true after adding");
 
-        registry.remove_index("status");
+        let _ = registry.remove_index("status");
         assert!(!registry.has_index("status"), "should be false after removing");
     }
 }
