@@ -588,4 +588,49 @@ mod tests {
         let result = idx.lookup_eq(&rmpv::Value::String("ABC123".into()));
         assert!(result.contains("p1"), "observer should update the registry's indexes");
     }
+
+    #[test]
+    fn all_index_stats_returns_only_maps_with_indexes() {
+        let factory = IndexObserverFactory::new();
+
+        // Register a map with indexes.
+        let registry = factory.register_map("users");
+        registry.add_hash_index("email");
+        registry.add_navigable_index("age");
+
+        // Register a map with no indexes.
+        factory.register_map("empty_map");
+
+        let stats = factory.all_index_stats();
+
+        // Only "users" should appear (empty_map has no indexes).
+        assert_eq!(stats.len(), 1, "only maps with indexes should be returned");
+        let (map_name, index_stats) = &stats[0];
+        assert_eq!(map_name, "users");
+        assert_eq!(index_stats.len(), 2, "users should have 2 indexes");
+    }
+
+    #[test]
+    fn all_index_stats_returns_empty_when_no_maps_registered() {
+        let factory = IndexObserverFactory::new();
+        let stats = factory.all_index_stats();
+        assert!(stats.is_empty(), "should return empty when no maps are registered");
+    }
+
+    #[test]
+    fn all_index_stats_includes_entry_counts() {
+        let factory = IndexObserverFactory::new();
+        let registry = factory.register_map("products");
+        registry.add_hash_index("sku");
+
+        // Insert a record to increment entry count.
+        let idx = registry.get_index("sku").unwrap();
+        idx.insert("p1", &rmpv::Value::String("ABC".into()));
+
+        let stats = factory.all_index_stats();
+        assert_eq!(stats.len(), 1);
+        let (_, index_stats) = &stats[0];
+        assert_eq!(index_stats.len(), 1);
+        assert_eq!(index_stats[0].entry_count, 1, "entry count should reflect inserted records");
+    }
 }

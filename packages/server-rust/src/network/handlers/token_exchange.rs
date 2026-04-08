@@ -307,6 +307,8 @@ mod tests {
             auth_providers: Arc::new(providers),
             refresh_grant_store: None,
             auth_validator: None,
+            index_observer_factory: None,
+            backfill_progress: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -496,6 +498,8 @@ mod tests {
             auth_providers: Arc::new(vec![provider]),
             refresh_grant_store: Some(store as Arc<dyn crate::network::handlers::RefreshGrantStore>),
             auth_validator: None,
+            index_observer_factory: None,
+            backfill_progress: Arc::new(dashmap::DashMap::new()),
         };
         let app = make_app(state);
         let (status, body) = post_exchange(app, json!({ "token": "any" })).await;

@@ -109,6 +109,6 @@ pub struct AppState {
     /// `None` when indexing is not configured.
     pub index_observer_factory: Option<Arc<IndexObserverFactory>>,
     /// Backfill progress tracking for async index creation.
-    /// Keyed by (map_name, attribute).
+    /// Keyed by `(map_name, attribute)`.
     pub backfill_progress: Arc<DashMap<(String, String), Arc<BackfillProgress>>>,
 }

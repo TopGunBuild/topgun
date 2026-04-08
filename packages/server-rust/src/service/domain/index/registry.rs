@@ -151,6 +151,7 @@ impl IndexRegistry {
     /// Removes the index for `attribute`, clearing all its data.
     ///
     /// Returns `true` if an index was removed, `false` if none existed.
+    #[must_use]
     pub fn remove_index(&self, attribute: &str) -> bool {
         if let Some((_, index)) = self.indexes.remove(attribute) {
             index.clear();
@@ -362,5 +363,52 @@ mod tests {
         registry.add_navigable_index("b");
         registry.add_inverted_index("c");
         assert_eq!(registry.indexes().len(), 3);
+    }
+
+    #[test]
+    fn remove_index_returns_true_when_present() {
+        let registry = IndexRegistry::new();
+        registry.add_hash_index("email");
+        assert!(registry.remove_index("email"), "should return true when index existed");
+    }
+
+    #[test]
+    fn remove_index_returns_false_when_absent() {
+        let registry = IndexRegistry::new();
+        assert!(
+            !registry.remove_index("nonexistent"),
+            "should return false when no index existed"
+        );
+    }
+
+    #[test]
+    fn remove_index_clears_data() {
+        let registry = IndexRegistry::new();
+        registry.add_hash_index("name");
+
+        // Insert some data into the index.
+        let idx = registry.get_index("name").unwrap();
+        idx.insert("k1", &rmpv::Value::String("alice".into()));
+        assert_eq!(idx.entry_count(), 1);
+
+        // Remove the index — data must be cleared.
+        registry.remove_index("name");
+
+        // The index should no longer exist in the registry.
+        assert!(registry.get_index("name").is_none(), "index should be gone after remove");
+        // The evicted Arc still holds cleared data.
+        assert_eq!(idx.entry_count(), 0, "index data should be cleared");
+    }
+
+    #[test]
+    fn has_index_reflects_state() {
+        let registry = IndexRegistry::new();
+        assert!(!registry.has_index("status"), "should be false before adding");
+
+        registry.add_hash_index("status");
+        assert!(registry.has_index("status"), "should be true after adding");
+
+        registry.remove_index("status");
+        assert!(!registry.has_index("status"), "should be false after removing");
     }
 }

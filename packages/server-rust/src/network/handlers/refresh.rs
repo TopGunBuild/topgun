@@ -275,6 +275,8 @@ mod tests {
             auth_providers: Arc::new(vec![]),
             refresh_grant_store: Some(store),
             auth_validator: None,
+            index_observer_factory: None,
+            backfill_progress: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -295,6 +297,8 @@ mod tests {
             auth_providers: Arc::new(vec![]),
             refresh_grant_store: None,
             auth_validator: None,
+            index_observer_factory: None,
+            backfill_progress: Arc::new(dashmap::DashMap::new()),
         }
     }
 

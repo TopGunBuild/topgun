@@ -825,6 +825,10 @@ pub async fn create_index(
 /// Lists all secondary indexes across all maps with their entry counts and types.
 ///
 /// Returns 200 with an `IndexListResponse`.
+///
+/// # Errors
+///
+/// Returns 503 if the index observer factory is not configured.
 pub async fn list_indexes(
     _claims: AdminClaims,
     State(state): State<AppState>,
@@ -912,7 +916,7 @@ pub async fn remove_index_handler(
         ));
     }
 
-    registry.remove_index(&attribute);
+    let _ = registry.remove_index(&attribute);
 
     // Remove stale backfill progress entry to avoid indefinitely accumulating entries.
     state
@@ -962,8 +966,7 @@ pub async fn index_backfill_status(
 
     let index_exists = factory
         .get_registry(&map_name)
-        .map(|r| r.has_index(&attribute))
-        .unwrap_or(false);
+        .is_some_and(|r| r.has_index(&attribute));
 
     if index_exists {
         // Index exists but has no backfill record: treat as already done.

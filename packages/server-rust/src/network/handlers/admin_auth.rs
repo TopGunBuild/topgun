@@ -210,6 +210,8 @@ mod tests {
             auth_providers: Arc::new(vec![]),
             refresh_grant_store: None,
             auth_validator: None,
+            index_observer_factory: None,
+            backfill_progress: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -375,6 +377,8 @@ CQIDAQAB
             auth_providers: Arc::new(vec![]),
             refresh_grant_store: None,
             auth_validator: None,
+            index_observer_factory: None,
+            backfill_progress: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -418,6 +422,8 @@ CQIDAQAB
             auth_providers: Arc::new(vec![]),
             refresh_grant_store: None,
             auth_validator: validator,
+            index_observer_factory: None,
+            backfill_progress: Arc::new(dashmap::DashMap::new()),
         }
     }
 
