@@ -30,8 +30,8 @@ import type {
 import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
 import type { IConnectionProvider } from './types';
 import { ConflictResolverClient } from './ConflictResolverClient';
-import { WebSocketManager, BackpressureController, QueryManager, TopicManager, LockManager, WriteConcernManager, CounterManager, EntryProcessorClient, SearchClient, MerkleSyncHandler, ORMapSyncHandler, MessageRouter, registerClientMessageHandlers } from './sync';
-import type { SearchResult, IMessageRouter } from './sync';
+import { WebSocketManager, BackpressureController, QueryManager, TopicManager, LockManager, WriteConcernManager, CounterManager, EntryProcessorClient, SearchClient, SqlClient, MerkleSyncHandler, ORMapSyncHandler, MessageRouter, registerClientMessageHandlers } from './sync';
+import type { SearchResult, SqlQueryResult, IMessageRouter } from './sync';
 
 // Re-export SearchResult from sync module for backwards compatibility
 export type { SearchResult } from './sync';
@@ -131,6 +131,9 @@ export class SyncEngine {
 
   // SearchClient handles full-text search operations
   private readonly searchClient: SearchClient;
+
+  // SqlClient handles server-side SQL query execution via DataFusion
+  private readonly sqlClient: SqlClient;
 
   // MerkleSyncHandler handles LWWMap sync protocol messages
   private readonly merkleSyncHandler: MerkleSyncHandler;
@@ -254,6 +257,12 @@ export class SyncEngine {
       isAuthenticated: () => this.isAuthenticated(),
     });
 
+    // Initialize SqlClient for server-side SQL query execution
+    this.sqlClient = new SqlClient({
+      sendMessage: (msg) => this.sendMessage(msg),
+      isAuthenticated: () => this.isAuthenticated(),
+    });
+
     // Initialize MerkleSyncHandler for LWWMap sync protocol
     this.merkleSyncHandler = new MerkleSyncHandler({
       getMap: (name) => this.maps.get(name),
@@ -309,6 +318,7 @@ export class SyncEngine {
         entryProcessorClient: this.entryProcessorClient,
         conflictResolverClient: this.conflictResolverClient,
         searchClient: this.searchClient,
+        sqlClient: this.sqlClient,
         merkleSyncHandler: this.merkleSyncHandler,
         orMapSyncHandler: this.orMapSyncHandler,
       }
@@ -915,6 +925,9 @@ export class SyncEngine {
     // Clean up SearchClient
     this.searchClient.close(new Error('SyncEngine closed'));
 
+    // Clean up SqlClient
+    this.sqlClient.close(new Error('SyncEngine closed'));
+
     this.stateMachine.transition(SyncState.DISCONNECTED);
     logger.info('SyncEngine closed');
   }
@@ -1279,6 +1292,21 @@ export class SyncEngine {
     options?: SearchOptions
   ): Promise<SearchResult<T>[]> {
     return this.searchClient.search<T>(mapName, query, options);
+  }
+
+  // ============================================
+  // SQL Query API
+  // ============================================
+
+  /**
+   * Execute a SQL query on the server via DataFusion.
+   * Delegates to SqlClient.
+   *
+   * @param query SQL query string
+   * @returns Promise resolving to { columns, rows }
+   */
+  public async sql(query: string): Promise<SqlQueryResult> {
+    return this.sqlClient.sql(query);
   }
 
   // ============================================

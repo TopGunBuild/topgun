@@ -34,6 +34,9 @@ export type {
   ISearchClient,
   SearchClientConfig,
   SearchResult,
+  ISqlClient,
+  SqlClientConfig,
+  SqlQueryResult,
   IMerkleSyncHandler,
   MerkleSyncHandlerConfig,
   IORMapSyncHandler,
@@ -53,6 +56,7 @@ export { WriteConcernManager } from './WriteConcernManager';
 export { CounterManager } from './CounterManager';
 export { EntryProcessorClient } from './EntryProcessorClient';
 export { SearchClient } from './SearchClient';
+export { SqlClient } from './SqlClient';
 export { MerkleSyncHandler } from './MerkleSyncHandler';
 export { ORMapSyncHandler } from './ORMapSyncHandler';
 export { MessageRouter } from './MessageRouter';
