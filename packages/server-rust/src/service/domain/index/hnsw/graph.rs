@@ -68,7 +68,7 @@ impl UndirectedGraph {
     /// Returns a reference to the neighbor set of `id`, if present.
     #[must_use]
     pub fn neighbors(&self, id: &ElementId) -> Option<&dyn DynamicSet> {
-        self.nodes.get(id).map(|s| s.as_ref())
+        self.nodes.get(id).map(std::convert::AsRef::as_ref)
     }
 
     /// Returns a mutable reference to the neighbor set of `id`, if present.

@@ -5,5 +5,8 @@ pub mod index;
 pub mod layer;
 pub mod types;
 
+#[cfg(test)]
+mod tests;
+
 pub use types::{DynamicSet, ElementId, Heuristic, HnswFlavor, HnswParams};
 pub use index::Hnsw;

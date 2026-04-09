@@ -48,6 +48,8 @@ impl Default for Layer {
 /// Formula: `floor(-ln(uniform(0,1)) * ml)` where `ml = 1/ln(m)`.
 /// This gives an exponentially decreasing probability of reaching higher
 /// layers, keeping the graph sparse at the top.
+#[must_use]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn random_level(ml: f64) -> usize {
     let mut rng = rand::rng();
     let r: f64 = rng.random::<f64>();

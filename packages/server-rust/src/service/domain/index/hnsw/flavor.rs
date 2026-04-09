@@ -8,7 +8,7 @@ use crate::service::domain::index::hnsw::types::{DynamicSet, ElementId, HnswFlav
 
 /// Fixed-capacity neighbor set backed by a stack-allocated array.
 ///
-/// Chosen over Vec for M8/M12/M16 flavors because neighbor sets are small
+/// Chosen over `Vec` for M8/M12/M16 flavors because neighbor sets are small
 /// (<=32 entries) and allocation-free insertion matters on the hot insert path.
 pub struct ArraySet<const N: usize> {
     slots: [Option<ElementId>; N],
@@ -34,13 +34,13 @@ impl<const N: usize> Default for ArraySet<N> {
 impl<const N: usize> DynamicSet for ArraySet<N> {
     fn insert(&mut self, id: ElementId) -> bool {
         // Reject if already present — duplicate edges waste capacity.
-        for slot in self.slots.iter() {
+        for slot in &self.slots {
             if *slot == Some(id) {
                 return true;
             }
         }
         // Find first empty slot.
-        for slot in self.slots.iter_mut() {
+        for slot in &mut self.slots {
             if slot.is_none() {
                 *slot = Some(id);
                 self.count += 1;
@@ -52,7 +52,7 @@ impl<const N: usize> DynamicSet for ArraySet<N> {
     }
 
     fn remove(&mut self, id: &ElementId) -> bool {
-        for slot in self.slots.iter_mut() {
+        for slot in &mut self.slots {
             if *slot == Some(*id) {
                 *slot = None;
                 self.count -= 1;
@@ -63,7 +63,7 @@ impl<const N: usize> DynamicSet for ArraySet<N> {
     }
 
     fn contains(&mut self, id: &ElementId) -> bool {
-        self.slots.iter().any(|s| *s == Some(*id))
+        self.slots.contains(&Some(*id))
     }
 
     fn iter(&self) -> Box<dyn Iterator<Item = ElementId> + '_> {
@@ -85,7 +85,7 @@ impl<const N: usize> DynamicSet for ArraySet<N> {
 
 /// Heap-backed neighbor set used by the Custom flavor when m exceeds 16.
 ///
-/// AHashSet provides faster hashing than std HashMap for integer keys,
+/// `AHashSet` provides faster hashing than std `HashMap` for integer keys,
 /// important when neighbor sets are accessed frequently during graph traversal.
 pub struct AHashSetWrapper {
     inner: AHashSet<ElementId>,

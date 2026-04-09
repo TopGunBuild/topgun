@@ -10,7 +10,7 @@ use crate::service::domain::index::hnsw::types::{ElementId, Heuristic, HnswFlavo
 ///
 /// No thread safety — callers must synchronize externally.
 /// No persistence — all state lives in heap memory.
-/// No integration with IndexRegistry — standalone component.
+/// No integration with `IndexRegistry` — standalone component.
 pub struct Hnsw {
     params: HnswParams,
     flavor: HnswFlavor,
@@ -107,9 +107,8 @@ impl Hnsw {
         ef: usize,
         layer_idx: usize,
     ) -> Vec<(ElementId, f64)> {
-        let layer = match self.layers.get(layer_idx) {
-            Some(l) => l,
-            None => return Vec::new(),
+        let Some(layer) = self.layers.get(layer_idx) else {
+            return Vec::new();
         };
 
         let mut candidates = DoublePriorityQueue::new();
@@ -126,8 +125,7 @@ impl Hnsw {
         while let Some((cand_id, cand_dist)) = candidates.pop_nearest() {
             let furthest_result_dist = results
                 .peek_furthest()
-                .map(|(_, d)| d)
-                .unwrap_or(f64::MAX);
+                .map_or(f64::MAX, |(_, d)| d);
 
             if cand_dist > furthest_result_dist {
                 break;
@@ -143,8 +141,7 @@ impl Hnsw {
                     let d = self.distance_to_query(nbr, query);
                     let furthest = results
                         .peek_furthest()
-                        .map(|(_, fd)| fd)
-                        .unwrap_or(f64::MAX);
+                        .map_or(f64::MAX, |(_, fd)| fd);
                     if d < furthest || results.len() < ef {
                         candidates.insert(nbr, d);
                         results.insert(nbr, d);
@@ -169,6 +166,8 @@ impl Hnsw {
     // -----------------------------------------------------------------------
 
     /// Insert a vector into the index.
+    ///
+    /// # Panics
     ///
     /// Panics if the vector dimension does not match `params.dimension`.
     pub fn insert(&mut self, id: ElementId, vector: SharedVector) {
@@ -199,13 +198,10 @@ impl Hnsw {
             self.layers[l].insert_node(id, set);
         }
 
-        // If this is the first node, it becomes the sole entry point.
-        let ep = match self.entry_point {
-            None => {
-                self.entry_point = Some(id);
-                return;
-            }
-            Some(ep) => ep,
+        // If this is the first node, it becomes the entry point.
+        let Some(ep) = self.entry_point else {
+            self.entry_point = Some(id);
+            return;
         };
 
         let current_max_level = self.layers.len().saturating_sub(1);
@@ -221,16 +217,11 @@ impl Hnsw {
             }
         }
 
-        // For each layer from min(level, current_max) down to 0, run beam
-        // search with ef_construction candidates and wire edges.
-        let heuristic = if self.params.extend_candidates && self.params.keep_pruned_connections {
-            Heuristic::ExtendedAndKeep
-        } else if self.params.extend_candidates {
-            Heuristic::Extended
-        } else if self.params.keep_pruned_connections {
-            Heuristic::KeepPruned
-        } else {
-            Heuristic::Standard
+        let heuristic = match (self.params.extend_candidates, self.params.keep_pruned_connections) {
+            (true, true) => Heuristic::ExtendedAndKeep,
+            (true, false) => Heuristic::Extended,
+            (false, true) => Heuristic::KeepPruned,
+            (false, false) => Heuristic::Standard,
         };
 
         for lc in (0..=level.min(current_max_level)).rev() {
@@ -283,7 +274,13 @@ impl Hnsw {
     }
 
     /// Prune neighbor list of `node` in `layer_idx` to at most `m` edges.
-    fn prune_neighbors(&mut self, node: ElementId, layer_idx: usize, m: usize, heuristic: Heuristic) {
+    fn prune_neighbors(
+        &mut self,
+        node: ElementId,
+        layer_idx: usize,
+        m: usize,
+        heuristic: Heuristic,
+    ) {
         let current_neighbors: Vec<(ElementId, f64)> = self.layers[layer_idx]
             .graph
             .neighbors(&node)
@@ -328,9 +325,8 @@ impl Hnsw {
     /// Deleted elements are excluded from results.
     #[must_use]
     pub fn search(&self, query: &[f32], k: usize, ef: usize) -> Vec<(ElementId, f64)> {
-        let ep = match self.entry_point {
-            None => return Vec::new(),
-            Some(ep) => ep,
+        let Some(ep) = self.entry_point else {
+            return Vec::new();
         };
 
         let max_layer = self.layers.len().saturating_sub(1);

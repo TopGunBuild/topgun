@@ -1,7 +1,7 @@
 /// Unique identifier for elements in the HNSW index.
 ///
 /// u64 gives ample ID space without pointer overhead — callers manage
-/// their own mapping from domain keys to ElementId.
+/// their own mapping from domain keys to `ElementId`.
 pub type ElementId = u64;
 
 /// Abstraction over neighbor-set implementations.
@@ -26,7 +26,7 @@ pub trait DynamicSet: Send + Sync {
     /// Number of currently stored neighbors.
     fn len(&self) -> usize;
 
-    /// Returns `true` when len() == 0.
+    /// Returns `true` when `len()` == 0.
     fn is_empty(&self) -> bool {
         self.len() == 0
     }

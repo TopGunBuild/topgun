@@ -11,10 +11,10 @@ use crate::service::domain::index::hnsw::types::{ElementId, Heuristic};
 
 /// Min/max priority queue for beam-search working sets.
 ///
-/// BTreeMap is chosen over a binary heap because we need efficient access to
+/// `BTreeMap` is chosen over a binary heap because we need efficient access to
 /// both the minimum (nearest candidate) and maximum (furthest result) without
 /// a second data structure.  Tie-breaking on equal distances stores multiple
-/// elements per key using a Vec.
+/// elements per key using a `Vec`.
 pub struct DoublePriorityQueue {
     map: BTreeMap<OrderedFloat<f64>, Vec<ElementId>>,
     len: usize,
@@ -105,10 +105,14 @@ impl Default for DoublePriorityQueue {
 
 /// Select at most `m` neighbors from `candidates` using the requested heuristic.
 ///
-/// `candidates` is a slice of (ElementId, distance-to-query) pairs.
+/// `candidates` is a slice of (`ElementId`, distance-to-query) pairs.
 /// The heuristic controls whether the candidate set is expanded and whether
 /// pruned candidates fill remaining slots.
-#[allow(clippy::too_many_arguments)]
+///
+/// # Panics
+///
+/// Does not panic in practice — `partial_cmp` on f64 returns `None` only for
+/// NaN, which distance functions should never produce.
 pub fn select_neighbors(
     candidates: &[(ElementId, f64)],
     m: usize,
@@ -131,7 +135,7 @@ pub fn select_neighbors(
             if let Some(nbrs) = graph.neighbors(&cand_id) {
                 for nbr in nbrs.iter() {
                     if !existing_ids.contains(&nbr) {
-                        let d = dist_fn(nbr, cand_id); // distance from nbr to "query proxy"
+                        let d = dist_fn(nbr, cand_id);
                         extra.push((nbr, d));
                     }
                 }
@@ -139,7 +143,10 @@ pub fn select_neighbors(
         }
         working.extend(extra);
         // Deduplicate by id — keep the entry with the smallest distance.
-        working.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.partial_cmp(&b.1).unwrap()));
+        working.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        });
         working.dedup_by(|a, b| {
             if a.0 == b.0 {
                 if a.1 < b.1 {
@@ -162,8 +169,8 @@ pub fn select_neighbors(
         if result.len() >= m {
             break;
         }
-        // Keep the candidate if it is closer to the query than to every already-selected neighbor.
-        // This ensures the resulting graph remains navigable by preferring diverse connections.
+        // Keep if closer to the query than to any already-selected neighbor —
+        // this promotes graph diversity and navigability.
         let closer_to_query = result.iter().all(|&selected| {
             let d_cand_to_selected = dist_fn(cand_id, selected);
             cand_dist < d_cand_to_selected
