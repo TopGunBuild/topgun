@@ -6,3 +6,4 @@ pub mod layer;
 pub mod types;
 
 pub use types::{DynamicSet, ElementId, Heuristic, HnswFlavor, HnswParams};
+pub use index::Hnsw;
