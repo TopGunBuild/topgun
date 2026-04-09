@@ -23,6 +23,7 @@ pub mod partition;
 pub mod schema;
 pub mod traits;
 pub mod types;
+pub mod vector;
 
 // Context
 pub use context::RequestContext;
@@ -64,6 +65,9 @@ pub use or_map::ORMap;
 pub use partition::{
     get_relevant_partitions, hash_to_partition, PartitionLookup, PartitionTable, PARTITION_COUNT,
 };
+
+// Vector
+pub use vector::{Distance, DistanceMetric, SharedVector, Vector, distance_for_metric};
 
 #[cfg(test)]
 mod tests {
