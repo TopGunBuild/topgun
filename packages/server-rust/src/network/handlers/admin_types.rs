@@ -312,4 +312,32 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         assert!(json["code"].is_u64(), "code must serialize as integer");
     }
+
+    #[test]
+    fn server_status_response_includes_metrics_fields() {
+        let resp = ServerStatusResponse {
+            configured: true,
+            version: "0.1.0".to_string(),
+            mode: ServerMode::Normal,
+            connections: 42,
+            uptime_seconds: 3600,
+            total_operations: 999,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+
+        // Existing fields unchanged
+        assert_eq!(json["configured"], true);
+        assert_eq!(json["version"], "0.1.0");
+        assert_eq!(json["mode"], "normal");
+
+        // New metrics fields present with camelCase keys
+        assert_eq!(json["connections"], 42);
+        assert_eq!(json["uptimeSeconds"], 3600);
+        assert_eq!(json["totalOperations"], 999);
+
+        // Integer types, not floats
+        assert!(json["connections"].is_u64(), "connections must be integer");
+        assert!(json["uptimeSeconds"].is_u64(), "uptimeSeconds must be integer");
+        assert!(json["totalOperations"].is_u64(), "totalOperations must be integer");
+    }
 }

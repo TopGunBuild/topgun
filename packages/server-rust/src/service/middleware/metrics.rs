@@ -182,4 +182,31 @@ mod tests {
         let resp = svc.oneshot(op).await.unwrap();
         assert!(matches!(resp, OperationResponse::Ack { call_id: 42 }));
     }
+
+    #[tokio::test]
+    async fn total_operations_increments_on_each_call() {
+        let before = total_operations();
+
+        let layer = MetricsLayer;
+        let svc = layer.layer(ImmediateService);
+
+        let ctx = OperationContext::new(
+            100,
+            "crdt",
+            Timestamp {
+                millis: 0,
+                counter: 0,
+                node_id: "test".to_string(),
+            },
+            5000,
+        );
+        let op = Operation::GarbageCollect { ctx };
+        let _ = svc.oneshot(op).await.unwrap();
+
+        let after = total_operations();
+        assert!(
+            after > before,
+            "total_operations should increment after processing an operation (before={before}, after={after})"
+        );
+    }
 }
