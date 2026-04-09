@@ -34,6 +34,12 @@ pub struct ServerStatusResponse {
     pub configured: bool,
     pub version: String,
     pub mode: ServerMode,
+    /// Active WebSocket connections.
+    pub connections: u32,
+    /// Seconds since server start.
+    pub uptime_seconds: u64,
+    /// Cumulative operations processed through the Tower pipeline.
+    pub total_operations: u64,
 }
 
 #[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]

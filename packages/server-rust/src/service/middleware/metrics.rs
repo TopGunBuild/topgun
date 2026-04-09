@@ -5,6 +5,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -12,6 +13,15 @@ use tower::{Layer, Service};
 use tracing::{info_span, Instrument};
 
 use crate::service::operation::{Operation, OperationError, OperationResponse};
+
+/// Global operations counter for lightweight metrics exposed via `/api/status`.
+/// Separate from Prometheus counters to avoid coupling the two systems.
+static TOTAL_OPERATIONS: AtomicU64 = AtomicU64::new(0);
+
+/// Returns the cumulative number of operations processed through the Tower pipeline.
+pub fn total_operations() -> u64 {
+    TOTAL_OPERATIONS.load(Ordering::Relaxed)
+}
 
 // ---------------------------------------------------------------------------
 // MetricsLayer
@@ -91,6 +101,9 @@ where
                     outcome = outcome,
                     "operation complete"
                 );
+
+                // Increment lightweight atomic counter for /api/status.
+                TOTAL_OPERATIONS.fetch_add(1, Ordering::Relaxed);
 
                 // Record to Prometheus-compatible metrics registry.
                 metrics::counter!("topgun_operations_total", "service" => service_name, "outcome" => outcome.to_string()).increment(1);

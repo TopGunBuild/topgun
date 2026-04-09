@@ -38,6 +38,7 @@ use super::AppState;
 
 use crate::cluster::types::NodeState;
 use crate::service::domain::index::IndexType;
+use crate::service::middleware::metrics::total_operations;
 use crate::service::policy::{expr_parser::parse_permission_expr, PermissionPolicy};
 
 /// JWT claims for token generation (encoding).
@@ -66,11 +67,15 @@ struct AdminJwtClaims {
     ),
     tag = "Server"
 )]
-pub async fn server_status() -> impl IntoResponse {
+#[allow(clippy::cast_possible_truncation)]
+pub async fn server_status(State(state): State<AppState>) -> impl IntoResponse {
     Json(ServerStatusResponse {
         configured: true,
         version: env!("CARGO_PKG_VERSION").to_string(),
         mode: ServerMode::Normal,
+        connections: state.registry.count() as u32,
+        uptime_seconds: state.start_time.elapsed().as_secs(),
+        total_operations: total_operations(),
     })
 }
 
