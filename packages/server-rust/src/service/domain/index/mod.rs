@@ -7,6 +7,7 @@
 
 pub mod attribute;
 pub mod hash_index;
+pub mod hnsw;
 pub mod inverted_index;
 pub mod mutation_observer;
 pub mod navigable_index;
