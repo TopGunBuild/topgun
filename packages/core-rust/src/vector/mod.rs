@@ -267,6 +267,7 @@ pub enum Vector {
 
 impl Vector {
     /// Returns the number of dimensions (length of the inner vec).
+    #[must_use]
     pub fn dimension(&self) -> usize {
         match self {
             Vector::F32(v) => v.len(),
@@ -279,19 +280,22 @@ impl Vector {
     /// Converts any variant to a new `Vec<f32>` for distance computation.
     ///
     /// I32 conversion is lossy for values exceeding f32 precision — acceptable
-    /// for approximate distance computation.
+    /// for approximate distance computation. F64 truncation is also intentional.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
     pub fn to_f32_vec(&self) -> Vec<f32> {
         match self {
             Vector::F32(v) => v.clone(),
             Vector::F64(v) => v.iter().map(|&x| x as f32).collect(),
             Vector::I32(v) => v.iter().map(|&x| x as f32).collect(),
-            Vector::I16(v) => v.iter().map(|&x| x as f32).collect(),
+            Vector::I16(v) => v.iter().map(|&x| f32::from(x)).collect(),
         }
     }
 
     /// Returns the raw data size in bytes (element count * element size).
     ///
     /// Does not include `Vec` struct overhead — used for cache eviction weighting.
+    #[must_use]
     pub fn mem_size(&self) -> usize {
         match self {
             Vector::F32(v) => v.len() * std::mem::size_of::<f32>(),
@@ -313,6 +317,7 @@ pub struct SharedVector {
 
 impl SharedVector {
     /// Wraps a `Vector` in an Arc and caches the dimension.
+    #[must_use]
     pub fn new(v: Vector) -> Self {
         let dimension = v.dimension();
         SharedVector {
@@ -322,19 +327,22 @@ impl SharedVector {
     }
 
     /// Returns a reference to the inner `Vector`.
+    #[must_use]
     pub fn vector(&self) -> &Vector {
         &self.inner
     }
 
     /// Returns the cached dimension (O(1)).
+    #[must_use]
     pub fn dimension(&self) -> usize {
         self.dimension
     }
 
     /// Returns the approximate memory size of the vector data plus Arc overhead.
     ///
-    /// Arc overhead is approximated as 3 * size_of::<usize>() (2 atomic counters + 1 pointer),
+    /// Arc overhead is approximated as `3 * size_of::<usize>()` (2 atomic counters + 1 pointer),
     /// sufficient for cache eviction weighting.
+    #[must_use]
     pub fn mem_size(&self) -> usize {
         self.inner.mem_size() + std::mem::size_of::<usize>() * 3
     }

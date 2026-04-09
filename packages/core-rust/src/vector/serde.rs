@@ -5,11 +5,11 @@ use std::fmt;
 
 use super::Vector;
 
-/// Serializes `Vector` as a MsgPack map with two fields:
+/// Serializes `Vector` as a `MsgPack` map with two fields:
 /// - `"type"`: string tag (`"f32"`, `"f64"`, `"i32"`, `"i16"`)
 /// - `"data"`: binary blob of raw little-endian bytes
 ///
-/// Uses `serde_bytes` semantics for the data field so MsgPack encodes it
+/// Uses `serde_bytes` semantics for the data field so `MsgPack` encodes it
 /// as a binary blob (ext/bin), not a byte array.
 impl serde::Serialize for Vector {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -131,7 +131,7 @@ fn ints_to_bytes_i16(v: &[i16]) -> Vec<u8> {
 }
 
 fn bytes_to_f32(bytes: &[u8]) -> Result<Vec<f32>, String> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(format!("f32 data length {} is not a multiple of 4", bytes.len()));
     }
     Ok(bytes
@@ -141,7 +141,7 @@ fn bytes_to_f32(bytes: &[u8]) -> Result<Vec<f32>, String> {
 }
 
 fn bytes_to_f64(bytes: &[u8]) -> Result<Vec<f64>, String> {
-    if bytes.len() % 8 != 0 {
+    if !bytes.len().is_multiple_of(8) {
         return Err(format!("f64 data length {} is not a multiple of 8", bytes.len()));
     }
     Ok(bytes
@@ -151,7 +151,7 @@ fn bytes_to_f64(bytes: &[u8]) -> Result<Vec<f64>, String> {
 }
 
 fn bytes_to_i32(bytes: &[u8]) -> Result<Vec<i32>, String> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(format!("i32 data length {} is not a multiple of 4", bytes.len()));
     }
     Ok(bytes
@@ -161,7 +161,7 @@ fn bytes_to_i32(bytes: &[u8]) -> Result<Vec<i32>, String> {
 }
 
 fn bytes_to_i16(bytes: &[u8]) -> Result<Vec<i16>, String> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(format!("i16 data length {} is not a multiple of 2", bytes.len()));
     }
     Ok(bytes

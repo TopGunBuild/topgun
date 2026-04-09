@@ -43,8 +43,8 @@ impl Distance for CosineDistance {
         let mut norm_a = 0.0f64;
         let mut norm_b = 0.0f64;
         for (&ai, &bi) in a.iter().zip(b.iter()) {
-            let ai = ai as f64;
-            let bi = bi as f64;
+            let ai = f64::from(ai);
+            let bi = f64::from(bi);
             dot += ai * bi;
             norm_a += ai * ai;
             norm_b += bi * bi;
@@ -70,7 +70,7 @@ impl Distance for EuclideanDistance {
             .iter()
             .zip(b.iter())
             .map(|(&ai, &bi)| {
-                let diff = ai as f64 - bi as f64;
+                let diff = f64::from(ai) - f64::from(bi);
                 diff * diff
             })
             .sum();
@@ -88,7 +88,7 @@ impl Distance for DotProductDistance {
         let dot: f64 = a
             .iter()
             .zip(b.iter())
-            .map(|(&ai, &bi)| ai as f64 * bi as f64)
+            .map(|(&ai, &bi)| f64::from(ai) * f64::from(bi))
             .sum();
         -dot
     }
@@ -103,7 +103,7 @@ impl Distance for ManhattanDistance {
         assert_eq!(a.len(), b.len(), "ManhattanDistance: slice lengths must match");
         a.iter()
             .zip(b.iter())
-            .map(|(&ai, &bi)| (ai as f64 - bi as f64).abs())
+            .map(|(&ai, &bi)| (f64::from(ai) - f64::from(bi)).abs())
             .sum()
     }
 
@@ -113,6 +113,7 @@ impl Distance for ManhattanDistance {
 }
 
 /// Returns a boxed `Distance` implementation for the given metric.
+#[must_use]
 pub fn distance_for_metric(metric: DistanceMetric) -> Box<dyn Distance> {
     match metric {
         DistanceMetric::Cosine => Box::new(CosineDistance),
