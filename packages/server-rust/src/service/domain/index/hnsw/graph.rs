@@ -71,12 +71,6 @@ impl UndirectedGraph {
         self.nodes.get(id).map(std::convert::AsRef::as_ref)
     }
 
-    /// Returns a mutable reference to the neighbor set of `id`, if present.
-    /// Returns a mutable reference to the boxed neighbor set for direct manipulation.
-    pub fn neighbors_mut_box(&mut self, id: &ElementId) -> Option<&mut Box<dyn DynamicSet>> {
-        self.nodes.get_mut(id)
-    }
-
     /// Returns `true` if the node is registered in this graph.
     #[must_use]
     pub fn has_node(&self, id: &ElementId) -> bool {
@@ -87,11 +81,6 @@ impl UndirectedGraph {
     #[must_use]
     pub fn node_count(&self) -> usize {
         self.nodes.len()
-    }
-
-    /// Iterate over all node IDs.
-    pub fn node_ids(&self) -> impl Iterator<Item = ElementId> + '_ {
-        self.nodes.keys().copied()
     }
 }
 

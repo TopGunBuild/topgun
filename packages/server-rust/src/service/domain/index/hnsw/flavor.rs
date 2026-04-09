@@ -62,7 +62,7 @@ impl<const N: usize> DynamicSet for ArraySet<N> {
         false
     }
 
-    fn contains(&mut self, id: &ElementId) -> bool {
+    fn contains(&self, id: &ElementId) -> bool {
         self.slots.contains(&Some(*id))
     }
 
@@ -118,7 +118,7 @@ impl DynamicSet for AHashSetWrapper {
         self.inner.remove(id)
     }
 
-    fn contains(&mut self, id: &ElementId) -> bool {
+    fn contains(&self, id: &ElementId) -> bool {
         self.inner.contains(id)
     }
 

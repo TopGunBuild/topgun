@@ -135,6 +135,12 @@ pub fn select_neighbors(
             if let Some(nbrs) = graph.neighbors(&cand_id) {
                 for nbr in nbrs.iter() {
                     if !existing_ids.contains(&nbr) {
+                        // Use distance to parent candidate as a proxy for
+                        // distance to query — `select_neighbors` doesn't
+                        // receive the query vector, so the exact query
+                        // distance isn't available. This is an acceptable
+                        // approximation: expanded neighbors that are close
+                        // to good candidates tend to be close to the query.
                         let d = dist_fn(nbr, cand_id);
                         extra.push((nbr, d));
                     }

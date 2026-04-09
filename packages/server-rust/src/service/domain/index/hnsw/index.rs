@@ -186,6 +186,26 @@ impl Hnsw {
 
         let level = random_level(self.params.ml);
 
+        // If this is the first node, it becomes the entry point.
+        if self.entry_point.is_none() {
+            while self.layers.len() <= level {
+                self.layers.push(Layer::new());
+            }
+            for l in 0..=level {
+                let is_base = l == 0;
+                let set = self.flavor.create_set(is_base);
+                self.layers[l].insert_node(id, set);
+            }
+            self.entry_point = Some(id);
+            return;
+        }
+        let ep = self.entry_point.unwrap();
+
+        // Capture before extending so the entry-point update at the end
+        // compares against the pre-insertion maximum, not the post-extension
+        // value (which would always equal `level`).
+        let old_max_level = self.layers.len().saturating_sub(1);
+
         // Ensure we have enough layer slots.
         while self.layers.len() <= level {
             self.layers.push(Layer::new());
@@ -197,12 +217,6 @@ impl Hnsw {
             let set = self.flavor.create_set(is_base);
             self.layers[l].insert_node(id, set);
         }
-
-        // If this is the first node, it becomes the entry point.
-        let Some(ep) = self.entry_point else {
-            self.entry_point = Some(id);
-            return;
-        };
 
         let current_max_level = self.layers.len().saturating_sub(1);
         let query = self.vectors[&id].vector().to_f32_vec();
@@ -267,8 +281,9 @@ impl Hnsw {
             }
         }
 
-        // Update entry point if the new node reaches a higher layer.
-        if level > current_max_level {
+        // Update entry point if the new node reaches a higher layer than
+        // the previous maximum (measured before we extended self.layers).
+        if level > old_max_level {
             self.entry_point = Some(id);
         }
     }

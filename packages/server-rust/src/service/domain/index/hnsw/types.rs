@@ -10,7 +10,7 @@ pub type ElementId = u64;
 /// capacity) and `AHashSetWrapper` (heap-allocated, configurable capacity).
 /// The trait lets `UndirectedGraph` and `Layer` work with either without
 /// monomorphization bloat across the whole module.
-pub trait DynamicSet: Send + Sync {
+pub trait DynamicSet {
     /// Add a neighbor. Returns `false` when the set is already at capacity.
     fn insert(&mut self, id: ElementId) -> bool;
 
@@ -18,7 +18,7 @@ pub trait DynamicSet: Send + Sync {
     fn remove(&mut self, id: &ElementId) -> bool;
 
     /// Returns `true` if the id is already in the set.
-    fn contains(&mut self, id: &ElementId) -> bool;
+    fn contains(&self, id: &ElementId) -> bool;
 
     /// Iterate over all neighbors in unspecified order.
     fn iter(&self) -> Box<dyn Iterator<Item = ElementId> + '_>;
