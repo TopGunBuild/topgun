@@ -18,6 +18,11 @@ pub struct OllamaEmbeddingProvider {
 }
 
 impl OllamaEmbeddingProvider {
+    /// # Panics
+    ///
+    /// Panics if the `reqwest::Client` cannot be constructed (e.g., invalid TLS config).
+    /// In practice this never happens with the default builder.
+    #[must_use]
     pub fn new(config: OllamaConfig) -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -45,7 +50,7 @@ struct OllamaResponse {
 
 #[async_trait]
 impl EmbeddingProvider for OllamaEmbeddingProvider {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "ollama"
     }
 
@@ -83,8 +88,7 @@ impl EmbeddingProvider for OllamaEmbeddingProvider {
                 .await
                 .unwrap_or_else(|_| "<unreadable>".to_string());
             return Err(EmbeddingError::Http(format!(
-                "Ollama returned HTTP {}: {}",
-                status, text
+                "Ollama returned HTTP {status}: {text}"
             )));
         }
 
@@ -94,15 +98,14 @@ impl EmbeddingProvider for OllamaEmbeddingProvider {
             .map_err(|e| EmbeddingError::InvalidResponse(e.to_string()))?;
 
         // Validate dimension of each returned vector.
-        for (i, vec) in parsed.embeddings.iter().enumerate() {
-            let actual = vec.len() as u16;
+        for vec in &parsed.embeddings {
+            let actual = u16::try_from(vec.len()).unwrap_or(u16::MAX);
             if actual != self.dimension {
                 return Err(EmbeddingError::DimensionMismatch {
                     expected: self.dimension,
                     actual,
                 });
             }
-            let _ = i;
         }
 
         Ok(parsed.embeddings)

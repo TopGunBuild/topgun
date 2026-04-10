@@ -21,7 +21,7 @@ pub mod ollama;
 #[async_trait]
 pub trait EmbeddingProvider: Send + Sync + 'static {
     /// Human-readable provider name (e.g., "ollama", "http", "noop").
-    fn name(&self) -> &str;
+    fn name(&self) -> &'static str;
 
     /// Output vector dimensionality.
     fn dimension(&self) -> u16;
@@ -68,7 +68,11 @@ pub struct VectorConfig {
 
 impl VectorConfig {
     /// Validate that every map's declared dimension matches the provider's dimension.
-    /// Returns `Err` with a descriptive message on the first mismatch found.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` with a descriptive message if any `MapVectorConfig.dimension`
+    /// does not equal the provider's declared dimension.
     pub fn validate(&self) -> Result<(), String> {
         let provider_dim = match &self.provider {
             EmbeddingProviderConfig::Ollama(c) => c.dimension,

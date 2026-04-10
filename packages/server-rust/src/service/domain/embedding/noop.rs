@@ -13,7 +13,8 @@ pub struct NoopEmbeddingProvider {
 }
 
 impl NoopEmbeddingProvider {
-    pub fn new(config: NoopConfig) -> Self {
+    #[must_use]
+    pub fn new(config: &NoopConfig) -> Self {
         Self {
             dimension: config.dimension,
         }
@@ -22,7 +23,7 @@ impl NoopEmbeddingProvider {
 
 #[async_trait]
 impl EmbeddingProvider for NoopEmbeddingProvider {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "noop"
     }
 
@@ -45,7 +46,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_noop_embed_returns_zero_vector() {
-        let provider = NoopEmbeddingProvider::new(NoopConfig { dimension: 4 });
+        let provider = NoopEmbeddingProvider::new(&NoopConfig { dimension: 4 });
         let result = provider.embed("hello world").await.unwrap();
         assert_eq!(result.len(), 4);
         assert!(result.iter().all(|&v| v == 0.0f32));
@@ -53,26 +54,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_noop_embed_correct_dimension() {
-        let provider = NoopEmbeddingProvider::new(NoopConfig { dimension: 768 });
+        let provider = NoopEmbeddingProvider::new(&NoopConfig { dimension: 768 });
         let result = provider.embed("test").await.unwrap();
         assert_eq!(result.len(), 768);
     }
 
     #[test]
     fn test_noop_provider_name() {
-        let provider = NoopEmbeddingProvider::new(NoopConfig { dimension: 4 });
+        let provider = NoopEmbeddingProvider::new(&NoopConfig { dimension: 4 });
         assert_eq!(provider.name(), "noop");
     }
 
     #[test]
     fn test_noop_provider_dimension() {
-        let provider = NoopEmbeddingProvider::new(NoopConfig { dimension: 128 });
+        let provider = NoopEmbeddingProvider::new(&NoopConfig { dimension: 128 });
         assert_eq!(provider.dimension(), 128);
     }
 
     #[tokio::test]
     async fn test_noop_batch_embed_uses_default_sequential() {
-        let provider = NoopEmbeddingProvider::new(NoopConfig { dimension: 4 });
+        let provider = NoopEmbeddingProvider::new(&NoopConfig { dimension: 4 });
         let texts = vec!["hello".to_string(), "world".to_string()];
         let results = provider.batch_embed(&texts).await.unwrap();
         assert_eq!(results.len(), 2);

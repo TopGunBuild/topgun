@@ -19,6 +19,11 @@ pub struct HttpEmbeddingProvider {
 }
 
 impl HttpEmbeddingProvider {
+    /// # Panics
+    ///
+    /// Panics if the `reqwest::Client` cannot be constructed (e.g., invalid TLS config).
+    /// In practice this never happens with the default builder.
+    #[must_use]
     pub fn new(config: HttpProviderConfig) -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -52,7 +57,7 @@ struct OpenAiEmbedding {
 
 #[async_trait]
 impl EmbeddingProvider for HttpEmbeddingProvider {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "http"
     }
 
@@ -93,8 +98,7 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
                 .await
                 .unwrap_or_else(|_| "<unreadable>".to_string());
             return Err(EmbeddingError::Http(format!(
-                "embedding API returned HTTP {}: {}",
-                status, text
+                "embedding API returned HTTP {status}: {text}"
             )));
         }
 
@@ -105,7 +109,7 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
 
         let mut embeddings = Vec::with_capacity(parsed.data.len());
         for item in parsed.data {
-            let actual = item.embedding.len() as u16;
+            let actual = u16::try_from(item.embedding.len()).unwrap_or(u16::MAX);
             if actual != self.dimension {
                 return Err(EmbeddingError::DimensionMismatch {
                     expected: self.dimension,
