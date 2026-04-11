@@ -197,6 +197,59 @@ mod tests {
         assert_eq!(d.metric_type(), DistanceMetric::Manhattan);
     }
 
+    // --- Vector::to_f32_bytes_le ---
+
+    #[test]
+    fn to_f32_bytes_le_from_f32() {
+        let v = Vector::F32(vec![1.0, 2.0]);
+        let bytes = v.to_f32_bytes_le();
+        let expected: Vec<u8> = [1.0f32.to_le_bytes(), 2.0f32.to_le_bytes()].concat();
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn to_f32_bytes_le_from_f64() {
+        let v = Vector::F64(vec![1.5, 2.5]);
+        let bytes = v.to_f32_bytes_le();
+        let expected: Vec<u8> = [1.5f32.to_le_bytes(), 2.5f32.to_le_bytes()].concat();
+        assert_eq!(bytes, expected);
+        assert_eq!(bytes.len(), 8);
+    }
+
+    #[test]
+    fn to_f32_bytes_le_from_i32() {
+        let v = Vector::I32(vec![10, -20]);
+        let bytes = v.to_f32_bytes_le();
+        let expected: Vec<u8> = [10.0f32.to_le_bytes(), (-20.0f32).to_le_bytes()].concat();
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn to_f32_bytes_le_from_i16() {
+        let v = Vector::I16(vec![100, -50]);
+        let bytes = v.to_f32_bytes_le();
+        let expected: Vec<u8> = [100.0f32.to_le_bytes(), (-50.0f32).to_le_bytes()].concat();
+        assert_eq!(bytes, expected);
+        assert_eq!(bytes.len(), 8);
+    }
+
+    #[test]
+    fn to_f32_bytes_le_empty_vector() {
+        let v = Vector::F32(vec![]);
+        let bytes = v.to_f32_bytes_le();
+        assert_eq!(bytes.len(), 0);
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn to_f32_bytes_le_length_invariant() {
+        let n = 5usize;
+        assert_eq!(Vector::F32(vec![0.0; n]).to_f32_bytes_le().len(), n * 4);
+        assert_eq!(Vector::F64(vec![0.0; n]).to_f32_bytes_le().len(), n * 4);
+        assert_eq!(Vector::I32(vec![0; n]).to_f32_bytes_le().len(), n * 4);
+        assert_eq!(Vector::I16(vec![0; n]).to_f32_bytes_le().len(), n * 4);
+    }
+
     // --- MsgPack serialization round-trips ---
 
     #[test]
@@ -290,6 +343,45 @@ impl Vector {
             Vector::I32(v) => v.iter().map(|&x| x as f32).collect(),
             Vector::I16(v) => v.iter().map(|&x| f32::from(x)).collect(),
         }
+    }
+
+    /// Returns the vector as raw little-endian f32 bytes.
+    ///
+    /// All variants are first converted to f32 using the same lossy rules
+    /// as `to_f32_vec()` (F64 truncation, I32 precision loss for large values,
+    /// I16 lossless). Each element is then written as 4 little-endian bytes.
+    /// Output length is always `dimension * 4`.
+    ///
+    /// This is the canonical on-wire form for `VECTOR_SEARCH_RESP` when the
+    /// caller requests `include_vectors = true`.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    pub fn to_f32_bytes_le(&self) -> Vec<u8> {
+        let dim = self.dimension();
+        let mut out = Vec::with_capacity(dim * 4);
+        match self {
+            Vector::F32(v) => {
+                for &f in v {
+                    out.extend_from_slice(&f.to_le_bytes());
+                }
+            }
+            Vector::F64(v) => {
+                for &f in v {
+                    out.extend_from_slice(&(f as f32).to_le_bytes());
+                }
+            }
+            Vector::I32(v) => {
+                for &i in v {
+                    out.extend_from_slice(&(i as f32).to_le_bytes());
+                }
+            }
+            Vector::I16(v) => {
+                for &i in v {
+                    out.extend_from_slice(&f32::from(i).to_le_bytes());
+                }
+            }
+        }
+        out
     }
 
     /// Returns the raw data size in bytes (element count * element size).

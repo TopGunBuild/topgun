@@ -120,7 +120,7 @@ pub struct VectorSearchResult {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub value: Option<rmpv::Value>,
     /// Raw attribute vector bytes (present iff `options.include_vectors == Some(true)`).
-    /// Deferred in this spec: always `None`. Follow-up spec will implement the affirmative path.
+    /// Contains little-endian f32 bytes; length == `dimension * 4`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     #[serde(with = "serde_bytes_opt")]
     pub vector: Option<Vec<u8>>,
