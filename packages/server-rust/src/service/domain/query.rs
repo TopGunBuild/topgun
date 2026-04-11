@@ -18,6 +18,8 @@ use tower::Service;
 use topgun_core::messages::base::{ChangeEventType, Query};
 use topgun_core::messages::client_events::QueryUpdatePayload;
 use topgun_core::messages::query::{QueryRespMessage, QueryRespPayload, QueryResultEntry};
+use topgun_core::messages::vector::{VectorSearchPayload, VectorSearchRespPayload, VectorSearchResult};
+use topgun_core::vector::distance::DistanceMetric;
 use topgun_core::messages::{Message, SyncRespRootMessage, SyncRespRootPayload};
 
 use crate::dag::coordinator::ClusterQueryCoordinator;
@@ -503,6 +505,9 @@ impl Service<Operation> for Arc<QueryService> {
                     Operation::SqlQuery { ctx, payload } => {
                         svc.handle_sql_query(&ctx, &payload).await
                     }
+                    Operation::VectorSearch { ctx, payload } => {
+                        svc.handle_vector_search(&ctx, &payload).await
+                    }
                     Operation::DagQuery { ctx, payload } => {
                         svc.handle_dag_query(&ctx, &payload).await
                     }
@@ -888,6 +893,186 @@ impl QueryService {
                 payload: resp_payload,
             },
         ))))
+    }
+
+    /// Handles a `VectorSearch` operation.
+    ///
+    /// Resolves the vector index from `IndexObserverFactory`, runs HNSW ANN
+    /// search, converts distance → score per metric, applies `min_score`
+    /// and optional post-filter, populates `value` per `include_value`, and
+    /// returns a `VectorSearchResp` with top-k results sorted descending by score.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) async fn handle_vector_search(
+        &self,
+        _ctx: &crate::service::operation::OperationContext,
+        payload: &VectorSearchPayload,
+    ) -> Result<OperationResponse, OperationError> {
+        let start = std::time::Instant::now();
+
+        // Helper macro that uses `start` for timing.
+        macro_rules! error_resp {
+            ($msg:expr) => {{
+                return Ok(OperationResponse::Message(Box::new(Message::VectorSearchResp {
+                    payload: VectorSearchRespPayload {
+                        id: payload.id.clone(),
+                        results: vec![],
+                        total_candidates: 0,
+                        search_time_ms: start.elapsed().as_millis() as u64,
+                        error: Some($msg.to_string()),
+                    },
+                })));
+            }};
+        }
+
+        // 1. Require index registry.
+        let factory = self.index_observer_factory.as_ref().ok_or_else(|| {
+            OperationError::Internal(anyhow::anyhow!("VectorSearch requires IndexObserverFactory"))
+        })?;
+        let registry = match factory.get_registry(&payload.map_name) {
+            Some(r) => r,
+            None => error_resp!(format!("map not registered for indexing: {}", payload.map_name)),
+        };
+
+        // 2. Resolve vector index attribute.
+        let attribute = if let Some(ref attr) = payload.index_name {
+            attr.clone()
+        } else {
+            // Auto-resolve: need exactly one vector index.
+            let count = registry.vector_index_count();
+            if count == 0 {
+                error_resp!(format!("no vector index on map {}", payload.map_name));
+            }
+            if count > 1 {
+                error_resp!(format!(
+                    "map {} has multiple vector indexes; specify indexName",
+                    payload.map_name
+                ));
+            }
+            match registry.first_vector_index_attribute() {
+                Some(a) => a,
+                None => error_resp!(format!("no vector index on map {}", payload.map_name)),
+            }
+        };
+
+        // 3. Fetch vector index handle.
+        let vector_index = match registry.get_vector_index(&attribute) {
+            Some(vi) => vi,
+            None => error_resp!(format!("attribute {attribute} is not a vector index")),
+        };
+
+        // 4. Decode query vector.
+        let dim = vector_index.dimension();
+        let query_f32 = match payload.decode_query_vector(Some(dim)) {
+            Ok(v) => v,
+            Err(e) => error_resp!(e),
+        };
+
+        // 5. Run ANN search in spawn_blocking to keep tokio worker responsive.
+        let k = payload.k as usize;
+        let ef = payload.ef_search.map(|v| v as usize).unwrap_or(k * 2).max(k);
+        let overfetch = (k * 4).max(k);
+        let raw: Vec<(String, f64)> = tokio::task::spawn_blocking({
+            let vi = Arc::clone(&vector_index);
+            let qf = query_f32.clone();
+            move || vi.search_nearest(&qf, overfetch, ef)
+        })
+        .await
+        .map_err(|e| OperationError::Internal(anyhow::anyhow!("vector search task join: {e}")))?;
+        let total_candidates = raw.len() as u32;
+
+        // 6. Convert distance → score per metric (R3 policy).
+        let metric = vector_index.distance_metric();
+        let mut scored: Vec<(String, f64)> = raw
+            .into_iter()
+            .map(|(key, dist)| {
+                let score = match metric {
+                    DistanceMetric::Cosine => 1.0 - dist,
+                    DistanceMetric::Euclidean | DistanceMetric::Manhattan => {
+                        1.0 / (1.0 + dist)
+                    }
+                    DistanceMetric::DotProduct => -dist,
+                };
+                (key, score)
+            })
+            .collect();
+
+        // 7. Apply min_score filter.
+        let min_score = payload.options.as_ref().and_then(|o| o.min_score);
+        if let Some(threshold) = min_score {
+            scored.retain(|(_, score)| *score >= threshold);
+        }
+
+        // 8. Apply post-filter predicate (best-effort: scalar leaf ops only).
+        let filter = payload.options.as_ref().and_then(|o| o.filter.as_ref());
+        let stores = self.record_store_factory.get_all_for_map(&payload.map_name);
+
+        // Build a lookup table (key → rmpv::Value) once if we need it for filtering or include_value.
+        let include_value = payload
+            .options
+            .as_ref()
+            .and_then(|o| o.include_value)
+            .unwrap_or(true);
+        let need_values = filter.is_some() || include_value;
+
+        let value_map: std::collections::HashMap<String, rmpv::Value> = if need_values {
+            let mut map = std::collections::HashMap::new();
+            for store in &stores {
+                store.for_each_boxed(&mut |key, record| {
+                    if let RecordValue::Lww { ref value, .. } = record.value {
+                        map.insert(key.to_string(), value_to_rmpv(value));
+                    }
+                }, false);
+            }
+            map
+        } else {
+            std::collections::HashMap::new()
+        };
+
+        if let Some(pred) = filter {
+            scored.retain(|(key, _)| {
+                if let Some(val) = value_map.get(key) {
+                    evaluate_predicate(pred, &EvalContext::data_only(val))
+                } else {
+                    false
+                }
+            });
+        }
+
+        // 9. Sort by descending score, truncate to top-k.
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+        scored.truncate(k);
+
+        // 10. Build result entries.
+        let results: Vec<VectorSearchResult> = scored
+            .into_iter()
+            .map(|(key, score)| {
+                let value = if include_value {
+                    value_map.get(&key).cloned()
+                } else {
+                    None
+                };
+                VectorSearchResult {
+                    key,
+                    score,
+                    value,
+                    // include_vectors deferred: Vector::to_f32_bytes_le() not yet in core-rust.
+                    vector: None,
+                }
+            })
+            .collect();
+
+        let resp_payload = VectorSearchRespPayload {
+            id: payload.id.clone(),
+            results,
+            total_candidates,
+            search_time_ms: start.elapsed().as_millis() as u64,
+            error: None,
+        };
+        Ok(OperationResponse::Message(Box::new(
+            Message::VectorSearchResp {
+                payload: resp_payload,
+            },
+        )))
     }
 }
 
@@ -2243,5 +2428,322 @@ mod tests {
         assert_eq!(entries[0].key, "active");
         assert_eq!(entries[1].key, "group-1");
         assert_eq!(entries[2].key, "group-2");
+    }
+
+    // ---------------------------------------------------------------------------
+    // handle_vector_search tests
+    // ---------------------------------------------------------------------------
+
+    use crate::service::domain::index::{IndexObserverFactory, Index};
+    use topgun_core::vector::{DistanceMetric, Vector};
+    use topgun_core::messages::vector::VectorSearchPayload;
+
+    /// Builds an rmpv::Value record with the attribute field containing the encoded vector.
+    fn make_vector_record(attr: &str, data: &[f32]) -> rmpv::Value {
+        let v = Vector::F32(data.to_vec());
+        let encoded = rmp_serde::to_vec_named(&v).unwrap();
+        rmpv::Value::Map(vec![(
+            rmpv::Value::String(rmpv::Utf8String::from(attr)),
+            rmpv::Value::Binary(encoded),
+        )])
+    }
+
+    fn make_query_vec(floats: &[f32]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(floats.len() * 4);
+        for &f in floats {
+            bytes.extend_from_slice(&f.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn make_svc_with_vector_index(
+        map_name: &str,
+        attr: &str,
+        dim: u16,
+        metric: DistanceMetric,
+    ) -> (Arc<QueryService>, Arc<crate::service::domain::index::registry::IndexRegistry>) {
+        let registry = Arc::new(QueryRegistry::new());
+        let factory = make_factory();
+        let conn_registry = Arc::new(ConnectionRegistry::new());
+        let observer_factory = Arc::new(IndexObserverFactory::new());
+        let index_registry = observer_factory.register_map(map_name);
+        index_registry.add_vector_index(attr, dim, metric);
+
+        let svc = Arc::new(QueryService::new(
+            registry,
+            factory,
+            conn_registry,
+            Arc::new(PredicateBackend),
+            None,
+            10_000,
+            Some(observer_factory),
+            #[cfg(feature = "datafusion")]
+            None,
+        ));
+        (svc, index_registry)
+    }
+
+    fn extract_vector_resp(result: OperationResponse) -> topgun_core::messages::vector::VectorSearchRespPayload {
+        match result {
+            OperationResponse::Message(msg) => {
+                match *msg {
+                    Message::VectorSearchResp { payload } => payload,
+                    other => panic!("expected VectorSearchResp, got {:?}", other),
+                }
+            }
+            other => panic!("expected Message response, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_vector_search_returns_top_k() {
+        let (svc, index_registry) = make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
+        let vi = index_registry.get_vector_index("embedding").unwrap();
+
+        // Insert 10 vectors: [0.1*i, 0.2*i] for i in 1..=10
+        for i in 1usize..=10 {
+            let rec = make_vector_record("embedding", &[0.1 * i as f32, 0.2 * i as f32]);
+            vi.insert(&format!("k{i}"), &rec);
+        }
+        vi.commit_pending();
+
+        let ctx = make_ctx(None);
+        let payload = VectorSearchPayload {
+            id: "vs-topk".to_string(),
+            map_name: "maps".to_string(),
+            index_name: Some("embedding".to_string()),
+            query_vector: make_query_vec(&[0.9f32, 1.8f32]),
+            k: 3,
+            ef_search: None,
+            options: None,
+        };
+        let op = Operation::VectorSearch { ctx, payload };
+        let resp = extract_vector_resp(svc.oneshot(op).await.unwrap());
+        assert_eq!(resp.results.len(), 3);
+        assert!(resp.error.is_none());
+        // Verify monotonic descending order
+        for i in 0..resp.results.len() - 1 {
+            assert!(
+                resp.results[i].score >= resp.results[i + 1].score,
+                "results not sorted descending: {:?}",
+                resp.results.iter().map(|r| r.score).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_vector_search_unknown_map_returns_error_resp() {
+        let (svc, _) = make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
+        let ctx = make_ctx(None);
+        let payload = VectorSearchPayload {
+            id: "vs-unknown".to_string(),
+            map_name: "nonexistent_map".to_string(),
+            index_name: None,
+            query_vector: make_query_vec(&[1.0f32, 0.0f32]),
+            k: 3,
+            ef_search: None,
+            options: None,
+        };
+        let op = Operation::VectorSearch { ctx, payload };
+        let resp = extract_vector_resp(svc.oneshot(op).await.unwrap());
+        assert!(resp.error.is_some(), "expected error for unknown map");
+        assert!(resp.results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_vector_search_missing_index_returns_error_resp() {
+        let (svc, index_registry) = make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
+        // Remove the vector index so the map has none
+        index_registry.remove_index("embedding");
+
+        let ctx = make_ctx(None);
+        let payload = VectorSearchPayload {
+            id: "vs-no-idx".to_string(),
+            map_name: "maps".to_string(),
+            index_name: None,
+            query_vector: make_query_vec(&[1.0f32, 0.0f32]),
+            k: 3,
+            ef_search: None,
+            options: None,
+        };
+        let op = Operation::VectorSearch { ctx, payload };
+        let resp = extract_vector_resp(svc.oneshot(op).await.unwrap());
+        assert!(resp.error.is_some(), "expected error for missing index");
+        assert!(resp.results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_vector_search_dimension_mismatch_returns_error_resp() {
+        let (svc, index_registry) = make_svc_with_vector_index("maps", "embedding", 4, DistanceMetric::Cosine);
+        let vi = index_registry.get_vector_index("embedding").unwrap();
+        let rec = make_vector_record("embedding", &[0.1, 0.2, 0.3, 0.4]);
+        vi.insert("k1", &rec);
+        vi.commit_pending();
+
+        let ctx = make_ctx(None);
+        let payload = VectorSearchPayload {
+            id: "vs-dim-mismatch".to_string(),
+            map_name: "maps".to_string(),
+            index_name: Some("embedding".to_string()),
+            // 2 floats instead of 4 (dimension = 4)
+            query_vector: make_query_vec(&[0.1f32, 0.2f32]),
+            k: 1,
+            ef_search: None,
+            options: None,
+        };
+        let op = Operation::VectorSearch { ctx, payload };
+        let resp = extract_vector_resp(svc.oneshot(op).await.unwrap());
+        assert!(resp.error.is_some(), "expected error for dimension mismatch");
+        assert!(resp.results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_vector_search_honors_min_score() {
+        let (svc, index_registry) = make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Euclidean);
+        let vi = index_registry.get_vector_index("embedding").unwrap();
+
+        // Insert vectors at varying distances from query [1.0, 0.0]
+        for i in 1usize..=5 {
+            let x = i as f32;
+            let rec = make_vector_record("embedding", &[x, 0.0]);
+            vi.insert(&format!("k{i}"), &rec);
+        }
+        vi.commit_pending();
+
+        let ctx = make_ctx(None);
+        let payload = VectorSearchPayload {
+            id: "vs-minscore".to_string(),
+            map_name: "maps".to_string(),
+            index_name: Some("embedding".to_string()),
+            query_vector: make_query_vec(&[1.0f32, 0.0f32]),
+            k: 10,
+            ef_search: None,
+            options: Some(topgun_core::messages::vector::VectorSearchOptions {
+                min_score: Some(0.5),
+                ..Default::default()
+            }),
+        };
+        let op = Operation::VectorSearch { ctx, payload };
+        let resp = extract_vector_resp(svc.oneshot(op).await.unwrap());
+        // All returned results must have score >= 0.5
+        for r in &resp.results {
+            assert!(r.score >= 0.5, "result score {} below threshold 0.5", r.score);
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_vector_search_include_value_default_true() {
+        let (svc, index_registry) = make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
+        let vi = index_registry.get_vector_index("embedding").unwrap();
+        // Note: include_value reads from RecordStore, but the test RecordStore is empty.
+        // With include_value = true (default), value is None because no records in store.
+        let rec = make_vector_record("embedding", &[1.0, 0.0]);
+        vi.insert("k1", &rec);
+        vi.commit_pending();
+
+        let ctx = make_ctx(None);
+        let payload = VectorSearchPayload {
+            id: "vs-iv-default".to_string(),
+            map_name: "maps".to_string(),
+            index_name: Some("embedding".to_string()),
+            query_vector: make_query_vec(&[1.0f32, 0.0f32]),
+            k: 1,
+            ef_search: None,
+            options: None, // defaults: include_value = true
+        };
+        let op = Operation::VectorSearch { ctx, payload };
+        let resp = extract_vector_resp(svc.oneshot(op).await.unwrap());
+        assert_eq!(resp.results.len(), 1);
+        // RecordStore is empty, so value is None even when include_value is true
+        // This verifies the handler runs without error with include_value = true
+        assert!(resp.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn handle_vector_search_include_value_false() {
+        let (svc, index_registry) = make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
+        let vi = index_registry.get_vector_index("embedding").unwrap();
+        let rec = make_vector_record("embedding", &[1.0, 0.0]);
+        vi.insert("k1", &rec);
+        vi.commit_pending();
+
+        let ctx = make_ctx(None);
+        let payload = VectorSearchPayload {
+            id: "vs-iv-false".to_string(),
+            map_name: "maps".to_string(),
+            index_name: Some("embedding".to_string()),
+            query_vector: make_query_vec(&[1.0f32, 0.0f32]),
+            k: 1,
+            ef_search: None,
+            options: Some(topgun_core::messages::vector::VectorSearchOptions {
+                include_value: Some(false),
+                ..Default::default()
+            }),
+        };
+        let op = Operation::VectorSearch { ctx, payload };
+        let resp = extract_vector_resp(svc.oneshot(op).await.unwrap());
+        assert_eq!(resp.results.len(), 1);
+        assert!(resp.results[0].value.is_none(), "value should be None when include_value = false");
+    }
+
+    #[tokio::test]
+    async fn handle_vector_search_ef_search_default() {
+        let (svc, index_registry) = make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
+        let vi = index_registry.get_vector_index("embedding").unwrap();
+        for i in 1usize..=5 {
+            let rec = make_vector_record("embedding", &[i as f32, 0.0]);
+            vi.insert(&format!("k{i}"), &rec);
+        }
+        vi.commit_pending();
+
+        let ctx = make_ctx(None);
+        let payload = VectorSearchPayload {
+            id: "vs-ef-default".to_string(),
+            map_name: "maps".to_string(),
+            index_name: Some("embedding".to_string()),
+            query_vector: make_query_vec(&[1.0f32, 0.0f32]),
+            k: 3,
+            ef_search: None, // server uses k * 2 = 6
+            options: None,
+        };
+        let op = Operation::VectorSearch { ctx, payload };
+        let resp = extract_vector_resp(svc.oneshot(op).await.unwrap());
+        // Should return top 3 results without error (behavioural check)
+        assert_eq!(resp.results.len(), 3, "expected 3 results");
+        assert!(resp.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn handle_vector_search_dot_product_score_convention() {
+        // DotProductDistance::compute returns -dot(a, b), so score = -distance = dot(a, b).
+        // Insert [1.0, 0.0] with attribute "embedding" into a DotProduct index.
+        let (svc, index_registry) = make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::DotProduct);
+        let vi = index_registry.get_vector_index("embedding").unwrap();
+
+        let a = [1.0f32, 0.0f32];
+        let rec = make_vector_record("embedding", &a);
+        vi.insert("k1", &rec);
+        vi.commit_pending();
+
+        // Query with q = [1.0, 0.0]; expected dot = 1.0*1.0 + 0.0*0.0 = 1.0
+        let ctx = make_ctx(None);
+        let payload = VectorSearchPayload {
+            id: "vs-dot".to_string(),
+            map_name: "maps".to_string(),
+            index_name: Some("embedding".to_string()),
+            query_vector: make_query_vec(&[1.0f32, 0.0f32]),
+            k: 1,
+            ef_search: Some(2),
+            options: None,
+        };
+        let op = Operation::VectorSearch { ctx, payload };
+        let resp = extract_vector_resp(svc.oneshot(op).await.unwrap());
+        assert_eq!(resp.results.len(), 1);
+        // score = -distance = -(-dot) = dot = 1.0
+        let score = resp.results[0].score;
+        assert!(
+            (score - 1.0).abs() < 1e-5,
+            "expected dot product score ~1.0, got {score}"
+        );
     }
 }

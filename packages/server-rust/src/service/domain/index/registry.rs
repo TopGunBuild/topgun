@@ -225,6 +225,26 @@ impl IndexRegistry {
     pub fn has_index(&self, attribute: &str) -> bool {
         self.indexes.contains_key(attribute)
     }
+
+    /// Returns the number of registered vector indexes.
+    #[must_use]
+    pub fn vector_index_count(&self) -> usize {
+        self.vector_indexes.len()
+    }
+
+    /// Returns the attribute name of the first registered vector index,
+    /// or `None` if no vector indexes are registered.
+    ///
+    /// Used by `handle_vector_search` when `index_name` is not specified and the
+    /// map has exactly one vector index. If the map has zero or multiple vector
+    /// indexes, the caller handles those cases before invoking this method.
+    #[must_use]
+    pub fn first_vector_index_attribute(&self) -> Option<String> {
+        self.vector_indexes
+            .iter()
+            .next()
+            .map(|r| r.key().clone())
+    }
 }
 
 impl Default for IndexRegistry {
