@@ -167,15 +167,19 @@ mod tests {
             key_overhead_bytes: 0,
         };
         let cache = VectorCache::new(config);
-        // Each F32(4) vector uses 4 * 4 = 16 bytes of data
         let v1 = SharedVector::new(Vector::F32(vec![0.1, 0.2, 0.3, 0.4]));
         let v2 = SharedVector::new(Vector::F32(vec![0.5, 0.6, 0.7, 0.8]));
         let v3 = SharedVector::new(Vector::F32(vec![0.9, 1.0, 1.1, 1.2]));
+        // Mirror the weighter formula: SharedVector::mem_size() +
+        // key_overhead_bytes (0 here). SharedVector::mem_size() =
+        // inner.mem_size() + size_of::<usize>() * 3.
+        let per_vector_weight =
+            (4 * std::mem::size_of::<f32>() + std::mem::size_of::<usize>() * 3) as u64;
+        let expected_total = per_vector_weight * 3;
         cache.insert("k1".to_string(), v1);
         cache.insert("k2".to_string(), v2);
         cache.insert("k3".to_string(), v3);
-        // Weight must be > 0 after inserting 3 vectors
-        assert!(cache.weight() > 0);
+        assert_eq!(cache.weight(), expected_total);
         assert!(!cache.is_empty());
     }
 
