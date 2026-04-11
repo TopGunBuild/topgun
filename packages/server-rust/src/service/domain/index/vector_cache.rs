@@ -10,7 +10,7 @@ use topgun_core::vector::SharedVector;
 /// Configuration for `VectorCache` capacity and per-entry cost.
 ///
 /// Consumed from TS configuration; `Deserialize` lets it be loaded from JSON
-/// or MsgPack config payloads using camelCase field names.
+/// or `MsgPack` config payloads using camelCase field names.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VectorCacheConfig {
@@ -43,8 +43,9 @@ struct VectorWeighter {
 
 impl quick_cache::Weighter<String, SharedVector> for VectorWeighter {
     fn weight(&self, _key: &String, val: &SharedVector) -> u64 {
-        val.mem_size()
-            .saturating_add(self.key_overhead_bytes as usize) as u64
+        let size = val.mem_size().saturating_add(self.key_overhead_bytes as usize);
+        // Safe: usize fits in u64 on all supported platforms (64-bit targets).
+        u64::try_from(size).unwrap_or(u64::MAX)
     }
 }
 
@@ -58,8 +59,12 @@ impl VectorCache {
         // Estimate a reasonable item count from the byte budget.
         // quick_cache requires an estimated item count for internal sharding;
         // the actual capacity is enforced by the weighter's weight budget.
-        let estimated_items = (config.capacity_bytes / (config.key_overhead_bytes as u64 + 128))
-            .max(16) as usize;
+        // Clamp to usize::MAX on 32-bit targets; the cache will simply use
+        // a very large (but correct) shard count.
+        let estimated_items = usize::try_from(
+            (config.capacity_bytes / (u64::from(config.key_overhead_bytes) + 128)).max(16),
+        )
+        .unwrap_or(usize::MAX);
         let inner = quick_cache::sync::Cache::with_weighter(
             estimated_items,
             config.capacity_bytes,
@@ -72,6 +77,7 @@ impl VectorCache {
     }
 
     /// Returns the cached vector for `key`, or `None` if not present.
+    #[must_use]
     pub fn get(&self, key: &str) -> Option<SharedVector> {
         self.inner.get(key)
     }
@@ -92,16 +98,19 @@ impl VectorCache {
     }
 
     /// Returns the number of entries currently in the cache.
+    #[must_use]
     pub fn len(&self) -> u64 {
         self.inner.len() as u64
     }
 
     /// Returns the total weight (bytes) currently occupied by all entries.
+    #[must_use]
     pub fn weight(&self) -> u64 {
         self.inner.weight()
     }
 
     /// Returns `true` when the cache contains no entries.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.inner.len() == 0
     }
@@ -115,13 +124,6 @@ mod tests {
         use topgun_core::vector::{SharedVector, Vector};
         let data = vec![1.0f32; dim];
         SharedVector::new(Vector::F32(data))
-    }
-
-    fn small_config() -> VectorCacheConfig {
-        VectorCacheConfig {
-            capacity_bytes: 1024,
-            key_overhead_bytes: 0,
-        }
     }
 
     #[test]
@@ -174,7 +176,7 @@ mod tests {
         cache.insert("k3".to_string(), v3);
         // Weight must be > 0 after inserting 3 vectors
         assert!(cache.weight() > 0);
-        assert!(cache.len() >= 1);
+        assert!(!cache.is_empty());
     }
 
     #[test]
@@ -188,6 +190,8 @@ mod tests {
         let cache = VectorCache::new(config);
         // Insert several 64-float vectors (each ~256 bytes)
         for i in 0..10u32 {
+            // Intentionally lossy cast: small integers fit exactly in f32 mantissa.
+            #[allow(clippy::cast_precision_loss)]
             let data = vec![i as f32; 64];
             let v = SharedVector::new(Vector::F32(data));
             cache.insert(format!("k{i}"), v);

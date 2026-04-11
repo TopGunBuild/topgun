@@ -4,9 +4,9 @@
 //! A separate `commit_pending` call drains the queue under an exclusive write
 //! lock, so concurrent readers are never blocked by write operations.
 //!
-//! This two-phase design follows SurrealDB's write-buffer pattern: fast path
-//! writes always hit a lock-free structure (DashMap + Mutex<Vec>), while the
-//! HNSW read lock is taken only for queries — never for incoming writes.
+//! This two-phase design keeps writes on a lock-free path: mutations always hit a
+//! `DashMap` + `Mutex<Vec>` buffer, while the HNSW read lock is taken only for
+//! queries — never for incoming writes.
 
 use std::collections::HashSet;
 
@@ -43,15 +43,15 @@ pub struct VectorIndex {
     /// Attribute extractor built once in `new`, reused in the decode helper
     /// for consistency with HashIndex/NavigableIndex/InvertedIndex.
     extractor: AttributeExtractor,
-    /// HNSW graph protected by RwLock — concurrent reads, exclusive writes
-    /// only during commit_pending.
+    /// HNSW graph protected by `RwLock` — concurrent reads, exclusive writes
+    /// only during `commit_pending`.
     hnsw: RwLock<Hnsw>,
     /// Pending mutations buffered under a cheap mutex, drained into the graph
-    /// during commit_pending. Writers never take the HNSW write lock.
+    /// during `commit_pending`. Writers never take the HNSW write lock.
     pending: Mutex<Vec<VectorPendingUpdate>>,
-    /// Monotonic allocator for HNSW ElementId values.
+    /// Monotonic allocator for HNSW `ElementId` values.
     next_id: Mutex<u64>,
-    /// Bidirectional key <-> ElementId mapping for concurrent reads.
+    /// Bidirectional key <-> `ElementId` mapping for concurrent reads.
     key_to_id: DashMap<String, ElementId>,
     id_to_key: DashMap<ElementId, String>,
     /// Snapshot of pending upserts for merging into read results before commit.
@@ -161,7 +161,7 @@ impl VectorIndex {
     }
 
     /// Runs ANN search, merging committed HNSW results with pending upserts
-    /// and applying pending_removed suppression.
+    /// and applying `pending_removed` suppression.
     ///
     /// Returns the top-`k` nearest neighbors as `(record_key, distance)`
     /// pairs sorted ascending by distance.
@@ -350,7 +350,7 @@ impl Index for VectorIndex {
 mod tests {
     use std::sync::Arc;
 
-    use topgun_core::vector::{DistanceMetric, SharedVector, Vector};
+    use topgun_core::vector::{DistanceMetric, Vector};
 
     use super::*;
 
@@ -467,6 +467,8 @@ mod tests {
 
         // Writer thread: insert more pending items
         for i in 0..10u32 {
+            // Small integers cast exactly to f32.
+            #[allow(clippy::cast_precision_loss)]
             let data = vec![i as f32 / 10.0, 0.1, 0.0, 0.0];
             let record = make_record(&data);
             idx.insert(&format!("w{i}"), &record);

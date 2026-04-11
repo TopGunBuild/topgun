@@ -1,9 +1,18 @@
 /// Unit tests for the HNSW module.
 ///
-/// Tests cover all acceptance criteria: ArraySet capacity enforcement,
-/// HnswFlavor::create_set, DoublePriorityQueue ordering, UndirectedGraph
+/// Tests cover all acceptance criteria: `ArraySet` capacity enforcement,
+/// `HnswFlavor::create_set`, `DoublePriorityQueue` ordering, `UndirectedGraph`
 /// bidirectionality, Heuristic variants, and Hnsw index public API.
 #[cfg(test)]
+#[allow(
+    clippy::doc_markdown,
+    clippy::module_inception,
+    clippy::uninlined_format_args,
+    clippy::stable_sort_primitive,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_lossless,
+)]
 mod tests {
     use topgun_core::vector::{DistanceMetric, SharedVector, Vector};
 
@@ -219,10 +228,10 @@ mod tests {
 
     fn random_vector(dim: usize, seed_offset: u64) -> SharedVector {
         // Deterministic pseudo-random vectors using a simple LCG for portability.
-        let mut state = 6364136223846793005u64.wrapping_add(seed_offset);
+        let mut state = 6_364_136_223_846_793_005_u64.wrapping_add(seed_offset);
         let vals: Vec<f32> = (0..dim)
             .map(|_| {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
                 ((state >> 33) as f32) / (u32::MAX as f32) * 2.0 - 1.0
             })
             .collect();
@@ -384,7 +393,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "dimension mismatch")]
     fn hnsw_dimension_mismatch_panics() {
         let mut h = Hnsw::new(make_params(4));
         h.insert(0, make_vector(vec![1.0, 2.0, 3.0])); // 3-dim, not 4

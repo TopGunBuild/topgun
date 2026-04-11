@@ -1,20 +1,27 @@
 //! Per-map index registry holding all secondary indexes for a given map.
 //!
 //! [`IndexRegistry`] stores one `Arc<dyn Index>` per attribute name. Callers
-//! add indexes explicitly via `add_hash_index`, `add_navigable_index`, or
-//! `add_inverted_index`. Adding a second index for the same attribute replaces
-//! the existing one — only one index strategy per attribute is supported.
+//! add indexes explicitly via `add_hash_index`, `add_navigable_index`,
+//! `add_inverted_index`, or `add_vector_index`. Adding a second index for the
+//! same attribute replaces the existing one — only one index strategy per
+//! attribute is supported.
 //!
 //! [`IndexRegistry::get_best_index`] implements the operation-to-index-type
 //! mapping so that query evaluation can pick the right index for a predicate
 //! leaf without knowing which index types are registered.
+//!
+//! Vector indexes bypass the standard predicate path: `get_best_index` always
+//! returns `None` for vector-typed attributes because vector search is not
+//! driven by `PredicateOp` comparisons. Callers obtain a concrete
+//! `Arc<VectorIndex>` via `get_vector_index` to run ANN queries.
 
 use std::sync::Arc;
 
 use dashmap::DashMap;
 use topgun_core::messages::base::{PredicateNode, PredicateOp};
+use topgun_core::vector::DistanceMetric;
 
-use super::{HashIndex, Index, IndexType, InvertedIndex, NavigableIndex};
+use super::{HashIndex, Index, IndexType, InvertedIndex, NavigableIndex, VectorIndex};
 
 // ---------------------------------------------------------------------------
 // IndexStats
@@ -39,9 +46,16 @@ pub struct IndexStats {
 ///
 /// All operations are lock-free at the registry level (backed by `DashMap`).
 /// Individual index implementations are also internally concurrent.
+///
+/// A side-channel `vector_indexes` map preserves the concrete `Arc<VectorIndex>`
+/// type alongside the `Arc<dyn Index>` trait-object view, avoiding the need to
+/// downcast from a trait object to access vector-specific methods.
 pub struct IndexRegistry {
-    /// Map from attribute name → registered index.
+    /// Map from attribute name → registered index (trait-object view).
     indexes: DashMap<String, Arc<dyn Index>>,
+    /// Side-channel map preserving the concrete type for vector indexes.
+    /// Both maps share the same underlying allocation via `Arc::clone`.
+    vector_indexes: DashMap<String, Arc<VectorIndex>>,
 }
 
 impl IndexRegistry {
@@ -50,12 +64,14 @@ impl IndexRegistry {
     pub fn new() -> Self {
         Self {
             indexes: DashMap::new(),
+            vector_indexes: DashMap::new(),
         }
     }
 
     /// Registers a [`HashIndex`] for `attribute`, replacing any existing index.
     pub fn add_hash_index(&self, attribute: impl Into<String>) {
         let attr = attribute.into();
+        self.vector_indexes.remove(&attr);
         self.indexes
             .insert(attr.clone(), Arc::new(HashIndex::new(attr)));
     }
@@ -63,6 +79,7 @@ impl IndexRegistry {
     /// Registers a [`NavigableIndex`] for `attribute`, replacing any existing index.
     pub fn add_navigable_index(&self, attribute: impl Into<String>) {
         let attr = attribute.into();
+        self.vector_indexes.remove(&attr);
         self.indexes
             .insert(attr.clone(), Arc::new(NavigableIndex::new(attr)));
     }
@@ -70,14 +87,46 @@ impl IndexRegistry {
     /// Registers an [`InvertedIndex`] for `attribute`, replacing any existing index.
     pub fn add_inverted_index(&self, attribute: impl Into<String>) {
         let attr = attribute.into();
+        self.vector_indexes.remove(&attr);
         self.indexes
             .insert(attr.clone(), Arc::new(InvertedIndex::new(attr)));
+    }
+
+    /// Registers a [`VectorIndex`] for `attribute`, replacing any existing index.
+    ///
+    /// Inserts into both the `indexes` trait-object map and the `vector_indexes`
+    /// side-channel so that `get_vector_index` can return the concrete type
+    /// without downcasting.
+    pub fn add_vector_index(
+        &self,
+        attribute: impl Into<String>,
+        dimension: u16,
+        distance_metric: DistanceMetric,
+    ) {
+        let attr = attribute.into();
+        let vi = Arc::new(VectorIndex::new(attr.clone(), dimension, distance_metric));
+        // Store the concrete type in the side-channel before moving into the
+        // trait-object map so both views share the same allocation.
+        self.vector_indexes.insert(attr.clone(), Arc::clone(&vi));
+        self.indexes.insert(attr, vi as Arc<dyn Index>);
     }
 
     /// Returns the index registered for `attribute`, or `None` if none exists.
     #[must_use]
     pub fn get_index(&self, attribute: &str) -> Option<Arc<dyn Index>> {
         self.indexes.get(attribute).map(|r| Arc::clone(r.value()))
+    }
+
+    /// Returns the concrete `VectorIndex` for `attribute`, or `None` if the
+    /// attribute has no vector index (or has a different index type).
+    ///
+    /// Query service callers use this to obtain an `Arc<VectorIndex>` with
+    /// access to `search_nearest` and `commit_pending` without downcasting.
+    #[must_use]
+    pub fn get_vector_index(&self, attribute: &str) -> Option<Arc<VectorIndex>> {
+        self.vector_indexes
+            .get(attribute)
+            .map(|r| Arc::clone(r.value()))
     }
 
     /// Returns the best index for accelerating a leaf predicate, or `None`.
@@ -88,6 +137,7 @@ impl IndexRegistry {
     /// - `Like` → requires an `Inverted` index (token-based partial match)
     /// - `Regex` → always `None` (regex cannot be accelerated)
     /// - `And` / `Or` / `Not` → always `None` (compound predicates handled by query optimizer)
+    /// - Vector indexes → always `None` (vector search is not predicate-driven)
     ///
     /// Returns `None` if the required index type is not registered for the
     /// attribute, even if an index of a different type is present — returning a
@@ -117,6 +167,9 @@ impl IndexRegistry {
             PredicateOp::Like => IndexType::Inverted,
         };
 
+        // `required_type` is one of Hash, Navigable, Inverted — never Vector —
+        // so this check naturally returns None for vector-indexed attributes
+        // without requiring an explicit short-circuit branch.
         let attribute = predicate.attribute.as_deref()?;
         let index = self.get_index(attribute)?;
         if index.index_type() == required_type {
@@ -150,9 +203,15 @@ impl IndexRegistry {
 
     /// Removes the index for `attribute`, clearing all its data.
     ///
+    /// For vector indexes, removes from both the trait-object map and the
+    /// concrete `vector_indexes` side-channel.
+    ///
     /// Returns `true` if an index was removed, `false` if none existed.
     #[must_use]
     pub fn remove_index(&self, attribute: &str) -> bool {
+        // Always attempt removal from both maps; removal from an empty map
+        // is a no-op, so this is safe for non-vector indexes.
+        self.vector_indexes.remove(attribute);
         if let Some((_, index)) = self.indexes.remove(attribute) {
             index.clear();
             true
@@ -180,8 +239,10 @@ impl Default for IndexRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use topgun_core::messages::base::PredicateOp;
+    use topgun_core::vector::DistanceMetric;
+
+    use super::*;
 
     fn make_leaf(op: PredicateOp, attribute: &str) -> PredicateNode {
         PredicateNode {
@@ -224,6 +285,101 @@ mod tests {
             .get_index("description")
             .expect("index should be present");
         assert_eq!(idx.index_type(), IndexType::Inverted);
+    }
+
+    #[test]
+    fn add_and_get_vector_index() {
+        let registry = IndexRegistry::new();
+        registry.add_vector_index("embedding", 768, DistanceMetric::Cosine);
+        let idx = registry
+            .get_index("embedding")
+            .expect("index should be present");
+        assert_eq!(idx.index_type(), IndexType::Vector);
+        let vi = registry
+            .get_vector_index("embedding")
+            .expect("vector index should be accessible");
+        assert_eq!(vi.dimension(), 768);
+        assert_eq!(vi.distance_metric(), DistanceMetric::Cosine);
+    }
+
+    #[test]
+    fn get_vector_index_returns_none_for_hash_attribute() {
+        let registry = IndexRegistry::new();
+        registry.add_hash_index("name");
+        assert!(
+            registry.get_vector_index("name").is_none(),
+            "hash index should not be returned by get_vector_index"
+        );
+    }
+
+    #[test]
+    fn get_best_index_vector_returns_none_for_all_predicate_ops() {
+        let registry = IndexRegistry::new();
+        registry.add_vector_index("embedding", 4, DistanceMetric::Cosine);
+
+        // Iterate over every PredicateOp variant to ensure future additions are
+        // also covered. The strum crate is not available; enumerate manually.
+        let all_ops = [
+            PredicateOp::Eq,
+            PredicateOp::Neq,
+            PredicateOp::Gt,
+            PredicateOp::Gte,
+            PredicateOp::Lt,
+            PredicateOp::Lte,
+            PredicateOp::Like,
+            PredicateOp::Regex,
+            PredicateOp::In,
+            PredicateOp::Between,
+            PredicateOp::IsNull,
+            PredicateOp::IsNotNull,
+            PredicateOp::ContainsAll,
+            PredicateOp::ContainsAny,
+            PredicateOp::StartsWith,
+            PredicateOp::EndsWith,
+            PredicateOp::And,
+            PredicateOp::Or,
+            PredicateOp::Not,
+        ];
+        for op in all_ops {
+            let pred = make_leaf(op.clone(), "embedding");
+            assert!(
+                registry.get_best_index(&pred).is_none(),
+                "get_best_index should return None for vector index with op {op:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn remove_vector_index_clears_both_views() {
+        let registry = IndexRegistry::new();
+        registry.add_vector_index("embedding", 4, DistanceMetric::Cosine);
+        assert!(registry.get_vector_index("embedding").is_some());
+        assert!(registry.get_index("embedding").is_some());
+
+        let removed = registry.remove_index("embedding");
+        assert!(removed, "should return true");
+        assert!(
+            registry.get_vector_index("embedding").is_none(),
+            "concrete view should be cleared"
+        );
+        assert!(
+            registry.get_index("embedding").is_none(),
+            "trait-object view should be cleared"
+        );
+    }
+
+    #[test]
+    fn stats_includes_vector_index() {
+        let registry = IndexRegistry::new();
+        registry.add_hash_index("name");
+        registry.add_vector_index("embedding", 4, DistanceMetric::Cosine);
+
+        let mut stats = registry.stats();
+        stats.sort_by(|a, b| a.attribute.cmp(&b.attribute));
+
+        let vector_stat = stats.iter().find(|s| s.attribute == "embedding");
+        assert!(vector_stat.is_some());
+        assert_eq!(vector_stat.unwrap().index_type, IndexType::Vector);
     }
 
     #[test]

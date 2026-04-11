@@ -6,6 +6,15 @@
 //! [`IndexObserverFactory`] implements [`ObserverFactory`] and creates
 //! [`IndexMutationObserver`] instances for maps that have registered indexes.
 //! Maps without a registry entry return `None` from `create_observer`.
+//!
+//! Vector indexes receive mutations through the same path as scalar indexes.
+//! The observer passes the full record `rmpv::Value` to every registered
+//! index; each index internally extracts its own attribute via `AttributeExtractor`.
+//! For `VectorIndex`, the per-index extraction navigates to the configured
+//! attribute, expects a `Binary` field containing a MsgPack-encoded vector,
+//! and queues an upsert. Records without the vector attribute or with a
+//! non-Binary attribute value are silently skipped — no observer-level
+//! branching is required.
 
 use std::sync::Arc;
 
@@ -231,6 +240,7 @@ mod tests {
     use topgun_core::types::Value;
 
     use super::*;
+    use crate::service::domain::index::Index;
     use crate::storage::record::RecordMetadata;
 
     // Helpers
@@ -275,12 +285,12 @@ mod tests {
 
     fn rmpv_to_core_value(v: rmpv::Value) -> Value {
         match v {
-            rmpv::Value::Nil => Value::Null,
             rmpv::Value::Boolean(b) => Value::Bool(b),
             rmpv::Value::Integer(i) => Value::Int(i.as_i64().unwrap_or(0)),
             rmpv::Value::F64(f) => Value::Float(f),
             rmpv::Value::F32(f) => Value::Float(f64::from(f)),
             rmpv::Value::String(s) => Value::String(s.into_str().unwrap_or_default()),
+            // Nil, Binary, Array, Map, Ext — not needed for scalar index tests.
             _ => Value::Null,
         }
     }
@@ -632,5 +642,70 @@ mod tests {
         let (_, index_stats) = &stats[0];
         assert_eq!(index_stats.len(), 1);
         assert_eq!(index_stats[0].entry_count, 1, "entry count should reflect inserted records");
+    }
+
+    // --- VectorIndex observer integration tests ---
+
+    /// Build a Record whose LWW value is a Map with the given `field` set to
+    /// `Value::Bytes(encoded_vector_bytes)`. This is the canonical on-wire form:
+    /// `Vector::F32(...)` → `rmp_serde::to_vec_named` → `Value::Bytes` →
+    /// `value_to_rmpv` → `rmpv::Value::Binary`.
+    fn make_vector_record(field: &str, data: &[f32]) -> Record {
+        use topgun_core::types::Value;
+        use topgun_core::vector::Vector;
+
+        let v = Vector::F32(data.to_vec());
+        let encoded = rmp_serde::to_vec_named(&v).expect("vector serialization failed");
+        let mut inner_map = std::collections::BTreeMap::new();
+        inner_map.insert(field.to_string(), Value::Bytes(encoded));
+        Record {
+            value: RecordValue::Lww {
+                value: Value::Map(inner_map),
+                timestamp: ts(),
+            },
+            metadata: RecordMetadata::new(1_000_000, 64),
+        }
+    }
+
+    #[test]
+    fn vector_index_receives_upserts_via_observer() {
+        use topgun_core::vector::DistanceMetric;
+
+        let registry = Arc::new(IndexRegistry::new());
+        registry.add_vector_index("embedding", 4, DistanceMetric::Cosine);
+
+        let observer = IndexMutationObserver::new(Arc::clone(&registry));
+        let record = make_vector_record("embedding", &[0.1, 0.2, 0.3, 0.4]);
+        observer.on_put("k1", &record, None, false);
+
+        let vi = registry
+            .get_vector_index("embedding")
+            .expect("vector index must exist");
+        assert_eq!(vi.pending_count(), 1, "observer should have queued one upsert");
+
+        vi.commit_pending();
+        assert_eq!(vi.entry_count(), 1, "after commit one entry should be committed");
+    }
+
+    #[test]
+    fn vector_index_ignores_non_vector_fields() {
+        use topgun_core::vector::DistanceMetric;
+
+        let registry = Arc::new(IndexRegistry::new());
+        registry.add_vector_index("embedding", 4, DistanceMetric::Cosine);
+
+        let observer = IndexMutationObserver::new(Arc::clone(&registry));
+        // Record contains "title" but not "embedding" — insert must be a no-op.
+        let record = make_lww_record(vec![("title", rmpv::Value::String("hello".into()))]);
+        observer.on_put("k1", &record, None, false);
+
+        let vi = registry
+            .get_vector_index("embedding")
+            .expect("vector index must exist");
+        assert_eq!(
+            vi.pending_count(),
+            0,
+            "insert with no vector field should not queue a mutation"
+        );
     }
 }
