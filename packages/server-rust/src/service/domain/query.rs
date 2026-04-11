@@ -907,6 +907,11 @@ impl QueryService {
         _ctx: &crate::service::operation::OperationContext,
         payload: &VectorSearchPayload,
     ) -> Result<OperationResponse, OperationError> {
+        // Elapsed milliseconds, saturated to u64::MAX (unreachable for any realistic request).
+        fn elapsed_ms(start: std::time::Instant) -> u64 {
+            u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+        }
+
         let start = std::time::Instant::now();
 
         // Helper macro that uses `start` for timing.
@@ -917,7 +922,7 @@ impl QueryService {
                         id: payload.id.clone(),
                         results: vec![],
                         total_candidates: 0,
-                        search_time_ms: start.elapsed().as_millis() as u64,
+                        search_time_ms: elapsed_ms(start),
                         error: Some($msg.to_string()),
                     },
                 })));
@@ -928,9 +933,8 @@ impl QueryService {
         let factory = self.index_observer_factory.as_ref().ok_or_else(|| {
             OperationError::Internal(anyhow::anyhow!("VectorSearch requires IndexObserverFactory"))
         })?;
-        let registry = match factory.get_registry(&payload.map_name) {
-            Some(r) => r,
-            None => error_resp!(format!("map not registered for indexing: {}", payload.map_name)),
+        let Some(registry) = factory.get_registry(&payload.map_name) else {
+            error_resp!(format!("map not registered for indexing: {}", payload.map_name));
         };
 
         // 2. Resolve vector index attribute.
@@ -955,9 +959,8 @@ impl QueryService {
         };
 
         // 3. Fetch vector index handle.
-        let vector_index = match registry.get_vector_index(&attribute) {
-            Some(vi) => vi,
-            None => error_resp!(format!("attribute {attribute} is not a vector index")),
+        let Some(vector_index) = registry.get_vector_index(&attribute) else {
+            error_resp!(format!("attribute {attribute} is not a vector index"));
         };
 
         // 4. Decode query vector.
@@ -969,7 +972,7 @@ impl QueryService {
 
         // 5. Run ANN search in spawn_blocking to keep tokio worker responsive.
         let k = payload.k as usize;
-        let ef = payload.ef_search.map(|v| v as usize).unwrap_or(k * 2).max(k);
+        let ef = payload.ef_search.map_or(k * 2, |v| v as usize).max(k);
         let overfetch = (k * 4).max(k);
         let raw: Vec<(String, f64)> = tokio::task::spawn_blocking({
             let vi = Arc::clone(&vector_index);
@@ -978,7 +981,7 @@ impl QueryService {
         })
         .await
         .map_err(|e| OperationError::Internal(anyhow::anyhow!("vector search task join: {e}")))?;
-        let total_candidates = raw.len() as u32;
+        let total_candidates = u32::try_from(raw.len()).unwrap_or(u32::MAX);
 
         // 6. Convert distance → score per metric (R3 policy).
         let metric = vector_index.distance_metric();
@@ -1065,7 +1068,7 @@ impl QueryService {
             id: payload.id.clone(),
             results,
             total_candidates,
-            search_time_ms: start.elapsed().as_millis() as u64,
+            search_time_ms: elapsed_ms(start),
             error: None,
         };
         Ok(OperationResponse::Message(Box::new(
@@ -2554,7 +2557,7 @@ mod tests {
     async fn handle_vector_search_missing_index_returns_error_resp() {
         let (svc, index_registry) = make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
         // Remove the vector index so the map has none
-        index_registry.remove_index("embedding");
+        let _ = index_registry.remove_index("embedding");
 
         let ctx = make_ctx(None);
         let payload = VectorSearchPayload {
@@ -2633,13 +2636,28 @@ mod tests {
 
     #[tokio::test]
     async fn handle_vector_search_include_value_default_true() {
+        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+
         let (svc, index_registry) = make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
         let vi = index_registry.get_vector_index("embedding").unwrap();
-        // Note: include_value reads from RecordStore, but the test RecordStore is empty.
-        // With include_value = true (default), value is None because no records in store.
         let rec = make_vector_record("embedding", &[1.0, 0.0]);
         vi.insert("k1", &rec);
         vi.commit_pending();
+
+        // Populate RecordStore so include_value (default true) can return a value.
+        let store = svc.record_store_factory.get_or_create("maps", 0);
+        store
+            .put(
+                "k1",
+                RecordValue::Lww {
+                    value: make_value_map(vec![("name", Value::String("Alice".to_string()))]),
+                    timestamp: make_timestamp(),
+                },
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
+            .await
+            .unwrap();
 
         let ctx = make_ctx(None);
         let payload = VectorSearchPayload {
@@ -2654,9 +2672,11 @@ mod tests {
         let op = Operation::VectorSearch { ctx, payload };
         let resp = extract_vector_resp(svc.oneshot(op).await.unwrap());
         assert_eq!(resp.results.len(), 1);
-        // RecordStore is empty, so value is None even when include_value is true
-        // This verifies the handler runs without error with include_value = true
         assert!(resp.error.is_none());
+        assert!(
+            resp.results[0].value.is_some(),
+            "expected value to be populated when include_value defaults to true"
+        );
     }
 
     #[tokio::test]
