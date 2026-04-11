@@ -456,7 +456,7 @@ impl OperationService {
                 Ok(Operation::JournalRead { ctx, payload })
             }
 
-            // ----- SQL query -----
+            // ----- SQL / vector query -----
 
             Message::SqlQuery { payload } => {
                 let ctx = self.make_ctx(
@@ -466,6 +466,16 @@ impl OperationService {
                     None,
                 );
                 Ok(Operation::SqlQuery { ctx, payload })
+            }
+
+            Message::VectorSearch { payload } => {
+                let ctx = self.make_ctx(
+                    service_names::QUERY,
+                    client_id,
+                    caller_origin,
+                    Some(payload.map_name.as_str()),
+                );
+                Ok(Operation::VectorSearch { ctx, payload })
             }
 
             // ----- Server-to-client responses -> ClassifyError::ServerToClient -----
@@ -500,6 +510,9 @@ impl OperationService {
             }
             Message::SqlQueryResp { .. } => {
                 Err(ClassifyError::ServerToClient { variant: "SqlQueryResp" })
+            }
+            Message::VectorSearchResp { .. } => {
+                Err(ClassifyError::ServerToClient { variant: "VectorSearchResp" })
             }
             Message::QueryUpdate { .. } => {
                 Err(ClassifyError::ServerToClient { variant: "QueryUpdate" })
@@ -1103,6 +1116,48 @@ mod tests {
         assert!(
             matches!(op, Operation::QuerySubscribe { .. }),
             "empty group_by vec should route to QuerySubscribe"
+        );
+    }
+
+    #[test]
+    fn classify_vector_search_routes_to_query() {
+        let svc = make_service();
+        let msg = Message::VectorSearch {
+            payload: topgun_core::messages::VectorSearchPayload {
+                id: "vs-1".to_string(),
+                map_name: "products".to_string(),
+                index_name: None,
+                query_vector: vec![0u8; 16], // 4 f32 values
+                k: 5,
+                ef_search: None,
+                options: None,
+            },
+        };
+        let op = svc.classify(msg, Some("client-1".to_string()), CallerOrigin::Client).unwrap();
+        assert_eq!(op.ctx().service_name, service_names::QUERY);
+        // partition_key = Some("products") should produce a partition_id
+        assert!(op.ctx().partition_id.is_some(), "partition_id should be set from map_name");
+        assert_eq!(op.ctx().client_id.as_deref(), Some("client-1"));
+        assert!(matches!(op, Operation::VectorSearch { .. }));
+    }
+
+    #[test]
+    fn classify_vector_search_resp_is_server_to_client() {
+        let svc = make_service();
+        let msg = Message::VectorSearchResp {
+            payload: topgun_core::messages::VectorSearchRespPayload {
+                id: "vs-1".to_string(),
+                results: vec![],
+                total_candidates: 0,
+                search_time_ms: 0,
+                error: None,
+            },
+        };
+        let err = svc.classify(msg, None, CallerOrigin::Client).unwrap_err();
+        assert!(
+            matches!(err, ClassifyError::ServerToClient { variant: "VectorSearchResp" }),
+            "expected ServerToClient VectorSearchResp, got: {:?}",
+            err
         );
     }
 }

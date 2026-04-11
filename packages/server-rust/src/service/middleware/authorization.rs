@@ -234,8 +234,8 @@ fn classify_operation(op: &Operation) -> (Option<PermissionAction>, String) {
         Operation::QuerySubscribe { payload, .. } | Operation::DagQuery { payload, .. } => {
             (Some(PermissionAction::Read), payload.payload.map_name.clone())
         }
-        // QuerySyncInit resumes by query_id; SqlQuery spans multiple maps — no single map_name.
-        Operation::QuerySyncInit { .. } | Operation::SqlQuery { .. } => {
+        // QuerySyncInit resumes by query_id; SqlQuery and VectorSearch may span multiple maps.
+        Operation::QuerySyncInit { .. } | Operation::SqlQuery { .. } | Operation::VectorSearch { .. } => {
             (Some(PermissionAction::Read), String::new())
         }
         Operation::Search { payload, .. } => {

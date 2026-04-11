@@ -212,6 +212,11 @@ pub enum Operation {
         ctx: OperationContext,
         payload: messages::query::SqlQueryPayload,
     },
+    /// Client requests ANN search over a map's vector index.
+    VectorSearch {
+        ctx: OperationContext,
+        payload: messages::vector::VectorSearchPayload,
+    },
     /// Client-initiated DAG query (GROUP BY).
     DagQuery {
         ctx: OperationContext,
@@ -357,6 +362,7 @@ impl Operation {
             | Self::QueryUnsubscribe { ctx, .. }
             | Self::QuerySyncInit { ctx, .. }
             | Self::SqlQuery { ctx, .. }
+            | Self::VectorSearch { ctx, .. }
             | Self::DagQuery { ctx, .. }
             // Messaging
             | Self::TopicSubscribe { ctx, .. }
@@ -411,6 +417,7 @@ impl Operation {
             | Self::QueryUnsubscribe { ctx, .. }
             | Self::QuerySyncInit { ctx, .. }
             | Self::SqlQuery { ctx, .. }
+            | Self::VectorSearch { ctx, .. }
             | Self::DagQuery { ctx, .. }
             // Messaging
             | Self::TopicSubscribe { ctx, .. }
@@ -465,6 +472,7 @@ impl Operation {
             | Self::QueryUnsubscribe { ctx, .. }
             | Self::QuerySyncInit { ctx, .. }
             | Self::SqlQuery { ctx, .. }
+            | Self::VectorSearch { ctx, .. }
             | Self::DagQuery { ctx, .. }
             // Messaging
             | Self::TopicSubscribe { ctx, .. }
@@ -683,6 +691,7 @@ mod tests {
             | Operation::QueryUnsubscribe { .. }
             | Operation::QuerySyncInit { .. }
             | Operation::SqlQuery { .. }
+            | Operation::VectorSearch { .. }
             | Operation::DagQuery { .. }
             | Operation::TopicSubscribe { .. }
             | Operation::TopicUnsubscribe { .. }
