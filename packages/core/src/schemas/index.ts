@@ -27,6 +27,9 @@ export * from './http-sync-schemas';
 // SQL query schemas (server-side DataFusion execution)
 export * from './sql-schemas';
 
+// Vector search schemas (ANN search request/response)
+export * from './vector-schemas';
+
 // Union MessageSchema (combines all message types)
 import { z } from 'zod';
 import { AuthMessageSchema, AuthRequiredMessageSchema } from './base-schemas';
@@ -119,6 +122,7 @@ import {
   SyncResetRequiredMessageSchema,
 } from './client-message-schemas';
 import { SqlQueryMessageSchema, SqlQueryRespMessageSchema } from './sql-schemas';
+import { VectorSearchMessageSchema, VectorSearchRespMessageSchema } from './vector-schemas';
 export const MessageSchema = z.discriminatedUnion('type', [
   // --- Base ---
   AuthMessageSchema,
@@ -202,6 +206,9 @@ export const MessageSchema = z.discriminatedUnion('type', [
   // --- SQL Query ---
   SqlQueryMessageSchema,
   SqlQueryRespMessageSchema,
+  // --- Vector Search ---
+  VectorSearchMessageSchema,
+  VectorSearchRespMessageSchema,
   // --- Server-to-Client ---
   ServerEventMessageSchema,
   ServerBatchEventMessageSchema,
