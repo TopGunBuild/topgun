@@ -28,7 +28,7 @@ fn read_fixture(name: &str) -> Vec<u8> {
     fs::read(&path).unwrap_or_else(|e| panic!("Failed to read fixture {name}: {e}"))
 }
 
-/// All Message enum fixture names (59 fixtures -- excludes `HTTP_SYNC`_* standalone types).
+/// All Message enum fixture names (59 fixtures -- excludes `HTTP_SYNC_REQUEST` and `HTTP_SYNC_RESPONSE` standalone types).
 const MESSAGE_FIXTURES: &[&str] = &[
     // Base domain
     "AUTH",
