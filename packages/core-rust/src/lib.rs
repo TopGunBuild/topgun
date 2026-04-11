@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn value_float_msgpack_roundtrip() {
-        let val = Value::Float(std::f64::consts::PI);
+        let val = Value::Float(1.5);
         let bytes = rmp_serde::to_vec(&val).expect("serialize");
         let decoded: Value = rmp_serde::from_slice(&bytes).expect("deserialize");
         assert_eq!(val, decoded);
@@ -279,7 +279,7 @@ mod tests {
                 ttl_ms: Some(1000),
             },
             ORMapRecord {
-                value: Value::Float(std::f64::consts::PI),
+                value: Value::Float(1.5),
                 timestamp: Timestamp { millis: 4, counter: 0, node_id: "n".to_string() },
                 tag: "4:0:n".to_string(),
                 ttl_ms: None,

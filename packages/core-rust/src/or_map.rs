@@ -1189,7 +1189,7 @@ mod tests {
             (Value::Null, "Null"),
             (Value::Bool(true), "Bool"),
             (Value::Int(42), "Int"),
-            (Value::Float(std::f64::consts::PI), "Float"),
+            (Value::Float(1.5), "Float"),
             (Value::String("hello".to_string()), "String"),
             (
                 Value::Array(vec![Value::Int(1), Value::String("two".to_string())]),

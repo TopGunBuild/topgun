@@ -610,7 +610,7 @@ mod tests {
             }],
             false,
         );
-        let value = make_map(vec![("x", Value::Float(std::f64::consts::PI))]);
+        let value = make_map(vec![("x", Value::Float(1.5))]);
         assert!(matches!(validate_value(&schema, &value), ValidationResult::Valid));
     }
 

@@ -916,7 +916,7 @@ mod tests {
                 ttl_ms: Some(1000),
             },
             LWWRecord {
-                value: Some(Value::Float(std::f64::consts::PI)),
+                value: Some(Value::Float(1.5)),
                 timestamp: Timestamp { millis: 4, counter: 0, node_id: "n".to_string() },
                 ttl_ms: None,
             },
