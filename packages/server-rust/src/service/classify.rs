@@ -1156,8 +1156,7 @@ mod tests {
         let err = svc.classify(msg, None, CallerOrigin::Client).unwrap_err();
         assert!(
             matches!(err, ClassifyError::ServerToClient { variant: "VectorSearchResp" }),
-            "expected ServerToClient VectorSearchResp, got: {:?}",
-            err
+            "expected ServerToClient VectorSearchResp, got: {err:?}",
         );
     }
 }

@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn value_float_msgpack_roundtrip() {
-        let val = Value::Float(3.14);
+        let val = Value::Float(std::f64::consts::PI);
         let bytes = rmp_serde::to_vec(&val).expect("serialize");
         let decoded: Value = rmp_serde::from_slice(&bytes).expect("deserialize");
         assert_eq!(val, decoded);
@@ -237,7 +237,7 @@ mod tests {
         assert_eq!(crdt_or.map_type(), MapType::Or);
     }
 
-    /// `ORMapRecord<Value>` round-trips through MsgPack without data loss (AC-5).
+    /// `ORMapRecord<Value>` round-trips through `MsgPack` without data loss (AC-5).
     #[test]
     fn or_map_record_msgpack_roundtrip() {
         let record = ORMapRecord {
@@ -279,7 +279,7 @@ mod tests {
                 ttl_ms: Some(1000),
             },
             ORMapRecord {
-                value: Value::Float(3.14),
+                value: Value::Float(std::f64::consts::PI),
                 timestamp: Timestamp { millis: 4, counter: 0, node_id: "n".to_string() },
                 tag: "4:0:n".to_string(),
                 ttl_ms: None,

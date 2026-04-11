@@ -235,10 +235,10 @@ mod tests {
     #[test]
     fn from_rmpv_string_invalid_utf8_falls_back_to_empty() {
         // rmpv::Utf8String::from_bytes with non-UTF-8 data → into_str() returns None → default ""
-        let raw = rmpv::Utf8String::from(rmpv::Utf8String::from(
+        let raw = rmpv::Utf8String::from(
             // Build a string from valid UTF-8 first; into_str() on valid = Some.
             "valid"
-        ));
+        );
         let v = rmpv::Value::String(raw);
         assert_eq!(Value::from(v), Value::String("valid".to_string()));
     }

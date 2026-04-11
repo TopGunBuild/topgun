@@ -2551,8 +2551,9 @@ mod tests {
         let vi = index_registry.get_vector_index("embedding").unwrap();
 
         // Insert 10 vectors: [0.1*i, 0.2*i] for i in 1..=10
-        for i in 1usize..=10 {
-            let rec = make_vector_record("embedding", &[0.1 * i as f32, 0.2 * i as f32]);
+        for i in 1u8..=10 {
+            let fi = f32::from(i);
+            let rec = make_vector_record("embedding", &[0.1 * fi, 0.2 * fi]);
             vi.insert(&format!("k{i}"), &rec);
         }
         vi.commit_pending();
@@ -2653,8 +2654,8 @@ mod tests {
         let vi = index_registry.get_vector_index("embedding").unwrap();
 
         // Insert vectors at varying distances from query [1.0, 0.0]
-        for i in 1usize..=5 {
-            let x = i as f32;
+        for i in 1u8..=5 {
+            let x = f32::from(i);
             let rec = make_vector_record("embedding", &[x, 0.0]);
             vi.insert(&format!("k{i}"), &rec);
         }
@@ -2757,8 +2758,8 @@ mod tests {
     async fn handle_vector_search_ef_search_default() {
         let (svc, index_registry) = make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
         let vi = index_registry.get_vector_index("embedding").unwrap();
-        for i in 1usize..=5 {
-            let rec = make_vector_record("embedding", &[i as f32, 0.0]);
+        for i in 1u8..=5 {
+            let rec = make_vector_record("embedding", &[f32::from(i), 0.0]);
             vi.insert(&format!("k{i}"), &rec);
         }
         vi.commit_pending();

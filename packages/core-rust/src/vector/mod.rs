@@ -100,21 +100,21 @@ mod tests {
     fn cosine_orthogonal_vectors_returns_1() {
         let d = CosineDistance;
         let result = d.compute(&[1.0, 0.0], &[0.0, 1.0]);
-        assert!((result - 1.0).abs() < 1e-9, "expected 1.0, got {}", result);
+        assert!((result - 1.0).abs() < 1e-9, "expected 1.0, got {result}");
     }
 
     #[test]
     fn cosine_identical_vectors_returns_0() {
         let d = CosineDistance;
         let result = d.compute(&[1.0, 0.0], &[1.0, 0.0]);
-        assert!(result.abs() < 1e-9, "expected 0.0, got {}", result);
+        assert!(result.abs() < 1e-9, "expected 0.0, got {result}");
     }
 
     #[test]
     fn cosine_zero_norm_returns_1() {
         let d = CosineDistance;
         let result = d.compute(&[0.0, 0.0], &[1.0, 0.0]);
-        assert!((result - 1.0).abs() < 1e-9, "expected 1.0, got {}", result);
+        assert!((result - 1.0).abs() < 1e-9, "expected 1.0, got {result}");
     }
 
     // --- Distance: Euclidean ---
@@ -123,7 +123,7 @@ mod tests {
     fn euclidean_3_4_5_triangle() {
         let d = EuclideanDistance;
         let result = d.compute(&[0.0, 0.0], &[3.0, 4.0]);
-        assert!((result - 5.0).abs() < 1e-9, "expected 5.0, got {}", result);
+        assert!((result - 5.0).abs() < 1e-9, "expected 5.0, got {result}");
     }
 
     // --- Distance: DotProduct ---
@@ -133,7 +133,7 @@ mod tests {
         let d = DotProductDistance;
         // dot([1,2], [3,4]) = 11; negated = -11
         let result = d.compute(&[1.0, 2.0], &[3.0, 4.0]);
-        assert!((result - (-11.0)).abs() < 1e-9, "expected -11.0, got {}", result);
+        assert!((result - (-11.0)).abs() < 1e-9, "expected -11.0, got {result}");
     }
 
     // --- Distance: Manhattan ---
@@ -142,31 +142,31 @@ mod tests {
     fn manhattan_distance() {
         let d = ManhattanDistance;
         let result = d.compute(&[1.0, 2.0], &[4.0, 6.0]);
-        assert!((result - 7.0).abs() < 1e-9, "expected 7.0, got {}", result);
+        assert!((result - 7.0).abs() < 1e-9, "expected 7.0, got {result}");
     }
 
     // --- Panic on mismatched lengths ---
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "CosineDistance: slice lengths must match")]
     fn cosine_panics_on_length_mismatch() {
         CosineDistance.compute(&[1.0], &[1.0, 2.0]);
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "EuclideanDistance: slice lengths must match")]
     fn euclidean_panics_on_length_mismatch() {
         EuclideanDistance.compute(&[1.0, 2.0], &[1.0]);
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "DotProductDistance: slice lengths must match")]
     fn dot_product_panics_on_length_mismatch() {
         DotProductDistance.compute(&[1.0], &[1.0, 2.0]);
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "ManhattanDistance: slice lengths must match")]
     fn manhattan_panics_on_length_mismatch() {
         ManhattanDistance.compute(&[1.0, 2.0], &[1.0]);
     }

@@ -270,7 +270,7 @@ mod tests {
         }
     }
 
-    /// Helper to create an LWWMap with a fixed clock and return the time control handle.
+    /// Helper to create an `LWWMap` with a fixed clock and return the time control handle.
     fn make_map(initial_time: u64) -> (LWWMap<Value>, Arc<AtomicU64>) {
         let (clock, time) = FixedClock::new(initial_time);
         let hlc = HLC::new("test-node".to_string(), Box::new(clock));
@@ -916,7 +916,7 @@ mod tests {
                 ttl_ms: Some(1000),
             },
             LWWRecord {
-                value: Some(Value::Float(3.14)),
+                value: Some(Value::Float(std::f64::consts::PI)),
                 timestamp: Timestamp { millis: 4, counter: 0, node_id: "n".to_string() },
                 ttl_ms: None,
             },
@@ -991,7 +991,7 @@ mod proptests {
             any::<bool>().prop_map(Value::Bool),
             any::<i64>().prop_map(Value::Int),
             any::<f64>().prop_map(Value::Float),
-            "[a-zA-Z0-9 ]{0,20}".prop_map(|s| Value::String(s)),
+            "[a-zA-Z0-9 ]{0,20}".prop_map(Value::String),
             proptest::collection::vec(any::<u8>(), 0..16).prop_map(Value::Bytes),
         ]
     }

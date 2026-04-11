@@ -199,22 +199,22 @@ mod tests {
         let val: rmpv::Value = rmp_serde::from_slice(&bytes).unwrap();
         let map = match val {
             rmpv::Value::Map(m) => m,
-            other => panic!("expected Map, got {:?}", other),
+            other => panic!("expected Map, got {other:?}"),
         };
         let keys: Vec<String> = map
             .iter()
             .filter_map(|(k, _)| {
                 if let rmpv::Value::String(s) = k {
-                    s.as_str().map(|s| s.to_string())
+                    s.as_str().map(std::string::ToString::to_string)
                 } else {
                     None
                 }
             })
             .collect();
-        assert!(keys.contains(&"mapName".to_string()), "missing mapName, keys={:?}", keys);
-        assert!(keys.contains(&"indexName".to_string()), "missing indexName, keys={:?}", keys);
-        assert!(keys.contains(&"queryVector".to_string()), "missing queryVector, keys={:?}", keys);
-        assert!(keys.contains(&"efSearch".to_string()), "missing efSearch, keys={:?}", keys);
+        assert!(keys.contains(&"mapName".to_string()), "missing mapName, keys={keys:?}");
+        assert!(keys.contains(&"indexName".to_string()), "missing indexName, keys={keys:?}");
+        assert!(keys.contains(&"queryVector".to_string()), "missing queryVector, keys={keys:?}");
+        assert!(keys.contains(&"efSearch".to_string()), "missing efSearch, keys={keys:?}");
     }
 
     #[test]
@@ -251,13 +251,13 @@ mod tests {
         let val: rmpv::Value = rmp_serde::from_slice(&bytes).unwrap();
         let map = match val {
             rmpv::Value::Map(m) => m,
-            other => panic!("expected Map, got {:?}", other),
+            other => panic!("expected Map, got {other:?}"),
         };
         let keys: Vec<String> = map
             .iter()
             .filter_map(|(k, _)| {
                 if let rmpv::Value::String(s) = k {
-                    s.as_str().map(|s| s.to_string())
+                    s.as_str().map(std::string::ToString::to_string)
                 } else {
                     None
                 }
@@ -331,7 +331,7 @@ mod tests {
         let val: rmpv::Value = rmp_serde::from_slice(&bytes).unwrap();
         let map = match val {
             rmpv::Value::Map(m) => m,
-            other => panic!("expected Map, got {:?}", other),
+            other => panic!("expected Map, got {other:?}"),
         };
         let qv_entry = map.iter().find(|(k, _)| {
             if let rmpv::Value::String(s) = k {
@@ -343,7 +343,7 @@ mod tests {
         let qv_val = qv_entry.expect("queryVector key not found");
         match &qv_val.1 {
             rmpv::Value::Binary(_) => {} // correct: MsgPack bin format
-            other => panic!("queryVector should be Binary, got {:?}", other),
+            other => panic!("queryVector should be Binary, got {other:?}"),
         }
     }
 

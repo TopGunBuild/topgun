@@ -547,7 +547,7 @@ mod tests {
         }
     }
 
-    /// Helper: create an ORMap with a FixedClock for deterministic testing.
+    /// Helper: create an `ORMap` with a `FixedClock` for deterministic testing.
     fn make_map(node_id: &str, time: u64) -> (ORMap<Value>, Arc<AtomicU64>) {
         let (clock, time_handle) = FixedClock::new(time);
         let hlc = HLC::new(node_id.to_string(), Box::new(clock));
@@ -575,9 +575,8 @@ mod tests {
         let values = map.get("key1");
         assert_eq!(values.len(), 2);
         // Both values should be present (order not guaranteed)
-        let strs: Vec<&Value> = values.iter().copied().collect();
-        assert!(strs.contains(&&Value::String("work".to_string())));
-        assert!(strs.contains(&&Value::String("play".to_string())));
+        assert!(values.contains(&&Value::String("work".to_string())));
+        assert!(values.contains(&&Value::String("play".to_string())));
     }
 
     #[test]
@@ -758,30 +757,30 @@ mod tests {
         map_b.add("k1", Value::Int(2), None);
 
         // Merge A into fresh copy of B, and B into fresh copy of A
-        let (mut map_a2, _) = make_map("node-A2", 1_000_000);
-        let (mut map_b2, _) = make_map("node-B2", 1_000_000);
+        let (mut first, _) = make_map("node-A2", 1_000_000);
+        let (mut second, _) = make_map("node-B2", 1_000_000);
 
         // Replicate A's state to A2 and B's state to B2
         for (key, key_map) in &map_a.items {
-            for (_, record) in key_map {
-                map_a2.apply(key.clone(), record.clone());
-                map_b2.apply(key.clone(), record.clone());
+            for record in key_map.values() {
+                first.apply(key.clone(), record.clone());
+                second.apply(key.clone(), record.clone());
             }
         }
         for (key, key_map) in &map_b.items {
-            for (_, record) in key_map {
-                map_a2.apply(key.clone(), record.clone());
-                map_b2.apply(key.clone(), record.clone());
+            for record in key_map.values() {
+                first.apply(key.clone(), record.clone());
+                second.apply(key.clone(), record.clone());
             }
         }
 
         // Both should have same values
-        let mut vals_a: Vec<String> = map_a2
+        let mut vals_a: Vec<String> = first
             .get("k1")
             .iter()
             .map(|v| format!("{v:?}"))
             .collect();
-        let mut vals_b: Vec<String> = map_b2
+        let mut vals_b: Vec<String> = second
             .get("k1")
             .iter()
             .map(|v| format!("{v:?}"))
@@ -838,7 +837,7 @@ mod tests {
         let tag = record.tag.clone();
 
         // Remote sends tombstone for local tag
-        let result = map.merge_key("key1", vec![], &[tag.clone()]);
+        let result = map.merge_key("key1", vec![], std::slice::from_ref(&tag));
         assert_eq!(result.added, 0);
         assert_eq!(result.updated, 0);
         assert!(map.get("key1").is_empty());
@@ -921,7 +920,7 @@ mod tests {
         let threshold = Timestamp {
             millis: 2_000_000,
             counter: 0,
-            node_id: "".to_string(),
+            node_id: String::new(),
         };
         let pruned = map.prune(&threshold);
         assert_eq!(pruned.len(), 1);
@@ -940,7 +939,7 @@ mod tests {
         let threshold = Timestamp {
             millis: 500_000,
             counter: 0,
-            node_id: "".to_string(),
+            node_id: String::new(),
         };
         let pruned = map.prune(&threshold);
         assert!(pruned.is_empty());
@@ -1190,7 +1189,7 @@ mod tests {
             (Value::Null, "Null"),
             (Value::Bool(true), "Bool"),
             (Value::Int(42), "Int"),
-            (Value::Float(3.14), "Float"),
+            (Value::Float(std::f64::consts::PI), "Float"),
             (Value::String("hello".to_string()), "String"),
             (
                 Value::Array(vec![Value::Int(1), Value::String("two".to_string())]),
@@ -1224,7 +1223,7 @@ mod tests {
     }
 }
 
-/// Property-based tests using `proptest` for ORMap CRDT correctness verification.
+/// Property-based tests using `proptest` for `ORMap` CRDT correctness verification.
 #[cfg(test)]
 mod proptests {
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -1267,7 +1266,7 @@ mod proptests {
             Just(Value::Null),
             any::<bool>().prop_map(Value::Bool),
             any::<i64>().prop_map(Value::Int),
-            "[a-zA-Z0-9 ]{0,20}".prop_map(|s| Value::String(s)),
+            "[a-zA-Z0-9 ]{0,20}".prop_map(Value::String),
         ]
     }
 
@@ -1276,14 +1275,14 @@ mod proptests {
         "[a-z]{1,4}"
     }
 
-    /// ORMap operation to apply to a replica.
+    /// `ORMap` operation to apply to a replica.
     #[derive(Debug, Clone)]
     enum OrMapOp {
         Add(String, Value),
         Remove(String, Value),
     }
 
-    /// Strategy for generating a sequence of ORMap operations.
+    /// Strategy for generating a sequence of `ORMap` operations.
     fn arb_ops(max_ops: usize) -> impl Strategy<Value = Vec<OrMapOp>> {
         proptest::collection::vec(
             prop_oneof![
@@ -1294,7 +1293,7 @@ mod proptests {
         )
     }
 
-    /// Apply operations to an ORMap. Returns tags/tombstones produced.
+    /// Apply operations to an `ORMap`. Returns tags/tombstones produced.
     fn apply_ops(map: &mut ORMap<Value>, ops: &[OrMapOp]) {
         for op in ops {
             match op {
@@ -1308,12 +1307,12 @@ mod proptests {
         }
     }
 
-    /// Collect all records and tombstones from an ORMap for merging into another.
+    /// Collect all records and tombstones from an `ORMap` for merging into another.
     fn collect_state(map: &ORMap<Value>) -> (Vec<(String, ORMapRecord<Value>)>, Vec<String>) {
         let mut records = Vec::new();
         for key in map.all_keys() {
             if let Some(key_map) = map.items.get(key) {
-                for (_, record) in key_map {
+                for record in key_map.values() {
                     records.push((key.clone(), record.clone()));
                 }
             }

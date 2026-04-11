@@ -640,7 +640,7 @@ mod tests {
 
         for (i, ts) in timestamps.iter().enumerate() {
             assert_eq!(ts.millis, 1_000_000);
-            assert_eq!(ts.counter, i as u32);
+            assert_eq!(ts.counter as usize, i);
         }
 
         for i in 1..timestamps.len() {
@@ -975,7 +975,7 @@ mod tests {
         assert_eq!(ts1.counter, ts2.counter);
 
         // Sort provides total ordering via node_id
-        let mut sorted = vec![ts1.clone(), ts2.clone(), ts3.clone()];
+        let mut sorted = [ts1.clone(), ts2.clone(), ts3.clone()];
         sorted.sort();
 
         assert_eq!(sorted[0].node_id, "node-A");
@@ -1048,14 +1048,14 @@ mod tests {
     #[should_panic(expected = "must not contain ':'")]
     fn new_rejects_node_id_with_colon() {
         let (clock, _) = FixedClock::new(0);
-        HLC::new("node:with:colons".to_string(), Box::new(clock));
+        let _ = HLC::new("node:with:colons".to_string(), Box::new(clock));
     }
 
     #[test]
     #[should_panic(expected = "must not contain ':'")]
     fn with_options_rejects_node_id_with_colon() {
         let (clock, _) = FixedClock::new(0);
-        HLC::with_options("bad:id".to_string(), Box::new(clock), false, 60_000);
+        let _ = HLC::with_options("bad:id".to_string(), Box::new(clock), false, 60_000);
     }
 
     #[test]
