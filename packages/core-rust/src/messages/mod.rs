@@ -13,6 +13,7 @@ pub mod cluster;
 pub mod query;
 pub mod search;
 pub mod sync;
+pub mod vector;
 
 pub mod client_events;
 pub mod http_sync;
@@ -36,6 +37,10 @@ pub use query::{
     CursorStatus, QueryRespMessage, QueryRespPayload, QueryResultEntry, QuerySubMessage,
     QuerySubPayload, QuerySyncInitMessage, QuerySyncInitPayload, QueryUnsubMessage,
     QueryUnsubPayload, SqlQueryPayload, SqlQueryRespPayload,
+};
+
+pub use vector::{
+    VectorSearchOptions, VectorSearchPayload, VectorSearchRespPayload, VectorSearchResult,
 };
 
 pub use search::{
@@ -81,7 +86,7 @@ pub use http_sync::{
 // Message union
 // ---------------------------------------------------------------------------
 
-/// Discriminated union of all 77 message types in the `TopGun` protocol.
+/// Discriminated union of all 79 message types in the `TopGun` protocol.
 ///
 /// Uses `#[serde(tag = "type")]` for internally-tagged representation matching
 /// the TypeScript `z.discriminatedUnion('type', [...])` pattern. Each variant's
@@ -208,6 +213,14 @@ pub enum Message {
     /// SQL query response from server.
     #[serde(rename = "SQL_QUERY_RESP")]
     SqlQueryResp { payload: SqlQueryRespPayload },
+
+    /// Client requests ANN search over a map's vector index.
+    #[serde(rename = "VECTOR_SEARCH")]
+    VectorSearch { payload: VectorSearchPayload },
+
+    /// Server responds with ranked nearest-neighbour results.
+    #[serde(rename = "VECTOR_SEARCH_RESP")]
+    VectorSearchResp { payload: VectorSearchRespPayload },
 
     // --- client_events domain (query update) ---
 
