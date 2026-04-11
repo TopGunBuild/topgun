@@ -27,6 +27,7 @@ use crate::dag::coordinator::ClusterQueryCoordinator;
 use tracing::Instrument;
 
 use crate::network::connection::{ConnectionId, ConnectionRegistry, OutboundMessage};
+use crate::service::domain::index::attribute::AttributeExtractor;
 use crate::service::domain::index::query_optimizer::index_aware_evaluate;
 use crate::service::domain::index::IndexObserverFactory;
 use crate::service::domain::predicate::{
@@ -1015,7 +1016,12 @@ impl QueryService {
             .as_ref()
             .and_then(|o| o.include_value)
             .unwrap_or(true);
-        let need_values = filter.is_some() || include_value;
+        let include_vectors = payload
+            .options
+            .as_ref()
+            .and_then(|o| o.include_vectors)
+            .unwrap_or(false);
+        let need_values = filter.is_some() || include_value || include_vectors;
 
         let value_map: std::collections::HashMap<String, rmpv::Value> = if need_values {
             let mut map = std::collections::HashMap::new();
@@ -1046,6 +1052,7 @@ impl QueryService {
         scored.truncate(k);
 
         // 10. Build result entries.
+        let extractor = AttributeExtractor::new(attribute.to_string());
         let results: Vec<VectorSearchResult> = scored
             .into_iter()
             .map(|(key, score)| {
@@ -1054,12 +1061,18 @@ impl QueryService {
                 } else {
                     None
                 };
+                let vector = if include_vectors {
+                    value_map
+                        .get(&key)
+                        .and_then(|rec| extract_vector_bytes_le(rec, &extractor))
+                } else {
+                    None
+                };
                 VectorSearchResult {
                     key,
                     score,
                     value,
-                    // include_vectors deferred: Vector::to_f32_bytes_le() not yet in core-rust.
-                    vector: None,
+                    vector,
                 }
             })
             .collect();
@@ -1076,6 +1089,41 @@ impl QueryService {
                 payload: resp_payload,
             },
         )))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vector extraction helper
+// ---------------------------------------------------------------------------
+
+/// Extracts the vector attribute binary from a record and returns its raw
+/// little-endian f32 bytes, suitable for `VectorSearchResult.vector`.
+///
+/// Returns `None` (with a warn log) on any failure: missing attribute,
+/// non-Binary field, or MsgPack decode error. Non-fatal: callers continue
+/// building the response with `vector: None` for that row.
+fn extract_vector_bytes_le(record: &rmpv::Value, extractor: &AttributeExtractor) -> Option<Vec<u8>> {
+    let field = extractor.extract(record);
+    let bytes = match &field {
+        rmpv::Value::Binary(b) => b.as_slice(),
+        _ => {
+            tracing::warn!(
+                attribute = extractor.attribute_name(),
+                "include_vectors: attribute field is not Binary"
+            );
+            return None;
+        }
+    };
+    match rmp_serde::from_slice::<topgun_core::vector::Vector>(bytes) {
+        Ok(v) => Some(v.to_f32_bytes_le()),
+        Err(e) => {
+            tracing::warn!(
+                attribute = extractor.attribute_name(),
+                error = %e,
+                "include_vectors: failed to decode vector binary"
+            );
+            None
+        }
     }
 }
 
@@ -2764,6 +2812,106 @@ mod tests {
         assert!(
             (score - 1.0).abs() < 1e-5,
             "expected dot product score ~1.0, got {score}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_vector_search_include_vectors_populated() {
+        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+        use std::collections::BTreeMap;
+        use topgun_core::{Value, vector::Vector};
+
+        let (svc, index_registry) =
+            make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
+        let vi = index_registry.get_vector_index("embedding").unwrap();
+        // make_vector_record returns rmpv::Value for HNSW insertion
+        let rec_rmpv = make_vector_record("embedding", &[1.0, 0.0]);
+        vi.insert("k1", &rec_rmpv);
+        vi.commit_pending();
+
+        // RecordValue::Lww requires topgun_core::Value, not rmpv::Value.
+        // Build a Value::Map containing the embedding as a MsgPack-encoded binary blob,
+        // matching the wire contract established by SPEC-196.
+        let embedding_bytes = rmp_serde::to_vec_named(&Vector::F32(vec![1.0, 0.0])).unwrap();
+        let stored_value = Value::Map(BTreeMap::from([(
+            "embedding".to_string(),
+            Value::Bytes(embedding_bytes),
+        )]));
+
+        // Populate the record store so the handler can reach the attribute binary
+        // for include_vectors via the value_map pass.
+        let store = svc.record_store_factory.get_or_create("maps", 0);
+        store
+            .put(
+                "k1",
+                RecordValue::Lww {
+                    value: stored_value,
+                    timestamp: make_timestamp(),
+                },
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
+            .await
+            .unwrap();
+
+        let ctx = make_ctx(None);
+        let payload = VectorSearchPayload {
+            id: "vs-incvec".to_string(),
+            map_name: "maps".to_string(),
+            index_name: Some("embedding".to_string()),
+            query_vector: make_query_vec(&[1.0f32, 0.0f32]),
+            k: 1,
+            ef_search: None,
+            options: Some(topgun_core::messages::vector::VectorSearchOptions {
+                include_vectors: Some(true),
+                ..Default::default()
+            }),
+        };
+        let op = Operation::VectorSearch { ctx, payload };
+        let resp = extract_vector_resp(svc.oneshot(op).await.unwrap());
+
+        assert_eq!(resp.results.len(), 1);
+        assert!(resp.error.is_none());
+        assert!(
+            resp.results[0].vector.is_some(),
+            "expected vector to be populated when include_vectors = true"
+        );
+        let bytes = resp.results[0].vector.as_ref().unwrap();
+        assert_eq!(bytes.len(), 2 * 4, "expected dimension * 4 bytes");
+        // Round-trip check: bytes decode back to [1.0, 0.0] f32
+        let mut floats = Vec::with_capacity(2);
+        for chunk in bytes.chunks_exact(4) {
+            floats.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+        assert_eq!(floats, vec![1.0f32, 0.0f32]);
+    }
+
+    #[tokio::test]
+    async fn handle_vector_search_include_vectors_default_none() {
+        let (svc, index_registry) =
+            make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
+        let vi = index_registry.get_vector_index("embedding").unwrap();
+        let rec_rmpv = make_vector_record("embedding", &[1.0, 0.0]);
+        vi.insert("k1", &rec_rmpv);
+        vi.commit_pending();
+
+        let ctx = make_ctx(None);
+        let payload = VectorSearchPayload {
+            id: "vs-defnone".to_string(),
+            map_name: "maps".to_string(),
+            index_name: Some("embedding".to_string()),
+            query_vector: make_query_vec(&[1.0f32, 0.0f32]),
+            k: 1,
+            ef_search: None,
+            options: None,
+        };
+        let op = Operation::VectorSearch { ctx, payload };
+        let resp = extract_vector_resp(svc.oneshot(op).await.unwrap());
+
+        assert_eq!(resp.results.len(), 1);
+        assert!(
+            resp.results[0].vector.is_none(),
+            "expected vector to be None when options is None"
         );
     }
 }
