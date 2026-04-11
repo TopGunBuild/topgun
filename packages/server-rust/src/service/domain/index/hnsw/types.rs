@@ -10,7 +10,7 @@ pub type ElementId = u64;
 /// capacity) and `AHashSetWrapper` (heap-allocated, configurable capacity).
 /// The trait lets `UndirectedGraph` and `Layer` work with either without
 /// monomorphization bloat across the whole module.
-pub trait DynamicSet {
+pub trait DynamicSet: Send + Sync {
     /// Add a neighbor. Returns `false` when the set is already at capacity.
     fn insert(&mut self, id: ElementId) -> bool;
 

@@ -1,9 +1,11 @@
 //! Secondary index subsystem for in-memory predicate acceleration.
 //!
-//! Provides three index types:
+//! Provides four index strategies:
 //! - [`HashIndex`]: O(1) equality lookups backed by `DashMap`
 //! - [`NavigableIndex`]: O(log N) range queries backed by `BTreeMap`
 //! - [`InvertedIndex`]: O(K) token search backed by `DashMap`
+//! - [`VectorIndex`]: approximate nearest-neighbor search via an HNSW graph
+//!   with two-phase write semantics (pending buffer + commit step)
 
 pub mod attribute;
 pub mod hash_index;
@@ -13,6 +15,8 @@ pub mod mutation_observer;
 pub mod navigable_index;
 pub mod query_optimizer;
 pub mod registry;
+pub mod vector_cache;
+pub mod vector_index;
 
 pub use attribute::AttributeExtractor;
 pub use hash_index::HashIndex;
@@ -21,15 +25,18 @@ pub use navigable_index::NavigableIndex;
 pub use mutation_observer::{IndexMutationObserver, IndexObserverFactory};
 pub use query_optimizer::index_aware_evaluate;
 pub use registry::{IndexRegistry, IndexStats};
+pub use vector_cache::{VectorCache, VectorCacheConfig};
+pub use vector_index::{VectorIndex, VectorPendingUpdate};
 
 use std::collections::HashSet;
 
-/// Discriminant for the three index strategies.
+/// Discriminant for the four index strategies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexType {
     Hash,
     Navigable,
     Inverted,
+    Vector,
 }
 
 /// Core trait implemented by all index types.

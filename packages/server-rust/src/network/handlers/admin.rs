@@ -771,6 +771,18 @@ pub async fn create_index(
         IndexTypeParam::Hash => registry.add_hash_index(&req.attribute),
         IndexTypeParam::Navigable => registry.add_navigable_index(&req.attribute),
         IndexTypeParam::Inverted => registry.add_inverted_index(&req.attribute),
+        // Vector index creation via the admin API is handled by a later spec;
+        // this arm prevents a non-exhaustive match compile error.
+        IndexTypeParam::Vector => {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                axum::Json(admin_types::ErrorResponse {
+                    code: 400,
+                    message: "Vector index creation via this endpoint is not yet supported. Use add_vector_index directly.".to_string(),
+                    field: None,
+                }),
+            ));
+        }
     }
 
     // Spawn a background backfill task to populate the new index with existing records.
@@ -858,6 +870,7 @@ pub async fn list_indexes(
                     IndexType::Hash => IndexTypeParam::Hash,
                     IndexType::Navigable => IndexTypeParam::Navigable,
                     IndexType::Inverted => IndexTypeParam::Inverted,
+                    IndexType::Vector => IndexTypeParam::Vector,
                 };
                 IndexInfoResponse {
                     map_name: map_name.clone(),

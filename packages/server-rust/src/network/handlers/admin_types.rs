@@ -215,6 +215,7 @@ pub enum IndexTypeParam {
     Hash,
     Navigable,
     Inverted,
+    Vector,
 }
 
 /// Request body for creating a new secondary index on a map attribute.
