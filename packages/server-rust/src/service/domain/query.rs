@@ -1052,7 +1052,7 @@ impl QueryService {
         scored.truncate(k);
 
         // 10. Build result entries.
-        let extractor = AttributeExtractor::new(attribute.to_string());
+        let extractor = AttributeExtractor::new(attribute.clone());
         let results: Vec<VectorSearchResult> = scored
             .into_iter()
             .map(|(key, score)| {
@@ -1100,19 +1100,18 @@ impl QueryService {
 /// little-endian f32 bytes, suitable for `VectorSearchResult.vector`.
 ///
 /// Returns `None` (with a warn log) on any failure: missing attribute,
-/// non-Binary field, or MsgPack decode error. Non-fatal: callers continue
+/// non-Binary field, or `MsgPack` decode error. Non-fatal: callers continue
 /// building the response with `vector: None` for that row.
 fn extract_vector_bytes_le(record: &rmpv::Value, extractor: &AttributeExtractor) -> Option<Vec<u8>> {
     let field = extractor.extract(record);
-    let bytes = match &field {
-        rmpv::Value::Binary(b) => b.as_slice(),
-        _ => {
-            tracing::warn!(
-                attribute = extractor.attribute_name(),
-                "include_vectors: attribute field is not Binary"
-            );
-            return None;
-        }
+    let bytes = if let rmpv::Value::Binary(b) = &field {
+        b.as_slice()
+    } else {
+        tracing::warn!(
+            attribute = extractor.attribute_name(),
+            "include_vectors: attribute field is not Binary"
+        );
+        return None;
     };
     match rmp_serde::from_slice::<topgun_core::vector::Vector>(bytes) {
         Ok(v) => Some(v.to_f32_bytes_le()),
