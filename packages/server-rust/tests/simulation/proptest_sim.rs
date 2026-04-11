@@ -8,9 +8,9 @@
 //! The async bridge pattern used here:
 //! - Each test is a `#[tokio::test]` function that constructs a `TestRunner`
 //!   directly and calls `runner.run(&strategy, |ops| { ... })`.
-//! - Async SimCluster methods are called via `Handle::current().block_on(...)`.
+//! - Async `SimCluster` methods are called via `Handle::current().block_on(...)`.
 //! - This avoids the `proptest!` macro which generates a synchronous `#[test]`
-//!   function incompatible with SimCluster's async API.
+//!   function incompatible with `SimCluster`'s async API.
 
 #![cfg(feature = "simulation")]
 
@@ -27,7 +27,7 @@ use topgun_server::sim::cluster::SimCluster;
 #[derive(Debug, Clone)]
 enum Op {
     /// Write a value to the given node (resolved via modular arithmetic), map,
-    /// and key. The node_idx is resolved at execution time as
+    /// and key. The `node_idx` is resolved at execution time as
     /// `node_idx % live_node_count` to handle dynamic cluster membership.
     Write {
         node_idx: usize,
@@ -96,7 +96,7 @@ fn arb_ops() -> impl Strategy<Value = Vec<Op>> {
 ///
 /// The `source_node` field tracks which node received the write. When that
 /// node is killed, the write is removed from the completeness check list
-/// because SimCluster does not replicate writes automatically — a write to a
+/// because `SimCluster` does not replicate writes automatically — a write to a
 /// single node is durably "present" only while that node is alive.
 #[derive(Debug, Clone)]
 struct AckedWrite {
@@ -328,7 +328,7 @@ fn maps_used(ops: &[Op]) -> Vec<String> {
 /// Property: random operation sequences preserve convergence.
 ///
 /// Executes a random sequence of writes, node joins, node kills, and network
-/// partitions on a 3-node SimCluster. After execution, all partitions are
+/// partitions on a 3-node `SimCluster`. After execution, all partitions are
 /// healed and a full Merkle sync is performed. All acknowledged writes must
 /// then be visible identically on every live node.
 #[tokio::test(flavor = "multi_thread")]
@@ -346,7 +346,7 @@ async fn random_operations_preserve_convergence() {
         tokio::task::block_in_place(|| {
             handle.block_on(async {
                 let maps: Vec<String> = maps_used(&ops);
-                let map_refs: Vec<&str> = maps.iter().map(|s| s.as_str()).collect();
+                let map_refs: Vec<&str> = maps.iter().map(String::as_str).collect();
 
                 // Fixed seed for reproducible node timing within each case.
                 let seed = 42u64;
@@ -416,7 +416,7 @@ async fn random_operations_merkle_consistent() {
         tokio::task::block_in_place(|| {
             handle.block_on(async {
                 let maps: Vec<String> = maps_used(&ops);
-                let map_refs: Vec<&str> = maps.iter().map(|s| s.as_str()).collect();
+                let map_refs: Vec<&str> = maps.iter().map(String::as_str).collect();
 
                 let seed = 44u64;
                 let (cluster, acked) = execute_ops(&ops, seed).await;

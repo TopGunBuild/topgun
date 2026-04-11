@@ -176,6 +176,7 @@ impl StorageEngine for HashMapStorage {
 }
 
 #[cfg(test)]
+#[allow(clippy::cast_sign_loss)]
 mod tests {
     use super::*;
     use crate::storage::record::{RecordMetadata, RecordValue};

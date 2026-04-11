@@ -991,9 +991,13 @@ impl ProcessorSupplier for LimitProcessorSupplier {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::map_unwrap_or,
+)]
 mod tests {
-    use std::collections::VecDeque;
-
     use topgun_core::messages::base::{PredicateNode, PredicateOp};
 
     use super::*;
@@ -1083,7 +1087,7 @@ mod tests {
 
     #[test]
     fn aggregate_groups_by_field() {
-        let mut proc = AggregateProcessor::new(vec!["category".to_string()], "".to_string());
+        let mut proc = AggregateProcessor::new(vec!["category".to_string()], String::new());
         let ctx = make_context();
         proc.init(&ctx).unwrap();
 

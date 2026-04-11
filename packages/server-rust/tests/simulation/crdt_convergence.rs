@@ -28,7 +28,7 @@ fn assert_or_tags(value: &RecordValue, expected_tags: &[&str]) {
 
 /// Three nodes each write a different value to the same key. After pairwise
 /// Merkle sync the cluster must converge to the LWW winner (highest HLC
-/// timestamp determines winner; with equal millis/counter the node_id
+/// timestamp determines winner; with equal millis/counter the `node_id`
 /// tiebreaker applies: "sim-node-2" > "sim-node-1" > "sim-node-0").
 #[tokio::test]
 async fn concurrent_writes_converge() {
@@ -145,7 +145,7 @@ async fn ormap_concurrent_add_remove() {
 
 /// Each partitioned node writes to the same key in isolation. After healing
 /// and Merkle syncing the cluster must converge to the LWW winner.
-/// With equal wall-clock timestamps the node_id tiebreaker applies:
+/// With equal wall-clock timestamps the `node_id` tiebreaker applies:
 /// "sim-node-1" > "sim-node-0", so node 1's value wins.
 #[tokio::test]
 async fn write_during_partition_converges() {

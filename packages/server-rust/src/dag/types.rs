@@ -531,14 +531,14 @@ mod tests {
 
     // --- AC #2: RoutingPolicy variants round-trip through MsgPack ---
 
-    fn routing_roundtrip(policy: RoutingPolicy) -> RoutingPolicy {
+    fn routing_roundtrip(policy: &RoutingPolicy) -> RoutingPolicy {
         let bytes = rmp_serde::to_vec_named(&policy).expect("serialize");
         rmp_serde::from_slice(&bytes).expect("deserialize")
     }
 
     #[test]
     fn routing_policy_unicast_roundtrip() {
-        assert_eq!(routing_roundtrip(RoutingPolicy::Unicast), RoutingPolicy::Unicast);
+        assert_eq!(routing_roundtrip(&RoutingPolicy::Unicast), RoutingPolicy::Unicast);
     }
 
     #[test]
@@ -546,22 +546,22 @@ mod tests {
         let policy = RoutingPolicy::Partitioned {
             partition_key_field: "userId".to_string(),
         };
-        assert_eq!(routing_roundtrip(policy.clone()), policy);
+        assert_eq!(routing_roundtrip(&policy), policy);
     }
 
     #[test]
     fn routing_policy_broadcast_roundtrip() {
-        assert_eq!(routing_roundtrip(RoutingPolicy::Broadcast), RoutingPolicy::Broadcast);
+        assert_eq!(routing_roundtrip(&RoutingPolicy::Broadcast), RoutingPolicy::Broadcast);
     }
 
     #[test]
     fn routing_policy_isolated_roundtrip() {
-        assert_eq!(routing_roundtrip(RoutingPolicy::Isolated), RoutingPolicy::Isolated);
+        assert_eq!(routing_roundtrip(&RoutingPolicy::Isolated), RoutingPolicy::Isolated);
     }
 
     #[test]
     fn routing_policy_fanout_roundtrip() {
-        assert_eq!(routing_roundtrip(RoutingPolicy::Fanout), RoutingPolicy::Fanout);
+        assert_eq!(routing_roundtrip(&RoutingPolicy::Fanout), RoutingPolicy::Fanout);
     }
 
     // --- AC #3: Plan descriptors serialize correctly ---

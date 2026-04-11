@@ -743,6 +743,13 @@ impl Service<Operation> for Arc<SyncService> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(
+    clippy::manual_string_new,
+    clippy::cloned_instead_of_copied,
+    clippy::approx_constant,
+    clippy::items_after_statements,
+    clippy::default_trait_access,
+)]
 mod tests {
     use std::sync::Arc;
 

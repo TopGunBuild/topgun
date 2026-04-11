@@ -561,6 +561,7 @@ fn compare_rmpv_values(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::doc_markdown)]
 mod tests {
     use super::*;
 

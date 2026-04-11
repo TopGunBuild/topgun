@@ -1026,6 +1026,7 @@ fn build_data_lhs_node(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::doc_markdown)]
 mod tests {
     use super::*;
     use topgun_core::messages::base::PredicateOp;

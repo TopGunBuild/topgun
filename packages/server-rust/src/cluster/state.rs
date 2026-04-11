@@ -466,7 +466,7 @@ mod tests {
         table.set_owner(2, "node-1".to_string(), vec![]);
 
         let mut pids = table.partitions_for_node("node-1");
-        pids.sort();
+        pids.sort_unstable();
         assert_eq!(pids, vec![0, 2]);
     }
 
@@ -526,15 +526,15 @@ mod tests {
     #[test]
     fn cluster_change_has_five_variants() {
         // Verify all 5 variants can be constructed.
-        let _v1 = ClusterChange::MemberAdded(make_member("n1", NodeState::Active));
-        let _v2 = ClusterChange::MemberUpdated(make_member("n1", NodeState::Active));
-        let _v3 = ClusterChange::MemberRemoved(make_member("n1", NodeState::Active));
-        let _v4 = ClusterChange::PartitionMoved {
+        let _ = ClusterChange::MemberAdded(make_member("n1", NodeState::Active));
+        let _ = ClusterChange::MemberUpdated(make_member("n1", NodeState::Active));
+        let _ = ClusterChange::MemberRemoved(make_member("n1", NodeState::Active));
+        let _ = ClusterChange::PartitionMoved {
             partition_id: 0,
             old_owner: "n1".to_string(),
             new_owner: "n2".to_string(),
         };
-        let _v5 = ClusterChange::PartitionTableUpdated { version: 1 };
+        let _ = ClusterChange::PartitionTableUpdated { version: 1 };
     }
 
     // -- ClusterState --

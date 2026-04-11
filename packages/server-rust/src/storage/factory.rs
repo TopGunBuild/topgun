@@ -180,6 +180,7 @@ impl RecordStoreFactory {
 }
 
 #[cfg(test)]
+#[allow(clippy::doc_markdown)]
 mod tests {
     use topgun_core::hlc::Timestamp;
     use topgun_core::types::Value;

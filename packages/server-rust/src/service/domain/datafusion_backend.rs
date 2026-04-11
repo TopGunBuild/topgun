@@ -139,6 +139,7 @@ impl SqlQueryBackend for DataFusionBackend {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::redundant_closure_for_method_calls)]
 mod tests {
     use super::*;
     use arrow::array::{Array, Int64Array, StringArray};
@@ -413,6 +414,7 @@ mod tests {
                 attribute: Some("age".to_string()),
                 value: Some(rmpv::Value::Integer(25.into())),
                 children: None,
+                value_ref: None,
             }),
             r#where: None,
             sort: None,

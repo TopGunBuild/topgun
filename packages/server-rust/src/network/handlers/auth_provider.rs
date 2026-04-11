@@ -512,6 +512,7 @@ impl AuthProvider for OidcProvider {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::needless_pass_by_value)]
 mod tests {
     use super::*;
     use jsonwebtoken::{encode, EncodingKey, Header};

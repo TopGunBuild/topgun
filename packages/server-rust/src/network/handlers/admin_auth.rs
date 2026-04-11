@@ -166,12 +166,13 @@ mod tests {
         exp: u64,
     }
 
-    /// Encode a token with given claims, using exp_offset_secs relative to now.
+    /// Encode a token with given claims, using `exp_offset_secs` relative to now.
     fn make_token(sub: Option<&str>, exp_offset_secs: i64) -> String {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after epoch")
             .as_secs();
+        #[allow(clippy::cast_sign_loss)]
         let exp = if exp_offset_secs >= 0 {
             now + exp_offset_secs as u64
         } else {
@@ -190,10 +191,9 @@ mod tests {
         .expect("test token encoding should not fail")
     }
 
-    /// Construct a minimal AppState for testing.
+    /// Construct a minimal `AppState` for testing.
     fn test_state(leeway: u64) -> AppState {
-        let mut config = NetworkConfig::default();
-        config.jwt_clock_skew_secs = leeway;
+        let config = NetworkConfig { jwt_clock_skew_secs: leeway, ..NetworkConfig::default() };
         AppState {
             registry: Arc::new(ConnectionRegistry::new()),
             shutdown: Arc::new(ShutdownController::new()),
@@ -221,7 +221,7 @@ mod tests {
             .header(header::AUTHORIZATION, format!("Bearer {token}"))
             .body(())
             .expect("request construction should not fail");
-        let (parts, _) = req.into_parts();
+        let (parts, ()) = req.into_parts();
         parts
     }
 
@@ -357,10 +357,9 @@ CQIDAQAB
         .expect("RS256 admin token encoding should not fail")
     }
 
-    /// Build an AppState with the RSA public key as jwt_secret.
+    /// Build an `AppState` with the RSA public key as `jwt_secret`.
     fn test_state_rsa(leeway: u64) -> AppState {
-        let mut config = NetworkConfig::default();
-        config.jwt_clock_skew_secs = leeway;
+        let config = NetworkConfig { jwt_clock_skew_secs: leeway, ..NetworkConfig::default() };
         AppState {
             registry: Arc::new(ConnectionRegistry::new()),
             shutdown: Arc::new(ShutdownController::new()),
@@ -402,10 +401,9 @@ CQIDAQAB
     // AuthValidator integration tests (SPEC-189 AC3, AC4)
     // -----------------------------------------------------------------------
 
-    /// Build a minimal AppState for testing with an optional validator.
+    /// Build a minimal `AppState` for testing with an optional validator.
     fn test_state_with_validator(validator: Option<Arc<dyn crate::network::handlers::auth_validator::AuthValidator>>) -> AppState {
-        let mut config = NetworkConfig::default();
-        config.jwt_clock_skew_secs = 60;
+        let config = NetworkConfig { jwt_clock_skew_secs: 60, ..NetworkConfig::default() };
         AppState {
             registry: Arc::new(ConnectionRegistry::new()),
             shutdown: Arc::new(ShutdownController::new()),
@@ -427,7 +425,7 @@ CQIDAQAB
         }
     }
 
-    /// AC3 (SPEC-189): A rejecting AuthValidator causes AdminClaims extractor to return Err(InvalidToken).
+    /// AC3 (SPEC-189): A rejecting `AuthValidator` causes `AdminClaims` extractor to return `Err(InvalidToken)`.
     #[tokio::test]
     async fn rejecting_validator_returns_invalid_token() {
         let validator = Arc::new(|_ctx: &crate::network::handlers::auth_validator::AuthValidationContext| {
@@ -446,7 +444,7 @@ CQIDAQAB
         }
     }
 
-    /// AC4 (SPEC-189): When auth_validator is None, valid admin token is accepted (no regression).
+    /// AC4 (SPEC-189): When `auth_validator` is `None`, valid admin token is accepted (no regression).
     #[tokio::test]
     async fn no_validator_accepts_valid_admin_token() {
         let state = test_state_with_validator(None);

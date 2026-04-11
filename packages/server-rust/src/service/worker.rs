@@ -220,7 +220,7 @@ mod tests {
     #[tokio::test]
     async fn gc_task_variants() {
         // Verify GcTask enum compiles and is usable.
-        let _full = GcTask::RunFull;
+        let _ = GcTask::RunFull;
         let _map = GcTask::RunMap {
             map_name: "users".to_string(),
         };

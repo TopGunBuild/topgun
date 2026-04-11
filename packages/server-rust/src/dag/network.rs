@@ -538,7 +538,9 @@ mod tests {
         let items: Vec<_> = outbox.drain_bucket(0).collect();
         assert_eq!(items.len(), 6);
         for (i, item) in items.iter().enumerate() {
-            assert_eq!(*item, rmpv::Value::Integer(((i + 1) as i64).into()));
+            #[allow(clippy::cast_possible_wrap)]
+            let expected = rmpv::Value::Integer(((i + 1) as i64).into());
+            assert_eq!(*item, expected);
         }
     }
 

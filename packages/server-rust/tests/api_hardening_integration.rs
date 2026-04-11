@@ -1,5 +1,5 @@
 //! Integration tests for API layer hardening (SPEC-177):
-//! CORS methods/credentials/max_age, request body limit, and error format.
+//! CORS, request body limit, and error format.
 
 use std::time::Duration;
 
@@ -8,7 +8,7 @@ use topgun_server::network::NetworkConfig;
 use topgun_server::network::NetworkModule;
 
 /// Starts a minimal server on an OS-assigned port.
-/// Returns (port, shutdown_tx, serve_handle).
+/// Returns `(port, shutdown_tx, serve_handle)`.
 async fn start_server(config: NetworkConfig) -> (u16, tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
     let mut module = NetworkModule::new(config);
     let port = module.start().await.expect("start should succeed");

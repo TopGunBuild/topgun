@@ -28,6 +28,11 @@ mod tests {
 ///
 /// Tests the end-to-end flow: Message -> classify -> pipeline -> router -> stub -> response.
 #[cfg(test)]
+#[allow(
+    clippy::doc_markdown,
+    clippy::too_many_lines,
+    clippy::no_effect_underscore_binding,
+)]
 mod integration_tests {
     use std::sync::Arc;
 

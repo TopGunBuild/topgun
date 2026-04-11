@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use topgun_server::sim::cluster::SimCluster;
+use topgun_server::sim::cluster::{SimCluster, SimNode};
 use topgun_server::sim::network::SimNetwork;
 use topgun_server::storage::record::RecordValue;
 
@@ -18,7 +18,7 @@ async fn sim_cluster_starts_with_three_nodes() {
     let mut cluster = SimCluster::new(3, 42);
     cluster.start().expect("cluster should start successfully");
     assert_eq!(cluster.nodes.len(), 3);
-    assert!(cluster.nodes.iter().all(|n| n.is_alive()));
+    assert!(cluster.nodes.iter().all(SimNode::is_alive));
 }
 
 /// AC2: Write via `SimCluster::write()` is readable via `SimCluster::read()` on the same node.
@@ -112,7 +112,6 @@ async fn sim_cluster_deterministic_with_same_seed() {
 }
 
 /// AC6 is verified by all tests compiling and running only with `--features simulation`.
-
 /// Test node kill and restart lifecycle.
 #[tokio::test]
 async fn sim_cluster_kill_and_restart_node() {

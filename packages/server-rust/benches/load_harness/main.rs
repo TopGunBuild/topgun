@@ -168,7 +168,9 @@ async fn main() {
                 policy_store: None,
                 auth_providers: Arc::new(vec![]),
                 refresh_grant_store: None,
-            auth_validator: None,
+                auth_validator: None,
+                index_observer_factory: None,
+                backfill_progress: Arc::new(DashMap::new()),
             };
 
             let ws_handler = get(topgun_server::network::handlers::ws_upgrade_handler);
@@ -529,7 +531,7 @@ fn build_services() -> (
         router.register(service_names::COORDINATION, Arc::clone(&coordination_svc));
         router.register(service_names::SEARCH, Arc::clone(&search_svc));
         router.register(service_names::PERSISTENCE, Arc::clone(&persistence_svc));
-        build_operation_pipeline(router, &config)
+        build_operation_pipeline(router, &config, None)
     };
 
     let dispatch_config = DispatchConfig::default();

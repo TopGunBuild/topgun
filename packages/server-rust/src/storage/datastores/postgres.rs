@@ -378,16 +378,20 @@ impl MapDataStore for PostgresDataStore {
 /// let store = PostgresRefreshGrantStore::new(pool, 2_592_000); // 30 days
 /// store.initialize().await?;
 /// ```
+// Not yet wired to any caller; kept for the next spec that activates the
+// refresh-grant endpoint.
+#[allow(dead_code)]
 pub struct PostgresRefreshGrantStore {
     pool: PgPool,
     grant_duration_secs: u64,
 }
 
+#[allow(dead_code)]
 impl PostgresRefreshGrantStore {
     /// Create a new grant store.
     ///
     /// `grant_duration_secs` is returned by `grant_duration_secs()` and used
-    /// by callers when computing grant expiry. 2_592_000 (30 days) is the
+    /// by callers when computing grant expiry. `2_592_000` (30 days) is the
     /// recommended default.
     pub fn new(pool: PgPool, grant_duration_secs: u64) -> Self {
         Self { pool, grant_duration_secs }
@@ -532,6 +536,7 @@ impl RefreshGrantStore for PostgresRefreshGrantStore {
 }
 
 #[cfg(test)]
+#[allow(clippy::doc_markdown)]
 mod tests {
     use super::*;
     use topgun_core::types::Value;

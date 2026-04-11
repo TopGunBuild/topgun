@@ -152,6 +152,7 @@ fn default_ollama_model() -> String {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::single_char_pattern)]
 mod tests {
     use super::*;
 

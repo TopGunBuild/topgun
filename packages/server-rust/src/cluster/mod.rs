@@ -97,7 +97,7 @@ mod integration_tests {
     // Test Category 1: Serde Round-Trip Tests
     // -----------------------------------------------------------------------
 
-    /// Helper: serialize to MsgPack named and deserialize back, asserting equality.
+    /// Helper: serialize to `MsgPack` named and deserialize back, asserting equality.
     fn round_trip(msg: &ClusterMessage) {
         let bytes = rmp_serde::to_vec_named(msg).expect("serialize failed");
         let decoded: ClusterMessage =
@@ -361,9 +361,9 @@ mod integration_tests {
     #[test]
     fn reexports_types_accessible() {
         // Construct values using only the cluster:: prefix (no submodule path).
-        let _state = NodeState::Active;
-        let _pstate = PartitionState::Unassigned;
-        let _phase = MigrationPhase::Replicating;
+        let _ = NodeState::Active;
+        let _ = PartitionState::Unassigned;
+        let _ = MigrationPhase::Replicating;
         let _member = MemberInfo {
             node_id: "n1".to_string(),
             host: "127.0.0.1".to_string(),
@@ -409,8 +409,8 @@ mod integration_tests {
 
     #[test]
     fn reexports_messages_core_types() {
-        let _msg = ClusterMessage::FetchPartitionTable;
-        let _map_type = MapType::Lww;
+        let _ = ClusterMessage::FetchPartitionTable;
+        let _ = MapType::Lww;
         let _chunk = MapStateChunk {
             map_name: "m".to_string(),
             data: vec![],
@@ -535,8 +535,8 @@ mod integration_tests {
     #[test]
     fn reexports_state_accessible() {
         let _table = ClusterPartitionTable::new(271);
-        let _change = ClusterChange::PartitionTableUpdated { version: 1 };
-        let _cmd = MigrationCommand::CancelAll;
+        let _ = ClusterChange::PartitionTableUpdated { version: 1 };
+        let _ = MigrationCommand::CancelAll;
         let _inbound = InboundClusterMessage {
             sender_node_id: "n1".to_string(),
             message: ClusterMessage::FetchPartitionTable,
@@ -548,16 +548,17 @@ mod integration_tests {
         let (_state, _rx) = ClusterState::new(config, "node-1".to_string());
     }
 
+    fn assert_fd(_: &dyn FailureDetector) {}
+
     #[test]
     fn reexports_failure_detector_accessible() {
         let _config = PhiAccrualConfig::default();
-        let _phi = PhiAccrualFailureDetector::new(PhiAccrualConfig::default());
-        let _deadline = DeadlineFailureDetector::new(5000);
+        let phi = PhiAccrualFailureDetector::new(PhiAccrualConfig::default());
+        let deadline = DeadlineFailureDetector::new(5000);
 
         // Verify they implement the FailureDetector trait via the re-exported trait.
-        fn assert_fd(_: &dyn FailureDetector) {}
-        assert_fd(&_phi);
-        assert_fd(&_deadline);
+        assert_fd(&phi);
+        assert_fd(&deadline);
     }
 
     #[test]

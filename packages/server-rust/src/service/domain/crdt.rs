@@ -18,8 +18,6 @@ use topgun_core::messages::{
 };
 use topgun_core::types::Value;
 use topgun_core::{hash_to_partition, LWWRecord, Timestamp};
-#[cfg(test)]
-use topgun_core::ORMapRecord;
 
 use tracing::Instrument;
 
@@ -749,6 +747,11 @@ fn lww_record_to_record_value(record: &LWWRecord<rmpv::Value>) -> RecordValue {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(
+    clippy::doc_markdown,
+    clippy::redundant_pattern_matching,
+    clippy::collapsible_match,
+)]
 mod tests {
     use std::sync::Arc;
 

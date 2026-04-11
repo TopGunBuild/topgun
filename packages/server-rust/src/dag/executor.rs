@@ -1032,6 +1032,7 @@ mod tests {
 
         // Fill to capacity.
         for i in 0..capacity {
+            #[allow(clippy::cast_possible_wrap)]
             let accepted = outbox.offer(0, rmpv::Value::Integer((i as i64).into()));
             assert!(accepted, "offer {i} should be accepted while under capacity");
         }
@@ -1082,7 +1083,7 @@ mod tests {
             local_parallelism: 1,
             processor_supplier: Box::new(AggregateProcessorSupplier {
                 group_by: vec!["category".to_string()],
-                agg_field: "".to_string(), // COUNT(*)
+                agg_field: String::new(), // COUNT(*)
             }),
             preferred_partitions: None,
         });
@@ -1119,7 +1120,7 @@ mod tests {
 
     /// AC #5: Partitioned routing hashes items deterministically.
     ///
-    /// Tests that compute_partition_hash produces a stable hash for a given field value.
+    /// Tests that `compute_partition_hash` produces a stable hash for a given field value.
     #[test]
     fn partitioned_routing_hash_is_deterministic() {
         let item = make_rmpv_map(&[("userId", rmpv::Value::String("alice".into()))]);

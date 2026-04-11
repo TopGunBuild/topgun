@@ -297,6 +297,7 @@ impl ExecutionPlan for TopGunExec {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::redundant_closure_for_method_calls)]
 mod tests {
     use super::*;
     use arrow::array::{Int64Array, StringArray};
@@ -308,7 +309,7 @@ mod tests {
     use crate::storage::impls::StorageConfig;
     use crate::storage::RecordStoreFactory;
     use crate::storage::{CallerProvenance, ExpiryPolicy};
-    use crate::storage::record::{RecordMetadata, RecordValue};
+    use crate::storage::record::RecordValue;
 
     fn test_schema() -> SchemaRef {
         Arc::new(Schema::new(vec![

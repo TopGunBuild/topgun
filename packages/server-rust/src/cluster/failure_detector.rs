@@ -278,6 +278,7 @@ fn erfc(x: f64) -> f64 {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
 
@@ -295,13 +296,13 @@ mod tests {
         // Known values: erfc(1) ≈ 0.1573, erfc(2) ≈ 0.00468
         let e1 = erfc(1.0);
         assert!(
-            (e1 - 0.1572992).abs() < 1e-5,
+            (e1 - 0.157_299_2).abs() < 1e-5,
             "erfc(1) = {e1}, expected ~0.1573"
         );
 
         let e2 = erfc(2.0);
         assert!(
-            (e2 - 0.0046778).abs() < 1e-5,
+            (e2 - 0.004_677_8).abs() < 1e-5,
             "erfc(2) = {e2}, expected ~0.00468"
         );
     }
@@ -311,7 +312,7 @@ mod tests {
         // erfc(-1) = 2 - erfc(1) ≈ 1.8427
         let val = erfc(-1.0);
         assert!(
-            (val - 1.8427008).abs() < 1e-5,
+            (val - 1.842_700_8).abs() < 1e-5,
             "erfc(-1) = {val}, expected ~1.8427"
         );
     }

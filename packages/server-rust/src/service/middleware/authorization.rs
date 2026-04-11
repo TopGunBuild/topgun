@@ -313,6 +313,7 @@ fn extract_data(op: &Operation) -> rmpv::Value {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::doc_markdown)]
 mod tests {
     use std::future::Future;
     use std::pin::Pin;

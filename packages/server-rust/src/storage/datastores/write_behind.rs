@@ -716,6 +716,7 @@ mod tests {
 
     /// Records which calls were made to the inner store, for test assertions.
     #[derive(Debug, Clone)]
+    #[allow(dead_code)]
     enum SpyCall {
         Add {
             map: String,

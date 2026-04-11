@@ -1049,6 +1049,11 @@ pub(crate) fn project_fields(fields: &[String], record: &rmpv::Value) -> rmpv::V
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(
+    clippy::doc_markdown,
+    clippy::doc_lazy_continuation,
+    clippy::uninlined_format_args,
+)]
 mod tests {
     use std::collections::BTreeMap;
 

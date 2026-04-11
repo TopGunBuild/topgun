@@ -547,12 +547,12 @@ mod tests {
     }
 
     fn make_coordinator(
-        state: Arc<ClusterState>,
+        state: &Arc<ClusterState>,
     ) -> (MigrationCoordinator, Vec<tokio::sync::mpsc::Receiver<OutboundMessage>>) {
         let registry = Arc::new(ConnectionRegistry::new());
         let map_provider: Arc<dyn MapProvider> = Arc::new(NoOpMapProvider);
         let coordinator = MigrationCoordinator::new(
-            Arc::clone(&state),
+            Arc::clone(state),
             registry,
             map_provider,
         );
@@ -817,7 +817,7 @@ mod tests {
             .partition_table
             .set_owner(5, "node-1".to_string(), vec![]);
 
-        let (coordinator, _) = make_coordinator(Arc::clone(&state));
+        let (coordinator, _) = make_coordinator(&state);
 
         let data = MigrateDataPayload {
             partition_id: 5,
@@ -945,7 +945,7 @@ mod tests {
     #[tokio::test]
     async fn is_migrating_returns_true_during_migration() {
         let (state, _rx) = make_state_with_master("node-1");
-        let (coordinator, _) = make_coordinator(Arc::clone(&state));
+        let (coordinator, _) = make_coordinator(&state);
 
         assert!(!coordinator.is_migrating(5));
 
@@ -1106,7 +1106,7 @@ mod tests {
                     task.destination
                 );
             }
-            other => panic!("expected MigrationCommand::Start, got {:?}", other),
+            other => panic!("expected MigrationCommand::Start, got {other:?}"),
         }
 
         // Clean up.

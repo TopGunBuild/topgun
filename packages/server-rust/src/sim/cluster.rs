@@ -943,6 +943,12 @@ impl SimCluster {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(
+    clippy::doc_markdown,
+    clippy::cast_possible_truncation,
+    clippy::too_many_lines,
+    clippy::manual_is_multiple_of,
+)]
 mod tests {
     use std::time::Duration;
 

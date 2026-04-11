@@ -151,6 +151,7 @@ impl WriteValidator {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::default_trait_access)]
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;

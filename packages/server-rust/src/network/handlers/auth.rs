@@ -252,6 +252,7 @@ impl AuthHandler {
 }
 
 #[cfg(test)]
+#[allow(clippy::cast_sign_loss)]
 mod tests {
     use super::*;
     use jsonwebtoken::{EncodingKey, Header};

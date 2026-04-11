@@ -870,6 +870,12 @@ fn msgpack_response(response: &HttpSyncResponse) -> axum::response::Response {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::cast_sign_loss,
+    clippy::field_reassign_with_default,
+    clippy::doc_markdown,
+    clippy::ignored_unit_patterns,
+)]
 mod tests {
     use super::*;
     use crate::network::handlers::auth::{decode_jwt_key, JwtClaims};
@@ -1102,7 +1108,6 @@ mod tests {
     #[tokio::test]
     async fn auth_invalid_token_insecure_mode_shows_detail() {
         use crate::network::config::NetworkConfig;
-        use crate::service::config::ServerConfig;
         use std::sync::Arc;
 
         let mut base_state = test_state_with_auth(true);
@@ -1658,7 +1663,6 @@ mod tests {
     /// AC2 (SPEC-189): A rejecting AuthValidator causes ClientClaims extractor to return None.
     #[tokio::test]
     async fn client_claims_rejecting_validator_returns_none() {
-        use axum::extract::OptionalFromRequestParts;
         use axum::http::{header, Request};
 
         let validator = Arc::new(|_ctx: &crate::network::handlers::auth_validator::AuthValidationContext| {
@@ -1679,7 +1683,6 @@ mod tests {
     /// AC4 (SPEC-189): When auth_validator is None, valid token is accepted (no regression).
     #[tokio::test]
     async fn client_claims_no_validator_accepts_valid_token() {
-        use axum::extract::OptionalFromRequestParts;
         use axum::http::{header, Request};
 
         let state = test_state_with_validator(None);
