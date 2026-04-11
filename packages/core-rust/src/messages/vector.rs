@@ -1,6 +1,6 @@
 //! Wire types for vector search request/response messages.
 //!
-//! Clients encode a little-endian f32 byte buffer as `query_vector` (MsgPack
+//! Clients encode a little-endian f32 byte buffer as `query_vector` (`MsgPack`
 //! `bin` format). The server decodes it via `decode_query_vector`, runs HNSW
 //! nearest-neighbour search, and returns ranked results.
 
@@ -16,6 +16,7 @@ mod serde_bytes_opt {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use serde_bytes::ByteBuf;
 
+    #[allow(clippy::ref_option)]
     pub fn serialize<S: Serializer>(v: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
         v.as_ref().map(|b| ByteBuf::from(b.clone())).serialize(s)
     }
@@ -81,7 +82,7 @@ impl VectorSearchPayload {
     /// Returns `Err` with a descriptive message if the byte length is not a multiple of 4
     /// or if it does not match `4 * expected_dim` when `expected_dim` is provided.
     pub fn decode_query_vector(&self, expected_dim: Option<u16>) -> Result<Vec<f32>, String> {
-        if self.query_vector.len() % 4 != 0 {
+        if !self.query_vector.len().is_multiple_of(4) {
             return Err(format!(
                 "query_vector length {} is not a multiple of 4",
                 self.query_vector.len()
