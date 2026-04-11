@@ -205,7 +205,7 @@ mod tests {
             .iter()
             .filter_map(|(k, _)| {
                 if let rmpv::Value::String(s) = k {
-                    s.as_str().map(std::string::ToString::to_string)
+                    s.as_str().map(String::from)
                 } else {
                     None
                 }
@@ -257,7 +257,7 @@ mod tests {
             .iter()
             .filter_map(|(k, _)| {
                 if let rmpv::Value::String(s) = k {
-                    s.as_str().map(std::string::ToString::to_string)
+                    s.as_str().map(String::from)
                 } else {
                     None
                 }
