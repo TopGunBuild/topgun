@@ -8,9 +8,12 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+pub mod hook;
 pub mod http;
 pub mod noop;
 pub mod ollama;
+
+pub use hook::{EmbeddingConfig, EmbeddingObserverFactory};
 
 // ---------------------------------------------------------------------------
 // Trait

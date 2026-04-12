@@ -43,6 +43,9 @@ use topgun_server::service::domain::messaging::MessagingService;
 use topgun_server::service::domain::persistence::PersistenceService;
 use topgun_server::service::domain::query::{QueryRegistry, QueryService};
 use topgun_server::service::domain::schema::SchemaService;
+use topgun_server::service::domain::embedding::{
+    EmbeddingConfig, EmbeddingObserverFactory,
+};
 use topgun_server::service::domain::search::{
     SearchConfig, SearchMutationObserver, SearchRegistry, SearchService, TantivyMapIndex,
 };
@@ -458,9 +461,29 @@ fn build_services(
     let merkle_observer_factory: Arc<dyn ObserverFactory> =
         Arc::new(MerkleObserverFactory::new(Arc::clone(&merkle_manager)));
 
+    // Phase 1: construct the embedding observer factory before RecordStoreFactory exists.
+    // Uses a noop provider for the test server (no real embedding service dependency).
+    // The maps config is empty so no observer is registered for any map by default;
+    // integration tests that need embedding can wire a custom VectorConfig.
+    let embedding_vector_config = Arc::new(topgun_server::service::domain::embedding::VectorConfig {
+        provider: topgun_server::service::domain::embedding::EmbeddingProviderConfig::Noop(
+            topgun_server::service::domain::embedding::NoopConfig { dimension: 4 },
+        ),
+        maps: std::collections::HashMap::new(),
+    });
+    let embedding_provider: Arc<dyn topgun_server::service::domain::embedding::EmbeddingProvider> =
+        Arc::new(topgun_server::service::domain::embedding::noop::NoopEmbeddingProvider::new(
+            &topgun_server::service::domain::embedding::NoopConfig { dimension: 4 },
+        ));
+    let embedding_factory = Arc::new(EmbeddingObserverFactory::new(
+        EmbeddingConfig::default(),
+        embedding_vector_config,
+        embedding_provider,
+    ));
+
     #[allow(unused_mut)]
     let mut observer_factories: Vec<Arc<dyn ObserverFactory>> =
-        vec![search_observer_factory, merkle_observer_factory];
+        vec![search_observer_factory, merkle_observer_factory, embedding_factory.clone()];
 
     // When datafusion is enabled, register ArrowCacheObserverFactory so that
     // record mutations invalidate the Arrow cache for SQL query freshness.
@@ -483,6 +506,9 @@ fn build_services(
         )
         .with_observer_factories(observer_factories),
     );
+
+    // Phase 2: inject the factory Arc and spawn the background embedding task.
+    embedding_factory.init(Arc::clone(&record_store_factory));
 
     let write_validator = {
         let wv_hlc = Arc::new(parking_lot::Mutex::new(HLC::new(
