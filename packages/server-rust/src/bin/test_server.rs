@@ -44,7 +44,8 @@ use topgun_server::service::domain::persistence::PersistenceService;
 use topgun_server::service::domain::query::{QueryRegistry, QueryService};
 use topgun_server::service::domain::schema::SchemaService;
 use topgun_server::service::domain::embedding::{
-    EmbeddingConfig, EmbeddingObserverFactory,
+    noop::NoopEmbeddingProvider, EmbeddingConfig, EmbeddingObserverFactory, EmbeddingProvider,
+    EmbeddingProviderConfig, NoopConfig, VectorConfig as EmbeddingVectorConfig,
 };
 use topgun_server::service::domain::search::{
     SearchConfig, SearchMutationObserver, SearchRegistry, SearchService, TantivyMapIndex,
@@ -465,16 +466,12 @@ fn build_services(
     // Uses a noop provider for the test server (no real embedding service dependency).
     // The maps config is empty so no observer is registered for any map by default;
     // integration tests that need embedding can wire a custom VectorConfig.
-    let embedding_vector_config = Arc::new(topgun_server::service::domain::embedding::VectorConfig {
-        provider: topgun_server::service::domain::embedding::EmbeddingProviderConfig::Noop(
-            topgun_server::service::domain::embedding::NoopConfig { dimension: 4 },
-        ),
+    let embedding_vector_config = Arc::new(EmbeddingVectorConfig {
+        provider: EmbeddingProviderConfig::Noop(NoopConfig { dimension: 4 }),
         maps: std::collections::HashMap::new(),
     });
-    let embedding_provider: Arc<dyn topgun_server::service::domain::embedding::EmbeddingProvider> =
-        Arc::new(topgun_server::service::domain::embedding::noop::NoopEmbeddingProvider::new(
-            &topgun_server::service::domain::embedding::NoopConfig { dimension: 4 },
-        ));
+    let embedding_provider: Arc<dyn EmbeddingProvider> =
+        Arc::new(NoopEmbeddingProvider::new(&NoopConfig { dimension: 4 }));
     let embedding_factory = Arc::new(EmbeddingObserverFactory::new(
         EmbeddingConfig::default(),
         embedding_vector_config,
