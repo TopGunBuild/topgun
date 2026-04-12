@@ -980,6 +980,102 @@ export interface ORMapSyncHandlerConfig {
 }
 
 // ============================================
+// VectorSearchClient Types
+// ============================================
+
+/**
+ * Configuration for VectorSearchClient.
+ */
+export interface VectorSearchClientConfig {
+  /**
+   * Callback to send messages via SyncEngine/WebSocketManager.
+   * @param message - Message to send
+   * @returns true if sent successfully
+   */
+  sendMessage: (message: any) => boolean;
+
+  /**
+   * Callback to check if authenticated.
+   */
+  isAuthenticated: () => boolean;
+
+  /**
+   * Timeout for vector search requests in milliseconds.
+   * Default: 30000 (30 seconds)
+   */
+  timeoutMs?: number;
+}
+
+/**
+ * Options for a vector search request.
+ */
+export interface VectorSearchClientOptions {
+  /** Number of nearest neighbours to return. Default: 10 */
+  k?: number;
+  /** Name of the HNSW index to query (if multiple indexes exist on the map). */
+  indexName?: string;
+  /** HNSW efSearch parameter — controls recall vs. speed trade-off. */
+  efSearch?: number;
+  /** Include the stored value in each result. Default: false */
+  includeValue?: boolean;
+  /** Include the stored vector in each result. Default: false */
+  includeVectors?: boolean;
+  /** Minimum similarity score threshold (0–1). Results below this are filtered. */
+  minScore?: number;
+}
+
+/**
+ * A single result from a vector search, as seen by the developer.
+ * The vector field is Float32Array (developer-facing), not the wire-format Uint8Array.
+ */
+export interface VectorSearchClientResult {
+  key: string;
+  score: number;
+  value?: unknown;
+  /** Decoded Float32Array, present only when includeVectors was true. */
+  vector?: Float32Array;
+}
+
+/**
+ * Interface for approximate nearest-neighbour vector search operations.
+ * Handles one-shot VECTOR_SEARCH request/response over the WebSocket connection.
+ */
+export interface IVectorSearchClient {
+  /**
+   * Perform an ANN vector search on the server.
+   * @param mapName - Name of the map / index to search
+   * @param queryVector - Query vector as Float32Array or number[]
+   * @param options - Search options (k, efSearch, filters, etc.)
+   * @returns Promise resolving to ranked VectorSearchClientResult[]
+   */
+  vectorSearch(
+    mapName: string,
+    queryVector: Float32Array | number[],
+    options?: VectorSearchClientOptions
+  ): Promise<VectorSearchClientResult[]>;
+
+  /**
+   * Handle VECTOR_SEARCH_RESP message from server.
+   * Called by the message router.
+   * @param payload - Response payload (matches VectorSearchRespPayloadSchema)
+   */
+  handleResponse(payload: {
+    id: string;
+    results: Array<{ key: string; score: number; value?: unknown; vector?: Uint8Array }>;
+    totalCandidates: number;
+    searchTimeMs: number;
+    error?: string;
+  }): void;
+
+  /**
+   * Clean up resources (clear pending timeouts).
+   * Does NOT reject pending promises — use when shutting down cleanly.
+   * @param error - If provided, reject pending promises with this error.
+   */
+  close(error?: Error): void;
+}
+
+// ============================================
 // MessageRouter Types
 // ============================================
 
