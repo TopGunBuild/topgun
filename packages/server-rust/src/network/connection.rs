@@ -25,8 +25,7 @@ use super::config::ConnectionConfig;
 /// dependency: `service` imports from `network`, so placing `MapPermissions`
 /// in `service` would require `network` to import from `service`, creating a cycle.
 /// As a plain data struct with no service logic, it belongs here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MapPermissions {
     /// Whether this connection may read from the map.
@@ -37,7 +36,10 @@ pub struct MapPermissions {
 
 impl Default for MapPermissions {
     fn default() -> Self {
-        Self { read: true, write: true }
+        Self {
+            read: true,
+            write: true,
+        }
     }
 }
 
@@ -286,11 +288,7 @@ impl ConnectionRegistry {
 
     /// Removes and returns all connections. Used during graceful shutdown.
     pub fn drain_all(&self) -> Vec<Arc<ConnectionHandle>> {
-        let keys: Vec<ConnectionId> = self
-            .connections
-            .iter()
-            .map(|entry| *entry.key())
-            .collect();
+        let keys: Vec<ConnectionId> = self.connections.iter().map(|entry| *entry.key()).collect();
 
         let mut handles = Vec::with_capacity(keys.len());
         for key in keys {
@@ -586,9 +584,15 @@ mod tests {
         registry.send_to_connections(&ids, &[42]);
 
         // h1 should have received the message
-        assert!(rx1.try_recv().is_ok(), "targeted connection should receive bytes");
+        assert!(
+            rx1.try_recv().is_ok(),
+            "targeted connection should receive bytes"
+        );
         // h2 should NOT have received anything
-        assert!(rx2.try_recv().is_err(), "non-targeted connection should not receive bytes");
+        assert!(
+            rx2.try_recv().is_err(),
+            "non-targeted connection should not receive bytes"
+        );
     }
 
     #[test]

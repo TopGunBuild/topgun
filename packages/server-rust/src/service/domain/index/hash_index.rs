@@ -49,10 +49,7 @@ impl HashIndex {
 
     fn index_single(&self, key: &str, val: &rmpv::Value) {
         let iv = IndexableValue::from_value(val);
-        self.map
-            .entry(iv)
-            .or_default()
-            .insert(key.to_owned());
+        self.map.entry(iv).or_default().insert(key.to_owned());
     }
 
     /// Removes a record key from the index entry for the given attribute value.
@@ -134,7 +131,10 @@ impl Index for HashIndex {
 
     fn entry_count(&self) -> u64 {
         // Count unique (value, key) pairs across all buckets.
-        self.map.iter().map(|entry| entry.value().len() as u64).sum()
+        self.map
+            .iter()
+            .map(|entry| entry.value().len() as u64)
+            .sum()
     }
 }
 
@@ -254,9 +254,8 @@ mod tests {
                     let key = format!("k{i}-{j}");
                     let cat = if j % 2 == 0 { "electronics" } else { "books" };
                     idx_clone.insert(&key, &record(cat));
-                    let _ = idx_clone.lookup_eq(&rmpv::Value::String(
-                        rmpv::Utf8String::from("electronics"),
-                    ));
+                    let _ = idx_clone
+                        .lookup_eq(&rmpv::Value::String(rmpv::Utf8String::from("electronics")));
                 }
             }));
         }

@@ -79,11 +79,8 @@ pub trait StorageEngine: Send + Sync + 'static {
     fn fetch_keys(&self, cursor: &IterationCursor, size: usize) -> FetchResult<String>;
 
     /// Fetch at least `size` entries (key + record) starting from `cursor`.
-    fn fetch_entries(
-        &self,
-        cursor: &IterationCursor,
-        size: usize,
-    ) -> FetchResult<(String, Record)>;
+    fn fetch_entries(&self, cursor: &IterationCursor, size: usize)
+        -> FetchResult<(String, Record)>;
 
     /// Return a point-in-time snapshot of all entries.
     ///

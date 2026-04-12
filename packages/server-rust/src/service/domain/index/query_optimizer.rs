@@ -290,20 +290,36 @@ mod tests {
         // Index::insert expects the full record map so AttributeExtractor can
         // pull the "status" attribute from it.
         let idx = registry.get_index("status").unwrap();
-        idx.insert("k1", &make_record("status", rmpv::Value::String("active".into())));
-        idx.insert("k2", &make_record("status", rmpv::Value::String("inactive".into())));
-        idx.insert("k3", &make_record("status", rmpv::Value::String("active".into())));
+        idx.insert(
+            "k1",
+            &make_record("status", rmpv::Value::String("active".into())),
+        );
+        idx.insert(
+            "k2",
+            &make_record("status", rmpv::Value::String("inactive".into())),
+        );
+        idx.insert(
+            "k3",
+            &make_record("status", rmpv::Value::String("active".into())),
+        );
 
         let all_keys = vec!["k1".to_string(), "k2".to_string(), "k3".to_string()];
         let records = |key: &str| -> Option<rmpv::Value> {
             match key {
                 "k1" | "k3" => Some(make_record("status", rmpv::Value::String("active".into()))),
-                "k2" => Some(make_record("status", rmpv::Value::String("inactive".into()))),
+                "k2" => Some(make_record(
+                    "status",
+                    rmpv::Value::String("inactive".into()),
+                )),
                 _ => None,
             }
         };
 
-        let pred = leaf(PredicateOp::Eq, "status", rmpv::Value::String("active".into()));
+        let pred = leaf(
+            PredicateOp::Eq,
+            "status",
+            rmpv::Value::String("active".into()),
+        );
         let mut result = index_aware_evaluate(&registry, &pred, &all_keys, records);
         result.sort();
 
@@ -347,16 +363,34 @@ mod tests {
         let registry = make_registry_with_inverted("bio");
         let idx = registry.get_index("bio").unwrap();
         // InvertedIndex tokenises on whitespace; pass full record maps.
-        idx.insert("k1", &make_record("bio", rmpv::Value::String("rust developer".into())));
-        idx.insert("k2", &make_record("bio", rmpv::Value::String("javascript developer".into())));
-        idx.insert("k3", &make_record("bio", rmpv::Value::String("rust engineer".into())));
+        idx.insert(
+            "k1",
+            &make_record("bio", rmpv::Value::String("rust developer".into())),
+        );
+        idx.insert(
+            "k2",
+            &make_record("bio", rmpv::Value::String("javascript developer".into())),
+        );
+        idx.insert(
+            "k3",
+            &make_record("bio", rmpv::Value::String("rust engineer".into())),
+        );
 
         let all_keys = vec!["k1".to_string(), "k2".to_string(), "k3".to_string()];
         let records = |key: &str| -> Option<rmpv::Value> {
             match key {
-                "k1" => Some(make_record("bio", rmpv::Value::String("rust developer".into()))),
-                "k2" => Some(make_record("bio", rmpv::Value::String("javascript developer".into()))),
-                "k3" => Some(make_record("bio", rmpv::Value::String("rust engineer".into()))),
+                "k1" => Some(make_record(
+                    "bio",
+                    rmpv::Value::String("rust developer".into()),
+                )),
+                "k2" => Some(make_record(
+                    "bio",
+                    rmpv::Value::String("javascript developer".into()),
+                )),
+                "k3" => Some(make_record(
+                    "bio",
+                    rmpv::Value::String("rust engineer".into()),
+                )),
                 _ => None,
             }
         };
@@ -369,7 +403,10 @@ mod tests {
         let pred = leaf(PredicateOp::Like, "bio", rmpv::Value::String("rust".into()));
         let result = index_aware_evaluate(&registry, &pred, &all_keys, records);
         // evaluate_predicate returns false for Like, so all candidates are rejected.
-        assert!(result.is_empty(), "Like returns false in evaluate_predicate, so no matches");
+        assert!(
+            result.is_empty(),
+            "Like returns false in evaluate_predicate, so no matches"
+        );
     }
 
     // ---- Fallback to full scan when no index exists ----------------------
@@ -406,8 +443,14 @@ mod tests {
         // Records with two fields: role and active.
         let make_full_record = |role: &str, active: bool| -> rmpv::Value {
             rmpv::Value::Map(vec![
-                (rmpv::Value::String("role".into()), rmpv::Value::String(role.into())),
-                (rmpv::Value::String("active".into()), rmpv::Value::Boolean(active)),
+                (
+                    rmpv::Value::String("role".into()),
+                    rmpv::Value::String(role.into()),
+                ),
+                (
+                    rmpv::Value::String("active".into()),
+                    rmpv::Value::Boolean(active),
+                ),
             ])
         };
 
@@ -450,16 +493,28 @@ mod tests {
     fn or_with_all_indexed_children_unions_candidates() {
         let registry = make_registry_with_hash("status");
         let idx = registry.get_index("status").unwrap();
-        idx.insert("k1", &make_record("status", rmpv::Value::String("active".into())));
-        idx.insert("k2", &make_record("status", rmpv::Value::String("pending".into())));
-        idx.insert("k3", &make_record("status", rmpv::Value::String("inactive".into())));
+        idx.insert(
+            "k1",
+            &make_record("status", rmpv::Value::String("active".into())),
+        );
+        idx.insert(
+            "k2",
+            &make_record("status", rmpv::Value::String("pending".into())),
+        );
+        idx.insert(
+            "k3",
+            &make_record("status", rmpv::Value::String("inactive".into())),
+        );
 
         let all_keys = vec!["k1".to_string(), "k2".to_string(), "k3".to_string()];
         let records = |key: &str| -> Option<rmpv::Value> {
             match key {
                 "k1" => Some(make_record("status", rmpv::Value::String("active".into()))),
                 "k2" => Some(make_record("status", rmpv::Value::String("pending".into()))),
-                "k3" => Some(make_record("status", rmpv::Value::String("inactive".into()))),
+                "k3" => Some(make_record(
+                    "status",
+                    rmpv::Value::String("inactive".into()),
+                )),
                 _ => None,
             }
         };
@@ -467,8 +522,16 @@ mod tests {
         let pred = combinator(
             PredicateOp::Or,
             vec![
-                leaf(PredicateOp::Eq, "status", rmpv::Value::String("active".into())),
-                leaf(PredicateOp::Eq, "status", rmpv::Value::String("pending".into())),
+                leaf(
+                    PredicateOp::Eq,
+                    "status",
+                    rmpv::Value::String("active".into()),
+                ),
+                leaf(
+                    PredicateOp::Eq,
+                    "status",
+                    rmpv::Value::String("pending".into()),
+                ),
             ],
         );
 

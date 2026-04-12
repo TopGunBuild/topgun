@@ -114,8 +114,7 @@ impl PartitionQueue {
 
     /// Removes and returns the entry for the given key, or `None` if not present.
     pub fn remove(&mut self, map: &str, key: &str) -> Option<DelayedEntry> {
-        self.entries
-            .remove(&(map.to_string(), key.to_string()))
+        self.entries.remove(&(map.to_string(), key.to_string()))
     }
 
     /// Collects all entries whose `store_time` is at or before the deadline.
@@ -301,7 +300,13 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                     } => {
                         store
                             .inner
-                            .add(&entry.map, &entry.key, value, *expiration_time, entry.store_time)
+                            .add(
+                                &entry.map,
+                                &entry.key,
+                                value,
+                                *expiration_time,
+                                entry.store_time,
+                            )
                             .await
                     }
                     DelayedOp::Remove => {
@@ -328,10 +333,7 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                             retry_entry.retry_count = new_retry;
 
                             let partition_id = partition_for(&entry.map, &entry.key);
-                            let mut queue = store
-                                .queues
-                                .entry(partition_id)
-                                .or_default();
+                            let mut queue = store.queues.entry(partition_id).or_default();
                             queue.reinsert_front(vec![retry_entry]);
 
                             // Backoff before processing next retry-eligible entry
@@ -381,7 +383,9 @@ impl MapDataStore for WriteBehindDataStore {
             // Only reject if this would be a NEW key (not a coalesce).
             // We check the staging area as a fast pre-check; the definitive
             // check happens via PartitionQueue::insert return value.
-            let is_new_key = !self.staging.contains_key(&(map.to_string(), key.to_string()));
+            let is_new_key = !self
+                .staging
+                .contains_key(&(map.to_string(), key.to_string()));
             if is_new_key && current >= self.config.capacity {
                 anyhow::bail!("Write-behind capacity exceeded");
             }
@@ -401,10 +405,7 @@ impl MapDataStore for WriteBehindDataStore {
         };
 
         // Insert into partition queue, preserving original store_time on coalesce
-        let mut queue = self
-            .queues
-            .entry(partition_id)
-            .or_default();
+        let mut queue = self.queues.entry(partition_id).or_default();
 
         // If coalescing, preserve the original store_time
         let staging_key = (map.to_string(), key.to_string());
@@ -444,7 +445,9 @@ impl MapDataStore for WriteBehindDataStore {
         // Check capacity before insertion
         if self.config.capacity != 0 {
             let current = self.pending_count.load(Ordering::Relaxed);
-            let is_new_key = !self.staging.contains_key(&(map.to_string(), key.to_string()));
+            let is_new_key = !self
+                .staging
+                .contains_key(&(map.to_string(), key.to_string()));
             if is_new_key && current >= self.config.capacity {
                 anyhow::bail!("Write-behind capacity exceeded");
             }
@@ -460,10 +463,7 @@ impl MapDataStore for WriteBehindDataStore {
             retry_count: 0,
         };
 
-        let mut queue = self
-            .queues
-            .entry(partition_id)
-            .or_default();
+        let mut queue = self.queues.entry(partition_id).or_default();
 
         let staging_key = (map.to_string(), key.to_string());
         if let Some(existing) = queue.value_mut().remove(map, key) {
@@ -539,8 +539,7 @@ impl MapDataStore for WriteBehindDataStore {
             // Check capacity before each insertion
             if self.config.capacity != 0 {
                 let current = self.pending_count.load(Ordering::Relaxed);
-                let is_new_key =
-                    !self.staging.contains_key(&(map.to_string(), key.clone()));
+                let is_new_key = !self.staging.contains_key(&(map.to_string(), key.clone()));
                 if is_new_key && current >= self.config.capacity {
                     anyhow::bail!("Write-behind capacity exceeded");
                 }
@@ -556,10 +555,7 @@ impl MapDataStore for WriteBehindDataStore {
                 retry_count: 0,
             };
 
-            let mut queue = self
-                .queues
-                .entry(partition_id)
-                .or_default();
+            let mut queue = self.queues.entry(partition_id).or_default();
 
             let staging_key = (map.to_string(), key.clone());
             if let Some(existing) = queue.value_mut().remove(map, key) {
@@ -718,14 +714,8 @@ mod tests {
     #[derive(Debug, Clone)]
     #[allow(dead_code)]
     enum SpyCall {
-        Add {
-            map: String,
-            key: String,
-        },
-        Remove {
-            map: String,
-            key: String,
-        },
+        Add { map: String, key: String },
+        Remove { map: String, key: String },
     }
 
     /// Test-only data store that records calls and optionally returns pre-seeded values.
@@ -808,10 +798,7 @@ mod tests {
         ) -> anyhow::Result<Vec<(String, RecordValue)>> {
             let mut results = Vec::new();
             for key in keys {
-                if let Some(v) = self
-                    .seeded
-                    .get(&(map.to_string(), key.clone()))
-                {
+                if let Some(v) = self.seeded.get(&(map.to_string(), key.clone())) {
                     results.push((key.clone(), v.value().clone()));
                 }
             }
@@ -875,7 +862,10 @@ mod tests {
 
         // load() should return the staged value immediately
         let loaded = store.load("map1", "key1").await.unwrap();
-        assert!(loaded.is_some(), "Staged value should be returned by load()");
+        assert!(
+            loaded.is_some(),
+            "Staged value should be returned by load()"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -940,7 +930,9 @@ mod tests {
 
         let recorded = calls.lock().unwrap();
         assert!(
-            recorded.iter().any(|c| matches!(c, SpyCall::Add { map, key } if map == "map1" && key == "key1")),
+            recorded
+                .iter()
+                .any(|c| matches!(c, SpyCall::Add { map, key } if map == "map1" && key == "key1")),
             "Inner store should have received the add call after flush"
         );
     }
@@ -989,10 +981,7 @@ mod tests {
 
         // Third key should be rejected
         let result = store.add("map1", "c", &val, 0, 1000).await;
-        assert!(
-            result.is_err(),
-            "Should reject writes exceeding capacity"
-        );
+        assert!(result.is_err(), "Should reject writes exceeding capacity");
 
         // Queue still contains exactly 2 entries
         assert_eq!(store.pending_operation_count(), 2);
@@ -1081,7 +1070,10 @@ mod tests {
 
         // Staging should be cleared
         assert!(
-            store.staging.get(&("map1".to_string(), "key1".to_string())).is_none(),
+            store
+                .staging
+                .get(&("map1".to_string(), "key1".to_string()))
+                .is_none(),
             "Staging should be cleared after flush_key"
         );
 
@@ -1091,7 +1083,9 @@ mod tests {
         // Inner store should have received an add call
         let recorded = calls.lock().unwrap();
         assert!(
-            recorded.iter().any(|c| matches!(c, SpyCall::Add { map, key } if map == "map1" && key == "key1")),
+            recorded
+                .iter()
+                .any(|c| matches!(c, SpyCall::Add { map, key } if map == "map1" && key == "key1")),
             "Inner store should have received the flush_key add call"
         );
     }

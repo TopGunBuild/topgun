@@ -66,7 +66,12 @@ async fn kill_node_data_remains_on_survivors() {
     cluster.start().expect("cluster should start");
 
     cluster
-        .write(0, "map", "resilient-key", rmpv::Value::String("value".into()))
+        .write(
+            0,
+            "map",
+            "resilient-key",
+            rmpv::Value::String("value".into()),
+        )
         .await
         .expect("write should succeed");
 

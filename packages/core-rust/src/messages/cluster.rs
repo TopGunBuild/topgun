@@ -10,9 +10,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::hlc::serde_number;
 use super::base::{ChangeEventType, SortDirection};
 use super::search::SearchOptions;
+use crate::hlc::serde_number;
 
 // ---------------------------------------------------------------------------
 // Enums
@@ -236,7 +236,11 @@ pub struct ClusterSubAckPayload {
     pub initial_results: Option<Vec<ClusterSubAckResultEntry>>,
 
     /// Total number of matching records on this node.
-    #[serde(skip_serializing_if = "Option::is_none", default, deserialize_with = "serde_number::deserialize_option_u64")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "serde_number::deserialize_option_u64"
+    )]
     pub total_hits: Option<u64>,
 }
 
@@ -355,7 +359,11 @@ pub struct ClusterSearchReqPayload {
     pub options: ClusterSearchReqOptions,
 
     /// Maximum time (ms) to wait for results from each node.
-    #[serde(skip_serializing_if = "Option::is_none", default, deserialize_with = "serde_number::deserialize_option_u64")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "serde_number::deserialize_option_u64"
+    )]
     pub timeout_ms: Option<u64>,
 }
 

@@ -10,7 +10,10 @@ use topgun_server::storage::record::{OrMapEntry, RecordValue};
 fn assert_or_tags(value: &RecordValue, expected_tags: &[&str]) {
     match value {
         RecordValue::OrMap { records } => {
-            let present: Vec<&str> = records.iter().map(|e: &OrMapEntry| e.tag.as_str()).collect();
+            let present: Vec<&str> = records
+                .iter()
+                .map(|e: &OrMapEntry| e.tag.as_str())
+                .collect();
             for tag in expected_tags {
                 assert!(
                     present.contains(tag),
@@ -36,17 +39,32 @@ async fn concurrent_writes_converge() {
     cluster.start().expect("cluster should start");
 
     cluster
-        .write(0, "data", "shared-key", rmpv::Value::String("from-node-0".into()))
+        .write(
+            0,
+            "data",
+            "shared-key",
+            rmpv::Value::String("from-node-0".into()),
+        )
         .await
         .expect("write on node 0 should succeed");
 
     cluster
-        .write(1, "data", "shared-key", rmpv::Value::String("from-node-1".into()))
+        .write(
+            1,
+            "data",
+            "shared-key",
+            rmpv::Value::String("from-node-1".into()),
+        )
         .await
         .expect("write on node 1 should succeed");
 
     cluster
-        .write(2, "data", "shared-key", rmpv::Value::String("from-node-2".into()))
+        .write(
+            2,
+            "data",
+            "shared-key",
+            rmpv::Value::String("from-node-2".into()),
+        )
         .await
         .expect("write on node 2 should succeed");
 
@@ -156,12 +174,22 @@ async fn write_during_partition_converges() {
     cluster.inject_partition(&[0], &[1]);
 
     cluster
-        .write(0, "events", "counter", rmpv::Value::String("node0-isolated".into()))
+        .write(
+            0,
+            "events",
+            "counter",
+            rmpv::Value::String("node0-isolated".into()),
+        )
         .await
         .expect("write on partitioned node 0 should succeed");
 
     cluster
-        .write(1, "events", "counter", rmpv::Value::String("node1-isolated".into()))
+        .write(
+            1,
+            "events",
+            "counter",
+            rmpv::Value::String("node1-isolated".into()),
+        )
         .await
         .expect("write on partitioned node 1 should succeed");
 

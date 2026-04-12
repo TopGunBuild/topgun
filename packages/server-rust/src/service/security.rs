@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use topgun_core::{HLC, Timestamp};
+use topgun_core::{Timestamp, HLC};
 
 use crate::network::connection::{ConnectionMetadata, MapPermissions};
 use crate::service::operation::{CallerOrigin, OperationContext, OperationError};
@@ -25,8 +25,7 @@ use crate::service::operation::{CallerOrigin, OperationContext, OperationError};
 /// Default is intentionally permissive (`require_auth: false`, unlimited size,
 /// default read+write permissions) to preserve backward compatibility for
 /// deployments without security configuration.
-#[derive(Debug, Clone, Default)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SecurityConfig {
     /// When true, all write operations require `ConnectionMetadata.authenticated == true`.
@@ -100,7 +99,10 @@ impl WriteValidator {
         // falls through to the same ACL/size checks as Client; its auth
         // enforcement is handler-level (HTTP 401 before dispatch) rather
         // than metadata-based.
-        if !matches!(ctx.caller_origin, CallerOrigin::Client | CallerOrigin::HttpClient) {
+        if !matches!(
+            ctx.caller_origin,
+            CallerOrigin::Client | CallerOrigin::HttpClient
+        ) {
             return Ok(());
         }
 
@@ -158,14 +160,17 @@ mod tests {
     use std::time::Instant;
 
     use parking_lot::Mutex;
-    use topgun_core::{HLC, SystemClock};
+    use topgun_core::{SystemClock, HLC};
 
     use super::*;
     use crate::network::connection::MapPermissions;
-    use crate::service::operation::{CallerOrigin, OperationContext, service_names};
+    use crate::service::operation::{service_names, CallerOrigin, OperationContext};
 
     fn make_hlc() -> Arc<Mutex<HLC>> {
-        Arc::new(Mutex::new(HLC::new("test-node".to_string(), Box::new(SystemClock))))
+        Arc::new(Mutex::new(HLC::new(
+            "test-node".to_string(),
+            Box::new(SystemClock),
+        )))
     }
 
     fn make_timestamp() -> topgun_core::Timestamp {
@@ -218,7 +223,9 @@ mod tests {
         let validator = make_validator(SecurityConfig::default());
         let ctx = make_ctx_client();
         let metadata = make_metadata(false);
-        assert!(validator.validate_write(&ctx, &metadata, "my-map", 0).is_ok());
+        assert!(validator
+            .validate_write(&ctx, &metadata, "my-map", 0)
+            .is_ok());
     }
 
     // -- AC1: require_auth + unauthenticated => Unauthorized --
@@ -247,7 +254,9 @@ mod tests {
         let validator = make_validator(config);
         let ctx = make_ctx_client();
         let metadata = make_metadata(true);
-        assert!(validator.validate_write(&ctx, &metadata, "my-map", 0).is_ok());
+        assert!(validator
+            .validate_write(&ctx, &metadata, "my-map", 0)
+            .is_ok());
     }
 
     // -- AC2: authenticated + no write perm => Forbidden --
@@ -263,10 +272,15 @@ mod tests {
         let mut metadata = make_metadata(true);
         metadata.map_permissions.insert(
             "locked-map".to_string(),
-            MapPermissions { read: true, write: false },
+            MapPermissions {
+                read: true,
+                write: false,
+            },
         );
         let result = validator.validate_write(&ctx, &metadata, "locked-map", 0);
-        assert!(matches!(result, Err(OperationError::Forbidden { map_name }) if map_name == "locked-map"));
+        assert!(
+            matches!(result, Err(OperationError::Forbidden { map_name }) if map_name == "locked-map")
+        );
     }
 
     // -- AC6: value exceeds max_value_bytes => ValueTooLarge --
@@ -281,7 +295,13 @@ mod tests {
         let ctx = make_ctx_client();
         let metadata = make_metadata(false);
         let result = validator.validate_write(&ctx, &metadata, "my-map", 101);
-        assert!(matches!(result, Err(OperationError::ValueTooLarge { size: 101, max: 100 })));
+        assert!(matches!(
+            result,
+            Err(OperationError::ValueTooLarge {
+                size: 101,
+                max: 100
+            })
+        ));
     }
 
     // -- AC7: value exactly at max_value_bytes => Ok --
@@ -295,7 +315,9 @@ mod tests {
         let validator = make_validator(config);
         let ctx = make_ctx_client();
         let metadata = make_metadata(false);
-        assert!(validator.validate_write(&ctx, &metadata, "my-map", 100).is_ok());
+        assert!(validator
+            .validate_write(&ctx, &metadata, "my-map", 100)
+            .is_ok());
     }
 
     // -- AC12: max_value_bytes=0 means unlimited --
@@ -309,7 +331,9 @@ mod tests {
         let validator = make_validator(config);
         let ctx = make_ctx_client();
         let metadata = make_metadata(false);
-        assert!(validator.validate_write(&ctx, &metadata, "my-map", u64::MAX).is_ok());
+        assert!(validator
+            .validate_write(&ctx, &metadata, "my-map", u64::MAX)
+            .is_ok());
     }
 
     // -- AC9: Forwarded origin bypasses all checks --
@@ -319,13 +343,18 @@ mod tests {
         let config = SecurityConfig {
             require_auth: true,
             max_value_bytes: 1,
-            default_permissions: MapPermissions { read: false, write: false },
+            default_permissions: MapPermissions {
+                read: false,
+                write: false,
+            },
         };
         let validator = make_validator(config);
         let ctx = make_ctx_forwarded();
         let metadata = make_metadata(false); // not authenticated
-        // value_size=1000 > max_value_bytes=1, but bypass skips it
-        assert!(validator.validate_write(&ctx, &metadata, "my-map", 1000).is_ok());
+                                             // value_size=1000 > max_value_bytes=1, but bypass skips it
+        assert!(validator
+            .validate_write(&ctx, &metadata, "my-map", 1000)
+            .is_ok());
     }
 
     // -- AC10: System origin bypasses all checks --
@@ -335,12 +364,17 @@ mod tests {
         let config = SecurityConfig {
             require_auth: true,
             max_value_bytes: 1,
-            default_permissions: MapPermissions { read: false, write: false },
+            default_permissions: MapPermissions {
+                read: false,
+                write: false,
+            },
         };
         let validator = make_validator(config);
         let ctx = make_ctx_system();
         let metadata = make_metadata(false);
-        assert!(validator.validate_write(&ctx, &metadata, "my-map", 1000).is_ok());
+        assert!(validator
+            .validate_write(&ctx, &metadata, "my-map", 1000)
+            .is_ok());
     }
 
     // -- AC13: MapPermissions defaults to read=true, write=true --
@@ -364,7 +398,10 @@ mod tests {
 
     #[test]
     fn sanitize_hlc_returns_server_node_id() {
-        let hlc = Arc::new(Mutex::new(HLC::new("server-node".to_string(), Box::new(SystemClock))));
+        let hlc = Arc::new(Mutex::new(HLC::new(
+            "server-node".to_string(),
+            Box::new(SystemClock),
+        )));
         let validator = WriteValidator::new(Arc::new(SecurityConfig::default()), hlc);
         let ts = validator.sanitize_hlc();
         assert_eq!(ts.node_id, "server-node");
@@ -382,7 +419,10 @@ mod tests {
         let t2 = (ts2.millis, ts2.counter);
         assert!(t2 >= t1, "timestamps must be monotonically non-decreasing");
         // Specifically, t2 must be strictly greater (HLC always advances)
-        assert!(t2 > t1 || ts2.counter > ts1.counter, "HLC must strictly advance");
+        assert!(
+            t2 > t1 || ts2.counter > ts1.counter,
+            "HLC must strictly advance"
+        );
     }
 
     // -- Default permissions fallback --
@@ -390,7 +430,10 @@ mod tests {
     #[test]
     fn falls_back_to_default_permissions_when_map_not_in_per_connection_map() {
         let config = SecurityConfig {
-            default_permissions: MapPermissions { read: true, write: false },
+            default_permissions: MapPermissions {
+                read: true,
+                write: false,
+            },
             ..SecurityConfig::default()
         };
         let validator = make_validator(config);
@@ -409,7 +452,9 @@ mod tests {
         ctx.caller_origin = CallerOrigin::Anonymous;
         let metadata = make_metadata(false);
         let result = validator.validate_write(&ctx, &metadata, "my-map", 0);
-        assert!(matches!(result, Err(OperationError::Forbidden { map_name }) if map_name == "my-map"));
+        assert!(
+            matches!(result, Err(OperationError::Forbidden { map_name }) if map_name == "my-map")
+        );
     }
 
     // -- Per-connection map permissions override default --
@@ -417,7 +462,10 @@ mod tests {
     #[test]
     fn per_connection_permissions_override_default() {
         let config = SecurityConfig {
-            default_permissions: MapPermissions { read: true, write: false }, // default: no write
+            default_permissions: MapPermissions {
+                read: true,
+                write: false,
+            }, // default: no write
             ..SecurityConfig::default()
         };
         let validator = make_validator(config);
@@ -426,10 +474,15 @@ mod tests {
         // Explicitly grant write for "allowed-map"
         metadata.map_permissions.insert(
             "allowed-map".to_string(),
-            MapPermissions { read: true, write: true },
+            MapPermissions {
+                read: true,
+                write: true,
+            },
         );
         // "allowed-map" should succeed despite default denying writes
-        assert!(validator.validate_write(&ctx, &metadata, "allowed-map", 0).is_ok());
+        assert!(validator
+            .validate_write(&ctx, &metadata, "allowed-map", 0)
+            .is_ok());
         // "other-map" falls back to default (no write)
         let result = validator.validate_write(&ctx, &metadata, "other-map", 0);
         assert!(matches!(result, Err(OperationError::Forbidden { .. })));

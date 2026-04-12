@@ -250,7 +250,7 @@ mod tests {
 
     use super::*;
     use crate::network::handlers::auth_provider::{AuthProvider, ExternalClaims};
-    use crate::network::handlers::{AppState};
+    use crate::network::handlers::AppState;
     use crate::network::{ConnectionRegistry, NetworkConfig, ShutdownController};
 
     // ── Stub providers ────────────────────────────────────────────────────────
@@ -378,8 +378,12 @@ mod tests {
 
     #[tokio::test]
     async fn all_providers_fail_returns_401() {
-        let p1: Arc<dyn AuthProvider> = Arc::new(AlwaysFail { name: "p1".to_string() });
-        let p2: Arc<dyn AuthProvider> = Arc::new(AlwaysFail { name: "p2".to_string() });
+        let p1: Arc<dyn AuthProvider> = Arc::new(AlwaysFail {
+            name: "p1".to_string(),
+        });
+        let p2: Arc<dyn AuthProvider> = Arc::new(AlwaysFail {
+            name: "p2".to_string(),
+        });
         let app = make_app(make_state(vec![p1, p2], Some("secret")));
         let (status, body) = post_exchange(app, json!({ "token": "bad" })).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -407,16 +411,19 @@ mod tests {
             sub: "alice".to_string(),
             roles: vec![],
         });
-        let fail: Arc<dyn AuthProvider> = Arc::new(AlwaysFail { name: "bad".to_string() });
+        let fail: Arc<dyn AuthProvider> = Arc::new(AlwaysFail {
+            name: "bad".to_string(),
+        });
         let app = make_app(make_state(vec![succeed, fail], Some("secret")));
-        let (status, _) =
-            post_exchange(app, json!({ "token": "any", "provider": "good" })).await;
+        let (status, _) = post_exchange(app, json!({ "token": "any", "provider": "good" })).await;
         assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]
     async fn first_succeeding_provider_is_used_when_no_provider_specified() {
-        let fail: Arc<dyn AuthProvider> = Arc::new(AlwaysFail { name: "first".to_string() });
+        let fail: Arc<dyn AuthProvider> = Arc::new(AlwaysFail {
+            name: "first".to_string(),
+        });
         let succeed: Arc<dyn AuthProvider> = Arc::new(AlwaysSucceed {
             name: "second".to_string(),
             sub: "bob".to_string(),
@@ -441,7 +448,10 @@ mod tests {
 
     impl InMemoryGrantStore {
         fn new(duration: u64) -> Self {
-            Self { grants: Mutex::new(HashMap::new()), duration }
+            Self {
+                grants: Mutex::new(HashMap::new()),
+                duration,
+            }
         }
     }
 
@@ -455,7 +465,10 @@ mod tests {
             &self,
             grant: &crate::network::handlers::RefreshGrant,
         ) -> anyhow::Result<()> {
-            self.grants.lock().unwrap().insert(grant.token_hash.clone(), grant.clone());
+            self.grants
+                .lock()
+                .unwrap()
+                .insert(grant.token_hash.clone(), grant.clone());
             Ok(())
         }
 
@@ -496,7 +509,9 @@ mod tests {
             server_config: None,
             policy_store: None,
             auth_providers: Arc::new(vec![provider]),
-            refresh_grant_store: Some(store as Arc<dyn crate::network::handlers::RefreshGrantStore>),
+            refresh_grant_store: Some(
+                store as Arc<dyn crate::network::handlers::RefreshGrantStore>,
+            ),
             auth_validator: None,
             index_observer_factory: None,
             backfill_progress: Arc::new(dashmap::DashMap::new()),
@@ -504,10 +519,22 @@ mod tests {
         let app = make_app(state);
         let (status, body) = post_exchange(app, json!({ "token": "any" })).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body["token"].as_str().is_some(), "access token must be present");
-        assert!(body["expiresAt"].as_u64().is_some(), "expiresAt must be present");
-        assert!(body["refreshToken"].as_str().is_some(), "refreshToken must be present when store is configured");
-        assert!(body["refreshExpiresAt"].as_u64().is_some(), "refreshExpiresAt must be present");
+        assert!(
+            body["token"].as_str().is_some(),
+            "access token must be present"
+        );
+        assert!(
+            body["expiresAt"].as_u64().is_some(),
+            "expiresAt must be present"
+        );
+        assert!(
+            body["refreshToken"].as_str().is_some(),
+            "refreshToken must be present when store is configured"
+        );
+        assert!(
+            body["refreshExpiresAt"].as_u64().is_some(),
+            "refreshExpiresAt must be present"
+        );
     }
 
     /// AC2: token exchange without refresh store omits refresh fields.
@@ -521,7 +548,13 @@ mod tests {
         let app = make_app(make_state(vec![provider], Some("secret")));
         let (status, body) = post_exchange(app, json!({ "token": "any" })).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body.get("refreshToken").is_none(), "refreshToken must be absent when store is not configured");
-        assert!(body.get("refreshExpiresAt").is_none(), "refreshExpiresAt must be absent");
+        assert!(
+            body.get("refreshToken").is_none(),
+            "refreshToken must be absent when store is not configured"
+        );
+        assert!(
+            body.get("refreshExpiresAt").is_none(),
+            "refreshExpiresAt must be absent"
+        );
     }
 }

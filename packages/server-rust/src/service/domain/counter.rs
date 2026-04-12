@@ -106,8 +106,7 @@ impl CounterRegistry {
                 drop(subs);
                 // Remove the entry if no subscribers remain.
                 // Re-check after acquiring write lock to avoid race.
-                self.subscribers
-                    .remove_if(name, |_, v| v.is_empty());
+                self.subscribers.remove_if(name, |_, v| v.is_empty());
             }
         }
     }
@@ -143,13 +142,11 @@ impl CounterRegistry {
     /// Returns 0.0 if the counter does not exist.
     #[must_use]
     pub fn counter_value(&self, name: &str) -> f64 {
-        self.counters
-            .get(name)
-            .map_or(0.0, |state| {
-                let pos: f64 = state.p.values().sum();
-                let neg: f64 = state.n.values().sum();
-                pos - neg
-            })
+        self.counters.get(name).map_or(0.0, |state| {
+            let pos: f64 = state.p.values().sum();
+            let neg: f64 = state.n.values().sum();
+            pos - neg
+        })
     }
 }
 

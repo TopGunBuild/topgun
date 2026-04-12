@@ -131,8 +131,7 @@ pub fn init_observability() -> ObservabilityHandle {
         .map(|v| v.eq_ignore_ascii_case("json"))
         .unwrap_or(false);
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     // Wrap the filter in a reload layer so it can be swapped at runtime.
     let (reload_layer, reload_handle) = reload::Layer::new(filter);

@@ -18,9 +18,7 @@ use tracing::Instrument;
 
 use crate::cluster::state::ClusterState;
 use crate::network::connection::ConnectionRegistry;
-use crate::service::operation::{
-    service_names, Operation, OperationError, OperationResponse,
-};
+use crate::service::operation::{service_names, Operation, OperationError, OperationResponse};
 use crate::service::registry::{ManagedService, ServiceContext};
 
 // ---------------------------------------------------------------------------
@@ -79,8 +77,7 @@ impl ManagedService for CoordinationService {
 impl Service<Operation> for Arc<CoordinationService> {
     type Response = OperationResponse;
     type Error = OperationError;
-    type Future =
-        Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>>;
+    type Future = Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
@@ -102,14 +99,11 @@ impl Service<Operation> for Arc<CoordinationService> {
         Box::pin(
             async move {
                 match op {
-                    Operation::Ping { ctx, payload } => {
-                        svc.handle_ping(&ctx, payload).await
-                    }
+                    Operation::Ping { ctx, payload } => svc.handle_ping(&ctx, payload).await,
                     Operation::PartitionMapRequest { payload, .. } => {
                         Ok(svc.handle_partition_map_request(payload.as_ref()))
                     }
-                    Operation::LockRequest { ctx, .. }
-                    | Operation::LockRelease { ctx, .. } => {
+                    Operation::LockRequest { ctx, .. } | Operation::LockRelease { ctx, .. } => {
                         Ok(OperationResponse::NotImplemented {
                             service_name: service_names::COORDINATION,
                             call_id: ctx.call_id,
@@ -168,18 +162,14 @@ impl CoordinationService {
         let table_version = self.cluster_state.partition_table.version();
 
         // Widen u32 -> u64 safely; missing payload treated as version 0.
-        let client_version = payload
-            .and_then(|p| p.current_version)
-            .map_or(0, u64::from);
+        let client_version = payload.and_then(|p| p.current_version).map_or(0, u64::from);
 
         if client_version < table_version {
             let map = self
                 .cluster_state
                 .partition_table
                 .to_partition_map(&members_view);
-            OperationResponse::Message(Box::new(
-                Message::PartitionMap { payload: map },
-            ))
+            OperationResponse::Message(Box::new(Message::PartitionMap { payload: map }))
         } else {
             OperationResponse::Empty
         }
@@ -202,8 +192,8 @@ mod tests {
     use super::*;
     use crate::cluster::state::ClusterState;
     use crate::cluster::types::{ClusterConfig, MemberInfo, MembersView, NodeState};
-    use crate::network::connection::{ConnectionKind, ConnectionRegistry};
     use crate::network::config::ConnectionConfig;
+    use crate::network::connection::{ConnectionKind, ConnectionRegistry};
     use crate::service::operation::{service_names, OperationContext, OperationResponse};
 
     /// Helper: build a test `CoordinationService` with default cluster state.
@@ -212,10 +202,7 @@ mod tests {
         let (state, _rx) = ClusterState::new(config, "test-node".to_string());
         let state = Arc::new(state);
         let registry = Arc::new(ConnectionRegistry::new());
-        let svc = Arc::new(CoordinationService::new(
-            Arc::clone(&state),
-            registry,
-        ));
+        let svc = Arc::new(CoordinationService::new(Arc::clone(&state), registry));
         (svc, state)
     }
 

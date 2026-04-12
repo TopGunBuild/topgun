@@ -28,27 +28,29 @@ use topgun_server::cluster::failure_detector::PhiAccrualConfig;
 use topgun_server::cluster::peer_connection::PeerConnectionMap;
 use topgun_server::cluster::state::{ClusterState, InboundClusterMessage, MigrationCommand};
 use topgun_server::cluster::types::{ClusterConfig, MemberInfo, NodeState};
-use topgun_server::cluster::{ClusterFormationService, HeartbeatService, MembershipReactor, PhiAccrualFailureDetector};
+use topgun_server::cluster::{
+    ClusterFormationService, HeartbeatService, MembershipReactor, PhiAccrualFailureDetector,
+};
 use topgun_server::network::config::NetworkConfig;
 use topgun_server::network::connection::ConnectionRegistry;
 use topgun_server::network::handlers::AppState;
 use topgun_server::network::shutdown::ShutdownController;
 use topgun_server::service::config::ServerConfig;
+use topgun_server::service::dispatch::{DispatchConfig, PartitionDispatcher};
 use topgun_server::service::domain::coordination::CoordinationService;
 use topgun_server::service::domain::crdt::CrdtService;
 use topgun_server::service::domain::messaging::MessagingService;
-use topgun_server::service::domain::schema::SchemaService;
 use topgun_server::service::domain::persistence::PersistenceService;
 use topgun_server::service::domain::query::{QueryRegistry, QueryService};
+use topgun_server::service::domain::schema::SchemaService;
 use topgun_server::service::domain::search::{
     SearchConfig, SearchMutationObserver, SearchRegistry, SearchService, TantivyMapIndex,
 };
 use topgun_server::service::domain::sync::SyncService;
-use topgun_server::service::dispatch::{DispatchConfig, PartitionDispatcher};
 use topgun_server::service::middleware::build_operation_pipeline;
 use topgun_server::service::operation::service_names;
-use topgun_server::service::router::OperationRouter;
 use topgun_server::service::policy::{InMemoryPolicyStore, PolicyEvaluator, PolicyStore};
+use topgun_server::service::router::OperationRouter;
 use topgun_server::service::security::{SecurityConfig, WriteValidator};
 use topgun_server::service::OperationService;
 use topgun_server::storage::datastores::NullDataStore;
@@ -115,8 +117,7 @@ async fn main() -> anyhow::Result<()> {
     // Bind to all interfaces so inter-container traffic (Docker networking) reaches
     // the server. TOPGUN_BIND_ADDR overrides the default for environments that
     // require loopback-only binding.
-    let bind_addr = std::env::var("TOPGUN_BIND_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0".to_string());
+    let bind_addr = std::env::var("TOPGUN_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0".to_string());
     let listener = TcpListener::bind(format!("{bind_addr}:{}", args.port)).await?;
     let bound_port = listener.local_addr()?.port();
 
@@ -141,15 +142,14 @@ async fn main() -> anyhow::Result<()> {
     // policies created via the admin API are immediately visible to the evaluator.
     let policy_store = Arc::new(InMemoryPolicyStore::new());
     let policy_evaluator = Arc::new(PolicyEvaluator::new(
-        policy_store.clone() as Arc<dyn PolicyStore>,
+        policy_store.clone() as Arc<dyn PolicyStore>
     ));
 
     let (cluster_state_for_services, cluster_state_for_app) = if cluster_mode {
         // --- Cluster mode ---
 
         // Bind the inter-node TCP listener on the cluster port.
-        let cluster_listener =
-            TcpListener::bind(format!("0.0.0.0:{}", args.cluster_port)).await?;
+        let cluster_listener = TcpListener::bind(format!("0.0.0.0:{}", args.cluster_port)).await?;
         let bound_cluster_port = cluster_listener.local_addr()?.port();
 
         let cluster_config = Arc::new(ClusterConfig {
@@ -157,8 +157,7 @@ async fn main() -> anyhow::Result<()> {
             ..ClusterConfig::default()
         });
 
-        let (cs, change_rx) =
-            ClusterState::new(Arc::clone(&cluster_config), node_id.clone());
+        let (cs, change_rx) = ClusterState::new(Arc::clone(&cluster_config), node_id.clone());
         let cluster_state = Arc::new(cs);
 
         let peers = Arc::new(PeerConnectionMap::new());
@@ -169,7 +168,8 @@ async fn main() -> anyhow::Result<()> {
 
         // Heartbeat-specific inbound channel: a routing task selects heartbeat and
         // complaint frames out of the shared inbound stream and forwards them here.
-        let (heartbeat_tx, heartbeat_rx) = mpsc::unbounded_channel::<topgun_server::cluster::ClusterMessage>();
+        let (heartbeat_tx, heartbeat_rx) =
+            mpsc::unbounded_channel::<topgun_server::cluster::ClusterMessage>();
 
         // Spawn the routing task that fans out inbound frames to the heartbeat channel.
         // All other variants are currently discarded; future dispatch integration will
@@ -232,8 +232,11 @@ async fn main() -> anyhow::Result<()> {
 
         // Build domain services, sharing the cluster_state with CoordinationService.
         // Pass the policy evaluator so every client operation is checked against RBAC.
-        let (classify_svc, dispatcher, connection_registry) =
-            build_services(node_id.clone(), Arc::clone(&cluster_state), Some(Arc::clone(&policy_evaluator)));
+        let (classify_svc, dispatcher, connection_registry) = build_services(
+            node_id.clone(),
+            Arc::clone(&cluster_state),
+            Some(Arc::clone(&policy_evaluator)),
+        );
 
         // Wire up the membership reactor (partition rebalancing on member changes).
         let reactor = MembershipReactor {
@@ -251,13 +254,13 @@ async fn main() -> anyhow::Result<()> {
         )
     } else {
         // --- Single-node mode (backward-compatible) ---
-        let (cs, _rx) = ClusterState::new(
-            Arc::new(ClusterConfig::default()),
-            node_id.clone(),
-        );
+        let (cs, _rx) = ClusterState::new(Arc::new(ClusterConfig::default()), node_id.clone());
         let cs = Arc::new(cs);
-        let (classify_svc, dispatcher, connection_registry) =
-            build_services(node_id.clone(), Arc::clone(&cs), Some(Arc::clone(&policy_evaluator)));
+        let (classify_svc, dispatcher, connection_registry) = build_services(
+            node_id.clone(),
+            Arc::clone(&cs),
+            Some(Arc::clone(&policy_evaluator)),
+        );
 
         // Single-node mode: expose no cluster state to AppState (existing behavior).
         ((classify_svc, dispatcher, connection_registry), None)
@@ -434,16 +437,14 @@ fn build_services(
     let search_registry = Arc::new(SearchRegistry::new());
     let search_indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>> =
         Arc::new(RwLock::new(HashMap::new()));
-    let search_needs_population: Arc<DashMap<String, AtomicBool>> =
-        Arc::new(DashMap::new());
+    let search_needs_population: Arc<DashMap<String, AtomicBool>> = Arc::new(DashMap::new());
 
-    let search_observer_factory: Arc<dyn ObserverFactory> =
-        Arc::new(SearchObserverFactory {
-            search_registry: Arc::clone(&search_registry),
-            indexes: Arc::clone(&search_indexes),
-            connection_registry: Arc::clone(&connection_registry),
-            needs_population: Arc::clone(&search_needs_population),
-        });
+    let search_observer_factory: Arc<dyn ObserverFactory> = Arc::new(SearchObserverFactory {
+        search_registry: Arc::clone(&search_registry),
+        indexes: Arc::clone(&search_indexes),
+        connection_registry: Arc::clone(&connection_registry),
+        needs_population: Arc::clone(&search_needs_population),
+    });
 
     // QueryRegistry shared between CrdtService (broadcast_query_updates) and QueryService.
     // QueryMutationObserver is no longer in the observer chain -- CrdtService handles
@@ -458,18 +459,14 @@ fn build_services(
         Arc::new(MerkleObserverFactory::new(Arc::clone(&merkle_manager)));
 
     #[allow(unused_mut)]
-    let mut observer_factories: Vec<Arc<dyn ObserverFactory>> = vec![
-        search_observer_factory,
-        merkle_observer_factory,
-    ];
+    let mut observer_factories: Vec<Arc<dyn ObserverFactory>> =
+        vec![search_observer_factory, merkle_observer_factory];
 
     // When datafusion is enabled, register ArrowCacheObserverFactory so that
     // record mutations invalidate the Arrow cache for SQL query freshness.
     #[cfg(feature = "datafusion")]
     let _arrow_cache_manager = {
-        let mgr = Arc::new(
-            topgun_server::service::domain::arrow_cache::ArrowCacheManager::new(),
-        );
+        let mgr = Arc::new(topgun_server::service::domain::arrow_cache::ArrowCacheManager::new());
         observer_factories.push(Arc::new(
             topgun_server::service::domain::arrow_cache::ArrowCacheObserverFactory::new(
                 Arc::clone(&mgr),
@@ -511,9 +508,8 @@ fn build_services(
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
     ));
-    let query_merkle_manager = Arc::new(
-        topgun_server::storage::query_merkle::QueryMerkleSyncManager::new(),
-    );
+    let query_merkle_manager =
+        Arc::new(topgun_server::storage::query_merkle::QueryMerkleSyncManager::new());
     let query_svc = Arc::new(QueryService::new(
         Arc::clone(&query_registry),
         Arc::clone(&record_store_factory),
@@ -557,11 +553,7 @@ fn build_services(
         router.register(service_names::COORDINATION, Arc::clone(&coordination_svc));
         router.register(service_names::SEARCH, Arc::clone(&search_svc));
         router.register(service_names::PERSISTENCE, Arc::clone(&persistence_svc));
-        build_operation_pipeline(
-            router,
-            &config,
-            evaluator_for_factory.clone(),
-        )
+        build_operation_pipeline(router, &config, evaluator_for_factory.clone())
     };
 
     let dispatch_config = DispatchConfig::default();

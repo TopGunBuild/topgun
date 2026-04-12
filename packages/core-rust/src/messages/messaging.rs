@@ -87,7 +87,11 @@ pub struct LockRequestPayload {
     pub name: String,
 
     /// Optional timeout in milliseconds.
-    #[serde(skip_serializing_if = "Option::is_none", default, deserialize_with = "serde_number::deserialize_option_u64")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "serde_number::deserialize_option_u64"
+    )]
     pub ttl: Option<u64>,
 }
 

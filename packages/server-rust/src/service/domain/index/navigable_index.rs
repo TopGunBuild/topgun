@@ -102,11 +102,7 @@ impl Index for NavigableIndex {
 
     fn lookup_eq(&self, value: &rmpv::Value) -> HashSet<String> {
         let cv = ComparableValue::from_value(value);
-        self.map
-            .read()
-            .get(&cv)
-            .cloned()
-            .unwrap_or_default()
+        self.map.read().get(&cv).cloned().unwrap_or_default()
     }
 
     fn lookup_range(

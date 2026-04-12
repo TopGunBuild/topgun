@@ -1,8 +1,8 @@
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashMap;
 use hdrhistogram::Histogram;
 use parking_lot::Mutex;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::traits::{LatencyStats, MetricsCollector, MetricsSnapshot};
 
@@ -82,12 +82,15 @@ impl MetricsCollector for HdrMetricsCollector {
     fn record_latency(&self, operation: &str, duration_us: u64) {
         // 3 significant digits gives ~0.1% relative error — standard for latency histograms.
         // 60_000_000 µs = 60 seconds, sufficient for any realistic operation timeout.
-        let entry = self.histograms.entry(operation.to_string()).or_insert_with(|| {
-            Mutex::new(
-                Histogram::<u64>::new_with_max(60_000_000, 3)
-                    .expect("valid histogram configuration"),
-            )
-        });
+        let entry = self
+            .histograms
+            .entry(operation.to_string())
+            .or_insert_with(|| {
+                Mutex::new(
+                    Histogram::<u64>::new_with_max(60_000_000, 3)
+                        .expect("valid histogram configuration"),
+                )
+            });
         // Saturating record so a single out-of-range value never panics the thread.
         entry.lock().saturating_record(duration_us);
     }
@@ -116,7 +119,10 @@ impl MetricsCollector for HdrMetricsCollector {
             .map(|e| (e.key().clone(), e.value().load(Ordering::Relaxed)))
             .collect();
 
-        MetricsSnapshot { latencies, counters }
+        MetricsSnapshot {
+            latencies,
+            counters,
+        }
     }
 }
 

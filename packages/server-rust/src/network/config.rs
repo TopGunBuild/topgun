@@ -109,7 +109,7 @@ impl Default for ConnectionConfig {
             send_timeout: Duration::from_secs(5),
             idle_timeout: Duration::from_secs(60),
             ws_write_buffer_size: 131_072,     // 128 KB
-            ws_max_write_buffer_size: 524_288,  // 512 KB
+            ws_max_write_buffer_size: 524_288, // 512 KB
         }
     }
 }

@@ -157,7 +157,9 @@ mod tests {
         let _in_flight = tokio::spawn({
             let fut = svc.call(make_op());
             #[allow(clippy::redundant_async_block)]
-            async move { fut.await }
+            async move {
+                fut.await
+            }
         });
 
         // Give the spawned task time to acquire the permit.

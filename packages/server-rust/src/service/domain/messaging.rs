@@ -204,8 +204,7 @@ impl ManagedService for MessagingService {
 impl Service<Operation> for Arc<MessagingService> {
     type Response = OperationResponse;
     type Error = OperationError;
-    type Future =
-        Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>>;
+    type Future = Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
@@ -258,9 +257,7 @@ impl MessagingService {
         topic: &str,
     ) -> Result<OperationResponse, OperationError> {
         let conn_id = ctx.connection_id.ok_or_else(|| {
-            OperationError::Internal(anyhow::anyhow!(
-                "TopicSubscribe requires a connection_id"
-            ))
+            OperationError::Internal(anyhow::anyhow!("TopicSubscribe requires a connection_id"))
         })?;
 
         self.topic_registry
@@ -284,9 +281,7 @@ impl MessagingService {
         topic: &str,
     ) -> Result<OperationResponse, OperationError> {
         let conn_id = ctx.connection_id.ok_or_else(|| {
-            OperationError::Internal(anyhow::anyhow!(
-                "TopicUnsubscribe requires a connection_id"
-            ))
+            OperationError::Internal(anyhow::anyhow!("TopicUnsubscribe requires a connection_id"))
         })?;
 
         self.topic_registry.unsubscribe(topic, conn_id);
@@ -310,9 +305,7 @@ impl MessagingService {
         data: rmpv::Value,
     ) -> Result<OperationResponse, OperationError> {
         let publisher_conn_id = ctx.connection_id.ok_or_else(|| {
-            OperationError::Internal(anyhow::anyhow!(
-                "TopicPublish requires a connection_id"
-            ))
+            OperationError::Internal(anyhow::anyhow!("TopicPublish requires a connection_id"))
         })?;
 
         // Validate topic name (publish to nonexistent topic is OK, but name must be valid).
@@ -519,7 +512,10 @@ mod tests {
         assert!(matches!(resp, OperationResponse::Empty));
 
         // Topic registry should contain the connection.
-        assert!(svc.topic_registry().subscribers("chat/room-1").contains(&conn_id));
+        assert!(svc
+            .topic_registry()
+            .subscribers("chat/room-1")
+            .contains(&conn_id));
 
         // Connection metadata should contain the topic.
         let meta = handle.metadata.read().await;
@@ -555,7 +551,10 @@ mod tests {
         assert!(matches!(resp, OperationResponse::Empty));
 
         // Topic registry should NOT contain the connection.
-        assert!(!svc.topic_registry().subscribers("chat/room-1").contains(&conn_id));
+        assert!(!svc
+            .topic_registry()
+            .subscribers("chat/room-1")
+            .contains(&conn_id));
 
         // Connection metadata should NOT contain the topic.
         let meta = handle.metadata.read().await;
@@ -578,7 +577,11 @@ mod tests {
         let conn_c = handle_c.id;
 
         // Subscribe A, B, C to "news".
-        for (svc_ref, cid) in [(Arc::clone(&svc), conn_a), (Arc::clone(&svc), conn_b), (Arc::clone(&svc), conn_c)] {
+        for (svc_ref, cid) in [
+            (Arc::clone(&svc), conn_a),
+            (Arc::clone(&svc), conn_b),
+            (Arc::clone(&svc), conn_c),
+        ] {
             let op = Operation::TopicSubscribe {
                 ctx: make_ctx(Some(cid)),
                 payload: TopicSubPayload {
@@ -609,7 +612,10 @@ mod tests {
 
         // A should NOT receive the message (publisher excluded).
         let msg_a = rx_a.try_recv();
-        assert!(msg_a.is_err(), "A (publisher) should NOT receive the message");
+        assert!(
+            msg_a.is_err(),
+            "A (publisher) should NOT receive the message"
+        );
 
         // Verify the payload content of B's message.
         if let Ok(OutboundMessage::Binary(bytes)) = msg_b {
@@ -791,12 +797,24 @@ mod tests {
         svc.topic_registry().unsubscribe_all(conn_id);
 
         // conn removed from all topics.
-        assert!(!svc.topic_registry().subscribers("topic-a").contains(&conn_id));
-        assert!(!svc.topic_registry().subscribers("topic-b").contains(&conn_id));
-        assert!(!svc.topic_registry().subscribers("topic-c").contains(&conn_id));
+        assert!(!svc
+            .topic_registry()
+            .subscribers("topic-a")
+            .contains(&conn_id));
+        assert!(!svc
+            .topic_registry()
+            .subscribers("topic-b")
+            .contains(&conn_id));
+        assert!(!svc
+            .topic_registry()
+            .subscribers("topic-c")
+            .contains(&conn_id));
 
         // conn2 still in topic-a.
-        assert!(svc.topic_registry().subscribers("topic-a").contains(&conn_id2));
+        assert!(svc
+            .topic_registry()
+            .subscribers("topic-a")
+            .contains(&conn_id2));
 
         // topic-b and topic-c auto-removed (only conn was subscribed).
         // topic-a remains because conn2 is still subscribed.

@@ -105,7 +105,10 @@ mod tests {
     async fn metrics_handler_content_type_without_observability() {
         let state = test_state_no_obs();
         let resp = metrics_handler(State(state)).await.into_response();
-        let ct = resp.headers().get("content-type").expect("content-type present");
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .expect("content-type present");
         assert_eq!(ct, PROMETHEUS_CONTENT_TYPE);
     }
 
@@ -118,7 +121,10 @@ mod tests {
 
         let resp = metrics_handler(State(state)).await.into_response();
         assert_eq!(resp.status(), StatusCode::OK);
-        let ct = resp.headers().get("content-type").expect("content-type present");
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .expect("content-type present");
         assert_eq!(ct, PROMETHEUS_CONTENT_TYPE);
     }
 }

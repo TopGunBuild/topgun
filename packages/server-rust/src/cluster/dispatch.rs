@@ -12,7 +12,9 @@ use tokio::sync::{mpsc, oneshot};
 use crate::cluster::messages::ClusterMessage;
 use crate::cluster::state::InboundClusterMessage;
 use crate::network::connection::ConnectionRegistry;
-use crate::service::domain::dag_dispatch::{handle_dag_complete, handle_dag_data, handle_dag_execute};
+use crate::service::domain::dag_dispatch::{
+    handle_dag_complete, handle_dag_data, handle_dag_execute,
+};
 use crate::storage::RecordStoreFactory;
 
 use crate::cluster::messages::DagCompletePayload;
@@ -139,7 +141,8 @@ pub fn handle_cluster_peer_frame(
         message,
     };
 
-    tx.try_send(inbound).map_err(|_| HandleFrameError::ChannelClosed)
+    tx.try_send(inbound)
+        .map_err(|_| HandleFrameError::ChannelClosed)
 }
 
 // ---------------------------------------------------------------------------
@@ -154,9 +157,7 @@ mod tests {
     use dashmap::DashMap;
     use tokio::sync::{mpsc, oneshot};
 
-    use crate::cluster::messages::{
-        ClusterMessage, DagCompletePayload, HeartbeatPayload,
-    };
+    use crate::cluster::messages::{ClusterMessage, DagCompletePayload, HeartbeatPayload};
     use crate::network::connection::ConnectionRegistry;
     use crate::storage::datastores::NullDataStore;
     use crate::storage::factory::RecordStoreFactory;

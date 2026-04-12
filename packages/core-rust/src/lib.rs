@@ -30,8 +30,8 @@ pub use context::RequestContext;
 
 // Schema
 pub use schema::{
-    FieldConstraint, FieldDef, FieldType, MapSchema, SyncShape, ValidationResult,
-    validate_schema, validate_value,
+    validate_schema, validate_value, FieldConstraint, FieldDef, FieldType, MapSchema, SyncShape,
+    ValidationResult,
 };
 
 // Traits
@@ -41,7 +41,7 @@ pub use traits::{Inbox, Processor, ProcessorContext, QueryNotifier};
 pub use types::{CrdtMap, MapType, Principal, StorageValue, Value};
 
 // HLC
-pub use hlc::{ClockSource, SystemClock, Timestamp, HLC, LWWRecord, MergeKeyResult, ORMapRecord};
+pub use hlc::{ClockSource, LWWRecord, MergeKeyResult, ORMapRecord, SystemClock, Timestamp, HLC};
 
 // Hash
 pub use hash::{combine_hashes, fnv1a_hash};
@@ -54,8 +54,8 @@ pub use lww_map::LWWMap;
 
 // Messages
 pub use messages::{
-    AuthMessage, AuthRequiredMessage, ChangeEventType, ClientOp, PredicateNode, PredicateOp,
-    Query, SortDirection, WriteConcern,
+    AuthMessage, AuthRequiredMessage, ChangeEventType, ClientOp, PredicateNode, PredicateOp, Query,
+    SortDirection, WriteConcern,
 };
 
 // ORMap
@@ -67,7 +67,7 @@ pub use partition::{
 };
 
 // Vector
-pub use vector::{Distance, DistanceMetric, SharedVector, Vector, distance_for_metric};
+pub use vector::{distance_for_metric, Distance, DistanceMetric, SharedVector, Vector};
 
 #[cfg(test)]
 mod tests {
@@ -199,7 +199,11 @@ mod tests {
     #[test]
     fn reexports_accessible() {
         // HLC types
-        let _ts = Timestamp { millis: 0, counter: 0, node_id: String::new() };
+        let _ts = Timestamp {
+            millis: 0,
+            counter: 0,
+            node_id: String::new(),
+        };
         let _ = SystemClock;
 
         // Hash functions
@@ -262,31 +266,51 @@ mod tests {
         let variants: Vec<ORMapRecord<Value>> = vec![
             ORMapRecord {
                 value: Value::Null,
-                timestamp: Timestamp { millis: 1, counter: 0, node_id: "n".to_string() },
+                timestamp: Timestamp {
+                    millis: 1,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
                 tag: "1:0:n".to_string(),
                 ttl_ms: None,
             },
             ORMapRecord {
                 value: Value::Bool(true),
-                timestamp: Timestamp { millis: 2, counter: 0, node_id: "n".to_string() },
+                timestamp: Timestamp {
+                    millis: 2,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
                 tag: "2:0:n".to_string(),
                 ttl_ms: None,
             },
             ORMapRecord {
                 value: Value::Int(-42),
-                timestamp: Timestamp { millis: 3, counter: 0, node_id: "n".to_string() },
+                timestamp: Timestamp {
+                    millis: 3,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
                 tag: "3:0:n".to_string(),
                 ttl_ms: Some(1000),
             },
             ORMapRecord {
                 value: Value::Float(1.5),
-                timestamp: Timestamp { millis: 4, counter: 0, node_id: "n".to_string() },
+                timestamp: Timestamp {
+                    millis: 4,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
                 tag: "4:0:n".to_string(),
                 ttl_ms: None,
             },
             ORMapRecord {
                 value: Value::Bytes(vec![0xDE, 0xAD]),
-                timestamp: Timestamp { millis: 5, counter: 0, node_id: "n".to_string() },
+                timestamp: Timestamp {
+                    millis: 5,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
                 tag: "5:0:n".to_string(),
                 ttl_ms: None,
             },
@@ -296,7 +320,11 @@ mod tests {
                     m.insert("key".to_string(), Value::String("val".to_string()));
                     m
                 }),
-                timestamp: Timestamp { millis: 6, counter: 0, node_id: "n".to_string() },
+                timestamp: Timestamp {
+                    millis: 6,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
                 tag: "6:0:n".to_string(),
                 ttl_ms: None,
             },
@@ -314,7 +342,11 @@ mod tests {
     fn storage_value_from_record_conversions() {
         let lww_record = LWWRecord {
             value: Some(Value::String("test".to_string())),
-            timestamp: Timestamp { millis: 100, counter: 0, node_id: "n".to_string() },
+            timestamp: Timestamp {
+                millis: 100,
+                counter: 0,
+                node_id: "n".to_string(),
+            },
             ttl_ms: None,
         };
         let sv = StorageValue::from_lww_record(&lww_record).expect("from_lww_record");
@@ -322,7 +354,11 @@ mod tests {
 
         let or_record = ORMapRecord {
             value: Value::Int(42),
-            timestamp: Timestamp { millis: 200, counter: 0, node_id: "n".to_string() },
+            timestamp: Timestamp {
+                millis: 200,
+                counter: 0,
+                node_id: "n".to_string(),
+            },
             tag: "200:0:n".to_string(),
             ttl_ms: None,
         };

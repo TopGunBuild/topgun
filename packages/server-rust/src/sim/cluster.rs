@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, oneshot};
 use tower::Service;
 
 use topgun_core::messages::sync::{ClientOpMessage, OpBatchMessage, OpBatchPayload};
-use topgun_core::{ClientOp, HLC, LWWRecord, ORMapRecord, SystemClock, Timestamp};
+use topgun_core::{ClientOp, LWWRecord, ORMapRecord, SystemClock, Timestamp, HLC};
 
 use async_trait::async_trait;
 
@@ -25,7 +25,6 @@ use crate::cluster::traits::ClusterService;
 use crate::cluster::types::{ClusterConfig, ClusterHealth, MembersView};
 use crate::dag::coordinator::ClusterQueryCoordinator;
 use crate::network::connection::ConnectionRegistry;
-use crate::service::registry::{ManagedService, ServiceContext};
 use crate::service::domain::query::QueryRegistry;
 use crate::service::domain::search::SearchRegistry;
 use crate::service::domain::{
@@ -33,6 +32,7 @@ use crate::service::domain::{
     SchemaService, SearchService, SyncService,
 };
 use crate::service::operation::{service_names, CallerOrigin, Operation, OperationContext};
+use crate::service::registry::{ManagedService, ServiceContext};
 use crate::service::router::OperationRouter;
 use crate::service::security::{SecurityConfig, WriteValidator};
 use crate::storage::datastores::NullDataStore;
@@ -166,10 +166,7 @@ impl SimNode {
     ) -> anyhow::Result<Self> {
         let node_id = node_id.into();
 
-        let hlc = Arc::new(Mutex::new(HLC::new(
-            node_id.clone(),
-            Box::new(SystemClock),
-        )));
+        let hlc = Arc::new(Mutex::new(HLC::new(node_id.clone(), Box::new(SystemClock))));
         let write_validator = Arc::new(WriteValidator::new(
             Arc::new(SecurityConfig::default()),
             hlc,
@@ -279,8 +276,10 @@ impl SimNode {
             record_store_factory: Arc::clone(&record_store_factory),
             connection_registry: Arc::clone(&connection_registry),
         };
-        let dispatch_handle =
-            tokio::spawn(run_cluster_dispatch_loop(dispatch_ctx, receivers.inbound_messages));
+        let dispatch_handle = tokio::spawn(run_cluster_dispatch_loop(
+            dispatch_ctx,
+            receivers.inbound_messages,
+        ));
 
         // Build the ClusterQueryCoordinator with the shared completion_registry
         // so the dispatch loop can resolve oneshot receivers created by the coordinator.
@@ -344,7 +343,9 @@ fn value_to_rmpv(v: &topgun_core::Value) -> rmpv::Value {
         topgun_core::Value::Float(f) => rmpv::Value::F64(*f),
         topgun_core::Value::String(s) => rmpv::Value::String(s.as_str().into()),
         topgun_core::Value::Bytes(b) => rmpv::Value::Binary(b.clone()),
-        topgun_core::Value::Array(arr) => rmpv::Value::Array(arr.iter().map(value_to_rmpv).collect()),
+        topgun_core::Value::Array(arr) => {
+            rmpv::Value::Array(arr.iter().map(value_to_rmpv).collect())
+        }
         topgun_core::Value::Map(map) => {
             let entries: Vec<(rmpv::Value, rmpv::Value)> = map
                 .iter()
@@ -404,7 +405,8 @@ impl SimCluster {
         for i in 0..self.node_count {
             let node_id = format!("sim-node-{i}");
             let node = SimNode::build(&node_id, self.seed, self.transport.clone())?;
-            self.transport.register(&node_id, Arc::clone(&node.crdt_service));
+            self.transport
+                .register(&node_id, Arc::clone(&node.crdt_service));
             self.nodes.push(node);
         }
         self.started = true;
@@ -428,7 +430,8 @@ impl SimCluster {
     pub fn restart_node(&mut self, idx: usize) -> anyhow::Result<()> {
         let node_id = format!("sim-node-{idx}");
         let node = SimNode::build(&node_id, self.seed, self.transport.clone())?;
-        self.transport.register(&node_id, Arc::clone(&node.crdt_service));
+        self.transport
+            .register(&node_id, Arc::clone(&node.crdt_service));
         if idx < self.nodes.len() {
             self.nodes[idx] = node;
         }
@@ -451,7 +454,9 @@ impl SimCluster {
         key: &str,
         value: rmpv::Value,
     ) -> anyhow::Result<()> {
-        let node = self.nodes.get(node_idx)
+        let node = self
+            .nodes
+            .get(node_idx)
             .ok_or_else(|| anyhow::anyhow!("node index {node_idx} out of range"))?;
 
         if !node.is_alive() {
@@ -514,7 +519,9 @@ impl SimCluster {
         map: &str,
         key: &str,
     ) -> anyhow::Result<Option<RecordValue>> {
-        let node = self.nodes.get(node_idx)
+        let node = self
+            .nodes
+            .get(node_idx)
             .ok_or_else(|| anyhow::anyhow!("node index {node_idx} out of range"))?;
 
         if !node.is_alive() {
@@ -665,9 +672,13 @@ impl SimCluster {
         dst_idx: usize,
         map: &str,
     ) -> anyhow::Result<()> {
-        let src = self.nodes.get(src_idx)
+        let src = self
+            .nodes
+            .get(src_idx)
             .ok_or_else(|| anyhow::anyhow!("src node index {src_idx} out of range"))?;
-        let dst = self.nodes.get(dst_idx)
+        let dst = self
+            .nodes
+            .get(dst_idx)
             .ok_or_else(|| anyhow::anyhow!("dst node index {dst_idx} out of range"))?;
 
         if !src.is_alive() {
@@ -721,7 +732,10 @@ impl SimCluster {
 
         for (key, value) in src_records {
             let client_op = match &value {
-                RecordValue::Lww { value: v, timestamp } => {
+                RecordValue::Lww {
+                    value: v,
+                    timestamp,
+                } => {
                     // Skip if destination already has an equal or newer timestamp.
                     // Full Timestamp ordering includes node_id as tiebreaker (millis → counter → node_id),
                     // matching the LWW semantics used by LWWMap::merge().
@@ -815,7 +829,8 @@ impl SimCluster {
     pub fn add_node(&mut self) -> anyhow::Result<usize> {
         let node_id = format!("sim-node-{}", self.nodes.len());
         let node = SimNode::build(&node_id, self.seed, self.transport.clone())?;
-        self.transport.register(&node_id, Arc::clone(&node.crdt_service));
+        self.transport
+            .register(&node_id, Arc::clone(&node.crdt_service));
         self.nodes.push(node);
         Ok(self.nodes.len() - 1)
     }
@@ -839,7 +854,9 @@ impl SimCluster {
         value: rmpv::Value,
     ) -> anyhow::Result<()> {
         let tag = tag.into();
-        let node = self.nodes.get(node_idx)
+        let node = self
+            .nodes
+            .get(node_idx)
             .ok_or_else(|| anyhow::anyhow!("node index {node_idx} out of range"))?;
 
         if !node.is_alive() {
@@ -925,8 +942,7 @@ impl SimCluster {
                     let lhs = rmp_serde::to_vec_named(first_value).unwrap_or_default();
                     let rhs = rmp_serde::to_vec_named(&value).unwrap_or_default();
                     assert_eq!(
-                        lhs,
-                        rhs,
+                        lhs, rhs,
                         "convergence failure for map={map:?} key={key:?}: \
                          node {first_idx} and node {idx} hold different values",
                     );
@@ -947,7 +963,7 @@ impl SimCluster {
     clippy::doc_markdown,
     clippy::cast_possible_truncation,
     clippy::too_many_lines,
-    clippy::manual_is_multiple_of,
+    clippy::manual_is_multiple_of
 )]
 mod tests {
     use std::time::Duration;
@@ -1011,8 +1027,9 @@ mod tests {
         to_inbound_tx: mpsc::Sender<InboundClusterMessage>,
     ) -> tokio::task::JoinHandle<()> {
         let config = ConnectionConfig::default();
-        let (handle, mut outbound_rx) =
-            from_node.connection_registry.register(ConnectionKind::ClusterPeer, &config);
+        let (handle, mut outbound_rx) = from_node
+            .connection_registry
+            .register(ConnectionKind::ClusterPeer, &config);
 
         // Set the peer_node_id metadata so send_to_peer can find this connection.
         {
@@ -1025,11 +1042,7 @@ mod tests {
             while let Some(msg) = outbound_rx.recv().await {
                 if let OutboundMessage::Binary(bytes) = msg {
                     // Forward the binary frame to the target node's dispatch loop.
-                    let _ = handle_cluster_peer_frame(
-                        &bytes,
-                        from_node_id.clone(),
-                        &to_inbound_tx,
-                    );
+                    let _ = handle_cluster_peer_frame(&bytes, from_node_id.clone(), &to_inbound_tx);
                 }
             }
         })

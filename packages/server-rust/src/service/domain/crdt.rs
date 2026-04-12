@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use tower::Service;
 
 use topgun_core::messages::{
-    ClientOp, ClientOpMessage, Message, OpAckMessage, OpAckPayload,
-    OpBatchMessage, ServerEventPayload, ServerEventType, WriteConcern,
+    ClientOp, ClientOpMessage, Message, OpAckMessage, OpAckPayload, OpBatchMessage,
+    ServerEventPayload, ServerEventType, WriteConcern,
 };
 use topgun_core::types::Value;
 use topgun_core::{hash_to_partition, LWWRecord, Timestamp};
@@ -22,7 +22,9 @@ use topgun_core::{hash_to_partition, LWWRecord, Timestamp};
 use tracing::Instrument;
 
 use crate::network::connection::{ConnectionId, ConnectionMetadata, ConnectionRegistry};
-use crate::service::domain::predicate::{evaluate_predicate, evaluate_where, value_to_rmpv, EvalContext};
+use crate::service::domain::predicate::{
+    evaluate_predicate, evaluate_where, value_to_rmpv, EvalContext,
+};
 use crate::service::domain::query::QueryRegistry;
 use crate::service::operation::{
     service_names, Operation, OperationContext, OperationError, OperationResponse,
@@ -121,8 +123,7 @@ impl ManagedService for CrdtService {
 impl Service<Operation> for Arc<CrdtService> {
     type Response = OperationResponse;
     type Error = OperationError;
-    type Future =
-        Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>>;
+    type Future = Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
@@ -147,9 +148,7 @@ impl Service<Operation> for Arc<CrdtService> {
                     Operation::ClientOp { ctx, payload } => {
                         svc.handle_client_op(&ctx, payload).await
                     }
-                    Operation::OpBatch { ctx, payload } => {
-                        svc.handle_op_batch(&ctx, payload).await
-                    }
+                    Operation::OpBatch { ctx, payload } => svc.handle_op_batch(&ctx, payload).await,
                     _ => Err(OperationError::WrongService),
                 }
             }
@@ -177,7 +176,12 @@ impl CrdtService {
         let sanitized_ts = if let Some(conn_id) = ctx.connection_id {
             let metadata_snapshot = self.snapshot_metadata(conn_id).await?;
             let value_size = estimate_value_size(op);
-            self.write_validator.validate_write(ctx, &metadata_snapshot, &op.map_name, value_size)?;
+            self.write_validator.validate_write(
+                ctx,
+                &metadata_snapshot,
+                &op.map_name,
+                value_size,
+            )?;
             // Schema validation runs after auth/ACL/size checks.
             self.validate_schema_for_op(op)?;
             Some(self.write_validator.sanitize_hlc())
@@ -186,9 +190,13 @@ impl CrdtService {
         };
 
         // Read old value before mutation for query broadcast filtering.
-        let old_rmpv_value = self.read_old_value_for_queries(&op.map_name, &op.key, partition_id).await;
+        let old_rmpv_value = self
+            .read_old_value_for_queries(&op.map_name, &op.key, partition_id)
+            .await;
 
-        let event_payload = self.apply_single_op(op, partition_id, sanitized_ts.as_ref()).await?;
+        let event_payload = self
+            .apply_single_op(op, partition_id, sanitized_ts.as_ref())
+            .await?;
 
         self.broadcast_event(&event_payload, ctx.connection_id)?;
         self.broadcast_query_updates(&event_payload, old_rmpv_value.as_ref(), ctx.connection_id);
@@ -231,7 +239,12 @@ impl CrdtService {
             let metadata_snapshot = self.snapshot_metadata(conn_id).await?;
             for op in ops {
                 let value_size = estimate_value_size(op);
-                self.write_validator.validate_write(ctx, &metadata_snapshot, &op.map_name, value_size)?;
+                self.write_validator.validate_write(
+                    ctx,
+                    &metadata_snapshot,
+                    &op.map_name,
+                    value_size,
+                )?;
                 // Schema validation runs after auth/ACL/size checks, before any apply.
                 self.validate_schema_for_op(op)?;
             }
@@ -242,10 +255,18 @@ impl CrdtService {
                 let sanitized_ts = self.write_validator.sanitize_hlc();
                 let partition_id = hash_to_partition(&op.key);
                 // Read old value before mutation for query broadcast filtering.
-                let old_rmpv_value = self.read_old_value_for_queries(&op.map_name, &op.key, partition_id).await;
-                let event_payload = self.apply_single_op(op, partition_id, Some(&sanitized_ts)).await?;
+                let old_rmpv_value = self
+                    .read_old_value_for_queries(&op.map_name, &op.key, partition_id)
+                    .await;
+                let event_payload = self
+                    .apply_single_op(op, partition_id, Some(&sanitized_ts))
+                    .await?;
                 self.broadcast_event(&event_payload, ctx.connection_id)?;
-                self.broadcast_query_updates(&event_payload, old_rmpv_value.as_ref(), ctx.connection_id);
+                self.broadcast_query_updates(
+                    &event_payload,
+                    old_rmpv_value.as_ref(),
+                    ctx.connection_id,
+                );
                 if let Some(id) = &op.id {
                     last_id = id.clone();
                 }
@@ -255,10 +276,16 @@ impl CrdtService {
             for op in ops {
                 let partition_id = hash_to_partition(&op.key);
                 // Read old value before mutation for query broadcast filtering.
-                let old_rmpv_value = self.read_old_value_for_queries(&op.map_name, &op.key, partition_id).await;
+                let old_rmpv_value = self
+                    .read_old_value_for_queries(&op.map_name, &op.key, partition_id)
+                    .await;
                 let event_payload = self.apply_single_op(op, partition_id, None).await?;
                 self.broadcast_event(&event_payload, ctx.connection_id)?;
-                self.broadcast_query_updates(&event_payload, old_rmpv_value.as_ref(), ctx.connection_id);
+                self.broadcast_query_updates(
+                    &event_payload,
+                    old_rmpv_value.as_ref(),
+                    ctx.connection_id,
+                );
                 if let Some(id) = &op.id {
                     last_id = id.clone();
                 }
@@ -316,8 +343,7 @@ impl CrdtService {
         //           or_tag present      -> OR_REMOVE
         //           otherwise           -> LWW PUT
 
-        let is_remove = op.op_type.as_deref() == Some("REMOVE")
-            || matches!(&op.record, Some(None));
+        let is_remove = op.op_type.as_deref() == Some("REMOVE") || matches!(&op.record, Some(None));
 
         let is_or_add = matches!(&op.or_record, Some(Some(_)));
         let is_or_remove = matches!(&op.or_tag, Some(Some(_))) && op.or_record.is_none();
@@ -369,7 +395,10 @@ impl CrdtService {
             // Read existing OR-Map entries so the new entry is merged in rather than replacing.
             // OR-Map add-wins semantics require all concurrent additions to be preserved.
             let record_value = {
-                let existing = store.get(&op.key, false).await.map_err(OperationError::Internal)?;
+                let existing = store
+                    .get(&op.key, false)
+                    .await
+                    .map_err(OperationError::Internal)?;
                 let mut records: Vec<OrMapEntry> = match existing.map(|r| r.value) {
                     Some(RecordValue::OrMap { records }) => records,
                     _ => Vec::new(),
@@ -381,7 +410,12 @@ impl CrdtService {
             };
 
             store
-                .put(&op.key, record_value, ExpiryPolicy::NONE, CallerProvenance::CrdtMerge)
+                .put(
+                    &op.key,
+                    record_value,
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::CrdtMerge,
+                )
                 .await
                 .map_err(OperationError::Internal)?;
 
@@ -406,7 +440,12 @@ impl CrdtService {
                 tags: vec![tag.clone()],
             };
             store
-                .put(&op.key, record_value, ExpiryPolicy::NONE, CallerProvenance::CrdtMerge)
+                .put(
+                    &op.key,
+                    record_value,
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::CrdtMerge,
+                )
                 .await
                 .map_err(OperationError::Internal)?;
 
@@ -433,7 +472,12 @@ impl CrdtService {
                     (lww_record_to_record_value(rec), rec.clone())
                 };
                 store
-                    .put(&op.key, record_value, ExpiryPolicy::NONE, CallerProvenance::CrdtMerge)
+                    .put(
+                        &op.key,
+                        record_value,
+                        ExpiryPolicy::NONE,
+                        CallerProvenance::CrdtMerge,
+                    )
                     .await
                     .map_err(OperationError::Internal)?;
                 Some(stored_rec)
@@ -499,12 +543,17 @@ impl CrdtService {
         key: &str,
         partition_id: u32,
     ) -> Option<rmpv::Value> {
-        let has_queries = !self.query_registry.get_subscriptions_for_map(map_name).is_empty();
+        let has_queries = !self
+            .query_registry
+            .get_subscriptions_for_map(map_name)
+            .is_empty();
         if !has_queries {
             return None;
         }
 
-        let store = self.record_store_factory.get_or_create(map_name, partition_id);
+        let store = self
+            .record_store_factory
+            .get_or_create(map_name, partition_id);
         let old_record = store.get(key, false).await.ok().flatten()?;
         if let RecordValue::Lww { ref value, .. } = old_record.value {
             Some(value_to_rmpv(value))
@@ -527,16 +576,16 @@ impl CrdtService {
         old_rmpv_value: Option<&rmpv::Value>,
         exclude_connection_id: Option<ConnectionId>,
     ) {
-        let subs = self.query_registry.get_subscriptions_for_map(&event_payload.map_name);
+        let subs = self
+            .query_registry
+            .get_subscriptions_for_map(&event_payload.map_name);
         if subs.is_empty() {
             return;
         }
 
         // Extract the new value from the event payload.
-        let new_rmpv_value: Option<rmpv::Value> = event_payload
-            .record
-            .as_ref()
-            .and_then(|r| r.value.clone());
+        let new_rmpv_value: Option<rmpv::Value> =
+            event_payload.record.as_ref().and_then(|r| r.value.clone());
 
         for sub in &subs {
             // Skip the writing connection so it does not receive its own updates.
@@ -547,12 +596,11 @@ impl CrdtService {
             }
 
             // Evaluate old/new against the query predicate.
-            let old_matches = old_rmpv_value.is_some_and(|v| {
-                matches_query_predicate(&sub.query, v)
-            });
-            let new_matches = new_rmpv_value.as_ref().is_some_and(|v| {
-                matches_query_predicate(&sub.query, v)
-            });
+            let old_matches =
+                old_rmpv_value.is_some_and(|v| matches_query_predicate(&sub.query, v));
+            let new_matches = new_rmpv_value
+                .as_ref()
+                .is_some_and(|v| matches_query_predicate(&sub.query, v));
 
             let change_type = match (old_matches, new_matches) {
                 (false, true) => {
@@ -607,8 +655,7 @@ impl CrdtService {
     /// Returns `Err(OperationError::SchemaInvalid)` when the value fails validation.
     fn validate_schema_for_op(&self, op: &ClientOp) -> Result<(), OperationError> {
         // Mirror the same REMOVE detection as apply_single_op.
-        let is_remove = op.op_type.as_deref() == Some("REMOVE")
-            || matches!(&op.record, Some(None));
+        let is_remove = op.op_type.as_deref() == Some("REMOVE") || matches!(&op.record, Some(None));
         let is_or_remove = matches!(&op.or_tag, Some(Some(_))) && op.or_record.is_none();
 
         if is_remove || is_or_remove {
@@ -714,9 +761,7 @@ pub(crate) fn rmpv_to_value(v: &rmpv::Value) -> Value {
                     // Extract the raw string from rmpv::Value::String to avoid
                     // the Display impl which wraps strings in quotes.
                     let key = match k {
-                        rmpv::Value::String(s) => {
-                            s.as_str().unwrap_or("").to_string()
-                        }
+                        rmpv::Value::String(s) => s.as_str().unwrap_or("").to_string(),
                         other => other.to_string(),
                     };
                     (key, rmpv_to_value(v))
@@ -732,10 +777,7 @@ pub(crate) fn rmpv_to_value(v: &rmpv::Value) -> Value {
 
 /// Converts a wire-format `LWWRecord<rmpv::Value>` into a storage `RecordValue::Lww`.
 fn lww_record_to_record_value(record: &LWWRecord<rmpv::Value>) -> RecordValue {
-    let value = record
-        .value
-        .as_ref()
-        .map_or(Value::Null, rmpv_to_value);
+    let value = record.value.as_ref().map_or(Value::Null, rmpv_to_value);
     RecordValue::Lww {
         value,
         timestamp: record.timestamp.clone(),
@@ -750,14 +792,14 @@ fn lww_record_to_record_value(record: &LWWRecord<rmpv::Value>) -> RecordValue {
 #[allow(
     clippy::doc_markdown,
     clippy::redundant_pattern_matching,
-    clippy::collapsible_match,
+    clippy::collapsible_match
 )]
 mod tests {
     use std::sync::Arc;
 
     use parking_lot::Mutex;
     use topgun_core::messages::Message;
-    use topgun_core::{HLC, SystemClock, Timestamp};
+    use topgun_core::{SystemClock, Timestamp, HLC};
     use tower::ServiceExt;
 
     use super::*;
@@ -779,15 +821,27 @@ mod tests {
     }
 
     fn make_validator() -> Arc<WriteValidator> {
-        let hlc = Arc::new(Mutex::new(HLC::new("test-node".to_string(), Box::new(SystemClock))));
-        Arc::new(WriteValidator::new(Arc::new(SecurityConfig::default()), hlc))
+        let hlc = Arc::new(Mutex::new(HLC::new(
+            "test-node".to_string(),
+            Box::new(SystemClock),
+        )));
+        Arc::new(WriteValidator::new(
+            Arc::new(SecurityConfig::default()),
+            hlc,
+        ))
     }
 
     fn make_service() -> Arc<CrdtService> {
         let factory = make_factory();
         let registry = Arc::new(ConnectionRegistry::new());
         let query_registry = Arc::new(QueryRegistry::new());
-        Arc::new(CrdtService::new(factory, registry, make_validator(), query_registry, Arc::new(SchemaService::new())))
+        Arc::new(CrdtService::new(
+            factory,
+            registry,
+            make_validator(),
+            query_registry,
+            Arc::new(SchemaService::new()),
+        ))
     }
 
     fn make_timestamp() -> Timestamp {
@@ -809,7 +863,13 @@ mod tests {
         let factory = make_factory();
         let registry = Arc::new(ConnectionRegistry::new());
         let query_registry = Arc::new(QueryRegistry::new());
-        let svc = CrdtService::new(factory, registry, make_validator(), query_registry, Arc::new(SchemaService::new()));
+        let svc = CrdtService::new(
+            factory,
+            registry,
+            make_validator(),
+            query_registry,
+            Arc::new(SchemaService::new()),
+        );
         assert_eq!(svc.name(), "crdt");
     }
 
@@ -1038,9 +1098,7 @@ mod tests {
     #[tokio::test]
     async fn wrong_service_returns_error() {
         let svc = make_service();
-        let op = Operation::GarbageCollect {
-            ctx: make_ctx(),
-        };
+        let op = Operation::GarbageCollect { ctx: make_ctx() };
 
         let result = svc.oneshot(op).await;
         assert!(
@@ -1079,7 +1137,10 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     fn make_strict_validator() -> Arc<WriteValidator> {
-        let hlc = Arc::new(Mutex::new(HLC::new("server-node".to_string(), Box::new(SystemClock))));
+        let hlc = Arc::new(Mutex::new(HLC::new(
+            "server-node".to_string(),
+            Box::new(SystemClock),
+        )));
         let config = SecurityConfig {
             require_auth: true,
             max_value_bytes: 0,
@@ -1201,7 +1262,10 @@ mod tests {
             meta.authenticated = true;
             meta.map_permissions.insert(
                 "locked-map".to_string(),
-                MapPermissions { read: true, write: false },
+                MapPermissions {
+                    read: true,
+                    write: false,
+                },
             );
         }
 
@@ -1221,7 +1285,10 @@ mod tests {
     async fn op_batch_atomic_rejection_when_second_op_fails() {
         use crate::network::connection::MapPermissions;
 
-        let hlc = Arc::new(Mutex::new(HLC::new("server-node".to_string(), Box::new(SystemClock))));
+        let hlc = Arc::new(Mutex::new(HLC::new(
+            "server-node".to_string(),
+            Box::new(SystemClock),
+        )));
         let config = SecurityConfig {
             require_auth: true,
             max_value_bytes: 0,
@@ -1247,7 +1314,10 @@ mod tests {
             // Grant write to "open-map" but deny write to "locked-map"
             meta.map_permissions.insert(
                 "locked-map".to_string(),
-                MapPermissions { read: true, write: false },
+                MapPermissions {
+                    read: true,
+                    write: false,
+                },
             );
         }
 
@@ -1307,7 +1377,10 @@ mod tests {
 
     #[tokio::test]
     async fn remove_op_not_rejected_by_size_limit() {
-        let hlc = Arc::new(Mutex::new(HLC::new("server-node".to_string(), Box::new(SystemClock))));
+        let hlc = Arc::new(Mutex::new(HLC::new(
+            "server-node".to_string(),
+            Box::new(SystemClock),
+        )));
         let config = SecurityConfig {
             require_auth: false,
             max_value_bytes: 1, // very small limit
@@ -1317,7 +1390,13 @@ mod tests {
         let factory = make_factory();
         let registry = Arc::new(ConnectionRegistry::new());
         let query_registry = Arc::new(QueryRegistry::new());
-        let svc = Arc::new(CrdtService::new(factory, Arc::clone(&registry), validator, query_registry, Arc::new(SchemaService::new())));
+        let svc = Arc::new(CrdtService::new(
+            factory,
+            Arc::clone(&registry),
+            validator,
+            query_registry,
+            Arc::new(SchemaService::new()),
+        ));
 
         let conn_config = crate::network::config::ConnectionConfig::default();
         let (handle, _rx) = registry.register(ConnectionKind::Client, &conn_config);
@@ -1356,8 +1435,14 @@ mod tests {
 
     #[test]
     fn rmpv_to_value_bool() {
-        assert_eq!(rmpv_to_value(&rmpv::Value::Boolean(true)), Value::Bool(true));
-        assert_eq!(rmpv_to_value(&rmpv::Value::Boolean(false)), Value::Bool(false));
+        assert_eq!(
+            rmpv_to_value(&rmpv::Value::Boolean(true)),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            rmpv_to_value(&rmpv::Value::Boolean(false)),
+            Value::Bool(false)
+        );
     }
 
     #[test]
@@ -1429,10 +1514,8 @@ mod tests {
         let config = crate::network::config::ConnectionConfig::default();
 
         // Register two client connections
-        let (conn1_handle, mut conn1_rx) =
-            conn_registry.register(ConnectionKind::Client, &config);
-        let (conn2_handle, mut conn2_rx) =
-            conn_registry.register(ConnectionKind::Client, &config);
+        let (conn1_handle, mut conn1_rx) = conn_registry.register(ConnectionKind::Client, &config);
+        let (conn2_handle, mut conn2_rx) = conn_registry.register(ConnectionKind::Client, &config);
 
         // Subscribe conn1 to "users" via QueryRegistry
         query_registry.register(QuerySubscription {
@@ -1445,7 +1528,7 @@ mod tests {
                 sort: None,
                 limit: None,
                 cursor: None,
-            group_by: None,
+                group_by: None,
             },
             previous_result_keys: DashSet::new(),
             fields: None,
@@ -1480,8 +1563,7 @@ mod tests {
         let config = crate::network::config::ConnectionConfig::default();
 
         // Register a connection but do NOT subscribe it to any map
-        let (_conn_handle, mut conn_rx) =
-            conn_registry.register(ConnectionKind::Client, &config);
+        let (_conn_handle, mut conn_rx) = conn_registry.register(ConnectionKind::Client, &config);
 
         // Write to "orders" with zero subscribers
         let ctx = make_ctx();
@@ -1502,8 +1584,7 @@ mod tests {
         let (svc, conn_registry, query_registry) = make_broadcast_test_setup();
         let config = crate::network::config::ConnectionConfig::default();
 
-        let (conn1_handle, mut conn1_rx) =
-            conn_registry.register(ConnectionKind::Client, &config);
+        let (conn1_handle, mut conn1_rx) = conn_registry.register(ConnectionKind::Client, &config);
 
         // Subscribe conn1 to "products" (NOT "users")
         query_registry.register(QuerySubscription {
@@ -1516,7 +1597,7 @@ mod tests {
                 sort: None,
                 limit: None,
                 cursor: None,
-            group_by: None,
+                group_by: None,
             },
             previous_result_keys: DashSet::new(),
             fields: None,
@@ -1585,7 +1666,11 @@ mod tests {
         ctx
     }
 
-    fn make_lww_put_with_value(ctx: OperationContext, map_name: &str, value: rmpv::Value) -> Operation {
+    fn make_lww_put_with_value(
+        ctx: OperationContext,
+        map_name: &str,
+        value: rmpv::Value,
+    ) -> Operation {
         let record = topgun_core::LWWRecord {
             value: Some(value),
             timestamp: make_timestamp(),
@@ -1734,7 +1819,10 @@ mod tests {
             .register_schema("typed-map", make_required_string_schema())
             .await
             .unwrap();
-        let hlc = Arc::new(Mutex::new(HLC::new("server-node".to_string(), Box::new(SystemClock))));
+        let hlc = Arc::new(Mutex::new(HLC::new(
+            "server-node".to_string(),
+            Box::new(SystemClock),
+        )));
         let config = SecurityConfig {
             require_auth: false,
             ..SecurityConfig::default()
@@ -1872,11 +1960,18 @@ mod tests {
 
     /// Helper: drain all QUERY_UPDATE messages from a connection receiver.
     /// Returns (change_type, key, value) triples.
-    fn drain_query_updates(rx: &mut tokio::sync::mpsc::Receiver<crate::network::connection::OutboundMessage>) -> Vec<(topgun_core::messages::base::ChangeEventType, String, rmpv::Value)> {
+    fn drain_query_updates(
+        rx: &mut tokio::sync::mpsc::Receiver<crate::network::connection::OutboundMessage>,
+    ) -> Vec<(
+        topgun_core::messages::base::ChangeEventType,
+        String,
+        rmpv::Value,
+    )> {
         let mut updates = Vec::new();
         while let Ok(msg) = rx.try_recv() {
             if let crate::network::connection::OutboundMessage::Binary(bytes) = msg {
-                if let Ok(decoded) = rmp_serde::from_slice::<topgun_core::messages::Message>(&bytes) {
+                if let Ok(decoded) = rmp_serde::from_slice::<topgun_core::messages::Message>(&bytes)
+                {
                     if let topgun_core::messages::Message::QueryUpdate { payload } = decoded {
                         updates.push((payload.change_type, payload.key, payload.value));
                     }
@@ -1896,8 +1991,7 @@ mod tests {
         // Register two client connections
         let (writer_handle, mut writer_rx) =
             conn_registry.register(ConnectionKind::Client, &config);
-        let (sub_handle, mut sub_rx) =
-            conn_registry.register(ConnectionKind::Client, &config);
+        let (sub_handle, mut sub_rx) = conn_registry.register(ConnectionKind::Client, &config);
 
         // Subscribe sub_handle to "users" with field projection ["name"]
         query_registry.register(QuerySubscription {
@@ -1910,7 +2004,7 @@ mod tests {
                 sort: None,
                 limit: None,
                 cursor: None,
-            group_by: None,
+                group_by: None,
             },
             previous_result_keys: DashSet::new(),
             fields: Some(vec!["name".to_string()]),
@@ -1946,7 +2040,10 @@ mod tests {
             "subscriber should receive exactly 1 QUERY_UPDATE"
         );
         let (change_type, key, value) = &sub_updates[0];
-        assert_eq!(*change_type, topgun_core::messages::base::ChangeEventType::ENTER);
+        assert_eq!(
+            *change_type,
+            topgun_core::messages::base::ChangeEventType::ENTER
+        );
         assert_eq!(key, "user-1");
 
         // The value should be projected to only include "name"

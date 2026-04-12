@@ -145,8 +145,8 @@ fn replica_count(partition_id: u32, table: &ClusterPartitionTable) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::types::NodeState;
+    use super::*;
 
     fn make_active_member(node_id: &str) -> MemberInfo {
         MemberInfo {

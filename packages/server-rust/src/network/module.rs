@@ -25,11 +25,13 @@ use utoipa::OpenApi;
 use super::config::NetworkConfig;
 use super::connection::{ConnectionRegistry, OutboundMessage};
 use super::handlers::admin::{
-    cluster_status, create_index, create_policy, delete_policy, get_settings, index_backfill_status,
-    list_indexes, list_maps, list_policies, login, remove_index_handler, server_status,
-    update_settings,
+    cluster_status, create_index, create_policy, delete_policy, get_settings,
+    index_backfill_status, list_indexes, list_maps, list_policies, login, remove_index_handler,
+    server_status, update_settings,
 };
-use super::handlers::auth_provider::{AuthProvider, AuthProviderConfig, HmacProvider, JwksProvider, OidcProvider};
+use super::handlers::auth_provider::{
+    AuthProvider, AuthProviderConfig, HmacProvider, JwksProvider, OidcProvider,
+};
 use super::handlers::{
     health_handler, http_sync_handler, liveness_handler, metrics_handler, readiness_handler,
     refresh_handler, token_exchange_handler, ws_upgrade_handler, AppState,
@@ -233,7 +235,15 @@ impl NetworkModule {
         shutdown_ctrl.set_ready();
 
         if let Some(ref tls_config) = tls {
-            serve_tls(listener, router, tls_config, registry, shutdown_ctrl, shutdown).await
+            serve_tls(
+                listener,
+                router,
+                tls_config,
+                registry,
+                shutdown_ctrl,
+                shutdown,
+            )
+            .await
         } else {
             serve_plain(listener, router, registry, shutdown_ctrl, shutdown).await
         }
@@ -276,9 +286,7 @@ fn build_app(
 
     // Load JWT secret from environment so the server can authenticate tokens
     // without requiring secret injection through application code paths.
-    let jwt_secret = std::env::var("JWT_SECRET")
-        .ok()
-        .filter(|s| !s.is_empty());
+    let jwt_secret = std::env::var("JWT_SECRET").ok().filter(|s| !s.is_empty());
 
     // Refuse to start when auth is required but no secret is configured.
     // Only enforced when server_config is Some (production paths). Unit tests
@@ -317,33 +325,43 @@ fn build_app(
         .iter()
         .map(|cfg| -> Arc<dyn AuthProvider> {
             match cfg {
-                AuthProviderConfig::Jwks { name, jwks_url, issuer, audience, claims } => Arc::new(
-                    JwksProvider::new(
-                        name.clone(),
-                        jwks_url.clone(),
-                        issuer.clone(),
-                        audience.clone(),
-                        claims.clone(),
-                        http_client.clone(),
-                    ),
-                ),
-                AuthProviderConfig::Oidc { name, issuer_url, audience, claims } => Arc::new(
-                    OidcProvider::new(
-                        name.clone(),
-                        issuer_url.clone(),
-                        audience.clone(),
-                        claims.clone(),
-                        http_client.clone(),
-                    ),
-                ),
-                AuthProviderConfig::Hmac { name, secret, issuer, claims } => Arc::new(
-                    HmacProvider::new(
-                        name.clone(),
-                        secret.clone(),
-                        issuer.clone(),
-                        claims.clone(),
-                    ),
-                ),
+                AuthProviderConfig::Jwks {
+                    name,
+                    jwks_url,
+                    issuer,
+                    audience,
+                    claims,
+                } => Arc::new(JwksProvider::new(
+                    name.clone(),
+                    jwks_url.clone(),
+                    issuer.clone(),
+                    audience.clone(),
+                    claims.clone(),
+                    http_client.clone(),
+                )),
+                AuthProviderConfig::Oidc {
+                    name,
+                    issuer_url,
+                    audience,
+                    claims,
+                } => Arc::new(OidcProvider::new(
+                    name.clone(),
+                    issuer_url.clone(),
+                    audience.clone(),
+                    claims.clone(),
+                    http_client.clone(),
+                )),
+                AuthProviderConfig::Hmac {
+                    name,
+                    secret,
+                    issuer,
+                    claims,
+                } => Arc::new(HmacProvider::new(
+                    name.clone(),
+                    secret.clone(),
+                    issuer.clone(),
+                    claims.clone(),
+                )),
             }
         })
         .collect();
@@ -390,8 +408,8 @@ fn build_app(
         .url("/api/openapi.json", AdminApiDoc::openapi());
 
     // Static SPA serving for admin dashboard
-    let admin_spa_dir = std::env::var("TOPGUN_ADMIN_DIR")
-        .unwrap_or_else(|_| "./admin-dashboard/dist".to_string());
+    let admin_spa_dir =
+        std::env::var("TOPGUN_ADMIN_DIR").unwrap_or_else(|_| "./admin-dashboard/dist".to_string());
     let index_html = format!("{admin_spa_dir}/index.html");
     let serve_dir = ServeDir::new(&admin_spa_dir)
         .append_index_html_on_directories(true)
@@ -406,7 +424,10 @@ fn build_app(
         .route("/api/auth/refresh", post(refresh_handler))
         .route("/api/admin/cluster/status", get(cluster_status))
         .route("/api/admin/maps", get(list_maps))
-        .route("/api/admin/settings", get(get_settings).put(update_settings))
+        .route(
+            "/api/admin/settings",
+            get(get_settings).put(update_settings),
+        )
         .route(
             "/api/admin/policies",
             get(list_policies).post(create_policy),
@@ -664,11 +685,10 @@ mod tests {
 
         assert_eq!(registry.count(), 0, "no connections initially");
 
-        let (ws_stream, _response) = tokio_tungstenite::connect_async(
-            format!("ws://127.0.0.1:{port}/ws"),
-        )
-        .await
-        .expect("WS connect should succeed");
+        let (ws_stream, _response) =
+            tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws"))
+                .await
+                .expect("WS connect should succeed");
 
         // Wait for the server to register the connection.
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -719,8 +739,8 @@ mod tests {
         assert_eq!(content_type, "application/msgpack");
 
         let body = resp.bytes().await.expect("body read should succeed");
-        let decoded: topgun_core::messages::HttpSyncResponse =
-            rmp_serde::from_slice(&body).expect("response body should be valid MsgPack HttpSyncResponse");
+        let decoded: topgun_core::messages::HttpSyncResponse = rmp_serde::from_slice(&body)
+            .expect("response body should be valid MsgPack HttpSyncResponse");
         // server_hlc.millis must be populated with a positive wall-clock value.
         assert!(decoded.server_hlc.millis > 0);
 
@@ -790,10 +810,7 @@ mod tests {
         let id_str = request_id
             .to_str()
             .expect("X-Request-Id should be valid UTF-8");
-        assert!(
-            !id_str.is_empty(),
-            "X-Request-Id should not be empty"
-        );
+        assert!(!id_str.is_empty(), "X-Request-Id should not be empty");
         assert_eq!(
             id_str.len(),
             36,

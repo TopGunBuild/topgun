@@ -35,9 +35,9 @@ pub mod arrow_cache;
 #[cfg(feature = "datafusion")]
 pub mod arrow_convert;
 #[cfg(feature = "datafusion")]
-pub mod table_provider;
-#[cfg(feature = "datafusion")]
 pub mod datafusion_backend;
+#[cfg(feature = "datafusion")]
+pub mod table_provider;
 
 pub mod search;
 pub use search::SearchService;
@@ -94,9 +94,18 @@ mod tests {
             Vec::new(),
         ));
         let needs_population = Arc::new(dashmap::DashMap::new());
-        let svc = Arc::new(SearchService::new(reg, indexes, store_factory, conn_reg, needs_population));
+        let svc = Arc::new(SearchService::new(
+            reg,
+            indexes,
+            store_factory,
+            conn_reg,
+            needs_population,
+        ));
 
-        let err = svc.oneshot(make_op(service_names::SEARCH)).await.unwrap_err();
+        let err = svc
+            .oneshot(make_op(service_names::SEARCH))
+            .await
+            .unwrap_err();
         assert!(matches!(err, OperationError::WrongService));
     }
 

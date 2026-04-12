@@ -182,10 +182,7 @@ impl IndexRegistry {
     /// Returns all registered indexes (for iteration by the mutation observer).
     #[must_use]
     pub fn indexes(&self) -> Vec<Arc<dyn Index>> {
-        self.indexes
-            .iter()
-            .map(|r| Arc::clone(r.value()))
-            .collect()
+        self.indexes.iter().map(|r| Arc::clone(r.value())).collect()
     }
 
     /// Returns statistics for all registered indexes.
@@ -240,10 +237,7 @@ impl IndexRegistry {
     /// indexes, the caller handles those cases before invoking this method.
     #[must_use]
     pub fn first_vector_index_attribute(&self) -> Option<String> {
-        self.vector_indexes
-            .iter()
-            .next()
-            .map(|r| r.key().clone())
+        self.vector_indexes.iter().next().map(|r| r.key().clone())
     }
 }
 
@@ -413,7 +407,9 @@ mod tests {
         let registry = IndexRegistry::new();
         registry.add_hash_index("field");
         registry.add_navigable_index("field");
-        let idx = registry.get_index("field").expect("index should be present");
+        let idx = registry
+            .get_index("field")
+            .expect("index should be present");
         assert_eq!(idx.index_type(), IndexType::Navigable, "should be replaced");
     }
 
@@ -453,7 +449,9 @@ mod tests {
         let registry = IndexRegistry::new();
         registry.add_hash_index("status");
         let pred = make_leaf(PredicateOp::Eq, "status");
-        let idx = registry.get_best_index(&pred).expect("should find hash index");
+        let idx = registry
+            .get_best_index(&pred)
+            .expect("should find hash index");
         assert_eq!(idx.index_type(), IndexType::Hash);
     }
 
@@ -462,7 +460,9 @@ mod tests {
         let registry = IndexRegistry::new();
         registry.add_hash_index("status");
         let pred = make_leaf(PredicateOp::Neq, "status");
-        let idx = registry.get_best_index(&pred).expect("should find hash index");
+        let idx = registry
+            .get_best_index(&pred)
+            .expect("should find hash index");
         assert_eq!(idx.index_type(), IndexType::Hash);
     }
 
@@ -545,7 +545,10 @@ mod tests {
     fn remove_index_returns_true_when_present() {
         let registry = IndexRegistry::new();
         registry.add_hash_index("email");
-        assert!(registry.remove_index("email"), "should return true when index existed");
+        assert!(
+            registry.remove_index("email"),
+            "should return true when index existed"
+        );
     }
 
     #[test]
@@ -571,7 +574,10 @@ mod tests {
         let _ = registry.remove_index("name");
 
         // The index should no longer exist in the registry.
-        assert!(registry.get_index("name").is_none(), "index should be gone after remove");
+        assert!(
+            registry.get_index("name").is_none(),
+            "index should be gone after remove"
+        );
         // The evicted Arc still holds cleared data.
         assert_eq!(idx.entry_count(), 0, "index data should be cleared");
     }
@@ -579,12 +585,18 @@ mod tests {
     #[test]
     fn has_index_reflects_state() {
         let registry = IndexRegistry::new();
-        assert!(!registry.has_index("status"), "should be false before adding");
+        assert!(
+            !registry.has_index("status"),
+            "should be false before adding"
+        );
 
         registry.add_hash_index("status");
         assert!(registry.has_index("status"), "should be true after adding");
 
         let _ = registry.remove_index("status");
-        assert!(!registry.has_index("status"), "should be false after removing");
+        assert!(
+            !registry.has_index("status"),
+            "should be false after removing"
+        );
     }
 }

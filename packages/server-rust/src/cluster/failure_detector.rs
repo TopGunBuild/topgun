@@ -133,8 +133,7 @@ impl FailureDetector for PhiAccrualFailureDetector {
         if state.intervals.len() < 3 {
             // Not enough samples for statistical analysis -- fall back to
             // a simple deadline-style linear scaling.
-            return elapsed / self.config.max_no_heartbeat_ms as f64
-                * self.config.phi_threshold;
+            return elapsed / self.config.max_no_heartbeat_ms as f64 * self.config.phi_threshold;
         }
 
         // Compute mean and standard deviation of recorded intervals.

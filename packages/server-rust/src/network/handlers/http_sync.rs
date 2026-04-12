@@ -7,9 +7,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::State;
 use axum::extract::FromRequestParts;
 use axum::extract::OptionalFromRequestParts;
+use axum::extract::State;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -17,11 +17,14 @@ use bytes::Bytes;
 use jsonwebtoken::Validation;
 use topgun_core::hash_to_partition;
 use topgun_core::messages::base::Query;
-use topgun_core::messages::{HttpQueryRequest, HttpQueryResult, HttpSyncAck, HttpSyncError, HttpSyncRequest, HttpSyncResponse};
+use topgun_core::messages::{
+    HttpQueryRequest, HttpQueryResult, HttpSyncAck, HttpSyncError, HttpSyncRequest,
+    HttpSyncResponse,
+};
 use topgun_core::Timestamp;
 
-use super::AppState;
 use super::auth_validator::AuthValidationContext;
+use super::AppState;
 use crate::service::dispatch::PartitionDispatcher;
 use crate::service::domain::predicate::{execute_query, value_to_rmpv};
 use crate::service::operation::CallerOrigin;
@@ -53,7 +56,9 @@ impl IntoResponse for ClientAuthError {
         // insecure_forward_auth_errors flag when constructing the response.
         let json = match &self {
             Self::MissingToken => r#"{"code":401,"message":"authentication required"}"#.to_string(),
-            Self::InvalidToken(_) | Self::NotConfigured => r#"{"code":401,"message":"Authentication failed"}"#.to_string(),
+            Self::InvalidToken(_) | Self::NotConfigured => {
+                r#"{"code":401,"message":"Authentication failed"}"#.to_string()
+            }
         };
         (
             StatusCode::UNAUTHORIZED,
@@ -126,10 +131,7 @@ impl OptionalFromRequestParts<AppState> for ClientClaims {
         // Header present — record presence regardless of token validity.
         parts.extensions.insert(TokenPresence::Present);
 
-        let token = token_str
-            .strip_prefix("Bearer ")
-            .unwrap_or("")
-            .trim();
+        let token = token_str.strip_prefix("Bearer ").unwrap_or("").trim();
 
         if token.is_empty() {
             return Ok(None);
@@ -149,7 +151,8 @@ impl OptionalFromRequestParts<AppState> for ClientClaims {
         validation.leeway = state.config.jwt_clock_skew_secs;
 
         // Decode into serde_json::Value to obtain raw_claims for AuthValidationContext.
-        let Ok(token_data) = jsonwebtoken::decode::<serde_json::Value>(token, &key, &validation) else {
+        let Ok(token_data) = jsonwebtoken::decode::<serde_json::Value>(token, &key, &validation)
+        else {
             return Ok(None);
         };
 
@@ -237,7 +240,11 @@ fn enforce_auth(
         TokenPresence::Absent => {
             let json = r#"{"code":401,"message":"authentication required"}"#.to_string();
             Some(
-                (StatusCode::UNAUTHORIZED, [("content-type", "application/json")], json.into_bytes())
+                (
+                    StatusCode::UNAUTHORIZED,
+                    [("content-type", "application/json")],
+                    json.into_bytes(),
+                )
                     .into_response(),
             )
         }
@@ -249,7 +256,11 @@ fn enforce_auth(
             };
             let json = format!(r#"{{"code":401,"message":"{message}"}}"#);
             Some(
-                (StatusCode::UNAUTHORIZED, [("content-type", "application/json")], json.into_bytes())
+                (
+                    StatusCode::UNAUTHORIZED,
+                    [("content-type", "application/json")],
+                    json.into_bytes(),
+                )
                     .into_response(),
             )
         }
@@ -378,11 +389,9 @@ fn encode_http_cursor(data: &HttpCursorData) -> String {
 /// Returns None when the cursor is malformed, not valid base64url, or fails JSON
 /// deserialization. Callers must additionally validate the timestamp for expiry.
 fn decode_http_cursor(cursor: &str) -> Option<HttpCursorData> {
-    let bytes = base64::engine::Engine::decode(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        cursor,
-    )
-    .ok()?;
+    let bytes =
+        base64::engine::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, cursor)
+            .ok()?;
     serde_json::from_slice::<HttpCursorData>(&bytes).ok()
 }
 
@@ -432,7 +441,7 @@ fn is_after_cursor(key: &str, value: &rmpv::Value, cursor: &HttpCursorData) -> b
 fn compare_rmpv_to_json(rmpv_val: &rmpv::Value, json_val: &serde_json::Value) -> i32 {
     match (rmpv_val, json_val) {
         (rmpv::Value::Nil, serde_json::Value::Null) => 0,
-        (rmpv::Value::Nil, _) => 1,  // nil sorts after any non-null value
+        (rmpv::Value::Nil, _) => 1, // nil sorts after any non-null value
         (_, serde_json::Value::Null) => -1, // any non-nil sorts before null
 
         (rmpv::Value::String(s), serde_json::Value::String(js)) => {
@@ -445,7 +454,9 @@ fn compare_rmpv_to_json(rmpv_val: &rmpv::Value, json_val: &serde_json::Value) ->
         }
         (rmpv::Value::F32(a), serde_json::Value::Number(n)) => {
             let b = n.as_f64().unwrap_or(f64::NAN);
-            f64::from(*a).partial_cmp(&b).map_or(0, OrderingExt::into_i32_sign)
+            f64::from(*a)
+                .partial_cmp(&b)
+                .map_or(0, OrderingExt::into_i32_sign)
         }
         (rmpv::Value::F64(a), serde_json::Value::Number(n)) => {
             let b = n.as_f64().unwrap_or(f64::NAN);
@@ -496,15 +507,15 @@ fn rmpv_to_json_value(v: &rmpv::Value) -> Option<serde_json::Value> {
             if let Some(n) = i.as_i64() {
                 Some(serde_json::Value::Number(serde_json::Number::from(n)))
             } else {
-                i.as_u64().map(|n| serde_json::Value::Number(serde_json::Number::from(n)))
+                i.as_u64()
+                    .map(|n| serde_json::Value::Number(serde_json::Number::from(n)))
             }
         }
-        rmpv::Value::F32(f) => serde_json::Number::from_f64(f64::from(*f))
-            .map(serde_json::Value::Number),
-        rmpv::Value::F64(f) => serde_json::Number::from_f64(*f)
-            .map(serde_json::Value::Number),
-        rmpv::Value::String(s) => s.as_str()
-            .map(|s| serde_json::Value::String(s.to_owned())),
+        rmpv::Value::F32(f) => {
+            serde_json::Number::from_f64(f64::from(*f)).map(serde_json::Value::Number)
+        }
+        rmpv::Value::F64(f) => serde_json::Number::from_f64(*f).map(serde_json::Value::Number),
+        rmpv::Value::String(s) => s.as_str().map(|s| serde_json::Value::String(s.to_owned())),
         _ => None,
     }
 }
@@ -549,7 +560,12 @@ async fn dispatch_queries(
             // Permissive default: if no policies are configured, allow all reads.
             if evaluator.has_policies().await {
                 let decision = evaluator
-                    .evaluate(principal, PermissionAction::Read, &map_name, &rmpv::Value::Nil)
+                    .evaluate(
+                        principal,
+                        PermissionAction::Read,
+                        &map_name,
+                        &rmpv::Value::Nil,
+                    )
                     .await;
                 if decision == PolicyDecision::Deny {
                     let errors = response.errors.get_or_insert_with(Vec::new);
@@ -658,15 +674,20 @@ async fn dispatch_queries(
                 let nc = if truncated {
                     page_entries.last().map(|last| {
                         // Extract the sort field value from the last entry in the page.
-                        let last_sort_value = cursor_data.sort_field.as_deref().and_then(|field| {
-                            if let rmpv::Value::Map(ref pairs) = last.value {
-                                pairs.iter()
-                                    .find(|(k, _)| k.as_str() == Some(field))
-                                    .and_then(|(_, v)| rmpv_to_json_value(v))
-                            } else {
-                                None
-                            }
-                        }).unwrap_or(serde_json::Value::Null);
+                        let last_sort_value = cursor_data
+                            .sort_field
+                            .as_deref()
+                            .and_then(|field| {
+                                if let rmpv::Value::Map(ref pairs) = last.value {
+                                    pairs
+                                        .iter()
+                                        .find(|(k, _)| k.as_str() == Some(field))
+                                        .and_then(|(_, v)| rmpv_to_json_value(v))
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or(serde_json::Value::Null);
 
                         let next = HttpCursorData {
                             last_sort_value,
@@ -772,7 +793,12 @@ pub async fn http_sync_handler(
         .is_some_and(|sc| sc.load().security.require_auth);
 
     // Authentication enforcement: reject unauthenticated requests when required.
-    if let Some(err_response) = enforce_auth(require_auth, token_presence, claims.as_ref(), state.config.insecure_forward_auth_errors) {
+    if let Some(err_response) = enforce_auth(
+        require_auth,
+        token_presence,
+        claims.as_ref(),
+        state.config.insecure_forward_auth_errors,
+    ) {
         return err_response;
     }
 
@@ -817,7 +843,10 @@ pub async fn http_sync_handler(
     let (Some(classify_svc), Some(dispatcher)) =
         (state.operation_service.as_ref(), state.dispatcher.as_ref())
     else {
-        return msgpack_response(&HttpSyncResponse { server_hlc, ..Default::default() });
+        return msgpack_response(&HttpSyncResponse {
+            server_hlc,
+            ..Default::default()
+        });
     };
 
     let mut http_response = HttpSyncResponse {
@@ -827,7 +856,13 @@ pub async fn http_sync_handler(
 
     if let Some(ops) = request.operations {
         dispatch_operations(
-            ops, classify_svc, dispatcher, claims.as_ref(), caller_origin, principal.as_ref(), &mut http_response,
+            ops,
+            classify_svc,
+            dispatcher,
+            claims.as_ref(),
+            caller_origin,
+            principal.as_ref(),
+            &mut http_response,
         )
         .await;
     }
@@ -874,7 +909,7 @@ fn msgpack_response(response: &HttpSyncResponse) -> axum::response::Response {
     clippy::cast_sign_loss,
     clippy::field_reassign_with_default,
     clippy::doc_markdown,
-    clippy::ignored_unit_patterns,
+    clippy::ignored_unit_patterns
 )]
 mod tests {
     use super::*;
@@ -908,7 +943,10 @@ mod tests {
         } else {
             now.saturating_sub((-exp_offset_secs) as u64)
         };
-        let claims = TestClaims { sub: sub.map(str::to_owned), exp };
+        let claims = TestClaims {
+            sub: sub.map(str::to_owned),
+            exp,
+        };
         jsonwebtoken::encode(
             &Header::default(),
             &claims,
@@ -945,7 +983,10 @@ mod tests {
         let mut config = NetworkConfig::default();
         config.jwt_clock_skew_secs = 60;
         let server_cfg = ServerConfig {
-            security: SecurityConfig { require_auth, ..SecurityConfig::default() },
+            security: SecurityConfig {
+                require_auth,
+                ..SecurityConfig::default()
+            },
             ..ServerConfig::default()
         };
         AppState {
@@ -974,10 +1015,14 @@ mod tests {
         let state = test_state();
         let body = Bytes::from_static(b"");
 
-        let response =
-            http_sync_handler(State(state), None, axum::Extension(TokenPresence::Absent), body)
-                .await
-                .into_response();
+        let response = http_sync_handler(
+            State(state),
+            None,
+            axum::Extension(TokenPresence::Absent),
+            body,
+        )
+        .await
+        .into_response();
         let content_type = response
             .headers()
             .get("content-type")
@@ -990,10 +1035,14 @@ mod tests {
         let state = test_state();
         let body = Bytes::from_static(b"");
 
-        let response =
-            http_sync_handler(State(state), None, axum::Extension(TokenPresence::Absent), body)
-                .await
-                .into_response();
+        let response = http_sync_handler(
+            State(state),
+            None,
+            axum::Extension(TokenPresence::Absent),
+            body,
+        )
+        .await
+        .into_response();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
     }
 
@@ -1013,10 +1062,14 @@ mod tests {
         };
         let body = Bytes::from(rmp_serde::to_vec_named(&req).unwrap());
 
-        let response =
-            http_sync_handler(State(state), None, axum::Extension(TokenPresence::Absent), body)
-                .await
-                .into_response();
+        let response = http_sync_handler(
+            State(state),
+            None,
+            axum::Extension(TokenPresence::Absent),
+            body,
+        )
+        .await
+        .into_response();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
 
         let body_bytes = axum::body::to_bytes(response.into_body(), 4096)
@@ -1026,7 +1079,10 @@ mod tests {
             rmp_serde::from_slice(&body_bytes).expect("response must be valid MsgPack");
 
         // server_hlc.millis must be a positive wall-clock timestamp.
-        assert!(decoded.server_hlc.millis > 0, "server_hlc.millis must be > 0");
+        assert!(
+            decoded.server_hlc.millis > 0,
+            "server_hlc.millis must be > 0"
+        );
     }
 
     #[tokio::test]
@@ -1035,10 +1091,14 @@ mod tests {
         // Two bytes that are not a valid MsgPack-encoded HttpSyncRequest.
         let body = Bytes::from_static(&[0xFF, 0xFF]);
 
-        let response =
-            http_sync_handler(State(state), None, axum::Extension(TokenPresence::Absent), body)
-                .await
-                .into_response();
+        let response = http_sync_handler(
+            State(state),
+            None,
+            axum::Extension(TokenPresence::Absent),
+            body,
+        )
+        .await
+        .into_response();
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 
@@ -1064,10 +1124,14 @@ mod tests {
             })
         };
         let body = Bytes::from_static(b"");
-        let response =
-            http_sync_handler(State(state), claims, axum::Extension(TokenPresence::Present), body)
-                .await
-                .into_response();
+        let response = http_sync_handler(
+            State(state),
+            claims,
+            axum::Extension(TokenPresence::Present),
+            body,
+        )
+        .await
+        .into_response();
         // With valid token + require_auth=true, handler should proceed (200 since no dispatch).
         assert_eq!(
             response.status(),
@@ -1095,7 +1159,9 @@ mod tests {
             axum::http::StatusCode::UNAUTHORIZED,
             "present-but-invalid token must return HTTP 401"
         );
-        let body_bytes = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+        let body_bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
         let body_str = std::str::from_utf8(&body_bytes).unwrap();
         // Default mode (insecure_forward_auth_errors=false) returns a generic message.
         assert!(
@@ -1126,7 +1192,9 @@ mod tests {
         .await
         .into_response();
         assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
-        let body_bytes = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+        let body_bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
         let body_str = std::str::from_utf8(&body_bytes).unwrap();
         assert!(
             body_str.contains("invalid or expired token"),
@@ -1152,7 +1220,9 @@ mod tests {
             axum::http::StatusCode::UNAUTHORIZED,
             "missing token + require_auth=true must return HTTP 401"
         );
-        let body_bytes = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+        let body_bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
         let body_str = std::str::from_utf8(&body_bytes).unwrap();
         assert!(
             body_str.contains("authentication required"),
@@ -1197,10 +1267,14 @@ mod tests {
             })
         };
         let body = Bytes::from_static(b"");
-        let response =
-            http_sync_handler(State(state), claims, axum::Extension(TokenPresence::Present), body)
-                .await
-                .into_response();
+        let response = http_sync_handler(
+            State(state),
+            claims,
+            axum::Extension(TokenPresence::Present),
+            body,
+        )
+        .await
+        .into_response();
         assert_eq!(
             response.status(),
             axum::http::StatusCode::OK,
@@ -1275,13 +1349,17 @@ mod tests {
     }
 
     /// Executes a dispatch_queries call directly and returns the response.
-    async fn run_dispatch_queries(
-        queries: Vec<QueryReq>,
-        state: &AppState,
-    ) -> HttpSyncResponse {
+    async fn run_dispatch_queries(queries: Vec<QueryReq>, state: &AppState) -> HttpSyncResponse {
         let mut response = HttpSyncResponse::default();
         if let Some(sf) = state.store_factory.as_ref() {
-            dispatch_queries(queries, sf, None, state.policy_store.as_ref(), &mut response).await;
+            dispatch_queries(
+                queries,
+                sf,
+                None,
+                state.policy_store.as_ref(),
+                &mut response,
+            )
+            .await;
         }
         response
     }
@@ -1310,10 +1388,16 @@ mod tests {
         };
 
         let response = run_dispatch_queries(vec![query], &state).await;
-        let results = response.query_results.expect("queryResults must be present");
+        let results = response
+            .query_results
+            .expect("queryResults must be present");
         assert_eq!(results.len(), 1, "should have one query result entry");
         assert_eq!(results[0].query_id, "q1");
-        assert_eq!(results[0].results.len(), 1, "filter should return exactly 1 matching record");
+        assert_eq!(
+            results[0].results.len(),
+            1,
+            "filter should return exactly 1 matching record"
+        );
     }
 
     /// Query against a non-existent map returns empty results, not an error.
@@ -1332,10 +1416,19 @@ mod tests {
 
         let response = run_dispatch_queries(vec![query], &state).await;
         // No error entries.
-        assert!(response.errors.is_none(), "missing map must not produce errors");
-        let results = response.query_results.expect("queryResults must be present");
+        assert!(
+            response.errors.is_none(),
+            "missing map must not produce errors"
+        );
+        let results = response
+            .query_results
+            .expect("queryResults must be present");
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].results.len(), 0, "empty map returns empty results array");
+        assert_eq!(
+            results[0].results.len(),
+            0,
+            "empty map returns empty results array"
+        );
     }
 
     /// Query with limit and offset paginates correctly, with hasMore = true.
@@ -1359,7 +1452,9 @@ mod tests {
         };
 
         let response = run_dispatch_queries(vec![query], &state).await;
-        let results = response.query_results.expect("queryResults must be present");
+        let results = response
+            .query_results
+            .expect("queryResults must be present");
         assert_eq!(results.len(), 1);
         let qr = &results[0];
         assert_eq!(qr.results.len(), 2, "limit=2 must return exactly 2 records");
@@ -1389,14 +1484,19 @@ mod tests {
         };
 
         let response = run_dispatch_queries(vec![query], &state).await;
-        let results = response.query_results.expect("queryResults must be present");
+        let results = response
+            .query_results
+            .expect("queryResults must be present");
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0].results.len(),
             3,
             "nil filter should return all 3 records"
         );
-        assert!(results[0].has_more.is_none(), "has_more must be None when no limit is set");
+        assert!(
+            results[0].has_more.is_none(),
+            "has_more must be None when no limit is set"
+        );
     }
 
     /// When store_factory is None, queries are silently skipped and queryResults is None.
@@ -1406,7 +1506,11 @@ mod tests {
 
         let req = HttpSyncRequest {
             client_id: "c1".to_string(),
-            client_hlc: Timestamp { millis: 1000, counter: 0, node_id: "n1".to_string() },
+            client_hlc: Timestamp {
+                millis: 1000,
+                counter: 0,
+                node_id: "n1".to_string(),
+            },
             queries: Some(vec![QueryReq {
                 query_id: "q-skip".to_string(),
                 map_name: "users".to_string(),
@@ -1419,13 +1523,19 @@ mod tests {
         };
         let body = Bytes::from(rmp_serde::to_vec_named(&req).unwrap());
 
-        let response =
-            http_sync_handler(State(state), None, axum::Extension(TokenPresence::Absent), body)
-                .await
-                .into_response();
+        let response = http_sync_handler(
+            State(state),
+            None,
+            axum::Extension(TokenPresence::Absent),
+            body,
+        )
+        .await
+        .into_response();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
 
-        let body_bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body_bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let decoded: HttpSyncResponse = rmp_serde::from_slice(&body_bytes).unwrap();
         assert!(
             decoded.query_results.is_none(),
@@ -1466,7 +1576,10 @@ mod tests {
         let qr1 = &results1[0];
         assert_eq!(qr1.results.len(), 2, "page 1 must have 2 results");
         assert_eq!(qr1.has_more, Some(true), "has_more must be true for page 1");
-        let cursor1 = qr1.next_cursor.clone().expect("page 1 must have next_cursor");
+        let cursor1 = qr1
+            .next_cursor
+            .clone()
+            .expect("page 1 must have next_cursor");
 
         // Page 2: use cursor from page 1.
         let page2_query = QueryReq {
@@ -1482,7 +1595,10 @@ mod tests {
         let qr2 = &results2[0];
         assert_eq!(qr2.results.len(), 2, "page 2 must have 2 results");
         assert_eq!(qr2.has_more, Some(true), "has_more must be true for page 2");
-        let cursor2 = qr2.next_cursor.clone().expect("page 2 must have next_cursor");
+        let cursor2 = qr2
+            .next_cursor
+            .clone()
+            .expect("page 2 must have next_cursor");
 
         // Page 3: use cursor from page 2, should get 1 remaining record.
         let page3_query = QueryReq {
@@ -1497,8 +1613,15 @@ mod tests {
         let results3 = resp3.query_results.expect("page 3 must have results");
         let qr3 = &results3[0];
         assert_eq!(qr3.results.len(), 1, "page 3 must have 1 remaining record");
-        assert_eq!(qr3.has_more, Some(false), "has_more must be false for last page");
-        assert!(qr3.next_cursor.is_none(), "next_cursor must be None on last page");
+        assert_eq!(
+            qr3.has_more,
+            Some(false),
+            "has_more must be false for last page"
+        );
+        assert!(
+            qr3.next_cursor.is_none(),
+            "next_cursor must be None on last page"
+        );
 
         // Verify no duplicates across pages.
         let all_count = qr1.results.len() + qr2.results.len() + qr3.results.len();
@@ -1508,11 +1631,7 @@ mod tests {
     /// R5 test 2: Invalid cursor string produces a 400 error for that query.
     #[tokio::test]
     async fn query_with_invalid_cursor_returns_error() {
-        let state = state_with_map_data(
-            "items2",
-            vec![("x", "X"), ("y", "Y")],
-        )
-        .await;
+        let state = state_with_map_data("items2", vec![("x", "X"), ("y", "Y")]).await;
 
         let query = QueryReq {
             query_id: "q-bad-cursor".to_string(),
@@ -1525,13 +1644,18 @@ mod tests {
         let response = run_dispatch_queries(vec![query], &state).await;
 
         // Should produce an error, not query results for this query.
-        let errors = response.errors.expect("errors must be present for invalid cursor");
+        let errors = response
+            .errors
+            .expect("errors must be present for invalid cursor");
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].code, 400);
         assert!(errors[0].message.contains("invalid or expired cursor"));
         assert_eq!(errors[0].context.as_deref(), Some("q-bad-cursor"));
         // No query result entry for the failed query.
-        assert!(response.query_results.is_none(), "queryResults must be absent when cursor is invalid");
+        assert!(
+            response.query_results.is_none(),
+            "queryResults must be absent when cursor is invalid"
+        );
     }
 
     /// R5 test 3: When both cursor and offset are provided, cursor takes precedence.
@@ -1554,9 +1678,9 @@ mod tests {
             cursor: None,
         };
         let resp1 = run_dispatch_queries(vec![page1], &state).await;
-        let cursor = resp1
-            .query_results.unwrap()[0]
-            .next_cursor.clone()
+        let cursor = resp1.query_results.unwrap()[0]
+            .next_cursor
+            .clone()
             .expect("page 1 must produce a cursor");
 
         // Query with both cursor and offset=0; cursor must win (should skip a, b).
@@ -1573,7 +1697,11 @@ mod tests {
         let qr = &results[0];
         // Cursor path: should return c, d (the two records after b).
         // Offset=0 path would return a, b. If cursor won, len=2 and records != a, b.
-        assert_eq!(qr.results.len(), 2, "cursor + offset must return cursor-based page (2 records)");
+        assert_eq!(
+            qr.results.len(),
+            2,
+            "cursor + offset must return cursor-based page (2 records)"
+        );
     }
 
     /// R5 test 4: encode_http_cursor / decode_http_cursor roundtrip.
@@ -1626,9 +1754,16 @@ mod tests {
         let response = run_dispatch_queries(vec![query], &state).await;
         let results = response.query_results.expect("results must be present");
         let qr = &results[0];
-        assert_eq!(qr.results.len(), 2, "offset=2 limit=2 must return 2 records");
+        assert_eq!(
+            qr.results.len(),
+            2,
+            "offset=2 limit=2 must return 2 records"
+        );
         assert_eq!(qr.has_more, Some(true), "has_more must be true (5 > 2+2)");
-        assert!(response.errors.is_none(), "offset pagination must not produce errors");
+        assert!(
+            response.errors.is_none(),
+            "offset pagination must not produce errors"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1636,7 +1771,11 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Helper: build a minimal AppState with a jwt_secret and optional validator.
-    fn test_state_with_validator(validator: Option<std::sync::Arc<dyn crate::network::handlers::auth_validator::AuthValidator>>) -> AppState {
+    fn test_state_with_validator(
+        validator: Option<
+            std::sync::Arc<dyn crate::network::handlers::auth_validator::AuthValidator>,
+        >,
+    ) -> AppState {
         let mut config = crate::network::config::NetworkConfig::default();
         config.jwt_clock_skew_secs = 60;
         AppState {
@@ -1665,9 +1804,11 @@ mod tests {
     async fn client_claims_rejecting_validator_returns_none() {
         use axum::http::{header, Request};
 
-        let validator = Arc::new(|_ctx: &crate::network::handlers::auth_validator::AuthValidationContext| {
-            Err("revoked".to_string())
-        });
+        let validator = Arc::new(
+            |_ctx: &crate::network::handlers::auth_validator::AuthValidationContext| {
+                Err("revoked".to_string())
+            },
+        );
         let state = test_state_with_validator(Some(validator));
         let token = make_token(Some("user-revoked"), 3600);
         let req = Request::builder()
@@ -1677,7 +1818,10 @@ mod tests {
         let (mut parts, _) = req.into_parts();
         let result = <ClientClaims as axum::extract::OptionalFromRequestParts<AppState>>::from_request_parts(&mut parts, &state).await;
         assert!(result.is_ok(), "extractor should be infallible");
-        assert!(result.unwrap().is_none(), "rejecting validator should cause None");
+        assert!(
+            result.unwrap().is_none(),
+            "rejecting validator should cause None"
+        );
     }
 
     /// AC4 (SPEC-189): When auth_validator is None, valid token is accepted (no regression).

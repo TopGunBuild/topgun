@@ -26,11 +26,7 @@ pub trait ServerStorage: Send + Sync {
     async fn store(&self, map: &str, key: &str, value: &StorageValue) -> anyhow::Result<()>;
 
     /// Store multiple records in a single batch.
-    async fn store_all(
-        &self,
-        map: &str,
-        records: &[(String, StorageValue)],
-    ) -> anyhow::Result<()>;
+    async fn store_all(&self, map: &str, records: &[(String, StorageValue)]) -> anyhow::Result<()>;
 
     /// Delete a single record by map name and key.
     async fn delete(&self, map: &str, key: &str) -> anyhow::Result<()>;
@@ -53,11 +49,8 @@ pub trait MapProvider: Send + Sync {
     async fn get_map(&self, name: &str) -> Option<Arc<CrdtMap>>;
 
     /// Get a map, loading it from storage if necessary.
-    async fn get_or_load_map(
-        &self,
-        name: &str,
-        type_hint: MapType,
-    ) -> anyhow::Result<Arc<CrdtMap>>;
+    async fn get_or_load_map(&self, name: &str, type_hint: MapType)
+        -> anyhow::Result<Arc<CrdtMap>>;
 
     /// Check whether a map is currently loaded in memory (non-blocking).
     fn has_map(&self, name: &str) -> bool;
@@ -78,9 +71,5 @@ pub trait SchemaProvider: Send + Sync {
 
     /// Compute the sync shape for a client given their request context.
     /// Returns `None` if the client has no access or no shape is configured.
-    async fn get_shape(
-        &self,
-        map_name: &str,
-        client_ctx: &RequestContext,
-    ) -> Option<SyncShape>;
+    async fn get_shape(&self, map_name: &str, client_ctx: &RequestContext) -> Option<SyncShape>;
 }

@@ -41,7 +41,8 @@ use crate::merkle::ORMapMerkleTree;
 /// ensures identical output regardless of the internal iteration order of
 /// the original type (e.g., `HashMap`-based structs).
 fn canonical_json<V: Serialize>(value: &V) -> String {
-    let json_value = serde_json::to_value(value).expect("V: Serialize must convert to serde_json::Value");
+    let json_value =
+        serde_json::to_value(value).expect("V: Serialize must convert to serde_json::Value");
     let sorted = sort_json_value(json_value);
     serde_json::to_string(&sorted).expect("sorted serde_json::Value must serialize to string")
 }
@@ -120,12 +121,7 @@ where
     ///
     /// Generates a unique tag from the HLC timestamp (`"millis:counter:nodeId"` format).
     /// Returns a clone of the stored record.
-    pub fn add(
-        &mut self,
-        key: impl Into<String>,
-        value: V,
-        ttl_ms: Option<u64>,
-    ) -> ORMapRecord<V> {
+    pub fn add(&mut self, key: impl Into<String>, value: V, ttl_ms: Option<u64>) -> ORMapRecord<V> {
         let key = key.into();
         let timestamp = self.hlc.now();
         let tag = HLC::to_string(&timestamp);
@@ -775,16 +771,8 @@ mod tests {
         }
 
         // Both should have same values
-        let mut vals_a: Vec<String> = first
-            .get("k1")
-            .iter()
-            .map(|v| format!("{v:?}"))
-            .collect();
-        let mut vals_b: Vec<String> = second
-            .get("k1")
-            .iter()
-            .map(|v| format!("{v:?}"))
-            .collect();
+        let mut vals_a: Vec<String> = first.get("k1").iter().map(|v| format!("{v:?}")).collect();
+        let mut vals_b: Vec<String> = second.get("k1").iter().map(|v| format!("{v:?}")).collect();
         vals_a.sort();
         vals_b.sort();
         assert_eq!(vals_a, vals_b);
@@ -804,7 +792,10 @@ mod tests {
         map_a.merge(&map_b);
         let count_after_second = map_a.get("key1").len();
 
-        assert_eq!(count_after_first, count_after_second, "Merge should be idempotent");
+        assert_eq!(
+            count_after_first, count_after_second,
+            "Merge should be idempotent"
+        );
     }
 
     // ---- merge_key tests ----
@@ -899,10 +890,7 @@ mod tests {
 
         let result = map.merge_key("key1", remote_records, &[]);
         assert_eq!(result.updated, 1);
-        assert_eq!(
-            map.get("key1")[0],
-            &Value::String("new".to_string())
-        );
+        assert_eq!(map.get("key1")[0], &Value::String("new".to_string()));
     }
 
     // ---- Prune tests ----
@@ -1140,7 +1128,10 @@ mod tests {
         let hash1 = ORMap::<Value>::hash_entry("user:1", &map1);
         let hash2 = ORMap::<Value>::hash_entry("user:1", &map2);
 
-        assert_eq!(hash1, hash2, "hash_entry must be deterministic regardless of insertion order");
+        assert_eq!(
+            hash1, hash2,
+            "hash_entry must be deterministic regardless of insertion order"
+        );
     }
 
     #[test]
@@ -1169,17 +1160,26 @@ mod tests {
         // "b" appears before "c" in the nested map.
         let a_pos = json_str.find("\"a\"").expect("should contain key 'a'");
         let z_pos = json_str.find("\"z\"").expect("should contain key 'z'");
-        assert!(a_pos < z_pos, "'a' must appear before 'z' in sorted output: {json_str}");
+        assert!(
+            a_pos < z_pos,
+            "'a' must appear before 'z' in sorted output: {json_str}"
+        );
 
         let b_pos = json_str.find("\"b\"").expect("should contain key 'b'");
         let c_pos = json_str.find("\"c\"").expect("should contain key 'c'");
-        assert!(b_pos < c_pos, "'b' must appear before 'c' in sorted output: {json_str}");
+        assert!(
+            b_pos < c_pos,
+            "'b' must appear before 'c' in sorted output: {json_str}"
+        );
 
         // Verify the output is valid JSON that round-trips through serde_json
-        let parsed: serde_json::Value = serde_json::from_str(&json_str)
-            .expect("canonical_json output must be valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("canonical_json output must be valid JSON");
         let re_serialized = serde_json::to_string(&parsed).unwrap();
-        assert_eq!(json_str, re_serialized, "canonical_json output must be stable");
+        assert_eq!(
+            json_str, re_serialized,
+            "canonical_json output must be stable"
+        );
     }
 
     #[test]
@@ -1210,15 +1210,22 @@ mod tests {
             let json2 = canonical_json(value);
 
             // Must be deterministic
-            assert_eq!(json1, json2, "canonical_json must be deterministic for {label}");
+            assert_eq!(
+                json1, json2,
+                "canonical_json must be deterministic for {label}"
+            );
 
             // Must be valid JSON
-            let parsed: serde_json::Value = serde_json::from_str(&json1)
-                .unwrap_or_else(|e| panic!("canonical_json output for {label} must be valid JSON: {e}"));
+            let parsed: serde_json::Value = serde_json::from_str(&json1).unwrap_or_else(|e| {
+                panic!("canonical_json output for {label} must be valid JSON: {e}")
+            });
 
             // Must round-trip through serde_json
             let re_serialized = serde_json::to_string(&parsed).unwrap();
-            assert_eq!(json1, re_serialized, "canonical_json for {label} must be stable through serde_json round-trip");
+            assert_eq!(
+                json1, re_serialized,
+                "canonical_json for {label} must be stable through serde_json round-trip"
+            );
         }
     }
 }
@@ -1328,11 +1335,7 @@ mod proptests {
         keys.sort();
 
         for key in keys {
-            let mut vals: Vec<String> = map
-                .get(key)
-                .iter()
-                .map(|v| format!("{v:?}"))
-                .collect();
+            let mut vals: Vec<String> = map.get(key).iter().map(|v| format!("{v:?}")).collect();
             vals.sort();
             result.push((key.clone(), vals));
         }

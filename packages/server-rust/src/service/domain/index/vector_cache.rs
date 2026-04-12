@@ -43,7 +43,9 @@ struct VectorWeighter {
 
 impl quick_cache::Weighter<String, SharedVector> for VectorWeighter {
     fn weight(&self, _key: &String, val: &SharedVector) -> u64 {
-        let size = val.mem_size().saturating_add(self.key_overhead_bytes as usize);
+        let size = val
+            .mem_size()
+            .saturating_add(self.key_overhead_bytes as usize);
         // Safe: usize fits in u64 on all supported platforms (64-bit targets).
         u64::try_from(size).unwrap_or(u64::MAX)
     }

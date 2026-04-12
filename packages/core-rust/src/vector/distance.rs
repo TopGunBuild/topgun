@@ -65,7 +65,11 @@ impl Distance for CosineDistance {
 
 impl Distance for EuclideanDistance {
     fn compute(&self, a: &[f32], b: &[f32]) -> f64 {
-        assert_eq!(a.len(), b.len(), "EuclideanDistance: slice lengths must match");
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "EuclideanDistance: slice lengths must match"
+        );
         let sum_sq: f64 = a
             .iter()
             .zip(b.iter())
@@ -84,7 +88,11 @@ impl Distance for EuclideanDistance {
 
 impl Distance for DotProductDistance {
     fn compute(&self, a: &[f32], b: &[f32]) -> f64 {
-        assert_eq!(a.len(), b.len(), "DotProductDistance: slice lengths must match");
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "DotProductDistance: slice lengths must match"
+        );
         let dot: f64 = a
             .iter()
             .zip(b.iter())
@@ -100,7 +108,11 @@ impl Distance for DotProductDistance {
 
 impl Distance for ManhattanDistance {
     fn compute(&self, a: &[f32], b: &[f32]) -> f64 {
-        assert_eq!(a.len(), b.len(), "ManhattanDistance: slice lengths must match");
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "ManhattanDistance: slice lengths must match"
+        );
         a.iter()
             .zip(b.iter())
             .map(|(&ai, &bi)| (f64::from(ai) - f64::from(bi)).abs())

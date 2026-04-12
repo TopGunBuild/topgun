@@ -12,7 +12,7 @@ pub mod sim;
 
 pub use service::{
     CallerOrigin, ManagedService, Operation, OperationContext, OperationError, OperationResponse,
-    OperationService, OperationRouter, ServerConfig, ServiceContext, ServiceRegistry,
+    OperationRouter, OperationService, ServerConfig, ServiceContext, ServiceRegistry,
 };
 pub use traits::{MapProvider, SchemaProvider, ServerStorage};
 
@@ -31,7 +31,7 @@ mod tests {
 #[allow(
     clippy::doc_markdown,
     clippy::too_many_lines,
-    clippy::no_effect_underscore_binding,
+    clippy::no_effect_underscore_binding
 )]
 mod integration_tests {
     use std::sync::Arc;
@@ -44,12 +44,12 @@ mod integration_tests {
     use crate::cluster::types::ClusterConfig;
     use crate::network::connection::ConnectionRegistry;
     use crate::service::config::ServerConfig;
+    use crate::service::domain::query::QueryRegistry;
+    use crate::service::domain::search::SearchRegistry;
     use crate::service::domain::{
         CoordinationService, CrdtService, MessagingService, PersistenceService, QueryService,
         SchemaService, SearchService, SyncService,
     };
-    use crate::service::domain::search::SearchRegistry;
-    use crate::service::domain::query::QueryRegistry;
     use crate::service::middleware::build_operation_pipeline;
     use crate::service::operation::{service_names, CallerOrigin, OperationResponse};
     use crate::service::registry::{ServiceContext, ServiceRegistry};
@@ -65,7 +65,10 @@ mod integration_tests {
             node_id.to_string(),
             Box::new(topgun_core::SystemClock),
         )));
-        Arc::new(WriteValidator::new(Arc::new(SecurityConfig::default()), hlc))
+        Arc::new(WriteValidator::new(
+            Arc::new(SecurityConfig::default()),
+            hlc,
+        ))
     }
 
     fn setup() -> (OperationService, OperationRouter, ServerConfig) {
@@ -99,29 +102,25 @@ mod integration_tests {
             Arc::new(MerkleObserverFactory::new(Arc::clone(&merkle_manager)));
 
         #[allow(unused_mut)]
-        let mut observer_factories: Vec<Arc<dyn ObserverFactory>> =
-            vec![merkle_observer_factory];
+        let mut observer_factories: Vec<Arc<dyn ObserverFactory>> = vec![merkle_observer_factory];
 
         // When datafusion is enabled, register ArrowCacheObserverFactory so that
         // record mutations invalidate the Arrow cache for SQL query freshness.
         #[cfg(feature = "datafusion")]
         let _arrow_cache_manager = {
-            let mgr = Arc::new(
-                crate::service::domain::arrow_cache::ArrowCacheManager::new(),
-            );
+            let mgr = Arc::new(crate::service::domain::arrow_cache::ArrowCacheManager::new());
             observer_factories.push(Arc::new(
-                crate::service::domain::arrow_cache::ArrowCacheObserverFactory::new(
-                    Arc::clone(&mgr),
-                ),
+                crate::service::domain::arrow_cache::ArrowCacheObserverFactory::new(Arc::clone(
+                    &mgr,
+                )),
             ));
             mgr
         };
 
         // Register IndexObserverFactory so that maps with secondary indexes
         // keep their indexes in sync with record mutations.
-        let index_observer_factory = Arc::new(
-            crate::service::domain::index::IndexObserverFactory::new(),
-        );
+        let index_observer_factory =
+            Arc::new(crate::service::domain::index::IndexObserverFactory::new());
         observer_factories.push(Arc::clone(&index_observer_factory) as Arc<dyn ObserverFactory>);
 
         let record_store_factory = Arc::new(
@@ -154,9 +153,8 @@ mod integration_tests {
                 Arc::clone(&connection_registry),
             )),
         );
-        let query_merkle_manager = Arc::new(
-            crate::storage::query_merkle::QueryMerkleSyncManager::new(),
-        );
+        let query_merkle_manager =
+            Arc::new(crate::storage::query_merkle::QueryMerkleSyncManager::new());
         router.register(
             service_names::QUERY,
             Arc::new(QueryService::new(
@@ -458,4 +456,3 @@ mod integration_tests {
         let _origin = crate::CallerOrigin::Client;
     }
 }
-

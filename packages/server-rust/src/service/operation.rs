@@ -145,7 +145,6 @@ impl OperationContext {
 #[derive(Debug)]
 pub enum Operation {
     // --- CRDT domain (service_name = "crdt") ---
-
     /// Single client write operation.
     ClientOp {
         ctx: OperationContext,
@@ -158,7 +157,6 @@ pub enum Operation {
     },
 
     // --- Sync domain (service_name = "sync") ---
-
     /// Client initiates LWW merkle sync.
     SyncInit {
         ctx: OperationContext,
@@ -191,7 +189,6 @@ pub enum Operation {
     },
 
     // --- Query domain (service_name = "query") ---
-
     /// Client subscribes to a live query.
     QuerySubscribe {
         ctx: OperationContext,
@@ -224,7 +221,6 @@ pub enum Operation {
     },
 
     // --- Messaging domain (service_name = "messaging") ---
-
     /// Client subscribes to a topic.
     TopicSubscribe {
         ctx: OperationContext,
@@ -242,7 +238,6 @@ pub enum Operation {
     },
 
     // --- Coordination domain (service_name = "coordination") ---
-
     /// Client requests a distributed lock.
     LockRequest {
         ctx: OperationContext,
@@ -265,7 +260,6 @@ pub enum Operation {
     },
 
     // --- Search domain (service_name = "search") ---
-
     /// Client sends a search request.
     Search {
         ctx: OperationContext,
@@ -283,7 +277,6 @@ pub enum Operation {
     },
 
     // --- Persistence domain (service_name = "persistence") ---
-
     /// Client requests counter state.
     CounterRequest {
         ctx: OperationContext,
@@ -336,7 +329,6 @@ pub enum Operation {
     },
 
     // --- System domain (internal, not from classify) ---
-
     /// System-internal garbage collection operation.
     /// Triggered by `BackgroundWorker`, not by message classification.
     GarbageCollect { ctx: OperationContext },
@@ -552,7 +544,10 @@ pub enum OperationError {
     #[error("value size {size} bytes exceeds maximum {max} bytes")]
     ValueTooLarge { size: u64, max: u64 },
     #[error("schema validation failed for map '{map_name}': {}", errors.join("; "))]
-    SchemaInvalid { map_name: String, errors: Vec<String> },
+    SchemaInvalid {
+        map_name: String,
+        errors: Vec<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------

@@ -61,7 +61,13 @@ impl IndexMutationObserver {
 }
 
 impl MutationObserver for IndexMutationObserver {
-    fn on_put(&self, key: &str, record: &Record, _old_value: Option<&RecordValue>, _is_backup: bool) {
+    fn on_put(
+        &self,
+        key: &str,
+        record: &Record,
+        _old_value: Option<&RecordValue>,
+        _is_backup: bool,
+    ) {
         let Some(rmpv_val) = Self::extract_rmpv(&record.value) else {
             return;
         };
@@ -191,9 +197,7 @@ impl IndexObserverFactory {
     /// absent — it is a pure read-only lookup suitable for query-time index selection.
     #[must_use]
     pub fn get_registry(&self, map_name: &str) -> Option<Arc<IndexRegistry>> {
-        self.registries
-            .get(map_name)
-            .map(|r| Arc::clone(r.value()))
+        self.registries.get(map_name).map(|r| Arc::clone(r.value()))
     }
 
     /// Returns a snapshot of all indexes across all maps.
@@ -303,9 +307,7 @@ mod tests {
         registry.add_hash_index("name");
         let observer = IndexMutationObserver::new(Arc::clone(&registry));
 
-        let record = make_lww_record(vec![
-            ("name", rmpv::Value::String("alice".into())),
-        ]);
+        let record = make_lww_record(vec![("name", rmpv::Value::String("alice".into()))]);
         observer.on_put("k1", &record, None, false);
 
         let idx = registry.get_index("name").unwrap();
@@ -336,7 +338,11 @@ mod tests {
         observer.on_put("k1", &record, None, false);
 
         let idx = registry.get_index("name").unwrap();
-        assert_eq!(idx.entry_count(), 0, "OrTombstones records should not be indexed");
+        assert_eq!(
+            idx.entry_count(),
+            0,
+            "OrTombstones records should not be indexed"
+        );
     }
 
     #[test]
@@ -345,9 +351,7 @@ mod tests {
         registry.add_hash_index("name");
         let observer = IndexMutationObserver::new(Arc::clone(&registry));
 
-        let record = make_lww_record(vec![
-            ("name", rmpv::Value::String("alice".into())),
-        ]);
+        let record = make_lww_record(vec![("name", rmpv::Value::String("alice".into()))]);
         observer.on_put("k1", &record, None, false);
         assert_eq!(registry.get_index("name").unwrap().entry_count(), 1);
 
@@ -363,15 +367,16 @@ mod tests {
         registry.add_hash_index("status");
         let observer = IndexMutationObserver::new(Arc::clone(&registry));
 
-        let record = make_lww_record(vec![
-            ("status", rmpv::Value::String("active".into())),
-        ]);
+        let record = make_lww_record(vec![("status", rmpv::Value::String("active".into()))]);
         observer.on_put("k1", &record, None, false);
         observer.on_evict("k1", &record, false);
 
         let idx = registry.get_index("status").unwrap();
         let result = idx.lookup_eq(&rmpv::Value::String("active".into()));
-        assert!(!result.contains("k1"), "evicted record should be removed from index");
+        assert!(
+            !result.contains("k1"),
+            "evicted record should be removed from index"
+        );
     }
 
     #[test]
@@ -380,9 +385,7 @@ mod tests {
         registry.add_hash_index("name");
         let observer = IndexMutationObserver::new(Arc::clone(&registry));
 
-        let record = make_lww_record(vec![
-            ("name", rmpv::Value::String("bob".into())),
-        ]);
+        let record = make_lww_record(vec![("name", rmpv::Value::String("bob".into()))]);
         observer.on_load("k1", &record, false);
 
         let idx = registry.get_index("name").unwrap();
@@ -396,14 +399,15 @@ mod tests {
         registry.add_hash_index("name");
         let observer = IndexMutationObserver::new(Arc::clone(&registry));
 
-        let record = make_lww_record(vec![
-            ("name", rmpv::Value::String("carol".into())),
-        ]);
+        let record = make_lww_record(vec![("name", rmpv::Value::String("carol".into()))]);
         observer.on_replication_put("k1", &record, true);
 
         let idx = registry.get_index("name").unwrap();
         let result = idx.lookup_eq(&rmpv::Value::String("carol".into()));
-        assert!(result.contains("k1"), "replication record should be indexed");
+        assert!(
+            result.contains("k1"),
+            "replication record should be indexed"
+        );
     }
 
     #[test]
@@ -412,13 +416,15 @@ mod tests {
         registry.add_hash_index("name");
         let observer = IndexMutationObserver::new(Arc::clone(&registry));
 
-        let record = make_lww_record(vec![
-            ("name", rmpv::Value::String("dave".into())),
-        ]);
+        let record = make_lww_record(vec![("name", rmpv::Value::String("dave".into()))]);
         observer.on_replication_put("k1", &record, false);
 
         let idx = registry.get_index("name").unwrap();
-        assert_eq!(idx.entry_count(), 0, "should not index when populate_index=false");
+        assert_eq!(
+            idx.entry_count(),
+            0,
+            "should not index when populate_index=false"
+        );
     }
 
     #[test]
@@ -427,19 +433,24 @@ mod tests {
         registry.add_hash_index("name");
         let observer = IndexMutationObserver::new(Arc::clone(&registry));
 
-        let old_record = make_lww_record(vec![
-            ("name", rmpv::Value::String("alice".into())),
-        ]);
+        let old_record = make_lww_record(vec![("name", rmpv::Value::String("alice".into()))]);
         observer.on_put("k1", &old_record, None, false);
 
-        let new_record = make_lww_record(vec![
-            ("name", rmpv::Value::String("bob".into())),
-        ]);
-        observer.on_update("k1", &new_record, &old_record.value, &new_record.value, false);
+        let new_record = make_lww_record(vec![("name", rmpv::Value::String("bob".into()))]);
+        observer.on_update(
+            "k1",
+            &new_record,
+            &old_record.value,
+            &new_record.value,
+            false,
+        );
 
         let idx = registry.get_index("name").unwrap();
         let old_result = idx.lookup_eq(&rmpv::Value::String("alice".into()));
-        assert!(!old_result.contains("k1"), "old value should be removed from index");
+        assert!(
+            !old_result.contains("k1"),
+            "old value should be removed from index"
+        );
         let new_result = idx.lookup_eq(&rmpv::Value::String("bob".into()));
         assert!(new_result.contains("k1"), "new value should be in index");
     }
@@ -450,9 +461,7 @@ mod tests {
         registry.add_hash_index("name");
         let observer = IndexMutationObserver::new(Arc::clone(&registry));
 
-        let record = make_lww_record(vec![
-            ("name", rmpv::Value::String("alice".into())),
-        ]);
+        let record = make_lww_record(vec![("name", rmpv::Value::String("alice".into()))]);
         observer.on_put("k1", &record, None, false);
         assert_eq!(registry.get_index("name").unwrap().entry_count(), 1);
 
@@ -516,9 +525,7 @@ mod tests {
         let records: Vec<(String, Record)> = (0..100)
             .map(|i| {
                 let key = format!("key-{i}");
-                let record = make_lww_record(vec![
-                    ("id", rmpv::Value::Integer(i.into())),
-                ]);
+                let record = make_lww_record(vec![("id", rmpv::Value::Integer(i.into()))]);
                 (key, record)
             })
             .collect();
@@ -596,7 +603,10 @@ mod tests {
 
         let idx = registry.get_index("sku").unwrap();
         let result = idx.lookup_eq(&rmpv::Value::String("ABC123".into()));
-        assert!(result.contains("p1"), "observer should update the registry's indexes");
+        assert!(
+            result.contains("p1"),
+            "observer should update the registry's indexes"
+        );
     }
 
     #[test]
@@ -624,7 +634,10 @@ mod tests {
     fn all_index_stats_returns_empty_when_no_maps_registered() {
         let factory = IndexObserverFactory::new();
         let stats = factory.all_index_stats();
-        assert!(stats.is_empty(), "should return empty when no maps are registered");
+        assert!(
+            stats.is_empty(),
+            "should return empty when no maps are registered"
+        );
     }
 
     #[test]
@@ -641,7 +654,10 @@ mod tests {
         assert_eq!(stats.len(), 1);
         let (_, index_stats) = &stats[0];
         assert_eq!(index_stats.len(), 1);
-        assert_eq!(index_stats[0].entry_count, 1, "entry count should reflect inserted records");
+        assert_eq!(
+            index_stats[0].entry_count, 1,
+            "entry count should reflect inserted records"
+        );
     }
 
     // --- VectorIndex observer integration tests ---
@@ -681,10 +697,18 @@ mod tests {
         let vi = registry
             .get_vector_index("embedding")
             .expect("vector index must exist");
-        assert_eq!(vi.pending_count(), 1, "observer should have queued one upsert");
+        assert_eq!(
+            vi.pending_count(),
+            1,
+            "observer should have queued one upsert"
+        );
 
         vi.commit_pending();
-        assert_eq!(vi.entry_count(), 1, "after commit one entry should be committed");
+        assert_eq!(
+            vi.entry_count(),
+            1,
+            "after commit one entry should be committed"
+        );
     }
 
     #[test]

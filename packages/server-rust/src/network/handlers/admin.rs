@@ -129,10 +129,8 @@ pub async fn login(
     })?;
 
     // Constant-time comparison to prevent timing attacks.
-    let username_match =
-        req.username.as_bytes().ct_eq(expected_username.as_bytes());
-    let password_match =
-        req.password.as_bytes().ct_eq(expected_password.as_bytes());
+    let username_match = req.username.as_bytes().ct_eq(expected_username.as_bytes());
+    let password_match = req.password.as_bytes().ct_eq(expected_password.as_bytes());
 
     if username_match.unwrap_u8() != 1 || password_match.unwrap_u8() != 1 {
         return Err((
@@ -368,7 +366,10 @@ pub async fn get_settings(
         port: state.config.port,
         require_auth: config.security.require_auth,
         max_value_bytes: config.security.max_value_bytes,
-        log_level: state.observability.as_ref().and_then(|o| o.current_log_level()),
+        log_level: state
+            .observability
+            .as_ref()
+            .and_then(|o| o.current_log_level()),
     }))
 }
 
@@ -620,9 +621,7 @@ pub async fn create_policy(
         )
     })?;
 
-    let id = req
-        .id
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let id = req.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     // Resolve condition: JSON `condition` takes precedence over `condition_expr` string.
     let condition = if req.condition.is_some() {
@@ -926,9 +925,7 @@ pub async fn remove_index_handler(
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
                 code: 404,
-                message: format!(
-                    "no index found for map '{map_name}' attribute '{attribute}'"
-                ),
+                message: format!("no index found for map '{map_name}' attribute '{attribute}'"),
                 field: None,
             }),
         ));
@@ -960,7 +957,10 @@ pub async fn index_backfill_status(
     Path((map_name, attribute)): Path<(String, String)>,
 ) -> Result<Json<BackfillStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
     // Check for an in-progress or completed backfill entry first.
-    if let Some(progress) = state.backfill_progress.get(&(map_name.clone(), attribute.clone())) {
+    if let Some(progress) = state
+        .backfill_progress
+        .get(&(map_name.clone(), attribute.clone()))
+    {
         return Ok(Json(BackfillStatusResponse {
             map_name,
             attribute,
@@ -1001,9 +1001,7 @@ pub async fn index_backfill_status(
         StatusCode::NOT_FOUND,
         Json(ErrorResponse {
             code: 404,
-            message: format!(
-                "no index found for map '{map_name}' attribute '{attribute}'"
-            ),
+            message: format!("no index found for map '{map_name}' attribute '{attribute}'"),
             field: None,
         }),
     ))

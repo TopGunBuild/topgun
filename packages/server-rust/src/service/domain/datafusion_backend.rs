@@ -115,10 +115,7 @@ impl QueryBackend for DataFusionBackend {
 #[async_trait]
 impl SqlQueryBackend for DataFusionBackend {
     /// Executes a SQL query string via `DataFusion`, returning Arrow `RecordBatches`.
-    async fn execute_sql(
-        &self,
-        sql: &str,
-    ) -> Result<Vec<RecordBatch>, QueryBackendError> {
+    async fn execute_sql(&self, sql: &str) -> Result<Vec<RecordBatch>, QueryBackendError> {
         let df = self
             .ctx
             .sql(sql)
@@ -150,8 +147,8 @@ mod tests {
 
     use crate::storage::datastores::NullDataStore;
     use crate::storage::impls::StorageConfig;
-    use crate::storage::{CallerProvenance, ExpiryPolicy};
     use crate::storage::record::RecordValue;
+    use crate::storage::{CallerProvenance, ExpiryPolicy};
 
     /// Test schema provider that returns a fixed schema for "users".
     struct TestSchemaProvider {
@@ -181,7 +178,11 @@ mod tests {
             Ok(())
         }
 
-        fn validate(&self, _map_name: &str, _value: &topgun_core::types::Value) -> topgun_core::ValidationResult {
+        fn validate(
+            &self,
+            _map_name: &str,
+            _value: &topgun_core::types::Value,
+        ) -> topgun_core::ValidationResult {
             topgun_core::ValidationResult::Valid
         }
 
@@ -239,26 +240,25 @@ mod tests {
         let sp = Arc::new(TestSchemaProvider::new());
         sp.register("users", users_schema());
         let cache = Arc::new(ArrowCacheManager::new());
-        let backend = DataFusionBackend::new(
-            Arc::clone(&factory),
-            sp,
-            cache,
-        );
+        let backend = DataFusionBackend::new(Arc::clone(&factory), sp, cache);
         (backend, factory)
     }
 
     async fn populate_users(factory: &RecordStoreFactory, users: Vec<(&str, &str, i64)>) {
         for (key, name, age) in users {
             let store = factory.get_or_create("users", 0);
-            store.put(
-                key,
-                RecordValue::Lww {
-                    value: make_user(name, age),
-                    timestamp: test_timestamp(),
-                },
-                ExpiryPolicy::NONE,
-                CallerProvenance::Client,
-            ).await.unwrap();
+            store
+                .put(
+                    key,
+                    RecordValue::Lww {
+                        value: make_user(name, age),
+                        timestamp: test_timestamp(),
+                    },
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Client,
+                )
+                .await
+                .unwrap();
         }
     }
 
@@ -267,8 +267,13 @@ mod tests {
         let (backend, factory) = setup_backend();
         populate_users(
             &factory,
-            vec![("u1", "Alice", 30), ("u2", "Bob", 25), ("u3", "Charlie", 35)],
-        ).await;
+            vec![
+                ("u1", "Alice", 30),
+                ("u2", "Bob", 25),
+                ("u3", "Charlie", 35),
+            ],
+        )
+        .await;
 
         backend.register_map("users").await.unwrap();
         let batches = backend.execute_sql("SELECT * FROM users").await.unwrap();
@@ -282,8 +287,13 @@ mod tests {
         let (backend, factory) = setup_backend();
         populate_users(
             &factory,
-            vec![("u1", "Alice", 30), ("u2", "Bob", 25), ("u3", "Charlie", 35)],
-        ).await;
+            vec![
+                ("u1", "Alice", 30),
+                ("u2", "Bob", 25),
+                ("u3", "Charlie", 35),
+            ],
+        )
+        .await;
 
         backend.register_map("users").await.unwrap();
         let batches = backend
@@ -317,7 +327,8 @@ mod tests {
                 ("u2", "Bob", 30),
                 ("u3", "Charlie", 25),
             ],
-        ).await;
+        )
+        .await;
 
         backend.register_map("users").await.unwrap();
         let batches = backend
@@ -334,8 +345,13 @@ mod tests {
         let (backend, factory) = setup_backend();
         populate_users(
             &factory,
-            vec![("u1", "Charlie", 35), ("u2", "Alice", 25), ("u3", "Bob", 30)],
-        ).await;
+            vec![
+                ("u1", "Charlie", 35),
+                ("u2", "Alice", 25),
+                ("u3", "Bob", 30),
+            ],
+        )
+        .await;
 
         backend.register_map("users").await.unwrap();
         let batches = backend
@@ -391,21 +407,17 @@ mod tests {
         let entries = vec![
             (
                 "k1".to_string(),
-                rmpv::Value::Map(vec![
-                    (
-                        rmpv::Value::String("age".into()),
-                        rmpv::Value::Integer(30.into()),
-                    ),
-                ]),
+                rmpv::Value::Map(vec![(
+                    rmpv::Value::String("age".into()),
+                    rmpv::Value::Integer(30.into()),
+                )]),
             ),
             (
                 "k2".to_string(),
-                rmpv::Value::Map(vec![
-                    (
-                        rmpv::Value::String("age".into()),
-                        rmpv::Value::Integer(20.into()),
-                    ),
-                ]),
+                rmpv::Value::Map(vec![(
+                    rmpv::Value::String("age".into()),
+                    rmpv::Value::Integer(20.into()),
+                )]),
             ),
         ];
         let query = Query {
@@ -423,7 +435,10 @@ mod tests {
             group_by: None,
         };
 
-        let result = backend.execute_query("users", entries, &query).await.unwrap();
+        let result = backend
+            .execute_query("users", entries, &query)
+            .await
+            .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].key, "k1");
     }
@@ -449,15 +464,18 @@ mod tests {
 
         // Add another user (this goes directly to the store, simulating a mutation).
         let store = factory.get_or_create("users", 0);
-        store.put(
-            "u2",
-            RecordValue::Lww {
-                value: make_user("Bob", 25),
-                timestamp: test_timestamp(),
-            },
-            ExpiryPolicy::NONE,
-            CallerProvenance::Client,
-        ).await.unwrap();
+        store
+            .put(
+                "u2",
+                RecordValue::Lww {
+                    value: make_user("Bob", 25),
+                    timestamp: test_timestamp(),
+                },
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
+            .await
+            .unwrap();
 
         // Manually invalidate cache (normally done by ArrowCacheObserver).
         backend.cache_manager.invalidate("users", 0);

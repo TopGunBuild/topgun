@@ -205,7 +205,12 @@ impl PolicyEvaluator {
     /// when no policies are configured, all operations are allowed so existing
     /// deployments continue to work without any RBAC configuration.
     pub async fn has_policies(&self) -> bool {
-        !self.store.list_policies().await.unwrap_or_default().is_empty()
+        !self
+            .store
+            .list_policies()
+            .await
+            .unwrap_or_default()
+            .is_empty()
     }
 
     /// Evaluates whether the given principal may perform `action` on `map_name`.
@@ -534,12 +539,7 @@ mod tests {
         let data = rmpv::Value::Map(vec![]);
         let principal = user_principal();
         let decision = eval
-            .evaluate(
-                Some(&principal),
-                PermissionAction::Read,
-                "anything",
-                &data,
-            )
+            .evaluate(Some(&principal), PermissionAction::Read, "anything", &data)
             .await;
         // No effective policies -> default deny
         assert_eq!(decision, PolicyDecision::Deny);

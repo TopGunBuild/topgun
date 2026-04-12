@@ -14,10 +14,9 @@ use async_trait::async_trait;
 use tower::Service;
 
 use topgun_core::messages::{
-    self, Message, ORMapDiffResponse, ORMapDiffResponsePayload, ORMapEntry,
-    ORMapSyncRespBuckets, ORMapSyncRespBucketsPayload, ORMapSyncRespLeaf,
-    ORMapSyncRespLeafPayload, ORMapSyncRespRoot, ORMapSyncRespRootPayload,
-    SyncLeafRecord, SyncRespBucketsMessage, SyncRespBucketsPayload,
+    self, Message, ORMapDiffResponse, ORMapDiffResponsePayload, ORMapEntry, ORMapSyncRespBuckets,
+    ORMapSyncRespBucketsPayload, ORMapSyncRespLeaf, ORMapSyncRespLeafPayload, ORMapSyncRespRoot,
+    ORMapSyncRespRootPayload, SyncLeafRecord, SyncRespBucketsMessage, SyncRespBucketsPayload,
     SyncRespLeafMessage, SyncRespLeafPayload, SyncRespRootMessage, SyncRespRootPayload,
 };
 use topgun_core::types::Value;
@@ -45,7 +44,11 @@ fn parse_partition_prefix(path: &str) -> Option<(u32, String)> {
         return None;
     }
     let bytes = path.as_bytes();
-    if bytes[0].is_ascii_digit() && bytes[1].is_ascii_digit() && bytes[2].is_ascii_digit() && bytes[3] == b'/' {
+    if bytes[0].is_ascii_digit()
+        && bytes[1].is_ascii_digit()
+        && bytes[2].is_ascii_digit()
+        && bytes[3] == b'/'
+    {
         let partition_id: u32 = path[..3].parse().ok()?;
         let sub_path = path[4..].to_string();
         Some((partition_id, sub_path))
@@ -57,9 +60,7 @@ fn parse_partition_prefix(path: &str) -> Option<(u32, String)> {
 use tracing::Instrument;
 
 use crate::network::connection::{ConnectionKind, ConnectionRegistry};
-use crate::service::operation::{
-    service_names, Operation, OperationError, OperationResponse,
-};
+use crate::service::operation::{service_names, Operation, OperationError, OperationResponse};
 use crate::service::registry::{ManagedService, ServiceContext};
 use crate::storage::merkle_sync::MerkleSyncManager;
 use crate::storage::record::RecordValue;
@@ -181,30 +182,30 @@ impl SyncService {
         // Parse path: routed mode uses a fixed 3-digit partition prefix (e.g. "042/abc").
         if let Some((partition_id, sub_path)) = parse_partition_prefix(&path) {
             // Routed mode: route directly to the specific partition tree.
-            let node_data =
-                self.merkle_manager
-                    .with_lww_tree(&map_name, partition_id, |tree| {
-                        match tree.get_node(&sub_path) {
-                            Some(node) if !node.entries.is_empty() => {
-                                let keys: Vec<String> =
-                                    node.entries.keys().cloned().collect();
-                                NodeData::Leaf(keys)
-                            }
-                            Some(_) => {
-                                let buckets = tree.get_buckets(&sub_path);
-                                NodeData::Internal(buckets)
-                            }
-                            None => NodeData::Missing,
+            let node_data = self
+                .merkle_manager
+                .with_lww_tree(&map_name, partition_id, |tree| {
+                    match tree.get_node(&sub_path) {
+                        Some(node) if !node.entries.is_empty() => {
+                            let keys: Vec<String> = node.entries.keys().cloned().collect();
+                            NodeData::Leaf(keys)
                         }
-                    });
+                        Some(_) => {
+                            let buckets = tree.get_buckets(&sub_path);
+                            NodeData::Internal(buckets)
+                        }
+                        None => NodeData::Missing,
+                    }
+                });
 
             return match node_data {
                 NodeData::Leaf(keys) => {
                     let mut records = Vec::new();
                     for key in &keys {
                         let key_partition = hash_to_partition(key);
-                        let store =
-                            self.record_store_factory.get_or_create(&map_name, key_partition);
+                        let store = self
+                            .record_store_factory
+                            .get_or_create(&map_name, key_partition);
                         match store.get(key, false).await {
                             Ok(Some(record)) => {
                                 if let RecordValue::Lww { value, timestamp } = record.value {
@@ -230,7 +231,11 @@ impl SyncService {
                     }
                     Ok(OperationResponse::Message(Box::new(Message::SyncRespLeaf(
                         SyncRespLeafMessage {
-                            payload: SyncRespLeafPayload { map_name, path, records },
+                            payload: SyncRespLeafPayload {
+                                map_name,
+                                path,
+                                records,
+                            },
                         },
                     ))))
                 }
@@ -242,11 +247,15 @@ impl SyncService {
                         .into_iter()
                         .map(|(c, h)| (format!("{prefix}{sub_path}{c}"), h))
                         .collect();
-                    Ok(OperationResponse::Message(Box::new(Message::SyncRespBuckets(
-                        SyncRespBucketsMessage {
-                            payload: SyncRespBucketsPayload { map_name, path, buckets },
-                        },
-                    ))))
+                    Ok(OperationResponse::Message(Box::new(
+                        Message::SyncRespBuckets(SyncRespBucketsMessage {
+                            payload: SyncRespBucketsPayload {
+                                map_name,
+                                path,
+                                buckets,
+                            },
+                        }),
+                    )))
                 }
                 NodeData::Missing => Ok(OperationResponse::Empty),
             };
@@ -279,7 +288,9 @@ impl SyncService {
             let mut records = Vec::new();
             for key in &all_keys {
                 let key_partition = hash_to_partition(key);
-                let store = self.record_store_factory.get_or_create(&map_name, key_partition);
+                let store = self
+                    .record_store_factory
+                    .get_or_create(&map_name, key_partition);
                 match store.get(key, false).await {
                     Ok(Some(record)) => {
                         if let RecordValue::Lww { value, timestamp } = record.value {
@@ -305,7 +316,11 @@ impl SyncService {
             }
             return Ok(OperationResponse::Message(Box::new(Message::SyncRespLeaf(
                 SyncRespLeafMessage {
-                    payload: SyncRespLeafPayload { map_name, path, records },
+                    payload: SyncRespLeafPayload {
+                        map_name,
+                        path,
+                        records,
+                    },
                 },
             ))));
         }
@@ -318,13 +333,16 @@ impl SyncService {
             .into_iter()
             .map(|(c, h)| (c.to_string(), h))
             .collect();
-        Ok(OperationResponse::Message(Box::new(Message::SyncRespBuckets(
-            SyncRespBucketsMessage {
-                payload: SyncRespBucketsPayload { map_name, path, buckets },
-            },
-        ))))
+        Ok(OperationResponse::Message(Box::new(
+            Message::SyncRespBuckets(SyncRespBucketsMessage {
+                payload: SyncRespBucketsPayload {
+                    map_name,
+                    path,
+                    buckets,
+                },
+            }),
+        )))
     }
-
 
     // -----------------------------------------------------------------------
     // OR-Map handlers
@@ -345,15 +363,15 @@ impl SyncService {
         let map_name = payload.map_name;
         let root_hash = self.merkle_manager.aggregate_ormap_root_hash(&map_name);
 
-        Ok(OperationResponse::Message(Box::new(Message::ORMapSyncRespRoot(
-            ORMapSyncRespRoot {
+        Ok(OperationResponse::Message(Box::new(
+            Message::ORMapSyncRespRoot(ORMapSyncRespRoot {
                 payload: ORMapSyncRespRootPayload {
                     map_name,
                     root_hash,
                     timestamp: ctx.timestamp.clone(),
                 },
-            },
-        ))))
+            }),
+        )))
     }
 
     /// Handles `ORMapMerkleReqBucket` — returns OR-Map bucket hashes (internal) or entries (leaf).
@@ -373,30 +391,30 @@ impl SyncService {
 
         if let Some((partition_id, sub_path)) = parse_partition_prefix(&path) {
             // Routed mode: route directly to the specific OR-Map partition tree.
-            let node_data =
-                self.merkle_manager
-                    .with_ormap_tree(&map_name, partition_id, |tree| {
-                        match tree.get_node(&sub_path) {
-                            Some(node) if !node.entries.is_empty() => {
-                                let keys: Vec<String> =
-                                    node.entries.keys().cloned().collect();
-                                NodeData::Leaf(keys)
-                            }
-                            Some(_) => {
-                                let buckets = tree.get_buckets(&sub_path);
-                                NodeData::Internal(buckets)
-                            }
-                            None => NodeData::Missing,
+            let node_data = self
+                .merkle_manager
+                .with_ormap_tree(&map_name, partition_id, |tree| {
+                    match tree.get_node(&sub_path) {
+                        Some(node) if !node.entries.is_empty() => {
+                            let keys: Vec<String> = node.entries.keys().cloned().collect();
+                            NodeData::Leaf(keys)
                         }
-                    });
+                        Some(_) => {
+                            let buckets = tree.get_buckets(&sub_path);
+                            NodeData::Internal(buckets)
+                        }
+                        None => NodeData::Missing,
+                    }
+                });
 
             return match node_data {
                 NodeData::Leaf(keys) => {
                     let mut entries = Vec::new();
                     for key in keys {
                         let key_partition = hash_to_partition(&key);
-                        let store =
-                            self.record_store_factory.get_or_create(&map_name, key_partition);
+                        let store = self
+                            .record_store_factory
+                            .get_or_create(&map_name, key_partition);
                         if let Ok(Some(record)) = store.get(&key, false).await {
                             match record.value {
                                 RecordValue::OrMap { records } => {
@@ -426,11 +444,15 @@ impl SyncService {
                             }
                         }
                     }
-                    Ok(OperationResponse::Message(Box::new(Message::ORMapSyncRespLeaf(
-                        ORMapSyncRespLeaf {
-                            payload: ORMapSyncRespLeafPayload { map_name, path, entries },
-                        },
-                    ))))
+                    Ok(OperationResponse::Message(Box::new(
+                        Message::ORMapSyncRespLeaf(ORMapSyncRespLeaf {
+                            payload: ORMapSyncRespLeafPayload {
+                                map_name,
+                                path,
+                                entries,
+                            },
+                        }),
+                    )))
                 }
                 NodeData::Internal(buckets) => {
                     let prefix = format!("{partition_id:03}/");
@@ -438,18 +460,24 @@ impl SyncService {
                         .into_iter()
                         .map(|(c, h)| (format!("{prefix}{sub_path}{c}"), h))
                         .collect();
-                    Ok(OperationResponse::Message(Box::new(Message::ORMapSyncRespBuckets(
-                        ORMapSyncRespBuckets {
-                            payload: ORMapSyncRespBucketsPayload { map_name, path, buckets },
-                        },
-                    ))))
+                    Ok(OperationResponse::Message(Box::new(
+                        Message::ORMapSyncRespBuckets(ORMapSyncRespBuckets {
+                            payload: ORMapSyncRespBucketsPayload {
+                                map_name,
+                                path,
+                                buckets,
+                            },
+                        }),
+                    )))
                 }
                 NodeData::Missing => Ok(OperationResponse::Empty),
             };
         }
 
         // Aggregate mode: combine bucket hashes from all OR-Map partitions.
-        let combined_buckets = self.merkle_manager.aggregate_ormap_buckets(&map_name, &path);
+        let combined_buckets = self
+            .merkle_manager
+            .aggregate_ormap_buckets(&map_name, &path);
 
         if combined_buckets.is_empty() {
             let partition_ids = self.merkle_manager.ormap_partition_ids(&map_name);
@@ -459,13 +487,14 @@ impl SyncService {
             // Check if partitions have leaf entries at this path.
             let mut all_keys: Vec<String> = Vec::new();
             for pid in &partition_ids {
-                self.merkle_manager.with_ormap_tree(&map_name, *pid, |tree| {
-                    if let Some(node) = tree.get_node(&path) {
-                        if !node.entries.is_empty() {
-                            all_keys.extend(node.entries.keys().cloned());
+                self.merkle_manager
+                    .with_ormap_tree(&map_name, *pid, |tree| {
+                        if let Some(node) = tree.get_node(&path) {
+                            if !node.entries.is_empty() {
+                                all_keys.extend(node.entries.keys().cloned());
+                            }
                         }
-                    }
-                });
+                    });
             }
             if all_keys.is_empty() {
                 return Ok(OperationResponse::Empty);
@@ -473,7 +502,9 @@ impl SyncService {
             let mut entries = Vec::new();
             for key in all_keys {
                 let key_partition = hash_to_partition(&key);
-                let store = self.record_store_factory.get_or_create(&map_name, key_partition);
+                let store = self
+                    .record_store_factory
+                    .get_or_create(&map_name, key_partition);
                 if let Ok(Some(record)) = store.get(&key, false).await {
                     match record.value {
                         RecordValue::OrMap { records } => {
@@ -503,22 +534,30 @@ impl SyncService {
                     }
                 }
             }
-            return Ok(OperationResponse::Message(Box::new(Message::ORMapSyncRespLeaf(
-                ORMapSyncRespLeaf {
-                    payload: ORMapSyncRespLeafPayload { map_name, path, entries },
-                },
-            ))));
+            return Ok(OperationResponse::Message(Box::new(
+                Message::ORMapSyncRespLeaf(ORMapSyncRespLeaf {
+                    payload: ORMapSyncRespLeafPayload {
+                        map_name,
+                        path,
+                        entries,
+                    },
+                }),
+            )));
         }
 
         let buckets: HashMap<String, u32> = combined_buckets
             .into_iter()
             .map(|(c, h)| (c.to_string(), h))
             .collect();
-        Ok(OperationResponse::Message(Box::new(Message::ORMapSyncRespBuckets(
-            ORMapSyncRespBuckets {
-                payload: ORMapSyncRespBucketsPayload { map_name, path, buckets },
-            },
-        ))))
+        Ok(OperationResponse::Message(Box::new(
+            Message::ORMapSyncRespBuckets(ORMapSyncRespBuckets {
+                payload: ORMapSyncRespBucketsPayload {
+                    map_name,
+                    path,
+                    buckets,
+                },
+            }),
+        )))
     }
 
     /// Handles `ORMapDiffRequest` — returns OR-Map entries for the requested keys.
@@ -538,7 +577,9 @@ impl SyncService {
         for key in keys {
             // Each key lives at its own partition based on hash_to_partition.
             let key_partition = hash_to_partition(&key);
-            let store = self.record_store_factory.get_or_create(&map_name, key_partition);
+            let store = self
+                .record_store_factory
+                .get_or_create(&map_name, key_partition);
             match store.get(&key, false).await {
                 Ok(Some(record)) => match record.value {
                     RecordValue::OrMap { records } => {
@@ -592,11 +633,11 @@ impl SyncService {
             }
         }
 
-        Ok(OperationResponse::Message(Box::new(Message::ORMapDiffResponse(
-            ORMapDiffResponse {
+        Ok(OperationResponse::Message(Box::new(
+            Message::ORMapDiffResponse(ORMapDiffResponse {
                 payload: ORMapDiffResponsePayload { map_name, entries },
-            },
-        ))))
+            }),
+        )))
     }
 
     /// Handles `ORMapPushDiff` — merges incoming OR-Map entries and broadcasts changes.
@@ -616,7 +657,9 @@ impl SyncService {
         for entry in &entries {
             // Each entry's key determines its storage partition.
             let key_partition = hash_to_partition(&entry.key);
-            let store = self.record_store_factory.get_or_create(&map_name, key_partition);
+            let store = self
+                .record_store_factory
+                .get_or_create(&map_name, key_partition);
             // Convert wire-format ORMapRecords to storage OrMapEntries.
             let storage_records: Vec<crate::storage::record::OrMapEntry> = entry
                 .records
@@ -631,7 +674,9 @@ impl SyncService {
             store
                 .put(
                     &entry.key,
-                    RecordValue::OrMap { records: storage_records },
+                    RecordValue::OrMap {
+                        records: storage_records,
+                    },
                     ExpiryPolicy::NONE,
                     CallerProvenance::CrdtMerge,
                 )
@@ -648,14 +693,19 @@ impl SyncService {
                     or_record: Some(record.clone()),
                     or_tag: Some(record.tag.clone()),
                 };
-                let msg = Message::ServerEvent { payload: event_payload };
+                let msg = Message::ServerEvent {
+                    payload: event_payload,
+                };
                 let bytes = rmp_serde::to_vec_named(&msg)
                     .map_err(|e| OperationError::Internal(anyhow::anyhow!("serialize: {e}")))?;
-                self.connection_registry.broadcast(&bytes, ConnectionKind::Client);
+                self.connection_registry
+                    .broadcast(&bytes, ConnectionKind::Client);
             }
         }
 
-        Ok(OperationResponse::Ack { call_id: ctx.call_id })
+        Ok(OperationResponse::Ack {
+            call_id: ctx.call_id,
+        })
     }
 }
 
@@ -689,8 +739,7 @@ impl ManagedService for SyncService {
 impl Service<Operation> for Arc<SyncService> {
     type Response = OperationResponse;
     type Error = OperationError;
-    type Future =
-        Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>>;
+    type Future = Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
@@ -748,7 +797,7 @@ impl Service<Operation> for Arc<SyncService> {
     clippy::cloned_instead_of_copied,
     clippy::approx_constant,
     clippy::items_after_statements,
-    clippy::default_trait_access,
+    clippy::default_trait_access
 )]
 mod tests {
     use std::sync::Arc;
@@ -758,11 +807,11 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::service::operation::{OperationContext, service_names};
+    use crate::network::connection::ConnectionRegistry;
+    use crate::service::operation::{service_names, OperationContext};
     use crate::storage::factory::RecordStoreFactory;
     use crate::storage::merkle_sync::MerkleSyncManager;
     use crate::storage::{NullDataStore, StorageConfig};
-    use crate::network::connection::ConnectionRegistry;
 
     fn make_timestamp() -> Timestamp {
         Timestamp {
@@ -813,7 +862,10 @@ mod tests {
         ));
 
         let expected_root = merkle_manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
-        assert_ne!(expected_root, 0, "precondition: tree must have non-zero hash");
+        assert_ne!(
+            expected_root, 0,
+            "precondition: tree must have non-zero hash"
+        );
 
         let op = Operation::SyncInit {
             ctx: make_ctx(service_names::SYNC),
@@ -854,7 +906,10 @@ mod tests {
         match resp {
             OperationResponse::Message(msg) => {
                 if let Message::SyncRespRoot(m) = *msg {
-                    assert_eq!(m.payload.root_hash, 0, "empty tree should have root_hash = 0");
+                    assert_eq!(
+                        m.payload.root_hash, 0,
+                        "empty tree should have root_hash = 0"
+                    );
                 } else {
                     panic!("expected SyncRespRoot");
                 }
@@ -898,11 +953,17 @@ mod tests {
                 if let Message::SyncRespBuckets(m) = *msg {
                     assert_eq!(m.payload.map_name, "users");
                     assert_eq!(m.payload.path, "");
-                    assert!(!m.payload.buckets.is_empty(), "internal node should have non-empty buckets");
+                    assert!(
+                        !m.payload.buckets.is_empty(),
+                        "internal node should have non-empty buckets"
+                    );
                     // Each bucket key is a single hex character string.
                     for key in m.payload.buckets.keys() {
                         assert_eq!(key.len(), 1, "bucket key should be single char, got: {key}");
-                        assert!(key.chars().all(|c| c.is_ascii_hexdigit()), "bucket key should be hex char: {key}");
+                        assert!(
+                            key.chars().all(|c| c.is_ascii_hexdigit()),
+                            "bucket key should be hex char: {key}"
+                        );
                     }
                 } else {
                     panic!("expected SyncRespBuckets");
@@ -992,8 +1053,14 @@ mod tests {
 
     #[test]
     fn ac14_value_to_rmpv_bool() {
-        assert_eq!(value_to_rmpv(&Value::Bool(true)), rmpv::Value::Boolean(true));
-        assert_eq!(value_to_rmpv(&Value::Bool(false)), rmpv::Value::Boolean(false));
+        assert_eq!(
+            value_to_rmpv(&Value::Bool(true)),
+            rmpv::Value::Boolean(true)
+        );
+        assert_eq!(
+            value_to_rmpv(&Value::Bool(false)),
+            rmpv::Value::Boolean(false)
+        );
     }
 
     #[test]
@@ -1108,7 +1175,10 @@ mod tests {
         ));
 
         let expected_root = merkle_manager.with_ormap_tree("tags", 0, |tree| tree.get_root_hash());
-        assert_ne!(expected_root, 0, "precondition: OR-Map tree must have non-zero hash");
+        assert_ne!(
+            expected_root, 0,
+            "precondition: OR-Map tree must have non-zero hash"
+        );
 
         use topgun_core::messages::ORMapSyncInit;
         let op = Operation::ORMapSyncInit {
@@ -1154,7 +1224,10 @@ mod tests {
         match resp {
             OperationResponse::Message(msg) => {
                 if let Message::ORMapSyncRespRoot(m) = *msg {
-                    assert_eq!(m.payload.root_hash, 0, "empty OR-Map tree should have root_hash = 0");
+                    assert_eq!(
+                        m.payload.root_hash, 0,
+                        "empty OR-Map tree should have root_hash = 0"
+                    );
                 } else {
                     panic!("expected ORMapSyncRespRoot");
                 }
@@ -1200,7 +1273,10 @@ mod tests {
                 if let Message::ORMapSyncRespBuckets(m) = *msg {
                     assert_eq!(m.payload.map_name, "tags");
                     assert_eq!(m.payload.path, "");
-                    assert!(!m.payload.buckets.is_empty(), "internal node should have non-empty buckets");
+                    assert!(
+                        !m.payload.buckets.is_empty(),
+                        "internal node should have non-empty buckets"
+                    );
                     for key in m.payload.buckets.keys() {
                         assert_eq!(key.len(), 1, "bucket key should be single char, got: {key}");
                     }
@@ -1301,10 +1377,20 @@ mod tests {
                     assert_eq!(m.payload.map_name, "tags");
                     // With NullDataStore, key-1 is not found — response should
                     // contain an empty entry for key-1 (not an error).
-                    assert_eq!(m.payload.entries.len(), 1, "should have one entry for key-1");
+                    assert_eq!(
+                        m.payload.entries.len(),
+                        1,
+                        "should have one entry for key-1"
+                    );
                     assert_eq!(m.payload.entries[0].key, "key-1");
-                    assert!(m.payload.entries[0].records.is_empty(), "NullDataStore returns no records");
-                    assert!(m.payload.entries[0].tombstones.is_empty(), "no tombstones for missing key");
+                    assert!(
+                        m.payload.entries[0].records.is_empty(),
+                        "NullDataStore returns no records"
+                    );
+                    assert!(
+                        m.payload.entries[0].tombstones.is_empty(),
+                        "no tombstones for missing key"
+                    );
                 } else {
                     panic!("expected ORMapDiffResponse, got different Message variant");
                 }
@@ -1335,7 +1421,11 @@ mod tests {
                 if let Message::ORMapDiffResponse(m) = *msg {
                     assert_eq!(m.payload.map_name, "tags");
                     // Two keys requested, two entries returned (both empty with NullDataStore).
-                    assert_eq!(m.payload.entries.len(), 2, "should have entries for all requested keys");
+                    assert_eq!(
+                        m.payload.entries.len(),
+                        2,
+                        "should have entries for all requested keys"
+                    );
                 } else {
                     panic!("expected ORMapDiffResponse");
                 }
@@ -1350,10 +1440,10 @@ mod tests {
 
     #[tokio::test]
     async fn ac7_ormap_push_diff_returns_ack_and_stores_data() {
+        use crate::storage::merkle_sync::MerkleMutationObserver;
         use topgun_core::hlc::Timestamp;
         use topgun_core::messages::{ORMapEntry, ORMapPushDiff, ORMapPushDiffPayload};
         use topgun_core::ORMapRecord;
-        use crate::storage::merkle_sync::MerkleMutationObserver;
 
         // Wire a MerkleMutationObserver into the factory so we can verify the
         // RecordStore put fires (the observer updates the merkle tree on put).
@@ -1377,7 +1467,10 @@ mod tests {
 
         // Precondition: OR-Map tree for ("tags", 0) should have root_hash = 0.
         let hash_before = merkle_manager.with_ormap_tree("tags", 0, |tree| tree.get_root_hash());
-        assert_eq!(hash_before, 0, "precondition: tree should be empty before push");
+        assert_eq!(
+            hash_before, 0,
+            "precondition: tree should be empty before push"
+        );
 
         let op = Operation::ORMapPushDiff {
             ctx: make_ctx(service_names::SYNC),
@@ -1411,7 +1504,10 @@ mod tests {
         // Verify the RecordStore put fired: the MerkleMutationObserver should
         // have updated the OR-Map merkle tree to a non-zero root hash.
         let hash_after = merkle_manager.with_ormap_tree("tags", 0, |tree| tree.get_root_hash());
-        assert_ne!(hash_after, 0, "OR-Map tree should have non-zero hash after push (proves store.put fired)");
+        assert_ne!(
+            hash_after, 0,
+            "OR-Map tree should have non-zero hash after push (proves store.put fired)"
+        );
     }
 
     #[tokio::test]
@@ -1518,7 +1614,10 @@ mod tests {
         ));
 
         let expected = merkle_manager.aggregate_lww_root_hash("users");
-        assert_ne!(expected, 0, "precondition: aggregate hash should be non-zero");
+        assert_ne!(
+            expected, 0,
+            "precondition: aggregate hash should be non-zero"
+        );
 
         let op = Operation::SyncInit {
             ctx: make_ctx(service_names::SYNC),
@@ -1532,8 +1631,10 @@ mod tests {
         match resp {
             OperationResponse::Message(msg) => {
                 if let Message::SyncRespRoot(m) = *msg {
-                    assert_eq!(m.payload.root_hash, expected,
-                        "SyncInit should return aggregate root hash from all partitions");
+                    assert_eq!(
+                        m.payload.root_hash, expected,
+                        "SyncInit should return aggregate root hash from all partitions"
+                    );
                 } else {
                     panic!("expected SyncRespRoot");
                 }
@@ -1577,12 +1678,16 @@ mod tests {
                 if let Message::SyncRespBuckets(m) = *msg {
                     assert_eq!(m.payload.map_name, "users");
                     assert_eq!(m.payload.path, "042/");
-                    assert!(!m.payload.buckets.is_empty(),
-                        "partition 42 with 10 keys should have non-empty buckets");
+                    assert!(
+                        !m.payload.buckets.is_empty(),
+                        "partition 42 with 10 keys should have non-empty buckets"
+                    );
                     // Bucket keys should be prefixed with "042/" to enable routed drill-down.
                     for key in m.payload.buckets.keys() {
-                        assert!(key.starts_with("042/"),
-                            "bucket key should have partition prefix, got: {key}");
+                        assert!(
+                            key.starts_with("042/"),
+                            "bucket key should have partition prefix, got: {key}"
+                        );
                     }
                 } else {
                     panic!("expected SyncRespBuckets, got different Message variant");
@@ -1627,11 +1732,16 @@ mod tests {
             OperationResponse::Message(msg) => {
                 if let Message::SyncRespBuckets(m) = *msg {
                     assert_eq!(m.payload.path, "");
-                    assert!(!m.payload.buckets.is_empty(),
-                        "aggregate buckets should be non-empty with data across partitions");
+                    assert!(
+                        !m.payload.buckets.is_empty(),
+                        "aggregate buckets should be non-empty with data across partitions"
+                    );
                     for key in m.payload.buckets.keys() {
-                        assert_eq!(key.len(), 1,
-                            "aggregate bucket keys should be single hex chars, got: {key}");
+                        assert_eq!(
+                            key.len(),
+                            1,
+                            "aggregate bucket keys should be single hex chars, got: {key}"
+                        );
                     }
                 } else {
                     panic!("expected SyncRespBuckets, got different Message variant");

@@ -23,18 +23,18 @@ use topgun_server::network::connection::ConnectionRegistry;
 use topgun_server::network::handlers::AppState;
 use topgun_server::network::shutdown::ShutdownController;
 use topgun_server::service::config::ServerConfig;
+use topgun_server::service::dispatch::{DispatchConfig, PartitionDispatcher};
 use topgun_server::service::domain::coordination::CoordinationService;
 use topgun_server::service::domain::crdt::CrdtService;
 use topgun_server::service::domain::messaging::MessagingService;
-use topgun_server::service::domain::schema::SchemaService;
 use topgun_server::service::domain::persistence::PersistenceService;
 use topgun_server::service::domain::query::{QueryRegistry, QueryService};
 use topgun_server::service::domain::query_backend::PredicateBackend;
+use topgun_server::service::domain::schema::SchemaService;
 use topgun_server::service::domain::search::{
     SearchConfig, SearchMutationObserver, SearchRegistry, SearchService, TantivyMapIndex,
 };
 use topgun_server::service::domain::sync::SyncService;
-use topgun_server::service::dispatch::{DispatchConfig, PartitionDispatcher};
 use topgun_server::service::middleware::build_operation_pipeline;
 use topgun_server::service::operation::service_names;
 use topgun_server::service::router::OperationRouter;
@@ -48,7 +48,10 @@ use topgun_server::storage::mutation_observer::MutationObserver;
 
 use metrics::HdrMetricsCollector;
 use scenarios::ThroughputScenario;
-use traits::{AssertionResult, HarnessContext, JsonAssertionResult, JsonLatency, JsonReport, LoadScenario, MetricsCollector};
+use traits::{
+    AssertionResult, HarnessContext, JsonAssertionResult, JsonLatency, JsonReport, LoadScenario,
+    MetricsCollector,
+};
 
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
@@ -187,9 +190,7 @@ async fn main() {
             shutdown.set_ready();
             addr_tx.send(addr).expect("failed to send server address");
 
-            axum::serve(listener, app)
-                .await
-                .expect("server error");
+            axum::serve(listener, app).await.expect("server error");
         });
     });
 
@@ -279,9 +280,9 @@ async fn main() {
         // Use write_latency key recorded by the throughput scenario, or zeros if absent.
         let latency_stats = snapshot.latencies.get("write_latency");
         let json_latency = JsonLatency {
-            p50_us:  latency_stats.map_or(0, |s| s.p50),
-            p95_us:  latency_stats.map_or(0, |s| s.p95),
-            p99_us:  latency_stats.map_or(0, |s| s.p99),
+            p50_us: latency_stats.map_or(0, |s| s.p50),
+            p95_us: latency_stats.map_or(0, |s| s.p95),
+            p99_us: latency_stats.map_or(0, |s| s.p99),
             p999_us: latency_stats.map_or(0, |s| s.p999),
         };
         let mode = if fire_and_forget {
@@ -348,7 +349,20 @@ fn utc_timestamp_now() -> String {
 
     // Determine month and day within the year.
     let leap = is_leap_year(year);
-    let month_days: [u64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_days: [u64; 12] = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut month: u64 = 1;
     for &md in &month_days {
         if days < md {
@@ -401,7 +415,6 @@ impl ObserverFactory for SearchObserverFactory {
     }
 }
 
-
 /// Wires all 7 domain services and builds the partition dispatcher.
 ///
 /// Duplicated from `test_server.rs` — keep in sync.
@@ -430,24 +443,21 @@ fn build_services() -> (
     ));
 
     let cluster_config = Arc::new(ClusterConfig::default());
-    let (cluster_state, _rx) =
-        ClusterState::new(cluster_config, "bench-server-node".to_string());
+    let (cluster_state, _rx) = ClusterState::new(cluster_config, "bench-server-node".to_string());
     let cluster_state = Arc::new(cluster_state);
     let connection_registry = Arc::new(ConnectionRegistry::new());
 
     let search_registry = Arc::new(SearchRegistry::new());
     let search_indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>> =
         Arc::new(RwLock::new(HashMap::new()));
-    let search_needs_population: Arc<DashMap<String, AtomicBool>> =
-        Arc::new(DashMap::new());
+    let search_needs_population: Arc<DashMap<String, AtomicBool>> = Arc::new(DashMap::new());
 
-    let search_observer_factory: Arc<dyn ObserverFactory> =
-        Arc::new(SearchObserverFactory {
-            search_registry: Arc::clone(&search_registry),
-            indexes: Arc::clone(&search_indexes),
-            connection_registry: Arc::clone(&connection_registry),
-            needs_population: Arc::clone(&search_needs_population),
-        });
+    let search_observer_factory: Arc<dyn ObserverFactory> = Arc::new(SearchObserverFactory {
+        search_registry: Arc::clone(&search_registry),
+        indexes: Arc::clone(&search_indexes),
+        connection_registry: Arc::clone(&connection_registry),
+        needs_population: Arc::clone(&search_needs_population),
+    });
 
     let query_registry = Arc::new(QueryRegistry::new());
 
@@ -462,10 +472,7 @@ fn build_services() -> (
             Arc::new(NullDataStore),
             Vec::new(),
         )
-        .with_observer_factories(vec![
-            search_observer_factory,
-            merkle_observer_factory,
-        ]),
+        .with_observer_factories(vec![search_observer_factory, merkle_observer_factory]),
     );
 
     let write_validator = {
@@ -491,9 +498,8 @@ fn build_services() -> (
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
     ));
-    let query_merkle_manager = Arc::new(
-        topgun_server::storage::query_merkle::QueryMerkleSyncManager::new(),
-    );
+    let query_merkle_manager =
+        Arc::new(topgun_server::storage::query_merkle::QueryMerkleSyncManager::new());
     let query_svc = Arc::new(QueryService::new(
         Arc::clone(&query_registry),
         Arc::clone(&record_store_factory),

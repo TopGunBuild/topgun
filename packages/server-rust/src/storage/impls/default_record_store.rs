@@ -161,10 +161,7 @@ impl RecordStore for DefaultRecordStore {
         let metadata = RecordMetadata::new(now, 0);
 
         // Step 3: Create record
-        let record = Record {
-            value,
-            metadata,
-        };
+        let record = Record { value, metadata };
 
         // Step 4: Put into engine
         self.engine.put(key, record.clone());
@@ -178,7 +175,10 @@ impl RecordStore for DefaultRecordStore {
         }
 
         // Step 6: Write-through for Client or CrdtMerge provenance
-        if matches!(provenance, CallerProvenance::Client | CallerProvenance::CrdtMerge) {
+        if matches!(
+            provenance,
+            CallerProvenance::Client | CallerProvenance::CrdtMerge
+        ) {
             let expiration_time = self.compute_expiration_time(&expiry, now);
             self.data_store
                 .add(&self.name, key, &record.value, expiration_time, now)
@@ -225,7 +225,10 @@ impl RecordStore for DefaultRecordStore {
             .on_put(key, &record, old.as_ref().map(|r| &r.value), true);
 
         // Step 3: Write-through for Client or CrdtMerge provenance
-        if matches!(provenance, CallerProvenance::Client | CallerProvenance::CrdtMerge) {
+        if matches!(
+            provenance,
+            CallerProvenance::Client | CallerProvenance::CrdtMerge
+        ) {
             let now = now_millis();
             self.data_store
                 .add_backup(&self.name, key, &record.value, 0, now)
@@ -235,11 +238,7 @@ impl RecordStore for DefaultRecordStore {
         Ok(())
     }
 
-    async fn remove_backup(
-        &self,
-        key: &str,
-        provenance: CallerProvenance,
-    ) -> anyhow::Result<()> {
+    async fn remove_backup(&self, key: &str, provenance: CallerProvenance) -> anyhow::Result<()> {
         // Step 1: Remove from engine
         let old = self.engine.remove(key);
 
@@ -442,8 +441,7 @@ impl DefaultRecordStore {
 
         // Check max-idle
         if self.config.default_max_idle_millis > 0
-            && now - record.metadata.last_access_time
-                > self.config.default_max_idle_millis as i64
+            && now - record.metadata.last_access_time > self.config.default_max_idle_millis as i64
         {
             return ExpiryReason::MaxIdle;
         }
@@ -572,7 +570,12 @@ mod tests {
         let value = make_value("hello");
 
         let old = store
-            .put("key1", value.clone(), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "key1",
+                value.clone(),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
         assert!(old.is_none(), "first put should return None");
@@ -596,7 +599,12 @@ mod tests {
         let store = make_store_with_observer(observer.clone(), StorageConfig::default());
 
         store
-            .put("key1", make_value("v1"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "key1",
+                make_value("v1"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
 
@@ -613,13 +621,23 @@ mod tests {
 
         // First put
         store
-            .put("key1", make_value("v1"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "key1",
+                make_value("v1"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
 
         // Second put on same key = update
         let old = store
-            .put("key1", make_value("v2"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "key1",
+                make_value("v2"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
 
@@ -636,11 +654,19 @@ mod tests {
         let store = make_store_with_observer(observer.clone(), StorageConfig::default());
 
         store
-            .put("key1", make_value("v1"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "key1",
+                make_value("v1"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
 
-        let old = store.remove("key1", CallerProvenance::Client).await.unwrap();
+        let old = store
+            .remove("key1", CallerProvenance::Client)
+            .await
+            .unwrap();
         assert!(old.is_some());
         assert_eq!(observer.remove_count.load(Ordering::Relaxed), 1);
     }
@@ -657,7 +683,12 @@ mod tests {
         let store = make_store_with_observer(Arc::new(CountingObserver::new()), config);
 
         store
-            .put("key1", make_value("v1"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "key1",
+                make_value("v1"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
 
@@ -679,7 +710,12 @@ mod tests {
         let store = make_store_with_observer(Arc::new(CountingObserver::new()), config);
 
         store
-            .put("key1", make_value("v1"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "key1",
+                make_value("v1"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
 
@@ -701,7 +737,12 @@ mod tests {
         let store = make_store_with_observer(Arc::new(CountingObserver::new()), config);
 
         store
-            .put("key1", make_value("v1"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "key1",
+                make_value("v1"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
 
@@ -721,11 +762,21 @@ mod tests {
         assert_eq!(store.owned_entry_cost(), 0);
 
         store
-            .put("key1", make_value("v1"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "key1",
+                make_value("v1"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
         store
-            .put("key2", make_value("v2"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "key2",
+                make_value("v2"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
 
@@ -742,11 +793,21 @@ mod tests {
         let store = make_store_with_observer(observer.clone(), StorageConfig::default());
 
         store
-            .put("key1", make_value("v1"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "key1",
+                make_value("v1"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
         store
-            .put("key2", make_value("v2"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "key2",
+                make_value("v2"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
 
@@ -763,7 +824,12 @@ mod tests {
         let store = make_store();
 
         store
-            .put("key1", make_value("v1"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "key1",
+                make_value("v1"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
 
@@ -796,12 +862,20 @@ mod tests {
 
         assert!(!store.exists_in_memory("key1"));
         store
-            .put("key1", make_value("v1"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "key1",
+                make_value("v1"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
         assert!(store.exists_in_memory("key1"));
 
-        store.remove("key1", CallerProvenance::Client).await.unwrap();
+        store
+            .remove("key1", CallerProvenance::Client)
+            .await
+            .unwrap();
         assert!(!store.exists_in_memory("key1"));
     }
 
@@ -822,24 +896,28 @@ mod tests {
             default_max_idle_millis: 0,
             max_entry_count: 0,
         };
-        let store_with_ttl =
-            make_store_with_observer(Arc::new(CountingObserver::new()), config);
+        let store_with_ttl = make_store_with_observer(Arc::new(CountingObserver::new()), config);
         assert!(store_with_ttl.is_expirable());
     }
 
     #[test]
     fn should_evict_reflects_config() {
         let store = make_store();
-        assert!(!store.should_evict(), "unlimited config should not trigger eviction");
+        assert!(
+            !store.should_evict(),
+            "unlimited config should not trigger eviction"
+        );
 
         let config = StorageConfig {
             default_ttl_millis: 0,
             default_max_idle_millis: 0,
             max_entry_count: 2,
         };
-        let store_limited =
-            make_store_with_observer(Arc::new(CountingObserver::new()), config);
-        assert!(!store_limited.should_evict(), "empty store should not trigger eviction");
+        let store_limited = make_store_with_observer(Arc::new(CountingObserver::new()), config);
+        assert!(
+            !store_limited.should_evict(),
+            "empty store should not trigger eviction"
+        );
     }
 
     #[tokio::test]
@@ -848,7 +926,12 @@ mod tests {
         let store = make_store_with_observer(observer.clone(), StorageConfig::default());
 
         store
-            .put("key1", make_value("v1"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "key1",
+                make_value("v1"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
 
@@ -864,15 +947,30 @@ mod tests {
         let store = make_store_with_observer(observer.clone(), StorageConfig::default());
 
         store
-            .put("a", make_value("v1"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "a",
+                make_value("v1"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
         store
-            .put("b", make_value("v2"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "b",
+                make_value("v2"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
         store
-            .put("c", make_value("v3"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "c",
+                make_value("v3"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
 
@@ -888,7 +986,12 @@ mod tests {
         let store = make_store_with_observer(observer.clone(), StorageConfig::default());
 
         store
-            .put("key1", make_value("v1"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "key1",
+                make_value("v1"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
 
@@ -903,7 +1006,12 @@ mod tests {
         let store = make_store_with_observer(observer.clone(), StorageConfig::default());
 
         store
-            .put("key1", make_value("v1"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "key1",
+                make_value("v1"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
 
@@ -923,11 +1031,21 @@ mod tests {
         let store = make_store();
 
         store
-            .put("a", make_value("va"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "a",
+                make_value("va"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
         store
-            .put("b", make_value("vb"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "b",
+                make_value("vb"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
 
@@ -956,7 +1074,12 @@ mod tests {
         let store = make_store_with_observer(Arc::new(CountingObserver::new()), config);
 
         store
-            .put("key1", make_value("v1"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "key1",
+                make_value("v1"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
 

@@ -205,8 +205,7 @@ fn optional_fields_omitted_in_auth_ack() {
     let re_bytes = rmp_serde::to_vec_named(&msg_no_optional).expect("re-encode");
 
     // Parse as raw Value and verify no "protocolVersion" key
-    let raw: rmpv::Value =
-        rmpv::decode::read_value(&mut &re_bytes[..]).expect("decode as Value");
+    let raw: rmpv::Value = rmpv::decode::read_value(&mut &re_bytes[..]).expect("decode as Value");
     let map = raw.as_map().expect("should be map");
 
     let has_protocol_version = map
@@ -228,8 +227,7 @@ fn optional_fields_omitted_in_partition_map_request() {
     let msg_no_payload = Message::PartitionMapRequest { payload: None };
     let bytes = rmp_serde::to_vec_named(&msg_no_payload).expect("encode");
 
-    let raw: rmpv::Value =
-        rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
+    let raw: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
     let map = raw.as_map().expect("should be map");
 
     let has_payload = map.iter().any(|(k, _)| k.as_str() == Some("payload"));
@@ -258,8 +256,7 @@ fn optional_fields_omitted_in_lock_request() {
     };
     let bytes = rmp_serde::to_vec_named(&msg_no_ttl).expect("encode");
 
-    let raw: rmpv::Value =
-        rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
+    let raw: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
     let map = raw.as_map().expect("should be map");
 
     // The payload should be a nested map that does NOT contain "ttl"
@@ -309,8 +306,7 @@ fn message_enum_routes_by_type_discriminator() {
 #[test]
 fn http_sync_request_decodes_from_ts_fixture() {
     let bytes = read_fixture("HTTP_SYNC_REQUEST");
-    let req: HttpSyncRequest =
-        rmp_serde::from_slice(&bytes).expect("decode HttpSyncRequest");
+    let req: HttpSyncRequest = rmp_serde::from_slice(&bytes).expect("decode HttpSyncRequest");
 
     assert_eq!(req.client_id, "client-1");
     assert!(!req.client_id.is_empty());
@@ -325,8 +321,7 @@ fn http_sync_request_decodes_from_ts_fixture() {
 #[test]
 fn http_sync_response_decodes_from_ts_fixture() {
     let bytes = read_fixture("HTTP_SYNC_RESPONSE");
-    let resp: HttpSyncResponse =
-        rmp_serde::from_slice(&bytes).expect("decode HttpSyncResponse");
+    let resp: HttpSyncResponse = rmp_serde::from_slice(&bytes).expect("decode HttpSyncResponse");
 
     assert_eq!(resp.server_hlc.millis, 1_700_000_000_000);
     assert!(resp.ack.is_some());
@@ -349,11 +344,7 @@ fn at_least_40_fixture_files_exist() {
     let count = fs::read_dir(&dir)
         .expect("read fixtures dir")
         .filter_map(std::result::Result::ok)
-        .filter(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|ext| ext == "msgpack")
-        })
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "msgpack"))
         .count();
 
     assert!(
@@ -382,7 +373,10 @@ impl ClockSource for FixedClock {
 
 /// Creates a fresh `ORMap<Value>` with a fixed clock for deterministic testing.
 fn make_test_map(node_id: &str) -> ORMap<Value> {
-    ORMap::new(HLC::new(node_id.to_string(), Box::new(FixedClock(1_000_000))))
+    ORMap::new(HLC::new(
+        node_id.to_string(),
+        Box::new(FixedClock(1_000_000)),
+    ))
 }
 
 /// Builds the three test records used by the Merkle determinism test.
@@ -395,19 +389,31 @@ fn build_test_records() -> [ORMapRecord<Value>; 3] {
     [
         ORMapRecord {
             value: Value::Map(user_data),
-            timestamp: Timestamp { millis: 1_000_000, counter: 0, node_id: "origin".to_string() },
+            timestamp: Timestamp {
+                millis: 1_000_000,
+                counter: 0,
+                node_id: "origin".to_string(),
+            },
             tag: "1000000:0:origin".to_string(),
             ttl_ms: None,
         },
         ORMapRecord {
             value: Value::String("status-online".to_string()),
-            timestamp: Timestamp { millis: 1_000_001, counter: 0, node_id: "origin".to_string() },
+            timestamp: Timestamp {
+                millis: 1_000_001,
+                counter: 0,
+                node_id: "origin".to_string(),
+            },
             tag: "1000001:0:origin".to_string(),
             ttl_ms: None,
         },
         ORMapRecord {
             value: Value::Int(42),
-            timestamp: Timestamp { millis: 1_000_002, counter: 0, node_id: "origin".to_string() },
+            timestamp: Timestamp {
+                millis: 1_000_002,
+                counter: 0,
+                node_id: "origin".to_string(),
+            },
             tag: "1000002:0:origin".to_string(),
             ttl_ms: None,
         },

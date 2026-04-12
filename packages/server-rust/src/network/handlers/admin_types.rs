@@ -286,8 +286,14 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["code"], 400);
         assert_eq!(json["message"], "bad request");
-        assert!(json.get("field").is_none(), "field should be omitted when None");
-        assert!(json.get("error").is_none(), "old 'error' key must not appear");
+        assert!(
+            json.get("field").is_none(),
+            "field should be omitted when None"
+        );
+        assert!(
+            json.get("error").is_none(),
+            "old 'error' key must not appear"
+        );
     }
 
     #[test]
@@ -338,7 +344,13 @@ mod tests {
 
         // Integer types, not floats
         assert!(json["connections"].is_u64(), "connections must be integer");
-        assert!(json["uptimeSeconds"].is_u64(), "uptimeSeconds must be integer");
-        assert!(json["totalOperations"].is_u64(), "totalOperations must be integer");
+        assert!(
+            json["uptimeSeconds"].is_u64(),
+            "uptimeSeconds must be integer"
+        );
+        assert!(
+            json["totalOperations"].is_u64(),
+            "totalOperations must be integer"
+        );
     }
 }

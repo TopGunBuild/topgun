@@ -44,9 +44,7 @@ impl PostgresDataStore {
         let table_name = table_name.unwrap_or_else(|| "topgun_maps".to_string());
 
         if !is_valid_table_name(&table_name) {
-            bail!(
-                "Invalid table name '{table_name}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$"
-            );
+            bail!("Invalid table name '{table_name}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
         }
 
         Ok(Self { pool, table_name })
@@ -394,7 +392,10 @@ impl PostgresRefreshGrantStore {
     /// by callers when computing grant expiry. `2_592_000` (30 days) is the
     /// recommended default.
     pub fn new(pool: PgPool, grant_duration_secs: u64) -> Self {
-        Self { pool, grant_duration_secs }
+        Self {
+            pool,
+            grant_duration_secs,
+        }
     }
 
     /// Run the schema migration (CREATE TABLE + indices).
@@ -484,18 +485,17 @@ impl RefreshGrantStore for PostgresRefreshGrantStore {
         // Atomically consume the grant with DELETE ... RETURNING.
         // The AND expires_at > $2 check ensures expired grants are rejected
         // without a separate SELECT.
-        let row: Option<(String, String, serde_json::Value, String, i64, i64)> =
-            sqlx::query_as(
-                r"
+        let row: Option<(String, String, serde_json::Value, String, i64, i64)> = sqlx::query_as(
+            r"
                 DELETE FROM topgun_refresh_grants
                 WHERE token_hash = $1 AND expires_at > $2
                 RETURNING id, sub, roles, token_hash, created_at, expires_at
                 ",
-            )
-            .bind(token_hash)
-            .bind(now_secs)
-            .fetch_optional(&self.pool)
-            .await?;
+        )
+        .bind(token_hash)
+        .bind(now_secs)
+        .fetch_optional(&self.pool)
+        .await?;
 
         match row {
             None => Ok(None),
@@ -524,12 +524,10 @@ impl RefreshGrantStore for PostgresRefreshGrantStore {
             .unwrap_or_default()
             .as_secs() as i64;
 
-        let result = sqlx::query(
-            "DELETE FROM topgun_refresh_grants WHERE expires_at <= $1",
-        )
-        .bind(now_secs)
-        .execute(&self.pool)
-        .await?;
+        let result = sqlx::query("DELETE FROM topgun_refresh_grants WHERE expires_at <= $1")
+            .bind(now_secs)
+            .execute(&self.pool)
+            .await?;
 
         Ok(result.rows_affected())
     }
@@ -953,10 +951,7 @@ mod tests {
         store.initialize().await.unwrap();
 
         let value = test_lww_value("expiring");
-        store
-            .add("map", "k", &value, 999_999, 1000)
-            .await
-            .unwrap();
+        store.add("map", "k", &value, 999_999, 1000).await.unwrap();
 
         // The value should be loadable (expiration is metadata, not enforced by the store)
         assert!(store.load("map", "k").await.unwrap().is_some());
@@ -965,8 +960,7 @@ mod tests {
     #[tokio::test]
     async fn custom_table_name() {
         let pool = require_db!();
-        let store =
-            PostgresDataStore::new(pool, Some("custom_table".to_string())).unwrap();
+        let store = PostgresDataStore::new(pool, Some("custom_table".to_string())).unwrap();
         store.initialize().await.unwrap();
 
         store

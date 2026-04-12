@@ -184,9 +184,7 @@ impl HeartbeatComplaintProcessor {
         let mut complaints = self.complaints.write();
 
         // Record the complaint.
-        let records = complaints
-            .entry(complaint.suspect_id.clone())
-            .or_default();
+        let records = complaints.entry(complaint.suspect_id.clone()).or_default();
         records.push(ComplaintRecord {
             complainer_id: complaint.complainer_id.clone(),
             received_at_ms: now_ms,
@@ -304,7 +302,10 @@ impl HeartbeatComplaintProcessor {
 
         // Check if enough time has passed since the node was marked Suspect.
         // Use the last heartbeat time as a proxy for when suspicion started.
-        let last_hb = self.failure_detector.last_heartbeat(suspect_id).unwrap_or(0);
+        let last_hb = self
+            .failure_detector
+            .last_heartbeat(suspect_id)
+            .unwrap_or(0);
         if now_ms.saturating_sub(last_hb) < suspicion_timeout {
             return;
         }
@@ -397,12 +398,11 @@ impl GracefulLeaveProcessor {
             // the message handler routes the LeaveRequest to the master).
             let view = self.state.current_view();
             if let Some(master) = view.master() {
-                let leave_msg = ClusterMessage::LeaveRequest(
-                    super::messages::LeaveRequestPayload {
+                let leave_msg =
+                    ClusterMessage::LeaveRequest(super::messages::LeaveRequestPayload {
                         node_id: node_id.to_string(),
                         reason: Some("forwarded leave request".to_string()),
-                    },
-                );
+                    });
                 let _ = send_to_peer(&self.registry, &master.node_id, &leave_msg).await;
             }
             return Ok(());
@@ -472,10 +472,7 @@ impl GracefulLeaveProcessor {
         let tasks = plan_rebalance(&self.state.partition_table, &target_assignments);
 
         for task in tasks {
-            let _ = self
-                .migration_tx
-                .send(MigrationCommand::Start(task))
-                .await;
+            let _ = self.migration_tx.send(MigrationCommand::Start(task)).await;
         }
 
         // Step 7: The caller (or a background monitor) must watch for
@@ -624,8 +621,7 @@ impl MastershipClaimProcessor {
             .members
             .iter()
             .filter(|m| {
-                m.state == NodeState::Active
-                    && dead_master_id.is_none_or(|id| m.node_id != id)
+                m.state == NodeState::Active && dead_master_id.is_none_or(|id| m.node_id != id)
             })
             .min_by(|a, b| {
                 a.join_version
@@ -718,15 +714,11 @@ impl MastershipClaimProcessor {
 
         let partition_count = self.state.partition_table.partition_count();
         let backup_count = self.state.config.backup_count;
-        let target_assignments =
-            compute_assignment(&active_members, partition_count, backup_count);
+        let target_assignments = compute_assignment(&active_members, partition_count, backup_count);
 
         let tasks = plan_rebalance(&self.state.partition_table, &target_assignments);
         for task in tasks {
-            let _ = self
-                .migration_tx
-                .send(MigrationCommand::Start(task))
-                .await;
+            let _ = self.migration_tx.send(MigrationCommand::Start(task)).await;
         }
 
         Ok(true)
@@ -1129,13 +1121,10 @@ mod tests {
 
         // Use a DeadlineFailureDetector that considers nodes dead
         // if no heartbeat within 5000ms.
-        let fd = Arc::new(
-            crate::cluster::failure_detector::DeadlineFailureDetector::new(5000),
-        );
+        let fd = Arc::new(crate::cluster::failure_detector::DeadlineFailureDetector::new(5000));
 
         let registry = Arc::new(ConnectionRegistry::new());
-        let processor =
-            HeartbeatComplaintProcessor::new(Arc::clone(&state), registry, fd);
+        let processor = HeartbeatComplaintProcessor::new(Arc::clone(&state), registry, fd);
 
         (processor, state)
     }
@@ -1153,7 +1142,10 @@ mod tests {
 
         // Single complaint should return None.
         let result = processor.process_complaint(&complaint);
-        assert!(result.is_none(), "single complainer should not trigger suspicion");
+        assert!(
+            result.is_none(),
+            "single complainer should not trigger suspicion"
+        );
     }
 
     #[test]
@@ -1204,7 +1196,10 @@ mod tests {
         // Two complaints from the same node should still return None.
         let _ = processor.process_complaint(&complaint);
         let result = processor.process_complaint(&complaint);
-        assert!(result.is_none(), "same complainer twice should not trigger suspicion");
+        assert!(
+            result.is_none(),
+            "same complainer twice should not trigger suspicion"
+        );
     }
 
     #[test]
@@ -1214,9 +1209,7 @@ mod tests {
         // Record a heartbeat for the suspect so the master's failure detector
         // considers it alive.
         let now_ms = current_unix_ms();
-        processor
-            .failure_detector
-            .heartbeat("suspect-1", now_ms);
+        processor.failure_detector.heartbeat("suspect-1", now_ms);
 
         let complaint1 = super::super::messages::HeartbeatComplaintPayload {
             complainer_id: "node-2".to_string(),
@@ -1302,9 +1295,7 @@ mod tests {
                 ],
             });
 
-            let fd = Arc::new(
-                crate::cluster::failure_detector::DeadlineFailureDetector::new(5000),
-            );
+            let fd = Arc::new(crate::cluster::failure_detector::DeadlineFailureDetector::new(5000));
             // Record an old heartbeat for master-1 so failure detector considers it dead.
             fd.heartbeat("master-1", 0);
 
@@ -1312,8 +1303,7 @@ mod tests {
             // Register a cluster peer connection so majority can be reached.
             // With 2 active members, majority = 2 (self + 1 peer).
             let conn_config = ConnectionConfig::default();
-            let (handle, _rx) =
-                registry.register(ConnectionKind::ClusterPeer, &conn_config);
+            let (handle, _rx) = registry.register(ConnectionKind::ClusterPeer, &conn_config);
             {
                 let mut meta = handle.metadata.write().await;
                 meta.peer_node_id = Some("master-1".to_string());
@@ -1321,12 +1311,8 @@ mod tests {
 
             let (migration_tx, _migration_rx) = mpsc::channel(16);
 
-            let processor = MastershipClaimProcessor::new(
-                Arc::clone(&state),
-                registry,
-                fd,
-                migration_tx,
-            );
+            let processor =
+                MastershipClaimProcessor::new(Arc::clone(&state), registry, fd, migration_tx);
 
             // attempt_claim should detect master-1 is dead and compute node-2
             // as the candidate (excluding dead master-1 from the filter).
@@ -1385,24 +1371,21 @@ mod tests {
                 ],
             });
 
-            let fd = Arc::new(
-                crate::cluster::failure_detector::DeadlineFailureDetector::new(5000),
-            );
+            let fd = Arc::new(crate::cluster::failure_detector::DeadlineFailureDetector::new(5000));
             fd.heartbeat("master-1", 0);
 
             let registry = Arc::new(ConnectionRegistry::new());
             let (migration_tx, _migration_rx) = mpsc::channel(16);
 
-            let processor = MastershipClaimProcessor::new(
-                Arc::clone(&state),
-                registry,
-                fd,
-                migration_tx,
-            );
+            let processor =
+                MastershipClaimProcessor::new(Arc::clone(&state), registry, fd, migration_tx);
 
             // node-3 is not the candidate (node-2 is), so it should not proceed.
             let result = processor.attempt_claim().await.unwrap();
-            assert!(!result, "node-3 should not claim mastership when node-2 is the candidate");
+            assert!(
+                !result,
+                "node-3 should not claim mastership when node-2 is the candidate"
+            );
 
             // View should be unchanged.
             let view = state.current_view();
@@ -1444,17 +1427,11 @@ mod tests {
             });
 
             let (migration_tx, _migration_rx) = mpsc::channel(16);
-            let fd = Arc::new(
-                crate::cluster::failure_detector::DeadlineFailureDetector::new(5000),
-            );
+            let fd = Arc::new(crate::cluster::failure_detector::DeadlineFailureDetector::new(5000));
             let registry = Arc::new(ConnectionRegistry::new());
 
-            let processor = GracefulLeaveProcessor::new(
-                Arc::clone(&state),
-                registry,
-                migration_tx,
-                fd,
-            );
+            let processor =
+                GracefulLeaveProcessor::new(Arc::clone(&state), registry, migration_tx, fd);
 
             // node-2 has zero partitions, so removal should be immediate.
             processor.process_leave("node-2").await.unwrap();

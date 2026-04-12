@@ -210,9 +210,7 @@ impl ExecutionPlan for TopGunExec {
         _partition: usize,
         _context: Arc<TaskContext>,
     ) -> DfResult<SendableRecordBatchStream> {
-        let stores = self
-            .record_store_factory
-            .get_all_for_map(&self.map_name);
+        let stores = self.record_store_factory.get_all_for_map(&self.map_name);
 
         let full_schema = Arc::clone(&self.full_schema);
 
@@ -240,29 +238,27 @@ impl ExecutionPlan for TopGunExec {
                 .get_or_build(&map_name, partition_id, move || {
                     let mut entries: Vec<(String, rmpv::Value)> = Vec::new();
                     store_clone.for_each_boxed(
-                        &mut |key: &str, record: &crate::storage::record::Record| {
-                            match &record.value {
-                                RecordValue::Lww { value, .. } => {
-                                    entries.push((
-                                        key.to_string(),
-                                        crate::service::domain::predicate::value_to_rmpv(value),
-                                    ));
-                                }
-                                RecordValue::OrMap { .. } | RecordValue::OrTombstones { .. } => {
-                                    tracing::warn!(
-                                        key = key,
-                                        "skipping non-LWW record in SQL table scan"
-                                    );
-                                }
+                        &mut |key: &str, record: &crate::storage::record::Record| match &record
+                            .value
+                        {
+                            RecordValue::Lww { value, .. } => {
+                                entries.push((
+                                    key.to_string(),
+                                    crate::service::domain::predicate::value_to_rmpv(value),
+                                ));
+                            }
+                            RecordValue::OrMap { .. } | RecordValue::OrTombstones { .. } => {
+                                tracing::warn!(
+                                    key = key,
+                                    "skipping non-LWW record in SQL table scan"
+                                );
                             }
                         },
                         false,
                     );
                     build_record_batch(&entries, &schema_for_build)
                 })
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(e.to_string())
-                })?;
+                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
             batches.push(batch);
         }
 
@@ -270,16 +266,15 @@ impl ExecutionPlan for TopGunExec {
         let concatenated = if batches.len() == 1 {
             batches.into_iter().next().unwrap()
         } else {
-            concat_batches(&full_schema, &batches).map_err(|e| {
-                datafusion::error::DataFusionError::ArrowError(e, None)
-            })?
+            concat_batches(&full_schema, &batches)
+                .map_err(|e| datafusion::error::DataFusionError::ArrowError(e, None))?
         };
 
         // Apply projection if needed.
         let final_batch = if let Some(ref proj) = self.projection {
-            concatenated.project(proj).map_err(|e| {
-                datafusion::error::DataFusionError::ArrowError(e, None)
-            })?
+            concatenated
+                .project(proj)
+                .map_err(|e| datafusion::error::DataFusionError::ArrowError(e, None))?
         } else {
             concatenated
         };
@@ -307,9 +302,9 @@ mod tests {
 
     use crate::storage::datastores::NullDataStore;
     use crate::storage::impls::StorageConfig;
+    use crate::storage::record::RecordValue;
     use crate::storage::RecordStoreFactory;
     use crate::storage::{CallerProvenance, ExpiryPolicy};
-    use crate::storage::record::RecordValue;
 
     fn test_schema() -> SchemaRef {
         Arc::new(Schema::new(vec![
@@ -327,14 +322,27 @@ mod tests {
         }
     }
 
-    async fn populate_store(factory: &RecordStoreFactory, map_name: &str, partition_id: u32, records: Vec<(&str, Value)>) {
+    async fn populate_store(
+        factory: &RecordStoreFactory,
+        map_name: &str,
+        partition_id: u32,
+        records: Vec<(&str, Value)>,
+    ) {
         let store = factory.get_or_create(map_name, partition_id);
         for (key, value) in records {
             let record_value = RecordValue::Lww {
                 value,
                 timestamp: test_timestamp(),
             };
-            store.put(key, record_value, ExpiryPolicy::NONE, CallerProvenance::Client).await.unwrap();
+            store
+                .put(
+                    key,
+                    record_value,
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Client,
+                )
+                .await
+                .unwrap();
         }
     }
 
@@ -347,12 +355,8 @@ mod tests {
             Vec::new(),
         ));
         let cache = Arc::new(ArrowCacheManager::new());
-        let provider = TopGunTableProvider::new(
-            "users".to_string(),
-            schema.clone(),
-            factory,
-            cache,
-        );
+        let provider =
+            TopGunTableProvider::new("users".to_string(), schema.clone(), factory, cache);
 
         assert_eq!(provider.schema(), schema);
         assert_eq!(provider.table_type(), TableType::Base);
@@ -385,8 +389,9 @@ mod tests {
         let ctx = Arc::new(TaskContext::default());
         let stream = exec.execute(0, ctx).unwrap();
 
-        let batches: Vec<RecordBatch> =
-            datafusion::physical_plan::common::collect(stream).await.unwrap();
+        let batches: Vec<RecordBatch> = datafusion::physical_plan::common::collect(stream)
+            .await
+            .unwrap();
 
         assert_eq!(batches.len(), 1);
         let batch = &batches[0];
@@ -444,8 +449,9 @@ mod tests {
 
         let ctx = Arc::new(TaskContext::default());
         let stream = exec.execute(0, ctx).unwrap();
-        let batches: Vec<RecordBatch> =
-            datafusion::physical_plan::common::collect(stream).await.unwrap();
+        let batches: Vec<RecordBatch> = datafusion::physical_plan::common::collect(stream)
+            .await
+            .unwrap();
 
         assert_eq!(batches[0].num_columns(), 2);
         let ages = batches[0]
@@ -466,18 +472,13 @@ mod tests {
         ));
         let cache = Arc::new(ArrowCacheManager::new());
 
-        let exec = TopGunExec::new(
-            "empty_map".to_string(),
-            schema,
-            factory,
-            cache,
-            None,
-        );
+        let exec = TopGunExec::new("empty_map".to_string(), schema, factory, cache, None);
 
         let ctx = Arc::new(TaskContext::default());
         let stream = exec.execute(0, ctx).unwrap();
-        let batches: Vec<RecordBatch> =
-            datafusion::physical_plan::common::collect(stream).await.unwrap();
+        let batches: Vec<RecordBatch> = datafusion::physical_plan::common::collect(stream)
+            .await
+            .unwrap();
 
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].num_rows(), 0);
@@ -514,8 +515,9 @@ mod tests {
 
         let ctx = Arc::new(TaskContext::default());
         let stream = exec.execute(0, ctx).unwrap();
-        let batches: Vec<RecordBatch> =
-            datafusion::physical_plan::common::collect(stream).await.unwrap();
+        let batches: Vec<RecordBatch> = datafusion::physical_plan::common::collect(stream)
+            .await
+            .unwrap();
 
         // Both partitions should be concatenated into one batch.
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
@@ -532,13 +534,7 @@ mod tests {
         ));
         let cache = Arc::new(ArrowCacheManager::new());
 
-        let exec = TopGunExec::new(
-            "test".to_string(),
-            schema,
-            factory,
-            cache,
-            None,
-        );
+        let exec = TopGunExec::new("test".to_string(), schema, factory, cache, None);
 
         assert!(exec.children().is_empty());
 

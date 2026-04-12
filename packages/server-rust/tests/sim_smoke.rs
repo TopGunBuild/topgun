@@ -29,13 +29,25 @@ async fn sim_cluster_write_read_same_node() {
 
     // Write a value to node 0.
     let value = rmpv::Value::Map(vec![
-        (rmpv::Value::String("name".into()), rmpv::Value::String("Alice".into())),
-        (rmpv::Value::String("age".into()), rmpv::Value::Integer(30.into())),
+        (
+            rmpv::Value::String("name".into()),
+            rmpv::Value::String("Alice".into()),
+        ),
+        (
+            rmpv::Value::String("age".into()),
+            rmpv::Value::Integer(30.into()),
+        ),
     ]);
-    cluster.write(0, "users", "alice", value).await.expect("write should succeed");
+    cluster
+        .write(0, "users", "alice", value)
+        .await
+        .expect("write should succeed");
 
     // Read back from the same node.
-    let result = cluster.read(0, "users", "alice").await.expect("read should succeed");
+    let result = cluster
+        .read(0, "users", "alice")
+        .await
+        .expect("read should succeed");
     assert!(result.is_some(), "written value should be readable");
 
     match result.unwrap() {
@@ -88,16 +100,26 @@ async fn sim_cluster_deterministic_with_same_seed() {
     // Run 1
     let mut cluster1 = SimCluster::new(3, 42);
     cluster1.start().expect("cluster1 should start");
-    cluster1.write(0, "users", "alice", rmpv::Value::String("v1".into()))
-        .await.expect("write1 should succeed");
-    let result1 = cluster1.read(0, "users", "alice").await.expect("read1 should succeed");
+    cluster1
+        .write(0, "users", "alice", rmpv::Value::String("v1".into()))
+        .await
+        .expect("write1 should succeed");
+    let result1 = cluster1
+        .read(0, "users", "alice")
+        .await
+        .expect("read1 should succeed");
 
     // Run 2 with same seed
     let mut cluster2 = SimCluster::new(3, 42);
     cluster2.start().expect("cluster2 should start");
-    cluster2.write(0, "users", "alice", rmpv::Value::String("v1".into()))
-        .await.expect("write2 should succeed");
-    let result2 = cluster2.read(0, "users", "alice").await.expect("read2 should succeed");
+    cluster2
+        .write(0, "users", "alice", rmpv::Value::String("v1".into()))
+        .await
+        .expect("write2 should succeed");
+    let result2 = cluster2
+        .read(0, "users", "alice")
+        .await
+        .expect("read2 should succeed");
 
     // Both runs produce the same result.
     assert!(result1.is_some());
@@ -123,16 +145,20 @@ async fn sim_cluster_kill_and_restart_node() {
     assert!(!cluster.nodes[1].is_alive());
 
     // Write to node 0 still works.
-    cluster.write(0, "data", "key1", rmpv::Value::String("hello".into()))
-        .await.expect("write to alive node should succeed");
+    cluster
+        .write(0, "data", "key1", rmpv::Value::String("hello".into()))
+        .await
+        .expect("write to alive node should succeed");
 
     // Restart node 1.
     cluster.restart_node(1).expect("restart should succeed");
     assert!(cluster.nodes[1].is_alive());
 
     // Write to restarted node works (fresh state).
-    cluster.write(1, "data", "key2", rmpv::Value::String("world".into()))
-        .await.expect("write to restarted node should succeed");
+    cluster
+        .write(1, "data", "key2", rmpv::Value::String("world".into()))
+        .await
+        .expect("write to restarted node should succeed");
 }
 
 /// Test `SimNetwork` delay and reorder methods.
@@ -142,8 +168,14 @@ async fn sim_network_delay_and_reorder() {
 
     // Add delay between two nodes.
     network.delay("node-a", "node-b", Duration::from_millis(100));
-    assert_eq!(network.get_delay("node-a", "node-b"), Some(Duration::from_millis(100)));
-    assert_eq!(network.get_delay("node-b", "node-a"), Some(Duration::from_millis(100)));
+    assert_eq!(
+        network.get_delay("node-a", "node-b"),
+        Some(Duration::from_millis(100))
+    );
+    assert_eq!(
+        network.get_delay("node-b", "node-a"),
+        Some(Duration::from_millis(100))
+    );
     assert_eq!(network.get_delay("node-a", "node-c"), None);
 
     // Enable reordering.

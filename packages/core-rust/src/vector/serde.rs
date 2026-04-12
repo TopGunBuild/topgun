@@ -87,11 +87,22 @@ impl<'de> Visitor<'de> for VectorVisitor {
         let bytes = data.into_vec();
 
         match type_tag.as_str() {
-            "f32" => Ok(Vector::F32(bytes_to_f32(&bytes).map_err(de::Error::custom)?)),
-            "f64" => Ok(Vector::F64(bytes_to_f64(&bytes).map_err(de::Error::custom)?)),
-            "i32" => Ok(Vector::I32(bytes_to_i32(&bytes).map_err(de::Error::custom)?)),
-            "i16" => Ok(Vector::I16(bytes_to_i16(&bytes).map_err(de::Error::custom)?)),
-            other => Err(de::Error::unknown_variant(other, &["f32", "f64", "i32", "i16"])),
+            "f32" => Ok(Vector::F32(
+                bytes_to_f32(&bytes).map_err(de::Error::custom)?,
+            )),
+            "f64" => Ok(Vector::F64(
+                bytes_to_f64(&bytes).map_err(de::Error::custom)?,
+            )),
+            "i32" => Ok(Vector::I32(
+                bytes_to_i32(&bytes).map_err(de::Error::custom)?,
+            )),
+            "i16" => Ok(Vector::I16(
+                bytes_to_i16(&bytes).map_err(de::Error::custom)?,
+            )),
+            other => Err(de::Error::unknown_variant(
+                other,
+                &["f32", "f64", "i32", "i16"],
+            )),
         }
     }
 }
@@ -132,7 +143,10 @@ fn ints_to_bytes_i16(v: &[i16]) -> Vec<u8> {
 
 fn bytes_to_f32(bytes: &[u8]) -> Result<Vec<f32>, String> {
     if !bytes.len().is_multiple_of(4) {
-        return Err(format!("f32 data length {} is not a multiple of 4", bytes.len()));
+        return Err(format!(
+            "f32 data length {} is not a multiple of 4",
+            bytes.len()
+        ));
     }
     Ok(bytes
         .chunks_exact(4)
@@ -142,7 +156,10 @@ fn bytes_to_f32(bytes: &[u8]) -> Result<Vec<f32>, String> {
 
 fn bytes_to_f64(bytes: &[u8]) -> Result<Vec<f64>, String> {
     if !bytes.len().is_multiple_of(8) {
-        return Err(format!("f64 data length {} is not a multiple of 8", bytes.len()));
+        return Err(format!(
+            "f64 data length {} is not a multiple of 8",
+            bytes.len()
+        ));
     }
     Ok(bytes
         .chunks_exact(8)
@@ -152,7 +169,10 @@ fn bytes_to_f64(bytes: &[u8]) -> Result<Vec<f64>, String> {
 
 fn bytes_to_i32(bytes: &[u8]) -> Result<Vec<i32>, String> {
     if !bytes.len().is_multiple_of(4) {
-        return Err(format!("i32 data length {} is not a multiple of 4", bytes.len()));
+        return Err(format!(
+            "i32 data length {} is not a multiple of 4",
+            bytes.len()
+        ));
     }
     Ok(bytes
         .chunks_exact(4)
@@ -162,7 +182,10 @@ fn bytes_to_i32(bytes: &[u8]) -> Result<Vec<i32>, String> {
 
 fn bytes_to_i16(bytes: &[u8]) -> Result<Vec<i16>, String> {
     if !bytes.len().is_multiple_of(2) {
-        return Err(format!("i16 data length {} is not a multiple of 2", bytes.len()));
+        return Err(format!(
+            "i16 data length {} is not a multiple of 2",
+            bytes.len()
+        ));
     }
     Ok(bytes
         .chunks_exact(2)

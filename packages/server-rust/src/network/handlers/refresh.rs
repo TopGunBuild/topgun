@@ -102,7 +102,12 @@ async fn rotate_grant_and_sign(
     let access_token = jsonwebtoken::encode(&Header::default(), &claims, &encoding_key)
         .map_err(|e| format!("JWT signing failed: {e}"))?;
 
-    Ok((access_token, access_expires_at, new_refresh_token, refresh_expires_at))
+    Ok((
+        access_token,
+        access_expires_at,
+        new_refresh_token,
+        refresh_expires_at,
+    ))
 }
 
 /// POST /api/auth/refresh handler.
@@ -117,7 +122,11 @@ pub async fn refresh_handler(
     let Some(store) = state.refresh_grant_store.as_ref() else {
         return (
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse { code: 404, message: "Not found".to_string(), field: None }),
+            Json(ErrorResponse {
+                code: 404,
+                message: "Not found".to_string(),
+                field: None,
+            }),
         )
             .into_response();
     };
@@ -126,7 +135,11 @@ pub async fn refresh_handler(
     let Some(jwt_secret) = state.jwt_secret.as_deref() else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { code: 500, message: "Server misconfiguration".to_string(), field: None }),
+            Json(ErrorResponse {
+                code: 500,
+                message: "Server misconfiguration".to_string(),
+                field: None,
+            }),
         )
             .into_response();
     };
@@ -147,7 +160,14 @@ pub async fn refresh_handler(
             } else {
                 "Authentication failed".to_string()
             };
-            return (StatusCode::UNAUTHORIZED, Json(ErrorResponse { code: 401, message: msg, field: None }))
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    code: 401,
+                    message: msg,
+                    field: None,
+                }),
+            )
                 .into_response();
         }
         Err(e) => {
@@ -156,7 +176,14 @@ pub async fn refresh_handler(
             } else {
                 "Authentication failed".to_string()
             };
-            return (StatusCode::UNAUTHORIZED, Json(ErrorResponse { code: 401, message: msg, field: None }))
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    code: 401,
+                    message: msg,
+                    field: None,
+                }),
+            )
                 .into_response();
         }
     };
@@ -173,8 +200,19 @@ pub async fn refresh_handler(
             .into_response()
         }
         Err(detail) => {
-            let msg = if state.config.insecure_forward_auth_errors { detail } else { "Authentication failed".to_string() };
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { code: 500, message: msg, field: None }))
+            let msg = if state.config.insecure_forward_auth_errors {
+                detail
+            } else {
+                "Authentication failed".to_string()
+            };
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    code: 500,
+                    message: msg,
+                    field: None,
+                }),
+            )
                 .into_response()
         }
     }
@@ -206,7 +244,10 @@ mod tests {
 
     impl InMemoryGrantStore {
         fn new(duration: u64) -> Self {
-            Self { grants: Mutex::new(HashMap::new()), duration }
+            Self {
+                grants: Mutex::new(HashMap::new()),
+                duration,
+            }
         }
     }
 
@@ -217,7 +258,10 @@ mod tests {
         }
 
         async fn insert_grant(&self, grant: &RefreshGrant) -> anyhow::Result<()> {
-            self.grants.lock().unwrap().insert(grant.token_hash.clone(), grant.clone());
+            self.grants
+                .lock()
+                .unwrap()
+                .insert(grant.token_hash.clone(), grant.clone());
             Ok(())
         }
 
@@ -321,7 +365,9 @@ mod tests {
             .await
             .unwrap();
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, json)
     }
@@ -371,16 +417,38 @@ mod tests {
             .unwrap()
             .as_secs()
             + 86400;
-        seed_grant(&store, raw_token, "user-1", vec!["viewer".to_string()], future_expiry).await;
+        seed_grant(
+            &store,
+            raw_token,
+            "user-1",
+            vec!["viewer".to_string()],
+            future_expiry,
+        )
+        .await;
 
-        let state = make_state_with_store(Arc::clone(&store) as Arc<dyn RefreshGrantStore>, Some("test-secret"));
+        let state = make_state_with_store(
+            Arc::clone(&store) as Arc<dyn RefreshGrantStore>,
+            Some("test-secret"),
+        );
         let app = make_app(state);
         let (status, body) = post_refresh(app, json!({"refreshToken": raw_token})).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body["token"].is_string(), "response must include access token");
-        assert!(body["expiresAt"].is_number(), "response must include expiresAt");
-        assert!(body["refreshToken"].is_string(), "response must include new refresh token");
-        assert!(body["refreshExpiresAt"].is_number(), "response must include refreshExpiresAt");
+        assert!(
+            body["token"].is_string(),
+            "response must include access token"
+        );
+        assert!(
+            body["expiresAt"].is_number(),
+            "response must include expiresAt"
+        );
+        assert!(
+            body["refreshToken"].is_string(),
+            "response must include new refresh token"
+        );
+        assert!(
+            body["refreshExpiresAt"].is_number(),
+            "response must include refreshExpiresAt"
+        );
         // New refresh token must differ from the original.
         assert_ne!(body["refreshToken"].as_str().unwrap(), raw_token);
     }
@@ -398,13 +466,23 @@ mod tests {
             + 86400;
         seed_grant(&store, raw_token, "user-2", vec![], future_expiry).await;
 
-        let state1 = make_state_with_store(Arc::clone(&store) as Arc<dyn RefreshGrantStore>, Some("test-secret"));
+        let state1 = make_state_with_store(
+            Arc::clone(&store) as Arc<dyn RefreshGrantStore>,
+            Some("test-secret"),
+        );
         let (status1, _) = post_refresh(make_app(state1), json!({"refreshToken": raw_token})).await;
         assert_eq!(status1, StatusCode::OK, "first use must succeed");
 
-        let state2 = make_state_with_store(Arc::clone(&store) as Arc<dyn RefreshGrantStore>, Some("test-secret"));
+        let state2 = make_state_with_store(
+            Arc::clone(&store) as Arc<dyn RefreshGrantStore>,
+            Some("test-secret"),
+        );
         let (status2, _) = post_refresh(make_app(state2), json!({"refreshToken": raw_token})).await;
-        assert_eq!(status2, StatusCode::UNAUTHORIZED, "second use must be rejected");
+        assert_eq!(
+            status2,
+            StatusCode::UNAUTHORIZED,
+            "second use must be rejected"
+        );
     }
 
     /// AC5: expired refresh token returns 401.
@@ -415,7 +493,10 @@ mod tests {
         // expires_at = 1 (far in the past)
         seed_grant(&store, raw_token, "user-3", vec![], 1).await;
 
-        let state = make_state_with_store(Arc::clone(&store) as Arc<dyn RefreshGrantStore>, Some("test-secret"));
+        let state = make_state_with_store(
+            Arc::clone(&store) as Arc<dyn RefreshGrantStore>,
+            Some("test-secret"),
+        );
         let app = make_app(state);
         let (status, _) = post_refresh(app, json!({"refreshToken": raw_token})).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);

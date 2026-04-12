@@ -344,8 +344,7 @@ fn rmpv_to_json_string(value: &rmpv::Value) -> String {
                     let key_str = match k {
                         rmpv::Value::String(s) => {
                             // Use serde_json for proper escaping of special characters in keys.
-                            serde_json::to_string(s.as_str().unwrap_or(""))
-                                .unwrap_or_default()
+                            serde_json::to_string(s.as_str().unwrap_or("")).unwrap_or_default()
                         }
                         _ => rmpv_to_json_string(k),
                     };
@@ -364,8 +363,8 @@ fn rmpv_to_json_string(value: &rmpv::Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::Array;
     use super::*;
+    use arrow::array::Array;
     use topgun_core::{FieldDef, FieldType};
 
     fn make_map_schema(fields: Vec<(&str, FieldType, bool)>) -> MapSchema {
@@ -549,9 +548,10 @@ mod tests {
 
         let entries = vec![(
             "k1".to_string(),
-            make_rmpv_map(vec![
-                ("created_at", rmpv::Value::Integer(1_700_000_000_000i64.into())),
-            ]),
+            make_rmpv_map(vec![(
+                "created_at",
+                rmpv::Value::Integer(1_700_000_000_000i64.into()),
+            )]),
         )];
 
         let batch = build_record_batch(&entries, &schema).unwrap();
@@ -605,10 +605,7 @@ mod tests {
             rmpv::Value::String("nested".into()),
             rmpv::Value::Integer(42.into()),
         )]);
-        let entries = vec![(
-            "k1".to_string(),
-            make_rmpv_map(vec![("meta", nested_map)]),
-        )];
+        let entries = vec![("k1".to_string(), make_rmpv_map(vec![("meta", nested_map)]))];
 
         let batch = build_record_batch(&entries, &schema).unwrap();
         let strs = batch

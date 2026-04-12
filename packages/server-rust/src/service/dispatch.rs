@@ -309,7 +309,8 @@ mod tests {
             operation: make_op_with_partition(0, Some(0)),
             response_tx: dummy_tx,
         };
-        tx.try_send(filler).expect("channel should accept first item");
+        tx.try_send(filler)
+            .expect("channel should accept first item");
 
         // Now the channel is full. dispatch() must return Overloaded at once.
         let op = make_op_with_partition(2, Some(0));
@@ -339,8 +340,14 @@ mod tests {
         let dispatcher = make_dispatcher();
         let op = make_op_with_partition(999, None);
         let result = dispatcher.dispatch(op).await;
-        assert!(result.is_ok(), "None partition_id should route to global worker");
-        assert!(matches!(result.unwrap(), OperationResponse::Ack { call_id: 999 }));
+        assert!(
+            result.is_ok(),
+            "None partition_id should route to global worker"
+        );
+        assert!(matches!(
+            result.unwrap(),
+            OperationResponse::Ack { call_id: 999 }
+        ));
     }
 
     #[tokio::test]

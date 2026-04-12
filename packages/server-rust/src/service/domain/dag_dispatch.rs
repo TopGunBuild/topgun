@@ -9,7 +9,9 @@ use anyhow::Result;
 use dashmap::DashMap;
 use tokio::sync::oneshot;
 
-use crate::cluster::messages::{ClusterMessage, DagCompletePayload, DagDataPayload, DagExecutePayload};
+use crate::cluster::messages::{
+    ClusterMessage, DagCompletePayload, DagDataPayload, DagExecutePayload,
+};
 use crate::dag::executor::{DagExecutor, ExecutorContext};
 use crate::dag::types::{Dag, ExecutionPlan};
 use crate::network::connection::{ConnectionKind, ConnectionRegistry, OutboundMessage};
@@ -33,12 +35,7 @@ pub async fn handle_dag_execute(
 ) -> Result<()> {
     let execution_id = payload.execution_id.clone();
 
-    let result = execute_local(
-        &payload,
-        local_node_id,
-        Arc::clone(&record_store_factory),
-    )
-    .await;
+    let result = execute_local(&payload, local_node_id, Arc::clone(&record_store_factory)).await;
 
     let complete_payload = match result {
         Ok(result_bytes) => DagCompletePayload {
@@ -92,10 +89,12 @@ async fn execute_local(
         .cloned()
         .unwrap_or_default();
 
-    let dag = Dag::from_descriptor(
-        &plan.plan,
-        &|vd| crate::dag::coordinator::make_supplier_from_descriptor(vd, Arc::clone(&record_store_factory)),
-    )?;
+    let dag = Dag::from_descriptor(&plan.plan, &|vd| {
+        crate::dag::coordinator::make_supplier_from_descriptor(
+            vd,
+            Arc::clone(&record_store_factory),
+        )
+    })?;
 
     let ctx = ExecutorContext {
         node_id: local_node_id.to_string(),

@@ -191,7 +191,11 @@ pub struct ClientOp {
     pub or_tag: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub write_concern: Option<WriteConcern>,
-    #[serde(skip_serializing_if = "Option::is_none", default, deserialize_with = "serde_number::deserialize_option_u64")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "serde_number::deserialize_option_u64"
+    )]
     pub timeout: Option<u64>,
 }
 
@@ -429,12 +433,10 @@ mod tests {
             key: "user-1".to_string(),
             op_type: Some("set".to_string()),
             record: Some(Some(LWWRecord {
-                value: Some(rmpv::Value::Map(vec![
-                    (
-                        rmpv::Value::String("name".into()),
-                        rmpv::Value::String("Alice".into()),
-                    ),
-                ])),
+                value: Some(rmpv::Value::Map(vec![(
+                    rmpv::Value::String("name".into()),
+                    rmpv::Value::String("Alice".into()),
+                )])),
                 timestamp: Timestamp {
                     millis: 1_700_000_000_000,
                     counter: 1,
@@ -542,7 +544,10 @@ mod tests {
         let map = val.as_map().expect("should be a map");
 
         let has_where_key = map.iter().any(|(k, _)| k.as_str() == Some("where"));
-        assert!(has_where_key, "expected 'where' field key in serialized output");
+        assert!(
+            has_where_key,
+            "expected 'where' field key in serialized output"
+        );
     }
 
     #[test]
@@ -562,14 +567,14 @@ mod tests {
         let val: rmpv::Value = rmp_serde::from_slice(&bytes).unwrap();
         let map = val.as_map().expect("should be a map");
 
-        let keys: Vec<&str> = map
-            .iter()
-            .filter_map(|(k, _)| k.as_str())
-            .collect();
+        let keys: Vec<&str> = map.iter().filter_map(|(k, _)| k.as_str()).collect();
 
         assert!(keys.contains(&"mapName"), "expected camelCase 'mapName'");
         assert!(keys.contains(&"opType"), "expected camelCase 'opType'");
-        assert!(keys.contains(&"writeConcern"), "expected camelCase 'writeConcern'");
+        assert!(
+            keys.contains(&"writeConcern"),
+            "expected camelCase 'writeConcern'"
+        );
     }
 
     // ---- Timestamp camelCase verification (AC-5) ----
@@ -585,12 +590,12 @@ mod tests {
         let val: rmpv::Value = rmp_serde::from_slice(&bytes).unwrap();
         let map = val.as_map().expect("should be a map");
 
-        let keys: Vec<&str> = map
-            .iter()
-            .filter_map(|(k, _)| k.as_str())
-            .collect();
+        let keys: Vec<&str> = map.iter().filter_map(|(k, _)| k.as_str()).collect();
 
-        assert!(keys.contains(&"nodeId"), "expected camelCase 'nodeId', got: {keys:?}");
+        assert!(
+            keys.contains(&"nodeId"),
+            "expected camelCase 'nodeId', got: {keys:?}"
+        );
         assert!(keys.contains(&"millis"), "expected 'millis'");
         assert!(keys.contains(&"counter"), "expected 'counter'");
     }
@@ -610,12 +615,12 @@ mod tests {
         let val: rmpv::Value = rmp_serde::from_slice(&bytes).unwrap();
         let map = val.as_map().expect("should be a map");
 
-        let keys: Vec<&str> = map
-            .iter()
-            .filter_map(|(k, _)| k.as_str())
-            .collect();
+        let keys: Vec<&str> = map.iter().filter_map(|(k, _)| k.as_str()).collect();
 
-        assert!(keys.contains(&"ttlMs"), "expected camelCase 'ttlMs', got: {keys:?}");
+        assert!(
+            keys.contains(&"ttlMs"),
+            "expected camelCase 'ttlMs', got: {keys:?}"
+        );
     }
 
     #[test]
@@ -634,12 +639,12 @@ mod tests {
         let val: rmpv::Value = rmp_serde::from_slice(&bytes).unwrap();
         let map = val.as_map().expect("should be a map");
 
-        let keys: Vec<&str> = map
-            .iter()
-            .filter_map(|(k, _)| k.as_str())
-            .collect();
+        let keys: Vec<&str> = map.iter().filter_map(|(k, _)| k.as_str()).collect();
 
-        assert!(keys.contains(&"ttlMs"), "expected camelCase 'ttlMs', got: {keys:?}");
+        assert!(
+            keys.contains(&"ttlMs"),
+            "expected camelCase 'ttlMs', got: {keys:?}"
+        );
     }
 
     // ---- LWWRecord<rmpv::Value> round-trip (AC-lww-rmpv-roundtrip) ----

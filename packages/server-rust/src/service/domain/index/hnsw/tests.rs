@@ -11,16 +11,18 @@
     clippy::stable_sort_primitive,
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
-    clippy::cast_lossless,
+    clippy::cast_lossless
 )]
 mod tests {
     use topgun_core::vector::{DistanceMetric, SharedVector, Vector};
 
     use crate::service::domain::index::hnsw::flavor::{AHashSetWrapper, ArraySet};
     use crate::service::domain::index::hnsw::graph::UndirectedGraph;
-    use crate::service::domain::index::hnsw::heuristic::{DoublePriorityQueue, select_neighbors};
+    use crate::service::domain::index::hnsw::heuristic::{select_neighbors, DoublePriorityQueue};
     use crate::service::domain::index::hnsw::index::Hnsw;
-    use crate::service::domain::index::hnsw::types::{DynamicSet, Heuristic, HnswFlavor, HnswParams};
+    use crate::service::domain::index::hnsw::types::{
+        DynamicSet, Heuristic, HnswFlavor, HnswParams,
+    };
 
     // -----------------------------------------------------------------------
     // AC-7 + AC-8: ArraySet capacity enforcement
@@ -231,7 +233,9 @@ mod tests {
         let mut state = 6_364_136_223_846_793_005_u64.wrapping_add(seed_offset);
         let vals: Vec<f32> = (0..dim)
             .map(|_| {
-                state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
                 ((state >> 33) as f32) / (u32::MAX as f32) * 2.0 - 1.0
             })
             .collect();
@@ -273,7 +277,12 @@ mod tests {
         assert_eq!(results.len(), 10);
         // Verify ascending order.
         for w in results.windows(2) {
-            assert!(w[0].1 <= w[1].1, "results not sorted: {} > {}", w[0].1, w[1].1);
+            assert!(
+                w[0].1 <= w[1].1,
+                "results not sorted: {} > {}",
+                w[0].1,
+                w[1].1
+            );
         }
     }
 
@@ -435,7 +444,8 @@ mod tests {
         // dist_fn returns large distance so all candidates beyond first get pruned initially.
         let dist_fn = |a: u64, b: u64| if a == b { 0.0 } else { 100.0 };
         let result_std = select_neighbors(&make_candidates(), 3, Heuristic::Standard, &g, &dist_fn);
-        let result_kp = select_neighbors(&make_candidates(), 3, Heuristic::KeepPruned, &g, &dist_fn);
+        let result_kp =
+            select_neighbors(&make_candidates(), 3, Heuristic::KeepPruned, &g, &dist_fn);
         // KeepPruned should return at least as many as Standard.
         assert!(result_kp.len() >= result_std.len());
         assert!(result_kp.len() <= 3);
@@ -445,8 +455,13 @@ mod tests {
     fn heuristic_extended_and_keep_result_le_m() {
         let g = UndirectedGraph::new();
         let dist_fn = |_: u64, _: u64| 1.0f64;
-        let result =
-            select_neighbors(&make_candidates(), 3, Heuristic::ExtendedAndKeep, &g, &dist_fn);
+        let result = select_neighbors(
+            &make_candidates(),
+            3,
+            Heuristic::ExtendedAndKeep,
+            &g,
+            &dist_fn,
+        );
         assert!(result.len() <= 3);
     }
 
@@ -484,6 +499,11 @@ mod tests {
     fn hnsw_params_default_ml() {
         let p = HnswParams::default();
         let expected = 1.0 / (16f64).ln();
-        assert!((p.ml - expected).abs() < 1e-10, "ml mismatch: {} vs {}", p.ml, expected);
+        assert!(
+            (p.ml - expected).abs() < 1e-10,
+            "ml mismatch: {} vs {}",
+            p.ml,
+            expected
+        );
     }
 }

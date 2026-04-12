@@ -141,12 +141,7 @@ impl PartitionTable {
         self.owners
             .iter()
             .enumerate()
-            .filter_map(|(i, owner)| {
-                owner
-                    .as_deref()
-                    .filter(|&o| o == node_id)
-                    .map(|_| i as u32)
-            })
+            .filter_map(|(i, owner)| owner.as_deref().filter(|&o| o == node_id).map(|_| i as u32))
             .collect()
     }
 }
@@ -245,10 +240,7 @@ fn extract_key_values_from_rmpv(val: &rmpv::Value) -> Option<Vec<String>> {
             }
         }
         rmpv::Value::Array(arr) => {
-            let keys: Vec<String> = arr
-                .iter()
-                .filter_map(value_to_string)
-                .collect();
+            let keys: Vec<String> = arr.iter().filter_map(value_to_string).collect();
             if keys.is_empty() {
                 None
             } else {
@@ -364,7 +356,10 @@ mod tests {
         for i in 0..10_000 {
             let key = format!("random-key-{i}");
             let pid = hash_to_partition(&key);
-            assert!(pid < PARTITION_COUNT, "partition {pid} out of range for key '{key}'");
+            assert!(
+                pid < PARTITION_COUNT,
+                "partition {pid} out of range for key '{key}'"
+            );
         }
     }
 
@@ -458,10 +453,7 @@ mod tests {
     #[test]
     fn ac6_pruning_where_key() {
         let mut where_clause = HashMap::new();
-        where_clause.insert(
-            "_key".to_string(),
-            rmpv::Value::String("hello".into()),
-        );
+        where_clause.insert("_key".to_string(), rmpv::Value::String("hello".into()));
         let query = Query {
             r#where: Some(where_clause),
             ..Default::default()
@@ -639,10 +631,7 @@ mod tests {
     #[test]
     fn pruning_where_integer_key() {
         let mut where_clause = HashMap::new();
-        where_clause.insert(
-            "id".to_string(),
-            rmpv::Value::Integer(42.into()),
-        );
+        where_clause.insert("id".to_string(), rmpv::Value::Integer(42.into()));
         let query = Query {
             r#where: Some(where_clause),
             ..Default::default()
@@ -737,10 +726,7 @@ mod tests {
     #[test]
     fn pruning_where_takes_precedence_over_predicate() {
         let mut where_clause = HashMap::new();
-        where_clause.insert(
-            "_key".to_string(),
-            rmpv::Value::String("hello".into()),
-        );
+        where_clause.insert("_key".to_string(), rmpv::Value::String("hello".into()));
         let query = Query {
             r#where: Some(where_clause),
             predicate: Some(PredicateNode {

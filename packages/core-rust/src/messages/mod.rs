@@ -20,8 +20,8 @@ pub mod http_sync;
 pub mod messaging;
 
 pub use base::{
-    AuthMessage, AuthRequiredMessage, ChangeEventType, ClientOp, PredicateNode, PredicateOp,
-    Query, SortDirection, WriteConcern,
+    AuthMessage, AuthRequiredMessage, ChangeEventType, ClientOp, PredicateNode, PredicateOp, Query,
+    SortDirection, WriteConcern,
 };
 
 pub use cluster::{
@@ -49,14 +49,15 @@ pub use search::{
 };
 
 pub use sync::{
-    BatchMessage, ClientOpMessage, MerkleReqBucketMessage, MerkleReqBucketPayload, OpAckMessage,
-    OpAckPayload, OpBatchMessage, OpBatchPayload, OpRejectedMessage, OpRejectedPayload, OpResult,
+    BatchMessage, ClientOpMessage, MerkleReqBucketMessage, MerkleReqBucketPayload,
     ORMapDiffRequest, ORMapDiffRequestPayload, ORMapDiffResponse, ORMapDiffResponsePayload,
     ORMapEntry, ORMapMerkleReqBucket, ORMapMerkleReqBucketPayload, ORMapPushDiff,
     ORMapPushDiffPayload, ORMapSyncInit, ORMapSyncRespBuckets, ORMapSyncRespBucketsPayload,
     ORMapSyncRespLeaf, ORMapSyncRespLeafPayload, ORMapSyncRespRoot, ORMapSyncRespRootPayload,
-    SyncInitMessage, SyncLeafRecord, SyncRespBucketsMessage, SyncRespBucketsPayload,
-    SyncRespLeafMessage, SyncRespLeafPayload, SyncRespRootMessage, SyncRespRootPayload,
+    OpAckMessage, OpAckPayload, OpBatchMessage, OpBatchPayload, OpRejectedMessage,
+    OpRejectedPayload, OpResult, SyncInitMessage, SyncLeafRecord, SyncRespBucketsMessage,
+    SyncRespBucketsPayload, SyncRespLeafMessage, SyncRespLeafPayload, SyncRespRootMessage,
+    SyncRespRootPayload,
 };
 
 pub use client_events::{
@@ -67,13 +68,14 @@ pub use client_events::{
 
 pub use messaging::{
     ConflictResolver, CounterRequestPayload, CounterStatePayload, EntryProcessBatchData,
-    EntryProcessBatchResponseData, EntryProcessData, EntryProcessKeyResult, EntryProcessor,
-    EntryProcessResponseData, JournalEventData, JournalEventMessageData, JournalEventType,
-    JournalReadData, JournalReadResponseData, JournalSubscribeData, JournalUnsubscribeData,
-    ListResolversData, ListResolversResponseData, LockReleasePayload, LockRequestPayload,
-    MergeRejectedData, PingData, PNCounterState, PongData, RegisterResolverData,
-    RegisterResolverResponseData, ResolverInfo, TopicMessageEventPayload, TopicPubPayload,
-    TopicSubPayload, TopicUnsubPayload, UnregisterResolverData, UnregisterResolverResponseData,
+    EntryProcessBatchResponseData, EntryProcessData, EntryProcessKeyResult,
+    EntryProcessResponseData, EntryProcessor, JournalEventData, JournalEventMessageData,
+    JournalEventType, JournalReadData, JournalReadResponseData, JournalSubscribeData,
+    JournalUnsubscribeData, ListResolversData, ListResolversResponseData, LockReleasePayload,
+    LockRequestPayload, MergeRejectedData, PNCounterState, PingData, PongData,
+    RegisterResolverData, RegisterResolverResponseData, ResolverInfo, TopicMessageEventPayload,
+    TopicPubPayload, TopicSubPayload, TopicUnsubPayload, UnregisterResolverData,
+    UnregisterResolverResponseData,
 };
 
 pub use http_sync::{
@@ -105,7 +107,6 @@ pub use http_sync::{
 #[serde(tag = "type")]
 pub enum Message {
     // --- base domain (2 variants) ---
-
     /// Authentication message from client to server.
     #[serde(rename = "AUTH")]
     Auth(AuthMessage),
@@ -115,7 +116,6 @@ pub enum Message {
     AuthRequired(AuthRequiredMessage),
 
     // --- sync domain (20 variants) ---
-
     /// Single client operation.
     #[serde(rename = "CLIENT_OP")]
     ClientOp(ClientOpMessage),
@@ -189,7 +189,6 @@ pub enum Message {
     ORMapPushDiff(ORMapPushDiff),
 
     // --- query domain (3 variants) ---
-
     /// Client subscribes to a live query.
     #[serde(rename = "QUERY_SUB")]
     QuerySub(QuerySubMessage),
@@ -223,13 +222,11 @@ pub enum Message {
     VectorSearchResp { payload: VectorSearchRespPayload },
 
     // --- client_events domain (query update) ---
-
     /// Server pushes a query result update to client.
     #[serde(rename = "QUERY_UPDATE")]
     QueryUpdate { payload: QueryUpdatePayload },
 
     // --- search domain (5 variants) ---
-
     /// Client sends a search request.
     #[serde(rename = "SEARCH")]
     Search { payload: SearchPayload },
@@ -251,7 +248,6 @@ pub enum Message {
     SearchUnsub { payload: SearchUnsubPayload },
 
     // --- cluster domain (11 variants) ---
-
     /// Client requests the partition map (optional payload).
     #[serde(rename = "PARTITION_MAP_REQUEST")]
     PartitionMapRequest {
@@ -265,9 +261,7 @@ pub enum Message {
 
     /// Node registers a cluster subscription.
     #[serde(rename = "CLUSTER_SUB_REGISTER")]
-    ClusterSubRegister {
-        payload: ClusterSubRegisterPayload,
-    },
+    ClusterSubRegister { payload: ClusterSubRegisterPayload },
 
     /// Node acknowledges a cluster subscription.
     #[serde(rename = "CLUSTER_SUB_ACK")]
@@ -275,9 +269,7 @@ pub enum Message {
 
     /// Node pushes a cluster subscription update.
     #[serde(rename = "CLUSTER_SUB_UPDATE")]
-    ClusterSubUpdate {
-        payload: ClusterSubUpdatePayload,
-    },
+    ClusterSubUpdate { payload: ClusterSubUpdatePayload },
 
     /// Node unregisters a cluster subscription.
     #[serde(rename = "CLUSTER_SUB_UNREGISTER")]
@@ -287,15 +279,11 @@ pub enum Message {
 
     /// Node sends a cluster search request.
     #[serde(rename = "CLUSTER_SEARCH_REQ")]
-    ClusterSearchReq {
-        payload: ClusterSearchReqPayload,
-    },
+    ClusterSearchReq { payload: ClusterSearchReqPayload },
 
     /// Node responds with cluster search results.
     #[serde(rename = "CLUSTER_SEARCH_RESP")]
-    ClusterSearchResp {
-        payload: ClusterSearchRespPayload,
-    },
+    ClusterSearchResp { payload: ClusterSearchRespPayload },
 
     /// Node subscribes to cluster search updates.
     #[serde(rename = "CLUSTER_SEARCH_SUBSCRIBE")]
@@ -311,12 +299,9 @@ pub enum Message {
 
     /// Node pushes a cluster search update.
     #[serde(rename = "CLUSTER_SEARCH_UPDATE")]
-    ClusterSearchUpdate {
-        payload: ClusterSearchUpdatePayload,
-    },
+    ClusterSearchUpdate { payload: ClusterSearchUpdatePayload },
 
     // --- messaging domain (28 variants) ---
-
     /// Client subscribes to a topic.
     #[serde(rename = "TOPIC_SUB")]
     TopicSub { payload: TopicSubPayload },
@@ -331,9 +316,7 @@ pub enum Message {
 
     /// Server delivers a topic message.
     #[serde(rename = "TOPIC_MESSAGE")]
-    TopicMessage {
-        payload: TopicMessageEventPayload,
-    },
+    TopicMessage { payload: TopicMessageEventPayload },
 
     /// Client requests a distributed lock.
     #[serde(rename = "LOCK_REQUEST")]
@@ -345,9 +328,7 @@ pub enum Message {
 
     /// Client requests counter state.
     #[serde(rename = "COUNTER_REQUEST")]
-    CounterRequest {
-        payload: CounterRequestPayload,
-    },
+    CounterRequest { payload: CounterRequestPayload },
 
     /// Server syncs counter state.
     #[serde(rename = "COUNTER_SYNC")]
@@ -434,16 +415,13 @@ pub enum Message {
     ListResolversResponse(ListResolversResponseData),
 
     // --- client_events domain (9 variants) ---
-
     /// Server pushes a data event to client.
     #[serde(rename = "SERVER_EVENT")]
     ServerEvent { payload: ServerEventPayload },
 
     /// Server pushes a batch of data events.
     #[serde(rename = "SERVER_BATCH_EVENT")]
-    ServerBatchEvent {
-        payload: ServerBatchEventPayload,
-    },
+    ServerBatchEvent { payload: ServerBatchEventPayload },
 
     /// Server requests garbage collection pruning.
     #[serde(rename = "GC_PRUNE")]
@@ -471,10 +449,7 @@ pub enum Message {
 
     /// Server requires sync reset for a map.
     #[serde(rename = "SYNC_RESET_REQUIRED")]
-    SyncResetRequired {
-        payload: SyncResetRequiredPayload,
-    },
-
+    SyncResetRequired { payload: SyncResetRequiredPayload },
 }
 
 #[cfg(test)]
@@ -537,8 +512,7 @@ mod prototype_tests {
         };
 
         let bytes = rmp_serde::to_vec_named(&msg).expect("serialize OpAck");
-        let decoded: MessagePrototype =
-            rmp_serde::from_slice(&bytes).expect("deserialize OpAck");
+        let decoded: MessagePrototype = rmp_serde::from_slice(&bytes).expect("deserialize OpAck");
         assert_eq!(msg, decoded);
     }
 
@@ -576,8 +550,7 @@ mod prototype_tests {
         };
 
         let bytes = rmp_serde::to_vec_named(&msg).expect("serialize Batch");
-        let decoded: MessagePrototype =
-            rmp_serde::from_slice(&bytes).expect("deserialize Batch");
+        let decoded: MessagePrototype = rmp_serde::from_slice(&bytes).expect("deserialize Batch");
         assert_eq!(msg, decoded);
     }
 
@@ -674,8 +647,7 @@ mod prototype_tests {
         };
 
         let bytes = rmp_serde::to_vec_named(&val).expect("serialize");
-        let raw: rmpv::Value =
-            rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
+        let raw: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
 
         let map = raw.as_map().expect("should be map");
         for (key, value) in map {
@@ -705,8 +677,7 @@ mod prototype_tests {
         };
 
         let bytes = rmp_serde::to_vec_named(&val).expect("serialize");
-        let raw: rmpv::Value =
-            rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
+        let raw: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
 
         let map = raw.as_map().expect("should be map");
         let (_, value) = &map[0];
@@ -725,8 +696,7 @@ mod prototype_tests {
         }
 
         let bytes = rmp_serde::to_vec_named(&ZeroTest { val: 0 }).expect("serialize");
-        let raw: rmpv::Value =
-            rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
+        let raw: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
 
         let map = raw.as_map().expect("should be map");
         let (_, value) = &map[0];
@@ -913,11 +883,11 @@ mod cluster_tests {
     use super::base::{ChangeEventType, SortDirection};
     use super::cluster::{
         ClusterSearchReqOptions, ClusterSearchReqPayload, ClusterSearchRespPayload,
-        ClusterSearchResultEntry, ClusterSearchSubscribePayload,
-        ClusterSearchUnsubscribePayload, ClusterSearchUpdatePayload, ClusterSubAckPayload,
-        ClusterSubAckResultEntry, ClusterSubRegisterPayload, ClusterSubType,
-        ClusterSubUnregisterPayload, ClusterSubUpdatePayload, NodeEndpoints, NodeInfo,
-        NodeStatus, PartitionInfo, PartitionMapPayload, PartitionMapRequestPayload,
+        ClusterSearchResultEntry, ClusterSearchSubscribePayload, ClusterSearchUnsubscribePayload,
+        ClusterSearchUpdatePayload, ClusterSubAckPayload, ClusterSubAckResultEntry,
+        ClusterSubRegisterPayload, ClusterSubType, ClusterSubUnregisterPayload,
+        ClusterSubUpdatePayload, NodeEndpoints, NodeInfo, NodeStatus, PartitionInfo,
+        PartitionMapPayload, PartitionMapRequestPayload,
     };
     use super::search::SearchOptions;
 
@@ -1112,8 +1082,7 @@ mod cluster_tests {
         };
 
         let bytes = rmp_serde::to_vec_named(&payload).expect("serialize");
-        let raw: rmpv::Value =
-            rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
+        let raw: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
         let map = raw.as_map().expect("should be map");
 
         // Find the "type" key in the serialized map
@@ -1139,8 +1108,7 @@ mod cluster_tests {
         };
 
         let bytes = rmp_serde::to_vec_named(&entry).expect("serialize");
-        let decoded: ClusterSubAckResultEntry =
-            rmp_serde::from_slice(&bytes).expect("deserialize");
+        let decoded: ClusterSubAckResultEntry = rmp_serde::from_slice(&bytes).expect("deserialize");
         assert_eq!(entry, decoded);
     }
 
@@ -1195,8 +1163,7 @@ mod cluster_tests {
         };
 
         let bytes = rmp_serde::to_vec_named(&payload).expect("serialize");
-        let decoded: ClusterSubUpdatePayload =
-            rmp_serde::from_slice(&bytes).expect("deserialize");
+        let decoded: ClusterSubUpdatePayload = rmp_serde::from_slice(&bytes).expect("deserialize");
         assert_eq!(payload, decoded);
     }
 
@@ -1226,8 +1193,7 @@ mod cluster_tests {
         };
 
         let bytes = rmp_serde::to_vec_named(&opts).expect("serialize");
-        let decoded: ClusterSearchReqOptions =
-            rmp_serde::from_slice(&bytes).expect("deserialize");
+        let decoded: ClusterSearchReqOptions = rmp_serde::from_slice(&bytes).expect("deserialize");
         assert_eq!(opts, decoded);
     }
 
@@ -1249,8 +1215,7 @@ mod cluster_tests {
         };
 
         let bytes = rmp_serde::to_vec_named(&payload).expect("serialize");
-        let decoded: ClusterSearchReqPayload =
-            rmp_serde::from_slice(&bytes).expect("deserialize");
+        let decoded: ClusterSearchReqPayload = rmp_serde::from_slice(&bytes).expect("deserialize");
         assert_eq!(payload, decoded);
     }
 
@@ -1271,8 +1236,7 @@ mod cluster_tests {
         };
 
         let bytes = rmp_serde::to_vec_named(&payload).expect("serialize");
-        let decoded: ClusterSearchRespPayload =
-            rmp_serde::from_slice(&bytes).expect("deserialize");
+        let decoded: ClusterSearchRespPayload = rmp_serde::from_slice(&bytes).expect("deserialize");
         assert_eq!(payload, decoded);
     }
 
@@ -1288,8 +1252,7 @@ mod cluster_tests {
         };
 
         let bytes = rmp_serde::to_vec_named(&payload).expect("serialize");
-        let decoded: ClusterSearchRespPayload =
-            rmp_serde::from_slice(&bytes).expect("deserialize");
+        let decoded: ClusterSearchRespPayload = rmp_serde::from_slice(&bytes).expect("deserialize");
         assert_eq!(payload, decoded);
     }
 
@@ -1371,13 +1334,13 @@ mod messaging_tests {
 
     use super::messaging::{
         ConflictResolver, CounterRequestPayload, CounterStatePayload, EntryProcessBatchData,
-        EntryProcessBatchResponseData, EntryProcessData, EntryProcessKeyResult, EntryProcessor,
-        EntryProcessResponseData, JournalEventData, JournalEventMessageData, JournalEventType,
-        JournalReadData, JournalReadResponseData, JournalSubscribeData, JournalUnsubscribeData,
-        ListResolversData, ListResolversResponseData, LockReleasePayload, LockRequestPayload,
-        MergeRejectedData, PNCounterState, PingData, PongData, RegisterResolverData,
-        RegisterResolverResponseData, ResolverInfo, TopicMessageEventPayload, TopicPubPayload,
-        TopicSubPayload, TopicUnsubPayload, UnregisterResolverData,
+        EntryProcessBatchResponseData, EntryProcessData, EntryProcessKeyResult,
+        EntryProcessResponseData, EntryProcessor, JournalEventData, JournalEventMessageData,
+        JournalEventType, JournalReadData, JournalReadResponseData, JournalSubscribeData,
+        JournalUnsubscribeData, ListResolversData, ListResolversResponseData, LockReleasePayload,
+        LockRequestPayload, MergeRejectedData, PNCounterState, PingData, PongData,
+        RegisterResolverData, RegisterResolverResponseData, ResolverInfo, TopicMessageEventPayload,
+        TopicPubPayload, TopicSubPayload, TopicUnsubPayload, UnregisterResolverData,
         UnregisterResolverResponseData,
     };
 
@@ -1426,8 +1389,7 @@ mod messaging_tests {
             timestamp: 1_700_000_000_000,
         };
         let bytes = rmp_serde::to_vec_named(&payload).expect("serialize");
-        let decoded: TopicMessageEventPayload =
-            rmp_serde::from_slice(&bytes).expect("deserialize");
+        let decoded: TopicMessageEventPayload = rmp_serde::from_slice(&bytes).expect("deserialize");
         assert_eq!(payload, decoded);
     }
 
@@ -1440,8 +1402,7 @@ mod messaging_tests {
             timestamp: 1_700_000_000_001,
         };
         let bytes = rmp_serde::to_vec_named(&payload).expect("serialize");
-        let decoded: TopicMessageEventPayload =
-            rmp_serde::from_slice(&bytes).expect("deserialize");
+        let decoded: TopicMessageEventPayload = rmp_serde::from_slice(&bytes).expect("deserialize");
         assert_eq!(payload, decoded);
     }
 
@@ -1655,8 +1616,7 @@ mod messaging_tests {
             error: None,
         };
         let bytes = rmp_serde::to_vec_named(&data).expect("serialize");
-        let decoded: EntryProcessResponseData =
-            rmp_serde::from_slice(&bytes).expect("deserialize");
+        let decoded: EntryProcessResponseData = rmp_serde::from_slice(&bytes).expect("deserialize");
         assert_eq!(data, decoded);
     }
 
@@ -1773,8 +1733,7 @@ mod messaging_tests {
         };
 
         let bytes = rmp_serde::to_vec_named(&data).expect("serialize");
-        let raw: rmpv::Value =
-            rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
+        let raw: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
         let map = raw.as_map().expect("should be map");
 
         let type_entry = map
@@ -1856,8 +1815,7 @@ mod messaging_tests {
             },
         };
         let bytes = rmp_serde::to_vec_named(&data).expect("serialize");
-        let decoded: JournalEventMessageData =
-            rmp_serde::from_slice(&bytes).expect("deserialize");
+        let decoded: JournalEventMessageData = rmp_serde::from_slice(&bytes).expect("deserialize");
         assert_eq!(data, decoded);
     }
 
@@ -1909,8 +1867,7 @@ mod messaging_tests {
             has_more: true,
         };
         let bytes = rmp_serde::to_vec_named(&data).expect("serialize");
-        let decoded: JournalReadResponseData =
-            rmp_serde::from_slice(&bytes).expect("deserialize");
+        let decoded: JournalReadResponseData = rmp_serde::from_slice(&bytes).expect("deserialize");
         assert_eq!(data, decoded);
     }
 
@@ -1922,8 +1879,7 @@ mod messaging_tests {
             has_more: false,
         };
         let bytes = rmp_serde::to_vec_named(&data).expect("serialize");
-        let decoded: JournalReadResponseData =
-            rmp_serde::from_slice(&bytes).expect("deserialize");
+        let decoded: JournalReadResponseData = rmp_serde::from_slice(&bytes).expect("deserialize");
         assert_eq!(data, decoded);
     }
 
@@ -2121,8 +2077,7 @@ mod messaging_tests {
         // Verify representative flat structs do NOT produce a "type" key
         let ping = PingData { timestamp: 100 };
         let bytes = rmp_serde::to_vec_named(&ping).expect("serialize");
-        let raw: rmpv::Value =
-            rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
+        let raw: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
         let map = raw.as_map().expect("should be map");
         let type_keys: Vec<_> = map
             .iter()
@@ -2139,8 +2094,7 @@ mod messaging_tests {
             ..Default::default()
         };
         let bytes = rmp_serde::to_vec_named(&proc_data).expect("serialize");
-        let raw: rmpv::Value =
-            rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
+        let raw: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
         let map = raw.as_map().expect("should be map");
         let type_keys: Vec<_> = map
             .iter()
@@ -2308,8 +2262,7 @@ mod client_events_tests {
             ],
         };
         let bytes = rmp_serde::to_vec_named(&payload).expect("serialize");
-        let decoded: ServerBatchEventPayload =
-            rmp_serde::from_slice(&bytes).expect("deserialize");
+        let decoded: ServerBatchEventPayload = rmp_serde::from_slice(&bytes).expect("deserialize");
         assert_eq!(payload, decoded);
     }
 
@@ -2473,8 +2426,7 @@ mod client_events_tests {
             reason: "partition ownership changed".into(),
         };
         let bytes = rmp_serde::to_vec_named(&payload).expect("serialize");
-        let decoded: SyncResetRequiredPayload =
-            rmp_serde::from_slice(&bytes).expect("deserialize");
+        let decoded: SyncResetRequiredPayload = rmp_serde::from_slice(&bytes).expect("deserialize");
         assert_eq!(payload, decoded);
     }
 
@@ -2488,8 +2440,7 @@ mod client_events_tests {
             ..Default::default()
         };
         let bytes = rmp_serde::to_vec_named(&auth).expect("serialize");
-        let raw: rmpv::Value =
-            rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
+        let raw: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
         let map = raw.as_map().expect("should be map");
         let type_keys: Vec<_> = map
             .iter()
@@ -2506,8 +2457,7 @@ mod client_events_tests {
             details: None,
         };
         let bytes = rmp_serde::to_vec_named(&error).expect("serialize");
-        let raw: rmpv::Value =
-            rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
+        let raw: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
         let map = raw.as_map().expect("should be map");
         let type_keys: Vec<_> = map
             .iter()
@@ -2521,8 +2471,7 @@ mod client_events_tests {
         // ServerEventPayload has eventType, not "type"
         let se = ServerEventPayload::default();
         let bytes = rmp_serde::to_vec_named(&se).expect("serialize");
-        let raw: rmpv::Value =
-            rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
+        let raw: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
         let map = raw.as_map().expect("should be map");
         let type_keys: Vec<_> = map
             .iter()
@@ -2544,8 +2493,7 @@ mod client_events_tests {
             code: Some(403),
         };
         let bytes = rmp_serde::to_vec_named(&data).expect("serialize");
-        let raw: rmpv::Value =
-            rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
+        let raw: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
         let map = raw.as_map().expect("should be map");
 
         let payload_keys: Vec<_> = map
@@ -2576,19 +2524,14 @@ mod client_events_tests {
             details: None,
         };
         let bytes = rmp_serde::to_vec_named(&payload).expect("serialize");
-        let raw: rmpv::Value =
-            rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
+        let raw: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
         let map = raw.as_map().expect("should be map");
 
         // Verify fields are present directly
-        let code_key = map
-            .iter()
-            .find(|(k, _)| k.as_str() == Some("code"));
+        let code_key = map.iter().find(|(k, _)| k.as_str() == Some("code"));
         assert!(code_key.is_some(), "should have 'code' key");
 
-        let msg_key = map
-            .iter()
-            .find(|(k, _)| k.as_str() == Some("message"));
+        let msg_key = map.iter().find(|(k, _)| k.as_str() == Some("message"));
         assert!(msg_key.is_some(), "should have 'message' key");
     }
 }

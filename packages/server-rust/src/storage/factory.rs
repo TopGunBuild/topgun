@@ -85,10 +85,7 @@ impl RecordStoreFactory {
     /// observers are added to the per-store `CompositeMutationObserver`
     /// alongside the shared static observers from `new()`.
     #[must_use]
-    pub fn with_observer_factories(
-        mut self,
-        factories: Vec<Arc<dyn ObserverFactory>>,
-    ) -> Self {
+    pub fn with_observer_factories(mut self, factories: Vec<Arc<dyn ObserverFactory>>) -> Self {
         self.observer_factories = factories;
         self
     }
@@ -216,7 +213,12 @@ mod tests {
 
         // Put and get round-trip through Arc<dyn RecordStore>
         store
-            .put("alice", make_value("data"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "alice",
+                make_value("data"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
 
@@ -258,7 +260,12 @@ mod tests {
         let store_b = factory.get_or_create("map-b", 1);
 
         store_a
-            .put("key1", make_value("a"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "key1",
+                make_value("a"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
 

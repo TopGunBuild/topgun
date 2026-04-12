@@ -16,13 +16,7 @@ use super::record::{Record, RecordValue};
 /// Used as `Arc<dyn MutationObserver>`.
 pub trait MutationObserver: Send + Sync {
     /// Called after a new record is inserted.
-    fn on_put(
-        &self,
-        key: &str,
-        record: &Record,
-        old_value: Option<&RecordValue>,
-        is_backup: bool,
-    );
+    fn on_put(&self, key: &str, record: &Record, old_value: Option<&RecordValue>, is_backup: bool);
 
     /// Called after an existing record is updated in place.
     fn on_update(
@@ -79,13 +73,7 @@ impl CompositeMutationObserver {
 }
 
 impl MutationObserver for CompositeMutationObserver {
-    fn on_put(
-        &self,
-        key: &str,
-        record: &Record,
-        old_value: Option<&RecordValue>,
-        is_backup: bool,
-    ) {
+    fn on_put(&self, key: &str, record: &Record, old_value: Option<&RecordValue>, is_backup: bool) {
         for observer in &self.observers {
             observer.on_put(key, record, old_value, is_backup);
         }

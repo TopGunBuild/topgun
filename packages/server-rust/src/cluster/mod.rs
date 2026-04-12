@@ -35,12 +35,11 @@ pub use traits::{
 
 // messages
 pub use messages::{
-    ClusterMessage, DeltaOp, ExplicitSuspicionPayload, HeartbeatComplaintPayload,
-    HeartbeatPayload, JoinRequestPayload, JoinResponsePayload, LeaveRequestPayload, MapStateChunk,
-    MapType, MembersUpdatePayload, MigrateCancelPayload, MigrateDataPayload,
-    MigrateFinalizePayload, MigrateReadyPayload, MigrateStartPayload, MergeRequestPayload,
-    OpForwardPayload, PartitionTableUpdatePayload, SplitBrainProbePayload,
-    SplitBrainProbeResponsePayload,
+    ClusterMessage, DeltaOp, ExplicitSuspicionPayload, HeartbeatComplaintPayload, HeartbeatPayload,
+    JoinRequestPayload, JoinResponsePayload, LeaveRequestPayload, MapStateChunk, MapType,
+    MembersUpdatePayload, MergeRequestPayload, MigrateCancelPayload, MigrateDataPayload,
+    MigrateFinalizePayload, MigrateReadyPayload, MigrateStartPayload, OpForwardPayload,
+    PartitionTableUpdatePayload, SplitBrainProbePayload, SplitBrainProbeResponsePayload,
 };
 
 // state
@@ -75,8 +74,7 @@ pub use membership_reactor::MembershipReactor;
 
 // dispatch
 pub use dispatch::{
-    run_cluster_dispatch_loop, ClusterDispatchContext, HandleFrameError,
-    handle_cluster_peer_frame,
+    handle_cluster_peer_frame, run_cluster_dispatch_loop, ClusterDispatchContext, HandleFrameError,
 };
 
 // resilience
@@ -100,8 +98,7 @@ mod integration_tests {
     /// Helper: serialize to `MsgPack` named and deserialize back, asserting equality.
     fn round_trip(msg: &ClusterMessage) {
         let bytes = rmp_serde::to_vec_named(msg).expect("serialize failed");
-        let decoded: ClusterMessage =
-            rmp_serde::from_slice(&bytes).expect("deserialize failed");
+        let decoded: ClusterMessage = rmp_serde::from_slice(&bytes).expect("deserialize failed");
         assert_eq!(msg, &decoded);
     }
 

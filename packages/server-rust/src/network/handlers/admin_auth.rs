@@ -71,7 +71,10 @@ impl FromRequestParts<AppState> for AdminClaims {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         // Extract JWT secret from app state
-        let jwt_secret = state.jwt_secret.as_deref().ok_or(AdminAuthError::NotConfigured)?;
+        let jwt_secret = state
+            .jwt_secret
+            .as_deref()
+            .ok_or(AdminAuthError::NotConfigured)?;
 
         // Extract Bearer token from Authorization header
         let auth_header = parts
@@ -90,8 +93,8 @@ impl FromRequestParts<AppState> for AdminClaims {
 
         // Validate JWT — do NOT clear required_spec_claims so that `exp` is
         // enforced. Use the configured clock skew tolerance for leeway.
-        let (algorithm, key) = super::auth::decode_jwt_key(jwt_secret)
-            .map_err(AdminAuthError::InvalidToken)?;
+        let (algorithm, key) =
+            super::auth::decode_jwt_key(jwt_secret).map_err(AdminAuthError::InvalidToken)?;
         let mut validation = Validation::new(algorithm);
         validation.validate_aud = false;
         validation.leeway = state.config.jwt_clock_skew_secs;
@@ -151,10 +154,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-    use crate::network::connection::ConnectionRegistry;
     use crate::network::config::NetworkConfig;
-    use crate::network::shutdown::ShutdownController;
+    use crate::network::connection::ConnectionRegistry;
     use crate::network::handlers::AppState;
+    use crate::network::shutdown::ShutdownController;
 
     const TEST_SECRET: &str = "test-admin-secret";
 
@@ -193,7 +196,10 @@ mod tests {
 
     /// Construct a minimal `AppState` for testing.
     fn test_state(leeway: u64) -> AppState {
-        let config = NetworkConfig { jwt_clock_skew_secs: leeway, ..NetworkConfig::default() };
+        let config = NetworkConfig {
+            jwt_clock_skew_secs: leeway,
+            ..NetworkConfig::default()
+        };
         AppState {
             registry: Arc::new(ConnectionRegistry::new()),
             shutdown: Arc::new(ShutdownController::new()),
@@ -278,7 +284,10 @@ mod tests {
         let token = make_token(Some("admin-user"), -90);
         let mut parts = parts_with_bearer(&token);
         let result = AdminClaims::from_request_parts(&mut parts, &state).await;
-        assert!(result.is_err(), "token 90s expired should be rejected with 60s leeway");
+        assert!(
+            result.is_err(),
+            "token 90s expired should be rejected with 60s leeway"
+        );
     }
 
     // Valid admin token is accepted
@@ -288,7 +297,10 @@ mod tests {
         let token = make_token(Some("admin-user"), 3600);
         let mut parts = parts_with_bearer(&token);
         let result = AdminClaims::from_request_parts(&mut parts, &state).await;
-        assert!(result.is_ok(), "valid admin token should be accepted, got {result:?}");
+        assert!(
+            result.is_ok(),
+            "valid admin token should be accepted, got {result:?}"
+        );
         let claims = result.unwrap();
         assert_eq!(claims.user_id, "admin-user");
         assert!(claims.roles.contains(&"admin".to_string()));
@@ -349,17 +361,16 @@ CQIDAQAB
         };
         let encoding_key = EncodingKey::from_rsa_pem(TEST_RSA_PRIVATE_PEM.as_bytes())
             .expect("test RSA private key should be valid PEM");
-        jsonwebtoken::encode(
-            &Header::new(Algorithm::RS256),
-            &claims,
-            &encoding_key,
-        )
-        .expect("RS256 admin token encoding should not fail")
+        jsonwebtoken::encode(&Header::new(Algorithm::RS256), &claims, &encoding_key)
+            .expect("RS256 admin token encoding should not fail")
     }
 
     /// Build an `AppState` with the RSA public key as `jwt_secret`.
     fn test_state_rsa(leeway: u64) -> AppState {
-        let config = NetworkConfig { jwt_clock_skew_secs: leeway, ..NetworkConfig::default() };
+        let config = NetworkConfig {
+            jwt_clock_skew_secs: leeway,
+            ..NetworkConfig::default()
+        };
         AppState {
             registry: Arc::new(ConnectionRegistry::new()),
             shutdown: Arc::new(ShutdownController::new()),
@@ -402,8 +413,13 @@ CQIDAQAB
     // -----------------------------------------------------------------------
 
     /// Build a minimal `AppState` for testing with an optional validator.
-    fn test_state_with_validator(validator: Option<Arc<dyn crate::network::handlers::auth_validator::AuthValidator>>) -> AppState {
-        let config = NetworkConfig { jwt_clock_skew_secs: 60, ..NetworkConfig::default() };
+    fn test_state_with_validator(
+        validator: Option<Arc<dyn crate::network::handlers::auth_validator::AuthValidator>>,
+    ) -> AppState {
+        let config = NetworkConfig {
+            jwt_clock_skew_secs: 60,
+            ..NetworkConfig::default()
+        };
         AppState {
             registry: Arc::new(ConnectionRegistry::new()),
             shutdown: Arc::new(ShutdownController::new()),
@@ -428,9 +444,11 @@ CQIDAQAB
     /// AC3 (SPEC-189): A rejecting `AuthValidator` causes `AdminClaims` extractor to return `Err(InvalidToken)`.
     #[tokio::test]
     async fn rejecting_validator_returns_invalid_token() {
-        let validator = Arc::new(|_ctx: &crate::network::handlers::auth_validator::AuthValidationContext| {
-            Err("ip not allowlisted".to_string())
-        });
+        let validator = Arc::new(
+            |_ctx: &crate::network::handlers::auth_validator::AuthValidationContext| {
+                Err("ip not allowlisted".to_string())
+            },
+        );
         let state = test_state_with_validator(Some(validator));
         let token = make_token(Some("admin-user"), 3600);
         let mut parts = parts_with_bearer(&token);
@@ -438,7 +456,10 @@ CQIDAQAB
         assert!(result.is_err(), "expected Err when validator rejects");
         match result.unwrap_err() {
             AdminAuthError::InvalidToken(reason) => {
-                assert_eq!(reason, "ip not allowlisted", "admin path should forward full reason");
+                assert_eq!(
+                    reason, "ip not allowlisted",
+                    "admin path should forward full reason"
+                );
             }
             e => panic!("expected InvalidToken, got {e:?}"),
         }
@@ -451,7 +472,10 @@ CQIDAQAB
         let token = make_token(Some("admin-user"), 3600);
         let mut parts = parts_with_bearer(&token);
         let result = AdminClaims::from_request_parts(&mut parts, &state).await;
-        assert!(result.is_ok(), "no validator should accept valid admin token, got {result:?}");
+        assert!(
+            result.is_ok(),
+            "no validator should accept valid admin token, got {result:?}"
+        );
         assert_eq!(result.unwrap().user_id, "admin-user");
     }
 }

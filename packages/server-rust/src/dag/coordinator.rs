@@ -25,7 +25,9 @@ use crate::dag::converter::QueryToDagConverter;
 use crate::dag::executor::{DagExecutor, ExecutorContext};
 use crate::dag::processors::CombineProcessorSupplier;
 use crate::dag::types::ProcessorSupplier;
-use crate::dag::types::{Dag, DagPlanDescriptor, ExecutionPlan, ProcessorType, QueryConfig, VertexDescriptor};
+use crate::dag::types::{
+    Dag, DagPlanDescriptor, ExecutionPlan, ProcessorType, QueryConfig, VertexDescriptor,
+};
 use crate::network::connection::{ConnectionKind, ConnectionRegistry, OutboundMessage};
 use crate::storage::factory::RecordStoreFactory;
 use topgun_core::messages::base::Query;
@@ -109,10 +111,7 @@ impl ClusterQueryCoordinator {
         let active_members = members_view.active_members();
 
         // Collect owned node IDs before the borrow on active_members expires.
-        let node_ids: Vec<String> = active_members
-            .iter()
-            .map(|m| m.node_id.clone())
-            .collect();
+        let node_ids: Vec<String> = active_members.iter().map(|m| m.node_id.clone()).collect();
         drop(active_members);
         drop(members_view);
 
@@ -130,7 +129,8 @@ impl ClusterQueryCoordinator {
         }
 
         // Step 3: build plan descriptor
-        let descriptor = QueryToDagConverter::convert_query(query, map_name, &partition_assignment)?;
+        let descriptor =
+            QueryToDagConverter::convert_query(query, map_name, &partition_assignment)?;
 
         // Step 4: generate execution_id and serialize plan
         let execution_id = Uuid::new_v4().to_string();
@@ -239,8 +239,7 @@ impl ClusterQueryCoordinator {
         map_name: &str,
         partition_assignment: &HashMap<String, Vec<u32>>,
     ) -> Result<Vec<rmpv::Value>> {
-        let descriptor =
-            QueryToDagConverter::convert_query(query, map_name, partition_assignment)?;
+        let descriptor = QueryToDagConverter::convert_query(query, map_name, partition_assignment)?;
 
         let factory = Arc::clone(&self.record_store_factory);
         let local_node_id = self.local_node_id.clone();
@@ -301,7 +300,9 @@ impl ClusterQueryCoordinator {
 
         // Get a CombineProcessor instance via the public supplier API.
         let mut processors = CombineProcessorSupplier.get(1);
-        let mut processor = processors.pop().ok_or_else(|| anyhow!("CombineProcessorSupplier returned no processors"))?;
+        let mut processor = processors
+            .pop()
+            .ok_or_else(|| anyhow!("CombineProcessorSupplier returned no processors"))?;
 
         let ctx = ProcessorContext {
             node_id: self.local_node_id.clone(),
@@ -370,10 +371,7 @@ pub(crate) fn make_supplier_from_descriptor(
                     }
                 })
                 .unwrap_or_default();
-            Ok(Box::new(ScanProcessorSupplier {
-                map_name,
-                factory,
-            }))
+            Ok(Box::new(ScanProcessorSupplier { map_name, factory }))
         }
         ProcessorType::Filter => {
             let predicate = vd
@@ -399,9 +397,7 @@ pub(crate) fn make_supplier_from_descriptor(
                                     if let rmpv::Value::Array(arr) = v {
                                         Some(
                                             arr.iter()
-                                                .filter_map(|i| {
-                                                    i.as_str().map(str::to_string)
-                                                })
+                                                .filter_map(|i| i.as_str().map(str::to_string))
                                                 .collect(),
                                         )
                                     } else {
@@ -507,13 +503,13 @@ mod tests {
     // Test helpers: mock ClusterService
     // ---------------------------------------------------------------------------
 
-    use async_trait::async_trait;
-    use crate::cluster::traits::ClusterService;
     use crate::cluster::state::ClusterChange;
+    use crate::cluster::traits::ClusterService;
     use crate::cluster::types::{ClusterConfig, ClusterHealth, MembersView, NodeState};
     use crate::service::registry::{ManagedService, ServiceContext};
     use crate::storage::datastores::NullDataStore;
     use crate::storage::impls::StorageConfig;
+    use async_trait::async_trait;
 
     struct MockClusterService {
         view: Arc<MembersView>,
@@ -556,19 +552,37 @@ mod tests {
 
     #[async_trait]
     impl ManagedService for MockClusterService {
-        fn name(&self) -> &'static str { "mock-cluster" }
-        async fn init(&self, _ctx: &ServiceContext) -> anyhow::Result<()> { Ok(()) }
-        async fn reset(&self) -> anyhow::Result<()> { Ok(()) }
-        async fn shutdown(&self, _terminate: bool) -> anyhow::Result<()> { Ok(()) }
+        fn name(&self) -> &'static str {
+            "mock-cluster"
+        }
+        async fn init(&self, _ctx: &ServiceContext) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn reset(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn shutdown(&self, _terminate: bool) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     #[async_trait]
     impl ClusterService for MockClusterService {
-        fn node_id(&self) -> &'static str { "coordinator-test" }
-        fn is_master(&self) -> bool { true }
-        fn master_id(&self) -> Option<String> { Some("coordinator-test".to_string()) }
-        fn members_view(&self) -> Arc<MembersView> { Arc::clone(&self.view) }
-        fn partition_table(&self) -> &ClusterPartitionTable { &self.partition_table }
+        fn node_id(&self) -> &'static str {
+            "coordinator-test"
+        }
+        fn is_master(&self) -> bool {
+            true
+        }
+        fn master_id(&self) -> Option<String> {
+            Some("coordinator-test".to_string())
+        }
+        fn members_view(&self) -> Arc<MembersView> {
+            Arc::clone(&self.view)
+        }
+        fn partition_table(&self) -> &ClusterPartitionTable {
+            &self.partition_table
+        }
         fn subscribe_changes(&self) -> tokio::sync::mpsc::UnboundedReceiver<ClusterChange> {
             tokio::sync::mpsc::unbounded_channel().1
         }
@@ -737,14 +751,8 @@ mod tests {
                     rmpv::Value::String("__sum".into()),
                     rmpv::Value::F64(count as f64),
                 ),
-                (
-                    rmpv::Value::String("__min".into()),
-                    rmpv::Value::Nil,
-                ),
-                (
-                    rmpv::Value::String("__max".into()),
-                    rmpv::Value::Nil,
-                ),
+                (rmpv::Value::String("__min".into()), rmpv::Value::Nil),
+                (rmpv::Value::String("__max".into()), rmpv::Value::Nil),
             ])
         };
 
@@ -794,12 +802,18 @@ mod tests {
         assert_eq!(merged.len(), 5, "expected 5 distinct groups (A-E)");
 
         let total_count: u64 = merged.iter().map(get_count).sum();
-        assert_eq!(total_count, 100, "total count across all groups should be 100");
+        assert_eq!(
+            total_count, 100,
+            "total count across all groups should be 100"
+        );
 
         // Each group should have count 20
         for item in &merged {
             let count = get_count(item);
-            assert_eq!(count, 20, "each group should have count 20, got {count} for {item:?}");
+            assert_eq!(
+                count, 20,
+                "each group should have count 20, got {count} for {item:?}"
+            );
         }
     }
 
@@ -828,7 +842,9 @@ mod tests {
         assert!(result.is_err(), "expected error on timeout");
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("timed out") || err_msg.contains("timeout") || err_msg.contains("disconnected"),
+            err_msg.contains("timed out")
+                || err_msg.contains("timeout")
+                || err_msg.contains("disconnected"),
             "expected timeout-related error, got: {err_msg}"
         );
     }
@@ -897,15 +913,13 @@ mod tests {
 
     #[test]
     fn make_supplier_sort_returns_valid_supplier() {
-        use crate::dag::types::VertexDescriptor;
         use super::make_supplier_from_descriptor;
+        use crate::dag::types::VertexDescriptor;
 
-        let sort_config = rmpv::Value::Array(vec![
-            rmpv::Value::Array(vec![
-                rmpv::Value::String("age".into()),
-                rmpv::Value::String("desc".into()),
-            ]),
-        ]);
+        let sort_config = rmpv::Value::Array(vec![rmpv::Value::Array(vec![
+            rmpv::Value::String("age".into()),
+            rmpv::Value::String("desc".into()),
+        ])]);
 
         let vd = VertexDescriptor {
             name: "sort".to_string(),
@@ -917,7 +931,10 @@ mod tests {
 
         let factory = make_record_store_factory();
         let supplier = make_supplier_from_descriptor(&vd, factory);
-        assert!(supplier.is_ok(), "sort supplier should be created successfully");
+        assert!(
+            supplier.is_ok(),
+            "sort supplier should be created successfully"
+        );
 
         let processors = supplier.unwrap().get(1);
         assert_eq!(processors.len(), 1);
@@ -925,8 +942,8 @@ mod tests {
 
     #[test]
     fn make_supplier_limit_returns_valid_supplier() {
-        use crate::dag::types::VertexDescriptor;
         use super::make_supplier_from_descriptor;
+        use crate::dag::types::VertexDescriptor;
 
         let vd = VertexDescriptor {
             name: "limit".to_string(),
@@ -938,7 +955,10 @@ mod tests {
 
         let factory = make_record_store_factory();
         let supplier = make_supplier_from_descriptor(&vd, factory);
-        assert!(supplier.is_ok(), "limit supplier should be created successfully");
+        assert!(
+            supplier.is_ok(),
+            "limit supplier should be created successfully"
+        );
 
         let processors = supplier.unwrap().get(1);
         assert_eq!(processors.len(), 1);

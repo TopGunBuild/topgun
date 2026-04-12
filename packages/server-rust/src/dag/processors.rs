@@ -65,7 +65,11 @@ impl AggregatorState {
             None => raw.clone(),
             Some(current) => {
                 let cur_f = rmpv_to_f64(current).unwrap_or(f64::MAX);
-                if value < cur_f { raw.clone() } else { current.clone() }
+                if value < cur_f {
+                    raw.clone()
+                } else {
+                    current.clone()
+                }
             }
         });
 
@@ -74,7 +78,11 @@ impl AggregatorState {
             None => raw.clone(),
             Some(current) => {
                 let cur_f = rmpv_to_f64(current).unwrap_or(f64::MIN);
-                if value > cur_f { raw } else { current.clone() }
+                if value > cur_f {
+                    raw
+                } else {
+                    current.clone()
+                }
             }
         });
     }
@@ -233,8 +241,10 @@ impl ProcessorSupplier for ScanProcessorSupplier {
     fn get(&self, count: u32) -> Vec<Box<dyn Processor>> {
         (0..count)
             .map(|_| {
-                Box::new(ScanProcessor::new(self.map_name.clone(), Arc::clone(&self.factory)))
-                    as Box<dyn Processor>
+                Box::new(ScanProcessor::new(
+                    self.map_name.clone(),
+                    Arc::clone(&self.factory),
+                )) as Box<dyn Processor>
             })
             .collect()
     }
@@ -305,9 +315,7 @@ pub struct FilterProcessorSupplier {
 impl ProcessorSupplier for FilterProcessorSupplier {
     fn get(&self, count: u32) -> Vec<Box<dyn Processor>> {
         (0..count)
-            .map(|_| {
-                Box::new(FilterProcessor::new(self.predicate.clone())) as Box<dyn Processor>
-            })
+            .map(|_| Box::new(FilterProcessor::new(self.predicate.clone())) as Box<dyn Processor>)
             .collect()
     }
 
@@ -387,9 +395,7 @@ pub struct ProjectProcessorSupplier {
 impl ProcessorSupplier for ProjectProcessorSupplier {
     fn get(&self, count: u32) -> Vec<Box<dyn Processor>> {
         (0..count)
-            .map(|_| {
-                Box::new(ProjectProcessor::new(self.fields.clone())) as Box<dyn Processor>
-            })
+            .map(|_| Box::new(ProjectProcessor::new(self.fields.clone())) as Box<dyn Processor>)
             .collect()
     }
 
@@ -585,7 +591,13 @@ impl Processor for CombineProcessor {
                 _ => return,
             };
             let count = get_field(&item, "__count")
-                .and_then(|v| if let rmpv::Value::Integer(i) = v { Some(i.as_u64().unwrap_or(0)) } else { None })
+                .and_then(|v| {
+                    if let rmpv::Value::Integer(i) = v {
+                        Some(i.as_u64().unwrap_or(0))
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or(0);
             let sum = get_field(&item, "__sum")
                 .and_then(rmpv_to_f64)
@@ -593,7 +605,10 @@ impl Processor for CombineProcessor {
             let min = get_field(&item, "__min").cloned();
             let max = get_field(&item, "__max").cloned();
 
-            let state = self.combined.entry(key).or_insert_with(AggregatorState::new);
+            let state = self
+                .combined
+                .entry(key)
+                .or_insert_with(AggregatorState::new);
             state.count += count;
             state.sum += sum;
 
@@ -605,7 +620,11 @@ impl Processor for CombineProcessor {
                         None => new_min,
                         Some(cur) => {
                             let cur_f = rmpv_to_f64(cur).unwrap_or(f64::MAX);
-                            if new_f < cur_f { new_min } else { cur.clone() }
+                            if new_f < cur_f {
+                                new_min
+                            } else {
+                                cur.clone()
+                            }
                         }
                     });
                 }
@@ -619,7 +638,11 @@ impl Processor for CombineProcessor {
                         None => new_max,
                         Some(cur) => {
                             let cur_f = rmpv_to_f64(cur).unwrap_or(f64::MIN);
-                            if new_f > cur_f { new_max } else { cur.clone() }
+                            if new_f > cur_f {
+                                new_max
+                            } else {
+                                cur.clone()
+                            }
                         }
                     });
                 }
@@ -825,9 +848,7 @@ fn compare_sort_values(
             // Numeric values sort before string values in ascending order
             Ordering::Less
         }
-        (None, Some(_)) => {
-            Ordering::Greater
-        }
+        (None, Some(_)) => Ordering::Greater,
         (None, None) => {
             // Fall back to string comparison
             let a_str = rmpv_to_key_part(a_val);
@@ -903,9 +924,7 @@ pub struct SortProcessorSupplier {
 impl ProcessorSupplier for SortProcessorSupplier {
     fn get(&self, count: u32) -> Vec<Box<dyn Processor>> {
         (0..count)
-            .map(|_| {
-                Box::new(SortProcessor::new(self.sort_fields.clone())) as Box<dyn Processor>
-            })
+            .map(|_| Box::new(SortProcessor::new(self.sort_fields.clone())) as Box<dyn Processor>)
             .collect()
     }
 
@@ -995,7 +1014,7 @@ impl ProcessorSupplier for LimitProcessorSupplier {
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::cast_possible_wrap,
-    clippy::map_unwrap_or,
+    clippy::map_unwrap_or
 )]
 mod tests {
     use topgun_core::messages::base::{PredicateNode, PredicateOp};
@@ -1044,9 +1063,18 @@ mod tests {
         proc.init(&ctx).unwrap();
 
         let mut inbox = VecDequeInbox::new(16);
-        inbox.push(make_map_item(&[("status", rmpv::Value::String("active".into()))]));
-        inbox.push(make_map_item(&[("status", rmpv::Value::String("inactive".into()))]));
-        inbox.push(make_map_item(&[("status", rmpv::Value::String("active".into()))]));
+        inbox.push(make_map_item(&[(
+            "status",
+            rmpv::Value::String("active".into()),
+        )]));
+        inbox.push(make_map_item(&[(
+            "status",
+            rmpv::Value::String("inactive".into()),
+        )]));
+        inbox.push(make_map_item(&[(
+            "status",
+            rmpv::Value::String("active".into()),
+        )]));
 
         let mut outbox = VecDequeOutbox::new(1, 16);
         let done = proc.process(0, &mut inbox, &mut outbox).unwrap();
@@ -1093,10 +1121,16 @@ mod tests {
 
         let mut inbox = VecDequeInbox::new(16);
         for _ in 0..3 {
-            inbox.push(make_map_item(&[("category", rmpv::Value::String("A".into()))]));
+            inbox.push(make_map_item(&[(
+                "category",
+                rmpv::Value::String("A".into()),
+            )]));
         }
         for _ in 0..2 {
-            inbox.push(make_map_item(&[("category", rmpv::Value::String("B".into()))]));
+            inbox.push(make_map_item(&[(
+                "category",
+                rmpv::Value::String("B".into()),
+            )]));
         }
 
         let mut outbox = VecDequeOutbox::new(1, 16);
@@ -1144,18 +1178,42 @@ mod tests {
         // Two partial aggregates for group "A" with count=3 and count=2.
         let mut inbox = VecDequeInbox::new(8);
         inbox.push(rmpv::Value::Map(vec![
-            (rmpv::Value::String("__key".into()), rmpv::Value::String("A".into())),
-            (rmpv::Value::String("__count".into()), rmpv::Value::Integer(3u64.into())),
+            (
+                rmpv::Value::String("__key".into()),
+                rmpv::Value::String("A".into()),
+            ),
+            (
+                rmpv::Value::String("__count".into()),
+                rmpv::Value::Integer(3u64.into()),
+            ),
             (rmpv::Value::String("__sum".into()), rmpv::Value::F64(30.0)),
-            (rmpv::Value::String("__min".into()), rmpv::Value::Integer(5.into())),
-            (rmpv::Value::String("__max".into()), rmpv::Value::Integer(15.into())),
+            (
+                rmpv::Value::String("__min".into()),
+                rmpv::Value::Integer(5.into()),
+            ),
+            (
+                rmpv::Value::String("__max".into()),
+                rmpv::Value::Integer(15.into()),
+            ),
         ]));
         inbox.push(rmpv::Value::Map(vec![
-            (rmpv::Value::String("__key".into()), rmpv::Value::String("A".into())),
-            (rmpv::Value::String("__count".into()), rmpv::Value::Integer(2u64.into())),
+            (
+                rmpv::Value::String("__key".into()),
+                rmpv::Value::String("A".into()),
+            ),
+            (
+                rmpv::Value::String("__count".into()),
+                rmpv::Value::Integer(2u64.into()),
+            ),
             (rmpv::Value::String("__sum".into()), rmpv::Value::F64(20.0)),
-            (rmpv::Value::String("__min".into()), rmpv::Value::Integer(3.into())),
-            (rmpv::Value::String("__max".into()), rmpv::Value::Integer(12.into())),
+            (
+                rmpv::Value::String("__min".into()),
+                rmpv::Value::Integer(3.into()),
+            ),
+            (
+                rmpv::Value::String("__max".into()),
+                rmpv::Value::Integer(12.into()),
+            ),
         ]));
 
         let mut outbox = VecDequeOutbox::new(1, 8);
@@ -1168,10 +1226,7 @@ mod tests {
         assert_eq!(items.len(), 1);
 
         // Combined: count=5, sum=50.0
-        assert_eq!(
-            get_f64_field(&items[0], "__count").unwrap() as u64,
-            5
-        );
+        assert_eq!(get_f64_field(&items[0], "__count").unwrap() as u64, 5);
         assert!((get_f64_field(&items[0], "__sum").unwrap() - 50.0).abs() < 1e-9);
         // min=3, max=15 after merge
         assert_eq!(get_f64_field(&items[0], "__min").unwrap() as i64, 3);
@@ -1225,9 +1280,7 @@ mod tests {
 
     #[test]
     fn sort_ascending_by_age() {
-        let mut proc = SortProcessor::new(vec![
-            ("age".to_string(), SortDirection::Asc),
-        ]);
+        let mut proc = SortProcessor::new(vec![("age".to_string(), SortDirection::Asc)]);
         let ctx = make_context();
         proc.init(&ctx).unwrap();
 
@@ -1253,9 +1306,7 @@ mod tests {
 
     #[test]
     fn sort_descending_by_age() {
-        let mut proc = SortProcessor::new(vec![
-            ("age".to_string(), SortDirection::Desc),
-        ]);
+        let mut proc = SortProcessor::new(vec![("age".to_string(), SortDirection::Desc)]);
         let ctx = make_context();
         proc.init(&ctx).unwrap();
 
@@ -1328,16 +1379,17 @@ mod tests {
 
     #[test]
     fn sort_nil_missing_fields_sort_last() {
-        let mut proc = SortProcessor::new(vec![
-            ("score".to_string(), SortDirection::Asc),
-        ]);
+        let mut proc = SortProcessor::new(vec![("score".to_string(), SortDirection::Asc)]);
         let ctx = make_context();
         proc.init(&ctx).unwrap();
 
         let mut inbox = VecDequeInbox::new(16);
         inbox.push(make_map_item(&[("score", rmpv::Value::Nil)]));
         inbox.push(make_map_item(&[("score", rmpv::Value::Integer(5.into()))]));
-        inbox.push(make_map_item(&[("name", rmpv::Value::String("no_score".into()))])); // missing field
+        inbox.push(make_map_item(&[(
+            "name",
+            rmpv::Value::String("no_score".into()),
+        )])); // missing field
         inbox.push(make_map_item(&[("score", rmpv::Value::Integer(1.into()))]));
 
         let mut outbox = VecDequeOutbox::new(1, 16);
@@ -1356,18 +1408,21 @@ mod tests {
         // Nil/missing items last
         let score_2 = get_field(&items[2], "score");
         let score_3 = get_field(&items[3], "score");
-        let is_nil_or_missing = |v: Option<&rmpv::Value>| {
-            v.is_none() || matches!(v, Some(rmpv::Value::Nil))
-        };
-        assert!(is_nil_or_missing(score_2), "third item should have nil/missing score");
-        assert!(is_nil_or_missing(score_3), "fourth item should have nil/missing score");
+        let is_nil_or_missing =
+            |v: Option<&rmpv::Value>| v.is_none() || matches!(v, Some(rmpv::Value::Nil));
+        assert!(
+            is_nil_or_missing(score_2),
+            "third item should have nil/missing score"
+        );
+        assert!(
+            is_nil_or_missing(score_3),
+            "fourth item should have nil/missing score"
+        );
     }
 
     #[test]
     fn sort_nil_fields_sort_last_even_with_desc() {
-        let mut proc = SortProcessor::new(vec![
-            ("score".to_string(), SortDirection::Desc),
-        ]);
+        let mut proc = SortProcessor::new(vec![("score".to_string(), SortDirection::Desc)]);
         let ctx = make_context();
         proc.init(&ctx).unwrap();
 
@@ -1406,7 +1461,10 @@ mod tests {
 
         let mut outbox = VecDequeOutbox::new(1, 16);
         let done = proc.process(0, &mut inbox, &mut outbox).unwrap();
-        assert!(done, "limit should signal completion after emitting limit items");
+        assert!(
+            done,
+            "limit should signal completion after emitting limit items"
+        );
 
         let items: Vec<_> = outbox.drain_bucket(0).collect();
         assert_eq!(items.len(), 3);
@@ -1456,9 +1514,7 @@ mod tests {
     #[test]
     fn sort_then_limit_returns_top_n() {
         // Simulate sort -> limit pipeline: sort desc by age, limit 2
-        let mut sort = SortProcessor::new(vec![
-            ("age".to_string(), SortDirection::Desc),
-        ]);
+        let mut sort = SortProcessor::new(vec![("age".to_string(), SortDirection::Desc)]);
         let ctx = make_context();
         sort.init(&ctx).unwrap();
 
@@ -1485,7 +1541,9 @@ mod tests {
         }
 
         let mut limit_outbox = VecDequeOutbox::new(1, 16);
-        limit.process(0, &mut limit_inbox, &mut limit_outbox).unwrap();
+        limit
+            .process(0, &mut limit_inbox, &mut limit_outbox)
+            .unwrap();
 
         let items: Vec<_> = limit_outbox.drain_bucket(0).collect();
         assert_eq!(items.len(), 2, "limit 2 should return exactly 2 items");

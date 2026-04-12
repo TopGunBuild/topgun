@@ -303,11 +303,7 @@ impl MigrationService for MigrationCoordinator {
         Ok(())
     }
 
-    async fn handle_migrate_ready(
-        &self,
-        partition_id: u32,
-        source: &str,
-    ) -> anyhow::Result<()> {
+    async fn handle_migrate_ready(&self, partition_id: u32, source: &str) -> anyhow::Result<()> {
         let mut migrations = self.state.active_migrations.write().await;
 
         let Some(migration) = migrations.get_mut(&partition_id) else {
@@ -374,11 +370,14 @@ impl MigrationService for MigrationCoordinator {
         let _ = self.state.partition_table.increment_version();
 
         // Emit PartitionMoved event.
-        let _ = self.state.change_sender().send(ClusterChange::PartitionMoved {
-            partition_id,
-            old_owner: source.to_string(),
-            new_owner: destination.clone(),
-        });
+        let _ = self
+            .state
+            .change_sender()
+            .send(ClusterChange::PartitionMoved {
+                partition_id,
+                old_owner: source.to_string(),
+                new_owner: destination.clone(),
+            });
 
         // Remove the completed migration.
         let mut migrations = self.state.active_migrations.write().await;
@@ -453,10 +452,7 @@ pub struct RebalanceTrigger {
 impl RebalanceTrigger {
     /// Creates a new rebalance trigger.
     #[must_use]
-    pub fn new(
-        state: Arc<ClusterState>,
-        migration_tx: mpsc::Sender<MigrationCommand>,
-    ) -> Self {
+    pub fn new(state: Arc<ClusterState>, migration_tx: mpsc::Sender<MigrationCommand>) -> Self {
         Self {
             state,
             migration_tx,
@@ -520,7 +516,9 @@ mod tests {
     }
 
     /// Creates a `ClusterState` with a master view (local node is master).
-    fn make_state_with_master(local_id: &str) -> (Arc<ClusterState>, mpsc::UnboundedReceiver<ClusterChange>) {
+    fn make_state_with_master(
+        local_id: &str,
+    ) -> (Arc<ClusterState>, mpsc::UnboundedReceiver<ClusterChange>) {
         let config = Arc::new(ClusterConfig {
             max_parallel_migrations: 2,
             ..ClusterConfig::default()
@@ -548,14 +546,13 @@ mod tests {
 
     fn make_coordinator(
         state: &Arc<ClusterState>,
-    ) -> (MigrationCoordinator, Vec<tokio::sync::mpsc::Receiver<OutboundMessage>>) {
+    ) -> (
+        MigrationCoordinator,
+        Vec<tokio::sync::mpsc::Receiver<OutboundMessage>>,
+    ) {
         let registry = Arc::new(ConnectionRegistry::new());
         let map_provider: Arc<dyn MapProvider> = Arc::new(NoOpMapProvider);
-        let coordinator = MigrationCoordinator::new(
-            Arc::clone(state),
-            registry,
-            map_provider,
-        );
+        let coordinator = MigrationCoordinator::new(Arc::clone(state), registry, map_provider);
         (coordinator, vec![])
     }
 
@@ -583,11 +580,8 @@ mod tests {
         }
 
         let map_provider: Arc<dyn MapProvider> = Arc::new(NoOpMapProvider);
-        let coordinator = MigrationCoordinator::new(
-            Arc::clone(&state),
-            Arc::clone(&registry),
-            map_provider,
-        );
+        let coordinator =
+            MigrationCoordinator::new(Arc::clone(&state), Arc::clone(&registry), map_provider);
 
         (coordinator, registry, receivers)
     }
@@ -863,10 +857,7 @@ mod tests {
 
         let version_before = state.partition_table.version();
 
-        coordinator
-            .handle_migrate_ready(5, "node-1")
-            .await
-            .unwrap();
+        coordinator.handle_migrate_ready(5, "node-1").await.unwrap();
 
         // Ownership should have been updated.
         let meta = state.partition_table.get_partition(5).unwrap();
@@ -903,11 +894,7 @@ mod tests {
         // Create coordinator with NO peer connections, so send_to_peer will fail.
         let registry = Arc::new(ConnectionRegistry::new());
         let map_provider: Arc<dyn MapProvider> = Arc::new(NoOpMapProvider);
-        let coordinator = MigrationCoordinator::new(
-            Arc::clone(&state),
-            registry,
-            map_provider,
-        );
+        let coordinator = MigrationCoordinator::new(Arc::clone(&state), registry, map_provider);
 
         // Insert an active migration.
         {
@@ -1008,10 +995,8 @@ mod tests {
         let config = crate::network::config::ConnectionConfig::default();
         let registry = ConnectionRegistry::new();
 
-        let (_client_handle, mut client_rx) =
-            registry.register(ConnectionKind::Client, &config);
-        let (_peer_handle, mut peer_rx) =
-            registry.register(ConnectionKind::ClusterPeer, &config);
+        let (_client_handle, mut client_rx) = registry.register(ConnectionKind::Client, &config);
+        let (_peer_handle, mut peer_rx) = registry.register(ConnectionKind::ClusterPeer, &config);
 
         broadcast_partition_map(&table, &members, &registry);
 

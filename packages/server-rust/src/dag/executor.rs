@@ -241,14 +241,18 @@ impl DagExecutor {
             let bucket_count = if out_edges.is_empty() {
                 1u32 // sink — 1 bucket (unused but required by VecDequeOutbox)
             } else {
-                out_edges.iter().map(|e| e.source_ordinal + 1).max().unwrap_or(1)
+                out_edges
+                    .iter()
+                    .map(|e| e.source_ordinal + 1)
+                    .max()
+                    .unwrap_or(1)
             };
 
             // Create processor via supplier (local_parallelism=1 per vertex in v1).
             let mut processors = vertex.processor_supplier.get(1);
-            let mut processor = processors.pop().ok_or_else(|| {
-                anyhow!("supplier for vertex '{name}' returned no processors")
-            })?;
+            let mut processor = processors
+                .pop()
+                .ok_or_else(|| anyhow!("supplier for vertex '{name}' returned no processors"))?;
 
             // Build ProcessorContext.
             let ctx = ProcessorContext {
@@ -416,10 +420,8 @@ async fn step_vertex(
                 proc.process(0, &mut state.inbox, &mut state.outbox)?
             } else {
                 let mut p = proc;
-                let mut inbox = std::mem::replace(
-                    &mut state.inbox,
-                    VecDequeInbox::new(DEFAULT_QUEUE_CAPACITY),
-                );
+                let mut inbox =
+                    std::mem::replace(&mut state.inbox, VecDequeInbox::new(DEFAULT_QUEUE_CAPACITY));
                 let mut outbox = std::mem::replace(
                     &mut state.outbox,
                     VecDequeOutbox::new(1, DEFAULT_QUEUE_CAPACITY),
@@ -472,11 +474,7 @@ fn collect_sink_results(
 /// Two-phase approach avoids simultaneous mutable borrows of `states`:
 /// Phase 1: drain source outbox buckets into a local buffer.
 /// Phase 2: push items into destination inboxes.
-fn route_vertex_outbox(
-    name: &str,
-    dag: &Dag,
-    states: &mut HashMap<String, VertexState>,
-) {
+fn route_vertex_outbox(name: &str, dag: &Dag, states: &mut HashMap<String, VertexState>) {
     let out_edges = dag.edges_for_source(name);
     if out_edges.is_empty() {
         return;
@@ -484,7 +482,13 @@ fn route_vertex_outbox(
 
     let routing_plan: Vec<(String, RoutingPolicy, u32)> = out_edges
         .iter()
-        .map(|e| (e.dest_name.clone(), e.routing_policy.clone(), e.source_ordinal))
+        .map(|e| {
+            (
+                e.dest_name.clone(),
+                e.routing_policy.clone(),
+                e.source_ordinal,
+            )
+        })
         .collect();
 
     // Phase 1: drain items from source outbox.
@@ -534,7 +538,9 @@ fn route_items(
                 dest_inbox.push(item);
             }
         }
-        RoutingPolicy::Partitioned { partition_key_field } => {
+        RoutingPolicy::Partitioned {
+            partition_key_field,
+        } => {
             for item in items {
                 // Extract partition key field and hash it.
                 // With a single destination the hash doesn't change routing,
@@ -700,9 +706,7 @@ mod tests {
 
     use topgun_core::messages::base::{PredicateNode, PredicateOp};
 
-    use crate::dag::processors::{
-        CollectorProcessorSupplier, FilterProcessorSupplier,
-    };
+    use crate::dag::processors::{CollectorProcessorSupplier, FilterProcessorSupplier};
     use crate::dag::types::{Dag, Edge, RoutingPolicy, Vertex};
     use crate::storage::datastores::NullDataStore;
     use crate::storage::factory::RecordStoreFactory;
@@ -814,9 +818,7 @@ mod tests {
     #[tokio::test]
     async fn executor_source_to_collector_pipeline() {
         let factory = make_test_factory();
-        let items: Vec<rmpv::Value> = (0i64..10)
-            .map(|i| rmpv::Value::Integer(i.into()))
-            .collect();
+        let items: Vec<rmpv::Value> = (0i64..10).map(|i| rmpv::Value::Integer(i.into())).collect();
 
         let mut dag = Dag::new();
         dag.new_vertex(Vertex {
@@ -886,7 +888,10 @@ mod tests {
 
         let ctx = make_test_context(factory);
         let executor = DagExecutor::new(dag, ctx, 5000);
-        let results = executor.execute().await.expect("filter pipeline should succeed");
+        let results = executor
+            .execute()
+            .await
+            .expect("filter pipeline should succeed");
 
         assert_eq!(results.len(), 5, "5 active items should pass the filter");
     }
@@ -1014,7 +1019,10 @@ mod tests {
 
         let ctx = make_test_context(factory);
         let executor = DagExecutor::new(dag, ctx, 5000);
-        let results = executor.execute().await.expect("broadcast pipeline should succeed");
+        let results = executor
+            .execute()
+            .await
+            .expect("broadcast pipeline should succeed");
 
         // With a single collector, broadcast = push-all.
         assert_eq!(results.len(), 2);
@@ -1034,12 +1042,18 @@ mod tests {
         for i in 0..capacity {
             #[allow(clippy::cast_possible_wrap)]
             let accepted = outbox.offer(0, rmpv::Value::Integer((i as i64).into()));
-            assert!(accepted, "offer {i} should be accepted while under capacity");
+            assert!(
+                accepted,
+                "offer {i} should be accepted while under capacity"
+            );
         }
 
         // Next offer should be rejected (backpressure).
         let rejected = outbox.offer(0, rmpv::Value::Integer(99.into()));
-        assert!(!rejected, "offer past capacity should return false (backpressure)");
+        assert!(
+            !rejected,
+            "offer past capacity should return false (backpressure)"
+        );
 
         // After draining, capacity is restored.
         let _drained: Vec<_> = outbox.drain_bucket(0).collect();
@@ -1098,7 +1112,10 @@ mod tests {
 
         let ctx = make_test_context(factory);
         let executor = DagExecutor::new(dag, ctx, 5000);
-        let results = executor.execute().await.expect("aggregate pipeline should succeed");
+        let results = executor
+            .execute()
+            .await
+            .expect("aggregate pipeline should succeed");
 
         assert_eq!(results.len(), 2, "GROUP BY category should produce 2 rows");
 
@@ -1107,8 +1124,16 @@ mod tests {
             .iter()
             .map(|item| {
                 if let rmpv::Value::Map(pairs) = item {
-                    pairs.iter().find(|(k, _)| k == &rmpv::Value::String("__count".into()))
-                        .and_then(|(_, v)| if let rmpv::Value::Integer(n) = v { n.as_u64() } else { None })
+                    pairs
+                        .iter()
+                        .find(|(k, _)| k == &rmpv::Value::String("__count".into()))
+                        .and_then(|(_, v)| {
+                            if let rmpv::Value::Integer(n) = v {
+                                n.as_u64()
+                            } else {
+                                None
+                            }
+                        })
                         .unwrap_or(0)
                 } else {
                     0

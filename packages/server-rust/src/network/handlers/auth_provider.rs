@@ -132,7 +132,10 @@ pub trait AuthProvider: Send + Sync {
 ///
 /// `sub_claim` falls back to "sub" when the configured field is empty, guarding
 /// against partial `claims` objects that omit the field entirely.
-pub(crate) fn extract_claims(payload: &Value, mapping: &ClaimMapping) -> Result<ExternalClaims, String> {
+pub(crate) fn extract_claims(
+    payload: &Value,
+    mapping: &ClaimMapping,
+) -> Result<ExternalClaims, String> {
     let sub_key = if mapping.sub_claim.is_empty() {
         "sub"
     } else {
@@ -337,19 +340,14 @@ impl AuthProvider for JwksProvider {
         let decoding_key = match &jwk.algorithm {
             AlgorithmParameters::RSA(rsa) => DecodingKey::from_rsa_components(&rsa.n, &rsa.e)
                 .map_err(|e| format!("invalid RSA key: {e}"))?,
-            AlgorithmParameters::EllipticCurve(ec) => {
-                DecodingKey::from_ec_components(&ec.x, &ec.y)
-                    .map_err(|e| format!("invalid EC key: {e}"))?
-            }
+            AlgorithmParameters::EllipticCurve(ec) => DecodingKey::from_ec_components(&ec.x, &ec.y)
+                .map_err(|e| format!("invalid EC key: {e}"))?,
             AlgorithmParameters::OctetKeyPair(_) | AlgorithmParameters::OctetKey(_) => {
                 return Err("unsupported JWK algorithm type".to_string());
             }
         };
 
-        let key_alg = jwk
-            .common
-            .key_algorithm
-            .ok_or("JWK missing 'alg' field")?;
+        let key_alg = jwk.common.key_algorithm.ok_or("JWK missing 'alg' field")?;
         let alg = Algorithm::from_str(&key_alg.to_string())
             .map_err(|e| format!("unsupported JWK algorithm: {e}"))?;
 
@@ -520,7 +518,12 @@ mod tests {
 
     fn make_hmac_token(secret: &str, claims: Value, alg: Algorithm) -> String {
         let header = Header::new(alg);
-        encode(&header, &claims, &EncodingKey::from_secret(secret.as_bytes())).unwrap()
+        encode(
+            &header,
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap()
     }
 
     // ── ClaimMapping default ──────────────────────────────────────────────────
@@ -605,7 +608,11 @@ mod tests {
     async fn hmac_provider_valid_token() {
         let secret = "test-secret";
         let exp = jsonwebtoken::get_current_timestamp() + 3600;
-        let token = make_hmac_token(secret, json!({ "sub": "user-1", "exp": exp }), Algorithm::HS256);
+        let token = make_hmac_token(
+            secret,
+            json!({ "sub": "user-1", "exp": exp }),
+            Algorithm::HS256,
+        );
 
         let provider = HmacProvider::new(
             "test".to_string(),
@@ -620,7 +627,11 @@ mod tests {
     #[tokio::test]
     async fn hmac_provider_wrong_secret_fails() {
         let exp = jsonwebtoken::get_current_timestamp() + 3600;
-        let token = make_hmac_token("right-secret", json!({ "sub": "u", "exp": exp }), Algorithm::HS256);
+        let token = make_hmac_token(
+            "right-secret",
+            json!({ "sub": "u", "exp": exp }),
+            Algorithm::HS256,
+        );
 
         let provider = HmacProvider::new(
             "test".to_string(),
@@ -635,7 +646,11 @@ mod tests {
     async fn hmac_provider_expired_token_fails() {
         // Expire far enough in the past to exceed the default 60-second leeway.
         let exp = jsonwebtoken::get_current_timestamp() - 120;
-        let token = make_hmac_token("secret", json!({ "sub": "u", "exp": exp }), Algorithm::HS256);
+        let token = make_hmac_token(
+            "secret",
+            json!({ "sub": "u", "exp": exp }),
+            Algorithm::HS256,
+        );
 
         let provider = HmacProvider::new(
             "test".to_string(),

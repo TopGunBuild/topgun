@@ -14,8 +14,14 @@ use super::operation::{Operation, OperationError, OperationResponse};
 // ---------------------------------------------------------------------------
 
 /// A boxed Tower service that handles operations for a single domain.
-type BoxedService =
-    Box<dyn Service<Operation, Response = OperationResponse, Error = OperationError, Future = BoxedFuture> + Send>;
+type BoxedService = Box<
+    dyn Service<
+            Operation,
+            Response = OperationResponse,
+            Error = OperationError,
+            Future = BoxedFuture,
+        > + Send,
+>;
 
 type BoxedFuture = Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>>;
 
@@ -44,10 +50,13 @@ impl OperationRouter {
     /// Register a domain service for the given name.
     pub fn register<S>(&mut self, name: &'static str, service: S)
     where
-        S: Service<Operation, Response = OperationResponse, Error = OperationError> + Send + 'static,
+        S: Service<Operation, Response = OperationResponse, Error = OperationError>
+            + Send
+            + 'static,
         S::Future: Send + 'static,
     {
-        self.services.insert(name, Box::new(ServiceWrapper(service)));
+        self.services
+            .insert(name, Box::new(ServiceWrapper(service)));
     }
 }
 
@@ -133,7 +142,8 @@ mod tests {
     impl Service<Operation> for StubService {
         type Response = OperationResponse;
         type Error = OperationError;
-        type Future = Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>>;
+        type Future =
+            Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>>;
 
         fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
@@ -167,7 +177,12 @@ mod tests {
     #[tokio::test]
     async fn routes_to_registered_service() {
         let mut router = OperationRouter::new();
-        router.register(service_names::COORDINATION, StubService { name: "coordination" });
+        router.register(
+            service_names::COORDINATION,
+            StubService {
+                name: "coordination",
+            },
+        );
 
         let ctx = make_ctx(service_names::COORDINATION);
         let op = Operation::GarbageCollect { ctx };
@@ -207,7 +222,12 @@ mod tests {
         // Route to sync
         let ctx = make_ctx(service_names::SYNC);
         let op = Operation::GarbageCollect { ctx };
-        let resp = ServiceExt::ready(&mut router).await.unwrap().call(op).await.unwrap();
+        let resp = ServiceExt::ready(&mut router)
+            .await
+            .unwrap()
+            .call(op)
+            .await
+            .unwrap();
         assert!(matches!(
             resp,
             OperationResponse::NotImplemented {
@@ -219,7 +239,12 @@ mod tests {
         // Route to query
         let ctx = make_ctx(service_names::QUERY);
         let op = Operation::GarbageCollect { ctx };
-        let resp = ServiceExt::ready(&mut router).await.unwrap().call(op).await.unwrap();
+        let resp = ServiceExt::ready(&mut router)
+            .await
+            .unwrap()
+            .call(op)
+            .await
+            .unwrap();
         assert!(matches!(
             resp,
             OperationResponse::NotImplemented {

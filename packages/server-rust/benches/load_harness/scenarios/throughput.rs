@@ -1,7 +1,7 @@
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
+    clippy::cast_sign_loss
 )]
 
 use std::collections::HashMap;
@@ -96,7 +96,12 @@ impl LoadScenario for ThroughputScenario {
         Ok(())
     }
 
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss, clippy::cast_possible_wrap)]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        clippy::cast_possible_wrap
+    )]
     async fn run(&self, ctx: &HarnessContext) -> ScenarioResult {
         // Clone the Arc so tasks can hold a 'static reference to the pool.
         let pool = Arc::clone(
@@ -121,14 +126,24 @@ impl LoadScenario for ThroughputScenario {
             join_set.spawn(async move {
                 if fire_and_forget {
                     run_fire_and_forget(
-                        &pool, conn_idx, duration_secs, batch_size,
-                        send_interval_ms, &metrics,
-                    ).await
+                        &pool,
+                        conn_idx,
+                        duration_secs,
+                        batch_size,
+                        send_interval_ms,
+                        &metrics,
+                    )
+                    .await
                 } else {
                     run_fire_and_wait(
-                        &pool, conn_idx, duration_secs, batch_size,
-                        send_interval_ms, &metrics,
-                    ).await
+                        &pool,
+                        conn_idx,
+                        duration_secs,
+                        batch_size,
+                        send_interval_ms,
+                        &metrics,
+                    )
+                    .await
                 }
             });
         }
@@ -204,12 +219,19 @@ fn build_batch(conn_idx: usize, seq: u64, batch_size: usize) -> Vec<u8> {
     }
 
     let msg = Message::OpBatch(OpBatchMessage {
-        payload: OpBatchPayload { ops, ..Default::default() },
+        payload: OpBatchPayload {
+            ops,
+            ..Default::default()
+        },
     });
     rmp_serde::to_vec_named(&msg).expect("serialize OpBatch")
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
 async fn run_fire_and_wait(
     pool: &ConnectionPool,
     conn_idx: usize,
@@ -267,7 +289,11 @@ async fn run_fire_and_wait(
     (total_sent, acked_count, timeout_count)
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
 async fn run_fire_and_forget(
     pool: &ConnectionPool,
     conn_idx: usize,
@@ -332,10 +358,7 @@ impl Assertion for ThroughputAssertion {
         }
 
         let snapshot = ctx.metrics.snapshot();
-        let p99 = snapshot
-            .latencies
-            .get("write_latency")
-            .map_or(0, |s| s.p99);
+        let p99 = snapshot.latencies.get("write_latency").map_or(0, |s| s.p99);
 
         if p99 >= 500_000 {
             return AssertionResult::Fail(format!("p99 {p99}µs >= 500000µs"));

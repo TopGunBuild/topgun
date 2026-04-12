@@ -127,10 +127,7 @@ pub fn evaluate_where<S: BuildHasher>(
 /// Returns filtered, sorted, limited results.
 /// Evaluation priority: predicate > where > match-all.
 #[must_use]
-pub fn execute_query(
-    entries: Vec<(String, rmpv::Value)>,
-    query: &Query,
-) -> Vec<QueryResultEntry> {
+pub fn execute_query(entries: Vec<(String, rmpv::Value)>, query: &Query) -> Vec<QueryResultEntry> {
     // 1. Filter
     let filtered: Vec<(String, rmpv::Value)> = entries
         .into_iter()
@@ -158,7 +155,11 @@ pub fn execute_query(
                 let va = a.as_map().and_then(|m| find_field_in_map(m, &field));
                 let vb = b.as_map().and_then(|m| find_field_in_map(m, &field));
                 let ord = compare_rmpv_values(va, vb);
-                if desc { ord.reverse() } else { ord }
+                if desc {
+                    ord.reverse()
+                } else {
+                    ord
+                }
             });
         }
     }
@@ -212,9 +213,7 @@ fn evaluate_leaf(predicate: &PredicateNode, ctx: &EvalContext) -> bool {
     match predicate.op {
         PredicateOp::Eq => values_equal(&actual, &expected),
         PredicateOp::Neq => !values_equal(&actual, &expected),
-        PredicateOp::Gt => {
-            compare_ordered(&actual, &expected) == Some(std::cmp::Ordering::Greater)
-        }
+        PredicateOp::Gt => compare_ordered(&actual, &expected) == Some(std::cmp::Ordering::Greater),
         PredicateOp::Gte => matches!(
             compare_ordered(&actual, &expected),
             Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
@@ -542,17 +541,12 @@ fn compare_ordered(a: &rmpv::Value, b: &rmpv::Value) -> Option<std::cmp::Orderin
 /// Compares two optional `rmpv::Value` references for sorting.
 ///
 /// Missing field values sort last.
-fn compare_rmpv_values(
-    a: Option<&rmpv::Value>,
-    b: Option<&rmpv::Value>,
-) -> std::cmp::Ordering {
+fn compare_rmpv_values(a: Option<&rmpv::Value>, b: Option<&rmpv::Value>) -> std::cmp::Ordering {
     match (a, b) {
         (None, None) => std::cmp::Ordering::Equal,
         (None, Some(_)) => std::cmp::Ordering::Greater, // missing sorts last
         (Some(_), None) => std::cmp::Ordering::Less,    // missing sorts last
-        (Some(va), Some(vb)) => {
-            compare_ordered(va, vb).unwrap_or(std::cmp::Ordering::Equal)
-        }
+        (Some(va), Some(vb)) => compare_ordered(va, vb).unwrap_or(std::cmp::Ordering::Equal),
     }
 }
 
@@ -669,7 +663,10 @@ mod tests {
         assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
 
         let pred_ne = leaf(PredicateOp::Eq, "age", rmpv::Value::Integer(30.into()));
-        assert!(!evaluate_predicate(&pred_ne, &EvalContext::data_only(&data)));
+        assert!(!evaluate_predicate(
+            &pred_ne,
+            &EvalContext::data_only(&data)
+        ));
     }
 
     #[test]
@@ -687,7 +684,10 @@ mod tests {
             "status",
             rmpv::Value::String("active".into()),
         );
-        assert!(!evaluate_predicate(&pred_eq, &EvalContext::data_only(&data)));
+        assert!(!evaluate_predicate(
+            &pred_eq,
+            &EvalContext::data_only(&data)
+        ));
     }
 
     #[test]
@@ -697,7 +697,10 @@ mod tests {
         assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
 
         let pred_eq = leaf(PredicateOp::Gt, "score", rmpv::Value::Integer(85.into()));
-        assert!(!evaluate_predicate(&pred_eq, &EvalContext::data_only(&data)));
+        assert!(!evaluate_predicate(
+            &pred_eq,
+            &EvalContext::data_only(&data)
+        ));
     }
 
     #[test]
@@ -707,7 +710,10 @@ mod tests {
         assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
 
         let pred_gt = leaf(PredicateOp::Lte, "score", rmpv::Value::Integer(79.into()));
-        assert!(!evaluate_predicate(&pred_gt, &EvalContext::data_only(&data)));
+        assert!(!evaluate_predicate(
+            &pred_gt,
+            &EvalContext::data_only(&data)
+        ));
     }
 
     #[test]
@@ -734,11 +740,7 @@ mod tests {
     #[test]
     fn predicate_string_ordering() {
         let data = make_map(vec![("name", rmpv::Value::String("banana".into()))]);
-        let pred = leaf(
-            PredicateOp::Gt,
-            "name",
-            rmpv::Value::String("apple".into()),
-        );
+        let pred = leaf(PredicateOp::Gt, "name", rmpv::Value::String("apple".into()));
         assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
 
         let pred_lt = leaf(
@@ -797,7 +799,11 @@ mod tests {
             PredicateOp::Or,
             vec![
                 leaf(PredicateOp::Eq, "role", rmpv::Value::String("admin".into())),
-                leaf(PredicateOp::Eq, "role", rmpv::Value::String("editor".into())),
+                leaf(
+                    PredicateOp::Eq,
+                    "role",
+                    rmpv::Value::String("editor".into()),
+                ),
             ],
         );
         assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
@@ -810,7 +816,11 @@ mod tests {
             PredicateOp::Or,
             vec![
                 leaf(PredicateOp::Eq, "role", rmpv::Value::String("admin".into())),
-                leaf(PredicateOp::Eq, "role", rmpv::Value::String("editor".into())),
+                leaf(
+                    PredicateOp::Eq,
+                    "role",
+                    rmpv::Value::String("editor".into()),
+                ),
             ],
         );
         assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
@@ -852,7 +862,11 @@ mod tests {
     #[test]
     fn predicate_like_percent_at_end() {
         let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
-        let pred = leaf(PredicateOp::Like, "name", rmpv::Value::String("Ali%".into()));
+        let pred = leaf(
+            PredicateOp::Like,
+            "name",
+            rmpv::Value::String("Ali%".into()),
+        );
         assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
 
         let data2 = make_map(vec![("name", rmpv::Value::String("Bob".into()))]);
@@ -862,7 +876,11 @@ mod tests {
     #[test]
     fn predicate_like_percent_at_start() {
         let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
-        let pred = leaf(PredicateOp::Like, "name", rmpv::Value::String("%ice".into()));
+        let pred = leaf(
+            PredicateOp::Like,
+            "name",
+            rmpv::Value::String("%ice".into()),
+        );
         assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
 
         let data2 = make_map(vec![("name", rmpv::Value::String("Bob".into()))]);
@@ -872,7 +890,11 @@ mod tests {
     #[test]
     fn predicate_like_percent_both_sides() {
         let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
-        let pred = leaf(PredicateOp::Like, "name", rmpv::Value::String("%li%".into()));
+        let pred = leaf(
+            PredicateOp::Like,
+            "name",
+            rmpv::Value::String("%li%".into()),
+        );
         assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
 
         let data2 = make_map(vec![("name", rmpv::Value::String("Bob".into()))]);
@@ -882,7 +904,11 @@ mod tests {
     #[test]
     fn predicate_like_underscore_single_char() {
         let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
-        let pred = leaf(PredicateOp::Like, "name", rmpv::Value::String("A_ice".into()));
+        let pred = leaf(
+            PredicateOp::Like,
+            "name",
+            rmpv::Value::String("A_ice".into()),
+        );
         assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
 
         let data2 = make_map(vec![("name", rmpv::Value::String("Aice".into()))]);
@@ -902,7 +928,11 @@ mod tests {
     #[test]
     fn predicate_like_case_insensitive() {
         let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
-        let pred = leaf(PredicateOp::Like, "name", rmpv::Value::String("ali%".into()));
+        let pred = leaf(
+            PredicateOp::Like,
+            "name",
+            rmpv::Value::String("ali%".into()),
+        );
         assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
@@ -918,7 +948,11 @@ mod tests {
     #[test]
     fn predicate_regex_simple_match() {
         let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
-        let pred = leaf(PredicateOp::Regex, "name", rmpv::Value::String("^Ali".into()));
+        let pred = leaf(
+            PredicateOp::Regex,
+            "name",
+            rmpv::Value::String("^Ali".into()),
+        );
         assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
 
         let data2 = make_map(vec![("name", rmpv::Value::String("Bob".into()))]);
@@ -929,28 +963,44 @@ mod tests {
     fn predicate_regex_invalid_pattern_returns_false() {
         let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
         // `[invalid` is an unclosed character class -- invalid regex
-        let pred = leaf(PredicateOp::Regex, "name", rmpv::Value::String("[invalid".into()));
+        let pred = leaf(
+            PredicateOp::Regex,
+            "name",
+            rmpv::Value::String("[invalid".into()),
+        );
         assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
     fn predicate_regex_non_string_field_returns_false() {
         let data = make_map(vec![("age", rmpv::Value::Integer(42.into()))]);
-        let pred = leaf(PredicateOp::Regex, "age", rmpv::Value::String("\\d+".into()));
+        let pred = leaf(
+            PredicateOp::Regex,
+            "age",
+            rmpv::Value::String("\\d+".into()),
+        );
         assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
     fn predicate_regex_case_sensitive_by_default() {
         let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
-        let pred = leaf(PredicateOp::Regex, "name", rmpv::Value::String("^ali".into()));
+        let pred = leaf(
+            PredicateOp::Regex,
+            "name",
+            rmpv::Value::String("^ali".into()),
+        );
         assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
     fn predicate_regex_inline_case_insensitive_flag() {
         let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
-        let pred = leaf(PredicateOp::Regex, "name", rmpv::Value::String("(?i)^ali".into()));
+        let pred = leaf(
+            PredicateOp::Regex,
+            "name",
+            rmpv::Value::String("(?i)^ali".into()),
+        );
         assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
@@ -1066,8 +1116,14 @@ mod tests {
         ]);
         let pred_low = leaf(PredicateOp::Between, "age", range.clone());
         let pred_high = leaf(PredicateOp::Between, "age", range);
-        assert!(evaluate_predicate(&pred_low, &EvalContext::data_only(&data_low)));
-        assert!(evaluate_predicate(&pred_high, &EvalContext::data_only(&data_high)));
+        assert!(evaluate_predicate(
+            &pred_low,
+            &EvalContext::data_only(&data_low)
+        ));
+        assert!(evaluate_predicate(
+            &pred_high,
+            &EvalContext::data_only(&data_high)
+        ));
     }
 
     #[test]
@@ -1254,7 +1310,11 @@ mod tests {
         sort.insert("name".to_string(), SortDirection::Asc);
 
         let query = Query {
-            predicate: Some(leaf(PredicateOp::Gte, "age", rmpv::Value::Integer(20.into()))),
+            predicate: Some(leaf(
+                PredicateOp::Gte,
+                "age",
+                rmpv::Value::Integer(20.into()),
+            )),
             r#where: None,
             sort: Some(sort),
             limit: Some(2),
@@ -1271,8 +1331,14 @@ mod tests {
     #[test]
     fn execute_query_no_filter_returns_all() {
         let entries = vec![
-            ("a".to_string(), make_map(vec![("x", rmpv::Value::Integer(1.into()))])),
-            ("b".to_string(), make_map(vec![("x", rmpv::Value::Integer(2.into()))])),
+            (
+                "a".to_string(),
+                make_map(vec![("x", rmpv::Value::Integer(1.into()))]),
+            ),
+            (
+                "b".to_string(),
+                make_map(vec![("x", rmpv::Value::Integer(2.into()))]),
+            ),
         ];
         let query = Query::default();
         let results = execute_query(entries, &query);
@@ -1282,8 +1348,14 @@ mod tests {
     #[test]
     fn execute_query_where_filter() {
         let entries = vec![
-            ("a".to_string(), make_map(vec![("status", rmpv::Value::String("active".into()))])),
-            ("b".to_string(), make_map(vec![("status", rmpv::Value::String("inactive".into()))])),
+            (
+                "a".to_string(),
+                make_map(vec![("status", rmpv::Value::String("active".into()))]),
+            ),
+            (
+                "b".to_string(),
+                make_map(vec![("status", rmpv::Value::String("inactive".into()))]),
+            ),
         ];
         let mut wh = HashMap::new();
         wh.insert("status".to_string(), rmpv::Value::String("active".into()));
@@ -1303,9 +1375,18 @@ mod tests {
     #[test]
     fn execute_query_sort_desc() {
         let entries = vec![
-            ("a".to_string(), make_map(vec![("score", rmpv::Value::Integer(10.into()))])),
-            ("b".to_string(), make_map(vec![("score", rmpv::Value::Integer(30.into()))])),
-            ("c".to_string(), make_map(vec![("score", rmpv::Value::Integer(20.into()))])),
+            (
+                "a".to_string(),
+                make_map(vec![("score", rmpv::Value::Integer(10.into()))]),
+            ),
+            (
+                "b".to_string(),
+                make_map(vec![("score", rmpv::Value::Integer(30.into()))]),
+            ),
+            (
+                "c".to_string(),
+                make_map(vec![("score", rmpv::Value::Integer(20.into()))]),
+            ),
         ];
         let mut sort = HashMap::new();
         sort.insert("score".to_string(), SortDirection::Desc);
@@ -1366,7 +1447,11 @@ mod tests {
         // Predicate filters by age >= 20; where would filter by status = active.
         // Predicate takes priority.
         let query = Query {
-            predicate: Some(leaf(PredicateOp::Gte, "age", rmpv::Value::Integer(20.into()))),
+            predicate: Some(leaf(
+                PredicateOp::Gte,
+                "age",
+                rmpv::Value::Integer(20.into()),
+            )),
             r#where: Some(wh),
             sort: None,
             limit: None,
@@ -1381,9 +1466,15 @@ mod tests {
     #[test]
     fn execute_query_missing_sort_field_sorts_last() {
         let entries = vec![
-            ("a".to_string(), make_map(vec![("score", rmpv::Value::Integer(10.into()))])),
+            (
+                "a".to_string(),
+                make_map(vec![("score", rmpv::Value::Integer(10.into()))]),
+            ),
             ("b".to_string(), make_map(vec![])), // no score field
-            ("c".to_string(), make_map(vec![("score", rmpv::Value::Integer(5.into()))])),
+            (
+                "c".to_string(),
+                make_map(vec![("score", rmpv::Value::Integer(5.into()))]),
+            ),
         ];
         let mut sort = HashMap::new();
         sort.insert("score".to_string(), SortDirection::Asc);
@@ -1417,8 +1508,14 @@ mod tests {
 
     #[test]
     fn values_equal_bool() {
-        assert!(values_equal(&rmpv::Value::Boolean(true), &rmpv::Value::Boolean(true)));
-        assert!(!values_equal(&rmpv::Value::Boolean(true), &rmpv::Value::Boolean(false)));
+        assert!(values_equal(
+            &rmpv::Value::Boolean(true),
+            &rmpv::Value::Boolean(true)
+        ));
+        assert!(!values_equal(
+            &rmpv::Value::Boolean(true),
+            &rmpv::Value::Boolean(false)
+        ));
     }
 
     // ---- Variable reference tests (AC4, AC5, AC6, AC7, AC8) ----
@@ -1503,7 +1600,10 @@ mod tests {
             value_ref: Some("data.address.city".to_string()),
             ..Default::default()
         };
-        let ctx = EvalContext { auth: None, data: &data };
+        let ctx = EvalContext {
+            auth: None,
+            data: &data,
+        };
         assert!(evaluate_predicate(&pred, &ctx));
     }
 
@@ -1517,7 +1617,10 @@ mod tests {
             value_ref: Some("env.DEBUG".to_string()),
             ..Default::default()
         };
-        let ctx = EvalContext { auth: None, data: &data };
+        let ctx = EvalContext {
+            auth: None,
+            data: &data,
+        };
         assert!(!evaluate_predicate(&pred, &ctx));
     }
 
@@ -1531,7 +1634,10 @@ mod tests {
             value_ref: Some("auth.id".to_string()),
             ..Default::default()
         };
-        let ctx = EvalContext { auth: None, data: &data };
+        let ctx = EvalContext {
+            auth: None,
+            data: &data,
+        };
         assert!(!evaluate_predicate(&pred, &ctx));
     }
 
@@ -1550,7 +1656,10 @@ mod tests {
             "address.city",
             rmpv::Value::String("Berlin".into()),
         );
-        let ctx = EvalContext { auth: None, data: &data };
+        let ctx = EvalContext {
+            auth: None,
+            data: &data,
+        };
         assert!(evaluate_predicate(&pred, &ctx));
     }
 
@@ -1567,24 +1676,28 @@ mod tests {
             "address.city",
             rmpv::Value::String("Berlin".into()),
         );
-        let ctx = EvalContext { auth: None, data: &data };
+        let ctx = EvalContext {
+            auth: None,
+            data: &data,
+        };
         assert!(!evaluate_predicate(&pred, &ctx));
     }
 
     /// AC9: IsNull with nested attribute "address.city" returns true when field is nil.
     #[test]
     fn nested_attribute_is_null_nil_value() {
-        let address = rmpv::Value::Map(vec![(
-            rmpv::Value::String("city".into()),
-            rmpv::Value::Nil,
-        )]);
+        let address =
+            rmpv::Value::Map(vec![(rmpv::Value::String("city".into()), rmpv::Value::Nil)]);
         let data = make_map(vec![("address", address)]);
         let pred = PredicateNode {
             op: PredicateOp::IsNull,
             attribute: Some("address.city".to_string()),
             ..Default::default()
         };
-        let ctx = EvalContext { auth: None, data: &data };
+        let ctx = EvalContext {
+            auth: None,
+            data: &data,
+        };
         assert!(evaluate_predicate(&pred, &ctx));
     }
 
@@ -1601,7 +1714,10 @@ mod tests {
             attribute: Some("address.city".to_string()),
             ..Default::default()
         };
-        let ctx = EvalContext { auth: None, data: &data };
+        let ctx = EvalContext {
+            auth: None,
+            data: &data,
+        };
         assert!(!evaluate_predicate(&pred, &ctx));
     }
 
@@ -1618,7 +1734,10 @@ mod tests {
             attribute: Some("address.city".to_string()),
             ..Default::default()
         };
-        let ctx = EvalContext { auth: None, data: &data };
+        let ctx = EvalContext {
+            auth: None,
+            data: &data,
+        };
         assert!(evaluate_predicate(&pred, &ctx));
     }
 
@@ -1635,7 +1754,10 @@ mod tests {
             attribute: Some("address.city".to_string()),
             ..Default::default()
         };
-        let ctx = EvalContext { auth: None, data: &data };
+        let ctx = EvalContext {
+            auth: None,
+            data: &data,
+        };
         assert!(evaluate_predicate(&pred, &ctx));
     }
 
@@ -1760,7 +1882,10 @@ mod tests {
     fn is_null_auth_returns_true_when_auth_none() {
         let data = make_map(vec![]);
         let pred = is_null_pred("auth");
-        let ctx = EvalContext { auth: None, data: &data };
+        let ctx = EvalContext {
+            auth: None,
+            data: &data,
+        };
         assert!(evaluate_predicate(&pred, &ctx));
     }
 
@@ -1770,7 +1895,10 @@ mod tests {
         let data = make_map(vec![]);
         let auth = make_auth(vec![("id", rmpv::Value::String("user1".into()))]);
         let pred = is_null_pred("auth");
-        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
         assert!(!evaluate_predicate(&pred, &ctx));
     }
 
@@ -1779,7 +1907,10 @@ mod tests {
     fn is_not_null_auth_returns_false_when_auth_none() {
         let data = make_map(vec![]);
         let pred = is_not_null_pred("auth");
-        let ctx = EvalContext { auth: None, data: &data };
+        let ctx = EvalContext {
+            auth: None,
+            data: &data,
+        };
         assert!(!evaluate_predicate(&pred, &ctx));
     }
 
@@ -1789,7 +1920,10 @@ mod tests {
         let data = make_map(vec![]);
         let auth = make_auth(vec![("id", rmpv::Value::String("user1".into()))]);
         let pred = is_not_null_pred("auth");
-        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
         assert!(evaluate_predicate(&pred, &ctx));
     }
 
@@ -1799,7 +1933,10 @@ mod tests {
         let data = make_map(vec![]);
         let auth = make_auth(vec![("id", rmpv::Value::String("user1".into()))]);
         let pred = is_null_pred("auth.id");
-        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
         assert!(!evaluate_predicate(&pred, &ctx));
     }
 
@@ -1809,7 +1946,10 @@ mod tests {
         let data = make_map(vec![]);
         let auth = make_auth(vec![]); // no id field
         let pred = is_null_pred("auth.id");
-        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
         assert!(evaluate_predicate(&pred, &ctx));
     }
 
@@ -1818,7 +1958,10 @@ mod tests {
     fn is_null_auth_field_returns_true_when_auth_none() {
         let data = make_map(vec![]);
         let pred = is_null_pred("auth.id");
-        let ctx = EvalContext { auth: None, data: &data };
+        let ctx = EvalContext {
+            auth: None,
+            data: &data,
+        };
         assert!(evaluate_predicate(&pred, &ctx));
     }
 
@@ -1830,11 +1973,17 @@ mod tests {
             .expect("expression should parse");
         let data = make_map(vec![("public", rmpv::Value::Boolean(true))]);
         // No auth context — should be true (public == true AND auth == null).
-        let ctx = EvalContext { auth: None, data: &data };
+        let ctx = EvalContext {
+            auth: None,
+            data: &data,
+        };
         assert!(evaluate_predicate(&node, &ctx));
         // With auth context — should be false (auth is not null).
         let auth = make_auth(vec![("id", rmpv::Value::String("u1".into()))]);
-        let ctx_with_auth = EvalContext { auth: Some(&auth), data: &data };
+        let ctx_with_auth = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
         assert!(!evaluate_predicate(&node, &ctx_with_auth));
     }
 

@@ -3,7 +3,7 @@ use std::sync::Arc;
 pub mod distance;
 pub mod serde;
 
-pub use distance::{Distance, DistanceMetric, distance_for_metric};
+pub use distance::{distance_for_metric, Distance, DistanceMetric};
 
 #[cfg(test)]
 mod tests {
@@ -133,7 +133,10 @@ mod tests {
         let d = DotProductDistance;
         // dot([1,2], [3,4]) = 11; negated = -11
         let result = d.compute(&[1.0, 2.0], &[3.0, 4.0]);
-        assert!((result - (-11.0)).abs() < 1e-9, "expected -11.0, got {result}");
+        assert!(
+            (result - (-11.0)).abs() < 1e-9,
+            "expected -11.0, got {result}"
+        );
     }
 
     // --- Distance: Manhattan ---
@@ -298,7 +301,7 @@ mod tests {
 
     #[test]
     fn crate_root_reexports() {
-        use crate::{Distance, DistanceMetric, SharedVector, Vector, distance_for_metric};
+        use crate::{distance_for_metric, Distance, DistanceMetric, SharedVector, Vector};
         let _v = Vector::F32(vec![1.0]);
         let _sv = SharedVector::new(Vector::F32(vec![1.0]));
         let _d: Box<dyn Distance> = distance_for_metric(DistanceMetric::Cosine);

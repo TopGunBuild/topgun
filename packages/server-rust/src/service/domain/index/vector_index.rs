@@ -12,7 +12,7 @@ use std::collections::HashSet;
 
 use dashmap::{DashMap, DashSet};
 use parking_lot::{Mutex, RwLock};
-use topgun_core::vector::{Distance, DistanceMetric, SharedVector, distance_for_metric};
+use topgun_core::vector::{distance_for_metric, Distance, DistanceMetric, SharedVector};
 use tracing::warn;
 
 use crate::service::domain::index::attribute::AttributeExtractor;
@@ -171,9 +171,7 @@ impl VectorIndex {
             let hnsw = self.hnsw.read();
             hnsw.search(query, k, ef)
                 .into_iter()
-                .filter_map(|(id, dist)| {
-                    self.id_to_key.get(&id).map(|k| (k.clone(), dist))
-                })
+                .filter_map(|(id, dist)| self.id_to_key.get(&id).map(|k| (k.clone(), dist)))
                 .collect()
         };
 
@@ -189,8 +187,7 @@ impl VectorIndex {
             .collect();
 
         // Merge: pending wins over committed for the same key.
-        let mut merged: std::collections::HashMap<String, f64> =
-            std::collections::HashMap::new();
+        let mut merged: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
         for (key, dist) in committed {
             merged.insert(key, dist);
         }
@@ -237,17 +234,16 @@ impl VectorIndex {
             _ => return None,
         };
 
-        let decoded: topgun_core::vector::Vector =
-            rmp_serde::from_slice(bytes)
-                .map_err(|e| {
-                    warn!(
-                        attribute = %self.attribute,
-                        error = %e,
-                        "failed to decode vector from record binary field"
-                    );
-                    e
-                })
-                .ok()?;
+        let decoded: topgun_core::vector::Vector = rmp_serde::from_slice(bytes)
+            .map_err(|e| {
+                warn!(
+                    attribute = %self.attribute,
+                    error = %e,
+                    "failed to decode vector from record binary field"
+                );
+                e
+            })
+            .ok()?;
 
         let expected = self.dimension as usize;
         let got = decoded.dimension();
@@ -282,11 +278,13 @@ impl Index for VectorIndex {
         let Some(vector) = self.decode_vector_from_record(value) else {
             return;
         };
-        self.pending_snapshot.insert(key.to_string(), vector.clone());
+        self.pending_snapshot
+            .insert(key.to_string(), vector.clone());
         self.pending_removed.remove(key);
-        self.pending
-            .lock()
-            .push(VectorPendingUpdate::Upsert { key: key.to_string(), vector });
+        self.pending.lock().push(VectorPendingUpdate::Upsert {
+            key: key.to_string(),
+            vector,
+        });
     }
 
     fn update(&self, key: &str, _old_value: &rmpv::Value, new_value: &rmpv::Value) {
@@ -298,9 +296,9 @@ impl Index for VectorIndex {
     fn remove(&self, key: &str, _old_value: &rmpv::Value) {
         self.pending_snapshot.remove(key);
         self.pending_removed.insert(key.to_string());
-        self.pending
-            .lock()
-            .push(VectorPendingUpdate::Remove { key: key.to_string() });
+        self.pending.lock().push(VectorPendingUpdate::Remove {
+            key: key.to_string(),
+        });
     }
 
     fn clear(&self) {

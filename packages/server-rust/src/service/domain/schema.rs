@@ -26,7 +26,9 @@ impl SchemaService {
     /// Creates a new `SchemaService` with an empty schema registry.
     #[must_use]
     pub fn new() -> Self {
-        Self { schemas: DashMap::new() }
+        Self {
+            schemas: DashMap::new(),
+        }
     }
 }
 
@@ -66,7 +68,9 @@ impl ManagedService for SchemaService {
 #[async_trait]
 impl SchemaProvider for SchemaService {
     async fn get_schema(&self, map_name: &str) -> Option<MapSchema> {
-        self.schemas.get(map_name).map(|entry| entry.value().clone())
+        self.schemas
+            .get(map_name)
+            .map(|entry| entry.value().clone())
     }
 
     /// Register a schema for a map.
@@ -100,11 +104,7 @@ impl SchemaProvider for SchemaService {
     /// Compute the sync shape for a client.
     ///
     /// Returns `None` — shape computation is deferred to TODO-070.
-    async fn get_shape(
-        &self,
-        _map_name: &str,
-        _client_ctx: &RequestContext,
-    ) -> Option<SyncShape> {
+    async fn get_shape(&self, _map_name: &str, _client_ctx: &RequestContext) -> Option<SyncShape> {
         None
     }
 }
@@ -139,7 +139,11 @@ mod tests {
     }
 
     fn make_schema(fields: Vec<FieldDef>) -> MapSchema {
-        MapSchema { version: 1, fields, strict: false }
+        MapSchema {
+            version: 1,
+            fields,
+            strict: false,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -166,8 +170,16 @@ mod tests {
     #[tokio::test]
     async fn register_schema_overwrites_existing() {
         let svc = SchemaService::new();
-        let v1 = MapSchema { version: 1, fields: vec![], strict: false };
-        let v2 = MapSchema { version: 2, fields: vec![], strict: false };
+        let v1 = MapSchema {
+            version: 1,
+            fields: vec![],
+            strict: false,
+        };
+        let v2 = MapSchema {
+            version: 2,
+            fields: vec![],
+            strict: false,
+        };
         svc.register_schema("map", v1).await.unwrap();
         svc.register_schema("map", v2).await.unwrap();
         assert_eq!(svc.get_schema("map").await.unwrap().version, 2);
@@ -199,7 +211,10 @@ mod tests {
     fn validate_no_schema_returns_valid() {
         let svc = SchemaService::new();
         let value = make_map(vec![("x", Value::Int(1))]);
-        assert!(matches!(svc.validate("any_map", &value), ValidationResult::Valid));
+        assert!(matches!(
+            svc.validate("any_map", &value),
+            ValidationResult::Valid
+        ));
     }
 
     #[tokio::test]
@@ -209,7 +224,10 @@ mod tests {
         svc.register_schema("users", schema).await.unwrap();
 
         let value = make_map(vec![("name", Value::String("Alice".to_string()))]);
-        assert!(matches!(svc.validate("users", &value), ValidationResult::Valid));
+        assert!(matches!(
+            svc.validate("users", &value),
+            ValidationResult::Valid
+        ));
     }
 
     #[tokio::test]
@@ -219,7 +237,10 @@ mod tests {
         svc.register_schema("users", schema).await.unwrap();
 
         let value = make_map(vec![]);
-        assert!(matches!(svc.validate("users", &value), ValidationResult::Invalid { .. }));
+        assert!(matches!(
+            svc.validate("users", &value),
+            ValidationResult::Invalid { .. }
+        ));
     }
 
     #[tokio::test]
@@ -229,7 +250,10 @@ mod tests {
         svc.register_schema("users", schema).await.unwrap();
 
         let value = make_map(vec![("name", Value::Int(42))]);
-        assert!(matches!(svc.validate("users", &value), ValidationResult::Invalid { .. }));
+        assert!(matches!(
+            svc.validate("users", &value),
+            ValidationResult::Invalid { .. }
+        ));
     }
 
     #[tokio::test]
@@ -248,11 +272,17 @@ mod tests {
 
         // 11-char string fails.
         let invalid = make_map(vec![("title", Value::String("hello world".to_string()))]);
-        assert!(matches!(svc.validate("items", &invalid), ValidationResult::Invalid { .. }));
+        assert!(matches!(
+            svc.validate("items", &invalid),
+            ValidationResult::Invalid { .. }
+        ));
 
         // 5-char string passes.
         let valid = make_map(vec![("title", Value::String("hello".to_string()))]);
-        assert!(matches!(svc.validate("items", &valid), ValidationResult::Valid));
+        assert!(matches!(
+            svc.validate("items", &valid),
+            ValidationResult::Valid
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -277,12 +307,14 @@ mod tests {
 
     #[tokio::test]
     async fn lifecycle_noop_methods_return_ok() {
+        use crate::service::config::ServerConfig;
         use crate::service::registry::ServiceContext;
         use std::sync::Arc;
-        use crate::service::config::ServerConfig;
 
         let svc = SchemaService::new();
-        let ctx = ServiceContext { config: Arc::new(ServerConfig::default()) };
+        let ctx = ServiceContext {
+            config: Arc::new(ServerConfig::default()),
+        };
 
         assert_eq!(svc.name(), "schema");
         svc.init(&ctx).await.unwrap();

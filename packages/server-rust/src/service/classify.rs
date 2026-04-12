@@ -7,9 +7,7 @@ use topgun_core::messages::{ClientOp, Message, OpBatchMessage, OpBatchPayload, W
 use topgun_core::{hash_to_partition, HLC};
 
 use super::config::ServerConfig;
-use super::operation::{
-    service_names, CallerOrigin, ClassifyError, Operation, OperationContext,
-};
+use super::operation::{service_names, CallerOrigin, ClassifyError, Operation, OperationContext};
 
 // ---------------------------------------------------------------------------
 // OperationService
@@ -131,93 +129,50 @@ impl OperationService {
     ) -> Result<Operation, ClassifyError> {
         match msg {
             // ----- CRDT domain (service_name = "crdt") -----
-
             Message::ClientOp(payload) => {
                 let partition_key = Some(payload.payload.key.as_str());
-                let ctx = self.make_ctx(
-                    service_names::CRDT,
-                    client_id,
-                    caller_origin,
-                    partition_key,
-                );
+                let ctx =
+                    self.make_ctx(service_names::CRDT, client_id, caller_origin, partition_key);
                 Ok(Operation::ClientOp { ctx, payload })
             }
             Message::OpBatch(payload) => {
-                let ctx =
-                    self.make_ctx(service_names::CRDT, client_id, caller_origin, None);
+                let ctx = self.make_ctx(service_names::CRDT, client_id, caller_origin, None);
                 Ok(Operation::OpBatch { ctx, payload })
             }
 
             // ----- Sync domain (service_name = "sync") -----
-
             Message::SyncInit(payload) => {
                 // Sync messages use partition 0 (client-sync partition), not
                 // hash_to_partition(map_name). Setting partition_key to None
                 // causes SyncService to default to partition 0 via
                 // ctx.partition_id.unwrap_or(0).
-                let ctx = self.make_ctx(
-                    service_names::SYNC,
-                    client_id,
-                    caller_origin,
-                    None,
-                );
+                let ctx = self.make_ctx(service_names::SYNC, client_id, caller_origin, None);
                 Ok(Operation::SyncInit { ctx, payload })
             }
             Message::MerkleReqBucket(payload) => {
-                let ctx = self.make_ctx(
-                    service_names::SYNC,
-                    client_id,
-                    caller_origin,
-                    None,
-                );
+                let ctx = self.make_ctx(service_names::SYNC, client_id, caller_origin, None);
                 Ok(Operation::MerkleReqBucket { ctx, payload })
             }
             Message::ORMapSyncInit(payload) => {
-                let ctx = self.make_ctx(
-                    service_names::SYNC,
-                    client_id,
-                    caller_origin,
-                    None,
-                );
+                let ctx = self.make_ctx(service_names::SYNC, client_id, caller_origin, None);
                 Ok(Operation::ORMapSyncInit { ctx, payload })
             }
             Message::ORMapMerkleReqBucket(payload) => {
-                let ctx = self.make_ctx(
-                    service_names::SYNC,
-                    client_id,
-                    caller_origin,
-                    None,
-                );
+                let ctx = self.make_ctx(service_names::SYNC, client_id, caller_origin, None);
                 Ok(Operation::ORMapMerkleReqBucket { ctx, payload })
             }
             Message::ORMapDiffRequest(payload) => {
-                let ctx = self.make_ctx(
-                    service_names::SYNC,
-                    client_id,
-                    caller_origin,
-                    None,
-                );
+                let ctx = self.make_ctx(service_names::SYNC, client_id, caller_origin, None);
                 Ok(Operation::ORMapDiffRequest { ctx, payload })
             }
             Message::ORMapPushDiff(payload) => {
-                let ctx = self.make_ctx(
-                    service_names::SYNC,
-                    client_id,
-                    caller_origin,
-                    None,
-                );
+                let ctx = self.make_ctx(service_names::SYNC, client_id, caller_origin, None);
                 Ok(Operation::ORMapPushDiff { ctx, payload })
             }
 
             // ----- Query domain (service_name = "query") -----
-
             Message::QuerySub(payload) => {
-                let ctx = self.make_ctx(
-                    service_names::QUERY,
-                    client_id,
-                    caller_origin,
-                    None,
-                );
+                let ctx = self.make_ctx(service_names::QUERY, client_id, caller_origin, None);
                 // Route GROUP BY queries through DAG path
                 let has_group_by = payload
                     .payload
@@ -232,26 +187,15 @@ impl OperationService {
                 }
             }
             Message::QueryUnsub(payload) => {
-                let ctx = self.make_ctx(
-                    service_names::QUERY,
-                    client_id,
-                    caller_origin,
-                    None,
-                );
+                let ctx = self.make_ctx(service_names::QUERY, client_id, caller_origin, None);
                 Ok(Operation::QueryUnsubscribe { ctx, payload })
             }
             Message::QuerySyncInit(payload) => {
-                let ctx = self.make_ctx(
-                    service_names::QUERY,
-                    client_id,
-                    caller_origin,
-                    None,
-                );
+                let ctx = self.make_ctx(service_names::QUERY, client_id, caller_origin, None);
                 Ok(Operation::QuerySyncInit { ctx, payload })
             }
 
             // ----- Messaging domain (service_name = "messaging") -----
-
             Message::TopicSub { payload } => {
                 let partition_key = Some(payload.topic.as_str());
                 let ctx = self.make_ctx(
@@ -284,7 +228,6 @@ impl OperationService {
             }
 
             // ----- Coordination domain (service_name = "coordination") -----
-
             Message::LockRequest { payload } => {
                 let partition_key = Some(payload.name.as_str());
                 let ctx = self.make_ctx(
@@ -306,56 +249,31 @@ impl OperationService {
                 Ok(Operation::LockRelease { ctx, payload })
             }
             Message::PartitionMapRequest { payload } => {
-                let ctx = self.make_ctx(
-                    service_names::COORDINATION,
-                    client_id,
-                    caller_origin,
-                    None,
-                );
+                let ctx =
+                    self.make_ctx(service_names::COORDINATION, client_id, caller_origin, None);
                 Ok(Operation::PartitionMapRequest { ctx, payload })
             }
             Message::Ping(payload) => {
-                let ctx = self.make_ctx(
-                    service_names::COORDINATION,
-                    client_id,
-                    caller_origin,
-                    None,
-                );
+                let ctx =
+                    self.make_ctx(service_names::COORDINATION, client_id, caller_origin, None);
                 Ok(Operation::Ping { ctx, payload })
             }
 
             // ----- Search domain (service_name = "search") -----
-
             Message::Search { payload } => {
-                let ctx = self.make_ctx(
-                    service_names::SEARCH,
-                    client_id,
-                    caller_origin,
-                    None,
-                );
+                let ctx = self.make_ctx(service_names::SEARCH, client_id, caller_origin, None);
                 Ok(Operation::Search { ctx, payload })
             }
             Message::SearchSub { payload } => {
-                let ctx = self.make_ctx(
-                    service_names::SEARCH,
-                    client_id,
-                    caller_origin,
-                    None,
-                );
+                let ctx = self.make_ctx(service_names::SEARCH, client_id, caller_origin, None);
                 Ok(Operation::SearchSubscribe { ctx, payload })
             }
             Message::SearchUnsub { payload } => {
-                let ctx = self.make_ctx(
-                    service_names::SEARCH,
-                    client_id,
-                    caller_origin,
-                    None,
-                );
+                let ctx = self.make_ctx(service_names::SEARCH, client_id, caller_origin, None);
                 Ok(Operation::SearchUnsubscribe { ctx, payload })
             }
 
             // ----- Persistence domain (service_name = "persistence") -----
-
             Message::CounterRequest { payload } => {
                 let partition_key = Some(payload.name.as_str());
                 let ctx = self.make_ctx(
@@ -387,12 +305,7 @@ impl OperationService {
                 Ok(Operation::EntryProcess { ctx, payload })
             }
             Message::EntryProcessBatch(payload) => {
-                let ctx = self.make_ctx(
-                    service_names::PERSISTENCE,
-                    client_id,
-                    caller_origin,
-                    None,
-                );
+                let ctx = self.make_ctx(service_names::PERSISTENCE, client_id, caller_origin, None);
                 Ok(Operation::EntryProcessBatch { ctx, payload })
             }
             Message::RegisterResolver(payload) => {
@@ -457,14 +370,8 @@ impl OperationService {
             }
 
             // ----- SQL / vector query -----
-
             Message::SqlQuery { payload } => {
-                let ctx = self.make_ctx(
-                    service_names::QUERY,
-                    client_id,
-                    caller_origin,
-                    None,
-                );
+                let ctx = self.make_ctx(service_names::QUERY, client_id, caller_origin, None);
                 Ok(Operation::SqlQuery { ctx, payload })
             }
 
@@ -479,68 +386,67 @@ impl OperationService {
             }
 
             // ----- Server-to-client responses -> ClassifyError::ServerToClient -----
-
             Message::OpAck(_) => Err(ClassifyError::ServerToClient { variant: "OpAck" }),
-            Message::OpRejected(_) => {
-                Err(ClassifyError::ServerToClient { variant: "OpRejected" })
-            }
-            Message::SyncRespRoot(_) => {
-                Err(ClassifyError::ServerToClient { variant: "SyncRespRoot" })
-            }
-            Message::SyncRespBuckets(_) => {
-                Err(ClassifyError::ServerToClient { variant: "SyncRespBuckets" })
-            }
-            Message::SyncRespLeaf(_) => {
-                Err(ClassifyError::ServerToClient { variant: "SyncRespLeaf" })
-            }
-            Message::ORMapSyncRespRoot(_) => {
-                Err(ClassifyError::ServerToClient { variant: "ORMapSyncRespRoot" })
-            }
+            Message::OpRejected(_) => Err(ClassifyError::ServerToClient {
+                variant: "OpRejected",
+            }),
+            Message::SyncRespRoot(_) => Err(ClassifyError::ServerToClient {
+                variant: "SyncRespRoot",
+            }),
+            Message::SyncRespBuckets(_) => Err(ClassifyError::ServerToClient {
+                variant: "SyncRespBuckets",
+            }),
+            Message::SyncRespLeaf(_) => Err(ClassifyError::ServerToClient {
+                variant: "SyncRespLeaf",
+            }),
+            Message::ORMapSyncRespRoot(_) => Err(ClassifyError::ServerToClient {
+                variant: "ORMapSyncRespRoot",
+            }),
             Message::ORMapSyncRespBuckets(_) => Err(ClassifyError::ServerToClient {
                 variant: "ORMapSyncRespBuckets",
             }),
-            Message::ORMapSyncRespLeaf(_) => {
-                Err(ClassifyError::ServerToClient { variant: "ORMapSyncRespLeaf" })
-            }
-            Message::ORMapDiffResponse(_) => {
-                Err(ClassifyError::ServerToClient { variant: "ORMapDiffResponse" })
-            }
-            Message::QueryResp(_) => {
-                Err(ClassifyError::ServerToClient { variant: "QueryResp" })
-            }
-            Message::SqlQueryResp { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "SqlQueryResp" })
-            }
-            Message::VectorSearchResp { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "VectorSearchResp" })
-            }
-            Message::QueryUpdate { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "QueryUpdate" })
-            }
-            Message::SearchResp { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "SearchResp" })
-            }
-            Message::SearchUpdate { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "SearchUpdate" })
-            }
-            Message::CounterResponse { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "CounterResponse" })
-            }
-            Message::CounterUpdate { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "CounterUpdate" })
-            }
+            Message::ORMapSyncRespLeaf(_) => Err(ClassifyError::ServerToClient {
+                variant: "ORMapSyncRespLeaf",
+            }),
+            Message::ORMapDiffResponse(_) => Err(ClassifyError::ServerToClient {
+                variant: "ORMapDiffResponse",
+            }),
+            Message::QueryResp(_) => Err(ClassifyError::ServerToClient {
+                variant: "QueryResp",
+            }),
+            Message::SqlQueryResp { .. } => Err(ClassifyError::ServerToClient {
+                variant: "SqlQueryResp",
+            }),
+            Message::VectorSearchResp { .. } => Err(ClassifyError::ServerToClient {
+                variant: "VectorSearchResp",
+            }),
+            Message::QueryUpdate { .. } => Err(ClassifyError::ServerToClient {
+                variant: "QueryUpdate",
+            }),
+            Message::SearchResp { .. } => Err(ClassifyError::ServerToClient {
+                variant: "SearchResp",
+            }),
+            Message::SearchUpdate { .. } => Err(ClassifyError::ServerToClient {
+                variant: "SearchUpdate",
+            }),
+            Message::CounterResponse { .. } => Err(ClassifyError::ServerToClient {
+                variant: "CounterResponse",
+            }),
+            Message::CounterUpdate { .. } => Err(ClassifyError::ServerToClient {
+                variant: "CounterUpdate",
+            }),
             Message::EntryProcessResponse(_) => Err(ClassifyError::ServerToClient {
                 variant: "EntryProcessResponse",
             }),
             Message::EntryProcessBatchResponse(_) => Err(ClassifyError::ServerToClient {
                 variant: "EntryProcessBatchResponse",
             }),
-            Message::JournalEvent { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "JournalEvent" })
-            }
-            Message::JournalReadResponse(_) => {
-                Err(ClassifyError::ServerToClient { variant: "JournalReadResponse" })
-            }
+            Message::JournalEvent { .. } => Err(ClassifyError::ServerToClient {
+                variant: "JournalEvent",
+            }),
+            Message::JournalReadResponse(_) => Err(ClassifyError::ServerToClient {
+                variant: "JournalReadResponse",
+            }),
             Message::RegisterResolverResponse(_) => Err(ClassifyError::ServerToClient {
                 variant: "RegisterResolverResponse",
             }),
@@ -550,90 +456,77 @@ impl OperationService {
             Message::ListResolversResponse(_) => Err(ClassifyError::ServerToClient {
                 variant: "ListResolversResponse",
             }),
-            Message::MergeRejected(_) => {
-                Err(ClassifyError::ServerToClient { variant: "MergeRejected" })
-            }
-            Message::ServerEvent { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "ServerEvent" })
-            }
-            Message::ServerBatchEvent { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "ServerBatchEvent" })
-            }
-            Message::GcPrune { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "GcPrune" })
-            }
-            Message::AuthAck(_) => {
-                Err(ClassifyError::ServerToClient { variant: "AuthAck" })
-            }
-            Message::AuthFail(_) => {
-                Err(ClassifyError::ServerToClient { variant: "AuthFail" })
-            }
-            Message::Error { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "Error" })
-            }
-            Message::LockGranted { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "LockGranted" })
-            }
-            Message::LockReleased { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "LockReleased" })
-            }
-            Message::SyncResetRequired { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "SyncResetRequired" })
-            }
-            Message::Pong(_) => {
-                Err(ClassifyError::ServerToClient { variant: "Pong" })
-            }
-            Message::PartitionMap { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "PartitionMap" })
-            }
-            Message::TopicMessage { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "TopicMessage" })
-            }
+            Message::MergeRejected(_) => Err(ClassifyError::ServerToClient {
+                variant: "MergeRejected",
+            }),
+            Message::ServerEvent { .. } => Err(ClassifyError::ServerToClient {
+                variant: "ServerEvent",
+            }),
+            Message::ServerBatchEvent { .. } => Err(ClassifyError::ServerToClient {
+                variant: "ServerBatchEvent",
+            }),
+            Message::GcPrune { .. } => Err(ClassifyError::ServerToClient { variant: "GcPrune" }),
+            Message::AuthAck(_) => Err(ClassifyError::ServerToClient { variant: "AuthAck" }),
+            Message::AuthFail(_) => Err(ClassifyError::ServerToClient {
+                variant: "AuthFail",
+            }),
+            Message::Error { .. } => Err(ClassifyError::ServerToClient { variant: "Error" }),
+            Message::LockGranted { .. } => Err(ClassifyError::ServerToClient {
+                variant: "LockGranted",
+            }),
+            Message::LockReleased { .. } => Err(ClassifyError::ServerToClient {
+                variant: "LockReleased",
+            }),
+            Message::SyncResetRequired { .. } => Err(ClassifyError::ServerToClient {
+                variant: "SyncResetRequired",
+            }),
+            Message::Pong(_) => Err(ClassifyError::ServerToClient { variant: "Pong" }),
+            Message::PartitionMap { .. } => Err(ClassifyError::ServerToClient {
+                variant: "PartitionMap",
+            }),
+            Message::TopicMessage { .. } => Err(ClassifyError::ServerToClient {
+                variant: "TopicMessage",
+            }),
 
             // ----- Cluster-internal messages -> ClassifyError::ServerToClient -----
             // These are node-to-node, not client-to-server. They will be handled
             // by a separate cluster message path in Phase 3+.
-
-            Message::ClusterSubRegister { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "ClusterSubRegister" })
-            }
-            Message::ClusterSubAck { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "ClusterSubAck" })
-            }
-            Message::ClusterSubUpdate { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "ClusterSubUpdate" })
-            }
-            Message::ClusterSubUnregister { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "ClusterSubUnregister" })
-            }
-            Message::ClusterSearchReq { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "ClusterSearchReq" })
-            }
-            Message::ClusterSearchResp { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "ClusterSearchResp" })
-            }
+            Message::ClusterSubRegister { .. } => Err(ClassifyError::ServerToClient {
+                variant: "ClusterSubRegister",
+            }),
+            Message::ClusterSubAck { .. } => Err(ClassifyError::ServerToClient {
+                variant: "ClusterSubAck",
+            }),
+            Message::ClusterSubUpdate { .. } => Err(ClassifyError::ServerToClient {
+                variant: "ClusterSubUpdate",
+            }),
+            Message::ClusterSubUnregister { .. } => Err(ClassifyError::ServerToClient {
+                variant: "ClusterSubUnregister",
+            }),
+            Message::ClusterSearchReq { .. } => Err(ClassifyError::ServerToClient {
+                variant: "ClusterSearchReq",
+            }),
+            Message::ClusterSearchResp { .. } => Err(ClassifyError::ServerToClient {
+                variant: "ClusterSearchResp",
+            }),
             Message::ClusterSearchSubscribe { .. } => Err(ClassifyError::ServerToClient {
                 variant: "ClusterSearchSubscribe",
             }),
             Message::ClusterSearchUnsubscribe { .. } => Err(ClassifyError::ServerToClient {
                 variant: "ClusterSearchUnsubscribe",
             }),
-            Message::ClusterSearchUpdate { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "ClusterSearchUpdate" })
-            }
+            Message::ClusterSearchUpdate { .. } => Err(ClassifyError::ServerToClient {
+                variant: "ClusterSearchUpdate",
+            }),
 
             // ----- Transport envelope -> ClassifyError::TransportEnvelope -----
-
-            Message::Batch(_) => {
-                Err(ClassifyError::TransportEnvelope { variant: "Batch" })
-            }
+            Message::Batch(_) => Err(ClassifyError::TransportEnvelope { variant: "Batch" }),
 
             // ----- Auth messages -> ClassifyError::AuthMessage -----
-
             Message::Auth(_) => Err(ClassifyError::AuthMessage { variant: "Auth" }),
-            Message::AuthRequired(_) => {
-                Err(ClassifyError::AuthMessage { variant: "AuthRequired" })
-            }
+            Message::AuthRequired(_) => Err(ClassifyError::AuthMessage {
+                variant: "AuthRequired",
+            }),
         }
     }
 }
@@ -760,7 +653,10 @@ mod tests {
             server_time: 1_700_000_000_001,
         });
         let err = svc.classify(msg, None, CallerOrigin::Client).unwrap_err();
-        assert!(matches!(err, ClassifyError::ServerToClient { variant: "Pong" }));
+        assert!(matches!(
+            err,
+            ClassifyError::ServerToClient { variant: "Pong" }
+        ));
     }
 
     #[test]
@@ -807,7 +703,9 @@ mod tests {
         let err = svc.classify(msg, None, CallerOrigin::Client).unwrap_err();
         assert!(matches!(
             err,
-            ClassifyError::ServerToClient { variant: "ClusterSubAck" }
+            ClassifyError::ServerToClient {
+                variant: "ClusterSubAck"
+            }
         ));
     }
 
@@ -892,9 +790,7 @@ mod tests {
                 path: "0".to_string(),
             },
         });
-        let op = svc
-            .classify(msg, None, CallerOrigin::Client)
-            .unwrap();
+        let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
         assert!(
             op.ctx().partition_id.is_none(),
             "MerkleReqBucket should produce partition_id: None"
@@ -911,9 +807,7 @@ mod tests {
             bucket_hashes: HashMap::new(),
             last_sync_timestamp: None,
         });
-        let op = svc
-            .classify(msg, None, CallerOrigin::Client)
-            .unwrap();
+        let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
         assert!(
             op.ctx().partition_id.is_none(),
             "ORMapSyncInit should produce partition_id: None"
@@ -934,14 +828,8 @@ mod tests {
             write_concern: None,
             timeout: None,
         }];
-        let op = svc.classify_op_batch_for_partition(
-            ops,
-            42,
-            None,
-            CallerOrigin::Client,
-            None,
-            None,
-        );
+        let op =
+            svc.classify_op_batch_for_partition(ops, 42, None, CallerOrigin::Client, None, None);
         assert_eq!(op.ctx().service_name, service_names::CRDT);
         assert_eq!(op.ctx().partition_id, Some(42));
         assert!(op.ctx().client_id.is_none());
@@ -1133,10 +1021,15 @@ mod tests {
                 options: None,
             },
         };
-        let op = svc.classify(msg, Some("client-1".to_string()), CallerOrigin::Client).unwrap();
+        let op = svc
+            .classify(msg, Some("client-1".to_string()), CallerOrigin::Client)
+            .unwrap();
         assert_eq!(op.ctx().service_name, service_names::QUERY);
         // partition_key = Some("products") should produce a partition_id
-        assert!(op.ctx().partition_id.is_some(), "partition_id should be set from map_name");
+        assert!(
+            op.ctx().partition_id.is_some(),
+            "partition_id should be set from map_name"
+        );
         assert_eq!(op.ctx().client_id.as_deref(), Some("client-1"));
         assert!(matches!(op, Operation::VectorSearch { .. }));
     }
@@ -1155,7 +1048,12 @@ mod tests {
         };
         let err = svc.classify(msg, None, CallerOrigin::Client).unwrap_err();
         assert!(
-            matches!(err, ClassifyError::ServerToClient { variant: "VectorSearchResp" }),
+            matches!(
+                err,
+                ClassifyError::ServerToClient {
+                    variant: "VectorSearchResp"
+                }
+            ),
             "expected ServerToClient VectorSearchResp, got: {err:?}",
         );
     }

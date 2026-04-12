@@ -88,13 +88,7 @@ impl QueryMerkleSyncManager {
     ///
     /// Used when a record no longer matches the query filter (LEAVE event).
     /// No-ops if the tree does not exist.
-    pub fn remove_entry(
-        &self,
-        query_id: &str,
-        map_name: &str,
-        partition_id: u32,
-        key: &str,
-    ) {
+    pub fn remove_entry(&self, query_id: &str, map_name: &str, partition_id: u32, key: &str) {
         let k = (query_id.to_string(), map_name.to_string(), partition_id);
         if let Some(entry) = self.trees.get(&k) {
             entry.lock().remove(key);

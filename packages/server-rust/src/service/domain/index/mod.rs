@@ -21,8 +21,8 @@ pub mod vector_index;
 pub use attribute::AttributeExtractor;
 pub use hash_index::HashIndex;
 pub use inverted_index::InvertedIndex;
-pub use navigable_index::NavigableIndex;
 pub use mutation_observer::{IndexMutationObserver, IndexObserverFactory};
+pub use navigable_index::NavigableIndex;
 pub use query_optimizer::index_aware_evaluate;
 pub use registry::{IndexRegistry, IndexStats};
 pub use vector_cache::{VectorCache, VectorCacheConfig};
@@ -134,12 +134,20 @@ impl std::hash::Hash for IndexableValue {
             rmpv::Value::F32(f) => {
                 3u8.hash(state);
                 // Normalise NaN to a canonical bit pattern before hashing.
-                let bits = if f.is_nan() { f32::NAN.to_bits() } else { f.to_bits() };
+                let bits = if f.is_nan() {
+                    f32::NAN.to_bits()
+                } else {
+                    f.to_bits()
+                };
                 bits.hash(state);
             }
             rmpv::Value::F64(f) => {
                 4u8.hash(state);
-                let bits = if f.is_nan() { f64::NAN.to_bits() } else { f.to_bits() };
+                let bits = if f.is_nan() {
+                    f64::NAN.to_bits()
+                } else {
+                    f.to_bits()
+                };
                 bits.hash(state);
             }
             rmpv::Value::String(s) => {
@@ -220,8 +228,12 @@ impl Ord for ComparableValue {
             (rmpv::Value::Boolean(a), rmpv::Value::Boolean(b)) => a.cmp(b),
             (rmpv::Value::Integer(a), rmpv::Value::Integer(b)) => {
                 // Convert to i128 for a unified comparison across signed/unsigned.
-                let ai = a.as_i64().map_or_else(|| i128::from(a.as_u64().unwrap_or(0)), i128::from);
-                let bi = b.as_i64().map_or_else(|| i128::from(b.as_u64().unwrap_or(0)), i128::from);
+                let ai = a
+                    .as_i64()
+                    .map_or_else(|| i128::from(a.as_u64().unwrap_or(0)), i128::from);
+                let bi = b
+                    .as_i64()
+                    .map_or_else(|| i128::from(b.as_u64().unwrap_or(0)), i128::from);
                 ai.cmp(&bi)
             }
             (rmpv::Value::F32(a), rmpv::Value::F32(b)) => a.total_cmp(b),
@@ -229,7 +241,9 @@ impl Ord for ComparableValue {
             // Cross-width float comparison: promote both to f64.
             (rmpv::Value::F32(a), rmpv::Value::F64(b)) => f64::from(*a).total_cmp(b),
             (rmpv::Value::F64(a), rmpv::Value::F32(b)) => a.total_cmp(&f64::from(*b)),
-            (rmpv::Value::String(a), rmpv::Value::String(b)) => a.as_str().unwrap_or("").cmp(b.as_str().unwrap_or("")),
+            (rmpv::Value::String(a), rmpv::Value::String(b)) => {
+                a.as_str().unwrap_or("").cmp(b.as_str().unwrap_or(""))
+            }
             (rmpv::Value::Binary(a), rmpv::Value::Binary(b)) => a.cmp(b),
             _ => Ordering::Equal,
         }

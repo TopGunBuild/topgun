@@ -28,7 +28,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::hash::fnv1a_hash;
-use crate::hlc::{HLC, LWWRecord, Timestamp};
+use crate::hlc::{LWWRecord, Timestamp, HLC};
 use crate::merkle::MerkleTree;
 
 /// A Last-Write-Wins Map providing conflict-free convergence.
@@ -76,12 +76,7 @@ where
     ///
     /// Generates a fresh timestamp from the internal HLC, stores the record,
     /// and updates the `MerkleTree`. Returns a clone of the stored record.
-    pub fn set(
-        &mut self,
-        key: impl Into<String>,
-        value: V,
-        ttl_ms: Option<u64>,
-    ) -> LWWRecord<V> {
+    pub fn set(&mut self, key: impl Into<String>, value: V, ttl_ms: Option<u64>) -> LWWRecord<V> {
         let key = key.into();
         let timestamp = self.hlc.now();
         let record = LWWRecord {
@@ -283,10 +278,7 @@ mod tests {
     fn set_and_get_basic() {
         let (mut map, _) = make_map(1_000_000);
         map.set("key1", Value::String("value1".to_string()), None);
-        assert_eq!(
-            map.get("key1"),
-            Some(&Value::String("value1".to_string()))
-        );
+        assert_eq!(map.get("key1"), Some(&Value::String("value1".to_string())));
     }
 
     #[test]
@@ -374,10 +366,7 @@ mod tests {
         // Clock is at 1_000_000, timestamp.millis is 1_000_000, TTL is 500ms
         // Expires when millis + 500 < now, i.e., 1_000_500 < now
         // now is 1_000_000, not expired
-        assert_eq!(
-            map.get("temp"),
-            Some(&Value::String("data".to_string()))
-        );
+        assert_eq!(map.get("temp"), Some(&Value::String("data".to_string())));
     }
 
     #[test]
@@ -396,10 +385,7 @@ mod tests {
         // At exactly the boundary: millis(1_000_000) + 500 = 1_000_500
         // Condition is `<`, so 1_000_500 < 1_000_500 is false => not expired
         time.store(1_000_500, AtomicOrdering::Relaxed);
-        assert_eq!(
-            map.get("temp"),
-            Some(&Value::String("data".to_string()))
-        );
+        assert_eq!(map.get("temp"), Some(&Value::String("data".to_string())));
     }
 
     #[test]
@@ -407,10 +393,7 @@ mod tests {
         let (mut map, time) = make_map(1_000_000);
         map.set("perm", Value::String("forever".to_string()), None);
         time.store(u64::MAX, AtomicOrdering::Relaxed);
-        assert_eq!(
-            map.get("perm"),
-            Some(&Value::String("forever".to_string()))
-        );
+        assert_eq!(map.get("perm"), Some(&Value::String("forever".to_string())));
     }
 
     // ---- Conflict resolution ----
@@ -902,27 +885,47 @@ mod tests {
         let variants: Vec<LWWRecord<Value>> = vec![
             LWWRecord {
                 value: Some(Value::Null),
-                timestamp: Timestamp { millis: 1, counter: 0, node_id: "n".to_string() },
+                timestamp: Timestamp {
+                    millis: 1,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
                 ttl_ms: None,
             },
             LWWRecord {
                 value: Some(Value::Bool(true)),
-                timestamp: Timestamp { millis: 2, counter: 0, node_id: "n".to_string() },
+                timestamp: Timestamp {
+                    millis: 2,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
                 ttl_ms: None,
             },
             LWWRecord {
                 value: Some(Value::Int(-42)),
-                timestamp: Timestamp { millis: 3, counter: 0, node_id: "n".to_string() },
+                timestamp: Timestamp {
+                    millis: 3,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
                 ttl_ms: Some(1000),
             },
             LWWRecord {
                 value: Some(Value::Float(1.5)),
-                timestamp: Timestamp { millis: 4, counter: 0, node_id: "n".to_string() },
+                timestamp: Timestamp {
+                    millis: 4,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
                 ttl_ms: None,
             },
             LWWRecord {
                 value: Some(Value::Bytes(vec![0xDE, 0xAD])),
-                timestamp: Timestamp { millis: 5, counter: 0, node_id: "n".to_string() },
+                timestamp: Timestamp {
+                    millis: 5,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
                 ttl_ms: None,
             },
         ];
@@ -976,12 +979,13 @@ mod proptests {
 
     /// Strategy for generating arbitrary `Timestamp` values.
     fn arb_timestamp() -> impl Strategy<Value = Timestamp> {
-        (1_u64..1_000_000_000_u64, 0_u32..1000_u32, "[a-z]{1,8}")
-            .prop_map(|(millis, counter, node_id)| Timestamp {
+        (1_u64..1_000_000_000_u64, 0_u32..1000_u32, "[a-z]{1,8}").prop_map(
+            |(millis, counter, node_id)| Timestamp {
                 millis,
                 counter,
                 node_id,
-            })
+            },
+        )
     }
 
     /// Strategy for generating arbitrary `Value` variants (non-recursive for simplicity).
@@ -1007,12 +1011,10 @@ mod proptests {
 
     /// Strategy for generating `LWWRecord<Value>` that may be a tombstone.
     fn arb_lww_record_maybe_tombstone() -> impl Strategy<Value = LWWRecord<Value>> {
-        (prop::option::of(arb_value()), arb_timestamp()).prop_map(|(value, timestamp)| {
-            LWWRecord {
-                value,
-                timestamp,
-                ttl_ms: None,
-            }
+        (prop::option::of(arb_value()), arb_timestamp()).prop_map(|(value, timestamp)| LWWRecord {
+            value,
+            timestamp,
+            ttl_ms: None,
         })
     }
 

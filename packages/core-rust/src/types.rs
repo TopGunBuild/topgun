@@ -141,7 +141,10 @@ impl CrdtMap {
 impl fmt::Debug for CrdtMap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Lww(_) => f.debug_tuple("CrdtMap::Lww").field(&"LWWMap<Value>").finish(),
+            Self::Lww(_) => f
+                .debug_tuple("CrdtMap::Lww")
+                .field(&"LWWMap<Value>")
+                .finish(),
             Self::Or(_) => f.debug_tuple("CrdtMap::Or").field(&"ORMap<Value>").finish(),
         }
     }
@@ -153,7 +156,9 @@ impl StorageValue {
     /// # Errors
     ///
     /// Returns an error if serialization fails.
-    pub fn from_lww_record<V: Serialize>(record: &LWWRecord<V>) -> Result<Self, rmp_serde::encode::Error> {
+    pub fn from_lww_record<V: Serialize>(
+        record: &LWWRecord<V>,
+    ) -> Result<Self, rmp_serde::encode::Error> {
         let data = rmp_serde::to_vec(record)?;
         Ok(Self { data })
     }
@@ -163,7 +168,9 @@ impl StorageValue {
     /// # Errors
     ///
     /// Returns an error if serialization fails.
-    pub fn from_or_map_record<V: Serialize>(record: &ORMapRecord<V>) -> Result<Self, rmp_serde::encode::Error> {
+    pub fn from_or_map_record<V: Serialize>(
+        record: &ORMapRecord<V>,
+    ) -> Result<Self, rmp_serde::encode::Error> {
         let data = rmp_serde::to_vec(record)?;
         Ok(Self { data })
     }
@@ -201,8 +208,14 @@ mod tests {
 
     #[test]
     fn from_rmpv_integer_signed() {
-        assert_eq!(Value::from(rmpv::Value::Integer((-42i64).into())), Value::Int(-42));
-        assert_eq!(Value::from(rmpv::Value::Integer(0i64.into())), Value::Int(0));
+        assert_eq!(
+            Value::from(rmpv::Value::Integer((-42i64).into())),
+            Value::Int(-42)
+        );
+        assert_eq!(
+            Value::from(rmpv::Value::Integer(0i64.into())),
+            Value::Int(0)
+        );
     }
 
     #[test]
@@ -237,7 +250,7 @@ mod tests {
         // rmpv::Utf8String::from_bytes with non-UTF-8 data → into_str() returns None → default ""
         let raw = rmpv::Utf8String::from(
             // Build a string from valid UTF-8 first; into_str() on valid = Some.
-            "valid"
+            "valid",
         );
         let v = rmpv::Value::String(raw);
         assert_eq!(Value::from(v), Value::String("valid".to_string()));
@@ -264,12 +277,10 @@ mod tests {
 
     #[test]
     fn from_rmpv_map_string_keys() {
-        let v = rmpv::Value::Map(vec![
-            (
-                rmpv::Value::String("name".into()),
-                rmpv::Value::String("Alice".into()),
-            ),
-        ]);
+        let v = rmpv::Value::Map(vec![(
+            rmpv::Value::String("name".into()),
+            rmpv::Value::String("Alice".into()),
+        )]);
         let result = Value::from(v);
         match result {
             Value::Map(m) => {
@@ -282,9 +293,10 @@ mod tests {
     #[test]
     fn from_rmpv_map_non_string_keys_use_display() {
         // Integer key → converted via Display to its string representation.
-        let v = rmpv::Value::Map(vec![
-            (rmpv::Value::Integer(42i64.into()), rmpv::Value::Boolean(true)),
-        ]);
+        let v = rmpv::Value::Map(vec![(
+            rmpv::Value::Integer(42i64.into()),
+            rmpv::Value::Boolean(true),
+        )]);
         let result = Value::from(v);
         match result {
             Value::Map(m) => {
@@ -303,19 +315,14 @@ mod tests {
 
     #[test]
     fn from_rmpv_nested_array_in_map() {
-        let v = rmpv::Value::Map(vec![
-            (
-                rmpv::Value::String("items".into()),
-                rmpv::Value::Array(vec![rmpv::Value::Integer(1i64.into())]),
-            ),
-        ]);
+        let v = rmpv::Value::Map(vec![(
+            rmpv::Value::String("items".into()),
+            rmpv::Value::Array(vec![rmpv::Value::Integer(1i64.into())]),
+        )]);
         let result = Value::from(v);
         match result {
             Value::Map(m) => {
-                assert_eq!(
-                    m.get("items"),
-                    Some(&Value::Array(vec![Value::Int(1)]))
-                );
+                assert_eq!(m.get("items"), Some(&Value::Array(vec![Value::Int(1)])));
             }
             other => panic!("expected Map, got {other:?}"),
         }

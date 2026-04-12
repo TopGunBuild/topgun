@@ -9,7 +9,13 @@ use topgun_server::network::NetworkModule;
 
 /// Starts a minimal server on an OS-assigned port.
 /// Returns `(port, shutdown_tx, serve_handle)`.
-async fn start_server(config: NetworkConfig) -> (u16, tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+async fn start_server(
+    config: NetworkConfig,
+) -> (
+    u16,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
     let mut module = NetworkModule::new(config);
     let port = module.start().await.expect("start should succeed");
 
@@ -44,7 +50,10 @@ async fn cors_preflight_allows_put_and_delete() {
 
     let client = reqwest::Client::new();
     let resp = client
-        .request(reqwest::Method::OPTIONS, format!("http://127.0.0.1:{port}/api/admin/settings"))
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("http://127.0.0.1:{port}/api/admin/settings"),
+        )
         .header("Origin", "http://localhost:3000")
         .header("Access-Control-Request-Method", "PUT")
         .send()
@@ -58,9 +67,18 @@ async fn cors_preflight_allows_put_and_delete() {
         .to_str()
         .unwrap();
 
-    assert!(allow_methods.contains("PUT"), "allowed methods should include PUT, got: {allow_methods}");
-    assert!(allow_methods.contains("DELETE"), "allowed methods should include DELETE, got: {allow_methods}");
-    assert!(allow_methods.contains("PATCH"), "allowed methods should include PATCH, got: {allow_methods}");
+    assert!(
+        allow_methods.contains("PUT"),
+        "allowed methods should include PUT, got: {allow_methods}"
+    );
+    assert!(
+        allow_methods.contains("DELETE"),
+        "allowed methods should include DELETE, got: {allow_methods}"
+    );
+    assert!(
+        allow_methods.contains("PATCH"),
+        "allowed methods should include PATCH, got: {allow_methods}"
+    );
 
     drop(shutdown_tx);
 }
@@ -75,7 +93,10 @@ async fn cors_preflight_includes_max_age() {
 
     let client = reqwest::Client::new();
     let resp = client
-        .request(reqwest::Method::OPTIONS, format!("http://127.0.0.1:{port}/api/admin/settings"))
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("http://127.0.0.1:{port}/api/admin/settings"),
+        )
         .header("Origin", "http://localhost:3000")
         .header("Access-Control-Request-Method", "GET")
         .send()
@@ -104,7 +125,10 @@ async fn cors_preflight_includes_credentials_with_explicit_origin() {
 
     let client = reqwest::Client::new();
     let resp = client
-        .request(reqwest::Method::OPTIONS, format!("http://127.0.0.1:{port}/api/admin/settings"))
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("http://127.0.0.1:{port}/api/admin/settings"),
+        )
         .header("Origin", "http://localhost:3000")
         .header("Access-Control-Request-Method", "GET")
         .send()
@@ -133,7 +157,10 @@ async fn cors_no_credentials_with_wildcard_origin() {
 
     let client = reqwest::Client::new();
     let resp = client
-        .request(reqwest::Method::OPTIONS, format!("http://127.0.0.1:{port}/api/status"))
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("http://127.0.0.1:{port}/api/status"),
+        )
         .header("Origin", "http://evil.com")
         .header("Access-Control-Request-Method", "GET")
         .send()
@@ -141,7 +168,9 @@ async fn cors_no_credentials_with_wildcard_origin() {
         .expect("preflight request should succeed");
 
     assert!(
-        resp.headers().get("access-control-allow-credentials").is_none(),
+        resp.headers()
+            .get("access-control-allow-credentials")
+            .is_none(),
         "credentials header must NOT be set with wildcard origin"
     );
 

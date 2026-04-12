@@ -110,8 +110,7 @@ impl ManagedService for PersistenceService {
 impl Service<Operation> for Arc<PersistenceService> {
     type Response = OperationResponse;
     type Error = OperationError;
-    type Future =
-        Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>>;
+    type Future = Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
@@ -148,9 +147,7 @@ impl Service<Operation> for Arc<PersistenceService> {
                     Operation::JournalUnsubscribe { ctx: _, payload } => {
                         svc.handle_journal_unsubscribe(&payload)
                     }
-                    Operation::JournalRead { ctx: _, payload } => {
-                        svc.handle_journal_read(&payload)
-                    }
+                    Operation::JournalRead { ctx: _, payload } => svc.handle_journal_read(&payload),
 
                     // Entry processing stubs (WASM sandbox required)
                     Operation::EntryProcess { ctx: _, payload } => {
@@ -274,9 +271,7 @@ impl PersistenceService {
     ) -> Result<OperationResponse, OperationError> {
         // Use request_id as the subscription ID.
         let conn_id = ctx.connection_id.ok_or_else(|| {
-            OperationError::Internal(anyhow::anyhow!(
-                "JournalSubscribe requires a connection_id"
-            ))
+            OperationError::Internal(anyhow::anyhow!("JournalSubscribe requires a connection_id"))
         })?;
 
         let sub = JournalSubscription {
@@ -285,7 +280,8 @@ impl PersistenceService {
             types: payload.types.clone(),
         };
 
-        self.journal_store.subscribe(payload.request_id.clone(), sub);
+        self.journal_store
+            .subscribe(payload.request_id.clone(), sub);
 
         Ok(OperationResponse::Empty)
     }

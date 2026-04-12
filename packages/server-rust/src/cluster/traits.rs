@@ -10,12 +10,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use topgun_core::messages::cluster::PartitionMapPayload;
 
-use crate::service::registry::ManagedService;
 use super::messages::MigrateDataPayload;
 use super::state::{ClusterChange, ClusterPartitionTable};
 use super::types::{
     ClusterHealth, MemberInfo, MembersView, MigrationTask, PartitionAssignment, PartitionState,
 };
+use crate::service::registry::ManagedService;
 
 // ---------------------------------------------------------------------------
 // ClusterService
@@ -147,11 +147,7 @@ pub trait MigrationService: Send + Sync {
     async fn handle_migrate_data(&self, data: MigrateDataPayload) -> anyhow::Result<()>;
 
     /// Handles the ready signal from a migration destination.
-    async fn handle_migrate_ready(
-        &self,
-        partition_id: u32,
-        source: &str,
-    ) -> anyhow::Result<()>;
+    async fn handle_migrate_ready(&self, partition_id: u32, source: &str) -> anyhow::Result<()>;
 
     /// Returns `true` if the given partition is currently being migrated.
     fn is_migrating(&self, partition_id: u32) -> bool;

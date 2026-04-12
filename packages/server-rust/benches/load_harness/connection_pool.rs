@@ -129,15 +129,11 @@ impl ConnectionPool {
             match stream.next().await {
                 Some(Ok(WsMessage::Binary(data))) => return Ok(data.to_vec()),
                 Some(Ok(WsMessage::Text(text))) => return Ok(text.as_bytes().to_vec()),
-                Some(Ok(
-                    WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Frame(_),
-                )) => {}
+                Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Frame(_))) => {}
                 Some(Ok(WsMessage::Close(_))) => {
                     return Err(anyhow!("connection {conn_idx} closed by server"))
                 }
-                Some(Err(e)) => {
-                    return Err(anyhow!("recv_from({conn_idx}) error: {e}"))
-                }
+                Some(Err(e)) => return Err(anyhow!("recv_from({conn_idx}) error: {e}")),
                 None => return Err(anyhow!("connection {conn_idx} stream ended")),
             }
         }
@@ -278,15 +274,17 @@ async fn recv_binary_message(stream: &mut WsStream, idx: usize) -> Result<Vec<u8
     loop {
         match stream.next().await {
             Some(Ok(WsMessage::Binary(data))) => return Ok(data.to_vec()),
-            Some(Ok(
-                WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Frame(_),
-            )) => {}
+            Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Frame(_))) => {}
             Some(Ok(WsMessage::Text(text))) => return Ok(text.as_bytes().to_vec()),
             Some(Ok(WsMessage::Close(_))) => {
-                return Err(anyhow!("connection {idx}: server closed connection during auth"))
+                return Err(anyhow!(
+                    "connection {idx}: server closed connection during auth"
+                ))
             }
             Some(Err(e)) => {
-                return Err(anyhow!("connection {idx}: WebSocket error during auth: {e}"))
+                return Err(anyhow!(
+                    "connection {idx}: WebSocket error during auth: {e}"
+                ))
             }
             None => {
                 return Err(anyhow!(

@@ -118,11 +118,7 @@ pub trait RecordStore: Send + Sync {
     ) -> anyhow::Result<()>;
 
     /// Remove a record on backup.
-    async fn remove_backup(
-        &self,
-        key: &str,
-        provenance: CallerProvenance,
-    ) -> anyhow::Result<()>;
+    async fn remove_backup(&self, key: &str, provenance: CallerProvenance) -> anyhow::Result<()>;
 
     // --- Batch operations ---
 
@@ -135,11 +131,8 @@ pub trait RecordStore: Send + Sync {
     fn fetch_keys(&self, cursor: &IterationCursor, size: usize) -> FetchResult<String>;
 
     /// Fetch entries with cursor-based pagination.
-    fn fetch_entries(
-        &self,
-        cursor: &IterationCursor,
-        size: usize,
-    ) -> FetchResult<(String, Record)>;
+    fn fetch_entries(&self, cursor: &IterationCursor, size: usize)
+        -> FetchResult<(String, Record)>;
 
     /// Iterate all records with an object-safe consumer.
     ///

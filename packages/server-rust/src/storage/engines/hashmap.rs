@@ -159,8 +159,7 @@ impl StorageEngine for HashMapStorage {
         #[allow(clippy::cast_possible_truncation)]
         let offset = decode_cursor_offset(cursor) as usize;
 
-        let items: Vec<(String, Record)> =
-            snapshot.into_iter().skip(offset).take(size).collect();
+        let items: Vec<(String, Record)> = snapshot.into_iter().skip(offset).take(size).collect();
 
         let new_offset = offset + items.len();
         let finished = new_offset >= total;

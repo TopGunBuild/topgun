@@ -287,11 +287,8 @@ impl Dag {
 
         // Step 2: Kahn's algorithm for topological sort + cycle detection.
         // Build in-degree map.
-        let mut in_degree: HashMap<&str, usize> = self
-            .vertices
-            .keys()
-            .map(|k| (k.as_str(), 0usize))
-            .collect();
+        let mut in_degree: HashMap<&str, usize> =
+            self.vertices.keys().map(|k| (k.as_str(), 0usize)).collect();
 
         for edge in &self.edges {
             *in_degree.entry(edge.dest_name.as_str()).or_insert(0) += 1;
@@ -445,7 +442,9 @@ mod tests {
 
     impl ProcessorSupplier for StubSupplier {
         fn get(&self, count: u32) -> Vec<Box<dyn Processor>> {
-            (0..count).map(|_| Box::new(StubProcessor) as Box<dyn Processor>).collect()
+            (0..count)
+                .map(|_| Box::new(StubProcessor) as Box<dyn Processor>)
+                .collect()
         }
 
         fn clone_supplier(&self) -> Box<dyn ProcessorSupplier> {
@@ -538,7 +537,10 @@ mod tests {
 
     #[test]
     fn routing_policy_unicast_roundtrip() {
-        assert_eq!(routing_roundtrip(&RoutingPolicy::Unicast), RoutingPolicy::Unicast);
+        assert_eq!(
+            routing_roundtrip(&RoutingPolicy::Unicast),
+            RoutingPolicy::Unicast
+        );
     }
 
     #[test]
@@ -551,17 +553,26 @@ mod tests {
 
     #[test]
     fn routing_policy_broadcast_roundtrip() {
-        assert_eq!(routing_roundtrip(&RoutingPolicy::Broadcast), RoutingPolicy::Broadcast);
+        assert_eq!(
+            routing_roundtrip(&RoutingPolicy::Broadcast),
+            RoutingPolicy::Broadcast
+        );
     }
 
     #[test]
     fn routing_policy_isolated_roundtrip() {
-        assert_eq!(routing_roundtrip(&RoutingPolicy::Isolated), RoutingPolicy::Isolated);
+        assert_eq!(
+            routing_roundtrip(&RoutingPolicy::Isolated),
+            RoutingPolicy::Isolated
+        );
     }
 
     #[test]
     fn routing_policy_fanout_roundtrip() {
-        assert_eq!(routing_roundtrip(&RoutingPolicy::Fanout), RoutingPolicy::Fanout);
+        assert_eq!(
+            routing_roundtrip(&RoutingPolicy::Fanout),
+            RoutingPolicy::Fanout
+        );
     }
 
     // --- AC #3: Plan descriptors serialize correctly ---

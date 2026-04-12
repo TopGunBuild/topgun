@@ -42,7 +42,10 @@ pub(crate) fn decode_jwt_key(secret: &str) -> Result<(Algorithm, DecodingKey), S
             .map_err(|e| format!("failed to parse RSA PEM key: {e}"))?;
         Ok((Algorithm::RS256, key))
     } else {
-        Ok((Algorithm::HS256, DecodingKey::from_secret(secret.as_bytes())))
+        Ok((
+            Algorithm::HS256,
+            DecodingKey::from_secret(secret.as_bytes()),
+        ))
     }
 }
 
@@ -93,7 +96,10 @@ impl AuthHandler {
     /// Create a new `AuthHandler` with the given JWT secret and optional validator.
     #[must_use]
     pub fn new(jwt_secret: String, auth_validator: Option<Arc<dyn AuthValidator>>) -> Self {
-        Self { jwt_secret, auth_validator }
+        Self {
+            jwt_secret,
+            auth_validator,
+        }
     }
 
     /// Send `AUTH_REQUIRED` message to the client.
@@ -105,10 +111,7 @@ impl AuthHandler {
     /// # Errors
     ///
     /// Returns an error if serialization or WebSocket send fails.
-    pub async fn send_auth_required(
-        &self,
-        socket: &mut WebSocket,
-    ) -> Result<(), anyhow::Error> {
+    pub async fn send_auth_required(&self, socket: &mut WebSocket) -> Result<(), anyhow::Error> {
         let msg = Message::AuthRequired(AuthRequiredMessage {});
         let bytes = rmp_serde::to_vec_named(&msg)?;
         socket
@@ -217,10 +220,7 @@ impl AuthHandler {
 
                 debug!(user_id = %user_id, ?roles, "JWT verified successfully");
 
-                Ok(Principal {
-                    id: user_id,
-                    roles,
-                })
+                Ok(Principal { id: user_id, roles })
             }
             Err(e) => {
                 let reason = format!("{e}");
@@ -295,7 +295,11 @@ mod tests {
     }
 
     /// Create an `AuthHandler` and a channel pair for testing.
-    fn setup() -> (AuthHandler, mpsc::Sender<OutboundMessage>, mpsc::Receiver<OutboundMessage>) {
+    fn setup() -> (
+        AuthHandler,
+        mpsc::Sender<OutboundMessage>,
+        mpsc::Receiver<OutboundMessage>,
+    ) {
         let handler = AuthHandler::new(TEST_SECRET.to_owned(), None);
         let (tx, rx) = mpsc::channel(8);
         (handler, tx, rx)
@@ -306,7 +310,10 @@ mod tests {
     async fn valid_token_accepted() {
         let (handler, tx, _rx) = setup();
         let token = make_token(Some("user-1"), 3600);
-        let auth_msg = AuthMessage { token, protocol_version: None };
+        let auth_msg = AuthMessage {
+            token,
+            protocol_version: None,
+        };
         let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         let principal = result.unwrap();
@@ -318,7 +325,10 @@ mod tests {
     async fn expired_token_rejected() {
         let (handler, tx, mut rx) = setup();
         let token = make_token(Some("user-1"), -3600);
-        let auth_msg = AuthMessage { token, protocol_version: None };
+        let auth_msg = AuthMessage {
+            token,
+            protocol_version: None,
+        };
         let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(result.is_err(), "expected Err for expired token");
         // AUTH_FAIL must have been sent on the channel (AC12 for expired path)
@@ -333,7 +343,10 @@ mod tests {
     async fn token_within_leeway_accepted() {
         let (handler, tx, _rx) = setup();
         let token = make_token(Some("user-1"), -30);
-        let auth_msg = AuthMessage { token, protocol_version: None };
+        let auth_msg = AuthMessage {
+            token,
+            protocol_version: None,
+        };
         let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(
             result.is_ok(),
@@ -346,7 +359,10 @@ mod tests {
     async fn token_beyond_leeway_rejected() {
         let (handler, tx, mut rx) = setup();
         let token = make_token(Some("user-1"), -90);
-        let auth_msg = AuthMessage { token, protocol_version: None };
+        let auth_msg = AuthMessage {
+            token,
+            protocol_version: None,
+        };
         let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(
             result.is_err(),
@@ -363,7 +379,10 @@ mod tests {
     async fn missing_sub_rejected_with_auth_fail() {
         let (handler, tx, mut rx) = setup();
         let token = make_token(None, 3600);
-        let auth_msg = AuthMessage { token, protocol_version: None };
+        let auth_msg = AuthMessage {
+            token,
+            protocol_version: None,
+        };
         let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(result.is_err(), "expected Err when sub is missing");
         match result.unwrap_err() {
@@ -446,15 +465,14 @@ RQIDAQAB
         } else {
             now.saturating_sub((-exp_offset_secs) as u64)
         };
-        let claims = TestClaims { sub: Some(sub.to_owned()), exp };
+        let claims = TestClaims {
+            sub: Some(sub.to_owned()),
+            exp,
+        };
         let encoding_key = EncodingKey::from_rsa_pem(private_pem.as_bytes())
             .expect("test RSA private key should be valid PEM");
-        jsonwebtoken::encode(
-            &Header::new(Algorithm::RS256),
-            &claims,
-            &encoding_key,
-        )
-        .expect("RS256 token encoding should not fail")
+        jsonwebtoken::encode(&Header::new(Algorithm::RS256), &claims, &encoding_key)
+            .expect("RS256 token encoding should not fail")
     }
 
     // RS256 token signed with TEST_RSA_PRIVATE_PEM is accepted when the handler
@@ -464,9 +482,15 @@ RQIDAQAB
         let token = make_rs256_token("rs-user-1", 3600, TEST_RSA_PRIVATE_PEM);
         let handler = AuthHandler::new(TEST_RSA_PUBLIC_PEM.to_owned(), None);
         let (tx, _rx) = mpsc::channel(8);
-        let auth_msg = AuthMessage { token, protocol_version: None };
+        let auth_msg = AuthMessage {
+            token,
+            protocol_version: None,
+        };
         let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
-        assert!(result.is_ok(), "RS256 token with matching public key should be accepted, got {result:?}");
+        assert!(
+            result.is_ok(),
+            "RS256 token with matching public key should be accepted, got {result:?}"
+        );
         assert_eq!(result.unwrap().id, "rs-user-1");
     }
 
@@ -478,10 +502,19 @@ RQIDAQAB
         // Use the second key pair's public key — signature will not match.
         let handler = AuthHandler::new(TEST_RSA2_PUBLIC_PEM.to_owned(), None);
         let (tx, mut rx) = mpsc::channel(8);
-        let auth_msg = AuthMessage { token, protocol_version: None };
+        let auth_msg = AuthMessage {
+            token,
+            protocol_version: None,
+        };
         let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
-        assert!(result.is_err(), "RS256 token with wrong public key should be rejected");
-        assert!(rx.try_recv().is_ok(), "AUTH_FAIL should be sent on rejection");
+        assert!(
+            result.is_err(),
+            "RS256 token with wrong public key should be rejected"
+        );
+        assert!(
+            rx.try_recv().is_ok(),
+            "AUTH_FAIL should be sent on rejection"
+        );
     }
 
     // decode_jwt_key selects RS256 for PEM input.
@@ -490,7 +523,11 @@ RQIDAQAB
         let result = decode_jwt_key(TEST_RSA_PUBLIC_PEM);
         assert!(result.is_ok(), "valid PEM should parse without error");
         let (algo, _key) = result.unwrap();
-        assert_eq!(algo, Algorithm::RS256, "PEM key should be detected as RS256");
+        assert_eq!(
+            algo,
+            Algorithm::RS256,
+            "PEM key should be detected as RS256"
+        );
     }
 
     // decode_jwt_key selects HS256 for plain string input.
@@ -499,7 +536,11 @@ RQIDAQAB
         let result = decode_jwt_key("my-secret");
         assert!(result.is_ok(), "plain secret should always succeed");
         let (algo, _key) = result.unwrap();
-        assert_eq!(algo, Algorithm::HS256, "plain string should be detected as HS256");
+        assert_eq!(
+            algo,
+            Algorithm::HS256,
+            "plain string should be detected as HS256"
+        );
     }
 
     // Default mode: AUTH_FAIL error field contains generic message for expired token.
@@ -507,7 +548,10 @@ RQIDAQAB
     async fn opaque_mode_generic_error_on_expired_token() {
         let (handler, tx, mut rx) = setup();
         let token = make_token(Some("user-1"), -3600);
-        let auth_msg = AuthMessage { token, protocol_version: None };
+        let auth_msg = AuthMessage {
+            token,
+            protocol_version: None,
+        };
         let _ = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         let msg = rx.try_recv().expect("AUTH_FAIL should be sent");
         let OutboundMessage::Binary(bytes) = msg else {
@@ -517,7 +561,10 @@ RQIDAQAB
             rmp_serde::from_slice(&bytes).expect("should deserialize");
         if let topgun_core::messages::Message::AuthFail(data) = tg_msg {
             let error_text = data.error.expect("error field should be Some");
-            assert_eq!(error_text, "Authentication failed", "opaque mode should return generic message");
+            assert_eq!(
+                error_text, "Authentication failed",
+                "opaque mode should return generic message"
+            );
         } else {
             panic!("expected AuthFail message");
         }
@@ -528,7 +575,10 @@ RQIDAQAB
     async fn insecure_mode_detailed_error_on_expired_token() {
         let (handler, tx, mut rx) = setup();
         let token = make_token(Some("user-1"), -3600);
-        let auth_msg = AuthMessage { token, protocol_version: None };
+        let auth_msg = AuthMessage {
+            token,
+            protocol_version: None,
+        };
         let _ = handler.handle_auth(&auth_msg, &tx, 60, true).await;
         let msg = rx.try_recv().expect("AUTH_FAIL should be sent");
         let OutboundMessage::Binary(bytes) = msg else {
@@ -538,7 +588,10 @@ RQIDAQAB
             rmp_serde::from_slice(&bytes).expect("should deserialize");
         if let topgun_core::messages::Message::AuthFail(data) = tg_msg {
             let error_text = data.error.expect("error field should be Some");
-            assert_ne!(error_text, "Authentication failed", "insecure mode should return detailed message");
+            assert_ne!(
+                error_text, "Authentication failed",
+                "insecure mode should return detailed message"
+            );
         } else {
             panic!("expected AuthFail message");
         }
@@ -549,7 +602,10 @@ RQIDAQAB
     async fn opaque_mode_generic_error_on_missing_sub() {
         let (handler, tx, mut rx) = setup();
         let token = make_token(None, 3600);
-        let auth_msg = AuthMessage { token, protocol_version: None };
+        let auth_msg = AuthMessage {
+            token,
+            protocol_version: None,
+        };
         let _ = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         let msg = rx.try_recv().expect("AUTH_FAIL should be sent");
         let OutboundMessage::Binary(bytes) = msg else {
@@ -559,7 +615,10 @@ RQIDAQAB
             rmp_serde::from_slice(&bytes).expect("should deserialize");
         if let topgun_core::messages::Message::AuthFail(data) = tg_msg {
             let error_text = data.error.expect("error field should be Some");
-            assert_eq!(error_text, "Authentication failed", "opaque mode should return generic message for missing sub");
+            assert_eq!(
+                error_text, "Authentication failed",
+                "opaque mode should return generic message for missing sub"
+            );
         } else {
             panic!("expected AuthFail message");
         }
@@ -584,13 +643,16 @@ RQIDAQAB
     // and send AUTH_FAIL on the channel.
     #[tokio::test]
     async fn rejecting_validator_causes_auth_fail() {
-        let validator = Arc::new(|_ctx: &super::super::auth_validator::AuthValidationContext| {
-            Err("revoked".to_string())
-        });
+        let validator = Arc::new(
+            |_ctx: &super::super::auth_validator::AuthValidationContext| Err("revoked".to_string()),
+        );
         let handler = AuthHandler::new(TEST_SECRET.to_owned(), Some(validator));
         let (tx, mut rx) = mpsc::channel(8);
         let token = make_token(Some("user-1"), 3600);
-        let auth_msg = AuthMessage { token, protocol_version: None };
+        let auth_msg = AuthMessage {
+            token,
+            protocol_version: None,
+        };
         let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(result.is_err(), "expected Err when validator rejects");
         match result.unwrap_err() {
@@ -599,7 +661,10 @@ RQIDAQAB
             }
             e => panic!("expected InvalidToken, got {e:?}"),
         }
-        assert!(rx.try_recv().is_ok(), "AUTH_FAIL should be sent when validator rejects");
+        assert!(
+            rx.try_recv().is_ok(),
+            "AUTH_FAIL should be sent when validator rejects"
+        );
     }
 
     // AC4 (SPEC-189): When auth_validator is None, valid token is accepted (no regression).
@@ -608,9 +673,15 @@ RQIDAQAB
         let handler = AuthHandler::new(TEST_SECRET.to_owned(), None);
         let (tx, _rx) = mpsc::channel(8);
         let token = make_token(Some("user-99"), 3600);
-        let auth_msg = AuthMessage { token, protocol_version: None };
+        let auth_msg = AuthMessage {
+            token,
+            protocol_version: None,
+        };
         let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
-        assert!(result.is_ok(), "expected Ok when no validator configured, got {result:?}");
+        assert!(
+            result.is_ok(),
+            "expected Ok when no validator configured, got {result:?}"
+        );
         assert_eq!(result.unwrap().id, "user-99");
     }
 
@@ -618,13 +689,18 @@ RQIDAQAB
     // sends generic "Authentication failed" message to client.
     #[tokio::test]
     async fn rejecting_validator_opaque_error_mode() {
-        let validator = Arc::new(|_ctx: &super::super::auth_validator::AuthValidationContext| {
-            Err("tenant not found".to_string())
-        });
+        let validator = Arc::new(
+            |_ctx: &super::super::auth_validator::AuthValidationContext| {
+                Err("tenant not found".to_string())
+            },
+        );
         let handler = AuthHandler::new(TEST_SECRET.to_owned(), Some(validator));
         let (tx, mut rx) = mpsc::channel(8);
         let token = make_token(Some("user-1"), 3600);
-        let auth_msg = AuthMessage { token, protocol_version: None };
+        let auth_msg = AuthMessage {
+            token,
+            protocol_version: None,
+        };
         let _ = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         let msg = rx.try_recv().expect("AUTH_FAIL should be sent");
         let OutboundMessage::Binary(bytes) = msg else {
@@ -635,8 +711,7 @@ RQIDAQAB
         if let topgun_core::messages::Message::AuthFail(data) = tg_msg {
             let error_text = data.error.expect("error field should be Some");
             assert_eq!(
-                error_text,
-                "Authentication failed",
+                error_text, "Authentication failed",
                 "opaque mode should send generic message for validator rejection"
             );
         } else {
@@ -648,13 +723,18 @@ RQIDAQAB
     // sends detailed reason to client.
     #[tokio::test]
     async fn rejecting_validator_insecure_error_mode() {
-        let validator = Arc::new(|_ctx: &super::super::auth_validator::AuthValidationContext| {
-            Err("tenant not found".to_string())
-        });
+        let validator = Arc::new(
+            |_ctx: &super::super::auth_validator::AuthValidationContext| {
+                Err("tenant not found".to_string())
+            },
+        );
         let handler = AuthHandler::new(TEST_SECRET.to_owned(), Some(validator));
         let (tx, mut rx) = mpsc::channel(8);
         let token = make_token(Some("user-1"), 3600);
-        let auth_msg = AuthMessage { token, protocol_version: None };
+        let auth_msg = AuthMessage {
+            token,
+            protocol_version: None,
+        };
         let _ = handler.handle_auth(&auth_msg, &tx, 60, true).await;
         let msg = rx.try_recv().expect("AUTH_FAIL should be sent");
         let OutboundMessage::Binary(bytes) = msg else {
@@ -665,8 +745,7 @@ RQIDAQAB
         if let topgun_core::messages::Message::AuthFail(data) = tg_msg {
             let error_text = data.error.expect("error field should be Some");
             assert_eq!(
-                error_text,
-                "tenant not found",
+                error_text, "tenant not found",
                 "insecure mode should forward validator rejection reason"
             );
         } else {

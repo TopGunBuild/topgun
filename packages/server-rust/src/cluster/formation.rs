@@ -140,8 +140,7 @@ impl ClusterFormationService {
             self.peers.insert(node_id.clone(), write_tx.clone());
         }
 
-        let peer_node_id: Arc<Mutex<Option<String>>> =
-            Arc::new(Mutex::new(known_node_id.clone()));
+        let peer_node_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(known_node_id.clone()));
 
         // Spawn write loop: forwards bytes from write_tx to the TCP sink
         let write_handle = tokio::spawn(async move {
@@ -486,8 +485,7 @@ impl ClusterFormationService {
             let mut id = peer_node_id.lock().await;
             *id = Some(payload.node_id.clone());
         }
-        self.peers
-            .insert(payload.node_id.clone(), write_tx.clone());
+        self.peers.insert(payload.node_id.clone(), write_tx.clone());
 
         // Build new member info -- add directly as Active so compute_assignment includes it
         let new_member = MemberInfo {

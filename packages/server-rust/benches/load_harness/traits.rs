@@ -3,8 +3,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use anyhow::Result;
+use async_trait::async_trait;
 use serde::Serialize;
 
 /// All latency percentile statistics for a single operation type.

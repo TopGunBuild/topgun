@@ -111,10 +111,8 @@ impl Processor for NetworkSenderProcessor {
         inbox.drain(&mut |item| {
             self.buffer.push(item);
             if self.buffer.len() >= SENDER_BATCH_SIZE {
-                let batch = std::mem::replace(
-                    &mut self.buffer,
-                    Vec::with_capacity(SENDER_BATCH_SIZE),
-                );
+                let batch =
+                    std::mem::replace(&mut self.buffer, Vec::with_capacity(SENDER_BATCH_SIZE));
                 self.flush_batch(&batch);
             }
         });
@@ -356,10 +354,7 @@ mod tests {
         }
     }
 
-    fn make_transport() -> (
-        mpsc::Sender<ClusterMessage>,
-        mpsc::Receiver<ClusterMessage>,
-    ) {
+    fn make_transport() -> (mpsc::Sender<ClusterMessage>, mpsc::Receiver<ClusterMessage>) {
         mpsc::channel(2048)
     }
 
@@ -431,8 +426,7 @@ mod tests {
         let mut batch_count = 0;
         while let Ok(msg) = rx.try_recv() {
             if let ClusterMessage::DagData(p) = msg {
-                let items: Vec<rmpv::Value> =
-                    rmp_serde::from_slice(&p.items).expect("deserialize");
+                let items: Vec<rmpv::Value> = rmp_serde::from_slice(&p.items).expect("deserialize");
                 assert_eq!(items.len(), 256, "each batch should have 256 items");
                 batch_count += 1;
             }
@@ -471,11 +465,17 @@ mod tests {
         let done = proc.complete(&mut outbox).unwrap();
         assert!(done);
 
-        let msg = rx.try_recv().expect("final batch expected after complete()");
+        let msg = rx
+            .try_recv()
+            .expect("final batch expected after complete()");
         if let ClusterMessage::DagData(payload) = msg {
             let items: Vec<rmpv::Value> =
                 rmp_serde::from_slice(&payload.items).expect("deserialize");
-            assert_eq!(items.len(), 100, "all 100 remainder items should be flushed");
+            assert_eq!(
+                items.len(),
+                100,
+                "all 100 remainder items should be flushed"
+            );
         } else {
             panic!("expected DagData message");
         }
@@ -533,7 +533,10 @@ mod tests {
 
         // process() drains both batches, then sees Disconnected => returns true.
         let done = proc.process(0, &mut inbox, &mut outbox).unwrap();
-        assert!(done, "receiver should report done when channel is disconnected");
+        assert!(
+            done,
+            "receiver should report done when channel is disconnected"
+        );
 
         let items: Vec<_> = outbox.drain_bucket(0).collect();
         assert_eq!(items.len(), 6);
@@ -559,7 +562,10 @@ mod tests {
 
         // No items sent; channel is empty but connected.
         let done = proc.process(0, &mut inbox, &mut outbox).unwrap();
-        assert!(!done, "should return false when channel is empty but not disconnected");
+        assert!(
+            !done,
+            "should return false when channel is empty but not disconnected"
+        );
     }
 
     // --- AC4: Payload serialization round-trips ---

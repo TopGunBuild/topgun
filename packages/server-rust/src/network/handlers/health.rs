@@ -16,9 +16,7 @@ use crate::network::HealthState;
 /// Always returns 200 -- the `state` field in the response body indicates
 /// whether the server is actually healthy. This lets monitoring tools
 /// distinguish between "server is up but draining" vs "server is down".
-pub async fn health_handler(
-    State(state): State<AppState>,
-) -> Json<serde_json::Value> {
+pub async fn health_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
     let health = state.shutdown.health_state();
     let connections = state.registry.count();
     let in_flight = state.shutdown.in_flight_count();
@@ -118,10 +116,9 @@ mod tests {
     async fn health_handler_reports_connection_count() {
         let state = test_state();
         let config = crate::network::ConnectionConfig::default();
-        let (_handle, _rx) = state.registry.register(
-            crate::network::ConnectionKind::Client,
-            &config,
-        );
+        let (_handle, _rx) = state
+            .registry
+            .register(crate::network::ConnectionKind::Client, &config);
 
         let response = health_handler(State(state)).await;
         assert_eq!(response.0["connections"], 1);

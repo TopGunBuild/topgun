@@ -148,11 +148,13 @@ pub fn create_datafusion_backend(
     schema_provider: Arc<dyn crate::traits::SchemaProvider>,
     cache_manager: Arc<crate::service::domain::arrow_cache::ArrowCacheManager>,
 ) -> Arc<crate::service::domain::datafusion_backend::DataFusionBackend> {
-    Arc::new(crate::service::domain::datafusion_backend::DataFusionBackend::new(
-        record_store_factory,
-        schema_provider,
-        cache_manager,
-    ))
+    Arc::new(
+        crate::service::domain::datafusion_backend::DataFusionBackend::new(
+            record_store_factory,
+            schema_provider,
+            cache_manager,
+        ),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -162,8 +164,8 @@ pub fn create_datafusion_backend(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use topgun_core::messages::{PredicateNode, PredicateOp, SortDirection};
     use std::collections::HashMap;
+    use topgun_core::messages::{PredicateNode, PredicateOp, SortDirection};
 
     #[tokio::test]
     async fn predicate_backend_execute_query_filters() {
@@ -171,21 +173,17 @@ mod tests {
         let entries = vec![
             (
                 "user-1".to_string(),
-                rmpv::Value::Map(vec![
-                    (
-                        rmpv::Value::String("age".into()),
-                        rmpv::Value::Integer(25.into()),
-                    ),
-                ]),
+                rmpv::Value::Map(vec![(
+                    rmpv::Value::String("age".into()),
+                    rmpv::Value::Integer(25.into()),
+                )]),
             ),
             (
                 "user-2".to_string(),
-                rmpv::Value::Map(vec![
-                    (
-                        rmpv::Value::String("age".into()),
-                        rmpv::Value::Integer(15.into()),
-                    ),
-                ]),
+                rmpv::Value::Map(vec![(
+                    rmpv::Value::String("age".into()),
+                    rmpv::Value::Integer(15.into()),
+                )]),
             ),
         ];
         let query = Query {
@@ -215,28 +213,21 @@ mod tests {
         let entries = vec![
             (
                 "k1".to_string(),
-                rmpv::Value::Map(vec![
-                    (
-                        rmpv::Value::String("status".into()),
-                        rmpv::Value::String("active".into()),
-                    ),
-                ]),
+                rmpv::Value::Map(vec![(
+                    rmpv::Value::String("status".into()),
+                    rmpv::Value::String("active".into()),
+                )]),
             ),
             (
                 "k2".to_string(),
-                rmpv::Value::Map(vec![
-                    (
-                        rmpv::Value::String("status".into()),
-                        rmpv::Value::String("inactive".into()),
-                    ),
-                ]),
+                rmpv::Value::Map(vec![(
+                    rmpv::Value::String("status".into()),
+                    rmpv::Value::String("inactive".into()),
+                )]),
             ),
         ];
         let mut where_clause = HashMap::new();
-        where_clause.insert(
-            "status".to_string(),
-            rmpv::Value::String("active".into()),
-        );
+        where_clause.insert("status".to_string(), rmpv::Value::String("active".into()));
         let query = Query {
             predicate: None,
             r#where: Some(where_clause),
@@ -259,30 +250,24 @@ mod tests {
         let entries = vec![
             (
                 "a".to_string(),
-                rmpv::Value::Map(vec![
-                    (
-                        rmpv::Value::String("name".into()),
-                        rmpv::Value::String("Charlie".into()),
-                    ),
-                ]),
+                rmpv::Value::Map(vec![(
+                    rmpv::Value::String("name".into()),
+                    rmpv::Value::String("Charlie".into()),
+                )]),
             ),
             (
                 "b".to_string(),
-                rmpv::Value::Map(vec![
-                    (
-                        rmpv::Value::String("name".into()),
-                        rmpv::Value::String("Alice".into()),
-                    ),
-                ]),
+                rmpv::Value::Map(vec![(
+                    rmpv::Value::String("name".into()),
+                    rmpv::Value::String("Alice".into()),
+                )]),
             ),
             (
                 "c".to_string(),
-                rmpv::Value::Map(vec![
-                    (
-                        rmpv::Value::String("name".into()),
-                        rmpv::Value::String("Bob".into()),
-                    ),
-                ]),
+                rmpv::Value::Map(vec![(
+                    rmpv::Value::String("name".into()),
+                    rmpv::Value::String("Bob".into()),
+                )]),
             ),
         ];
         let mut sort = HashMap::new();
@@ -307,8 +292,14 @@ mod tests {
     #[tokio::test]
     async fn predicate_backend_register_deregister_are_noops() {
         let backend = PredicateBackend;
-        backend.register_map("test").await.expect("register should succeed");
-        backend.deregister_map("test").await.expect("deregister should succeed");
+        backend
+            .register_map("test")
+            .await
+            .expect("register should succeed");
+        backend
+            .deregister_map("test")
+            .await
+            .expect("deregister should succeed");
     }
 
     #[test]

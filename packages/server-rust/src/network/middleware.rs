@@ -125,11 +125,7 @@ fn build_cors_layer(config: &NetworkConfig) -> CorsLayer {
     // credentials are enabled. Use an explicit allowlist instead.
     if use_credentials {
         layer = layer
-            .allow_headers([
-                header::AUTHORIZATION,
-                header::CONTENT_TYPE,
-                header::ACCEPT,
-            ])
+            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
             .allow_credentials(true);
     } else {
         layer = layer.allow_headers(Any);

@@ -18,9 +18,11 @@ use tower::Service;
 use topgun_core::messages::base::{ChangeEventType, Query};
 use topgun_core::messages::client_events::QueryUpdatePayload;
 use topgun_core::messages::query::{QueryRespMessage, QueryRespPayload, QueryResultEntry};
-use topgun_core::messages::vector::{VectorSearchPayload, VectorSearchRespPayload, VectorSearchResult};
-use topgun_core::vector::distance::DistanceMetric;
+use topgun_core::messages::vector::{
+    VectorSearchPayload, VectorSearchRespPayload, VectorSearchResult,
+};
 use topgun_core::messages::{Message, SyncRespRootMessage, SyncRespRootPayload};
+use topgun_core::vector::distance::DistanceMetric;
 
 use crate::dag::coordinator::ClusterQueryCoordinator;
 
@@ -34,9 +36,7 @@ use crate::service::domain::predicate::{
     evaluate_predicate, evaluate_where, value_to_rmpv, EvalContext,
 };
 use crate::service::domain::query_backend::QueryBackend;
-use crate::service::operation::{
-    service_names, Operation, OperationError, OperationResponse,
-};
+use crate::service::operation::{service_names, Operation, OperationError, OperationResponse};
 use crate::service::registry::{ManagedService, ServiceContext};
 use crate::storage::mutation_observer::MutationObserver;
 use crate::storage::record::{Record, RecordValue};
@@ -408,8 +408,9 @@ impl QueryService {
         query_merkle_manager: Option<Arc<crate::storage::query_merkle::QueryMerkleSyncManager>>,
         max_query_records: u32,
         index_observer_factory: Option<Arc<IndexObserverFactory>>,
-        #[cfg(feature = "datafusion")]
-        sql_query_backend: Option<Arc<dyn crate::service::domain::query_backend::SqlQueryBackend>>,
+        #[cfg(feature = "datafusion")] sql_query_backend: Option<
+            Arc<dyn crate::service::domain::query_backend::SqlQueryBackend>,
+        >,
     ) -> Self {
         Self {
             query_registry,
@@ -471,8 +472,7 @@ impl ManagedService for QueryService {
 impl Service<Operation> for Arc<QueryService> {
     type Response = OperationResponse;
     type Error = OperationError;
-    type Future =
-        Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>>;
+    type Future = Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
@@ -597,22 +597,19 @@ impl QueryService {
         // reduces the entries passed to execute_query without altering the
         // query semantics — the predicate is re-evaluated inside the backend
         // and inside index_aware_evaluate itself, so no correctness risk.
-        let entries = if let (Some(factory), Some(predicate)) =
-            (self.index_observer_factory.as_ref(), query.predicate.as_ref())
-        {
+        let entries = if let (Some(factory), Some(predicate)) = (
+            self.index_observer_factory.as_ref(),
+            query.predicate.as_ref(),
+        ) {
             if let Some(registry) = factory.get_registry(&map_name) {
                 // Build a lookup map so the optimizer can fetch record values by key.
                 let entry_map: std::collections::HashMap<&str, &rmpv::Value> =
                     entries.iter().map(|(k, v)| (k.as_str(), v)).collect();
-                let all_keys: Vec<String> =
-                    entries.iter().map(|(k, _)| k.clone()).collect();
+                let all_keys: Vec<String> = entries.iter().map(|(k, _)| k.clone()).collect();
 
-                let matching_keys = index_aware_evaluate(
-                    &registry,
-                    predicate,
-                    &all_keys,
-                    |key| entry_map.get(key).map(|v| (*v).clone()),
-                );
+                let matching_keys = index_aware_evaluate(&registry, predicate, &all_keys, |key| {
+                    entry_map.get(key).map(|v| (*v).clone())
+                });
 
                 let matching_set: HashSet<&str> =
                     matching_keys.iter().map(String::as_str).collect();
@@ -667,8 +664,7 @@ impl QueryService {
         if let Some(ref merkle) = self.query_merkle_manager {
             // Only insert keys that are in the result set into Merkle trees.
             // Build a set of result keys for fast lookup.
-            let result_key_set: HashSet<&str> =
-                results.iter().map(|e| e.key.as_str()).collect();
+            let result_key_set: HashSet<&str> = results.iter().map(|e| e.key.as_str()).collect();
 
             for (partition_id, partition_hashes) in &key_hash_pairs_by_partition {
                 let matching: Vec<(String, u32)> = partition_hashes
@@ -725,8 +721,7 @@ impl QueryService {
         if let Some(ref merkle) = self.query_merkle_manager {
             merkle.cleanup_query(&payload.payload.query_id);
         }
-        let _ = self.query_registry
-            .unregister(&payload.payload.query_id);
+        let _ = self.query_registry.unregister(&payload.payload.query_id);
         Ok(OperationResponse::Empty)
     }
 
@@ -799,7 +794,9 @@ impl QueryService {
                     error: None,
                 };
                 Ok(OperationResponse::Message(Box::new(
-                    Message::SqlQueryResp { payload: resp_payload },
+                    Message::SqlQueryResp {
+                        payload: resp_payload,
+                    },
                 )))
             }
             Err(e) => {
@@ -810,7 +807,9 @@ impl QueryService {
                     error: Some(e.to_string()),
                 };
                 Ok(OperationResponse::Message(Box::new(
-                    Message::SqlQueryResp { payload: resp_payload },
+                    Message::SqlQueryResp {
+                        payload: resp_payload,
+                    },
                 )))
             }
         }
@@ -918,24 +917,31 @@ impl QueryService {
         // Helper macro that uses `start` for timing.
         macro_rules! error_resp {
             ($msg:expr) => {{
-                return Ok(OperationResponse::Message(Box::new(Message::VectorSearchResp {
-                    payload: VectorSearchRespPayload {
-                        id: payload.id.clone(),
-                        results: vec![],
-                        total_candidates: 0,
-                        search_time_ms: elapsed_ms(start),
-                        error: Some($msg.to_string()),
+                return Ok(OperationResponse::Message(Box::new(
+                    Message::VectorSearchResp {
+                        payload: VectorSearchRespPayload {
+                            id: payload.id.clone(),
+                            results: vec![],
+                            total_candidates: 0,
+                            search_time_ms: elapsed_ms(start),
+                            error: Some($msg.to_string()),
+                        },
                     },
-                })));
+                )));
             }};
         }
 
         // 1. Require index registry.
         let factory = self.index_observer_factory.as_ref().ok_or_else(|| {
-            OperationError::Internal(anyhow::anyhow!("VectorSearch requires IndexObserverFactory"))
+            OperationError::Internal(anyhow::anyhow!(
+                "VectorSearch requires IndexObserverFactory"
+            ))
         })?;
         let Some(registry) = factory.get_registry(&payload.map_name) else {
-            error_resp!(format!("map not registered for indexing: {}", payload.map_name));
+            error_resp!(format!(
+                "map not registered for indexing: {}",
+                payload.map_name
+            ));
         };
 
         // 2. Resolve vector index attribute.
@@ -991,9 +997,7 @@ impl QueryService {
             .map(|(key, dist)| {
                 let score = match metric {
                     DistanceMetric::Cosine => 1.0 - dist,
-                    DistanceMetric::Euclidean | DistanceMetric::Manhattan => {
-                        1.0 / (1.0 + dist)
-                    }
+                    DistanceMetric::Euclidean | DistanceMetric::Manhattan => 1.0 / (1.0 + dist),
                     DistanceMetric::DotProduct => -dist,
                 };
                 (key, score)
@@ -1026,11 +1030,14 @@ impl QueryService {
         let value_map: std::collections::HashMap<String, rmpv::Value> = if need_values {
             let mut map = std::collections::HashMap::new();
             for store in &stores {
-                store.for_each_boxed(&mut |key, record| {
-                    if let RecordValue::Lww { ref value, .. } = record.value {
-                        map.insert(key.to_string(), value_to_rmpv(value));
-                    }
-                }, false);
+                store.for_each_boxed(
+                    &mut |key, record| {
+                        if let RecordValue::Lww { ref value, .. } = record.value {
+                            map.insert(key.to_string(), value_to_rmpv(value));
+                        }
+                    },
+                    false,
+                );
             }
             map
         } else {
@@ -1102,7 +1109,10 @@ impl QueryService {
 /// Returns `None` (with a warn log) on any failure: missing attribute,
 /// non-Binary field, or `MsgPack` decode error. Non-fatal: callers continue
 /// building the response with `vector: None` for that row.
-fn extract_vector_bytes_le(record: &rmpv::Value, extractor: &AttributeExtractor) -> Option<Vec<u8>> {
+fn extract_vector_bytes_le(
+    record: &rmpv::Value,
+    extractor: &AttributeExtractor,
+) -> Option<Vec<u8>> {
     let field = extractor.extract(record);
     let bytes = if let rmpv::Value::Binary(b) = &field {
         b.as_slice()
@@ -1166,9 +1176,8 @@ fn record_batches_to_rows(
 #[cfg(feature = "datafusion")]
 fn arrow_value_to_rmpv(array: &dyn arrow::array::Array, row_idx: usize) -> rmpv::Value {
     use arrow::array::{
-        BinaryArray, BooleanArray, Float32Array, Float64Array, Int32Array,
-        Int64Array, LargeStringArray, StringArray, TimestampMicrosecondArray, UInt32Array,
-        UInt64Array,
+        BinaryArray, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array,
+        LargeStringArray, StringArray, TimestampMicrosecondArray, UInt32Array, UInt64Array,
     };
     use arrow::datatypes::DataType;
 
@@ -1232,7 +1241,9 @@ fn arrow_value_to_rmpv(array: &dyn arrow::array::Array, row_idx: usize) -> rmpv:
                     let display = fmt.value(row_idx);
                     rmpv::Value::String(display.to_string().into())
                 }
-                Err(_) => rmpv::Value::String(format!("<unsupported: {:?}>", array.data_type()).into()),
+                Err(_) => {
+                    rmpv::Value::String(format!("<unsupported: {:?}>", array.data_type()).into())
+                }
             }
         }
     }
@@ -1287,7 +1298,7 @@ pub(crate) fn project_fields(fields: &[String], record: &rmpv::Value) -> rmpv::V
 #[allow(
     clippy::doc_markdown,
     clippy::doc_lazy_continuation,
-    clippy::uninlined_format_args,
+    clippy::uninlined_format_args
 )]
 mod tests {
     use std::collections::BTreeMap;
@@ -1295,7 +1306,9 @@ mod tests {
     use dashmap::DashSet;
     use topgun_core::hlc::Timestamp;
     use topgun_core::messages::base::{PredicateNode, PredicateOp, Query};
-    use topgun_core::messages::query::{QuerySubMessage, QuerySubPayload, QueryUnsubMessage, QueryUnsubPayload};
+    use topgun_core::messages::query::{
+        QuerySubMessage, QuerySubPayload, QueryUnsubMessage, QueryUnsubPayload,
+    };
     use topgun_core::types::Value;
     use tower::ServiceExt;
 
@@ -1318,12 +1331,7 @@ mod tests {
     }
 
     fn make_ctx(conn_id: Option<ConnectionId>) -> OperationContext {
-        let mut ctx = OperationContext::new(
-            1,
-            service_names::QUERY,
-            make_timestamp(),
-            5000,
-        );
+        let mut ctx = OperationContext::new(1, service_names::QUERY, make_timestamp(), 5000);
         ctx.connection_id = conn_id;
         ctx
     }
@@ -1469,12 +1477,8 @@ mod tests {
     fn observer_skips_backup_partitions() {
         let registry = Arc::new(QueryRegistry::new());
         let conn_registry = Arc::new(ConnectionRegistry::new());
-        let observer = QueryMutationObserver::new(
-            registry.clone(),
-            conn_registry,
-            "users".to_string(),
-            0,
-        );
+        let observer =
+            QueryMutationObserver::new(registry.clone(), conn_registry, "users".to_string(), 0);
 
         // Register a subscription
         let prev_keys = DashSet::new();
@@ -1487,7 +1491,10 @@ mod tests {
             fields: None,
         });
 
-        let record = make_record(make_value_map(vec![("name", Value::String("Alice".to_string()))]));
+        let record = make_record(make_value_map(vec![(
+            "name",
+            Value::String("Alice".to_string()),
+        )]));
 
         // on_put with is_backup=true should be a no-op
         observer.on_put("key1", &record, None, true);
@@ -1505,12 +1512,8 @@ mod tests {
         let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &config);
         let conn_id = handle.id;
 
-        let observer = QueryMutationObserver::new(
-            registry.clone(),
-            conn_registry,
-            "users".to_string(),
-            0,
-        );
+        let observer =
+            QueryMutationObserver::new(registry.clone(), conn_registry, "users".to_string(), 0);
 
         // Register subscription with no predicate (match all)
         registry.register(QuerySubscription {
@@ -1522,7 +1525,10 @@ mod tests {
             fields: None,
         });
 
-        let record = make_record(make_value_map(vec![("name", Value::String("Alice".to_string()))]));
+        let record = make_record(make_value_map(vec![(
+            "name",
+            Value::String("Alice".to_string()),
+        )]));
         observer.on_put("key1", &record, None, false);
 
         // Should have received an ENTER event
@@ -1555,12 +1561,8 @@ mod tests {
         let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &config);
         let conn_id = handle.id;
 
-        let observer = QueryMutationObserver::new(
-            registry.clone(),
-            conn_registry,
-            "users".to_string(),
-            0,
-        );
+        let observer =
+            QueryMutationObserver::new(registry.clone(), conn_registry, "users".to_string(), 0);
 
         // Register subscription with key already in previous_result_keys
         let prev_keys = DashSet::new();
@@ -1613,12 +1615,8 @@ mod tests {
         let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &config);
         let conn_id = handle.id;
 
-        let observer = QueryMutationObserver::new(
-            registry.clone(),
-            conn_registry,
-            "users".to_string(),
-            0,
-        );
+        let observer =
+            QueryMutationObserver::new(registry.clone(), conn_registry, "users".to_string(), 0);
 
         // Subscription requires age >= 18
         let prev_keys = DashSet::new();
@@ -1672,12 +1670,8 @@ mod tests {
         let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &config);
         let conn_id = handle.id;
 
-        let observer = QueryMutationObserver::new(
-            registry.clone(),
-            conn_registry,
-            "users".to_string(),
-            0,
-        );
+        let observer =
+            QueryMutationObserver::new(registry.clone(), conn_registry, "users".to_string(), 0);
 
         let prev_keys = DashSet::new();
         prev_keys.insert("key1".to_string());
@@ -1690,7 +1684,10 @@ mod tests {
             fields: None,
         });
 
-        let record = make_record(make_value_map(vec![("name", Value::String("Alice".to_string()))]));
+        let record = make_record(make_value_map(vec![(
+            "name",
+            Value::String("Alice".to_string()),
+        )]));
         observer.on_remove("key1", &record, false);
 
         let msg = rx.try_recv().expect("should have received a message");
@@ -1716,12 +1713,8 @@ mod tests {
         let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &config);
         let conn_id = handle.id;
 
-        let observer = QueryMutationObserver::new(
-            registry.clone(),
-            conn_registry,
-            "users".to_string(),
-            0,
-        );
+        let observer =
+            QueryMutationObserver::new(registry.clone(), conn_registry, "users".to_string(), 0);
 
         let prev_keys = DashSet::new();
         prev_keys.insert("k1".to_string());
@@ -1770,12 +1763,8 @@ mod tests {
         let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &config);
         let conn_id = handle.id;
 
-        let observer = QueryMutationObserver::new(
-            registry.clone(),
-            conn_registry,
-            "users".to_string(),
-            0,
-        );
+        let observer =
+            QueryMutationObserver::new(registry.clone(), conn_registry, "users".to_string(), 0);
 
         // Subscription requires age >= 18; key1 not in previous
         registry.register(QuerySubscription {
@@ -1912,15 +1901,13 @@ mod tests {
         let result = svc.oneshot(op).await.unwrap();
 
         match result {
-            OperationResponse::Message(msg) => {
-                match *msg {
-                    Message::QueryResp(resp) => {
-                        assert_eq!(resp.payload.query_id, "q-1");
-                        assert!(resp.payload.results.is_empty());
-                    }
-                    _ => panic!("expected QueryResp"),
+            OperationResponse::Message(msg) => match *msg {
+                Message::QueryResp(resp) => {
+                    assert_eq!(resp.payload.query_id, "q-1");
+                    assert!(resp.payload.results.is_empty());
                 }
-            }
+                _ => panic!("expected QueryResp"),
+            },
             _ => panic!("expected Message response"),
         }
 
@@ -1944,15 +1931,27 @@ mod tests {
             (
                 "user-1".to_string(),
                 rmpv::Value::Map(vec![
-                    (rmpv::Value::String("name".into()), rmpv::Value::String("Alice".into())),
-                    (rmpv::Value::String("age".into()), rmpv::Value::Integer(30.into())),
+                    (
+                        rmpv::Value::String("name".into()),
+                        rmpv::Value::String("Alice".into()),
+                    ),
+                    (
+                        rmpv::Value::String("age".into()),
+                        rmpv::Value::Integer(30.into()),
+                    ),
                 ]),
             ),
             (
                 "user-2".to_string(),
                 rmpv::Value::Map(vec![
-                    (rmpv::Value::String("name".into()), rmpv::Value::String("Bob".into())),
-                    (rmpv::Value::String("age".into()), rmpv::Value::Integer(15.into())),
+                    (
+                        rmpv::Value::String("name".into()),
+                        rmpv::Value::String("Bob".into()),
+                    ),
+                    (
+                        rmpv::Value::String("age".into()),
+                        rmpv::Value::Integer(15.into()),
+                    ),
                 ]),
             ),
         ];
@@ -2051,7 +2050,7 @@ mod tests {
                 sort: None,
                 limit: None,
                 cursor: None,
-            group_by: None,
+                group_by: None,
             },
             previous_result_keys: DashSet::new(),
             fields: None,
@@ -2067,7 +2066,7 @@ mod tests {
                 sort: None,
                 limit: None,
                 cursor: None,
-            group_by: None,
+                group_by: None,
             },
             previous_result_keys: DashSet::new(),
             fields: None,
@@ -2096,7 +2095,7 @@ mod tests {
                 sort: None,
                 limit: None,
                 cursor: None,
-            group_by: None,
+                group_by: None,
             },
             previous_result_keys: DashSet::new(),
             fields: None,
@@ -2111,7 +2110,7 @@ mod tests {
                 sort: None,
                 limit: None,
                 cursor: None,
-            group_by: None,
+                group_by: None,
             },
             previous_result_keys: DashSet::new(),
             fields: None,
@@ -2130,9 +2129,18 @@ mod tests {
     fn field_projection_on_query_resp() {
         // Simulate a record with multiple fields
         let value = rmpv::Value::Map(vec![
-            (rmpv::Value::String("name".into()), rmpv::Value::String("Alice".into())),
-            (rmpv::Value::String("age".into()), rmpv::Value::Integer(30.into())),
-            (rmpv::Value::String("email".into()), rmpv::Value::String("alice@test.com".into())),
+            (
+                rmpv::Value::String("name".into()),
+                rmpv::Value::String("Alice".into()),
+            ),
+            (
+                rmpv::Value::String("age".into()),
+                rmpv::Value::Integer(30.into()),
+            ),
+            (
+                rmpv::Value::String("email".into()),
+                rmpv::Value::String("alice@test.com".into()),
+            ),
         ]);
 
         let fields = vec!["name".to_string()];
@@ -2141,14 +2149,8 @@ mod tests {
         // Projected value should only contain "name"
         let map = projected.as_map().expect("projected should be a map");
         assert_eq!(map.len(), 1);
-        assert_eq!(
-            map[0].0.as_str().unwrap(),
-            "name"
-        );
-        assert_eq!(
-            map[0].1.as_str().unwrap(),
-            "Alice"
-        );
+        assert_eq!(map[0].0.as_str().unwrap(), "name");
+        assert_eq!(map[0].1.as_str().unwrap(), "Alice");
     }
 
     /// AC7: QUERY_RESP with results exceeding `max_query_records` returns
@@ -2169,8 +2171,14 @@ mod tests {
                 (
                     format!("key-{i}"),
                     rmpv::Value::Map(vec![
-                        (rmpv::Value::String("id".into()), rmpv::Value::Integer(i.into())),
-                        (rmpv::Value::String("name".into()), rmpv::Value::String(format!("item-{i}").into())),
+                        (
+                            rmpv::Value::String("id".into()),
+                            rmpv::Value::Integer(i.into()),
+                        ),
+                        (
+                            rmpv::Value::String("name".into()),
+                            rmpv::Value::String(format!("item-{i}").into()),
+                        ),
                     ]),
                 )
             })
@@ -2484,9 +2492,9 @@ mod tests {
     // handle_vector_search tests
     // ---------------------------------------------------------------------------
 
-    use crate::service::domain::index::{IndexObserverFactory, Index};
-    use topgun_core::vector::{DistanceMetric, Vector};
+    use crate::service::domain::index::{Index, IndexObserverFactory};
     use topgun_core::messages::vector::VectorSearchPayload;
+    use topgun_core::vector::{DistanceMetric, Vector};
 
     /// Builds an rmpv::Value record with the attribute field containing the encoded vector.
     fn make_vector_record(attr: &str, data: &[f32]) -> rmpv::Value {
@@ -2511,7 +2519,10 @@ mod tests {
         attr: &str,
         dim: u16,
         metric: DistanceMetric,
-    ) -> (Arc<QueryService>, Arc<crate::service::domain::index::registry::IndexRegistry>) {
+    ) -> (
+        Arc<QueryService>,
+        Arc<crate::service::domain::index::registry::IndexRegistry>,
+    ) {
         let registry = Arc::new(QueryRegistry::new());
         let factory = make_factory();
         let conn_registry = Arc::new(ConnectionRegistry::new());
@@ -2533,21 +2544,22 @@ mod tests {
         (svc, index_registry)
     }
 
-    fn extract_vector_resp(result: OperationResponse) -> topgun_core::messages::vector::VectorSearchRespPayload {
+    fn extract_vector_resp(
+        result: OperationResponse,
+    ) -> topgun_core::messages::vector::VectorSearchRespPayload {
         match result {
-            OperationResponse::Message(msg) => {
-                match *msg {
-                    Message::VectorSearchResp { payload } => payload,
-                    other => panic!("expected VectorSearchResp, got {:?}", other),
-                }
-            }
+            OperationResponse::Message(msg) => match *msg {
+                Message::VectorSearchResp { payload } => payload,
+                other => panic!("expected VectorSearchResp, got {:?}", other),
+            },
             other => panic!("expected Message response, got {:?}", other),
         }
     }
 
     #[tokio::test]
     async fn handle_vector_search_returns_top_k() {
-        let (svc, index_registry) = make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
+        let (svc, index_registry) =
+            make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
         let vi = index_registry.get_vector_index("embedding").unwrap();
 
         // Insert 10 vectors: [0.1*i, 0.2*i] for i in 1..=10
@@ -2603,7 +2615,8 @@ mod tests {
 
     #[tokio::test]
     async fn handle_vector_search_missing_index_returns_error_resp() {
-        let (svc, index_registry) = make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
+        let (svc, index_registry) =
+            make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
         // Remove the vector index so the map has none
         let _ = index_registry.remove_index("embedding");
 
@@ -2625,7 +2638,8 @@ mod tests {
 
     #[tokio::test]
     async fn handle_vector_search_dimension_mismatch_returns_error_resp() {
-        let (svc, index_registry) = make_svc_with_vector_index("maps", "embedding", 4, DistanceMetric::Cosine);
+        let (svc, index_registry) =
+            make_svc_with_vector_index("maps", "embedding", 4, DistanceMetric::Cosine);
         let vi = index_registry.get_vector_index("embedding").unwrap();
         let rec = make_vector_record("embedding", &[0.1, 0.2, 0.3, 0.4]);
         vi.insert("k1", &rec);
@@ -2644,13 +2658,17 @@ mod tests {
         };
         let op = Operation::VectorSearch { ctx, payload };
         let resp = extract_vector_resp(svc.oneshot(op).await.unwrap());
-        assert!(resp.error.is_some(), "expected error for dimension mismatch");
+        assert!(
+            resp.error.is_some(),
+            "expected error for dimension mismatch"
+        );
         assert!(resp.results.is_empty());
     }
 
     #[tokio::test]
     async fn handle_vector_search_honors_min_score() {
-        let (svc, index_registry) = make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Euclidean);
+        let (svc, index_registry) =
+            make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Euclidean);
         let vi = index_registry.get_vector_index("embedding").unwrap();
 
         // Insert vectors at varying distances from query [1.0, 0.0]
@@ -2678,7 +2696,11 @@ mod tests {
         let resp = extract_vector_resp(svc.oneshot(op).await.unwrap());
         // All returned results must have score >= 0.5
         for r in &resp.results {
-            assert!(r.score >= 0.5, "result score {} below threshold 0.5", r.score);
+            assert!(
+                r.score >= 0.5,
+                "result score {} below threshold 0.5",
+                r.score
+            );
         }
     }
 
@@ -2686,7 +2708,8 @@ mod tests {
     async fn handle_vector_search_include_value_default_true() {
         use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
 
-        let (svc, index_registry) = make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
+        let (svc, index_registry) =
+            make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
         let vi = index_registry.get_vector_index("embedding").unwrap();
         let rec = make_vector_record("embedding", &[1.0, 0.0]);
         vi.insert("k1", &rec);
@@ -2729,7 +2752,8 @@ mod tests {
 
     #[tokio::test]
     async fn handle_vector_search_include_value_false() {
-        let (svc, index_registry) = make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
+        let (svc, index_registry) =
+            make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
         let vi = index_registry.get_vector_index("embedding").unwrap();
         let rec = make_vector_record("embedding", &[1.0, 0.0]);
         vi.insert("k1", &rec);
@@ -2751,12 +2775,16 @@ mod tests {
         let op = Operation::VectorSearch { ctx, payload };
         let resp = extract_vector_resp(svc.oneshot(op).await.unwrap());
         assert_eq!(resp.results.len(), 1);
-        assert!(resp.results[0].value.is_none(), "value should be None when include_value = false");
+        assert!(
+            resp.results[0].value.is_none(),
+            "value should be None when include_value = false"
+        );
     }
 
     #[tokio::test]
     async fn handle_vector_search_ef_search_default() {
-        let (svc, index_registry) = make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
+        let (svc, index_registry) =
+            make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
         let vi = index_registry.get_vector_index("embedding").unwrap();
         for i in 1u8..=5 {
             let rec = make_vector_record("embedding", &[f32::from(i), 0.0]);
@@ -2785,7 +2813,8 @@ mod tests {
     async fn handle_vector_search_dot_product_score_convention() {
         // DotProductDistance::compute returns -dot(a, b), so score = -distance = dot(a, b).
         // Insert [1.0, 0.0] with attribute "embedding" into a DotProduct index.
-        let (svc, index_registry) = make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::DotProduct);
+        let (svc, index_registry) =
+            make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::DotProduct);
         let vi = index_registry.get_vector_index("embedding").unwrap();
 
         let a = [1.0f32, 0.0f32];
@@ -2819,7 +2848,7 @@ mod tests {
     async fn handle_vector_search_include_vectors_populated() {
         use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
         use std::collections::BTreeMap;
-        use topgun_core::{Value, vector::Vector};
+        use topgun_core::{vector::Vector, Value};
 
         let (svc, index_registry) =
             make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);

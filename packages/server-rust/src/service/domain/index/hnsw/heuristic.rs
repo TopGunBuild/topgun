@@ -31,10 +31,7 @@ impl DoublePriorityQueue {
 
     /// Insert an element with its distance.
     pub fn insert(&mut self, id: ElementId, distance: f64) {
-        self.map
-            .entry(OrderedFloat(distance))
-            .or_default()
-            .push(id);
+        self.map.entry(OrderedFloat(distance)).or_default().push(id);
         self.len += 1;
     }
 
@@ -121,7 +118,10 @@ pub fn select_neighbors(
     dist_fn: &dyn Fn(ElementId, ElementId) -> f64,
 ) -> Vec<ElementId> {
     let extend = matches!(heuristic, Heuristic::Extended | Heuristic::ExtendedAndKeep);
-    let keep_pruned = matches!(heuristic, Heuristic::KeepPruned | Heuristic::ExtendedAndKeep);
+    let keep_pruned = matches!(
+        heuristic,
+        Heuristic::KeepPruned | Heuristic::ExtendedAndKeep
+    );
 
     // Build working candidate list, optionally expanded with neighbors-of-candidates.
     let mut working: Vec<(ElementId, f64)> = candidates.to_vec();

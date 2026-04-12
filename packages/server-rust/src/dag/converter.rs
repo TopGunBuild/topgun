@@ -13,9 +13,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use topgun_core::messages::base::{PredicateNode, PredicateOp, Query, SortDirection};
 
-use crate::dag::types::{
-    DagPlanDescriptor, Edge, ProcessorType, RoutingPolicy, VertexDescriptor,
-};
+use crate::dag::types::{DagPlanDescriptor, Edge, ProcessorType, RoutingPolicy, VertexDescriptor};
 
 // ---------------------------------------------------------------------------
 // Private helpers
@@ -159,11 +157,11 @@ impl QueryToDagConverter {
 
         if has_group_by {
             // SAFETY: has_group_by is true only when group_by is Some(non-empty).
-            let group_by_fields = query.group_by.as_ref().expect("has_group_by guard ensures Some");
-            let first_field = group_by_fields
-                .first()
-                .cloned()
-                .unwrap_or_default();
+            let group_by_fields = query
+                .group_by
+                .as_ref()
+                .expect("has_group_by guard ensures Some");
+            let first_field = group_by_fields.first().cloned().unwrap_or_default();
 
             let agg_config = rmpv::Value::Map(vec![
                 (
@@ -308,8 +306,10 @@ impl QueryToDagConverter {
             if !sort_map.is_empty() {
                 // HashMap iteration order is non-deterministic; fields are sorted
                 // alphabetically to ensure deterministic multi-field sort behavior.
-                let mut sort_fields: Vec<(String, SortDirection)> =
-                    sort_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                let mut sort_fields: Vec<(String, SortDirection)> = sort_map
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
                 sort_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
 
                 let sort_config = rmpv::Value::Array(
@@ -427,13 +427,19 @@ mod tests {
     #[test]
     fn needs_distribution_false_for_single_node() {
         let q = Query::default();
-        assert!(!QueryToDagConverter::needs_distribution(&q, &single_node_assignment()));
+        assert!(!QueryToDagConverter::needs_distribution(
+            &q,
+            &single_node_assignment()
+        ));
     }
 
     #[test]
     fn needs_distribution_true_for_multi_node() {
         let q = Query::default();
-        assert!(QueryToDagConverter::needs_distribution(&q, &multi_node_assignment()));
+        assert!(QueryToDagConverter::needs_distribution(
+            &q,
+            &multi_node_assignment()
+        ));
     }
 
     // --- Simple scan-only query ---
@@ -552,7 +558,10 @@ mod tests {
         let config = scan.config.as_ref().expect("scan should have config");
         if let rmpv::Value::Map(pairs) = config {
             let map_name_entry = pairs.iter().find(|(k, _)| k.as_str() == Some("mapName"));
-            assert!(map_name_entry.is_some(), "scan config should contain mapName");
+            assert!(
+                map_name_entry.is_some(),
+                "scan config should contain mapName"
+            );
             let map_name_val = &map_name_entry.unwrap().1;
             assert_eq!(map_name_val.as_str(), Some("my_map"));
         } else {
@@ -606,12 +615,19 @@ mod tests {
 
         // Sort should be between the last processing vertex and collector
         let sort_idx = desc.vertices.iter().position(|v| v.name == "sort").unwrap();
-        let collector_idx = desc.vertices.iter().position(|v| v.name == "collector").unwrap();
+        let collector_idx = desc
+            .vertices
+            .iter()
+            .position(|v| v.name == "collector")
+            .unwrap();
         assert!(sort_idx < collector_idx, "sort must come before collector");
 
         // Verify sort config contains the field
         let sort_vertex = &desc.vertices[sort_idx];
-        let config = sort_vertex.config.as_ref().expect("sort should have config");
+        let config = sort_vertex
+            .config
+            .as_ref()
+            .expect("sort should have config");
         if let rmpv::Value::Array(arr) = config {
             assert_eq!(arr.len(), 1, "one sort field");
             if let rmpv::Value::Array(pair) = &arr[0] {
@@ -639,13 +655,27 @@ mod tests {
 
         assert!(vertex_names(&desc).contains(&"limit"));
 
-        let limit_idx = desc.vertices.iter().position(|v| v.name == "limit").unwrap();
-        let collector_idx = desc.vertices.iter().position(|v| v.name == "collector").unwrap();
-        assert!(limit_idx < collector_idx, "limit must come before collector");
+        let limit_idx = desc
+            .vertices
+            .iter()
+            .position(|v| v.name == "limit")
+            .unwrap();
+        let collector_idx = desc
+            .vertices
+            .iter()
+            .position(|v| v.name == "collector")
+            .unwrap();
+        assert!(
+            limit_idx < collector_idx,
+            "limit must come before collector"
+        );
 
         // Verify limit config
         let limit_vertex = &desc.vertices[limit_idx];
-        let config = limit_vertex.config.as_ref().expect("limit should have config");
+        let config = limit_vertex
+            .config
+            .as_ref()
+            .expect("limit should have config");
         assert_eq!(config.as_u64(), Some(10));
     }
 
@@ -677,14 +707,29 @@ mod tests {
         let collector_idx = names.iter().position(|&n| n == "collector").unwrap();
 
         assert!(sort_idx < limit_idx, "sort must come before limit");
-        assert!(limit_idx < collector_idx, "limit must come before collector");
+        assert!(
+            limit_idx < collector_idx,
+            "limit must come before collector"
+        );
 
         // Verify edge chain: ... -> sort -> limit -> collector
-        let sort_to_limit = desc.edges.iter().find(|e| e.source_name == "sort" && e.dest_name == "limit");
-        assert!(sort_to_limit.is_some(), "edge from sort to limit must exist");
+        let sort_to_limit = desc
+            .edges
+            .iter()
+            .find(|e| e.source_name == "sort" && e.dest_name == "limit");
+        assert!(
+            sort_to_limit.is_some(),
+            "edge from sort to limit must exist"
+        );
 
-        let limit_to_collector = desc.edges.iter().find(|e| e.source_name == "limit" && e.dest_name == "collector");
-        assert!(limit_to_collector.is_some(), "edge from limit to collector must exist");
+        let limit_to_collector = desc
+            .edges
+            .iter()
+            .find(|e| e.source_name == "limit" && e.dest_name == "collector");
+        assert!(
+            limit_to_collector.is_some(),
+            "edge from limit to collector must exist"
+        );
     }
 
     // --- Sort + Limit after GROUP BY ---
@@ -707,14 +752,23 @@ mod tests {
             .expect("convert should succeed");
 
         let names = vertex_names(&desc);
-        let combine_idx = names.iter().position(|&n| n == "combine-aggregate").unwrap();
+        let combine_idx = names
+            .iter()
+            .position(|&n| n == "combine-aggregate")
+            .unwrap();
         let sort_idx = names.iter().position(|&n| n == "sort").unwrap();
         let limit_idx = names.iter().position(|&n| n == "limit").unwrap();
         let collector_idx = names.iter().position(|&n| n == "collector").unwrap();
 
-        assert!(combine_idx < sort_idx, "sort must come after combine-aggregate");
+        assert!(
+            combine_idx < sort_idx,
+            "sort must come after combine-aggregate"
+        );
         assert!(sort_idx < limit_idx, "sort must come before limit");
-        assert!(limit_idx < collector_idx, "limit must come before collector");
+        assert!(
+            limit_idx < collector_idx,
+            "limit must come before collector"
+        );
     }
 
     // --- Multi-field sort deterministic ordering ---

@@ -293,21 +293,17 @@ mod tests {
                 results: vec![
                     QueryResultEntry {
                         key: "user-1".to_string(),
-                        value: rmpv::Value::Map(vec![
-                            (
-                                rmpv::Value::String("name".into()),
-                                rmpv::Value::String("Alice".into()),
-                            ),
-                        ]),
+                        value: rmpv::Value::Map(vec![(
+                            rmpv::Value::String("name".into()),
+                            rmpv::Value::String("Alice".into()),
+                        )]),
                     },
                     QueryResultEntry {
                         key: "user-2".to_string(),
-                        value: rmpv::Value::Map(vec![
-                            (
-                                rmpv::Value::String("name".into()),
-                                rmpv::Value::String("Bob".into()),
-                            ),
-                        ]),
+                        value: rmpv::Value::Map(vec![(
+                            rmpv::Value::String("name".into()),
+                            rmpv::Value::String("Bob".into()),
+                        )]),
                     },
                 ],
                 next_cursor: Some("cursor-abc".to_string()),
@@ -362,10 +358,7 @@ mod tests {
         let has_next_cursor = payload_map
             .iter()
             .any(|(k, _)| k.as_str() == Some("nextCursor"));
-        assert!(
-            !has_next_cursor,
-            "nextCursor should be omitted when None"
-        );
+        assert!(!has_next_cursor, "nextCursor should be omitted when None");
 
         let has_has_more = payload_map
             .iter()
@@ -411,10 +404,7 @@ mod tests {
             .expect("should have payload");
         let payload_map = payload.as_map().expect("payload should be a map");
 
-        let keys: Vec<&str> = payload_map
-            .iter()
-            .filter_map(|(k, _)| k.as_str())
-            .collect();
+        let keys: Vec<&str> = payload_map.iter().filter_map(|(k, _)| k.as_str()).collect();
         assert!(keys.contains(&"queryId"), "expected camelCase 'queryId'");
         assert!(keys.contains(&"mapName"), "expected camelCase 'mapName'");
     }
@@ -556,10 +546,7 @@ mod tests {
             .map(|(_, v)| v)
             .expect("should have payload");
         let payload_map = payload.as_map().expect("payload should be a map");
-        let keys: Vec<&str> = payload_map
-            .iter()
-            .filter_map(|(k, _)| k.as_str())
-            .collect();
+        let keys: Vec<&str> = payload_map.iter().filter_map(|(k, _)| k.as_str()).collect();
         assert!(keys.contains(&"queryId"), "expected camelCase 'queryId'");
         assert!(keys.contains(&"rootHash"), "expected camelCase 'rootHash'");
     }

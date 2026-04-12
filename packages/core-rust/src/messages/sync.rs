@@ -40,7 +40,11 @@ pub struct OpBatchPayload {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub write_concern: Option<WriteConcern>,
     /// Optional timeout in milliseconds.
-    #[serde(skip_serializing_if = "Option::is_none", default, deserialize_with = "serde_number::deserialize_option_u64")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "serde_number::deserialize_option_u64"
+    )]
     pub timeout: Option<u64>,
 }
 
@@ -69,7 +73,11 @@ pub struct SyncInitMessage {
     /// Name of the map to synchronize.
     pub map_name: String,
     /// Optional timestamp of last successful sync for delta optimization.
-    #[serde(skip_serializing_if = "Option::is_none", default, deserialize_with = "serde_number::deserialize_option_u64")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "serde_number::deserialize_option_u64"
+    )]
     pub last_sync_timestamp: Option<u64>,
 }
 
@@ -220,7 +228,11 @@ pub struct ORMapSyncInit {
     /// Map of bucket index to bucket hash for delta detection.
     pub bucket_hashes: HashMap<String, u32>,
     /// Optional timestamp of last successful sync for delta optimization.
-    #[serde(skip_serializing_if = "Option::is_none", default, deserialize_with = "serde_number::deserialize_option_u64")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "serde_number::deserialize_option_u64"
+    )]
     pub last_sync_timestamp: Option<u64>,
 }
 
@@ -531,19 +543,17 @@ mod tests {
     fn op_batch_message_roundtrip() {
         let msg = OpBatchMessage {
             payload: OpBatchPayload {
-                ops: vec![
-                    ClientOp {
-                        id: Some("op-1".to_string()),
-                        map_name: "events".to_string(),
-                        key: "evt-1".to_string(),
-                        op_type: None,
-                        record: None,
-                        or_record: None,
-                        or_tag: None,
-                        write_concern: None,
-                        timeout: None,
-                    },
-                ],
+                ops: vec![ClientOp {
+                    id: Some("op-1".to_string()),
+                    map_name: "events".to_string(),
+                    key: "evt-1".to_string(),
+                    op_type: None,
+                    record: None,
+                    or_record: None,
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                }],
                 write_concern: Some(WriteConcern::PERSISTED),
                 timeout: Some(5000),
             },
@@ -610,20 +620,18 @@ mod tests {
             payload: SyncRespLeafPayload {
                 map_name: "users".to_string(),
                 path: "0/1".to_string(),
-                records: vec![
-                    SyncLeafRecord {
-                        key: "user-1".to_string(),
-                        record: LWWRecord {
-                            value: Some(rmpv::Value::String("Alice".into())),
-                            timestamp: Timestamp {
-                                millis: 1_700_000_000_000,
-                                counter: 1,
-                                node_id: "node-1".to_string(),
-                            },
-                            ttl_ms: None,
+                records: vec![SyncLeafRecord {
+                    key: "user-1".to_string(),
+                    record: LWWRecord {
+                        value: Some(rmpv::Value::String("Alice".into())),
+                        timestamp: Timestamp {
+                            millis: 1_700_000_000_000,
+                            counter: 1,
+                            node_id: "node-1".to_string(),
                         },
+                        ttl_ms: None,
                     },
-                ],
+                }],
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
@@ -705,24 +713,20 @@ mod tests {
             payload: ORMapSyncRespLeafPayload {
                 map_name: "tags".to_string(),
                 path: "0/1".to_string(),
-                entries: vec![
-                    ORMapEntry {
-                        key: "tag-1".to_string(),
-                        records: vec![
-                            ORMapRecord {
-                                value: rmpv::Value::String("important".into()),
-                                timestamp: Timestamp {
-                                    millis: 1_700_000_000_000,
-                                    counter: 0,
-                                    node_id: "node-1".to_string(),
-                                },
-                                tag: "1700000000000:0:node-1".to_string(),
-                                ttl_ms: None,
-                            },
-                        ],
-                        tombstones: vec!["old-tag".to_string()],
-                    },
-                ],
+                entries: vec![ORMapEntry {
+                    key: "tag-1".to_string(),
+                    records: vec![ORMapRecord {
+                        value: rmpv::Value::String("important".into()),
+                        timestamp: Timestamp {
+                            millis: 1_700_000_000_000,
+                            counter: 0,
+                            node_id: "node-1".to_string(),
+                        },
+                        tag: "1700000000000:0:node-1".to_string(),
+                        ttl_ms: None,
+                    }],
+                    tombstones: vec!["old-tag".to_string()],
+                }],
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
@@ -744,13 +748,11 @@ mod tests {
         let msg = ORMapDiffResponse {
             payload: ORMapDiffResponsePayload {
                 map_name: "tags".to_string(),
-                entries: vec![
-                    ORMapEntry {
-                        key: "key-1".to_string(),
-                        records: vec![],
-                        tombstones: vec![],
-                    },
-                ],
+                entries: vec![ORMapEntry {
+                    key: "key-1".to_string(),
+                    records: vec![],
+                    tombstones: vec![],
+                }],
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
@@ -761,24 +763,20 @@ mod tests {
         let msg = ORMapPushDiff {
             payload: ORMapPushDiffPayload {
                 map_name: "tags".to_string(),
-                entries: vec![
-                    ORMapEntry {
-                        key: "key-1".to_string(),
-                        records: vec![
-                            ORMapRecord {
-                                value: rmpv::Value::Integer(42.into()),
-                                timestamp: Timestamp {
-                                    millis: 100,
-                                    counter: 0,
-                                    node_id: "n".to_string(),
-                                },
-                                tag: "100:0:n".to_string(),
-                                ttl_ms: Some(5000),
-                            },
-                        ],
-                        tombstones: vec![],
-                    },
-                ],
+                entries: vec![ORMapEntry {
+                    key: "key-1".to_string(),
+                    records: vec![ORMapRecord {
+                        value: rmpv::Value::Integer(42.into()),
+                        timestamp: Timestamp {
+                            millis: 100,
+                            counter: 0,
+                            node_id: "n".to_string(),
+                        },
+                        tag: "100:0:n".to_string(),
+                        ttl_ms: Some(5000),
+                    }],
+                    tombstones: vec![],
+                }],
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
@@ -903,10 +901,7 @@ mod tests {
         let has_achieved = payload_map
             .iter()
             .any(|(k, _)| k.as_str() == Some("achievedLevel"));
-        assert!(
-            !has_achieved,
-            "achievedLevel should be omitted when None"
-        );
+        assert!(!has_achieved, "achievedLevel should be omitted when None");
 
         let has_results = payload_map
             .iter()

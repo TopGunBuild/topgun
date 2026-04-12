@@ -21,10 +21,10 @@ use axum::response::Response;
 use futures_util::sink::SinkExt;
 use futures_util::stream::{SplitSink, StreamExt};
 use tokio::sync::mpsc;
-use topgun_core::messages::{
-    AuthAckData, ErrorPayload, OpAckMessage, OpAckPayload, Message as TopGunMessage, WriteConcern,
-};
 use topgun_core::hash_to_partition;
+use topgun_core::messages::{
+    AuthAckData, ErrorPayload, Message as TopGunMessage, OpAckMessage, OpAckPayload, WriteConcern,
+};
 use tracing::{debug, warn};
 
 use super::auth::AuthHandler;
@@ -83,10 +83,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     if let Some(ref secret) = state.jwt_secret {
         let auth_handler = AuthHandler::new(secret.clone(), state.auth_validator.clone());
         if let Err(e) = auth_handler.send_auth_required(&mut socket).await {
-            warn!(
-                "failed to send AUTH_REQUIRED to {:?}: {}",
-                conn_id, e
-            );
+            warn!("failed to send AUTH_REQUIRED to {:?}: {}", conn_id, e);
             state.registry.remove(conn_id);
             return;
         }
@@ -117,18 +114,24 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     let tg_msg = match rmp_serde::from_slice::<TopGunMessage>(&data) {
                         Ok(msg) => msg,
                         Err(e) => {
-                            debug!(
-                                "failed to deserialize message from {:?}: {}",
-                                conn_id, e
-                            );
+                            debug!("failed to deserialize message from {:?}: {}", conn_id, e);
                             continue;
                         }
                     };
 
                     if let TopGunMessage::Auth(ref auth_msg) = tg_msg {
                         if let Some(ref secret) = state.jwt_secret {
-                            let auth_handler = AuthHandler::new(secret.clone(), state.auth_validator.clone());
-                            match auth_handler.handle_auth(auth_msg, &handle.tx, state.config.jwt_clock_skew_secs, state.config.insecure_forward_auth_errors).await {
+                            let auth_handler =
+                                AuthHandler::new(secret.clone(), state.auth_validator.clone());
+                            match auth_handler
+                                .handle_auth(
+                                    auth_msg,
+                                    &handle.tx,
+                                    state.config.jwt_clock_skew_secs,
+                                    state.config.insecure_forward_auth_errors,
+                                )
+                                .await
+                            {
                                 Ok(principal) => {
                                     // Store principal in metadata so domain services can read it.
                                     // AtomicBool is set after metadata write so no reader sees
@@ -146,7 +149,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                         ..Default::default()
                                     });
                                     if let Ok(bytes) = rmp_serde::to_vec_named(&ack_msg) {
-                                        let _ = handle.tx.send(OutboundMessage::Binary(bytes)).await;
+                                        let _ =
+                                            handle.tx.send(OutboundMessage::Binary(bytes)).await;
                                     }
 
                                     debug!(
@@ -159,10 +163,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                 }
                                 Err(e) => {
                                     // AUTH_FAIL already sent by handle_auth; close connection
-                                    debug!(
-                                        "auth failed for {:?}: {}",
-                                        conn_id, e
-                                    );
+                                    debug!("auth failed for {:?}: {}", conn_id, e);
                                     // Drain semaphore and drop before returning
                                     semaphore.close();
                                     drop(handle);
@@ -190,12 +191,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     debug!("connection {:?} closed during auth phase", conn_id);
                     semaphore.close();
                     drop(handle);
-                    tokio::time::timeout(
-                        std::time::Duration::from_secs(2),
-                        outbound_handle,
-                    )
-                    .await
-                    .ok();
+                    tokio::time::timeout(std::time::Duration::from_secs(2), outbound_handle)
+                        .await
+                        .ok();
                     state.registry.remove(conn_id);
                     debug!("WebSocket disconnected: {:?}", conn_id);
                     return;
@@ -216,12 +214,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     );
                     semaphore.close();
                     drop(handle);
-                    tokio::time::timeout(
-                        std::time::Duration::from_secs(2),
-                        outbound_handle,
-                    )
-                    .await
-                    .ok();
+                    tokio::time::timeout(std::time::Duration::from_secs(2), outbound_handle)
+                        .await
+                        .ok();
                     state.registry.remove(conn_id);
                     debug!("WebSocket disconnected: {:?}", conn_id);
                     return;
@@ -247,10 +242,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 let tg_msg = match rmp_serde::from_slice::<TopGunMessage>(&data) {
                     Ok(msg) => msg,
                     Err(e) => {
-                        debug!(
-                            "failed to deserialize message from {:?}: {}",
-                            conn_id, e
-                        );
+                        debug!("failed to deserialize message from {:?}: {}", conn_id, e);
                         continue;
                     }
                 };
@@ -267,7 +259,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 let principal_clone = principal.clone();
 
                 tokio::spawn(async move {
-                    dispatch_message(tg_msg, conn_id, principal_clone, op_service, dispatcher, tx).await;
+                    dispatch_message(tg_msg, conn_id, principal_clone, op_service, dispatcher, tx)
+                        .await;
                     drop(permit); // Release after dispatch completes
                 });
             }
@@ -286,10 +279,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 // Ping/Pong are handled automatically by axum/tungstenite.
             }
             Some(Err(e)) => {
-                debug!(
-                    "WebSocket error on connection {:?}: {}",
-                    conn_id, e
-                );
+                debug!("WebSocket error on connection {:?}: {}", conn_id, e);
                 break;
             }
         }
@@ -310,12 +300,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
     // Wait for the outbound task to finish flushing, with a timeout to
     // prevent hanging if the writer is stuck.
-    tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        outbound_handle,
-    )
-    .await
-    .ok();
+    tokio::time::timeout(std::time::Duration::from_secs(2), outbound_handle)
+        .await
+        .ok();
 
     state.registry.remove(conn_id);
     debug!("WebSocket disconnected: {:?}", conn_id);
@@ -340,13 +327,24 @@ async fn dispatch_message(
     tx: mpsc::Sender<OutboundMessage>,
 ) {
     let (Some(classify_svc), Some(dispatcher)) = (operation_service, dispatcher) else {
-        debug!("dispatcher not configured, dropping message from {:?}", conn_id);
+        debug!(
+            "dispatcher not configured, dropping message from {:?}",
+            conn_id
+        );
         return;
     };
 
     // Handle BATCH messages: unpack each inner message and route individually
     if let TopGunMessage::Batch(ref batch_msg) = tg_msg {
-        unpack_and_dispatch_batch(batch_msg, conn_id, principal, &classify_svc, &dispatcher, &tx).await;
+        unpack_and_dispatch_batch(
+            batch_msg,
+            conn_id,
+            principal,
+            &classify_svc,
+            &dispatcher,
+            &tx,
+        )
+        .await;
         return;
     }
 
@@ -354,7 +352,15 @@ async fn dispatch_message(
     // Split by partition so each sub-batch runs on a dedicated partition worker
     // rather than serializing all ops on the single global worker.
     if let TopGunMessage::OpBatch(ref batch_msg) = tg_msg {
-        dispatch_op_batch(batch_msg, conn_id, principal, &classify_svc, &dispatcher, &tx).await;
+        dispatch_op_batch(
+            batch_msg,
+            conn_id,
+            principal,
+            &classify_svc,
+            &dispatcher,
+            &tx,
+        )
+        .await;
         return;
     }
 
@@ -460,7 +466,10 @@ async fn dispatch_op_batch(
     let mut partition_groups: HashMap<u32, Vec<topgun_core::messages::ClientOp>> = HashMap::new();
     for op in ops {
         let partition_id = hash_to_partition(&op.key);
-        partition_groups.entry(partition_id).or_default().push(op.clone());
+        partition_groups
+            .entry(partition_id)
+            .or_default()
+            .push(op.clone());
     }
 
     let write_concern = batch_msg.payload.write_concern.clone();
@@ -516,9 +525,7 @@ async fn dispatch_op_batch(
     if let Some(err) = dispatch_error {
         debug!("dispatch_op_batch error for {:?}: {}", conn_id, err);
         let (code, message) = match err {
-            OperationError::Overloaded => {
-                (429, "server overloaded, try again later".to_string())
-            }
+            OperationError::Overloaded => (429, "server overloaded, try again later".to_string()),
             ref e => (500, format!("{e}")),
         };
         let err_response = TopGunMessage::Error {
@@ -640,10 +647,7 @@ async fn unpack_and_dispatch_batch(
 /// - `Empty` -> no response
 /// - `Ack` -> construct `OpAck` with `call_id.to_string()` as `last_id`
 /// - `NotImplemented` -> construct `Error` with code 501
-async fn send_operation_response(
-    resp: OperationResponse,
-    tx: &mpsc::Sender<OutboundMessage>,
-) {
+async fn send_operation_response(resp: OperationResponse, tx: &mpsc::Sender<OutboundMessage>) {
     match resp {
         OperationResponse::Message(msg) => {
             if let Ok(bytes) = rmp_serde::to_vec_named(&*msg) {

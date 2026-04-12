@@ -12,10 +12,9 @@ use tracing::{debug, warn};
 use crate::network::connection::ConnectionRegistry;
 
 use super::{
-    ClusterChange, ClusterConfig, ClusterMessage, ClusterState, MigrationCommand,
-    PartitionTableUpdatePayload, PeerConnectionMap,
-    assignment::compute_assignment,
-    migration::broadcast_partition_map,
+    assignment::compute_assignment, migration::broadcast_partition_map, ClusterChange,
+    ClusterConfig, ClusterMessage, ClusterState, MigrationCommand, PartitionTableUpdatePayload,
+    PeerConnectionMap,
 };
 
 // ---------------------------------------------------------------------------
@@ -54,10 +53,7 @@ impl MembershipReactor {
     /// Processes `ClusterChange` events: recomputes partition assignments on
     /// `MemberAdded`/`MemberRemoved`, broadcasts updated tables, and cancels
     /// migrations involving dead nodes.
-    pub async fn run(
-        self: Arc<Self>,
-        mut change_rx: mpsc::UnboundedReceiver<ClusterChange>,
-    ) {
+    pub async fn run(self: Arc<Self>, mut change_rx: mpsc::UnboundedReceiver<ClusterChange>) {
         while let Some(change) = change_rx.recv().await {
             match change {
                 ClusterChange::MemberAdded(_) => {
@@ -85,14 +81,9 @@ impl MembershipReactor {
         let view = self.cluster_state.current_view();
 
         // Collect active members for assignment computation.
-        let active_members: Vec<_> = view
-            .active_members()
-            .into_iter()
-            .cloned()
-            .collect();
+        let active_members: Vec<_> = view.active_members().into_iter().cloned().collect();
 
-        let assignments =
-            compute_assignment(&active_members, 271, self.config.backup_count);
+        let assignments = compute_assignment(&active_members, 271, self.config.backup_count);
 
         // Atomically update the partition table and increment its version.
         self.cluster_state
@@ -101,7 +92,10 @@ impl MembershipReactor {
 
         let table_version = self.cluster_state.partition_table.version();
 
-        debug!(version = table_version, "partition table updated after membership change");
+        debug!(
+            version = table_version,
+            "partition table updated after membership change"
+        );
 
         // Broadcast updated partition table to all peers.
         let update_msg = ClusterMessage::PartitionTableUpdate(PartitionTableUpdatePayload {

@@ -180,7 +180,11 @@ pub fn validate_schema(schema: &MapSchema) -> Result<(), Vec<String>> {
         }
     }
 
-    if errors.is_empty() { Ok(()) } else { Err(errors) }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -249,11 +253,7 @@ pub fn validate_value(schema: &MapSchema, value: &Value) -> ValidationResult {
 
 /// Check that `value` matches `field_def.field_type` and satisfies all
 /// constraints. Appends error messages to `errors`.
-fn check_type_and_constraints(
-    value: &Value,
-    field_def: &FieldDef,
-    errors: &mut Vec<String>,
-) {
+fn check_type_and_constraints(value: &Value, field_def: &FieldDef, errors: &mut Vec<String>) {
     let name = &field_def.name;
     let type_ok = check_type(value, &field_def.field_type, name, errors);
 
@@ -266,12 +266,7 @@ fn check_type_and_constraints(
 
 /// Returns true if the value matches the expected field type (and recursively
 /// checks element types for `FieldType::Array`). Appends a type error if not.
-fn check_type(
-    value: &Value,
-    field_type: &FieldType,
-    name: &str,
-    errors: &mut Vec<String>,
-) -> bool {
+fn check_type(value: &Value, field_type: &FieldType, name: &str, errors: &mut Vec<String>) -> bool {
     let ok = match field_type {
         FieldType::String => matches!(value, Value::String(_)),
         // Int and Timestamp both accept Value::Int.
@@ -395,9 +390,7 @@ fn check_constraints(
             }
             if let Some(max) = constraints.max_value {
                 if *i > max {
-                    errors.push(format!(
-                        "field '{name}': value {i} exceeds maximum {max}"
-                    ));
+                    errors.push(format!("field '{name}': value {i} exceeds maximum {max}"));
                 }
             }
         }
@@ -499,7 +492,11 @@ mod tests {
     }
 
     fn make_schema(fields: Vec<FieldDef>, strict: bool) -> MapSchema {
-        MapSchema { version: 1, fields, strict }
+        MapSchema {
+            version: 1,
+            fields,
+            strict,
+        }
     }
 
     fn make_map(pairs: Vec<(&str, Value)>) -> Value {
@@ -518,7 +515,10 @@ mod tests {
     fn valid_map_passes() {
         let schema = make_schema(vec![make_string_field("name", true)], false);
         let value = make_map(vec![("name", Value::String("Alice".to_string()))]);
-        assert!(matches!(validate_value(&schema, &value), ValidationResult::Valid));
+        assert!(matches!(
+            validate_value(&schema, &value),
+            ValidationResult::Valid
+        ));
     }
 
     #[test]
@@ -562,7 +562,10 @@ mod tests {
     fn optional_field_absent_is_valid() {
         let schema = make_schema(vec![make_string_field("name", false)], false);
         let value = make_map(vec![]);
-        assert!(matches!(validate_value(&schema, &value), ValidationResult::Valid));
+        assert!(matches!(
+            validate_value(&schema, &value),
+            ValidationResult::Valid
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -581,7 +584,10 @@ mod tests {
             false,
         );
         let value = make_map(vec![("x", Value::Int(5))]);
-        assert!(matches!(validate_value(&schema, &value), ValidationResult::Valid));
+        assert!(matches!(
+            validate_value(&schema, &value),
+            ValidationResult::Valid
+        ));
     }
 
     #[test]
@@ -596,7 +602,10 @@ mod tests {
             false,
         );
         let value = make_map(vec![("x", Value::Int(5))]);
-        assert!(matches!(validate_value(&schema, &value), ValidationResult::Valid));
+        assert!(matches!(
+            validate_value(&schema, &value),
+            ValidationResult::Valid
+        ));
     }
 
     #[test]
@@ -611,7 +620,10 @@ mod tests {
             false,
         );
         let value = make_map(vec![("x", Value::Float(1.5))]);
-        assert!(matches!(validate_value(&schema, &value), ValidationResult::Valid));
+        assert!(matches!(
+            validate_value(&schema, &value),
+            ValidationResult::Valid
+        ));
     }
 
     #[test]
@@ -626,7 +638,10 @@ mod tests {
             false,
         );
         let value = make_map(vec![("data", Value::Bytes(vec![0xDE, 0xAD]))]);
-        assert!(matches!(validate_value(&schema, &value), ValidationResult::Valid));
+        assert!(matches!(
+            validate_value(&schema, &value),
+            ValidationResult::Valid
+        ));
     }
 
     #[test]
@@ -641,7 +656,10 @@ mod tests {
             false,
         );
         let value = make_map(vec![("ts", Value::Int(1_700_000_000_000))]);
-        assert!(matches!(validate_value(&schema, &value), ValidationResult::Valid));
+        assert!(matches!(
+            validate_value(&schema, &value),
+            ValidationResult::Valid
+        ));
     }
 
     #[test]
@@ -656,7 +674,10 @@ mod tests {
             false,
         );
         let value = make_map(vec![("active", Value::Bool(true))]);
-        assert!(matches!(validate_value(&schema, &value), ValidationResult::Valid));
+        assert!(matches!(
+            validate_value(&schema, &value),
+            ValidationResult::Valid
+        ));
     }
 
     #[test]
@@ -678,7 +699,10 @@ mod tests {
             Value::Bytes(vec![1]),
         ] {
             let value = make_map(vec![("x", val)]);
-            assert!(matches!(validate_value(&schema, &value), ValidationResult::Valid));
+            assert!(matches!(
+                validate_value(&schema, &value),
+                ValidationResult::Valid
+            ));
         }
     }
 
@@ -701,14 +725,20 @@ mod tests {
                 Value::String("b".to_string()),
             ]),
         )]);
-        assert!(matches!(validate_value(&schema, &valid), ValidationResult::Valid));
+        assert!(matches!(
+            validate_value(&schema, &valid),
+            ValidationResult::Valid
+        ));
 
         // Invalid: contains an int.
         let invalid = make_map(vec![(
             "tags",
             Value::Array(vec![Value::String("a".to_string()), Value::Int(1)]),
         )]);
-        assert!(matches!(validate_value(&schema, &invalid), ValidationResult::Invalid { .. }));
+        assert!(matches!(
+            validate_value(&schema, &invalid),
+            ValidationResult::Invalid { .. }
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -731,11 +761,17 @@ mod tests {
         );
         // 11-char string — exceeds max.
         let value = make_map(vec![("name", Value::String("hello world".to_string()))]);
-        assert!(matches!(validate_value(&schema, &value), ValidationResult::Invalid { .. }));
+        assert!(matches!(
+            validate_value(&schema, &value),
+            ValidationResult::Invalid { .. }
+        ));
 
         // 5-char string — within limit.
         let value2 = make_map(vec![("name", Value::String("hello".to_string()))]);
-        assert!(matches!(validate_value(&schema, &value2), ValidationResult::Valid));
+        assert!(matches!(
+            validate_value(&schema, &value2),
+            ValidationResult::Valid
+        ));
     }
 
     #[test]
@@ -753,10 +789,16 @@ mod tests {
             false,
         );
         let invalid = make_map(vec![("age", Value::Int(-1))]);
-        assert!(matches!(validate_value(&schema, &invalid), ValidationResult::Invalid { .. }));
+        assert!(matches!(
+            validate_value(&schema, &invalid),
+            ValidationResult::Invalid { .. }
+        ));
 
         let valid = make_map(vec![("age", Value::Int(0))]);
-        assert!(matches!(validate_value(&schema, &valid), ValidationResult::Valid));
+        assert!(matches!(
+            validate_value(&schema, &valid),
+            ValidationResult::Valid
+        ));
     }
 
     #[test]
@@ -773,11 +815,20 @@ mod tests {
             }],
             false,
         );
-        let valid = make_map(vec![("email", Value::String("user@example.com".to_string()))]);
-        assert!(matches!(validate_value(&schema, &valid), ValidationResult::Valid));
+        let valid = make_map(vec![(
+            "email",
+            Value::String("user@example.com".to_string()),
+        )]);
+        assert!(matches!(
+            validate_value(&schema, &valid),
+            ValidationResult::Valid
+        ));
 
         let invalid = make_map(vec![("email", Value::String("not-an-email".to_string()))]);
-        assert!(matches!(validate_value(&schema, &invalid), ValidationResult::Invalid { .. }));
+        assert!(matches!(
+            validate_value(&schema, &invalid),
+            ValidationResult::Invalid { .. }
+        ));
     }
 
     #[test]
@@ -795,10 +846,16 @@ mod tests {
             false,
         );
         let valid = make_map(vec![("status", Value::String("active".to_string()))]);
-        assert!(matches!(validate_value(&schema, &valid), ValidationResult::Valid));
+        assert!(matches!(
+            validate_value(&schema, &valid),
+            ValidationResult::Valid
+        ));
 
         let invalid = make_map(vec![("status", Value::String("pending".to_string()))]);
-        assert!(matches!(validate_value(&schema, &invalid), ValidationResult::Invalid { .. }));
+        assert!(matches!(
+            validate_value(&schema, &invalid),
+            ValidationResult::Invalid { .. }
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -826,7 +883,10 @@ mod tests {
             ("name", Value::String("Alice".to_string())),
             ("extra", Value::Int(42)),
         ]);
-        assert!(matches!(validate_value(&schema, &value), ValidationResult::Valid));
+        assert!(matches!(
+            validate_value(&schema, &value),
+            ValidationResult::Valid
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -954,7 +1014,10 @@ mod tests {
         };
         // 11-char string — fails max_length.
         let value = make_map(vec![("title", Value::String("hello world".to_string()))]);
-        assert!(matches!(validate_value(&schema, &value), ValidationResult::Invalid { .. }));
+        assert!(matches!(
+            validate_value(&schema, &value),
+            ValidationResult::Invalid { .. }
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -968,53 +1031,76 @@ mod tests {
         use super::*;
 
         fn make_field(name: &str, ft: FieldType, required: bool) -> FieldDef {
-            FieldDef { name: name.to_string(), required, field_type: ft, constraints: None }
+            FieldDef {
+                name: name.to_string(),
+                required,
+                field_type: ft,
+                constraints: None,
+            }
         }
 
         #[test]
         fn string_maps_to_utf8() {
-            let schema =
-                MapSchema { version: 1, strict: false, fields: vec![make_field("s", FieldType::String, false)] };
+            let schema = MapSchema {
+                version: 1,
+                strict: false,
+                fields: vec![make_field("s", FieldType::String, false)],
+            };
             let arrow = schema.to_arrow_schema();
             assert_eq!(arrow.field(0).data_type(), &DataType::Utf8);
         }
 
         #[test]
         fn int_maps_to_int64() {
-            let schema =
-                MapSchema { version: 1, strict: false, fields: vec![make_field("i", FieldType::Int, false)] };
+            let schema = MapSchema {
+                version: 1,
+                strict: false,
+                fields: vec![make_field("i", FieldType::Int, false)],
+            };
             let arrow = schema.to_arrow_schema();
             assert_eq!(arrow.field(0).data_type(), &DataType::Int64);
         }
 
         #[test]
         fn float_maps_to_float64() {
-            let schema =
-                MapSchema { version: 1, strict: false, fields: vec![make_field("f", FieldType::Float, false)] };
+            let schema = MapSchema {
+                version: 1,
+                strict: false,
+                fields: vec![make_field("f", FieldType::Float, false)],
+            };
             let arrow = schema.to_arrow_schema();
             assert_eq!(arrow.field(0).data_type(), &DataType::Float64);
         }
 
         #[test]
         fn bool_maps_to_boolean() {
-            let schema =
-                MapSchema { version: 1, strict: false, fields: vec![make_field("b", FieldType::Bool, false)] };
+            let schema = MapSchema {
+                version: 1,
+                strict: false,
+                fields: vec![make_field("b", FieldType::Bool, false)],
+            };
             let arrow = schema.to_arrow_schema();
             assert_eq!(arrow.field(0).data_type(), &DataType::Boolean);
         }
 
         #[test]
         fn binary_maps_to_binary() {
-            let schema =
-                MapSchema { version: 1, strict: false, fields: vec![make_field("bin", FieldType::Binary, false)] };
+            let schema = MapSchema {
+                version: 1,
+                strict: false,
+                fields: vec![make_field("bin", FieldType::Binary, false)],
+            };
             let arrow = schema.to_arrow_schema();
             assert_eq!(arrow.field(0).data_type(), &DataType::Binary);
         }
 
         #[test]
         fn timestamp_maps_to_timestamp_millisecond_no_tz() {
-            let schema =
-                MapSchema { version: 1, strict: false, fields: vec![make_field("ts", FieldType::Timestamp, false)] };
+            let schema = MapSchema {
+                version: 1,
+                strict: false,
+                fields: vec![make_field("ts", FieldType::Timestamp, false)],
+            };
             let arrow = schema.to_arrow_schema();
             assert_eq!(
                 arrow.field(0).data_type(),
@@ -1024,16 +1110,22 @@ mod tests {
 
         #[test]
         fn map_variant_maps_to_utf8() {
-            let schema =
-                MapSchema { version: 1, strict: false, fields: vec![make_field("m", FieldType::Map, false)] };
+            let schema = MapSchema {
+                version: 1,
+                strict: false,
+                fields: vec![make_field("m", FieldType::Map, false)],
+            };
             let arrow = schema.to_arrow_schema();
             assert_eq!(arrow.field(0).data_type(), &DataType::Utf8);
         }
 
         #[test]
         fn any_variant_maps_to_utf8() {
-            let schema =
-                MapSchema { version: 1, strict: false, fields: vec![make_field("a", FieldType::Any, false)] };
+            let schema = MapSchema {
+                version: 1,
+                strict: false,
+                fields: vec![make_field("a", FieldType::Any, false)],
+            };
             let arrow = schema.to_arrow_schema();
             assert_eq!(arrow.field(0).data_type(), &DataType::Utf8);
         }
@@ -1043,13 +1135,20 @@ mod tests {
             let schema = MapSchema {
                 version: 1,
                 strict: false,
-                fields: vec![make_field("ids", FieldType::Array(Box::new(FieldType::Int)), false)],
+                fields: vec![make_field(
+                    "ids",
+                    FieldType::Array(Box::new(FieldType::Int)),
+                    false,
+                )],
             };
             let arrow = schema.to_arrow_schema();
             let dt = arrow.field(0).data_type();
             if let DataType::List(item_field) = dt {
                 assert_eq!(item_field.data_type(), &DataType::Int64);
-                assert!(item_field.is_nullable(), "array item field should be nullable");
+                assert!(
+                    item_field.is_nullable(),
+                    "array item field should be nullable"
+                );
             } else {
                 panic!("expected DataType::List, got {dt:?}");
             }
@@ -1057,18 +1156,30 @@ mod tests {
 
         #[test]
         fn required_true_produces_non_nullable_field() {
-            let schema =
-                MapSchema { version: 1, strict: false, fields: vec![make_field("name", FieldType::String, true)] };
+            let schema = MapSchema {
+                version: 1,
+                strict: false,
+                fields: vec![make_field("name", FieldType::String, true)],
+            };
             let arrow = schema.to_arrow_schema();
-            assert!(!arrow.field(0).is_nullable(), "required field must be non-nullable in Arrow");
+            assert!(
+                !arrow.field(0).is_nullable(),
+                "required field must be non-nullable in Arrow"
+            );
         }
 
         #[test]
         fn required_false_produces_nullable_field() {
-            let schema =
-                MapSchema { version: 1, strict: false, fields: vec![make_field("name", FieldType::String, false)] };
+            let schema = MapSchema {
+                version: 1,
+                strict: false,
+                fields: vec![make_field("name", FieldType::String, false)],
+            };
             let arrow = schema.to_arrow_schema();
-            assert!(arrow.field(0).is_nullable(), "optional field must be nullable in Arrow");
+            assert!(
+                arrow.field(0).is_nullable(),
+                "optional field must be nullable in Arrow"
+            );
         }
 
         #[test]
@@ -1076,7 +1187,11 @@ mod tests {
             let schema = MapSchema {
                 version: 1,
                 strict: false,
-                fields: vec![make_field("tags", FieldType::Array(Box::new(FieldType::String)), false)],
+                fields: vec![make_field(
+                    "tags",
+                    FieldType::Array(Box::new(FieldType::String)),
+                    false,
+                )],
             };
             let arrow = schema.to_arrow_schema();
             if let DataType::List(item_field) = arrow.field(0).data_type() {

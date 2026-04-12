@@ -11,11 +11,11 @@ use dashmap::DashMap;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, warn};
 
+use super::traits::FailureDetector;
 use super::{
     ClusterChange, ClusterConfig, ClusterMessage, ClusterState, HeartbeatComplaintPayload,
     HeartbeatPayload, NodeState, PeerConnectionMap, PhiAccrualFailureDetector,
 };
-use super::traits::FailureDetector;
 
 // ---------------------------------------------------------------------------
 // HeartbeatService
@@ -57,8 +57,7 @@ impl HeartbeatService {
         mut shutdown: watch::Receiver<bool>,
     ) {
         let interval_ms = self.config.heartbeat_interval_ms;
-        let mut ticker =
-            tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
+        let mut ticker = tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
 
         loop {
             tokio::select! {
@@ -133,16 +132,15 @@ impl HeartbeatService {
                     // Non-master: forward a complaint to the master.
                     let master_id = view.master().map(|m| m.node_id.clone());
                     if let Some(master_id) = master_id {
-                        let complaint = ClusterMessage::HeartbeatComplaint(
-                            HeartbeatComplaintPayload {
+                        let complaint =
+                            ClusterMessage::HeartbeatComplaint(HeartbeatComplaintPayload {
                                 complainer_id: self.cluster_state.local_node_id.clone(),
                                 complainer_view_version: view.version,
                                 suspect_id: peer_id.clone(),
                                 suspect_view_version: view
                                     .get_member(&peer_id)
                                     .map_or(0, |m| m.join_version),
-                            },
-                        );
+                            });
                         if let Err(e) = self.peers.send_to(&master_id, &complaint) {
                             warn!(
                                 master = %master_id,
@@ -171,13 +169,8 @@ impl HeartbeatService {
         if !self.failure_detector.is_alive(&payload.suspect_id, now_ms) {
             let already_suspected = self.suspected_at.contains_key(&*payload.suspect_id);
             if !already_suspected {
-                self.suspected_at
-                    .insert(payload.suspect_id.clone(), now_ms);
-                self.apply_node_state_update(
-                    &payload.suspect_id,
-                    NodeState::Suspect,
-                    true,
-                );
+                self.suspected_at.insert(payload.suspect_id.clone(), now_ms);
+                self.apply_node_state_update(&payload.suspect_id, NodeState::Suspect, true);
                 debug!(node = %payload.suspect_id, "node marked Suspect via complaint");
             }
         }
@@ -213,12 +206,7 @@ impl HeartbeatService {
     ///
     /// `is_suspect` controls which `ClusterChange` variant to emit:
     /// `true` -> `MemberUpdated`, `false` -> `MemberRemoved`.
-    fn apply_node_state_update(
-        &self,
-        node_id: &str,
-        new_state: NodeState,
-        is_suspect: bool,
-    ) {
+    fn apply_node_state_update(&self, node_id: &str, new_state: NodeState, is_suspect: bool) {
         // 1. Load current view.
         let current = self.cluster_state.current_view();
         // 2. Clone members vec.

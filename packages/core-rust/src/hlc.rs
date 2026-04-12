@@ -75,11 +75,8 @@ pub mod serde_number {
             F64(f64),
         }
         match NumericU32::deserialize(deserializer)? {
-            NumericU32::U64(v) => {
-                u32::try_from(v).map_err(|_| {
-                    serde::de::Error::custom(format!("u64 value {v} overflows u32"))
-                })
-            }
+            NumericU32::U64(v) => u32::try_from(v)
+                .map_err(|_| serde::de::Error::custom(format!("u64 value {v} overflows u32"))),
             NumericU32::F64(v) => {
                 if v >= 0.0 && v <= f64::from(u32::MAX) && is_whole(v) {
                     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
@@ -297,19 +294,19 @@ impl HLC {
     }
 
     /// Returns the node ID of this HLC instance.
-    #[must_use] 
+    #[must_use]
     pub fn node_id(&self) -> &str {
         &self.node_id
     }
 
     /// Returns whether strict mode is enabled.
-    #[must_use] 
+    #[must_use]
     pub fn strict_mode(&self) -> bool {
         self.strict_mode
     }
 
     /// Returns the maximum allowed clock drift in milliseconds.
-    #[must_use] 
+    #[must_use]
     pub fn max_drift_ms(&self) -> u64 {
         self.max_drift_ms
     }
@@ -317,7 +314,7 @@ impl HLC {
     /// Returns a reference to the clock source used by this HLC.
     ///
     /// Useful for LWWMap/ORMap to access the same clock for TTL checks.
-    #[must_use] 
+    #[must_use]
     pub fn clock_source(&self) -> &dyn ClockSource {
         &*self.clock_source
     }
@@ -405,13 +402,13 @@ impl HLC {
     /// `Ordering::Equal` if they are identical.
     ///
     /// Comparison order: millis first, then counter, then `node_id` (byte-order).
-    #[must_use] 
+    #[must_use]
     pub fn compare(a: &Timestamp, b: &Timestamp) -> Ordering {
         a.cmp(b)
     }
 
     /// Serializes a timestamp to the wire format `"millis:counter:nodeId"`.
-    #[must_use] 
+    #[must_use]
     pub fn to_string(ts: &Timestamp) -> String {
         ts.to_string()
     }
@@ -529,29 +526,61 @@ mod tests {
 
     #[test]
     fn timestamp_ordering_millis_first() {
-        let a = Timestamp { millis: 100, counter: 5, node_id: "z".to_string() };
-        let b = Timestamp { millis: 200, counter: 0, node_id: "a".to_string() };
+        let a = Timestamp {
+            millis: 100,
+            counter: 5,
+            node_id: "z".to_string(),
+        };
+        let b = Timestamp {
+            millis: 200,
+            counter: 0,
+            node_id: "a".to_string(),
+        };
         assert!(a < b);
     }
 
     #[test]
     fn timestamp_ordering_counter_second() {
-        let a = Timestamp { millis: 100, counter: 1, node_id: "z".to_string() };
-        let b = Timestamp { millis: 100, counter: 2, node_id: "a".to_string() };
+        let a = Timestamp {
+            millis: 100,
+            counter: 1,
+            node_id: "z".to_string(),
+        };
+        let b = Timestamp {
+            millis: 100,
+            counter: 2,
+            node_id: "a".to_string(),
+        };
         assert!(a < b);
     }
 
     #[test]
     fn timestamp_ordering_node_id_third() {
-        let a = Timestamp { millis: 100, counter: 1, node_id: "a".to_string() };
-        let b = Timestamp { millis: 100, counter: 1, node_id: "b".to_string() };
+        let a = Timestamp {
+            millis: 100,
+            counter: 1,
+            node_id: "a".to_string(),
+        };
+        let b = Timestamp {
+            millis: 100,
+            counter: 1,
+            node_id: "b".to_string(),
+        };
         assert!(a < b);
     }
 
     #[test]
     fn timestamp_equal() {
-        let a = Timestamp { millis: 100, counter: 1, node_id: "node".to_string() };
-        let b = Timestamp { millis: 100, counter: 1, node_id: "node".to_string() };
+        let a = Timestamp {
+            millis: 100,
+            counter: 1,
+            node_id: "node".to_string(),
+        };
+        let b = Timestamp {
+            millis: 100,
+            counter: 1,
+            node_id: "node".to_string(),
+        };
         assert_eq!(a.cmp(&b), Ordering::Equal);
     }
 
@@ -563,8 +592,14 @@ mod tests {
 
     #[test]
     fn merge_key_result_equality() {
-        let a = MergeKeyResult { added: 1, updated: 2 };
-        let b = MergeKeyResult { added: 1, updated: 2 };
+        let a = MergeKeyResult {
+            added: 1,
+            updated: 2,
+        };
+        let b = MergeKeyResult {
+            added: 1,
+            updated: 2,
+        };
         assert_eq!(a, b);
     }
 
@@ -734,8 +769,16 @@ mod tests {
 
     #[test]
     fn compare_by_millis() {
-        let a = Timestamp { millis: 100, counter: 0, node_id: "A".to_string() };
-        let b = Timestamp { millis: 200, counter: 0, node_id: "A".to_string() };
+        let a = Timestamp {
+            millis: 100,
+            counter: 0,
+            node_id: "A".to_string(),
+        };
+        let b = Timestamp {
+            millis: 200,
+            counter: 0,
+            node_id: "A".to_string(),
+        };
 
         assert_eq!(HLC::compare(&a, &b), Ordering::Less);
         assert_eq!(HLC::compare(&b, &a), Ordering::Greater);
@@ -743,8 +786,16 @@ mod tests {
 
     #[test]
     fn compare_by_counter() {
-        let a = Timestamp { millis: 100, counter: 1, node_id: "A".to_string() };
-        let b = Timestamp { millis: 100, counter: 5, node_id: "A".to_string() };
+        let a = Timestamp {
+            millis: 100,
+            counter: 1,
+            node_id: "A".to_string(),
+        };
+        let b = Timestamp {
+            millis: 100,
+            counter: 5,
+            node_id: "A".to_string(),
+        };
 
         assert_eq!(HLC::compare(&a, &b), Ordering::Less);
         assert_eq!(HLC::compare(&b, &a), Ordering::Greater);
@@ -752,8 +803,16 @@ mod tests {
 
     #[test]
     fn compare_by_node_id() {
-        let a = Timestamp { millis: 100, counter: 0, node_id: "A".to_string() };
-        let b = Timestamp { millis: 100, counter: 0, node_id: "B".to_string() };
+        let a = Timestamp {
+            millis: 100,
+            counter: 0,
+            node_id: "A".to_string(),
+        };
+        let b = Timestamp {
+            millis: 100,
+            counter: 0,
+            node_id: "B".to_string(),
+        };
 
         assert_eq!(HLC::compare(&a, &b), Ordering::Less);
         assert_eq!(HLC::compare(&b, &a), Ordering::Greater);
@@ -761,8 +820,16 @@ mod tests {
 
     #[test]
     fn compare_equal() {
-        let a = Timestamp { millis: 100, counter: 5, node_id: "node1".to_string() };
-        let b = Timestamp { millis: 100, counter: 5, node_id: "node1".to_string() };
+        let a = Timestamp {
+            millis: 100,
+            counter: 5,
+            node_id: "node1".to_string(),
+        };
+        let b = Timestamp {
+            millis: 100,
+            counter: 5,
+            node_id: "node1".to_string(),
+        };
 
         assert_eq!(HLC::compare(&a, &b), Ordering::Equal);
     }
@@ -771,7 +838,11 @@ mod tests {
 
     #[test]
     fn to_string_format() {
-        let ts = Timestamp { millis: 1_234_567_890, counter: 42, node_id: "my-node".to_string() };
+        let ts = Timestamp {
+            millis: 1_234_567_890,
+            counter: 42,
+            node_id: "my-node".to_string(),
+        };
         assert_eq!(HLC::to_string(&ts), "1234567890:42:my-node");
     }
 
@@ -804,7 +875,11 @@ mod tests {
 
     #[test]
     fn parse_node_id_with_dashes() {
-        let ts = Timestamp { millis: 100, counter: 0, node_id: "node-with-dashes".to_string() };
+        let ts = Timestamp {
+            millis: 100,
+            counter: 0,
+            node_id: "node-with-dashes".to_string(),
+        };
         let serialized = HLC::to_string(&ts);
         assert_eq!(serialized, "100:0:node-with-dashes");
         let parsed = HLC::parse(&serialized).unwrap();
@@ -816,12 +891,7 @@ mod tests {
     #[test]
     fn strict_mode_rejects_excessive_drift() {
         let (clock, _) = FixedClock::new(1_000_000);
-        let mut hlc = HLC::with_options(
-            "strict-node".to_string(),
-            Box::new(clock),
-            true,
-            5_000,
-        );
+        let mut hlc = HLC::with_options("strict-node".to_string(), Box::new(clock), true, 5_000);
 
         let remote = Timestamp {
             millis: 1_010_000, // 10s ahead, exceeds 5s threshold
@@ -840,12 +910,7 @@ mod tests {
     #[test]
     fn strict_mode_accepts_within_threshold() {
         let (clock, _) = FixedClock::new(1_000_000);
-        let mut hlc = HLC::with_options(
-            "strict-node".to_string(),
-            Box::new(clock),
-            true,
-            10_000,
-        );
+        let mut hlc = HLC::with_options("strict-node".to_string(), Box::new(clock), true, 10_000);
 
         let remote = Timestamp {
             millis: 1_005_000, // 5s ahead, within 10s threshold
@@ -861,12 +926,7 @@ mod tests {
     #[test]
     fn strict_mode_default_drift_60s() {
         let (clock, _) = FixedClock::new(1_000_000);
-        let mut hlc = HLC::with_options(
-            "strict-node".to_string(),
-            Box::new(clock),
-            true,
-            60_000,
-        );
+        let mut hlc = HLC::with_options("strict-node".to_string(), Box::new(clock), true, 60_000);
 
         // 50s ahead: within 60s threshold
         let within = Timestamp {
@@ -878,12 +938,7 @@ mod tests {
 
         // 70s ahead: exceeds 60s threshold (need a fresh HLC for clean test)
         let (clock2, _) = FixedClock::new(1_000_000);
-        let mut hlc2 = HLC::with_options(
-            "strict-node".to_string(),
-            Box::new(clock2),
-            true,
-            60_000,
-        );
+        let mut hlc2 = HLC::with_options("strict-node".to_string(), Box::new(clock2), true, 60_000);
         let exceeds = Timestamp {
             millis: 1_070_000,
             counter: 0,
@@ -914,12 +969,7 @@ mod tests {
     #[test]
     fn negative_drift_not_rejected() {
         let (clock, _) = FixedClock::new(1_000_000);
-        let mut hlc = HLC::with_options(
-            "strict-node".to_string(),
-            Box::new(clock),
-            true,
-            5_000,
-        );
+        let mut hlc = HLC::with_options("strict-node".to_string(), Box::new(clock), true, 5_000);
 
         let remote = Timestamp {
             millis: 900_000, // 100s BEHIND
@@ -1068,7 +1118,10 @@ mod tests {
     #[test]
     fn accepts_uuid_node_id() {
         let (clock, _) = FixedClock::new(0);
-        let hlc = HLC::new("550e8400-e29b-41d4-a716-446655440000".to_string(), Box::new(clock));
+        let hlc = HLC::new(
+            "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            Box::new(clock),
+        );
         assert_eq!(hlc.node_id(), "550e8400-e29b-41d4-a716-446655440000");
     }
 
@@ -1076,7 +1129,11 @@ mod tests {
 
     #[test]
     fn timestamp_display() {
-        let ts = Timestamp { millis: 100, counter: 5, node_id: "n1".to_string() };
+        let ts = Timestamp {
+            millis: 100,
+            counter: 5,
+            node_id: "n1".to_string(),
+        };
         assert_eq!(format!("{ts}"), "100:5:n1");
     }
 }

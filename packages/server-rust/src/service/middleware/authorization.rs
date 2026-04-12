@@ -65,9 +65,7 @@ pub struct AuthorizationService<S> {
 
 impl<S> AuthorizationService<S>
 where
-    S: Service<Operation, Response = OperationResponse, Error = OperationError>
-        + Send
-        + 'static,
+    S: Service<Operation, Response = OperationResponse, Error = OperationError> + Send + 'static,
     S::Future: Send + 'static,
 {
     /// Evaluates policies with a pre-resolved principal.
@@ -88,17 +86,23 @@ where
             if !evaluator.has_policies().await {
                 return fut.await;
             }
-            evaluate_and_dispatch(evaluator, principal, action, map_name, batch_ops_data, data, fut)
-                .await
+            evaluate_and_dispatch(
+                evaluator,
+                principal,
+                action,
+                map_name,
+                batch_ops_data,
+                data,
+                fut,
+            )
+            .await
         })
     }
 }
 
 impl<S> Service<Operation> for AuthorizationService<S>
 where
-    S: Service<Operation, Response = OperationResponse, Error = OperationError>
-        + Send
-        + 'static,
+    S: Service<Operation, Response = OperationResponse, Error = OperationError> + Send + 'static,
     S::Future: Send + 'static,
 {
     type Response = OperationResponse;
@@ -199,9 +203,10 @@ where
 fn classify_operation(op: &Operation) -> (Option<PermissionAction>, String) {
     match op {
         // --- Write actions ---
-        Operation::ClientOp { payload, .. } => {
-            (Some(PermissionAction::Write), payload.payload.map_name.clone())
-        }
+        Operation::ClientOp { payload, .. } => (
+            Some(PermissionAction::Write),
+            payload.payload.map_name.clone(),
+        ),
         Operation::OpBatch { payload, .. } => {
             // Use the map_name from the first op in the batch; fall back to empty.
             let map_name = payload
@@ -226,18 +231,20 @@ fn classify_operation(op: &Operation) -> (Option<PermissionAction>, String) {
             // Counters use a name field; treat as the resource identifier.
             (Some(PermissionAction::Write), payload.name.clone())
         }
-        Operation::ORMapPushDiff { payload, .. } => {
-            (Some(PermissionAction::Write), payload.payload.map_name.clone())
-        }
+        Operation::ORMapPushDiff { payload, .. } => (
+            Some(PermissionAction::Write),
+            payload.payload.map_name.clone(),
+        ),
 
         // --- Read actions ---
-        Operation::QuerySubscribe { payload, .. } | Operation::DagQuery { payload, .. } => {
-            (Some(PermissionAction::Read), payload.payload.map_name.clone())
-        }
+        Operation::QuerySubscribe { payload, .. } | Operation::DagQuery { payload, .. } => (
+            Some(PermissionAction::Read),
+            payload.payload.map_name.clone(),
+        ),
         // QuerySyncInit resumes by query_id; SqlQuery and VectorSearch may span multiple maps.
-        Operation::QuerySyncInit { .. } | Operation::SqlQuery { .. } | Operation::VectorSearch { .. } => {
-            (Some(PermissionAction::Read), String::new())
-        }
+        Operation::QuerySyncInit { .. }
+        | Operation::SqlQuery { .. }
+        | Operation::VectorSearch { .. } => (Some(PermissionAction::Read), String::new()),
         Operation::Search { payload, .. } => {
             (Some(PermissionAction::Read), payload.map_name.clone())
         }
@@ -248,19 +255,22 @@ fn classify_operation(op: &Operation) -> (Option<PermissionAction>, String) {
             // SyncInitMessage is flat (no payload wrapper).
             (Some(PermissionAction::Read), payload.map_name.clone())
         }
-        Operation::MerkleReqBucket { payload, .. } => {
-            (Some(PermissionAction::Read), payload.payload.map_name.clone())
-        }
+        Operation::MerkleReqBucket { payload, .. } => (
+            Some(PermissionAction::Read),
+            payload.payload.map_name.clone(),
+        ),
         Operation::ORMapSyncInit { payload, .. } => {
             // ORMapSyncInit is flat (no payload wrapper).
             (Some(PermissionAction::Read), payload.map_name.clone())
         }
-        Operation::ORMapMerkleReqBucket { payload, .. } => {
-            (Some(PermissionAction::Read), payload.payload.map_name.clone())
-        }
-        Operation::ORMapDiffRequest { payload, .. } => {
-            (Some(PermissionAction::Read), payload.payload.map_name.clone())
-        }
+        Operation::ORMapMerkleReqBucket { payload, .. } => (
+            Some(PermissionAction::Read),
+            payload.payload.map_name.clone(),
+        ),
+        Operation::ORMapDiffRequest { payload, .. } => (
+            Some(PermissionAction::Read),
+            payload.payload.map_name.clone(),
+        ),
 
         // --- Bypass group (no policy check) ---
         Operation::Ping { .. }
@@ -343,7 +353,12 @@ mod tests {
         fn call(&mut self, op: Operation) -> Self::Future {
             let call_id = op.ctx().call_id;
             let name = op.ctx().service_name;
-            Box::pin(async move { Ok(OperationResponse::NotImplemented { service_name: name, call_id }) })
+            Box::pin(async move {
+                Ok(OperationResponse::NotImplemented {
+                    service_name: name,
+                    call_id,
+                })
+            })
         }
     }
 
@@ -357,8 +372,7 @@ mod tests {
 
     /// Builds a Ping operation with the given `CallerOrigin`.
     fn ping_op(origin: CallerOrigin) -> Operation {
-        let mut ctx =
-            OperationContext::new(1, service_names::COORDINATION, make_timestamp(), 5000);
+        let mut ctx = OperationContext::new(1, service_names::COORDINATION, make_timestamp(), 5000);
         ctx.caller_origin = origin;
         Operation::Ping {
             ctx,
@@ -416,17 +430,22 @@ mod tests {
         let layer = AuthorizationLayer::new(evaluator);
         let mut svc = layer.layer(AlwaysOkService);
 
-        let mut ctx =
-            OperationContext::new(2, service_names::COORDINATION, make_timestamp(), 5000);
+        let mut ctx = OperationContext::new(2, service_names::COORDINATION, make_timestamp(), 5000);
         ctx.caller_origin = CallerOrigin::Client;
-        ctx.principal = Some(Principal { id: "user1".to_string(), roles: vec![] });
+        ctx.principal = Some(Principal {
+            id: "user1".to_string(),
+            roles: vec![],
+        });
         let op = Operation::Ping {
             ctx,
             payload: topgun_core::messages::PingData { timestamp: 0 },
         };
 
         let resp = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
-        assert!(resp.is_ok(), "empty store should allow all ops, got {resp:?}");
+        assert!(
+            resp.is_ok(),
+            "empty store should allow all ops, got {resp:?}"
+        );
     }
 
     /// Missing principal on a Client-origin operation returns Unauthorized.
@@ -438,8 +457,7 @@ mod tests {
         let layer = AuthorizationLayer::new(evaluator);
         let mut svc = layer.layer(AlwaysOkService);
 
-        let mut ctx =
-            OperationContext::new(3, service_names::COORDINATION, make_timestamp(), 5000);
+        let mut ctx = OperationContext::new(3, service_names::COORDINATION, make_timestamp(), 5000);
         ctx.caller_origin = CallerOrigin::Client;
         // principal deliberately left as None
         let op = Operation::Ping {
@@ -488,8 +506,7 @@ mod tests {
             timestamp: make_timestamp(),
             ttl_ms: None,
         };
-        let mut ctx =
-            OperationContext::new(10, service_names::CRDT, make_timestamp(), 5000);
+        let mut ctx = OperationContext::new(10, service_names::CRDT, make_timestamp(), 5000);
         ctx.caller_origin = CallerOrigin::Client;
         ctx.principal = Some(principal);
         Operation::ClientOp {
@@ -513,8 +530,7 @@ mod tests {
             timestamp: make_timestamp(),
             ttl_ms: None,
         };
-        let mut ctx =
-            OperationContext::new(11, service_names::CRDT, make_timestamp(), 5000);
+        let mut ctx = OperationContext::new(11, service_names::CRDT, make_timestamp(), 5000);
         ctx.caller_origin = CallerOrigin::Client;
         ctx.principal = Some(principal);
         Operation::ClientOp {
@@ -554,8 +570,7 @@ mod tests {
             })
             .collect();
 
-        let mut ctx =
-            OperationContext::new(12, service_names::CRDT, make_timestamp(), 5000);
+        let mut ctx = OperationContext::new(12, service_names::CRDT, make_timestamp(), 5000);
         ctx.caller_origin = CallerOrigin::Client;
         ctx.principal = Some(principal);
         Operation::OpBatch {
@@ -576,7 +591,10 @@ mod tests {
         store.upsert_policy(owner_condition_policy()).await.unwrap();
 
         let evaluator = Arc::new(PolicyEvaluator::new(store));
-        let principal = Principal { id: "user1".to_string(), roles: vec!["user".to_string()] };
+        let principal = Principal {
+            id: "user1".to_string(),
+            roles: vec!["user".to_string()],
+        };
 
         let layer = AuthorizationLayer::new(evaluator);
         let mut svc = layer.layer(AlwaysOkService);
@@ -584,7 +602,10 @@ mod tests {
         // Record ownerId matches the principal's id
         let op = client_op_with_owner(principal, "user1");
         let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
-        assert!(result.is_ok(), "matching owner should be allowed, got {result:?}");
+        assert!(
+            result.is_ok(),
+            "matching owner should be allowed, got {result:?}"
+        );
     }
 
     /// Owner condition denies a write when the record's ownerId does NOT match auth.id.
@@ -594,7 +615,10 @@ mod tests {
         store.upsert_policy(owner_condition_policy()).await.unwrap();
 
         let evaluator = Arc::new(PolicyEvaluator::new(store));
-        let principal = Principal { id: "user1".to_string(), roles: vec!["user".to_string()] };
+        let principal = Principal {
+            id: "user1".to_string(),
+            roles: vec!["user".to_string()],
+        };
 
         let layer = AuthorizationLayer::new(evaluator);
         let mut svc = layer.layer(AlwaysOkService);
@@ -615,7 +639,10 @@ mod tests {
         store.upsert_policy(owner_condition_policy()).await.unwrap();
 
         let evaluator = Arc::new(PolicyEvaluator::new(store));
-        let principal = Principal { id: "user1".to_string(), roles: vec!["user".to_string()] };
+        let principal = Principal {
+            id: "user1".to_string(),
+            roles: vec!["user".to_string()],
+        };
 
         let layer = AuthorizationLayer::new(evaluator);
         let mut svc = layer.layer(AlwaysOkService);
@@ -636,7 +663,10 @@ mod tests {
         store.upsert_policy(owner_condition_policy()).await.unwrap();
 
         let evaluator = Arc::new(PolicyEvaluator::new(store));
-        let principal = Principal { id: "user1".to_string(), roles: vec!["user".to_string()] };
+        let principal = Principal {
+            id: "user1".to_string(),
+            roles: vec!["user".to_string()],
+        };
 
         let layer = AuthorizationLayer::new(evaluator);
         let mut svc = layer.layer(AlwaysOkService);
@@ -644,7 +674,10 @@ mod tests {
         // Batch: both ops match owner
         let op = op_batch_with_owners(principal, &[("docs", "user1"), ("notes", "user1")]);
         let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
-        assert!(result.is_ok(), "batch where all ops match owner should be allowed, got {result:?}");
+        assert!(
+            result.is_ok(),
+            "batch where all ops match owner should be allowed, got {result:?}"
+        );
     }
 
     /// Helper: builds a SyncInit (read) operation with CallerOrigin::Anonymous (no connection_id).
@@ -694,7 +727,10 @@ mod tests {
 
         let op = anon_query_op("public-map");
         let resp = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
-        assert!(resp.is_ok(), "anonymous with no policies should pass through, got {resp:?}");
+        assert!(
+            resp.is_ok(),
+            "anonymous with no policies should pass through, got {resp:?}"
+        );
     }
 
     /// Anonymous callers can read when an unconditional Allow-Read policy exists.
@@ -762,7 +798,10 @@ mod tests {
         store.upsert_policy(owner_condition_policy()).await.unwrap();
 
         let evaluator = Arc::new(PolicyEvaluator::new(store));
-        let principal = Principal { id: "user1".to_string(), roles: vec!["user".to_string()] };
+        let principal = Principal {
+            id: "user1".to_string(),
+            roles: vec!["user".to_string()],
+        };
 
         let layer = AuthorizationLayer::new(evaluator);
         let mut svc = layer.layer(AlwaysOkService);

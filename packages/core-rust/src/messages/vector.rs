@@ -211,10 +211,22 @@ mod tests {
                 }
             })
             .collect();
-        assert!(keys.contains(&"mapName".to_string()), "missing mapName, keys={keys:?}");
-        assert!(keys.contains(&"indexName".to_string()), "missing indexName, keys={keys:?}");
-        assert!(keys.contains(&"queryVector".to_string()), "missing queryVector, keys={keys:?}");
-        assert!(keys.contains(&"efSearch".to_string()), "missing efSearch, keys={keys:?}");
+        assert!(
+            keys.contains(&"mapName".to_string()),
+            "missing mapName, keys={keys:?}"
+        );
+        assert!(
+            keys.contains(&"indexName".to_string()),
+            "missing indexName, keys={keys:?}"
+        );
+        assert!(
+            keys.contains(&"queryVector".to_string()),
+            "missing queryVector, keys={keys:?}"
+        );
+        assert!(
+            keys.contains(&"efSearch".to_string()),
+            "missing efSearch, keys={keys:?}"
+        );
     }
 
     #[test]
@@ -264,10 +276,22 @@ mod tests {
             })
             .collect();
         // All optional fields should be absent when None
-        assert!(!keys.contains(&"minScore".to_string()), "minScore should be omitted");
-        assert!(!keys.contains(&"includeValue".to_string()), "includeValue should be omitted");
-        assert!(!keys.contains(&"includeVectors".to_string()), "includeVectors should be omitted");
-        assert!(!keys.contains(&"filter".to_string()), "filter should be omitted");
+        assert!(
+            !keys.contains(&"minScore".to_string()),
+            "minScore should be omitted"
+        );
+        assert!(
+            !keys.contains(&"includeValue".to_string()),
+            "includeValue should be omitted"
+        );
+        assert!(
+            !keys.contains(&"includeVectors".to_string()),
+            "includeVectors should be omitted"
+        );
+        assert!(
+            !keys.contains(&"filter".to_string()),
+            "filter should be omitted"
+        );
     }
 
     #[test]

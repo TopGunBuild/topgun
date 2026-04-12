@@ -101,10 +101,7 @@ impl InvertedIndex {
         // Only string values are tokenized; other types are ignored.
         if let Some(text) = val.as_str() {
             for token in Self::tokenize(text) {
-                self.map
-                    .entry(token)
-                    .or_default()
-                    .insert(key.to_owned());
+                self.map.entry(token).or_default().insert(key.to_owned());
             }
         }
     }
@@ -190,7 +187,10 @@ impl Index for InvertedIndex {
 
     fn entry_count(&self) -> u64 {
         // Count total (token, key) pairs.
-        self.map.iter().map(|entry| entry.value().len() as u64).sum()
+        self.map
+            .iter()
+            .map(|entry| entry.value().len() as u64)
+            .sum()
     }
 }
 

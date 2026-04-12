@@ -270,7 +270,10 @@ impl<'a> Lexer<'a> {
                 let has_dot = self.peek_char() == Some('.');
                 // Only treat as float if followed by a digit (not just a lone dot).
                 let is_float = has_dot && {
-                    let after_dot = self.input.get(self.pos + 1..).and_then(|s| s.chars().next());
+                    let after_dot = self
+                        .input
+                        .get(self.pos + 1..)
+                        .and_then(|s| s.chars().next());
                     after_dot.is_some_and(|c| c.is_ascii_digit())
                 };
                 if is_float {
@@ -279,22 +282,25 @@ impl<'a> Lexer<'a> {
                         self.advance();
                     }
                     let s = &self.input[num_start..self.pos];
-                    let v: f64 = s.parse().map_err(|_| {
-                        self.make_error(num_start, "invalid float literal")
-                    })?;
+                    let v: f64 = s
+                        .parse()
+                        .map_err(|_| self.make_error(num_start, "invalid float literal"))?;
                     Ok((start, Token::FloatLit(v)))
                 } else {
                     let s = &self.input[num_start..self.pos];
-                    let v: i64 = s.parse().map_err(|_| {
-                        self.make_error(num_start, "invalid integer literal")
-                    })?;
+                    let v: i64 = s
+                        .parse()
+                        .map_err(|_| self.make_error(num_start, "invalid integer literal"))?;
                     Ok((start, Token::IntLit(v)))
                 }
             }
             c if c.is_ascii_alphabetic() || c == '_' => {
                 // Read the first identifier segment.
                 let seg_start = self.pos;
-                while self.peek_char().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+                while self
+                    .peek_char()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
                     self.advance();
                 }
                 let first = self.input[seg_start..self.pos].to_string();
@@ -318,10 +324,16 @@ impl<'a> Lexer<'a> {
                     while self.peek_char() == Some('.') {
                         self.advance(); // consume '.'
                         let seg_s = self.pos;
-                        if !self.peek_char().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') {
+                        if !self
+                            .peek_char()
+                            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                        {
                             return Err(self.make_error(seg_s, "expected identifier after '.'"));
                         }
-                        while self.peek_char().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+                        while self
+                            .peek_char()
+                            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+                        {
                             self.advance();
                         }
                         segments.push(self.input[seg_s..self.pos].to_string());
@@ -531,29 +543,48 @@ impl<'a> Parser<'a> {
             Token::ContainsAll => {
                 self.advance()?;
                 let rhs = self.parse_value_or_ref(lhs_pos)?;
-                build_data_lhs_node(PredicateOp::ContainsAll, &lhs_segments, rhs, lhs_pos, self.input)
+                build_data_lhs_node(
+                    PredicateOp::ContainsAll,
+                    &lhs_segments,
+                    rhs,
+                    lhs_pos,
+                    self.input,
+                )
             }
             Token::ContainsAny => {
                 self.advance()?;
                 let rhs = self.parse_value_or_ref(lhs_pos)?;
-                build_data_lhs_node(PredicateOp::ContainsAny, &lhs_segments, rhs, lhs_pos, self.input)
+                build_data_lhs_node(
+                    PredicateOp::ContainsAny,
+                    &lhs_segments,
+                    rhs,
+                    lhs_pos,
+                    self.input,
+                )
             }
             Token::StartsWith => {
                 self.advance()?;
                 let rhs = self.parse_value_or_ref(lhs_pos)?;
-                build_data_lhs_node(PredicateOp::StartsWith, &lhs_segments, rhs, lhs_pos, self.input)
+                build_data_lhs_node(
+                    PredicateOp::StartsWith,
+                    &lhs_segments,
+                    rhs,
+                    lhs_pos,
+                    self.input,
+                )
             }
             Token::EndsWith => {
                 self.advance()?;
                 let rhs = self.parse_value_or_ref(lhs_pos)?;
-                build_data_lhs_node(PredicateOp::EndsWith, &lhs_segments, rhs, lhs_pos, self.input)
+                build_data_lhs_node(
+                    PredicateOp::EndsWith,
+                    &lhs_segments,
+                    rhs,
+                    lhs_pos,
+                    self.input,
+                )
             }
-            Token::Eq
-            | Token::Neq
-            | Token::Gt
-            | Token::Gte
-            | Token::Lt
-            | Token::Lte => {
+            Token::Eq | Token::Neq | Token::Gt | Token::Gte | Token::Lt | Token::Lte => {
                 let op_tok = self.current_token().clone();
                 let op_pos = self.current_pos();
                 self.advance()?;
@@ -593,12 +624,11 @@ impl<'a> Parser<'a> {
                 Ok((pos, vec!["false".to_string()]))
             }
             // null is not a valid left-hand side in a comparison
-            Token::Null => {
-                Err(self.error_at(pos, "null literal is not valid as left-hand side of a comparison"))
-            }
-            _ => {
-                Err(self.error_at(pos, "expected field reference (e.g. data.age or auth.id)"))
-            }
+            Token::Null => Err(self.error_at(
+                pos,
+                "null literal is not valid as left-hand side of a comparison",
+            )),
+            _ => Err(self.error_at(pos, "expected field reference (e.g. data.age or auth.id)")),
         }
     }
 
@@ -1121,7 +1151,11 @@ mod tests {
             "unexpected error: {err}"
         );
         // Position should be at or near end of input (length 9).
-        assert!(err.position >= 9, "expected position near end, got {}", err.position);
+        assert!(
+            err.position >= 9,
+            "expected position near end, got {}",
+            err.position
+        );
     }
 
     // --- AC6: nested parenthesized Or inside And ---
@@ -1305,7 +1339,10 @@ mod tests {
     fn parse_error_display_includes_position() {
         let err = parse_err("data.x ==");
         let display = err.to_string();
-        assert!(display.contains("parse error at position"), "display: {display}");
+        assert!(
+            display.contains("parse error at position"),
+            "display: {display}"
+        );
         assert!(display.contains('^'), "caret missing in display: {display}");
     }
 
@@ -1314,10 +1351,7 @@ mod tests {
     #[test]
     fn string_with_spaces() {
         let node = parsed("data.name == 'hello world'");
-        assert_eq!(
-            node.value,
-            Some(rmpv::Value::String("hello world".into()))
-        );
+        assert_eq!(node.value, Some(rmpv::Value::String("hello world".into())));
     }
 
     // --- Whitespace tolerance ---
@@ -1466,15 +1500,17 @@ mod tests {
         let node = parsed("!(data.age == 18)");
         let data_18 = make_data(&[("age", rmpv::Value::Integer(18.into()))]);
         let data_25 = make_data(&[("age", rmpv::Value::Integer(25.into()))]);
-        assert!(!evaluate_predicate(&node, &EvalContext::data_only(&data_18)));
+        assert!(!evaluate_predicate(
+            &node,
+            &EvalContext::data_only(&data_18)
+        ));
         assert!(evaluate_predicate(&node, &EvalContext::data_only(&data_25)));
     }
 
     #[test]
     fn roundtrip_nested_parens() {
-        let node = parsed(
-            "data.x == 'hello' && (data.status == 'admin' || data.status == 'editor')",
-        );
+        let node =
+            parsed("data.x == 'hello' && (data.status == 'admin' || data.status == 'editor')");
         let data_match = make_data(&[
             ("x", rmpv::Value::String("hello".into())),
             ("status", rmpv::Value::String("admin".into())),
@@ -1483,8 +1519,14 @@ mod tests {
             ("x", rmpv::Value::String("hello".into())),
             ("status", rmpv::Value::String("viewer".into())),
         ]);
-        assert!(evaluate_predicate(&node, &EvalContext::data_only(&data_match)));
-        assert!(!evaluate_predicate(&node, &EvalContext::data_only(&data_no_match)));
+        assert!(evaluate_predicate(
+            &node,
+            &EvalContext::data_only(&data_match)
+        ));
+        assert!(!evaluate_predicate(
+            &node,
+            &EvalContext::data_only(&data_no_match)
+        ));
     }
 
     // --- contains keyword parser tests ---
@@ -1543,7 +1585,8 @@ mod tests {
         // auth.roles contains 'x' -> parse error: LHS must be data.*
         let err = parse_err("auth.roles contains 'x'");
         assert!(
-            err.message.contains("left side of 'contains' must be a data.*"),
+            err.message
+                .contains("left side of 'contains' must be a data.*"),
             "unexpected error: {err}"
         );
     }
@@ -1575,9 +1618,8 @@ mod tests {
 
     #[test]
     fn roundtrip_nested_parens_auth() {
-        let node = parsed(
-            "(auth.id == data.ownerId || data.public == true) && data.active == true",
-        );
+        let node =
+            parsed("(auth.id == data.ownerId || data.public == true) && data.active == true");
 
         // Owner with inactive record — false because active == false.
         let data_inactive = make_data(&[
@@ -1588,7 +1630,10 @@ mod tests {
         let auth = make_auth("u1", &[]);
         assert!(!evaluate_predicate(
             &node,
-            &EvalContext { auth: Some(&auth), data: &data_inactive }
+            &EvalContext {
+                auth: Some(&auth),
+                data: &data_inactive
+            }
         ));
 
         // Owner with active record — true.
@@ -1599,7 +1644,10 @@ mod tests {
         ]);
         assert!(evaluate_predicate(
             &node,
-            &EvalContext { auth: Some(&auth), data: &data_active_owner }
+            &EvalContext {
+                auth: Some(&auth),
+                data: &data_active_owner
+            }
         ));
 
         // Non-owner, public, active — true.
@@ -1611,7 +1659,10 @@ mod tests {
         let auth2 = make_auth("u1", &[]);
         assert!(evaluate_predicate(
             &node,
-            &EvalContext { auth: Some(&auth2), data: &data_public_active }
+            &EvalContext {
+                auth: Some(&auth2),
+                data: &data_public_active
+            }
         ));
     }
 
@@ -1669,7 +1720,8 @@ mod tests {
     fn null_lhs_returns_parse_error() {
         let err = parse_err("null == auth");
         assert!(
-            err.message.contains("null literal is not valid as left-hand side"),
+            err.message
+                .contains("null literal is not valid as left-hand side"),
             "unexpected error message: {}",
             err.message
         );
@@ -1703,7 +1755,8 @@ mod tests {
         // AC12: auth.roles containsAll auth.x -> parse error
         let err = parse_err("auth.roles containsAll auth.x");
         assert!(
-            err.message.contains("left side of 'containsAll' must be a data.*"),
+            err.message
+                .contains("left side of 'containsAll' must be a data.*"),
             "unexpected error: {err}"
         );
     }
@@ -1724,7 +1777,8 @@ mod tests {
     fn contains_any_non_data_lhs_is_error() {
         let err = parse_err("auth.roles containsAny auth.x");
         assert!(
-            err.message.contains("left side of 'containsAny' must be a data.*"),
+            err.message
+                .contains("left side of 'containsAny' must be a data.*"),
             "unexpected error: {err}"
         );
     }
@@ -1755,7 +1809,8 @@ mod tests {
     fn starts_with_non_data_lhs_is_error() {
         let err = parse_err("auth.path startsWith '/public'");
         assert!(
-            err.message.contains("left side of 'startsWith' must be a data.*"),
+            err.message
+                .contains("left side of 'startsWith' must be a data.*"),
             "unexpected error: {err}"
         );
     }
@@ -1776,7 +1831,8 @@ mod tests {
     fn ends_with_non_data_lhs_is_error() {
         let err = parse_err("auth.email endsWith '@company.com'");
         assert!(
-            err.message.contains("left side of 'endsWith' must be a data.*"),
+            err.message
+                .contains("left side of 'endsWith' must be a data.*"),
             "unexpected error: {err}"
         );
     }
@@ -1856,7 +1912,10 @@ mod tests {
                 rmpv::Value::String("c".into()),
             ]),
         )]);
-        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
         assert!(evaluate_predicate(&node, &ctx));
     }
 
@@ -1872,7 +1931,10 @@ mod tests {
                 rmpv::Value::String("d".into()),
             ]),
         )]);
-        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
         assert!(!evaluate_predicate(&node, &ctx));
     }
 
@@ -1882,8 +1944,14 @@ mod tests {
         let node = parsed("data.tags containsAll 'admin'");
         let data_yes = make_array_data("tags", &["admin", "editor"]);
         let data_no = make_array_data("tags", &["editor", "viewer"]);
-        assert!(evaluate_predicate(&node, &EvalContext::data_only(&data_yes)));
-        assert!(!evaluate_predicate(&node, &EvalContext::data_only(&data_no)));
+        assert!(evaluate_predicate(
+            &node,
+            &EvalContext::data_only(&data_yes)
+        ));
+        assert!(!evaluate_predicate(
+            &node,
+            &EvalContext::data_only(&data_no)
+        ));
     }
 
     #[test]
@@ -1908,7 +1976,10 @@ mod tests {
                 rmpv::Value::String("x".into()),
             ]),
         )]);
-        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
         assert!(evaluate_predicate(&node, &ctx));
     }
 
@@ -1924,7 +1995,10 @@ mod tests {
                 rmpv::Value::String("y".into()),
             ]),
         )]);
-        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
         assert!(!evaluate_predicate(&node, &ctx));
     }
 
@@ -1952,7 +2026,10 @@ mod tests {
         let node = parsed("data.path startsWith auth.pathPrefix");
         let data = make_data(&[("path", rmpv::Value::String("/api/v2/users".into()))]);
         let auth = make_data(&[("pathPrefix", rmpv::Value::String("/api/v2".into()))]);
-        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
         assert!(evaluate_predicate(&node, &ctx));
     }
 
@@ -1979,9 +2056,7 @@ mod tests {
     #[test]
     fn roundtrip_contains_all_and_starts_with_compound_true() {
         // AC11: data.tags containsAll auth.required && data.path startsWith '/api'
-        let node = parsed(
-            "data.tags containsAll auth.required && data.path startsWith '/api'",
-        );
+        let node = parsed("data.tags containsAll auth.required && data.path startsWith '/api'");
         let data = make_data(&[
             (
                 "tags",
@@ -1996,16 +2071,17 @@ mod tests {
             "required",
             rmpv::Value::Array(vec![rmpv::Value::String("x".into())]),
         )]);
-        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
         assert!(evaluate_predicate(&node, &ctx));
     }
 
     #[test]
     fn roundtrip_contains_all_and_starts_with_compound_false_path() {
         // AC11: false when path condition fails
-        let node = parsed(
-            "data.tags containsAll auth.required && data.path startsWith '/api'",
-        );
+        let node = parsed("data.tags containsAll auth.required && data.path startsWith '/api'");
         let data = make_data(&[
             (
                 "tags",
@@ -2017,7 +2093,10 @@ mod tests {
             "required",
             rmpv::Value::Array(vec![rmpv::Value::String("x".into())]),
         )]);
-        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
         assert!(!evaluate_predicate(&node, &ctx));
     }
 
@@ -2029,7 +2108,11 @@ mod tests {
         );
         assert_eq!(node.op, PredicateOp::And);
         let children = node.children.as_ref().unwrap();
-        assert_eq!(children.len(), 3, "expected 3 children in flattened And node");
+        assert_eq!(
+            children.len(),
+            3,
+            "expected 3 children in flattened And node"
+        );
 
         // Evaluate: all conditions true
         let data = make_data(&[
@@ -2044,7 +2127,10 @@ mod tests {
             "required",
             rmpv::Value::Array(vec![rmpv::Value::String("req".into())]),
         )]);
-        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
         assert!(evaluate_predicate(&node, &ctx));
 
         // Evaluate: status wrong -> false
@@ -2056,15 +2142,20 @@ mod tests {
             ("path", rmpv::Value::String("/api/v1".into())),
             ("status", rmpv::Value::String("inactive".into())),
         ]);
-        assert!(!evaluate_predicate(&node, &EvalContext { auth: Some(&auth), data: &data_bad }));
+        assert!(!evaluate_predicate(
+            &node,
+            &EvalContext {
+                auth: Some(&auth),
+                data: &data_bad
+            }
+        ));
     }
 
     #[test]
     fn roundtrip_contains_any_or_ends_with() {
         // data.roles containsAny auth.allowed || data.email endsWith '@admin.com'
-        let node = parsed(
-            "data.roles containsAny auth.allowed || data.email endsWith '@admin.com'",
-        );
+        let node =
+            parsed("data.roles containsAny auth.allowed || data.email endsWith '@admin.com'");
         // True via containsAny
         let data_via_roles = make_data(&[
             (
@@ -2077,7 +2168,10 @@ mod tests {
             "allowed",
             rmpv::Value::Array(vec![rmpv::Value::String("mod".into())]),
         )]);
-        let ctx = EvalContext { auth: Some(&auth), data: &data_via_roles };
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data_via_roles,
+        };
         assert!(evaluate_predicate(&node, &ctx));
 
         // True via endsWith
@@ -2088,7 +2182,10 @@ mod tests {
             ),
             ("email", rmpv::Value::String("super@admin.com".into())),
         ]);
-        let ctx2 = EvalContext { auth: Some(&auth), data: &data_via_email };
+        let ctx2 = EvalContext {
+            auth: Some(&auth),
+            data: &data_via_email,
+        };
         assert!(evaluate_predicate(&node, &ctx2));
 
         // False on both
@@ -2099,7 +2196,10 @@ mod tests {
             ),
             ("email", rmpv::Value::String("user@company.com".into())),
         ]);
-        let ctx3 = EvalContext { auth: Some(&auth), data: &data_neither };
+        let ctx3 = EvalContext {
+            auth: Some(&auth),
+            data: &data_neither,
+        };
         assert!(!evaluate_predicate(&node, &ctx3));
     }
 }

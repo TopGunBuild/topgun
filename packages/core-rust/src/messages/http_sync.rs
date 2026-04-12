@@ -306,8 +306,7 @@ mod tests {
     fn delta_record_event_type_roundtrip() {
         for evt in [DeltaRecordEventType::PUT, DeltaRecordEventType::REMOVE] {
             let bytes = rmp_serde::to_vec_named(&evt).expect("serialize");
-            let decoded: DeltaRecordEventType =
-                rmp_serde::from_slice(&bytes).expect("deserialize");
+            let decoded: DeltaRecordEventType = rmp_serde::from_slice(&bytes).expect("deserialize");
             assert_eq!(evt, decoded);
         }
     }
@@ -381,8 +380,7 @@ mod tests {
             cursor: None,
         };
         let bytes = rmp_serde::to_vec_named(&req).expect("serialize");
-        let raw: rmpv::Value =
-            rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
+        let raw: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
         let map = raw.as_map().expect("should be map");
         let cursor_keys: Vec<_> = map
             .iter()
@@ -723,8 +721,7 @@ mod tests {
         };
 
         let bytes = rmp_serde::to_vec_named(&req).expect("serialize");
-        let raw: rmpv::Value =
-            rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
+        let raw: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
         let map = raw.as_map().expect("should be map");
 
         let limit_keys: Vec<_> = map
@@ -767,8 +764,7 @@ mod tests {
         };
 
         let bytes = rmp_serde::to_vec_named(&req).expect("serialize");
-        let raw: rmpv::Value =
-            rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
+        let raw: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode as Value");
         let map = raw.as_map().expect("should be map");
 
         let limit_key = map

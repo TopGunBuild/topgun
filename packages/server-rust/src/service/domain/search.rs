@@ -30,9 +30,7 @@ use tracing::Instrument;
 
 use crate::network::connection::{ConnectionId, ConnectionRegistry, OutboundMessage};
 use crate::service::domain::predicate::value_to_rmpv;
-use crate::service::operation::{
-    service_names, Operation, OperationError, OperationResponse,
-};
+use crate::service::operation::{service_names, Operation, OperationError, OperationResponse};
 use crate::service::registry::{ManagedService, ServiceContext};
 use crate::storage::mutation_observer::MutationObserver;
 use crate::storage::record::{Record, RecordValue};
@@ -166,7 +164,7 @@ impl SearchRegistry {
     /// Removes a subscription by ID.
     ///
     /// Returns the removed subscription, or `None` if not found.
-    #[must_use] 
+    #[must_use]
     pub fn unregister(&self, subscription_id: &str) -> Option<Arc<SearchSubscription>> {
         self.subscriptions
             .remove(subscription_id)
@@ -177,7 +175,7 @@ impl SearchRegistry {
     ///
     /// Returns the IDs of all removed subscriptions.
     #[allow(dead_code)] // Caller wiring is deferred — see spec Observable Truth 5.
-    #[must_use] 
+    #[must_use]
     pub fn unregister_by_connection(&self, connection_id: ConnectionId) -> Vec<String> {
         let mut removed = Vec::new();
         self.subscriptions.retain(|id, sub| {
@@ -251,7 +249,7 @@ impl TantivyMapIndex {
     ///
     /// Panics if tantivy fails to create the index (out-of-memory or internal
     /// tantivy error). Treated as unrecoverable at startup.
-    #[must_use] 
+    #[must_use]
     pub fn new() -> Self {
         use tantivy::schema::{SchemaBuilder, STORED, STRING, TEXT};
 
@@ -370,8 +368,7 @@ impl TantivyMapIndex {
         let user_query = query_parser.parse_query(query_str).ok()?;
 
         let key_term = Term::from_field_text(self.key_field, key);
-        let key_query =
-            Box::new(TermQuery::new(key_term, IndexRecordOption::Basic));
+        let key_query = Box::new(TermQuery::new(key_term, IndexRecordOption::Basic));
 
         let combined = BooleanQuery::new(vec![
             (Occur::Must, key_query as Box<dyn tantivy::query::Query>),
@@ -417,11 +414,11 @@ impl TantivyMapIndex {
             writer
                 .delete_all_documents()
                 .expect("tantivy delete_all_documents failed");
-            writer
-                .commit()
-                .expect("tantivy commit after clear failed");
+            writer.commit().expect("tantivy commit after clear failed");
         } // drop writer lock before reloading reader
-        self.reader.reload().expect("tantivy reader reload after clear failed");
+        self.reader
+            .reload()
+            .expect("tantivy reader reload after clear failed");
     }
 
     /// Returns the number of documents in the index (after the last commit).
@@ -480,7 +477,10 @@ fn collect_strings(value: &rmpv::Value, out: &mut Vec<String>) {
 fn extract_query_terms(query_str: &str) -> Vec<String> {
     query_str
         .split_whitespace()
-        .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+        .map(|t| {
+            t.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
         .filter(|t| !t.is_empty())
         .collect()
 }
@@ -818,11 +818,7 @@ async fn run_batch_processor(
 }
 
 /// Sends a LEAVE `SearchUpdate` for the given subscription and key.
-fn send_leave(
-    conn_reg: &ConnectionRegistry,
-    sub: &SearchSubscription,
-    key: &str,
-) {
+fn send_leave(conn_reg: &ConnectionRegistry, sub: &SearchSubscription, key: &str) {
     let msg = Message::SearchUpdate {
         payload: SearchUpdatePayload {
             subscription_id: sub.subscription_id.clone(),
@@ -845,8 +841,11 @@ fn notify_clear_subscriptions(
 ) {
     let subs = registry.get_subscriptions_for_map(map_name);
     for sub in &subs {
-        let keys: Vec<String> =
-            sub.current_results.iter().map(|e| e.key().clone()).collect();
+        let keys: Vec<String> = sub
+            .current_results
+            .iter()
+            .map(|e| e.key().clone())
+            .collect();
         for key in keys {
             sub.current_results.remove(&key);
             send_leave(connection_registry, sub, &key);
@@ -1013,7 +1012,9 @@ fn process_batch(
 
         for op in ops {
             let (key, change_type) = match op {
-                IndexOp::Index { key, change_type, .. } => (key.as_str(), change_type),
+                IndexOp::Index {
+                    key, change_type, ..
+                } => (key.as_str(), change_type),
                 IndexOp::Remove { key } => (key.as_str(), &ChangeEventType::LEAVE),
                 IndexOp::Clear => continue,
             };
@@ -1073,10 +1074,7 @@ impl SearchService {
 
     /// Registers an observer's shutdown signal so that `ManagedService::shutdown()`
     /// can flush all background batch processors.
-    pub fn register_observer_shutdown(
-        &self,
-        signal: Arc<tokio::sync::watch::Sender<bool>>,
-    ) {
+    pub fn register_observer_shutdown(&self, signal: Arc<tokio::sync::watch::Sender<bool>>) {
         self.observer_shutdown_signals.write().push(signal);
     }
 
@@ -1094,7 +1092,8 @@ impl SearchService {
     /// the search query executes, ensuring correct results.
     fn ensure_index_populated(&self, map_name: &str) {
         // Check explicit flag set when conditional indexing skipped writes for this map.
-        let needs_pop = self.needs_population
+        let needs_pop = self
+            .needs_population
             .get(map_name)
             .is_some_and(|flag| flag.load(Ordering::Acquire));
         if !needs_pop {
@@ -1179,9 +1178,9 @@ impl SearchService {
                     total_count,
                     error: None,
                 };
-                Ok(OperationResponse::Message(Box::new(
-                    Message::SearchResp { payload: resp_payload },
-                )))
+                Ok(OperationResponse::Message(Box::new(Message::SearchResp {
+                    payload: resp_payload,
+                })))
             }
 
             Operation::SearchSubscribe { ctx, payload } => {
@@ -1192,8 +1191,7 @@ impl SearchService {
                 })?;
                 let options = payload.options.unwrap_or_default();
                 // Execute initial search.
-                let results =
-                    self.execute_search(&payload.map_name, &payload.query, &options);
+                let results = self.execute_search(&payload.map_name, &payload.query, &options);
                 let total_count = u32::try_from(results.len()).unwrap_or(u32::MAX);
 
                 // Build subscription with initial result cache populated.
@@ -1221,14 +1219,16 @@ impl SearchService {
                     total_count,
                     error: None,
                 };
-                Ok(OperationResponse::Message(Box::new(
-                    Message::SearchResp { payload: resp_payload },
-                )))
+                Ok(OperationResponse::Message(Box::new(Message::SearchResp {
+                    payload: resp_payload,
+                })))
             }
 
             Operation::SearchUnsubscribe { ctx, payload } => {
                 let _ = self.registry.unregister(&payload.subscription_id);
-                Ok(OperationResponse::Ack { call_id: ctx.call_id })
+                Ok(OperationResponse::Ack {
+                    call_id: ctx.call_id,
+                })
             }
 
             _ => Err(OperationError::WrongService),
@@ -1268,7 +1268,7 @@ impl ManagedService for SearchService {
             }
             !signals.is_empty()
         }; // guard dropped before await
-        // Brief yield to allow background tasks to drain.
+           // Brief yield to allow background tasks to drain.
         if has_signals {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -1279,8 +1279,7 @@ impl ManagedService for SearchService {
 impl Service<Operation> for Arc<SearchService> {
     type Response = OperationResponse;
     type Error = OperationError;
-    type Future =
-        Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>>;
+    type Future = Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
@@ -1314,12 +1313,14 @@ mod tests {
 
     use parking_lot::RwLock;
     use topgun_core::hlc::Timestamp;
-    use topgun_core::messages::search::{SearchOptions, SearchPayload, SearchSubPayload, SearchUnsubPayload};
+    use topgun_core::messages::search::{
+        SearchOptions, SearchPayload, SearchSubPayload, SearchUnsubPayload,
+    };
     use tower::ServiceExt;
 
     use super::*;
     use crate::network::connection::ConnectionRegistry;
-    use crate::service::operation::{service_names, OperationContext, OperationError, Operation};
+    use crate::service::operation::{service_names, Operation, OperationContext, OperationError};
     use crate::storage::datastores::NullDataStore;
     use crate::storage::impls::StorageConfig;
     use crate::storage::RecordStoreFactory;
@@ -1366,7 +1367,13 @@ mod tests {
         let conn_reg = Arc::new(ConnectionRegistry::new());
         let store_factory = make_factory();
         let needs_population = Arc::new(DashMap::new());
-        Arc::new(SearchService::new(reg, indexes, store_factory, conn_reg, needs_population))
+        Arc::new(SearchService::new(
+            reg,
+            indexes,
+            store_factory,
+            conn_reg,
+            needs_population,
+        ))
     }
 
     fn make_search_op(map_name: &str, query: &str) -> Operation {
@@ -1516,7 +1523,10 @@ mod tests {
         }
         idx.commit();
 
-        let opts = SearchOptions { limit: Some(3), ..Default::default() };
+        let opts = SearchOptions {
+            limit: Some(3),
+            ..Default::default()
+        };
         let results = idx.search("common", &opts);
         assert!(results.len() <= 3);
     }
@@ -1589,7 +1599,11 @@ mod tests {
         for i in 0..3u64 {
             let sub = SearchSubscription::new(
                 format!("sub-{i}"),
-                if i < 2 { ConnectionId(10) } else { ConnectionId(20) },
+                if i < 2 {
+                    ConnectionId(10)
+                } else {
+                    ConnectionId(20)
+                },
                 "my-map".to_string(),
                 "hello".to_string(),
                 SearchOptions::default(),
@@ -1690,17 +1704,26 @@ mod tests {
             needs_population,
         ));
 
-        svc.clone().oneshot(make_subscribe_op("my-map", "hello")).await.unwrap();
+        svc.clone()
+            .oneshot(make_subscribe_op("my-map", "hello"))
+            .await
+            .unwrap();
         assert_eq!(reg.get_subscriptions_for_map("my-map").len(), 1);
 
-        svc.clone().oneshot(make_unsubscribe_op("sub-1")).await.unwrap();
+        svc.clone()
+            .oneshot(make_unsubscribe_op("sub-1"))
+            .await
+            .unwrap();
         assert!(reg.get_subscriptions_for_map("my-map").is_empty());
     }
 
     #[tokio::test]
     async fn search_service_returns_wrong_service_for_non_search_ops() {
         let svc = make_service();
-        let err = svc.oneshot(make_op_gc(service_names::SEARCH)).await.unwrap_err();
+        let err = svc
+            .oneshot(make_op_gc(service_names::SEARCH))
+            .await
+            .unwrap_err();
         assert!(matches!(err, OperationError::WrongService));
     }
 
@@ -1726,8 +1749,14 @@ mod tests {
         ));
 
         assert!(indexes.read().is_empty(), "no index before first search");
-        svc.clone().oneshot(make_search_op("lazy-map", "hello")).await.unwrap();
-        assert!(indexes.read().contains_key("lazy-map"), "index created after search");
+        svc.clone()
+            .oneshot(make_search_op("lazy-map", "hello"))
+            .await
+            .unwrap();
+        assert!(
+            indexes.read().contains_key("lazy-map"),
+            "index created after search"
+        );
     }
 
     // --- Helper tests ---

@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use topgun_core::vector::{Distance, SharedVector, distance_for_metric};
+use topgun_core::vector::{distance_for_metric, Distance, SharedVector};
 
-use crate::service::domain::index::hnsw::heuristic::{DoublePriorityQueue, select_neighbors};
-use crate::service::domain::index::hnsw::layer::{Layer, random_level};
+use crate::service::domain::index::hnsw::heuristic::{select_neighbors, DoublePriorityQueue};
+use crate::service::domain::index::hnsw::layer::{random_level, Layer};
 use crate::service::domain::index::hnsw::types::{ElementId, Heuristic, HnswFlavor, HnswParams};
 
 /// In-memory HNSW approximate nearest-neighbor index.
@@ -123,9 +123,7 @@ impl Hnsw {
         }
 
         while let Some((cand_id, cand_dist)) = candidates.pop_nearest() {
-            let furthest_result_dist = results
-                .peek_furthest()
-                .map_or(f64::MAX, |(_, d)| d);
+            let furthest_result_dist = results.peek_furthest().map_or(f64::MAX, |(_, d)| d);
 
             if cand_dist > furthest_result_dist {
                 break;
@@ -139,9 +137,7 @@ impl Hnsw {
                     }
                     visited.insert(nbr);
                     let d = self.distance_to_query(nbr, query);
-                    let furthest = results
-                        .peek_furthest()
-                        .map_or(f64::MAX, |(_, fd)| fd);
+                    let furthest = results.peek_furthest().map_or(f64::MAX, |(_, fd)| fd);
                     if d < furthest || results.len() < ef {
                         candidates.insert(nbr, d);
                         results.insert(nbr, d);
@@ -231,7 +227,10 @@ impl Hnsw {
             }
         }
 
-        let heuristic = match (self.params.extend_candidates, self.params.keep_pruned_connections) {
+        let heuristic = match (
+            self.params.extend_candidates,
+            self.params.keep_pruned_connections,
+        ) {
             (true, true) => Heuristic::ExtendedAndKeep,
             (true, false) => Heuristic::Extended,
             (false, true) => Heuristic::KeepPruned,

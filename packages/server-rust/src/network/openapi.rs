@@ -15,9 +15,9 @@ use utoipa::{Modify, OpenApi};
 
 use super::handlers::admin;
 use super::handlers::admin_types::{
-    ClusterStatusResponse, CreatePolicyRequest, ErrorResponse, LoginRequest, LoginResponse, MapInfo,
-    MapsListResponse, NodeInfo, NodeStatus, PartitionInfo, PolicyListResponse, PolicyResponse,
-    ServerMode, ServerStatusResponse, SettingsResponse, SettingsUpdateRequest,
+    ClusterStatusResponse, CreatePolicyRequest, ErrorResponse, LoginRequest, LoginResponse,
+    MapInfo, MapsListResponse, NodeInfo, NodeStatus, PartitionInfo, PolicyListResponse,
+    PolicyResponse, ServerMode, ServerStatusResponse, SettingsResponse, SettingsUpdateRequest,
 };
 use crate::service::policy::{PermissionAction, PermissionPolicy, PolicyEffect};
 

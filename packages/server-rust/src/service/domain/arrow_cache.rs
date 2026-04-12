@@ -162,11 +162,7 @@ pub struct ArrowCacheObserver {
 impl ArrowCacheObserver {
     /// Creates a new observer for the given map and partition.
     #[must_use]
-    pub fn new(
-        cache_manager: Arc<ArrowCacheManager>,
-        map_name: String,
-        partition_id: u32,
-    ) -> Self {
+    pub fn new(cache_manager: Arc<ArrowCacheManager>, map_name: String, partition_id: u32) -> Self {
         Self {
             cache_manager,
             map_name,
@@ -182,7 +178,13 @@ impl ArrowCacheObserver {
 }
 
 impl MutationObserver for ArrowCacheObserver {
-    fn on_put(&self, _key: &str, _record: &Record, _old_value: Option<&RecordValue>, _is_backup: bool) {
+    fn on_put(
+        &self,
+        _key: &str,
+        _record: &Record,
+        _old_value: Option<&RecordValue>,
+        _is_backup: bool,
+    ) {
         self.invalidate();
     }
 
@@ -336,7 +338,10 @@ mod tests {
                 Ok(RecordBatch::try_new(s2, vec![col])?)
             })
             .unwrap();
-        assert!(rebuilt.load(Ordering::Acquire), "build_fn should have been called after invalidation");
+        assert!(
+            rebuilt.load(Ordering::Acquire),
+            "build_fn should have been called after invalidation"
+        );
     }
 
     #[test]
@@ -375,7 +380,10 @@ mod tests {
         let factory = ArrowCacheObserverFactory::new(Arc::clone(&mgr));
 
         let observer = factory.create_observer("orders", 5);
-        assert!(observer.is_some(), "factory should always create an observer");
+        assert!(
+            observer.is_some(),
+            "factory should always create an observer"
+        );
     }
 
     #[test]
