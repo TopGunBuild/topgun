@@ -209,6 +209,9 @@ export {
 // Base64URL utilities
 export { encodeBase64Url, decodeBase64Url } from './utils/base64url';
 
+// Vector serialization utilities
+export { vectorToBytes, bytesToVector } from './utils/vector';
+
 // Compare utilities
 export { compareValues } from './utils/compare';
 
