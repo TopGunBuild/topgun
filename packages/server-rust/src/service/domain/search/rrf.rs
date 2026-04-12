@@ -126,7 +126,7 @@ mod tests {
         let list = vec![entry("a", 1, 1.0), entry("b", 100, 0.5)];
 
         // With k=1: 1/2 vs 1/101 — large difference
-        let results_small_k = fuse(&[list.clone()], 1, 10);
+        let results_small_k = fuse(std::slice::from_ref(&list), 1, 10);
         let diff_small = results_small_k[0].score - results_small_k[1].score;
 
         // With k=1000: 1/1001 vs 1/1100 — small difference
@@ -136,7 +136,7 @@ mod tests {
         assert!(diff_small > diff_large, "larger k should reduce score differences");
     }
 
-    /// `top_n` truncation: only the top_n results are returned.
+    /// `top_n` truncation: only the `top_n` results are returned.
     #[test]
     fn test_top_n_truncation() {
         let list = vec![

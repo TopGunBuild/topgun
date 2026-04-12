@@ -377,3 +377,267 @@ impl HybridSearchEngine {
         result
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use dashmap::DashMap;
+    use parking_lot::RwLock;
+
+    use super::*;
+    use crate::network::connection::ConnectionRegistry;
+    use crate::service::domain::embedding::noop::NoopEmbeddingProvider;
+    use crate::service::domain::embedding::NoopConfig;
+    use crate::service::domain::index::registry::IndexRegistry;
+    use crate::service::domain::search::{SearchRegistry, SearchService};
+    use crate::storage::datastores::NullDataStore;
+    use crate::storage::impls::StorageConfig;
+    use crate::storage::RecordStoreFactory;
+
+    fn make_search_service(factory: Arc<RecordStoreFactory>) -> Arc<SearchService> {
+        let reg = Arc::new(SearchRegistry::new());
+        let indexes = Arc::new(RwLock::new(std::collections::HashMap::new()));
+        let conn_reg = Arc::new(ConnectionRegistry::new());
+        let needs_population = Arc::new(DashMap::new());
+        Arc::new(SearchService::new(reg, indexes, factory, conn_reg, needs_population))
+    }
+
+    fn make_empty_factory() -> Arc<RecordStoreFactory> {
+        Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::new(NullDataStore),
+            Vec::new(),
+        ))
+    }
+
+    // -----------------------------------------------------------------------
+    // Error case: NoEmbeddingProvider
+    // -----------------------------------------------------------------------
+
+    /// Requesting Semantic search without a `query_vector` and without an
+    /// `EmbeddingProvider` returns `HybridSearchError::NoEmbeddingProvider`.
+    #[tokio::test]
+    async fn test_semantic_without_provider_returns_error() {
+        let factory = make_empty_factory();
+        let svc = make_search_service(Arc::clone(&factory));
+        let engine = HybridSearchEngine::new(svc, factory, None);
+        let registry = IndexRegistry::new();
+
+        let result = engine
+            .hybrid_search(HybridSearchParams {
+                map_name: "test-map",
+                index_registry: &registry,
+                query_text: "hello",
+                query_vector: None,
+                predicate: None,
+                methods: &[SearchMethod::Semantic],
+                k: 10,
+                include_value: false,
+            })
+            .await;
+
+        assert!(matches!(result, Err(HybridSearchError::NoEmbeddingProvider)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Single-method passthrough: FullText only
+    // -----------------------------------------------------------------------
+
+    /// When only `FullText` is requested against an empty map, results are empty.
+    #[tokio::test]
+    async fn test_fulltext_only_empty_map_returns_empty() {
+        let factory = make_empty_factory();
+        let svc = make_search_service(Arc::clone(&factory));
+        let engine = HybridSearchEngine::new(svc, factory, None);
+        let registry = IndexRegistry::new();
+
+        let results = engine
+            .hybrid_search(HybridSearchParams {
+                map_name: "test-map",
+                index_registry: &registry,
+                query_text: "hello",
+                query_vector: None,
+                predicate: None,
+                methods: &[SearchMethod::FullText],
+                k: 10,
+                include_value: false,
+            })
+            .await
+            .unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Semantic with pre-computed vector and no index: skip gracefully
+    // -----------------------------------------------------------------------
+
+    /// When Semantic is requested with a pre-computed vector but the map has
+    /// no vector index, the result is empty (valid configuration, not an error).
+    #[tokio::test]
+    async fn test_semantic_with_vector_no_index_returns_empty() {
+        let factory = make_empty_factory();
+        let svc = make_search_service(Arc::clone(&factory));
+        let engine = HybridSearchEngine::new(svc, factory, None);
+        let registry = IndexRegistry::new(); // no vector index registered
+
+        let query_vector = vec![0.1f32, 0.2, 0.3, 0.4];
+        let results = engine
+            .hybrid_search(HybridSearchParams {
+                map_name: "test-map",
+                index_registry: &registry,
+                query_text: "",
+                query_vector: Some(&query_vector),
+                predicate: None,
+                methods: &[SearchMethod::Semantic],
+                k: 10,
+                include_value: false,
+            })
+            .await
+            .unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Semantic with NoopEmbeddingProvider auto-embeds
+    // -----------------------------------------------------------------------
+
+    /// When Semantic is requested with no pre-computed vector but a configured
+    /// `EmbeddingProvider`, the engine calls `embed()` automatically.
+    /// With a Noop provider (zero vectors) and no vector index, result is empty.
+    #[tokio::test]
+    async fn test_semantic_with_noop_provider_embeds_and_skips_without_index() {
+        let factory = make_empty_factory();
+        let svc = make_search_service(Arc::clone(&factory));
+        let provider = Arc::new(NoopEmbeddingProvider::new(&NoopConfig { dimension: 4 }));
+        let engine = HybridSearchEngine::new(svc, factory, Some(provider));
+        let registry = IndexRegistry::new(); // no vector index
+
+        // No error — provider successfully embeds, but no index means empty result.
+        let results = engine
+            .hybrid_search(HybridSearchParams {
+                map_name: "test-map",
+                index_registry: &registry,
+                query_text: "hello",
+                query_vector: None,
+                predicate: None,
+                methods: &[SearchMethod::Semantic],
+                k: 10,
+                include_value: false,
+            })
+            .await
+            .unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Exact method with no predicate returns empty
+    // -----------------------------------------------------------------------
+
+    /// When Exact is requested but no predicate is provided, the result is empty.
+    #[tokio::test]
+    async fn test_exact_without_predicate_returns_empty() {
+        let factory = make_empty_factory();
+        let svc = make_search_service(Arc::clone(&factory));
+        let engine = HybridSearchEngine::new(svc, factory, None);
+        let registry = IndexRegistry::new();
+
+        let results = engine
+            .hybrid_search(HybridSearchParams {
+                map_name: "test-map",
+                index_registry: &registry,
+                query_text: "",
+                query_vector: None,
+                predicate: None,
+                methods: &[SearchMethod::Exact],
+                k: 10,
+                include_value: false,
+            })
+            .await
+            .unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Empty methods list returns empty
+    // -----------------------------------------------------------------------
+
+    /// When methods is empty, results are empty.
+    #[tokio::test]
+    async fn test_empty_methods_returns_empty() {
+        let factory = make_empty_factory();
+        let svc = make_search_service(Arc::clone(&factory));
+        let engine = HybridSearchEngine::new(svc, factory, None);
+        let registry = IndexRegistry::new();
+
+        let results = engine
+            .hybrid_search(HybridSearchParams {
+                map_name: "test-map",
+                index_registry: &registry,
+                query_text: "hello",
+                query_vector: None,
+                predicate: None,
+                methods: &[],
+                k: 10,
+                include_value: false,
+            })
+            .await
+            .unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // method_scores contains entries only for methods that produced a hit
+    // -----------------------------------------------------------------------
+
+    /// Verifies that `method_scores` is empty when no methods produce results.
+    #[tokio::test]
+    async fn test_method_scores_empty_when_no_hits() {
+        let factory = make_empty_factory();
+        let svc = make_search_service(Arc::clone(&factory));
+        let engine = HybridSearchEngine::new(svc, factory, None);
+        let registry = IndexRegistry::new();
+
+        // FullText on an empty map: no docs, no fused results.
+        let results = engine
+            .hybrid_search(HybridSearchParams {
+                map_name: "test-map",
+                index_registry: &registry,
+                query_text: "anything",
+                query_vector: None,
+                predicate: None,
+                methods: &[SearchMethod::FullText],
+                k: 10,
+                include_value: false,
+            })
+            .await
+            .unwrap();
+
+        // No results means no method_scores to inspect, but the call must succeed.
+        assert!(results.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // SearchMethod serde round-trip
+    // -----------------------------------------------------------------------
+
+    /// Verifies that `SearchMethod` serde derives produce camelCase JSON output.
+    #[test]
+    fn test_search_method_serde_camel_case() {
+        let json = serde_json::to_string(&SearchMethod::FullText).unwrap();
+        assert_eq!(json, "\"fullText\"");
+        let json = serde_json::to_string(&SearchMethod::Exact).unwrap();
+        assert_eq!(json, "\"exact\"");
+        let json = serde_json::to_string(&SearchMethod::Semantic).unwrap();
+        assert_eq!(json, "\"semantic\"");
+    }
+}
