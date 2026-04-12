@@ -60,6 +60,9 @@ export type { SearchResult } from './SyncEngine';
 // SQL Query exports
 export type { SqlQueryResult } from './SyncEngine';
 
+// Vector Search exports
+export type { VectorSearchClientOptions, VectorSearchClientResult } from './sync';
+
 // Live Search exports
 export { SearchHandle } from './SearchHandle';
 export type { SearchResultsCallback } from './SearchHandle';
