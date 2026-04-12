@@ -5,6 +5,9 @@
 //! `SearchMutationObserver` indexes records and re-scores standing subscriptions
 //! on every data mutation.
 
+pub mod hybrid;
+pub mod rrf;
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
