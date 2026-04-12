@@ -8,6 +8,8 @@
 pub mod hybrid;
 pub mod rrf;
 
+pub use hybrid::{HybridSearchError, HybridSearchResult, SearchMethod};
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -1167,6 +1169,26 @@ impl SearchService {
                 }
             })
             .collect()
+    }
+
+    /// Executes a BM25 full-text search against the tantivy index for `map_name`.
+    ///
+    /// Ensures the index exists and is populated before searching. Returns an
+    /// empty vec if no index exists for the map. Returns raw `ScoredDoc` results
+    /// so callers (e.g. `HybridSearchEngine`) can handle value enrichment separately.
+    pub(crate) fn search_map(
+        &self,
+        map_name: &str,
+        query_str: &str,
+        options: &SearchOptions,
+    ) -> Vec<ScoredDoc> {
+        self.ensure_index(map_name);
+        self.ensure_index_populated(map_name);
+        let indexes = self.indexes.read();
+        let Some(index) = indexes.get(map_name) else {
+            return Vec::new();
+        };
+        index.search(query_str, options)
     }
 
     fn handle(&self, op: Operation) -> Result<OperationResponse, OperationError> {
