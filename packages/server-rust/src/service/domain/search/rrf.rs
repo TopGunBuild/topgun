@@ -64,9 +64,13 @@ pub fn fuse(ranked_lists: &[Vec<RankedEntry>], k: u32, top_n: usize) -> Vec<Fuse
     }
 
     let mut results: Vec<FusedEntry> = accumulator.into_values().collect();
-    // Sort descending by fused score; stable sort on key ensures deterministic
-    // ordering when scores are equal.
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    // Sort descending by fused score, then by key for deterministic tie-breaking.
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.key.cmp(&b.key))
+    });
     results.truncate(top_n);
     results
 }
