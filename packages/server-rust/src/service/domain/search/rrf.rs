@@ -2,7 +2,10 @@
 //!
 //! RRF is a pure, stateless function: it takes ranked lists from multiple
 //! search methods and produces a single deduplicated ranking using the formula:
-//!   RRF_score(d) = sum over all lists of 1 / (k + rank_i(d))
+//!
+//! ```text
+//! RRF_score(d) = sum over all lists of 1 / (k + rank_i(d))
+//! ```
 //!
 //! Keeping this module free of async, Arc, and service dependencies makes it
 //! easy to unit-test and reason about in isolation.
@@ -28,17 +31,18 @@ pub struct FusedEntry {
     pub key: String,
     /// Fused RRF score (sum of reciprocal ranks across methods).
     pub score: f64,
-    /// Per-method original scores for transparency: (list_index, original_score).
+    /// Per-method original scores for transparency: (`list_index`, `original_score`).
     pub method_scores: Vec<(usize, f64)>,
 }
 
 /// Fuse multiple ranked lists using Reciprocal Rank Fusion.
 ///
-/// Formula: RRF_score(d) = sum over all lists of 1 / (k + rank_i(d))
-/// where rank_i(d) is the 1-based rank of document d in list i,
-/// and k is the smoothing constant (standard value: 60).
+/// # Errors
+///
+/// This function is infallible and never returns an error.
 ///
 /// Returns results sorted descending by fused score, limited to `top_n`.
+#[must_use]
 pub fn fuse(ranked_lists: &[Vec<RankedEntry>], k: u32, top_n: usize) -> Vec<FusedEntry> {
     if ranked_lists.is_empty() || top_n == 0 {
         return Vec::new();
@@ -48,7 +52,7 @@ pub fn fuse(ranked_lists: &[Vec<RankedEntry>], k: u32, top_n: usize) -> Vec<Fuse
 
     for (list_idx, list) in ranked_lists.iter().enumerate() {
         for entry in list {
-            let rrf_contribution = 1.0 / (k as f64 + entry.rank as f64);
+            let rrf_contribution = 1.0 / (f64::from(k) + f64::from(entry.rank));
             let fused = accumulator.entry(entry.key.clone()).or_insert_with(|| FusedEntry {
                 key: entry.key.clone(),
                 score: 0.0,
@@ -132,7 +136,7 @@ mod tests {
         assert!(diff_small > diff_large, "larger k should reduce score differences");
     }
 
-    /// top_n truncation: only the top_n results are returned.
+    /// `top_n` truncation: only the top_n results are returned.
     #[test]
     fn test_top_n_truncation() {
         let list = vec![

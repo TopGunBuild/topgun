@@ -8,7 +8,7 @@
 pub mod hybrid;
 pub mod rrf;
 
-pub use hybrid::{HybridSearchError, HybridSearchResult, SearchMethod};
+pub use hybrid::{HybridSearchEngine, HybridSearchError, HybridSearchResult, SearchMethod};
 
 use std::collections::HashMap;
 use std::future::Future;
