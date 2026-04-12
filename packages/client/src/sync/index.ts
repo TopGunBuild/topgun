@@ -37,6 +37,10 @@ export type {
   ISqlClient,
   SqlClientConfig,
   SqlQueryResult,
+  IVectorSearchClient,
+  VectorSearchClientConfig,
+  VectorSearchClientOptions,
+  VectorSearchClientResult,
   IMerkleSyncHandler,
   MerkleSyncHandlerConfig,
   IORMapSyncHandler,
@@ -57,6 +61,7 @@ export { CounterManager } from './CounterManager';
 export { EntryProcessorClient } from './EntryProcessorClient';
 export { SearchClient } from './SearchClient';
 export { SqlClient } from './SqlClient';
+export { VectorSearchClient } from './VectorSearchClient';
 export { MerkleSyncHandler } from './MerkleSyncHandler';
 export { ORMapSyncHandler } from './ORMapSyncHandler';
 export { MessageRouter } from './MessageRouter';

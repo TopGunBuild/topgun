@@ -30,8 +30,8 @@ import type {
 import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
 import type { IConnectionProvider } from './types';
 import { ConflictResolverClient } from './ConflictResolverClient';
-import { WebSocketManager, BackpressureController, QueryManager, TopicManager, LockManager, WriteConcernManager, CounterManager, EntryProcessorClient, SearchClient, SqlClient, MerkleSyncHandler, ORMapSyncHandler, MessageRouter, registerClientMessageHandlers } from './sync';
-import type { SearchResult, SqlQueryResult, IMessageRouter } from './sync';
+import { WebSocketManager, BackpressureController, QueryManager, TopicManager, LockManager, WriteConcernManager, CounterManager, EntryProcessorClient, SearchClient, SqlClient, VectorSearchClient, MerkleSyncHandler, ORMapSyncHandler, MessageRouter, registerClientMessageHandlers } from './sync';
+import type { SearchResult, SqlQueryResult, VectorSearchClientOptions, VectorSearchClientResult, IMessageRouter } from './sync';
 
 // Re-export SearchResult and SqlQueryResult from sync module for backwards compatibility
 export type { SearchResult, SqlQueryResult } from './sync';
@@ -134,6 +134,9 @@ export class SyncEngine {
 
   // SqlClient handles server-side SQL query execution via DataFusion
   private readonly sqlClient: SqlClient;
+
+  // VectorSearchClient handles ANN vector search requests
+  private readonly vectorSearchClient: VectorSearchClient;
 
   // MerkleSyncHandler handles LWWMap sync protocol messages
   private readonly merkleSyncHandler: MerkleSyncHandler;
@@ -263,6 +266,12 @@ export class SyncEngine {
       isAuthenticated: () => this.isAuthenticated(),
     });
 
+    // Initialize VectorSearchClient for ANN vector search requests
+    this.vectorSearchClient = new VectorSearchClient({
+      sendMessage: (msg) => this.sendMessage(msg),
+      isAuthenticated: () => this.isAuthenticated(),
+    });
+
     // Initialize MerkleSyncHandler for LWWMap sync protocol
     this.merkleSyncHandler = new MerkleSyncHandler({
       getMap: (name) => this.maps.get(name),
@@ -319,6 +328,7 @@ export class SyncEngine {
         conflictResolverClient: this.conflictResolverClient,
         searchClient: this.searchClient,
         sqlClient: this.sqlClient,
+        vectorSearchClient: this.vectorSearchClient,
         merkleSyncHandler: this.merkleSyncHandler,
         orMapSyncHandler: this.orMapSyncHandler,
       }
@@ -928,6 +938,9 @@ export class SyncEngine {
     // Clean up SqlClient
     this.sqlClient.close(new Error('SyncEngine closed'));
 
+    // Clean up VectorSearchClient
+    this.vectorSearchClient.close(new Error('SyncEngine closed'));
+
     this.stateMachine.transition(SyncState.DISCONNECTED);
     logger.info('SyncEngine closed');
   }
@@ -1307,6 +1320,27 @@ export class SyncEngine {
    */
   public async sql(query: string): Promise<SqlQueryResult> {
     return this.sqlClient.sql(query);
+  }
+
+  // ============================================
+  // Vector Search API
+  // ============================================
+
+  /**
+   * Perform an ANN vector search on the server.
+   * Delegates to VectorSearchClient.
+   *
+   * @param mapName Name of the map / HNSW index to search
+   * @param queryVector Query vector as Float32Array or number[]
+   * @param options Search options (k, efSearch, etc.)
+   * @returns Promise resolving to ranked VectorSearchClientResult[]
+   */
+  public async vectorSearch(
+    mapName: string,
+    queryVector: Float32Array | number[],
+    options?: VectorSearchClientOptions
+  ): Promise<VectorSearchClientResult[]> {
+    return this.vectorSearchClient.vectorSearch(mapName, queryVector, options);
   }
 
   // ============================================

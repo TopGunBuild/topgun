@@ -18,3 +18,6 @@ export * from './hooks/useSearch';
 
 // Hybrid Query hooks
 export * from './hooks/useHybridQuery';
+
+// Vector Search hooks
+export * from './hooks/useVectorSearch';

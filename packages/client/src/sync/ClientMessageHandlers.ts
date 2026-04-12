@@ -84,6 +84,15 @@ export interface ManagerDelegates {
       error?: string;
     }): void;
   };
+  vectorSearchClient: {
+    handleResponse(payload: {
+      id: string;
+      results: Array<{ key: string; score: number; value?: unknown; vector?: Uint8Array }>;
+      totalCandidates: number;
+      searchTimeMs: number;
+      error?: string;
+    }): void;
+  };
   merkleSyncHandler: {
     handleSyncRespRoot(payload: SyncRespRootPayload): void;
     handleSyncRespBuckets(payload: SyncRespBucketsPayload): void;
@@ -118,6 +127,7 @@ export const CLIENT_MESSAGE_TYPES = [
   'REGISTER_RESOLVER_RESPONSE', 'UNREGISTER_RESOLVER_RESPONSE', 'LIST_RESOLVERS_RESPONSE', 'MERGE_REJECTED',
   'SEARCH_RESP', 'SEARCH_UPDATE',
   'SQL_QUERY_RESP',
+  'VECTOR_SEARCH_RESP',
 ] as const;
 
 /**
@@ -226,6 +236,11 @@ export function registerClientMessageHandlers(
     // SQL handlers
     'SQL_QUERY_RESP': (msg) => {
       managers.sqlClient.handleSqlQueryResponse(msg.payload);
+    },
+
+    // Vector search handlers
+    'VECTOR_SEARCH_RESP': (msg) => {
+      managers.vectorSearchClient.handleResponse(msg.payload);
     },
   });
 }

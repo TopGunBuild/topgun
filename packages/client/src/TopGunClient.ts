@@ -3,6 +3,7 @@ import type { ORMapRecord, LWWRecord, EntryProcessorDef, EntryProcessorResult, S
 import type { IStorageAdapter } from './IStorageAdapter';
 import { SyncEngine } from './SyncEngine';
 import type { BackoffConfig, SqlQueryResult } from './SyncEngine';
+import type { VectorSearchClientOptions, VectorSearchClientResult } from './sync';
 import type { AuthProvider } from './auth/types';
 import { QueryHandle } from './QueryHandle';
 import type { QueryFilter } from './QueryHandle';
@@ -659,6 +660,38 @@ export class TopGunClient {
    */
   public async sql(query: string): Promise<SqlQueryResult> {
     return this.syncEngine.sql(query);
+  }
+
+  // ============================================
+  // Vector Search API
+  // ============================================
+
+  /**
+   * Perform an ANN vector search on the server using the HNSW index.
+   *
+   * Sends a VECTOR_SEARCH message and resolves with ranked results.
+   * The query vector is transmitted as little-endian f32 bytes and the
+   * result vectors (if requested) are decoded back to Float32Array.
+   *
+   * @param mapName Name of the map / HNSW index to search
+   * @param queryVector Query vector as Float32Array or number[]
+   * @param options Search options (k, efSearch, minScore, etc.)
+   * @returns Promise resolving to ranked VectorSearchClientResult[]
+   *
+   * @example
+   * ```typescript
+   * const results = await client.vectorSearch('notes', new Float32Array([0.1, 0.2, 0.3]), { k: 5 });
+   * for (const r of results) {
+   *   console.log(r.key, r.score);
+   * }
+   * ```
+   */
+  public async vectorSearch(
+    mapName: string,
+    queryVector: Float32Array | number[],
+    options?: VectorSearchClientOptions
+  ): Promise<VectorSearchClientResult[]> {
+    return this.syncEngine.vectorSearch(mapName, queryVector, options);
   }
 
   // ============================================
