@@ -30,6 +30,9 @@ export * from './sql-schemas';
 // Vector search schemas (ANN search request/response)
 export * from './vector-schemas';
 
+// Hybrid search schemas (exact + full-text + semantic with RRF fusion)
+export * from './hybrid-search-schemas';
+
 // Union MessageSchema (combines all message types)
 import { z } from 'zod';
 import { AuthMessageSchema, AuthRequiredMessageSchema } from './base-schemas';
@@ -123,6 +126,13 @@ import {
 } from './client-message-schemas';
 import { SqlQueryMessageSchema, SqlQueryRespMessageSchema } from './sql-schemas';
 import { VectorSearchMessageSchema, VectorSearchRespMessageSchema } from './vector-schemas';
+import {
+  HybridSearchMessageSchema,
+  HybridSearchRespMessageSchema,
+  HybridSearchSubMessageSchema,
+  HybridSearchUpdateMessageSchema,
+  HybridSearchUnsubMessageSchema,
+} from './hybrid-search-schemas';
 export const MessageSchema = z.discriminatedUnion('type', [
   // --- Base ---
   AuthMessageSchema,
@@ -209,6 +219,12 @@ export const MessageSchema = z.discriminatedUnion('type', [
   // --- Vector Search ---
   VectorSearchMessageSchema,
   VectorSearchRespMessageSchema,
+  // --- Hybrid Search ---
+  HybridSearchMessageSchema,
+  HybridSearchRespMessageSchema,
+  HybridSearchSubMessageSchema,
+  HybridSearchUpdateMessageSchema,
+  HybridSearchUnsubMessageSchema,
   // --- Server-to-Client ---
   ServerEventMessageSchema,
   ServerBatchEventMessageSchema,

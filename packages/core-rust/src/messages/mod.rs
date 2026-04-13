@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub mod base;
 
 pub mod cluster;
+pub mod hybrid;
 pub mod query;
 pub mod search;
 pub mod sync;
@@ -37,6 +38,11 @@ pub use query::{
     CursorStatus, QueryRespMessage, QueryRespPayload, QueryResultEntry, QuerySubMessage,
     QuerySubPayload, QuerySyncInitMessage, QuerySyncInitPayload, QueryUnsubMessage,
     QueryUnsubPayload, SqlQueryPayload, SqlQueryRespPayload,
+};
+
+pub use hybrid::{
+    HybridSearchPayload, HybridSearchRespPayload, HybridSearchResultEntry, HybridSearchSubPayload,
+    HybridSearchUnsubPayload, HybridSearchUpdatePayload, SearchMethod,
 };
 
 pub use vector::{
@@ -246,6 +252,27 @@ pub enum Message {
     /// Client unsubscribes from live search.
     #[serde(rename = "SEARCH_UNSUB")]
     SearchUnsub { payload: SearchUnsubPayload },
+
+    // --- hybrid search domain (5 variants) ---
+    /// Client requests a hybrid search (exact + full-text + semantic with RRF fusion).
+    #[serde(rename = "HYBRID_SEARCH")]
+    HybridSearch { payload: HybridSearchPayload },
+
+    /// Server responds with fused hybrid search results.
+    #[serde(rename = "HYBRID_SEARCH_RESP")]
+    HybridSearchResp { payload: HybridSearchRespPayload },
+
+    /// Client subscribes to live hybrid search results.
+    #[serde(rename = "HYBRID_SEARCH_SUB")]
+    HybridSearchSub { payload: HybridSearchSubPayload },
+
+    /// Server pushes a hybrid search result delta (ENTER/UPDATE/LEAVE).
+    #[serde(rename = "HYBRID_SEARCH_UPDATE")]
+    HybridSearchUpdate { payload: HybridSearchUpdatePayload },
+
+    /// Client unsubscribes from live hybrid search.
+    #[serde(rename = "HYBRID_SEARCH_UNSUB")]
+    HybridSearchUnsub { payload: HybridSearchUnsubPayload },
 
     // --- cluster domain (11 variants) ---
     /// Client requests the partition map (optional payload).
