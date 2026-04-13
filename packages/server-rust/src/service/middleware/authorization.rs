@@ -272,6 +272,13 @@ fn classify_operation(op: &Operation) -> (Option<PermissionAction>, String) {
             payload.payload.map_name.clone(),
         ),
 
+        Operation::HybridSearch { payload, .. } => {
+            (Some(PermissionAction::Read), payload.map_name.clone())
+        }
+        Operation::HybridSearchSubscribe { payload, .. } => {
+            (Some(PermissionAction::Read), payload.map_name.clone())
+        }
+
         // --- Bypass group (no policy check) ---
         Operation::Ping { .. }
         | Operation::PartitionMapRequest { .. }
@@ -282,6 +289,7 @@ fn classify_operation(op: &Operation) -> (Option<PermissionAction>, String) {
         | Operation::TopicUnsubscribe { .. }
         | Operation::QueryUnsubscribe { .. }
         | Operation::SearchUnsubscribe { .. }
+        | Operation::HybridSearchUnsubscribe { .. }
         | Operation::JournalSubscribe { .. }
         | Operation::JournalUnsubscribe { .. }
         | Operation::JournalRead { .. }

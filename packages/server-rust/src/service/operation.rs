@@ -275,6 +275,21 @@ pub enum Operation {
         ctx: OperationContext,
         payload: messages::SearchUnsubPayload,
     },
+    /// Client requests hybrid search (exact + full-text + semantic).
+    HybridSearch {
+        ctx: OperationContext,
+        payload: messages::hybrid::HybridSearchPayload,
+    },
+    /// Client subscribes to live hybrid search results.
+    HybridSearchSubscribe {
+        ctx: OperationContext,
+        payload: messages::hybrid::HybridSearchSubPayload,
+    },
+    /// Client unsubscribes from live hybrid search.
+    HybridSearchUnsubscribe {
+        ctx: OperationContext,
+        payload: messages::hybrid::HybridSearchUnsubPayload,
+    },
 
     // --- Persistence domain (service_name = "persistence") ---
     /// Client requests counter state.
@@ -369,6 +384,9 @@ impl Operation {
             | Self::Search { ctx, .. }
             | Self::SearchSubscribe { ctx, .. }
             | Self::SearchUnsubscribe { ctx, .. }
+            | Self::HybridSearch { ctx, .. }
+            | Self::HybridSearchSubscribe { ctx, .. }
+            | Self::HybridSearchUnsubscribe { ctx, .. }
             // Persistence
             | Self::CounterRequest { ctx, .. }
             | Self::CounterSync { ctx, .. }
@@ -424,6 +442,9 @@ impl Operation {
             | Self::Search { ctx, .. }
             | Self::SearchSubscribe { ctx, .. }
             | Self::SearchUnsubscribe { ctx, .. }
+            | Self::HybridSearch { ctx, .. }
+            | Self::HybridSearchSubscribe { ctx, .. }
+            | Self::HybridSearchUnsubscribe { ctx, .. }
             // Persistence
             | Self::CounterRequest { ctx, .. }
             | Self::CounterSync { ctx, .. }
@@ -479,6 +500,9 @@ impl Operation {
             | Self::Search { ctx, .. }
             | Self::SearchSubscribe { ctx, .. }
             | Self::SearchUnsubscribe { ctx, .. }
+            | Self::HybridSearch { ctx, .. }
+            | Self::HybridSearchSubscribe { ctx, .. }
+            | Self::HybridSearchUnsubscribe { ctx, .. }
             // Persistence
             | Self::CounterRequest { ctx, .. }
             | Self::CounterSync { ctx, .. }
@@ -698,6 +722,9 @@ mod tests {
             | Operation::Search { .. }
             | Operation::SearchSubscribe { .. }
             | Operation::SearchUnsubscribe { .. }
+            | Operation::HybridSearch { .. }
+            | Operation::HybridSearchSubscribe { .. }
+            | Operation::HybridSearchUnsubscribe { .. }
             | Operation::CounterRequest { .. }
             | Operation::CounterSync { .. }
             | Operation::EntryProcess { .. }
