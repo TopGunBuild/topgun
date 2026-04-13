@@ -2382,4 +2382,216 @@ mod tests {
         let terms = extract_query_terms("Hello World FOO");
         assert_eq!(terms, vec!["hello", "world", "foo"]);
     }
+
+    // --- HybridSearchRegistry tests ---
+
+    #[test]
+    fn hybrid_registry_register_and_get_by_map() {
+        let reg = HybridSearchRegistry::new();
+        let sub = HybridSearchSubscription::new(
+            "hsub-1".to_string(),
+            ConnectionId(99),
+            "my-map".to_string(),
+            "hello".to_string(),
+            vec![SearchMethod::FullText],
+            10,
+            None,
+            None,
+            true,
+            None,
+        );
+        reg.register(sub);
+
+        let subs = reg.get_subscriptions_for_map("my-map");
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].subscription_id, "hsub-1");
+        assert!(reg.get_subscriptions_for_map("other-map").is_empty());
+    }
+
+    #[test]
+    fn hybrid_registry_unregister_removes_subscription() {
+        let reg = HybridSearchRegistry::new();
+        let sub = HybridSearchSubscription::new(
+            "hsub-1".to_string(),
+            ConnectionId(99),
+            "my-map".to_string(),
+            "hello".to_string(),
+            vec![SearchMethod::Exact],
+            5,
+            None,
+            None,
+            true,
+            None,
+        );
+        reg.register(sub);
+        assert_eq!(reg.get_subscriptions_for_map("my-map").len(), 1);
+
+        let removed = reg.unregister("hsub-1");
+        assert!(removed.is_some());
+        assert!(reg.get_subscriptions_for_map("my-map").is_empty());
+
+        // Second unregister of the same ID returns None.
+        let removed2 = reg.unregister("hsub-1");
+        assert!(removed2.is_none());
+    }
+
+    // --- Hybrid search handler tests ---
+
+    fn make_hybrid_search_op(map_name: &str, query_text: &str) -> Operation {
+        let mut ctx = OperationContext::new(
+            50,
+            service_names::SEARCH,
+            topgun_core::hlc::Timestamp {
+                millis: 0,
+                counter: 0,
+                node_id: "test".to_string(),
+            },
+            5000,
+        );
+        ctx.connection_id = Some(ConnectionId(1));
+        Operation::HybridSearch {
+            ctx,
+            payload: HybridSearchPayload {
+                request_id: "req-h1".to_string(),
+                map_name: map_name.to_string(),
+                query_text: query_text.to_string(),
+                methods: vec![WireSearchMethod::FullText],
+                k: 5,
+                query_vector: None,
+                predicate: None,
+                include_value: None,
+                min_score: None,
+            },
+        }
+    }
+
+    fn make_hybrid_sub_op(map_name: &str, query_text: &str, sub_id: &str) -> Operation {
+        let mut ctx = OperationContext::new(
+            51,
+            service_names::SEARCH,
+            topgun_core::hlc::Timestamp {
+                millis: 0,
+                counter: 0,
+                node_id: "test".to_string(),
+            },
+            5000,
+        );
+        ctx.connection_id = Some(ConnectionId(1));
+        Operation::HybridSearchSubscribe {
+            ctx,
+            payload: HybridSearchSubPayload {
+                subscription_id: sub_id.to_string(),
+                map_name: map_name.to_string(),
+                query_text: query_text.to_string(),
+                methods: vec![WireSearchMethod::FullText],
+                k: 5,
+                query_vector: None,
+                predicate: None,
+                include_value: None,
+                min_score: None,
+            },
+        }
+    }
+
+    fn make_hybrid_unsub_op(sub_id: &str) -> Operation {
+        let ctx = OperationContext::new(
+            52,
+            service_names::SEARCH,
+            topgun_core::hlc::Timestamp {
+                millis: 0,
+                counter: 0,
+                node_id: "test".to_string(),
+            },
+            5000,
+        );
+        Operation::HybridSearchUnsubscribe {
+            ctx,
+            payload: HybridSearchUnsubPayload {
+                subscription_id: sub_id.to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_without_engine_returns_error_resp() {
+        // When hybrid_engine is not configured, handler returns HybridSearchResp with error.
+        let svc = make_service();
+        let op = make_hybrid_search_op("my-map", "hello");
+        let resp = svc.oneshot(op).await.unwrap();
+        match resp {
+            OperationResponse::Message(msg) => {
+                if let Message::HybridSearchResp { payload } = *msg {
+                    assert!(payload.error.is_some(), "expected error when engine not set");
+                } else {
+                    panic!("expected HybridSearchResp, got different message");
+                }
+            }
+            other => panic!("expected OperationResponse::Message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_subscribe_registers_subscription_returns_resp() {
+        // Without engine, subscribe still registers the subscription and returns
+        // an empty-results HybridSearchResp (initial snapshot with no results).
+        let svc = make_service();
+        let op = make_hybrid_sub_op("my-map", "hello", "sub-h1");
+        let resp = svc.clone().oneshot(op).await.unwrap();
+
+        // Expect HybridSearchResp (initial snapshot).
+        match resp {
+            OperationResponse::Message(msg) => {
+                assert!(
+                    matches!(*msg, Message::HybridSearchResp { .. }),
+                    "expected HybridSearchResp initial snapshot"
+                );
+            }
+            other => panic!("expected Message response, got {other:?}"),
+        }
+
+        // Subscription must be registered.
+        let subs = svc.hybrid_registry.get_subscriptions_for_map("my-map");
+        assert_eq!(subs.len(), 1, "subscription should be registered");
+        assert_eq!(subs[0].subscription_id, "sub-h1");
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_unsubscribe_removes_subscription_returns_ack() {
+        let svc = make_service();
+
+        // Subscribe first.
+        svc.clone()
+            .oneshot(make_hybrid_sub_op("my-map", "hello", "sub-h1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            svc.hybrid_registry.get_subscriptions_for_map("my-map").len(),
+            1
+        );
+
+        // Unsubscribe.
+        let resp = svc
+            .clone()
+            .oneshot(make_hybrid_unsub_op("sub-h1"))
+            .await
+            .unwrap();
+        assert!(
+            matches!(resp, OperationResponse::Ack { .. }),
+            "expected Ack after unsubscribe"
+        );
+
+        // Subscription removed.
+        assert!(svc.hybrid_registry.get_subscriptions_for_map("my-map").is_empty());
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_unsubscribe_nonexistent_returns_ack() {
+        // Unsubscribing a non-existent subscription is a no-op that still returns Ack.
+        let svc = make_service();
+        let resp = svc.oneshot(make_hybrid_unsub_op("no-such-sub")).await.unwrap();
+        assert!(
+            matches!(resp, OperationResponse::Ack { .. }),
+            "expected Ack even for non-existent subscription"
+        );
+    }
 }

@@ -1075,4 +1075,112 @@ mod tests {
             "expected ServerToClient VectorSearchResp, got: {err:?}",
         );
     }
+
+    // --- Hybrid search classify tests ---
+
+    #[test]
+    fn classify_hybrid_search_routes_to_search() {
+        let svc = make_service();
+        let msg = Message::HybridSearch {
+            payload: topgun_core::messages::hybrid::HybridSearchPayload {
+                request_id: "req-h1".to_string(),
+                map_name: "products".to_string(),
+                query_text: "widget".to_string(),
+                methods: vec![topgun_core::messages::hybrid::SearchMethod::FullText],
+                k: 10,
+                query_vector: None,
+                predicate: None,
+                include_value: None,
+                min_score: None,
+            },
+        };
+        let op = svc.classify(msg, Some("client-1".to_string()), CallerOrigin::Client).unwrap();
+        assert_eq!(op.ctx().service_name, service_names::SEARCH);
+        assert!(matches!(op, Operation::HybridSearch { .. }));
+        // partition_key=None for hybrid search means no partition_id.
+        assert!(op.ctx().partition_id.is_none());
+    }
+
+    #[test]
+    fn classify_hybrid_search_sub_routes_to_search() {
+        let svc = make_service();
+        let msg = Message::HybridSearchSub {
+            payload: topgun_core::messages::hybrid::HybridSearchSubPayload {
+                subscription_id: "sub-h1".to_string(),
+                map_name: "products".to_string(),
+                query_text: "widget".to_string(),
+                methods: vec![topgun_core::messages::hybrid::SearchMethod::Exact],
+                k: 5,
+                query_vector: None,
+                predicate: None,
+                include_value: None,
+                min_score: None,
+            },
+        };
+        let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
+        assert_eq!(op.ctx().service_name, service_names::SEARCH);
+        assert!(matches!(op, Operation::HybridSearchSubscribe { .. }));
+    }
+
+    #[test]
+    fn classify_hybrid_search_unsub_routes_to_search() {
+        let svc = make_service();
+        let msg = Message::HybridSearchUnsub {
+            payload: topgun_core::messages::hybrid::HybridSearchUnsubPayload {
+                subscription_id: "sub-h1".to_string(),
+            },
+        };
+        let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
+        assert_eq!(op.ctx().service_name, service_names::SEARCH);
+        assert!(matches!(op, Operation::HybridSearchUnsubscribe { .. }));
+    }
+
+    #[test]
+    fn classify_hybrid_search_resp_is_server_to_client() {
+        let svc = make_service();
+        let msg = Message::HybridSearchResp {
+            payload: topgun_core::messages::hybrid::HybridSearchRespPayload {
+                request_id: "req-h1".to_string(),
+                results: vec![],
+                search_time_ms: 0,
+                error: None,
+            },
+        };
+        let err = svc.classify(msg, None, CallerOrigin::Client).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::ServerToClient {
+                    variant: "HybridSearchResp"
+                }
+            ),
+            "expected ServerToClient HybridSearchResp, got: {err:?}",
+        );
+    }
+
+    #[test]
+    fn classify_hybrid_search_update_is_server_to_client() {
+        use topgun_core::messages::base::ChangeEventType;
+        let svc = make_service();
+        let msg = Message::HybridSearchUpdate {
+            payload: topgun_core::messages::hybrid::HybridSearchUpdatePayload {
+                subscription_id: "sub-h1".to_string(),
+                key: "k1".to_string(),
+                score: 0.9,
+                method_scores: std::collections::HashMap::new(),
+                value: None,
+                change_type: ChangeEventType::ENTER,
+            },
+        };
+        let err = svc.classify(msg, None, CallerOrigin::Client).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::ServerToClient {
+                    variant: "HybridSearchUpdate"
+                }
+            ),
+            "expected ServerToClient HybridSearchUpdate, got: {err:?}",
+        );
+    }
 }
