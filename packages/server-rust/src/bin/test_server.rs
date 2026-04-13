@@ -564,6 +564,13 @@ fn build_services(
         search_needs_population,
         Arc::clone(&index_observer_factory),
     ));
+    // Two-phase OnceLock wiring: construct engine after search_svc, then set it.
+    let hybrid_engine = topgun_server::service::domain::search::HybridSearchEngine::new(
+        Arc::clone(&search_svc),
+        Arc::clone(&record_store_factory),
+        None,
+    );
+    search_svc.set_hybrid_engine(Arc::new(hybrid_engine));
     let persistence_svc = Arc::new(PersistenceService::new(
         Arc::clone(&connection_registry),
         node_id,

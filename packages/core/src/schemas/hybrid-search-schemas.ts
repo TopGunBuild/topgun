@@ -26,7 +26,7 @@ export type HybridSearchMessage = z.infer<typeof HybridSearchMessageSchema>;
 export const HybridSearchResultEntrySchema = z.object({
   key: z.string(),
   score: z.number(),
-  methodScores: z.record(SearchMethodSchema, z.number()),
+  methodScores: z.record(SearchMethodSchema, z.number().optional()),
   value: z.unknown().optional(),
 });
 export type HybridSearchResultEntry = z.infer<typeof HybridSearchResultEntrySchema>;
@@ -67,7 +67,7 @@ export const HybridSearchUpdatePayloadSchema = z.object({
   subscriptionId: z.string(),
   key: z.string(),
   score: z.number(),
-  methodScores: z.record(SearchMethodSchema, z.number()),
+  methodScores: z.record(SearchMethodSchema, z.number().optional()),
   value: z.unknown().optional(),
   changeType: ChangeEventTypeSchema,
 });

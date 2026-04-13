@@ -181,17 +181,21 @@ mod integration_tests {
             )),
         );
         let search_needs_population = Arc::new(dashmap::DashMap::new());
-        router.register(
-            service_names::SEARCH,
-            Arc::new(SearchService::new(
-                Arc::new(SearchRegistry::new()),
-                Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
-                Arc::clone(&record_store_factory),
-                Arc::clone(&connection_registry),
-                search_needs_population,
-                Arc::clone(&index_observer_factory),
-            )),
+        let search_svc = Arc::new(SearchService::new(
+            Arc::new(SearchRegistry::new()),
+            Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
+            Arc::clone(&record_store_factory),
+            Arc::clone(&connection_registry),
+            search_needs_population,
+            Arc::clone(&index_observer_factory),
+        ));
+        let hybrid_engine = crate::service::domain::search::HybridSearchEngine::new(
+            Arc::clone(&search_svc),
+            Arc::clone(&record_store_factory),
+            None,
         );
+        search_svc.set_hybrid_engine(Arc::new(hybrid_engine));
+        router.register(service_names::SEARCH, search_svc);
         router.register(
             service_names::PERSISTENCE,
             Arc::new(PersistenceService::new(
@@ -413,14 +417,23 @@ mod integration_tests {
             cluster_state,
             Arc::clone(&connection_registry),
         ));
-        registry.register(SearchService::new(
+        let search_svc = SearchService::new(
             Arc::new(SearchRegistry::new()),
             Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
             Arc::clone(&record_store_factory),
             Arc::clone(&connection_registry),
             Arc::new(dashmap::DashMap::new()),
             Arc::new(crate::service::domain::index::IndexObserverFactory::new()),
-        ));
+        );
+        registry.register(search_svc);
+        // Two-phase wiring: retrieve Arc<SearchService>, build engine, set it.
+        let search_svc_arc = registry.get::<SearchService>().unwrap();
+        let hybrid_engine = crate::service::domain::search::HybridSearchEngine::new(
+            Arc::clone(&search_svc_arc),
+            Arc::clone(&record_store_factory),
+            None,
+        );
+        search_svc_arc.set_hybrid_engine(Arc::new(hybrid_engine));
         registry.register(PersistenceService::new(
             connection_registry,
             "test-node".to_string(),

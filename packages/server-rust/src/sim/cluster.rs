@@ -251,17 +251,21 @@ impl SimNode {
 
         let search_needs_population = Arc::new(dashmap::DashMap::new());
         let index_observer_factory = Arc::new(crate::service::domain::index::IndexObserverFactory::new());
-        router.register(
-            service_names::SEARCH,
-            Arc::new(SearchService::new(
-                Arc::new(SearchRegistry::new()),
-                Arc::new(parking_lot::RwLock::new(HashMap::new())),
-                Arc::clone(&record_store_factory),
-                Arc::clone(&connection_registry),
-                search_needs_population,
-                index_observer_factory,
-            )),
+        let search_svc = Arc::new(SearchService::new(
+            Arc::new(SearchRegistry::new()),
+            Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            Arc::clone(&record_store_factory),
+            Arc::clone(&connection_registry),
+            search_needs_population,
+            index_observer_factory,
+        ));
+        let hybrid_engine = crate::service::domain::search::HybridSearchEngine::new(
+            Arc::clone(&search_svc),
+            Arc::clone(&record_store_factory),
+            None,
         );
+        search_svc.set_hybrid_engine(Arc::new(hybrid_engine));
+        router.register(service_names::SEARCH, search_svc);
 
         router.register(
             service_names::PERSISTENCE,

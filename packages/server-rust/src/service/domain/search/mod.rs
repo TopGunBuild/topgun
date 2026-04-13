@@ -1536,6 +1536,10 @@ impl SearchService {
         ctx: &OperationContext,
         payload: &HybridSearchSubPayload,
     ) -> Result<OperationResponse, OperationError> {
+        fn elapsed_ms(start: std::time::Instant) -> u64 {
+            u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+        }
+
         let connection_id = ctx.connection_id.ok_or_else(|| {
             OperationError::Internal(anyhow::anyhow!(
                 "HybridSearchSubscribe requires connection_id in OperationContext"
@@ -1579,6 +1583,7 @@ impl SearchService {
         let include_value = payload.include_value.unwrap_or(true);
 
         // Execute initial search snapshot.
+        let start = std::time::Instant::now();
         let initial_resp = if let Some(engine) = self.hybrid_engine.get() {
             if let Some(registry) = self.index_observer_factory.get_registry(&payload.map_name) {
                 let params = crate::service::domain::search::hybrid::HybridSearchParams {
@@ -1661,7 +1666,7 @@ impl SearchService {
                 payload: HybridSearchRespPayload {
                     request_id: payload.subscription_id.clone(),
                     results: entries,
-                    search_time_ms: 0,
+                    search_time_ms: elapsed_ms(start),
                     error: None,
                 },
             },
@@ -1684,6 +1689,13 @@ impl SearchService {
     ///
     /// Compares new results against cached results and emits ENTER/UPDATE/LEAVE
     /// deltas to each subscriber's connection.
+    ///
+    /// TODO: Wire into mutation observer path. Currently unreachable because
+    /// `SearchMutationObserver::process_batch` is synchronous and has no
+    /// reference to `SearchService`. Requires either giving the observer an
+    /// `Arc<SearchService>` and spawning a tokio task, or switching to an
+    /// async mutation pipeline.
+    #[allow(dead_code)]
     pub async fn notify_hybrid_subscriptions_for_map(&self, map_name: &str) {
         let subs = self.hybrid_registry.get_subscriptions_for_map(map_name);
         if subs.is_empty() {

@@ -516,12 +516,14 @@ fn build_services() -> (
         cluster_state,
         Arc::clone(&connection_registry),
     ));
+    let index_observer_factory = Arc::new(topgun_server::service::domain::index::IndexObserverFactory::new());
     let search_svc = Arc::new(SearchService::new(
         search_registry,
         search_indexes,
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
         search_needs_population,
+        Arc::clone(&index_observer_factory),
     ));
     let persistence_svc = Arc::new(PersistenceService::new(
         Arc::clone(&connection_registry),
