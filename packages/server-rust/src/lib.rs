@@ -189,6 +189,7 @@ mod integration_tests {
                 Arc::clone(&record_store_factory),
                 Arc::clone(&connection_registry),
                 search_needs_population,
+                Arc::clone(&index_observer_factory),
             )),
         );
         router.register(
@@ -418,6 +419,7 @@ mod integration_tests {
             Arc::clone(&record_store_factory),
             Arc::clone(&connection_registry),
             Arc::new(dashmap::DashMap::new()),
+            Arc::new(crate::service::domain::index::IndexObserverFactory::new()),
         ));
         registry.register(PersistenceService::new(
             connection_registry,

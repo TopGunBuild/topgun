@@ -250,6 +250,7 @@ impl SimNode {
         );
 
         let search_needs_population = Arc::new(dashmap::DashMap::new());
+        let index_observer_factory = Arc::new(crate::service::domain::index::IndexObserverFactory::new());
         router.register(
             service_names::SEARCH,
             Arc::new(SearchService::new(
@@ -258,6 +259,7 @@ impl SimNode {
                 Arc::clone(&record_store_factory),
                 Arc::clone(&connection_registry),
                 search_needs_population,
+                index_observer_factory,
             )),
         );
 

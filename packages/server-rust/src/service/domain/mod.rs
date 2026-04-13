@@ -94,12 +94,14 @@ mod tests {
             Vec::new(),
         ));
         let needs_population = Arc::new(dashmap::DashMap::new());
+        let index_factory = Arc::new(crate::service::domain::index::IndexObserverFactory::new());
         let svc = Arc::new(SearchService::new(
             reg,
             indexes,
             store_factory,
             conn_reg,
             needs_population,
+            index_factory,
         ));
 
         let err = svc

@@ -47,6 +47,7 @@ use topgun_server::service::domain::embedding::{
     noop::NoopEmbeddingProvider, EmbeddingConfig, EmbeddingObserverFactory, EmbeddingProvider,
     EmbeddingProviderConfig, NoopConfig, VectorConfig as EmbeddingVectorConfig,
 };
+use topgun_server::service::domain::index::IndexObserverFactory;
 use topgun_server::service::domain::search::{
     SearchConfig, SearchMutationObserver, SearchRegistry, SearchService, TantivyMapIndex,
 };
@@ -478,9 +479,15 @@ fn build_services(
         embedding_provider,
     ));
 
+    let index_observer_factory = Arc::new(IndexObserverFactory::new());
+
     #[allow(unused_mut)]
-    let mut observer_factories: Vec<Arc<dyn ObserverFactory>> =
-        vec![search_observer_factory, merkle_observer_factory, embedding_factory.clone()];
+    let mut observer_factories: Vec<Arc<dyn ObserverFactory>> = vec![
+        search_observer_factory,
+        merkle_observer_factory,
+        embedding_factory.clone(),
+        Arc::clone(&index_observer_factory) as Arc<dyn ObserverFactory>,
+    ];
 
     // When datafusion is enabled, register ArrowCacheObserverFactory so that
     // record mutations invalidate the Arrow cache for SQL query freshness.
@@ -555,6 +562,7 @@ fn build_services(
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
         search_needs_population,
+        Arc::clone(&index_observer_factory),
     ));
     let persistence_svc = Arc::new(PersistenceService::new(
         Arc::clone(&connection_registry),

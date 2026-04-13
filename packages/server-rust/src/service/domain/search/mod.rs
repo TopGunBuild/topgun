@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -26,6 +26,11 @@ use tokio::sync::mpsc;
 use tower::Service;
 
 use topgun_core::messages::base::ChangeEventType;
+use topgun_core::messages::hybrid::{
+    HybridSearchPayload, HybridSearchRespPayload, HybridSearchResultEntry, HybridSearchSubPayload,
+    HybridSearchUnsubPayload, HybridSearchUpdatePayload,
+};
+use topgun_core::messages::hybrid::SearchMethod as WireSearchMethod;
 use topgun_core::messages::search::{
     SearchOptions, SearchRespPayload, SearchResultEntry, SearchUpdatePayload,
 };
@@ -34,12 +39,121 @@ use topgun_core::messages::Message;
 use tracing::Instrument;
 
 use crate::network::connection::{ConnectionId, ConnectionRegistry, OutboundMessage};
+use crate::service::domain::index::IndexObserverFactory;
 use crate::service::domain::predicate::value_to_rmpv;
-use crate::service::operation::{service_names, Operation, OperationError, OperationResponse};
+use crate::service::operation::{service_names, Operation, OperationContext, OperationError, OperationResponse};
 use crate::service::registry::{ManagedService, ServiceContext};
 use crate::storage::mutation_observer::MutationObserver;
 use crate::storage::record::{Record, RecordValue};
 use crate::storage::RecordStoreFactory;
+
+// ---------------------------------------------------------------------------
+// CachedHybridResult (used by HybridSearchSubscription)
+// ---------------------------------------------------------------------------
+
+/// Last-known fused score and per-method scores for a key in a hybrid subscription.
+#[derive(Debug, Clone)]
+pub struct CachedHybridResult {
+    pub score: f64,
+    pub method_scores: HashMap<SearchMethod, f64>,
+    pub value: Option<rmpv::Value>,
+}
+
+// ---------------------------------------------------------------------------
+// HybridSearchSubscription
+// ---------------------------------------------------------------------------
+
+/// A standing hybrid search subscription.
+pub struct HybridSearchSubscription {
+    pub subscription_id: String,
+    pub connection_id: ConnectionId,
+    pub map_name: String,
+    pub query_text: String,
+    pub methods: Vec<SearchMethod>,
+    pub k: usize,
+    pub query_vector: Option<Vec<f32>>,
+    pub predicate: Option<topgun_core::messages::base::PredicateNode>,
+    pub include_value: bool,
+    pub min_score: Option<f64>,
+    /// Current result cache: key -> `CachedHybridResult`.
+    pub current_results: DashMap<String, CachedHybridResult>,
+}
+
+impl HybridSearchSubscription {
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        subscription_id: String,
+        connection_id: ConnectionId,
+        map_name: String,
+        query_text: String,
+        methods: Vec<SearchMethod>,
+        k: usize,
+        query_vector: Option<Vec<f32>>,
+        predicate: Option<topgun_core::messages::base::PredicateNode>,
+        include_value: bool,
+        min_score: Option<f64>,
+    ) -> Self {
+        Self {
+            subscription_id,
+            connection_id,
+            map_name,
+            query_text,
+            methods,
+            k,
+            query_vector,
+            predicate,
+            include_value,
+            min_score,
+            current_results: DashMap::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HybridSearchRegistry
+// ---------------------------------------------------------------------------
+
+/// Concurrent registry of standing hybrid search subscriptions.
+pub struct HybridSearchRegistry {
+    subscriptions: DashMap<String, Arc<HybridSearchSubscription>>,
+}
+
+impl HybridSearchRegistry {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            subscriptions: DashMap::new(),
+        }
+    }
+
+    pub fn register(&self, sub: HybridSearchSubscription) {
+        let id = sub.subscription_id.clone();
+        self.subscriptions.insert(id, Arc::new(sub));
+    }
+
+    #[must_use]
+    pub fn unregister(&self, subscription_id: &str) -> Option<Arc<HybridSearchSubscription>> {
+        self.subscriptions
+            .remove(subscription_id)
+            .map(|(_, sub)| sub)
+    }
+
+    #[must_use]
+    pub fn get_subscriptions_for_map(&self, map_name: &str) -> Vec<Arc<HybridSearchSubscription>> {
+        self.subscriptions
+            .iter()
+            .filter(|entry| entry.value().map_name == map_name)
+            .map(|entry| Arc::clone(entry.value()))
+            .collect()
+    }
+}
+
+impl Default for HybridSearchRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // SearchConfig
@@ -1034,18 +1148,20 @@ fn process_batch(
 
 /// Full-text search domain service backed by per-map tantivy indexes.
 ///
-/// Handles `Operation::Search`, `Operation::SearchSubscribe`, and
-/// `Operation::SearchUnsubscribe`. Returns `OperationError::WrongService`
-/// for all other operations.
+/// Handles `Operation::Search`, `Operation::SearchSubscribe`,
+/// `Operation::SearchUnsubscribe`, `Operation::HybridSearch`,
+/// `Operation::HybridSearchSubscribe`, and `Operation::HybridSearchUnsubscribe`.
+/// Returns `OperationError::WrongService` for all other operations.
 pub struct SearchService {
     registry: Arc<SearchRegistry>,
+    hybrid_registry: Arc<HybridSearchRegistry>,
     indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
     /// Used to populate the tantivy index lazily when the first search query
     /// arrives for a map that had writes skipped due to no active subscriptions.
     record_store_factory: Arc<RecordStoreFactory>,
-    /// Retained for future subscription-aware push (currently unused after
-    /// switching to `OperationResponse::Message` for request-response ops).
-    #[allow(dead_code)]
+    /// Used by hybrid search handler to resolve `IndexRegistry` per map.
+    index_observer_factory: Arc<IndexObserverFactory>,
+    /// Connection registry used to push hybrid search update deltas.
     connection_registry: Arc<ConnectionRegistry>,
     /// Shutdown signals collected from registered `SearchMutationObserver`s.
     /// Sending `true` on each channel tells the background batch processor to
@@ -1055,6 +1171,9 @@ pub struct SearchService {
     /// `enqueue_remove` skips a write due to no active subscriptions. Cleared
     /// after `populate_index_from_store` completes.
     needs_population: Arc<DashMap<String, AtomicBool>>,
+    /// `HybridSearchEngine` wired after construction (two-phase `OnceLock` to break
+    /// the circular Arc: `SearchService` -> `HybridSearchEngine` -> `SearchService`).
+    hybrid_engine: OnceLock<Arc<HybridSearchEngine>>,
 }
 
 impl SearchService {
@@ -1066,15 +1185,32 @@ impl SearchService {
         record_store_factory: Arc<RecordStoreFactory>,
         connection_registry: Arc<ConnectionRegistry>,
         needs_population: Arc<DashMap<String, AtomicBool>>,
+        index_observer_factory: Arc<IndexObserverFactory>,
     ) -> Self {
         Self {
             registry,
+            hybrid_registry: Arc::new(HybridSearchRegistry::new()),
             indexes,
             record_store_factory,
+            index_observer_factory,
             connection_registry,
             observer_shutdown_signals: RwLock::new(Vec::new()),
             needs_population,
+            hybrid_engine: OnceLock::new(),
         }
+    }
+
+    /// Wires the `HybridSearchEngine` after construction (two-phase `OnceLock`
+    /// to break the circular Arc: `SearchService` -> `HybridSearchEngine` -> `SearchService`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if called more than once (prevents accidental double-wiring).
+    pub fn set_hybrid_engine(&self, engine: Arc<HybridSearchEngine>) {
+        assert!(
+            self.hybrid_engine.set(engine).is_ok(),
+            "hybrid_engine set twice"
+        );
     }
 
     /// Registers an observer's shutdown signal so that `ManagedService::shutdown()`
@@ -1259,6 +1395,408 @@ impl SearchService {
             _ => Err(OperationError::WrongService),
         }
     }
+
+    /// Handle a one-shot hybrid search request.
+    ///
+    /// Builds `HybridSearchParams` from the wire payload, delegates to
+    /// `HybridSearchEngine::hybrid_search()`, and converts results to
+    /// a `HybridSearchRespPayload`.
+    async fn handle_hybrid_search(
+        &self,
+        _ctx: &OperationContext,
+        payload: &HybridSearchPayload,
+    ) -> Result<OperationResponse, OperationError> {
+        fn elapsed_ms(start: std::time::Instant) -> u64 {
+            u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+        }
+
+        let start = std::time::Instant::now();
+
+        // Helper macro that returns an error HybridSearchRespPayload.
+        macro_rules! error_resp {
+            ($msg:expr) => {{
+                return Ok(OperationResponse::Message(Box::new(
+                    Message::HybridSearchResp {
+                        payload: HybridSearchRespPayload {
+                            request_id: payload.request_id.clone(),
+                            results: vec![],
+                            search_time_ms: elapsed_ms(start),
+                            error: Some($msg.to_string()),
+                        },
+                    },
+                )));
+            }};
+        }
+
+        // 1. Resolve IndexRegistry for the target map.
+        let Some(registry) = self.index_observer_factory.get_registry(&payload.map_name) else {
+            error_resp!("index registry not found for map");
+        };
+
+        // 2. Decode query_vector from little-endian f32 bytes (if present).
+        let query_vector_f32: Option<Vec<f32>> = if let Some(ref bytes) = payload.query_vector {
+            if bytes.len() % 4 != 0 {
+                error_resp!("query_vector length is not a multiple of 4");
+            }
+            let floats: Vec<f32> = bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            Some(floats)
+        } else {
+            None
+        };
+
+        // 3. Convert wire SearchMethod to server-side SearchMethod.
+        let methods: Vec<SearchMethod> = payload
+            .methods
+            .iter()
+            .map(|m| match m {
+                WireSearchMethod::Exact => SearchMethod::Exact,
+                WireSearchMethod::FullText => SearchMethod::FullText,
+                WireSearchMethod::Semantic => SearchMethod::Semantic,
+            })
+            .collect();
+
+        // 4. Get the HybridSearchEngine (must be set before first hybrid search).
+        let Some(engine) = self.hybrid_engine.get() else {
+            error_resp!("hybrid search engine not configured");
+        };
+
+        let include_value = payload.include_value.unwrap_or(true);
+
+        // 5. Build HybridSearchParams and run hybrid_search.
+        let params = crate::service::domain::search::hybrid::HybridSearchParams {
+            map_name: &payload.map_name,
+            index_registry: &registry,
+            query_text: &payload.query_text,
+            query_vector: query_vector_f32.as_deref(),
+            predicate: payload.predicate.as_ref(),
+            methods: &methods,
+            k: payload.k as usize,
+            include_value,
+        };
+
+        let mut results = match engine.hybrid_search(params).await {
+            Ok(r) => r,
+            Err(e) => error_resp!(e),
+        };
+
+        // 9. Apply min_score post-filter AFTER hybrid_search() returns.
+        if let Some(min_score) = payload.min_score {
+            results.retain(|r| r.score >= min_score);
+        }
+
+        // 6. Convert Vec<HybridSearchResult> to Vec<HybridSearchResultEntry>.
+        let entries: Vec<HybridSearchResultEntry> = results
+            .into_iter()
+            .map(|r| {
+                // Convert server-side SearchMethod keys to wire SearchMethod keys.
+                let method_scores = r
+                    .method_scores
+                    .into_iter()
+                    .map(|(k, v)| {
+                        let wire_k = match k {
+                            SearchMethod::Exact => WireSearchMethod::Exact,
+                            SearchMethod::FullText => WireSearchMethod::FullText,
+                            SearchMethod::Semantic => WireSearchMethod::Semantic,
+                        };
+                        (wire_k, v)
+                    })
+                    .collect();
+                HybridSearchResultEntry {
+                    key: r.key,
+                    score: r.score,
+                    method_scores,
+                    value: r.value,
+                }
+            })
+            .collect();
+
+        // 10. Return HybridSearchResp.
+        Ok(OperationResponse::Message(Box::new(
+            Message::HybridSearchResp {
+                payload: HybridSearchRespPayload {
+                    request_id: payload.request_id.clone(),
+                    results: entries,
+                    search_time_ms: elapsed_ms(start),
+                    error: None,
+                },
+            },
+        )))
+    }
+
+    /// Handle a hybrid search subscription request.
+    ///
+    /// Executes an initial hybrid search, registers the subscription, and
+    /// returns the initial snapshot as a `HybridSearchRespPayload`.
+    #[allow(clippy::too_many_lines)]
+    async fn handle_hybrid_search_subscribe(
+        &self,
+        ctx: &OperationContext,
+        payload: &HybridSearchSubPayload,
+    ) -> Result<OperationResponse, OperationError> {
+        let connection_id = ctx.connection_id.ok_or_else(|| {
+            OperationError::Internal(anyhow::anyhow!(
+                "HybridSearchSubscribe requires connection_id in OperationContext"
+            ))
+        })?;
+
+        // Decode query vector.
+        let query_vector_f32: Option<Vec<f32>> = if let Some(ref bytes) = payload.query_vector {
+            if bytes.len() % 4 != 0 {
+                return Ok(OperationResponse::Message(Box::new(
+                    Message::HybridSearchResp {
+                        payload: HybridSearchRespPayload {
+                            request_id: payload.subscription_id.clone(),
+                            results: vec![],
+                            search_time_ms: 0,
+                            error: Some("query_vector length is not a multiple of 4".to_string()),
+                        },
+                    },
+                )));
+            }
+            Some(
+                bytes
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect(),
+            )
+        } else {
+            None
+        };
+
+        let methods: Vec<SearchMethod> = payload
+            .methods
+            .iter()
+            .map(|m| match m {
+                WireSearchMethod::Exact => SearchMethod::Exact,
+                WireSearchMethod::FullText => SearchMethod::FullText,
+                WireSearchMethod::Semantic => SearchMethod::Semantic,
+            })
+            .collect();
+
+        let include_value = payload.include_value.unwrap_or(true);
+
+        // Execute initial search snapshot.
+        let initial_resp = if let Some(engine) = self.hybrid_engine.get() {
+            if let Some(registry) = self.index_observer_factory.get_registry(&payload.map_name) {
+                let params = crate::service::domain::search::hybrid::HybridSearchParams {
+                    map_name: &payload.map_name,
+                    index_registry: &registry,
+                    query_text: &payload.query_text,
+                    query_vector: query_vector_f32.as_deref(),
+                    predicate: payload.predicate.as_ref(),
+                    methods: &methods,
+                    k: payload.k as usize,
+                    include_value,
+                };
+                match engine.hybrid_search(params).await {
+                    Ok(mut results) => {
+                        if let Some(min_score) = payload.min_score {
+                            results.retain(|r| r.score >= min_score);
+                        }
+                        results
+                    }
+                    Err(_) => vec![],
+                }
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
+
+        // Build initial result entries and populate cache.
+        let sub = HybridSearchSubscription::new(
+            payload.subscription_id.clone(),
+            connection_id,
+            payload.map_name.clone(),
+            payload.query_text.clone(),
+            methods,
+            payload.k as usize,
+            query_vector_f32,
+            payload.predicate.clone(),
+            include_value,
+            payload.min_score,
+        );
+        for r in &initial_resp {
+            sub.current_results.insert(
+                r.key.clone(),
+                CachedHybridResult {
+                    score: r.score,
+                    method_scores: r.method_scores.clone(),
+                    value: r.value.clone(),
+                },
+            );
+        }
+        self.hybrid_registry.register(sub);
+
+        let entries: Vec<HybridSearchResultEntry> = initial_resp
+            .into_iter()
+            .map(|r| {
+                let method_scores = r
+                    .method_scores
+                    .into_iter()
+                    .map(|(k, v)| {
+                        let wire_k = match k {
+                            SearchMethod::Exact => WireSearchMethod::Exact,
+                            SearchMethod::FullText => WireSearchMethod::FullText,
+                            SearchMethod::Semantic => WireSearchMethod::Semantic,
+                        };
+                        (wire_k, v)
+                    })
+                    .collect();
+                HybridSearchResultEntry {
+                    key: r.key,
+                    score: r.score,
+                    method_scores,
+                    value: r.value,
+                }
+            })
+            .collect();
+
+        Ok(OperationResponse::Message(Box::new(
+            Message::HybridSearchResp {
+                payload: HybridSearchRespPayload {
+                    request_id: payload.subscription_id.clone(),
+                    results: entries,
+                    search_time_ms: 0,
+                    error: None,
+                },
+            },
+        )))
+    }
+
+    /// Handle a hybrid search unsubscribe request.
+    fn handle_hybrid_search_unsubscribe(
+        &self,
+        ctx: &OperationContext,
+        payload: &HybridSearchUnsubPayload,
+    ) -> OperationResponse {
+        let _ = self.hybrid_registry.unregister(&payload.subscription_id);
+        OperationResponse::Ack {
+            call_id: ctx.call_id,
+        }
+    }
+
+    /// Re-evaluate all hybrid subscriptions for a map on data mutation.
+    ///
+    /// Compares new results against cached results and emits ENTER/UPDATE/LEAVE
+    /// deltas to each subscriber's connection.
+    pub async fn notify_hybrid_subscriptions_for_map(&self, map_name: &str) {
+        let subs = self.hybrid_registry.get_subscriptions_for_map(map_name);
+        if subs.is_empty() {
+            return;
+        }
+
+        let Some(engine_ref) = self.hybrid_engine.get() else {
+            return;
+        };
+        let engine = Arc::clone(engine_ref);
+
+        let factory = Arc::clone(&self.index_observer_factory);
+        let conn_reg = Arc::clone(&self.connection_registry);
+
+        for sub in subs {
+            let Some(registry) = factory.get_registry(&sub.map_name) else {
+                continue;
+            };
+
+            let params = crate::service::domain::search::hybrid::HybridSearchParams {
+                map_name: &sub.map_name,
+                index_registry: &registry,
+                query_text: &sub.query_text,
+                query_vector: sub.query_vector.as_deref(),
+                predicate: sub.predicate.as_ref(),
+                methods: &sub.methods,
+                k: sub.k,
+                include_value: sub.include_value,
+            };
+
+            let Ok(mut new_results) = engine.hybrid_search(params).await else {
+                continue;
+            };
+
+            if let Some(min_score) = sub.min_score {
+                new_results.retain(|r| r.score >= min_score);
+            }
+
+            // Compute deltas: ENTER, UPDATE, LEAVE.
+            let new_map: HashMap<String, &HybridSearchResult> = new_results
+                .iter()
+                .map(|r| (r.key.clone(), r))
+                .collect();
+
+            // LEAVE: in cache but not in new results.
+            let leaves: Vec<String> = sub
+                .current_results
+                .iter()
+                .filter(|entry| !new_map.contains_key(entry.key()))
+                .map(|entry| entry.key().clone())
+                .collect();
+
+            for key in &leaves {
+                let method_scores = HashMap::new();
+                let msg = Message::HybridSearchUpdate {
+                    payload: HybridSearchUpdatePayload {
+                        subscription_id: sub.subscription_id.clone(),
+                        key: key.clone(),
+                        score: 0.0,
+                        method_scores,
+                        value: None,
+                        change_type: ChangeEventType::LEAVE,
+                    },
+                };
+                send_to_connection(&conn_reg, sub.connection_id, &msg);
+                sub.current_results.remove(key);
+            }
+
+            // ENTER and UPDATE.
+            for result in &new_results {
+                let wire_scores: HashMap<WireSearchMethod, f64> = result
+                    .method_scores
+                    .iter()
+                    .map(|(k, v)| {
+                        let wk = match k {
+                            SearchMethod::Exact => WireSearchMethod::Exact,
+                            SearchMethod::FullText => WireSearchMethod::FullText,
+                            SearchMethod::Semantic => WireSearchMethod::Semantic,
+                        };
+                        (wk, *v)
+                    })
+                    .collect();
+
+                let change_type = if sub.current_results.contains_key(&result.key) {
+                    ChangeEventType::UPDATE
+                } else {
+                    ChangeEventType::ENTER
+                };
+
+                let msg = Message::HybridSearchUpdate {
+                    payload: HybridSearchUpdatePayload {
+                        subscription_id: sub.subscription_id.clone(),
+                        key: result.key.clone(),
+                        score: result.score,
+                        method_scores: wire_scores,
+                        value: result.value.clone(),
+                        change_type,
+                    },
+                };
+                send_to_connection(&conn_reg, sub.connection_id, &msg);
+
+                // Update cache.
+                sub.current_results.insert(
+                    result.key.clone(),
+                    CachedHybridResult {
+                        score: result.score,
+                        method_scores: result.method_scores.clone(),
+                        value: result.value.clone(),
+                    },
+                );
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -1323,7 +1861,23 @@ impl Service<Operation> for Arc<SearchService> {
             caller_origin = %caller_origin,
         );
 
-        Box::pin(async move { svc.handle(op) }.instrument(span))
+        Box::pin(
+            async move {
+                match op {
+                    Operation::HybridSearch { ref ctx, ref payload } => {
+                        svc.handle_hybrid_search(ctx, payload).await
+                    }
+                    Operation::HybridSearchSubscribe { ref ctx, ref payload } => {
+                        svc.handle_hybrid_search_subscribe(ctx, payload).await
+                    }
+                    Operation::HybridSearchUnsubscribe { ref ctx, ref payload } => {
+                        Ok(svc.handle_hybrid_search_unsubscribe(ctx, payload))
+                    }
+                    _ => svc.handle(op),
+                }
+            }
+            .instrument(span),
+        )
     }
 }
 
@@ -1392,12 +1946,14 @@ mod tests {
         let conn_reg = Arc::new(ConnectionRegistry::new());
         let store_factory = make_factory();
         let needs_population = Arc::new(DashMap::new());
+        let index_factory = Arc::new(crate::service::domain::index::IndexObserverFactory::new());
         Arc::new(SearchService::new(
             reg,
             indexes,
             store_factory,
             conn_reg,
             needs_population,
+            index_factory,
         ))
     }
 
@@ -1698,12 +2254,14 @@ mod tests {
         let conn_reg = Arc::new(ConnectionRegistry::new());
         let store_factory = make_factory();
         let needs_population = Arc::new(DashMap::new());
+        let index_factory = Arc::new(crate::service::domain::index::IndexObserverFactory::new());
         let svc = Arc::new(SearchService::new(
             Arc::clone(&reg),
             indexes,
             store_factory,
             conn_reg,
             needs_population,
+            index_factory,
         ));
 
         let op = make_subscribe_op("my-map", "hello");
@@ -1721,12 +2279,14 @@ mod tests {
         let conn_reg = Arc::new(ConnectionRegistry::new());
         let store_factory = make_factory();
         let needs_population = Arc::new(DashMap::new());
+        let index_factory = Arc::new(crate::service::domain::index::IndexObserverFactory::new());
         let svc = Arc::new(SearchService::new(
             Arc::clone(&reg),
             indexes,
             store_factory,
             conn_reg,
             needs_population,
+            index_factory,
         ));
 
         svc.clone()
@@ -1765,12 +2325,14 @@ mod tests {
         let conn_reg = Arc::new(ConnectionRegistry::new());
         let store_factory = make_factory();
         let needs_population = Arc::new(DashMap::new());
+        let index_factory = Arc::new(crate::service::domain::index::IndexObserverFactory::new());
         let svc = Arc::new(SearchService::new(
             reg,
             Arc::clone(&indexes),
             store_factory,
             conn_reg,
             needs_population,
+            index_factory,
         ));
 
         assert!(indexes.read().is_empty(), "no index before first search");

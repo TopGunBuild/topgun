@@ -2,7 +2,7 @@
 //!
 //! Hybrid search combines exact-match, BM25 full-text, and ANN semantic search
 //! via RRF (Reciprocal Rank Fusion) into a single fused result list.
-//! All types use named MsgPack serialization with camelCase field names.
+//! All types use named `MsgPack` serialization with camelCase field names.
 
 use serde::{Deserialize, Serialize};
 
@@ -57,14 +57,14 @@ pub struct HybridSearchPayload {
     pub request_id: String,
     /// Map to search.
     pub map_name: String,
-    /// Full-text query string (used by FullText and optionally Semantic for auto-embed).
+    /// Full-text query string (used by `FullText` and optionally `Semantic` for auto-embed).
     pub query_text: String,
     /// Which search methods to invoke.
     pub methods: Vec<SearchMethod>,
     /// Number of top results to return.
     pub k: u32,
     /// Pre-computed query vector as little-endian f32 bytes. If None and Semantic
-    /// is requested, the server auto-embeds from query_text.
+    /// is requested, the server auto-embeds from `query_text`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     #[serde(with = "serde_bytes_opt")]
     pub query_vector: Option<Vec<u8>>,
@@ -89,7 +89,7 @@ pub struct HybridSearchResultEntry {
     pub score: f64,
     /// Per-method original scores for transparency.
     pub method_scores: std::collections::HashMap<SearchMethod, f64>,
-    /// Full record value (present iff include_value != Some(false)).
+    /// Full record value (present iff `include_value` != Some(false)).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub value: Option<rmpv::Value>,
 }
@@ -98,7 +98,7 @@ pub struct HybridSearchResultEntry {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HybridSearchRespPayload {
-    /// Correlates with HybridSearchPayload.request_id.
+    /// Correlates with `HybridSearchPayload.request_id`.
     pub request_id: String,
     /// Top-k results sorted by descending fused score.
     pub results: Vec<HybridSearchResultEntry>,
@@ -150,7 +150,7 @@ pub struct HybridSearchUpdatePayload {
     pub score: f64,
     /// Per-method scores.
     pub method_scores: std::collections::HashMap<SearchMethod, f64>,
-    /// Record value (if include_value is true).
+    /// Record value (if `include_value` is true).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub value: Option<rmpv::Value>,
     /// Whether the record entered, updated within, or left the result set.

@@ -272,6 +272,18 @@ impl OperationService {
                 let ctx = self.make_ctx(service_names::SEARCH, client_id, caller_origin, None);
                 Ok(Operation::SearchUnsubscribe { ctx, payload })
             }
+            Message::HybridSearch { payload } => {
+                let ctx = self.make_ctx(service_names::SEARCH, client_id, caller_origin, None);
+                Ok(Operation::HybridSearch { ctx, payload })
+            }
+            Message::HybridSearchSub { payload } => {
+                let ctx = self.make_ctx(service_names::SEARCH, client_id, caller_origin, None);
+                Ok(Operation::HybridSearchSubscribe { ctx, payload })
+            }
+            Message::HybridSearchUnsub { payload } => {
+                let ctx = self.make_ctx(service_names::SEARCH, client_id, caller_origin, None);
+                Ok(Operation::HybridSearchUnsubscribe { ctx, payload })
+            }
 
             // ----- Persistence domain (service_name = "persistence") -----
             Message::CounterRequest { payload } => {
@@ -428,6 +440,12 @@ impl OperationService {
             }),
             Message::SearchUpdate { .. } => Err(ClassifyError::ServerToClient {
                 variant: "SearchUpdate",
+            }),
+            Message::HybridSearchResp { .. } => Err(ClassifyError::ServerToClient {
+                variant: "HybridSearchResp",
+            }),
+            Message::HybridSearchUpdate { .. } => Err(ClassifyError::ServerToClient {
+                variant: "HybridSearchUpdate",
             }),
             Message::CounterResponse { .. } => Err(ClassifyError::ServerToClient {
                 variant: "CounterResponse",

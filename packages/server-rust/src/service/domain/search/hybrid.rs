@@ -404,7 +404,7 @@ mod tests {
         let indexes = Arc::new(RwLock::new(std::collections::HashMap::new()));
         let conn_reg = Arc::new(ConnectionRegistry::new());
         let needs_population = Arc::new(DashMap::new());
-        Arc::new(SearchService::new(reg, indexes, factory, conn_reg, needs_population))
+        Arc::new(SearchService::new(reg, indexes, factory, conn_reg, needs_population, Arc::new(crate::service::domain::index::IndexObserverFactory::new())))
     }
 
     fn make_empty_factory() -> Arc<RecordStoreFactory> {
