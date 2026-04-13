@@ -1537,10 +1537,6 @@ impl SearchService {
         ctx: &OperationContext,
         payload: &HybridSearchSubPayload,
     ) -> Result<OperationResponse, OperationError> {
-        fn elapsed_ms(start: std::time::Instant) -> u64 {
-            u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
-        }
-
         let connection_id = ctx.connection_id.ok_or_else(|| {
             OperationError::Internal(anyhow::anyhow!(
                 "HybridSearchSubscribe requires connection_id in OperationContext"
