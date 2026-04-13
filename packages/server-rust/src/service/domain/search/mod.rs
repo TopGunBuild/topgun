@@ -1176,6 +1176,11 @@ pub struct SearchService {
     hybrid_engine: OnceLock<Arc<HybridSearchEngine>>,
 }
 
+/// Convert an `Instant` elapsed duration to milliseconds, saturating at `u64::MAX`.
+fn elapsed_ms(start: std::time::Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
 impl SearchService {
     /// Creates a new `SearchService`.
     #[must_use]
@@ -1406,10 +1411,6 @@ impl SearchService {
         _ctx: &OperationContext,
         payload: &HybridSearchPayload,
     ) -> Result<OperationResponse, OperationError> {
-        fn elapsed_ms(start: std::time::Instant) -> u64 {
-            u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
-        }
-
         let start = std::time::Instant::now();
 
         // Helper macro that returns an error HybridSearchRespPayload.
