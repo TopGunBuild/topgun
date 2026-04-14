@@ -22,6 +22,8 @@ use crate::service::domain::index::attribute::AttributeExtractor;
 use crate::service::domain::index::hnsw::{ElementId, Hnsw, HnswParams};
 use crate::service::domain::index::{Index, IndexType};
 use crate::service::domain::index::registry::VectorIndexStats;
+use crate::storage::factory::RecordStoreFactory;
+use crate::storage::record::RecordValue;
 
 /// A queued mutation waiting to be applied to the HNSW graph.
 #[derive(Debug, Clone)]
@@ -57,7 +59,7 @@ pub struct OptimizeHandle {
 /// through `IndexRegistry::get_vector_index`.
 pub struct VectorIndex {
     attribute: String,
-    /// User-visible name for this index (e.g. "embedding_index").
+    /// User-visible name for this index (e.g. `embedding_index`).
     index_name: String,
     dimension: u16,
     distance_metric: DistanceMetric,
@@ -83,7 +85,7 @@ pub struct VectorIndex {
     /// Keys queued for removal — suppressed in read results until commit.
     pending_removed: DashSet<String>,
     /// When `true`, BLAKE3 hashes of inserted vectors are recorded in `blake3_seen`
-    /// and duplicates skip HNSW insertion. Defaults to `true` (SurrealDB pattern).
+    /// and duplicates skip HNSW insertion. Defaults to `true` (`SurrealDB` pattern).
     dedup_enabled: bool,
     /// BLAKE3-256 hashes of all committed vectors (when dedup is enabled).
     /// `DashSet::insert` returns `false` for duplicates — the atomic check-and-insert
@@ -441,7 +443,7 @@ impl VectorIndex {
     /// The formula is owned here so it stays accurate if edge-pointer width changes.
     fn estimate_memory_bytes(&self) -> u64 {
         let vc = self.key_to_id.len() as u64;
-        let dim = self.dimension as u64;
+        let dim = u64::from(self.dimension);
         // 4 bytes per f32 component + average 16 neighbor pointers at 8 bytes each
         vc * dim * 4 + vc * 16 * 8
     }
@@ -492,25 +494,27 @@ impl VectorIndex {
 
 /// Formats Unix seconds as a minimal ISO-8601 UTC string: `YYYY-MM-DDTHH:MM:SSZ`.
 #[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
 fn format_iso8601(secs: u64) -> String {
-    let s = secs % 60;
-    let m = (secs / 60) % 60;
-    let h = (secs / 3600) % 24;
+    let sec = secs % 60;
+    let min = (secs / 60) % 60;
+    let hour = (secs / 3600) % 24;
     let days = secs / 86400;
 
-    let z = days + 2_440_588;
-    let a = (z as f64 - 1_867_216.25) / 36_524.25;
-    let a = z + 1 + a as u64 - (a as u64 / 4);
-    let b = a + 1524;
-    let c = ((b as f64 - 122.1) / 365.25) as u64;
-    let dd = (365.25 * c as f64) as u64;
-    let e = ((b - dd) as f64 / 30.6001) as u64;
+    // Days since 1970-01-01 to Gregorian date (Meeus algorithm, simplified).
+    let julian_z = days + 2_440_588; // Julian Day Number offset
+    let julian_a_frac = (julian_z as f64 - 1_867_216.25) / 36_524.25;
+    let julian_a = julian_z + 1 + julian_a_frac as u64 - (julian_a_frac as u64 / 4);
+    let julian_b = julian_a + 1524;
+    let julian_c = ((julian_b as f64 - 122.1) / 365.25) as u64;
+    let days_in_year = (365.25 * julian_c as f64) as u64;
+    let julian_e = ((julian_b - days_in_year) as f64 / 30.6001) as u64;
 
-    let day = (b - dd - (30.6001 * e as f64) as u64) as u32;
-    let month = if e < 14 { e - 1 } else { e - 13 } as u32;
-    let year = if month > 2 { c - 4716 } else { c - 4715 } as u32;
+    let day = (julian_b - days_in_year - (30.6001 * julian_e as f64) as u64) as u32;
+    let month = if julian_e < 14 { julian_e - 1 } else { julian_e - 13 } as u32;
+    let year = if month > 2 { julian_c - 4716 } else { julian_c - 4715 } as u32;
 
-    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
 }
 
 // ------------------------------------------------------------------
@@ -621,6 +625,178 @@ impl Index for VectorIndex {
     fn entry_count(&self) -> u64 {
         // Committed entries only; pending count is accessible via pending_count().
         self.key_to_id.len() as u64
+    }
+}
+
+// ------------------------------------------------------------------
+// Startup rebuild support
+// ------------------------------------------------------------------
+
+/// Minimal descriptor for re-registering and rebuilding a vector index at startup.
+///
+/// Populated from the on-disk `VectorIndexDescriptor` JSON (loaded in `module.rs`).
+/// Keeping a separate struct avoids a circular import between the service domain
+/// layer and the network handler layer.
+pub struct VectorRebuildSpec {
+    /// Map name this index belongs to.
+    pub map_name: String,
+    /// Attribute name this index covers.
+    pub attribute: String,
+    /// User-visible index name.
+    pub index_name: String,
+    /// Vector dimensionality.
+    pub dimension: u16,
+    /// Distance metric.
+    pub distance_metric: DistanceMetric,
+    /// HNSW m parameter.
+    pub hnsw_m: u16,
+    /// HNSW `ef_construction` parameter.
+    pub hnsw_ef_construction: u32,
+    /// BLAKE3 dedup setting.
+    pub dedup_enabled: bool,
+}
+
+/// Re-registers and rebuilds vector indexes from persisted record stores after restart.
+///
+/// Called from `NetworkModule::serve` after `start()` binds the TCP listener and
+/// before `set_ready()` is called, ensuring vector indexes are fully populated
+/// before `VECTOR_SEARCH` requests are served.
+///
+/// For each descriptor:
+/// 1. Re-registers the vector index via `registry.add_vector_index_with_params`.
+/// 2. Iterates all partition stores for the map and inserts records containing
+///    the `_embedding` attribute of matching dimension into the rebuilt index.
+/// 3. Calls `commit_pending()` to flush all buffered mutations into the HNSW graph.
+/// 4. Logs progress at INFO level.
+///
+/// Missing `store_factory` records are a no-op (clean first start).
+pub async fn rebuild_from_store(
+    index_factory: &crate::service::domain::index::mutation_observer::IndexObserverFactory,
+    store_factory: &RecordStoreFactory,
+    specs: &[VectorRebuildSpec],
+) {
+    if specs.is_empty() {
+        return;
+    }
+
+    for spec in specs {
+        let started = std::time::Instant::now();
+        let registry = index_factory.register_map(&spec.map_name);
+
+        let vi = registry.add_vector_index_with_params(
+            spec.attribute.clone(),
+            spec.index_name.clone(),
+            spec.dimension,
+            spec.distance_metric,
+            spec.hnsw_m,
+            spec.hnsw_ef_construction,
+            spec.dedup_enabled,
+        );
+
+        let stores = store_factory.get_all_for_map(&spec.map_name);
+        let mut count: u64 = 0;
+
+        for store in &stores {
+            store.for_each_boxed(
+                &mut |key, record| {
+                    if let RecordValue::Lww { ref value, .. } = record.value {
+                        let rmpv_val = crate::service::domain::predicate::value_to_rmpv(value);
+                        vi.insert(key, &rmpv_val);
+                        count += 1;
+                    }
+                },
+                false,
+            );
+        }
+
+        // Flush all buffered inserts into the HNSW graph.
+        let flushed = vi.commit_pending();
+        let elapsed = started.elapsed();
+
+        info!(
+            map = %spec.map_name,
+            attribute = %spec.attribute,
+            index_name = %spec.index_name,
+            count = count,
+            flushed = flushed,
+            elapsed_ms = elapsed.as_millis(),
+            "vector index rebuilt from store"
+        );
+    }
+}
+
+// ------------------------------------------------------------------
+// Startup rebuild tests
+// ------------------------------------------------------------------
+
+#[cfg(test)]
+mod rebuild_tests {
+    use std::sync::Arc;
+
+    use topgun_core::vector::DistanceMetric;
+
+    use super::VectorRebuildSpec;
+    use crate::service::domain::index::mutation_observer::IndexObserverFactory;
+    use crate::storage::datastores::NullDataStore;
+    use crate::storage::factory::RecordStoreFactory;
+    use crate::storage::impls::StorageConfig;
+
+    fn make_store_factory() -> Arc<RecordStoreFactory> {
+        Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::new(NullDataStore),
+            vec![],
+        ))
+    }
+
+    #[tokio::test]
+    async fn rebuild_from_store_no_op_when_empty_specs() {
+        let factory = IndexObserverFactory::new();
+        let store_factory = make_store_factory();
+        // Should complete without error and without registering any indexes.
+        super::rebuild_from_store(&factory, &store_factory, &[]).await;
+        assert_eq!(factory.all_index_stats().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn rebuild_from_store_registers_index_when_no_records() {
+        let factory = IndexObserverFactory::new();
+        let store_factory = make_store_factory();
+        let specs = vec![VectorRebuildSpec {
+            map_name: "users".to_string(),
+            attribute: "_embedding".to_string(),
+            index_name: "emb_idx".to_string(),
+            dimension: 4,
+            distance_metric: DistanceMetric::Cosine,
+            hnsw_m: 16,
+            hnsw_ef_construction: 200,
+            dedup_enabled: true,
+        }];
+        super::rebuild_from_store(&factory, &store_factory, &specs).await;
+        // Index should be registered even with no records (empty store).
+        let registry = factory.get_registry("users").expect("registry should exist");
+        assert!(registry.get_vector_index("_embedding").is_some());
+        let stats = registry.vector_index_stats();
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].vector_count, 0);
+        assert_eq!(stats[0].index_name, "emb_idx");
+    }
+
+    #[test]
+    fn rebuild_spec_fields_preserved() {
+        let spec = VectorRebuildSpec {
+            map_name: "m".to_string(),
+            attribute: "a".to_string(),
+            index_name: "n".to_string(),
+            dimension: 8,
+            distance_metric: DistanceMetric::Euclidean,
+            hnsw_m: 12,
+            hnsw_ef_construction: 100,
+            dedup_enabled: false,
+        };
+        assert_eq!(spec.dimension, 8);
+        assert_eq!(spec.hnsw_m, 12);
+        assert!(!spec.dedup_enabled);
     }
 }
 
@@ -911,9 +1087,10 @@ mod tests {
             if handle.finished.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
             }
-            if std::time::Instant::now() > deadline {
-                panic!("optimize did not complete in time");
-            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "optimize did not complete in time"
+            );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
 
@@ -953,9 +1130,10 @@ mod tests {
             if h1.finished.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
             }
-            if std::time::Instant::now() > deadline {
-                panic!("optimize did not complete in time");
-            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "optimize did not complete in time"
+            );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }

@@ -156,6 +156,7 @@ impl IndexRegistry {
     /// `dedup_enabled` controls BLAKE3-based duplicate vector suppression (default: true).
     ///
     /// Returns an `Arc<VectorIndex>` so the caller can persist the descriptor.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_vector_index_with_params(
         &self,
         attribute: impl Into<String>,

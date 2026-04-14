@@ -26,10 +26,11 @@ use super::config::NetworkConfig;
 use super::connection::{ConnectionRegistry, OutboundMessage};
 use super::handlers::admin::{
     cluster_status, create_index, create_policy, create_vector_index, delete_policy, get_settings,
-    index_backfill_status, list_indexes, list_maps, list_policies, list_vector_indexes, login,
+    index_backfill_status, list_indexes, list_maps, list_policies, list_vector_indexes, load_vector_descriptors, login,
     optimize_vector_index_handler, remove_index_handler, remove_vector_index_handler,
     server_status, update_settings, vector_index_status,
 };
+use crate::service::domain::index::vector_index::{rebuild_from_store, VectorRebuildSpec};
 use super::handlers::auth_provider::{
     AuthProvider, AuthProviderConfig, HmacProvider, JwksProvider, OidcProvider,
 };
@@ -217,6 +218,35 @@ impl NetworkModule {
         // since build_app takes ownership of config.
         let tls = config.tls.take();
         let observability = self.observability.clone();
+
+        // Rebuild vector indexes from persisted records before serving requests.
+        // This must complete before set_ready() so that VECTOR_SEARCH requests
+        // are not served against empty indexes during the startup window.
+        if let (Some(ref index_factory), Some(ref store_factory)) =
+            (&self.index_observer_factory, &self.store_factory)
+        {
+            let descriptor_path = std::path::PathBuf::from(
+                std::env::var("TOPGUN_VECTOR_INDEX_PATH")
+                    .unwrap_or_else(|_| "./vector_indexes.json".to_string()),
+            );
+            let descriptors = load_vector_descriptors(&descriptor_path);
+            if !descriptors.is_empty() {
+                let specs: Vec<VectorRebuildSpec> = descriptors
+                    .into_iter()
+                    .map(|d| VectorRebuildSpec {
+                        map_name: d.map_name,
+                        attribute: d.attribute,
+                        index_name: d.index_name,
+                        dimension: d.dimension,
+                        distance_metric: d.distance_metric,
+                        hnsw_m: d.hnsw_m,
+                        hnsw_ef_construction: d.hnsw_ef_construction,
+                        dedup_enabled: d.dedup_enabled,
+                    })
+                    .collect();
+                rebuild_from_store(index_factory, store_factory, &specs).await;
+            }
+        }
 
         let router = build_app(
             config,

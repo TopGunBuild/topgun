@@ -66,6 +66,7 @@ impl Hnsw {
     /// progressively fewer elements. The layer count grows logarithmically
     /// with the number of insertions.
     #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
     pub fn layer_count(&self) -> u32 {
         self.layers.len() as u32
     }

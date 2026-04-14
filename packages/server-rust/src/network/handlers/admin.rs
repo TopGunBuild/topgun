@@ -1087,6 +1087,9 @@ fn stats_to_response(stats: crate::service::domain::index::registry::VectorIndex
 /// Creates a new vector index on a map attribute.
 ///
 /// Returns 201 with the registered index descriptor on success.
+///
+/// # Errors
+///
 /// Returns 409 if an index with the same name already exists for (map, attribute).
 /// Returns 422 if dimension is 0 or > 4096.
 /// Returns 503 if the index observer factory is not configured.
@@ -1170,8 +1173,8 @@ pub async fn create_vector_index(
             .unwrap_or_default()
             .as_secs();
         // Format as a minimal ISO-8601 UTC string (no sub-second precision).
-        let (y, mo, d, h, mi, s) = secs_to_ymd_hms(secs);
-        format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
+        let (year, month, day, hour, min, sec) = secs_to_ymd_hms(secs);
+        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
     };
     descriptors.push(VectorIndexDescriptor {
         map_name: req.map_name.clone(),
@@ -1223,8 +1226,7 @@ pub async fn list_vector_indexes(
     let all_vector_stats = factory.all_vector_index_stats();
     let indexes: Vec<VectorIndexInfoResponse> = all_vector_stats
         .into_iter()
-        .map(|(_, stats_vec)| stats_vec)
-        .flatten()
+        .flat_map(|(_, stats_vec)| stats_vec)
         .map(stats_to_response)
         .collect();
 
@@ -1233,7 +1235,11 @@ pub async fn list_vector_indexes(
 
 /// Removes a vector index for the specified map and index name.
 ///
-/// Returns 204 on success, 404 if no vector index exists for (map, name).
+/// Returns 204 on success.
+///
+/// # Errors
+///
+/// Returns 404 if no vector index exists for (map, name).
 /// Returns 503 if the index observer factory is not configured.
 pub async fn remove_vector_index_handler(
     _claims: AdminClaims,
@@ -1298,8 +1304,11 @@ pub async fn remove_vector_index_handler(
 ///
 /// Returns 202 with an `OptimizeResponse`. If an optimize is already in progress,
 /// returns 202 with `already_running: true` and the existing `optimization_id`.
-/// Returns 503 if the index observer factory is not configured.
+///
+/// # Errors
+///
 /// Returns 404 if no vector index with the given name exists for the map.
+/// Returns 503 if the index observer factory is not configured.
 pub async fn optimize_vector_index_handler(
     _claims: AdminClaims,
     State(state): State<AppState>,
@@ -1376,6 +1385,9 @@ pub async fn optimize_vector_index_handler(
 /// Returns the status of a vector index, including any in-progress optimize.
 ///
 /// Returns 200 with a `VectorIndexStatusResponse`.
+///
+/// # Errors
+///
 /// Returns 404 if no vector index with the given name exists for the map.
 /// Returns 503 if the index observer factory is not configured.
 pub async fn vector_index_status(
@@ -1433,7 +1445,7 @@ pub async fn vector_index_status(
         )
     })?;
 
-    let stats = vi.stats();
+    let vi_stats = vi.stats();
     let optimize_handle = vi.current_optimize_handle();
     let (optimize_in_progress, optimize_processed, optimize_total) =
         if let Some(ref h) = optimize_handle {
@@ -1448,11 +1460,40 @@ pub async fn vector_index_status(
         };
 
     Ok(Json(VectorIndexStatusResponse {
-        stats: stats_to_response(stats),
+        stats: stats_to_response(vi_stats),
         optimize_in_progress,
         optimize_processed,
         optimize_total,
     }))
+}
+
+// ── ISO-8601 timestamp helper ─────────────────────────────────────────────────
+
+/// Converts Unix seconds to `(year, month, day, hour, minute, second)` tuple.
+///
+/// Uses a simple division algorithm without any external crate dependency.
+/// Accurate for dates in the range 2000-2100 (sufficient for timestamps).
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss, clippy::cast_sign_loss)]
+fn secs_to_ymd_hms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
+    let sec = secs % 60;
+    let min = (secs / 60) % 60;
+    let hour = (secs / 3600) % 24;
+    let days = secs / 86400;
+
+    // Days since 1970-01-01 to Gregorian date (Meeus algorithm, simplified).
+    let julian_z = days + 2_440_588; // Julian Day Number offset
+    let julian_a_frac = (julian_z as f64 - 1_867_216.25) / 36_524.25;
+    let julian_a = julian_z + 1 + julian_a_frac as u64 - (julian_a_frac as u64 / 4);
+    let julian_b = julian_a + 1524;
+    let julian_c = ((julian_b as f64 - 122.1) / 365.25) as u64;
+    let days_in_year = (365.25 * julian_c as f64) as u64;
+    let julian_e = ((julian_b - days_in_year) as f64 / 30.6001) as u64;
+
+    let day = (julian_b - days_in_year - (30.6001 * julian_e as f64) as u64) as u32;
+    let month = if julian_e < 14 { julian_e - 1 } else { julian_e - 13 } as u32;
+    let year = if month > 2 { julian_c - 4716 } else { julian_c - 4715 } as u32;
+
+    (year, month, day, hour as u32, min as u32, sec as u32)
 }
 
 #[cfg(test)]
@@ -1738,31 +1779,3 @@ mod vector_admin_tests {
     }
 }
 
-// ── ISO-8601 timestamp helper ─────────────────────────────────────────────────
-
-/// Converts Unix seconds to `(year, month, day, hour, minute, second)` tuple.
-///
-/// Uses a simple division algorithm without any external crate dependency.
-/// Accurate for dates in the range 2000-2100 (sufficient for timestamps).
-#[allow(clippy::cast_possible_truncation)]
-fn secs_to_ymd_hms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
-    let s = secs % 60;
-    let m = (secs / 60) % 60;
-    let h = (secs / 3600) % 24;
-    let days = secs / 86400;
-
-    // Days since 1970-01-01 to Gregorian date (Meeus algorithm, simplified).
-    let z = days + 2_440_588; // Julian Day Number offset
-    let a = (z as f64 - 1_867_216.25) / 36_524.25;
-    let a = z + 1 + a as u64 - (a as u64 / 4);
-    let b = a + 1524;
-    let c = ((b as f64 - 122.1) / 365.25) as u64;
-    let dd = (365.25 * c as f64) as u64;
-    let e = ((b - dd) as f64 / 30.6001) as u64;
-
-    let day = (b - dd - (30.6001 * e as f64) as u64) as u32;
-    let month = if e < 14 { e - 1 } else { e - 13 } as u32;
-    let year = if month > 2 { c - 4716 } else { c - 4715 } as u32;
-
-    (year, month, day, h as u32, m as u32, s as u32)
-}
