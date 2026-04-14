@@ -26,7 +26,7 @@ use crate::cluster::types::{ClusterConfig, ClusterHealth, MembersView};
 use crate::dag::coordinator::ClusterQueryCoordinator;
 use crate::network::connection::ConnectionRegistry;
 use crate::service::domain::query::QueryRegistry;
-use crate::service::domain::search::SearchRegistry;
+use crate::service::domain::search::{HybridSearchRegistry, SearchRegistry};
 use crate::service::domain::{
     CoordinationService, CrdtService, MessagingService, PersistenceService, QueryService,
     SchemaService, SearchService, SyncService,
@@ -253,6 +253,7 @@ impl SimNode {
         let index_observer_factory = Arc::new(crate::service::domain::index::IndexObserverFactory::new());
         let search_svc = Arc::new(SearchService::new(
             Arc::new(SearchRegistry::new()),
+            Arc::new(HybridSearchRegistry::new()),
             Arc::new(parking_lot::RwLock::new(HashMap::new())),
             Arc::clone(&record_store_factory),
             Arc::clone(&connection_registry),

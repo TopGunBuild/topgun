@@ -63,7 +63,7 @@ mod tests {
 
     use super::*;
     use crate::network::connection::ConnectionRegistry;
-    use crate::service::domain::search::SearchRegistry;
+    use crate::service::domain::search::{HybridSearchRegistry, SearchRegistry};
     use crate::service::operation::{service_names, Operation, OperationContext, OperationError};
     use crate::storage::datastores::NullDataStore;
     use crate::storage::impls::StorageConfig;
@@ -95,8 +95,10 @@ mod tests {
         ));
         let needs_population = Arc::new(dashmap::DashMap::new());
         let index_factory = Arc::new(crate::service::domain::index::IndexObserverFactory::new());
+        let hybrid_reg = Arc::new(HybridSearchRegistry::new());
         let svc = Arc::new(SearchService::new(
             reg,
+            hybrid_reg,
             indexes,
             store_factory,
             conn_reg,

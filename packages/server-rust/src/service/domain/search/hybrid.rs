@@ -394,17 +394,26 @@ mod tests {
     use crate::service::domain::embedding::noop::NoopEmbeddingProvider;
     use crate::service::domain::embedding::NoopConfig;
     use crate::service::domain::index::registry::IndexRegistry;
-    use crate::service::domain::search::{SearchRegistry, SearchService};
+    use crate::service::domain::search::{HybridSearchRegistry, SearchRegistry, SearchService};
     use crate::storage::datastores::NullDataStore;
     use crate::storage::impls::StorageConfig;
     use crate::storage::RecordStoreFactory;
 
     fn make_search_service(factory: Arc<RecordStoreFactory>) -> Arc<SearchService> {
         let reg = Arc::new(SearchRegistry::new());
+        let hybrid_reg = Arc::new(HybridSearchRegistry::new());
         let indexes = Arc::new(RwLock::new(std::collections::HashMap::new()));
         let conn_reg = Arc::new(ConnectionRegistry::new());
         let needs_population = Arc::new(DashMap::new());
-        Arc::new(SearchService::new(reg, indexes, factory, conn_reg, needs_population, Arc::new(crate::service::domain::index::IndexObserverFactory::new())))
+        Arc::new(SearchService::new(
+            reg,
+            hybrid_reg,
+            indexes,
+            factory,
+            conn_reg,
+            needs_population,
+            Arc::new(crate::service::domain::index::IndexObserverFactory::new()),
+        ))
     }
 
     fn make_empty_factory() -> Arc<RecordStoreFactory> {

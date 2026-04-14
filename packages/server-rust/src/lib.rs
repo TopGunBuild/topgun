@@ -183,6 +183,7 @@ mod integration_tests {
         let search_needs_population = Arc::new(dashmap::DashMap::new());
         let search_svc = Arc::new(SearchService::new(
             Arc::new(SearchRegistry::new()),
+            Arc::new(crate::service::domain::search::HybridSearchRegistry::new()),
             Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
             Arc::clone(&record_store_factory),
             Arc::clone(&connection_registry),
@@ -419,6 +420,7 @@ mod integration_tests {
         ));
         let search_svc = SearchService::new(
             Arc::new(SearchRegistry::new()),
+            Arc::new(crate::service::domain::search::HybridSearchRegistry::new()),
             Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
             Arc::clone(&record_store_factory),
             Arc::clone(&connection_registry),

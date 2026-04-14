@@ -32,7 +32,8 @@ use topgun_server::service::domain::query::{QueryRegistry, QueryService};
 use topgun_server::service::domain::query_backend::PredicateBackend;
 use topgun_server::service::domain::schema::SchemaService;
 use topgun_server::service::domain::search::{
-    SearchConfig, SearchMutationObserver, SearchRegistry, SearchService, TantivyMapIndex,
+    HybridSearchRegistry, SearchConfig, SearchMutationObserver, SearchRegistry, SearchService,
+    TantivyMapIndex,
 };
 use topgun_server::service::domain::sync::SyncService;
 use topgun_server::service::middleware::build_operation_pipeline;
@@ -387,9 +388,34 @@ fn is_leap_year(year: u64) -> bool {
 
 struct SearchObserverFactory {
     search_registry: Arc<SearchRegistry>,
+    hybrid_registry: Arc<HybridSearchRegistry>,
     indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
     connection_registry: Arc<ConnectionRegistry>,
     needs_population: Arc<DashMap<String, AtomicBool>>,
+    search_service: std::sync::OnceLock<Arc<SearchService>>,
+}
+
+impl SearchObserverFactory {
+    fn new(
+        search_registry: Arc<SearchRegistry>,
+        hybrid_registry: Arc<HybridSearchRegistry>,
+        indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
+        connection_registry: Arc<ConnectionRegistry>,
+        needs_population: Arc<DashMap<String, AtomicBool>>,
+    ) -> Self {
+        Self {
+            search_registry,
+            hybrid_registry,
+            indexes,
+            connection_registry,
+            needs_population,
+            search_service: std::sync::OnceLock::new(),
+        }
+    }
+
+    fn init_search_service(&self, svc: Arc<SearchService>) {
+        let _ = self.search_service.set(svc);
+    }
 }
 
 impl ObserverFactory for SearchObserverFactory {
@@ -403,14 +429,18 @@ impl ObserverFactory for SearchObserverFactory {
             batch_interval_ms: 16,
             batch_flush_threshold: 100,
         };
-        let observer = SearchMutationObserver::new(
+        let (observer, hybrid_rx) = SearchMutationObserver::new(
             map_name.to_string(),
             Arc::clone(&self.search_registry),
+            Arc::clone(&self.hybrid_registry),
             Arc::clone(&self.indexes),
             Arc::clone(&self.connection_registry),
             config,
             Arc::clone(&self.needs_population),
         );
+        if let Some(svc) = self.search_service.get() {
+            svc.spawn_hybrid_notifier(hybrid_rx);
+        }
         Some(Arc::new(observer))
     }
 }
@@ -448,16 +478,20 @@ fn build_services() -> (
     let connection_registry = Arc::new(ConnectionRegistry::new());
 
     let search_registry = Arc::new(SearchRegistry::new());
+    let hybrid_registry = Arc::new(HybridSearchRegistry::new());
     let search_indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>> =
         Arc::new(RwLock::new(HashMap::new()));
     let search_needs_population: Arc<DashMap<String, AtomicBool>> = Arc::new(DashMap::new());
 
-    let search_observer_factory: Arc<dyn ObserverFactory> = Arc::new(SearchObserverFactory {
-        search_registry: Arc::clone(&search_registry),
-        indexes: Arc::clone(&search_indexes),
-        connection_registry: Arc::clone(&connection_registry),
-        needs_population: Arc::clone(&search_needs_population),
-    });
+    let search_observer_factory = Arc::new(SearchObserverFactory::new(
+        Arc::clone(&search_registry),
+        Arc::clone(&hybrid_registry),
+        Arc::clone(&search_indexes),
+        Arc::clone(&connection_registry),
+        Arc::clone(&search_needs_population),
+    ));
+    let search_observer_factory_dyn: Arc<dyn ObserverFactory> =
+        Arc::clone(&search_observer_factory) as Arc<dyn ObserverFactory>;
 
     let query_registry = Arc::new(QueryRegistry::new());
 
@@ -472,7 +506,7 @@ fn build_services() -> (
             Arc::new(NullDataStore),
             Vec::new(),
         )
-        .with_observer_factories(vec![search_observer_factory, merkle_observer_factory]),
+        .with_observer_factories(vec![search_observer_factory_dyn, merkle_observer_factory]),
     );
 
     let write_validator = {
@@ -519,12 +553,14 @@ fn build_services() -> (
     let index_observer_factory = Arc::new(topgun_server::service::domain::index::IndexObserverFactory::new());
     let search_svc = Arc::new(SearchService::new(
         search_registry,
+        hybrid_registry,
         search_indexes,
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
         search_needs_population,
         Arc::clone(&index_observer_factory),
     ));
+    search_observer_factory.init_search_service(Arc::clone(&search_svc));
     let persistence_svc = Arc::new(PersistenceService::new(
         Arc::clone(&connection_registry),
         config.node_id.clone(),

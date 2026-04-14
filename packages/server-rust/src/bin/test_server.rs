@@ -49,7 +49,8 @@ use topgun_server::service::domain::embedding::{
 };
 use topgun_server::service::domain::index::IndexObserverFactory;
 use topgun_server::service::domain::search::{
-    SearchConfig, SearchMutationObserver, SearchRegistry, SearchService, TantivyMapIndex,
+    HybridSearchRegistry, SearchConfig, SearchMutationObserver, SearchRegistry, SearchService,
+    TantivyMapIndex,
 };
 use topgun_server::service::domain::sync::SyncService;
 use topgun_server::service::middleware::build_operation_pipeline;
@@ -356,11 +357,43 @@ async fn main() -> anyhow::Result<()> {
 /// to search queries and live subscriptions.
 struct SearchObserverFactory {
     search_registry: Arc<SearchRegistry>,
+    hybrid_registry: Arc<HybridSearchRegistry>,
     indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
     connection_registry: Arc<ConnectionRegistry>,
     /// Shared with `SearchService` so the observer can signal that an index needs
     /// population when writes were skipped due to no active subscriptions.
     needs_population: Arc<DashMap<String, AtomicBool>>,
+    /// `SearchService` wired after construction via `init_search_service()`.
+    /// Uses `OnceLock` to break the construction-order dependency: the factory
+    /// is created before `RecordStoreFactory`, but `SearchService` requires
+    /// `RecordStoreFactory`. The `OnceLock` is set immediately after `SearchService`
+    /// is constructed and before the first map access triggers `create_observer`.
+    search_service: std::sync::OnceLock<Arc<SearchService>>,
+}
+
+impl SearchObserverFactory {
+    fn new(
+        search_registry: Arc<SearchRegistry>,
+        hybrid_registry: Arc<HybridSearchRegistry>,
+        indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
+        connection_registry: Arc<ConnectionRegistry>,
+        needs_population: Arc<DashMap<String, AtomicBool>>,
+    ) -> Self {
+        Self {
+            search_registry,
+            hybrid_registry,
+            indexes,
+            connection_registry,
+            needs_population,
+            search_service: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Wires the `SearchService` reference so `create_observer` can call
+    /// `spawn_hybrid_notifier`. Must be called before the first map write.
+    fn init_search_service(&self, svc: Arc<SearchService>) {
+        let _ = self.search_service.set(svc);
+    }
 }
 
 impl ObserverFactory for SearchObserverFactory {
@@ -375,14 +408,21 @@ impl ObserverFactory for SearchObserverFactory {
             batch_interval_ms: 16,
             batch_flush_threshold: 100,
         };
-        let observer = SearchMutationObserver::new(
+        let (observer, hybrid_rx) = SearchMutationObserver::new(
             map_name.to_string(),
             Arc::clone(&self.search_registry),
+            Arc::clone(&self.hybrid_registry),
             Arc::clone(&self.indexes),
             Arc::clone(&self.connection_registry),
             config,
             Arc::clone(&self.needs_population),
         );
+        // Spawn the hybrid notifier task if search_service is wired.
+        // If not yet wired (should not happen in production), the hybrid_rx
+        // is dropped and no hybrid deltas will be delivered for this map.
+        if let Some(svc) = self.search_service.get() {
+            svc.spawn_hybrid_notifier(hybrid_rx);
+        }
         Some(Arc::new(observer))
     }
 }
@@ -440,16 +480,20 @@ fn build_services(
     // needs_population signals when writes were skipped due to no subscriptions,
     // so SearchService can lazily repopulate the index on first search query.
     let search_registry = Arc::new(SearchRegistry::new());
+    let hybrid_registry = Arc::new(HybridSearchRegistry::new());
     let search_indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>> =
         Arc::new(RwLock::new(HashMap::new()));
     let search_needs_population: Arc<DashMap<String, AtomicBool>> = Arc::new(DashMap::new());
 
-    let search_observer_factory: Arc<dyn ObserverFactory> = Arc::new(SearchObserverFactory {
-        search_registry: Arc::clone(&search_registry),
-        indexes: Arc::clone(&search_indexes),
-        connection_registry: Arc::clone(&connection_registry),
-        needs_population: Arc::clone(&search_needs_population),
-    });
+    let search_observer_factory = Arc::new(SearchObserverFactory::new(
+        Arc::clone(&search_registry),
+        Arc::clone(&hybrid_registry),
+        Arc::clone(&search_indexes),
+        Arc::clone(&connection_registry),
+        Arc::clone(&search_needs_population),
+    ));
+    let search_observer_factory_dyn: Arc<dyn ObserverFactory> =
+        Arc::clone(&search_observer_factory) as Arc<dyn ObserverFactory>;
 
     // QueryRegistry shared between CrdtService (broadcast_query_updates) and QueryService.
     // QueryMutationObserver is no longer in the observer chain -- CrdtService handles
@@ -483,7 +527,7 @@ fn build_services(
 
     #[allow(unused_mut)]
     let mut observer_factories: Vec<Arc<dyn ObserverFactory>> = vec![
-        search_observer_factory,
+        search_observer_factory_dyn,
         merkle_observer_factory,
         embedding_factory.clone(),
         Arc::clone(&index_observer_factory) as Arc<dyn ObserverFactory>,
@@ -558,12 +602,16 @@ fn build_services(
     ));
     let search_svc = Arc::new(SearchService::new(
         search_registry,
+        hybrid_registry,
         search_indexes,
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
         search_needs_population,
         Arc::clone(&index_observer_factory),
     ));
+    // Wire the search_service back into the observer factory so hybrid notifier
+    // tasks can be spawned when observers are created for each map.
+    search_observer_factory.init_search_service(Arc::clone(&search_svc));
     // Two-phase OnceLock wiring: construct engine after search_svc, then set it.
     let hybrid_engine = topgun_server::service::domain::search::HybridSearchEngine::new(
         Arc::clone(&search_svc),

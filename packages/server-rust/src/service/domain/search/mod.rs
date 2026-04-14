@@ -1154,9 +1154,13 @@ fn elapsed_ms(start: std::time::Instant) -> u64 {
 
 impl SearchService {
     /// Creates a new `SearchService`.
+    ///
+    /// `hybrid_registry` must be the same `Arc` shared with `SearchObserverFactory`
+    /// so that mutations indexed by the observer are visible to hybrid subscribers.
     #[must_use]
     pub fn new(
         registry: Arc<SearchRegistry>,
+        hybrid_registry: Arc<HybridSearchRegistry>,
         indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
         record_store_factory: Arc<RecordStoreFactory>,
         connection_registry: Arc<ConnectionRegistry>,
@@ -1165,7 +1169,7 @@ impl SearchService {
     ) -> Self {
         Self {
             registry,
-            hybrid_registry: Arc::new(HybridSearchRegistry::new()),
+            hybrid_registry,
             indexes,
             record_store_factory,
             index_observer_factory,
@@ -1690,9 +1694,24 @@ impl SearchService {
         let conn_reg = Arc::clone(&self.connection_registry);
 
         for sub in subs {
-            let Some(registry) = factory.get_registry(&sub.map_name) else {
-                continue;
-            };
+            // Use the registered IndexRegistry if available. For subscriptions that
+            // only use FullText or Semantic methods, an empty registry suffices since
+            // no Exact-match predicate evaluation is performed against the index.
+            let owned_registry;
+            let registry: &crate::service::domain::index::registry::IndexRegistry =
+                if let Some(reg) = factory.get_registry(&sub.map_name) {
+                    owned_registry = reg;
+                    &owned_registry
+                } else if sub.methods.contains(&SearchMethod::Exact) {
+                    // Exact search without a registered index would return no results,
+                    // but we skip rather than silently return empty deltas.
+                    continue;
+                } else {
+                    owned_registry = Arc::new(
+                        crate::service::domain::index::registry::IndexRegistry::new(),
+                    );
+                    &owned_registry
+                };
 
             let params = crate::service::domain::search::hybrid::HybridSearchParams {
                 map_name: &sub.map_name,
@@ -1933,6 +1952,7 @@ mod tests {
 
     fn make_service() -> Arc<SearchService> {
         let reg = Arc::new(SearchRegistry::new());
+        let hybrid_reg = Arc::new(HybridSearchRegistry::new());
         let indexes = Arc::new(RwLock::new(HashMap::new()));
         let conn_reg = Arc::new(ConnectionRegistry::new());
         let store_factory = make_factory();
@@ -1940,6 +1960,7 @@ mod tests {
         let index_factory = Arc::new(crate::service::domain::index::IndexObserverFactory::new());
         Arc::new(SearchService::new(
             reg,
+            hybrid_reg,
             indexes,
             store_factory,
             conn_reg,
@@ -2241,6 +2262,7 @@ mod tests {
     #[tokio::test]
     async fn search_service_subscribe_registers_subscription() {
         let reg = Arc::new(SearchRegistry::new());
+        let hybrid_reg = Arc::new(HybridSearchRegistry::new());
         let indexes = Arc::new(RwLock::new(HashMap::new()));
         let conn_reg = Arc::new(ConnectionRegistry::new());
         let store_factory = make_factory();
@@ -2248,6 +2270,7 @@ mod tests {
         let index_factory = Arc::new(crate::service::domain::index::IndexObserverFactory::new());
         let svc = Arc::new(SearchService::new(
             Arc::clone(&reg),
+            hybrid_reg,
             indexes,
             store_factory,
             conn_reg,
@@ -2266,6 +2289,7 @@ mod tests {
     #[tokio::test]
     async fn search_service_unsubscribe_removes_subscription() {
         let reg = Arc::new(SearchRegistry::new());
+        let hybrid_reg = Arc::new(HybridSearchRegistry::new());
         let indexes = Arc::new(RwLock::new(HashMap::new()));
         let conn_reg = Arc::new(ConnectionRegistry::new());
         let store_factory = make_factory();
@@ -2273,6 +2297,7 @@ mod tests {
         let index_factory = Arc::new(crate::service::domain::index::IndexObserverFactory::new());
         let svc = Arc::new(SearchService::new(
             Arc::clone(&reg),
+            hybrid_reg,
             indexes,
             store_factory,
             conn_reg,
@@ -2313,12 +2338,14 @@ mod tests {
     async fn search_service_creates_index_lazily_on_first_search() {
         let indexes = Arc::new(RwLock::new(HashMap::<String, TantivyMapIndex>::new()));
         let reg = Arc::new(SearchRegistry::new());
+        let hybrid_reg = Arc::new(HybridSearchRegistry::new());
         let conn_reg = Arc::new(ConnectionRegistry::new());
         let store_factory = make_factory();
         let needs_population = Arc::new(DashMap::new());
         let index_factory = Arc::new(crate::service::domain::index::IndexObserverFactory::new());
         let svc = Arc::new(SearchService::new(
             reg,
+            hybrid_reg,
             Arc::clone(&indexes),
             store_factory,
             conn_reg,
@@ -2583,6 +2610,197 @@ mod tests {
         assert!(
             matches!(resp, OperationResponse::Ack { .. }),
             "expected Ack even for non-existent subscription"
+        );
+    }
+
+    // --- Hybrid delta delivery tests (AC1, AC2, AC3) ---
+
+    /// Builds a `SearchService` backed by a real `ConnectionRegistry` with one
+    /// registered test connection. Returns the service, a receiver for that
+    /// connection's outbound messages, and the `ConnectionId`.
+    fn make_service_with_connection() -> (
+        Arc<SearchService>,
+        tokio::sync::mpsc::Receiver<OutboundMessage>,
+        ConnectionId,
+    ) {
+        use crate::network::config::ConnectionConfig;
+        use crate::network::connection::ConnectionKind;
+
+        let reg = Arc::new(SearchRegistry::new());
+        let hybrid_reg = Arc::new(HybridSearchRegistry::new());
+        let indexes = Arc::new(RwLock::new(HashMap::new()));
+        let conn_reg = Arc::new(ConnectionRegistry::new());
+        let store_factory = make_factory();
+        let needs_population = Arc::new(DashMap::new());
+        let index_factory = Arc::new(crate::service::domain::index::IndexObserverFactory::new());
+
+        let (handle, rx) = conn_reg.register(ConnectionKind::Client, &ConnectionConfig::default());
+        let conn_id = handle.id;
+
+        let svc = Arc::new(SearchService::new(
+            reg,
+            hybrid_reg,
+            indexes,
+            store_factory,
+            Arc::clone(&conn_reg),
+            needs_population,
+            index_factory,
+        ));
+        (svc, rx, conn_id)
+    }
+
+    /// Wires a `HybridSearchEngine` (FullText-only) onto the service, then
+    /// populates the tantivy index with the given documents.
+    fn wire_engine_and_index(
+        svc: &Arc<SearchService>,
+        map_name: &str,
+        docs: &[(&str, &str)], // key -> text
+    ) {
+        let store_factory = make_factory();
+        let engine = HybridSearchEngine::new(Arc::clone(svc), store_factory, None);
+        svc.set_hybrid_engine(Arc::new(engine));
+
+        // Populate the tantivy index directly.
+        let mut indexes = svc.indexes.write();
+        let index = indexes.entry(map_name.to_owned()).or_default();
+        for (key, text) in docs {
+            let val = make_rmpv_map(&[("text", text)]);
+            index.index_document(key, &val);
+        }
+        index.commit();
+    }
+
+    /// Decodes a `HybridSearchUpdate` payload from a received `OutboundMessage`.
+    fn decode_hybrid_update(msg: OutboundMessage) -> Option<HybridSearchUpdatePayload> {
+        if let OutboundMessage::Binary(bytes) = msg {
+            if let Ok(Message::HybridSearchUpdate { payload }) =
+                rmp_serde::from_slice::<Message>(&bytes)
+            {
+                return Some(payload);
+            }
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn hybrid_delta_enter_delivered_when_record_matches_new_subscription() {
+        // AC1: A record that matches the query after indexing delivers ENTER.
+        let (svc, mut rx, conn_id) = make_service_with_connection();
+        wire_engine_and_index(&svc, "map1", &[("k1", "hello world")]);
+
+        // Register subscription with empty initial cache (k1 not yet in cache).
+        let sub = HybridSearchSubscription::new(
+            "hsub-ac1".to_string(),
+            conn_id,
+            "map1".to_string(),
+            "hello".to_string(),
+            vec![SearchMethod::FullText],
+            10,
+            None,
+            None,
+            false,
+            None,
+        );
+        svc.hybrid_registry.register(sub);
+
+        // Trigger notification (simulate batch processor sending map name).
+        svc.notify_hybrid_subscriptions_for_map("map1").await;
+
+        // Expect ENTER for k1.
+        let msg = rx.try_recv().expect("expected HybridSearchUpdate message");
+        let payload = decode_hybrid_update(msg).expect("expected HybridSearchUpdate payload");
+        assert_eq!(payload.key, "k1", "wrong key in ENTER");
+        assert_eq!(
+            payload.change_type,
+            ChangeEventType::ENTER,
+            "expected ENTER change_type"
+        );
+    }
+
+    #[tokio::test]
+    async fn hybrid_delta_leave_delivered_when_record_removed_from_index() {
+        // AC2: A key in cache that no longer matches delivers LEAVE.
+        let (svc, mut rx, conn_id) = make_service_with_connection();
+        // Index is empty — k1 will not be found in search results.
+        wire_engine_and_index(&svc, "map2", &[]);
+
+        // Subscription with k1 already in cache.
+        let sub = HybridSearchSubscription::new(
+            "hsub-ac2".to_string(),
+            conn_id,
+            "map2".to_string(),
+            "hello".to_string(),
+            vec![SearchMethod::FullText],
+            10,
+            None,
+            None,
+            false,
+            None,
+        );
+        sub.current_results.insert(
+            "k1".to_string(),
+            CachedHybridResult {
+                score: 1.0,
+                method_scores: HashMap::new(),
+                value: None,
+            },
+        );
+        svc.hybrid_registry.register(sub);
+
+        // Trigger notification — k1 won't be found in empty index.
+        svc.notify_hybrid_subscriptions_for_map("map2").await;
+
+        // Expect LEAVE for k1.
+        let msg = rx.try_recv().expect("expected HybridSearchUpdate message");
+        let payload = decode_hybrid_update(msg).expect("expected HybridSearchUpdate payload");
+        assert_eq!(payload.key, "k1", "wrong key in LEAVE");
+        assert_eq!(
+            payload.change_type,
+            ChangeEventType::LEAVE,
+            "expected LEAVE change_type"
+        );
+    }
+
+    #[tokio::test]
+    async fn hybrid_delta_update_delivered_when_record_still_matches_but_score_changes() {
+        // AC3: A key already in cache that still matches delivers UPDATE.
+        let (svc, mut rx, conn_id) = make_service_with_connection();
+        wire_engine_and_index(&svc, "map3", &[("k1", "hello world rust")]);
+
+        // Subscription with k1 already in cache (from a prior notification).
+        let sub = HybridSearchSubscription::new(
+            "hsub-ac3".to_string(),
+            conn_id,
+            "map3".to_string(),
+            "hello".to_string(),
+            vec![SearchMethod::FullText],
+            10,
+            None,
+            None,
+            false,
+            None,
+        );
+        sub.current_results.insert(
+            "k1".to_string(),
+            CachedHybridResult {
+                score: 0.5,
+                method_scores: HashMap::new(),
+                value: None,
+            },
+        );
+        svc.hybrid_registry.register(sub);
+
+        // Trigger notification — k1 is still in the index and matches "hello".
+        svc.notify_hybrid_subscriptions_for_map("map3").await;
+
+        // Expect UPDATE for k1 (already cached, still matches).
+        let msg = rx.try_recv().expect("expected HybridSearchUpdate message");
+        let payload = decode_hybrid_update(msg).expect("expected HybridSearchUpdate payload");
+        assert_eq!(payload.key, "k1", "wrong key in UPDATE");
+        assert_eq!(
+            payload.change_type,
+            ChangeEventType::UPDATE,
+            "expected UPDATE change_type"
         );
     }
 }
