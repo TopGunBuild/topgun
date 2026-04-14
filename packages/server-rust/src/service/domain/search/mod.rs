@@ -6,9 +6,11 @@
 //! on every data mutation.
 
 pub mod hybrid;
+pub mod registry;
 pub mod rrf;
 
 pub use hybrid::{HybridSearchEngine, HybridSearchError, HybridSearchResult, SearchMethod};
+pub use registry::{RegistryEntry, SubscriptionRegistry};
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -107,6 +109,20 @@ impl HybridSearchSubscription {
             min_score,
             current_results: DashMap::new(),
         }
+    }
+}
+
+impl RegistryEntry for HybridSearchSubscription {
+    fn subscription_id(&self) -> &str {
+        &self.subscription_id
+    }
+
+    fn connection_id(&self) -> ConnectionId {
+        self.connection_id
+    }
+
+    fn map_name(&self) -> &str {
+        &self.map_name
     }
 }
 
@@ -228,6 +244,20 @@ pub struct SearchSubscription {
     ///
     /// Used to compute ENTER/UPDATE/LEAVE deltas when data changes.
     pub current_results: DashMap<String, CachedSearchResult>,
+}
+
+impl RegistryEntry for SearchSubscription {
+    fn subscription_id(&self) -> &str {
+        &self.subscription_id
+    }
+
+    fn connection_id(&self) -> ConnectionId {
+        self.connection_id
+    }
+
+    fn map_name(&self) -> &str {
+        &self.map_name
+    }
 }
 
 impl SearchSubscription {
