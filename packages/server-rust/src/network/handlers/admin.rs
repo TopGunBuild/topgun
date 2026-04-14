@@ -39,6 +39,7 @@ use super::AppState;
 
 use crate::cluster::types::NodeState;
 use crate::service::domain::index::IndexType;
+use crate::service::domain::index::vector_index::format_iso8601;
 use crate::service::middleware::metrics::total_operations;
 use crate::service::policy::{expr_parser::parse_permission_expr, PermissionPolicy};
 
@@ -1172,9 +1173,7 @@ pub async fn create_vector_index(
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        // Format as a minimal ISO-8601 UTC string (no sub-second precision).
-        let (year, month, day, hour, min, sec) = secs_to_ymd_hms(secs);
-        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
+        format_iso8601(secs)
     };
     descriptors.push(VectorIndexDescriptor {
         map_name: req.map_name.clone(),
@@ -1223,10 +1222,19 @@ pub async fn list_vector_indexes(
         )
     })?;
 
-    let all_vector_stats = factory.all_vector_index_stats();
-    let indexes: Vec<VectorIndexInfoResponse> = all_vector_stats
+    // Collect vector indexes from all maps that have at least one Vector index.
+    // We use all_index_stats() to enumerate maps, then retrieve vector-specific
+    // stats via get_registry() — avoiding a dedicated method on the factory.
+    let indexes: Vec<VectorIndexInfoResponse> = factory
+        .all_index_stats()
         .into_iter()
-        .flat_map(|(_, stats_vec)| stats_vec)
+        .filter(|(_, stats)| stats.iter().any(|s| s.index_type == IndexType::Vector))
+        .flat_map(|(map_name, _)| {
+            factory
+                .get_registry(&map_name)
+                .map(|r| r.vector_index_stats())
+                .unwrap_or_default()
+        })
         .map(stats_to_response)
         .collect();
 
@@ -1364,13 +1372,7 @@ pub async fn optimize_vector_index_handler(
         )
     })?;
 
-    let handle = vi.optimize();
-    // already_running is true when the handle was pre-existing (not freshly started).
-    // G3 sets `finished = false` on a new handle and `finished = true` when done;
-    // an in-flight handle has `finished = false`, meaning it is still running.
-    // The distinction between "new" vs "already running" is provided by `optimize()`
-    // returning the same Arc when a rebuild is already active — callers compare id.
-    let already_running = !handle.finished.load(std::sync::atomic::Ordering::Relaxed);
+    let (handle, already_running) = vi.optimize();
 
     Ok((
         StatusCode::ACCEPTED,
@@ -1468,33 +1470,6 @@ pub async fn vector_index_status(
 }
 
 // ── ISO-8601 timestamp helper ─────────────────────────────────────────────────
-
-/// Converts Unix seconds to `(year, month, day, hour, minute, second)` tuple.
-///
-/// Uses a simple division algorithm without any external crate dependency.
-/// Accurate for dates in the range 2000-2100 (sufficient for timestamps).
-#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss, clippy::cast_sign_loss)]
-fn secs_to_ymd_hms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
-    let sec = secs % 60;
-    let min = (secs / 60) % 60;
-    let hour = (secs / 3600) % 24;
-    let days = secs / 86400;
-
-    // Days since 1970-01-01 to Gregorian date (Meeus algorithm, simplified).
-    let julian_z = days + 2_440_588; // Julian Day Number offset
-    let julian_a_frac = (julian_z as f64 - 1_867_216.25) / 36_524.25;
-    let julian_a = julian_z + 1 + julian_a_frac as u64 - (julian_a_frac as u64 / 4);
-    let julian_b = julian_a + 1524;
-    let julian_c = ((julian_b as f64 - 122.1) / 365.25) as u64;
-    let days_in_year = (365.25 * julian_c as f64) as u64;
-    let julian_e = ((julian_b - days_in_year) as f64 / 30.6001) as u64;
-
-    let day = (julian_b - days_in_year - (30.6001 * julian_e as f64) as u64) as u32;
-    let month = if julian_e < 14 { julian_e - 1 } else { julian_e - 13 } as u32;
-    let year = if month > 2 { julian_c - 4716 } else { julian_c - 4715 } as u32;
-
-    (year, month, day, hour as u32, min as u32, sec as u32)
-}
 
 #[cfg(test)]
 mod vector_admin_tests {
@@ -1776,6 +1751,69 @@ mod vector_admin_tests {
         let path = std::path::Path::new("/tmp/definitely_does_not_exist_vi.json");
         let result = load_vector_descriptors(path);
         assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn optimize_vector_index_503_when_no_factory() {
+        let state = make_state_no_factory();
+        let result = optimize_vector_index_handler(
+            make_claims(),
+            State(state),
+            Path(("users".to_string(), "emb_idx".to_string())),
+        )
+        .await;
+        assert!(result.is_err());
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn optimize_vector_index_404_when_not_found() {
+        let state = make_state_with_factory();
+        let result = optimize_vector_index_handler(
+            make_claims(),
+            State(state),
+            Path(("users".to_string(), "missing_idx".to_string())),
+        )
+        .await;
+        assert!(result.is_err());
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn optimize_vector_index_202_happy_path() {
+        let tmp = std::env::temp_dir().join(format!("vi_opt_{}.json", uuid::Uuid::new_v4()));
+        std::env::set_var("TOPGUN_VECTOR_INDEX_PATH", tmp.to_str().unwrap());
+
+        let state = make_state_with_factory();
+        // First create the index.
+        let req = CreateVectorIndexRequest {
+            map_name: "users".to_string(),
+            attribute: "_embedding".to_string(),
+            index_name: "emb_idx".to_string(),
+            dimension: 4,
+            distance_metric: DistanceMetric::Cosine,
+            hnsw_params: None,
+            dedup_enabled: None,
+        };
+        let _ = create_vector_index(make_claims(), State(state.clone()), Json(req)).await;
+
+        // Now optimize it.
+        let result = optimize_vector_index_handler(
+            make_claims(),
+            State(state),
+            Path(("users".to_string(), "emb_idx".to_string())),
+        )
+        .await;
+        assert!(result.is_ok(), "expected 202, got err: {:?}", result.err());
+        let (code, Json(resp)) = result.unwrap();
+        assert_eq!(code, StatusCode::ACCEPTED);
+        assert!(!resp.optimization_id.is_empty(), "optimization_id should be set");
+        assert!(!resp.already_running, "new optimize should report already_running=false");
+
+        let _ = std::fs::remove_file(&tmp);
+        std::env::remove_var("TOPGUN_VECTOR_INDEX_PATH");
     }
 }
 
