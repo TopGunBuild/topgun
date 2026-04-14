@@ -127,49 +127,15 @@ impl RegistryEntry for HybridSearchSubscription {
 }
 
 // ---------------------------------------------------------------------------
-// HybridSearchRegistry
+// HybridSearchRegistry type alias
 // ---------------------------------------------------------------------------
 
 /// Concurrent registry of standing hybrid search subscriptions.
-pub struct HybridSearchRegistry {
-    subscriptions: DashMap<String, Arc<HybridSearchSubscription>>,
-}
-
-impl HybridSearchRegistry {
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            subscriptions: DashMap::new(),
-        }
-    }
-
-    pub fn register(&self, sub: HybridSearchSubscription) {
-        let id = sub.subscription_id.clone();
-        self.subscriptions.insert(id, Arc::new(sub));
-    }
-
-    #[must_use]
-    pub fn unregister(&self, subscription_id: &str) -> Option<Arc<HybridSearchSubscription>> {
-        self.subscriptions
-            .remove(subscription_id)
-            .map(|(_, sub)| sub)
-    }
-
-    #[must_use]
-    pub fn get_subscriptions_for_map(&self, map_name: &str) -> Vec<Arc<HybridSearchSubscription>> {
-        self.subscriptions
-            .iter()
-            .filter(|entry| entry.value().map_name == map_name)
-            .map(|entry| Arc::clone(entry.value()))
-            .collect()
-    }
-}
-
-impl Default for HybridSearchRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+///
+/// Type alias for `SubscriptionRegistry<HybridSearchSubscription>` providing
+/// the full API surface (register, unregister, unregister_by_connection,
+/// get_subscriptions_for_map, has_subscriptions_for_map, has_any_subscriptions).
+pub type HybridSearchRegistry = SubscriptionRegistry<HybridSearchSubscription>;
 
 // ---------------------------------------------------------------------------
 // SearchConfig
@@ -282,95 +248,15 @@ impl SearchSubscription {
 }
 
 // ---------------------------------------------------------------------------
-// SearchRegistry
+// SearchRegistry type alias
 // ---------------------------------------------------------------------------
 
-/// Concurrent registry of standing search subscriptions.
+/// Concurrent registry of standing text-search subscriptions.
 ///
-/// Keyed by `subscription_id` for O(1) lookup. Per-map iteration is
-/// O(n) where n is the total number of subscriptions, acceptable for
-/// the expected workload (few hundred concurrent subscriptions per server).
-pub struct SearchRegistry {
-    /// `subscription_id` -> `SearchSubscription`
-    subscriptions: DashMap<String, Arc<SearchSubscription>>,
-}
-
-impl SearchRegistry {
-    /// Creates a new empty registry.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            subscriptions: DashMap::new(),
-        }
-    }
-
-    /// Registers a standing search subscription.
-    pub fn register(&self, sub: SearchSubscription) {
-        let id = sub.subscription_id.clone();
-        self.subscriptions.insert(id, Arc::new(sub));
-    }
-
-    /// Removes a subscription by ID.
-    ///
-    /// Returns the removed subscription, or `None` if not found.
-    #[must_use]
-    pub fn unregister(&self, subscription_id: &str) -> Option<Arc<SearchSubscription>> {
-        self.subscriptions
-            .remove(subscription_id)
-            .map(|(_, sub)| sub)
-    }
-
-    /// Removes all subscriptions for a given connection ID.
-    ///
-    /// Returns the IDs of all removed subscriptions.
-    #[allow(dead_code)] // Caller wiring is deferred — see spec Observable Truth 5.
-    #[must_use]
-    pub fn unregister_by_connection(&self, connection_id: ConnectionId) -> Vec<String> {
-        let mut removed = Vec::new();
-        self.subscriptions.retain(|id, sub| {
-            if sub.connection_id == connection_id {
-                removed.push(id.clone());
-                false
-            } else {
-                true
-            }
-        });
-        removed
-    }
-
-    /// Returns all subscriptions targeting the given map.
-    #[must_use]
-    pub fn get_subscriptions_for_map(&self, map_name: &str) -> Vec<Arc<SearchSubscription>> {
-        self.subscriptions
-            .iter()
-            .filter(|entry| entry.value().map_name == map_name)
-            .map(|entry| Arc::clone(entry.value()))
-            .collect()
-    }
-
-    /// Returns true if any subscription targets the given map.
-    ///
-    /// O(n) scan of all subscriptions, returning early on first match.
-    /// Negligible cost compared to a tantivy commit (pointer scan vs disk I/O).
-    #[must_use]
-    pub fn has_subscriptions_for_map(&self, map_name: &str) -> bool {
-        self.subscriptions
-            .iter()
-            .any(|entry| entry.value().map_name == map_name)
-    }
-
-    /// Returns true if any subscriptions exist at all.
-    #[must_use]
-    pub fn has_any_subscriptions(&self) -> bool {
-        !self.subscriptions.is_empty()
-    }
-}
-
-impl Default for SearchRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// Type alias for `SubscriptionRegistry<SearchSubscription>` providing
+/// the full API surface (register, unregister, unregister_by_connection,
+/// get_subscriptions_for_map, has_subscriptions_for_map, has_any_subscriptions).
+pub type SearchRegistry = SubscriptionRegistry<SearchSubscription>;
 
 // ---------------------------------------------------------------------------
 // TantivyMapIndex
@@ -646,6 +532,21 @@ fn send_to_connection(conn_reg: &ConnectionRegistry, conn_id: ConnectionId, msg:
             let _ = handle.try_send(OutboundMessage::Binary(bytes));
         }
     }
+}
+
+/// Generic unsubscribe handler used by both text-search and hybrid-search unsubscribe arms.
+///
+/// Removes the subscription from the registry and returns an Ack response.
+/// This is a free function (not a method on `SearchService`) to avoid borrow complications
+/// when both `self.registry` and `self.hybrid_registry` need to be called from within
+/// the same match arm.
+fn handle_unsubscribe<S: RegistryEntry>(
+    registry: &SubscriptionRegistry<S>,
+    subscription_id: &str,
+    call_id: u64,
+) -> OperationResponse {
+    let _ = registry.unregister(subscription_id);
+    OperationResponse::Ack { call_id }
 }
 
 // ---------------------------------------------------------------------------
@@ -1421,10 +1322,11 @@ impl SearchService {
             }
 
             Operation::SearchUnsubscribe { ctx, payload } => {
-                let _ = self.registry.unregister(&payload.subscription_id);
-                Ok(OperationResponse::Ack {
-                    call_id: ctx.call_id,
-                })
+                Ok(handle_unsubscribe(
+                    &self.registry,
+                    &payload.subscription_id,
+                    ctx.call_id,
+                ))
             }
 
             _ => Err(OperationError::WrongService),
@@ -1706,10 +1608,7 @@ impl SearchService {
         ctx: &OperationContext,
         payload: &HybridSearchUnsubPayload,
     ) -> OperationResponse {
-        let _ = self.hybrid_registry.unregister(&payload.subscription_id);
-        OperationResponse::Ack {
-            call_id: ctx.call_id,
-        }
+        handle_unsubscribe(&self.hybrid_registry, &payload.subscription_id, ctx.call_id)
     }
 
     /// Re-evaluate all hybrid subscriptions for a map on data mutation.
