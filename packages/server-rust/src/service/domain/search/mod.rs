@@ -594,8 +594,11 @@ pub struct SearchMutationObserver {
     /// Shutdown signal for the background task.
     shutdown_tx: Arc<tokio::sync::watch::Sender<bool>>,
     /// Retained for per-enqueue subscription check — avoids indexing cost when
-    /// no search subscriptions are active for this map.
+    /// no text-search subscriptions are active for this map.
     registry: Arc<SearchRegistry>,
+    /// Retained for per-enqueue hybrid subscription check — ensures the tantivy
+    /// index is kept current even when only hybrid subscriptions are active.
+    hybrid_registry: Arc<HybridSearchRegistry>,
     /// Shared flag map: set to true when a write is skipped due to no active
     /// subscriptions, so `SearchService` knows to populate the index on first query.
     needs_population: Arc<DashMap<String, AtomicBool>>,
@@ -603,17 +606,29 @@ pub struct SearchMutationObserver {
 
 impl SearchMutationObserver {
     /// Creates a new observer and spawns the background batch processor task.
+    ///
+    /// Returns a tuple of `(Self, UnboundedReceiver<String>)`. The receiver
+    /// delivers mutated map names to the hybrid delta notifier task, which
+    /// must be spawned by the caller (i.e., `SearchService::spawn_hybrid_notifier`).
+    /// This design avoids giving the observer a reference to `SearchService`
+    /// which would create a circular `Arc` dependency.
     pub fn new(
         map_name: String,
         registry: Arc<SearchRegistry>,
+        hybrid_registry: Arc<HybridSearchRegistry>,
         indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
         connection_registry: Arc<ConnectionRegistry>,
         config: SearchConfig,
         needs_population: Arc<DashMap<String, AtomicBool>>,
-    ) -> Self {
+    ) -> (Self, mpsc::UnboundedReceiver<String>) {
         let (event_tx, event_rx) = mpsc::unbounded_channel::<MutationEvent>();
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let shutdown_tx = Arc::new(shutdown_tx);
+
+        // Channel for hybrid delta notifications: the batch processor sends mutated
+        // map names, and the caller (SearchService) receives them to call
+        // notify_hybrid_subscriptions_for_map asynchronously.
+        let (hybrid_notify_tx_for_task, hybrid_notify_rx) = mpsc::unbounded_channel::<String>();
 
         // Clone the registry Arc so the struct retains a reference for the
         // subscription check in enqueue_index/enqueue_remove, while the batch
@@ -630,15 +645,18 @@ impl SearchMutationObserver {
             connection_registry,
             Duration::from_millis(config.batch_interval_ms),
             config.batch_flush_threshold,
+            hybrid_notify_tx_for_task,
         ));
 
-        Self {
+        let observer = Self {
             map_name,
             event_tx,
             shutdown_tx,
             registry,
+            hybrid_registry,
             needs_population,
-        }
+        };
+        (observer, hybrid_notify_rx)
     }
 
     /// Returns a clone of the shutdown signal sender, so that `SearchService`
@@ -657,15 +675,17 @@ impl SearchMutationObserver {
 
     /// Enqueues an index operation for the batch processor (no synchronous indexing).
     ///
-    /// Skips enqueue when no search subscriptions are active for this map,
-    /// avoiding tantivy indexing cost for pure write workloads. Sets the
+    /// Skips enqueue when no text-search *or* hybrid subscriptions are active for
+    /// this map, avoiding tantivy indexing cost for pure write workloads. Sets the
     /// `needs_population` flag so the index is rebuilt lazily on first search query.
+    /// Hybrid subscriptions also require the tantivy index to be current so they
+    /// are included in the "should we index?" check.
     fn enqueue_index(&self, key: &str, value: rmpv::Value, change_type: ChangeEventType) {
-        // Skip indexing when no search subscriptions exist for this map.
-        // Documents will be indexed on first search query via SearchService::ensure_index_populated
-        // which rebuilds from RecordStore when the flag is set.
-        if !self.registry.has_subscriptions_for_map(&self.map_name) {
-            // Mark this map as needing population when a search subscription arrives.
+        // Skip indexing when neither text-search nor hybrid subscriptions exist for this map.
+        let has_text = self.registry.has_subscriptions_for_map(&self.map_name);
+        let has_hybrid = self.hybrid_registry.has_subscriptions_for_map(&self.map_name);
+        if !has_text && !has_hybrid {
+            // Mark this map as needing population when a subscription arrives.
             self.needs_population
                 .entry(self.map_name.clone())
                 .or_insert_with(|| AtomicBool::new(false))
@@ -684,12 +704,14 @@ impl SearchMutationObserver {
 
     /// Enqueues a remove operation for the batch processor (no synchronous indexing).
     ///
-    /// Skips enqueue when no search subscriptions are active for this map.
-    /// Sets the `needs_population` flag so the index is rebuilt lazily on first
-    /// search query (ensuring removals are reflected when indexing resumes).
+    /// Skips enqueue when no text-search or hybrid subscriptions are active for
+    /// this map. Sets the `needs_population` flag so the index is rebuilt lazily
+    /// on first search query (ensuring removals are reflected when indexing resumes).
     fn enqueue_remove(&self, key: &str) {
-        // Skip indexing when no search subscriptions exist for this map.
-        if !self.registry.has_subscriptions_for_map(&self.map_name) {
+        // Skip indexing when no subscriptions exist for this map.
+        let has_text = self.registry.has_subscriptions_for_map(&self.map_name);
+        let has_hybrid = self.hybrid_registry.has_subscriptions_for_map(&self.map_name);
+        if !has_text && !has_hybrid {
             // Mark map as needing population so the first query triggers a full
             // rebuild that correctly excludes the removed key.
             self.needs_population
@@ -792,6 +814,7 @@ async fn run_batch_processor(
     connection_registry: Arc<ConnectionRegistry>,
     batch_interval: Duration,
     batch_flush_threshold: usize,
+    hybrid_notify_tx: mpsc::UnboundedSender<String>,
 ) {
     let mut batch: Vec<MutationEvent> = Vec::new();
 
@@ -809,7 +832,7 @@ async fn run_batch_processor(
                             batch.push(evt);
                         }
                         if !batch.is_empty() {
-                            process_batch(batch, &registry, &indexes, &connection_registry);
+                            process_batch(batch, &registry, &indexes, &connection_registry, &hybrid_notify_tx);
                         }
                         return;
                     }
@@ -846,7 +869,7 @@ async fn run_batch_processor(
                                 batch.push(evt);
                             }
                             if !batch.is_empty() {
-                                process_batch(batch, &registry, &indexes, &connection_registry);
+                                process_batch(batch, &registry, &indexes, &connection_registry, &hybrid_notify_tx);
                             }
                             return;
                         }
@@ -862,7 +885,7 @@ async fn run_batch_processor(
 
         if !batch.is_empty() {
             let current_batch = std::mem::take(&mut batch);
-            process_batch(current_batch, &registry, &indexes, &connection_registry);
+            process_batch(current_batch, &registry, &indexes, &connection_registry, &hybrid_notify_tx);
         }
     }
 }
@@ -982,6 +1005,7 @@ fn process_batch(
     registry: &Arc<SearchRegistry>,
     indexes: &Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
     connection_registry: &Arc<ConnectionRegistry>,
+    hybrid_notify_tx: &mpsc::UnboundedSender<String>,
 ) {
     // --- Phase 1: Deduplicate ---
     let mut per_key_ops: HashMap<(String, String), IndexOp> = HashMap::new();
@@ -1071,6 +1095,22 @@ fn process_batch(
             notify_key_subscriptions(index, &subs, connection_registry, key, change_type);
         }
     }
+
+    // --- Phase 4: Notify hybrid subscribers ---
+    // Send each mutated map name through the channel so the hybrid notifier task
+    // can call SearchService::notify_hybrid_subscriptions_for_map asynchronously.
+    // Deduplicate: only send each map name once per batch.
+    let mut notified_hybrid: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for map_name in ops_by_map.keys() {
+        if notified_hybrid.insert(map_name.as_str()) {
+            let _ = hybrid_notify_tx.send(map_name.clone());
+        }
+    }
+    for map_name in cleared_maps.keys() {
+        if notified_hybrid.insert(map_name.as_str()) {
+            let _ = hybrid_notify_tx.send(map_name.clone());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1153,6 +1193,25 @@ impl SearchService {
     /// can flush all background batch processors.
     pub fn register_observer_shutdown(&self, signal: Arc<tokio::sync::watch::Sender<bool>>) {
         self.observer_shutdown_signals.write().push(signal);
+    }
+
+    /// Spawns the hybrid delta notifier task that consumes the map-name channel
+    /// produced by `SearchMutationObserver::new()`.
+    ///
+    /// Each map name received from the channel triggers a call to
+    /// `notify_hybrid_subscriptions_for_map`, which re-evaluates all hybrid
+    /// subscriptions for that map and sends ENTER/UPDATE/LEAVE deltas.
+    ///
+    /// The spawned task holds an `Arc<SearchService>` (cloned from `self`).
+    /// Because `test_server` lifetimes are process-bounded the task is dropped
+    /// when the process exits, so this is not a reference-cycle concern in practice.
+    pub fn spawn_hybrid_notifier(self: &Arc<Self>, mut hybrid_rx: mpsc::UnboundedReceiver<String>) {
+        let svc = Arc::clone(self);
+        tokio::spawn(async move {
+            while let Some(map_name) = hybrid_rx.recv().await {
+                svc.notify_hybrid_subscriptions_for_map(&map_name).await;
+            }
+        });
     }
 
     /// Creates or retrieves the tantivy index for a map (lazy creation).
@@ -1614,14 +1673,8 @@ impl SearchService {
     /// Re-evaluate all hybrid subscriptions for a map on data mutation.
     ///
     /// Compares new results against cached results and emits ENTER/UPDATE/LEAVE
-    /// deltas to each subscriber's connection.
-    ///
-    /// TODO: Wire into mutation observer path. Currently unreachable because
-    /// `SearchMutationObserver::process_batch` is synchronous and has no
-    /// reference to `SearchService`. Requires either giving the observer an
-    /// `Arc<SearchService>` and spawning a tokio task, or switching to an
-    /// async mutation pipeline.
-    #[allow(dead_code)]
+    /// deltas to each subscriber's connection. Called by the hybrid notifier task
+    /// spawned in `spawn_hybrid_notifier`.
     pub async fn notify_hybrid_subscriptions_for_map(&self, map_name: &str) {
         let subs = self.hybrid_registry.get_subscriptions_for_map(map_name);
         if subs.is_empty() {
