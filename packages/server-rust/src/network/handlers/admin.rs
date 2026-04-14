@@ -29,10 +29,11 @@ use tracing_subscriber::EnvFilter;
 use super::admin_auth::AdminClaims;
 use super::admin_types::{
     self, BackfillProgress, BackfillStatusResponse, ClusterStatusResponse, CreateIndexRequest,
-    CreatePolicyRequest, ErrorResponse, IndexInfoResponse, IndexListResponse, IndexTypeParam,
-    LoginRequest, LoginResponse, MapInfo, MapsListResponse, NodeStatus, PartitionInfo,
-    PolicyListResponse, PolicyResponse, ServerMode, ServerStatusResponse, SettingsResponse,
-    SettingsUpdateRequest,
+    CreatePolicyRequest, CreateVectorIndexRequest, ErrorResponse, IndexInfoResponse,
+    IndexListResponse, IndexTypeParam, LoginRequest, LoginResponse, MapInfo, MapsListResponse,
+    NodeStatus, OptimizeResponse, PartitionInfo, PolicyListResponse, PolicyResponse, ServerMode,
+    ServerStatusResponse, SettingsResponse, SettingsUpdateRequest, VectorIndexDescriptor,
+    VectorIndexInfoResponse, VectorIndexStatusResponse,
 };
 use super::AppState;
 
@@ -1005,4 +1006,763 @@ pub async fn index_backfill_status(
             field: None,
         }),
     ))
+}
+
+// ── Vector index descriptor persistence ──────────────────────────────────────
+
+/// Path for the vector index descriptor sidecar JSON file.
+///
+/// Configured via `TOPGUN_VECTOR_INDEX_PATH`; defaults to `./vector_indexes.json`.
+fn descriptor_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        std::env::var("TOPGUN_VECTOR_INDEX_PATH")
+            .unwrap_or_else(|_| "./vector_indexes.json".to_string()),
+    )
+}
+
+/// Loads all persisted `VectorIndexDescriptor` entries from the sidecar JSON file.
+///
+/// Returns an empty `Vec` if the file does not exist (first start). Any parse
+/// error is logged and treated as empty to avoid a crash loop on corrupt data.
+pub fn load_vector_descriptors(path: &std::path::Path) -> Vec<VectorIndexDescriptor> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|e| {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "failed to parse vector index descriptor file; treating as empty"
+            );
+            vec![]
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "failed to read vector index descriptor file; treating as empty"
+            );
+            vec![]
+        }
+    }
+}
+
+/// Persists the full list of `VectorIndexDescriptor` entries to the sidecar JSON file.
+///
+/// Creates the file on first write. Any write error is logged; the function
+/// is intentionally infallible to avoid propagating I/O errors into the HTTP path.
+pub fn save_vector_descriptors(path: &std::path::Path, descriptors: &[VectorIndexDescriptor]) {
+    match serde_json::to_string_pretty(descriptors) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(path, json) {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to write vector index descriptor file"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to serialize vector index descriptors");
+        }
+    }
+}
+
+// ── Vector index admin endpoints ──────────────────────────────────────────────
+
+/// Converts a `VectorIndexStats` (domain type) to a `VectorIndexInfoResponse` (wire type).
+fn stats_to_response(stats: crate::service::domain::index::registry::VectorIndexStats) -> VectorIndexInfoResponse {
+    VectorIndexInfoResponse {
+        attribute: stats.attribute,
+        index_name: stats.index_name,
+        dimension: stats.dimension,
+        distance_metric: stats.distance_metric,
+        vector_count: stats.vector_count,
+        memory_bytes: stats.memory_bytes,
+        graph_layers: stats.graph_layers,
+        pending_updates: stats.pending_updates,
+        last_optimized: stats.last_optimized,
+    }
+}
+
+/// Creates a new vector index on a map attribute.
+///
+/// Returns 201 with the registered index descriptor on success.
+/// Returns 409 if an index with the same name already exists for (map, attribute).
+/// Returns 422 if dimension is 0 or > 4096.
+/// Returns 503 if the index observer factory is not configured.
+pub async fn create_vector_index(
+    _claims: AdminClaims,
+    State(state): State<AppState>,
+    Json(req): Json<CreateVectorIndexRequest>,
+) -> Result<(StatusCode, Json<VectorIndexInfoResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let factory = state.index_observer_factory.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                code: 503,
+                message: "index observer factory not configured".to_string(),
+                field: None,
+            }),
+        )
+    })?;
+
+    if req.dimension == 0 || req.dimension > 4096 {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorResponse {
+                code: 422,
+                message: format!(
+                    "dimension must be in range 1..=4096, got {}",
+                    req.dimension
+                ),
+                field: Some("dimension".to_string()),
+            }),
+        ));
+    }
+
+    let registry = factory.register_map(&req.map_name);
+
+    // Check for an existing vector index with the same index_name on this attribute.
+    if let Some(existing) = registry.get_vector_index(&req.attribute) {
+        if existing.index_name() == req.index_name {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    code: 409,
+                    message: format!(
+                        "vector index '{}' already exists for map '{}' attribute '{}'",
+                        req.index_name, req.map_name, req.attribute
+                    ),
+                    field: None,
+                }),
+            ));
+        }
+    }
+
+    let hnsw_m = req
+        .hnsw_params
+        .as_ref()
+        .and_then(|p| p.m)
+        .unwrap_or(16);
+    let hnsw_ef = req
+        .hnsw_params
+        .as_ref()
+        .and_then(|p| p.ef_construction)
+        .unwrap_or(200);
+    let dedup_enabled = req.dedup_enabled.unwrap_or(true);
+
+    let vi = registry.add_vector_index_with_params(
+        req.attribute.clone(),
+        req.index_name.clone(),
+        req.dimension,
+        req.distance_metric,
+        hnsw_m,
+        hnsw_ef,
+        dedup_enabled,
+    );
+
+    // Persist the descriptor so startup rebuild can re-register this index.
+    let path = descriptor_path();
+    let mut descriptors = load_vector_descriptors(&path);
+    let now_iso = {
+        let secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // Format as a minimal ISO-8601 UTC string (no sub-second precision).
+        let (y, mo, d, h, mi, s) = secs_to_ymd_hms(secs);
+        format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
+    };
+    descriptors.push(VectorIndexDescriptor {
+        map_name: req.map_name.clone(),
+        attribute: req.attribute.clone(),
+        index_name: req.index_name.clone(),
+        dimension: req.dimension,
+        distance_metric: req.distance_metric,
+        hnsw_m,
+        hnsw_ef_construction: hnsw_ef,
+        dedup_enabled,
+        created_at: now_iso,
+    });
+    save_vector_descriptors(&path, &descriptors);
+
+    info!(
+        map = %req.map_name,
+        attribute = %req.attribute,
+        index_name = %req.index_name,
+        dimension = req.dimension,
+        "vector index created"
+    );
+
+    Ok((StatusCode::CREATED, Json(stats_to_response(vi.stats()))))
+}
+
+/// Lists all registered vector indexes across all maps.
+///
+/// Filters `factory.all_index_stats()` to `IndexType::Vector` and augments with
+/// vector-specific stats from `IndexRegistry::vector_index_stats()`.
+///
+/// # Errors
+///
+/// Returns 503 if the index observer factory is not configured.
+pub async fn list_vector_indexes(
+    _claims: AdminClaims,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let factory = state.index_observer_factory.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                code: 503,
+                message: "index observer factory not configured".to_string(),
+                field: None,
+            }),
+        )
+    })?;
+
+    let all_vector_stats = factory.all_vector_index_stats();
+    let indexes: Vec<VectorIndexInfoResponse> = all_vector_stats
+        .into_iter()
+        .map(|(_, stats_vec)| stats_vec)
+        .flatten()
+        .map(stats_to_response)
+        .collect();
+
+    Ok(Json(serde_json::json!({ "indexes": indexes })))
+}
+
+/// Removes a vector index for the specified map and index name.
+///
+/// Returns 204 on success, 404 if no vector index exists for (map, name).
+/// Returns 503 if the index observer factory is not configured.
+pub async fn remove_vector_index_handler(
+    _claims: AdminClaims,
+    State(state): State<AppState>,
+    Path((map_name, index_name)): Path<(String, String)>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let factory = state.index_observer_factory.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                code: 503,
+                message: "index observer factory not configured".to_string(),
+                field: None,
+            }),
+        )
+    })?;
+
+    let registry = factory.get_registry(&map_name).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                code: 404,
+                message: format!("no vector indexes registered for map '{map_name}'"),
+                field: None,
+            }),
+        )
+    })?;
+
+    // Find the attribute for this index_name.
+    let attribute = registry
+        .find_vector_index_attribute(&index_name)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    code: 404,
+                    message: format!(
+                        "no vector index '{index_name}' found for map '{map_name}'"
+                    ),
+                    field: None,
+                }),
+            )
+        })?;
+
+    let _ = registry.remove_index(&attribute);
+
+    // Remove from persistent descriptor file.
+    let path = descriptor_path();
+    let mut descriptors = load_vector_descriptors(&path);
+    descriptors.retain(|d| !(d.map_name == map_name && d.index_name == index_name));
+    save_vector_descriptors(&path, &descriptors);
+
+    // Clean up backfill progress entry if present.
+    state
+        .backfill_progress
+        .remove(&(map_name.clone(), attribute));
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Triggers an HNSW graph optimize (rebuild) for a vector index.
+///
+/// Returns 202 with an `OptimizeResponse`. If an optimize is already in progress,
+/// returns 202 with `already_running: true` and the existing `optimization_id`.
+/// Returns 503 if the index observer factory is not configured.
+/// Returns 404 if no vector index with the given name exists for the map.
+pub async fn optimize_vector_index_handler(
+    _claims: AdminClaims,
+    State(state): State<AppState>,
+    Path((map_name, index_name)): Path<(String, String)>,
+) -> Result<(StatusCode, Json<OptimizeResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let factory = state.index_observer_factory.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                code: 503,
+                message: "index observer factory not configured".to_string(),
+                field: None,
+            }),
+        )
+    })?;
+
+    let registry = factory.get_registry(&map_name).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                code: 404,
+                message: format!("no vector indexes registered for map '{map_name}'"),
+                field: None,
+            }),
+        )
+    })?;
+
+    let attribute = registry
+        .find_vector_index_attribute(&index_name)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    code: 404,
+                    message: format!(
+                        "no vector index '{index_name}' found for map '{map_name}'"
+                    ),
+                    field: None,
+                }),
+            )
+        })?;
+
+    let vi = registry.get_vector_index(&attribute).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                code: 404,
+                message: format!(
+                    "no vector index '{index_name}' found for map '{map_name}'"
+                ),
+                field: None,
+            }),
+        )
+    })?;
+
+    let handle = vi.optimize();
+    // already_running is true when the handle was pre-existing (not freshly started).
+    // G3 sets `finished = false` on a new handle and `finished = true` when done;
+    // an in-flight handle has `finished = false`, meaning it is still running.
+    // The distinction between "new" vs "already running" is provided by `optimize()`
+    // returning the same Arc when a rebuild is already active — callers compare id.
+    let already_running = !handle.finished.load(std::sync::atomic::Ordering::Relaxed);
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(OptimizeResponse {
+            optimization_id: handle.id.clone(),
+            started_at: handle.started_at.clone(),
+            already_running,
+        }),
+    ))
+}
+
+/// Returns the status of a vector index, including any in-progress optimize.
+///
+/// Returns 200 with a `VectorIndexStatusResponse`.
+/// Returns 404 if no vector index with the given name exists for the map.
+/// Returns 503 if the index observer factory is not configured.
+pub async fn vector_index_status(
+    _claims: AdminClaims,
+    State(state): State<AppState>,
+    Path((map_name, index_name)): Path<(String, String)>,
+) -> Result<Json<VectorIndexStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let factory = state.index_observer_factory.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                code: 503,
+                message: "index observer factory not configured".to_string(),
+                field: None,
+            }),
+        )
+    })?;
+
+    let registry = factory.get_registry(&map_name).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                code: 404,
+                message: format!("no vector indexes registered for map '{map_name}'"),
+                field: None,
+            }),
+        )
+    })?;
+
+    let attribute = registry
+        .find_vector_index_attribute(&index_name)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    code: 404,
+                    message: format!(
+                        "no vector index '{index_name}' found for map '{map_name}'"
+                    ),
+                    field: None,
+                }),
+            )
+        })?;
+
+    let vi = registry.get_vector_index(&attribute).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                code: 404,
+                message: format!(
+                    "no vector index '{index_name}' found for map '{map_name}'"
+                ),
+                field: None,
+            }),
+        )
+    })?;
+
+    let stats = vi.stats();
+    let optimize_handle = vi.current_optimize_handle();
+    let (optimize_in_progress, optimize_processed, optimize_total) =
+        if let Some(ref h) = optimize_handle {
+            let finished = h.finished.load(std::sync::atomic::Ordering::Relaxed);
+            (
+                !finished,
+                h.processed.load(std::sync::atomic::Ordering::Relaxed),
+                h.total.load(std::sync::atomic::Ordering::Relaxed),
+            )
+        } else {
+            (false, 0, 0)
+        };
+
+    Ok(Json(VectorIndexStatusResponse {
+        stats: stats_to_response(stats),
+        optimize_in_progress,
+        optimize_processed,
+        optimize_total,
+    }))
+}
+
+#[cfg(test)]
+mod vector_admin_tests {
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use dashmap::DashMap;
+    use topgun_core::vector::DistanceMetric;
+
+    use super::*;
+    use crate::network::config::NetworkConfig;
+    use crate::network::connection::ConnectionRegistry;
+    use crate::network::shutdown::ShutdownController;
+    use crate::service::domain::index::mutation_observer::IndexObserverFactory;
+
+    fn make_state_with_factory() -> AppState {
+        let factory = Arc::new(IndexObserverFactory::new());
+        AppState {
+            registry: Arc::new(ConnectionRegistry::new()),
+            shutdown: Arc::new(ShutdownController::new()),
+            config: Arc::new(NetworkConfig::default()),
+            start_time: Instant::now(),
+            observability: None,
+            operation_service: None,
+            dispatcher: None,
+            jwt_secret: None,
+            cluster_state: None,
+            store_factory: None,
+            server_config: None,
+            policy_store: None,
+            auth_providers: Arc::new(vec![]),
+            refresh_grant_store: None,
+            auth_validator: None,
+            index_observer_factory: Some(factory),
+            backfill_progress: Arc::new(DashMap::new()),
+        }
+    }
+
+    fn make_state_no_factory() -> AppState {
+        AppState {
+            registry: Arc::new(ConnectionRegistry::new()),
+            shutdown: Arc::new(ShutdownController::new()),
+            config: Arc::new(NetworkConfig::default()),
+            start_time: Instant::now(),
+            observability: None,
+            operation_service: None,
+            dispatcher: None,
+            jwt_secret: None,
+            cluster_state: None,
+            store_factory: None,
+            server_config: None,
+            policy_store: None,
+            auth_providers: Arc::new(vec![]),
+            refresh_grant_store: None,
+            auth_validator: None,
+            index_observer_factory: None,
+            backfill_progress: Arc::new(DashMap::new()),
+        }
+    }
+
+    fn make_claims() -> AdminClaims {
+        AdminClaims {
+            user_id: "test".to_string(),
+            roles: vec!["admin".to_string()],
+        }
+    }
+
+    #[tokio::test]
+    async fn create_vector_index_503_when_no_factory() {
+        let state = make_state_no_factory();
+        let req = CreateVectorIndexRequest {
+            map_name: "users".to_string(),
+            attribute: "_embedding".to_string(),
+            index_name: "emb_idx".to_string(),
+            dimension: 4,
+            distance_metric: DistanceMetric::Cosine,
+            hnsw_params: None,
+            dedup_enabled: None,
+        };
+        let result = create_vector_index(make_claims(), State(state), Json(req)).await;
+        assert!(result.is_err());
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn create_vector_index_422_on_zero_dimension() {
+        let state = make_state_with_factory();
+        let req = CreateVectorIndexRequest {
+            map_name: "users".to_string(),
+            attribute: "_embedding".to_string(),
+            index_name: "emb_idx".to_string(),
+            dimension: 0,
+            distance_metric: DistanceMetric::Cosine,
+            hnsw_params: None,
+            dedup_enabled: None,
+        };
+        let result = create_vector_index(make_claims(), State(state), Json(req)).await;
+        assert!(result.is_err());
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn create_vector_index_422_on_dimension_above_4096() {
+        let state = make_state_with_factory();
+        let req = CreateVectorIndexRequest {
+            map_name: "users".to_string(),
+            attribute: "_embedding".to_string(),
+            index_name: "emb_idx".to_string(),
+            dimension: 4097,
+            distance_metric: DistanceMetric::Euclidean,
+            hnsw_params: None,
+            dedup_enabled: None,
+        };
+        let result = create_vector_index(make_claims(), State(state), Json(req)).await;
+        assert!(result.is_err());
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn create_vector_index_201_on_valid_request() {
+        // Use temp dir for descriptor file to avoid polluting the workspace.
+        let tmp = std::env::temp_dir().join(format!("vi_test_{}.json", uuid::Uuid::new_v4()));
+        std::env::set_var("TOPGUN_VECTOR_INDEX_PATH", tmp.to_str().unwrap());
+
+        let state = make_state_with_factory();
+        let req = CreateVectorIndexRequest {
+            map_name: "users".to_string(),
+            attribute: "_embedding".to_string(),
+            index_name: "emb_idx".to_string(),
+            dimension: 4,
+            distance_metric: DistanceMetric::Cosine,
+            hnsw_params: None,
+            dedup_enabled: None,
+        };
+        let result = create_vector_index(make_claims(), State(state), Json(req)).await;
+        assert!(result.is_ok(), "expected 201, got err: {:?}", result.err());
+        let (code, Json(resp)) = result.unwrap();
+        assert_eq!(code, StatusCode::CREATED);
+        assert_eq!(resp.dimension, 4);
+        assert_eq!(resp.index_name, "emb_idx");
+        assert_eq!(resp.vector_count, 0);
+
+        // Clean up temp file.
+        let _ = std::fs::remove_file(&tmp);
+        std::env::remove_var("TOPGUN_VECTOR_INDEX_PATH");
+    }
+
+    #[tokio::test]
+    async fn create_vector_index_409_on_duplicate() {
+        let tmp = std::env::temp_dir().join(format!("vi_test_{}.json", uuid::Uuid::new_v4()));
+        std::env::set_var("TOPGUN_VECTOR_INDEX_PATH", tmp.to_str().unwrap());
+
+        let state = make_state_with_factory();
+        let req = CreateVectorIndexRequest {
+            map_name: "users".to_string(),
+            attribute: "_embedding".to_string(),
+            index_name: "emb_idx".to_string(),
+            dimension: 4,
+            distance_metric: DistanceMetric::Cosine,
+            hnsw_params: None,
+            dedup_enabled: None,
+        };
+        // First create succeeds.
+        let _ = create_vector_index(make_claims(), State(state.clone()), Json(req.clone())).await;
+        // Second create conflicts.
+        let result = create_vector_index(make_claims(), State(state), Json(req)).await;
+        assert!(result.is_err());
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, StatusCode::CONFLICT);
+
+        let _ = std::fs::remove_file(&tmp);
+        std::env::remove_var("TOPGUN_VECTOR_INDEX_PATH");
+    }
+
+    #[tokio::test]
+    async fn list_vector_indexes_503_when_no_factory() {
+        let state = make_state_no_factory();
+        let result = list_vector_indexes(make_claims(), State(state)).await;
+        assert!(result.is_err());
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn list_vector_indexes_200_empty_when_none_registered() {
+        let state = make_state_with_factory();
+        let result = list_vector_indexes(make_claims(), State(state)).await;
+        assert!(result.is_ok());
+        let Json(body) = result.unwrap();
+        let indexes = body["indexes"].as_array().unwrap();
+        assert!(indexes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn remove_vector_index_503_when_no_factory() {
+        let state = make_state_no_factory();
+        let result = remove_vector_index_handler(
+            make_claims(),
+            State(state),
+            Path(("users".to_string(), "emb_idx".to_string())),
+        )
+        .await;
+        assert!(result.is_err());
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn remove_vector_index_404_when_not_found() {
+        let state = make_state_with_factory();
+        let result = remove_vector_index_handler(
+            make_claims(),
+            State(state),
+            Path(("users".to_string(), "missing".to_string())),
+        )
+        .await;
+        assert!(result.is_err());
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn vector_index_status_503_when_no_factory() {
+        let state = make_state_no_factory();
+        let result = vector_index_status(
+            make_claims(),
+            State(state),
+            Path(("users".to_string(), "emb_idx".to_string())),
+        )
+        .await;
+        assert!(result.is_err());
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn vector_index_status_404_when_not_found() {
+        let state = make_state_with_factory();
+        let result = vector_index_status(
+            make_claims(),
+            State(state),
+            Path(("users".to_string(), "missing".to_string())),
+        )
+        .await;
+        assert!(result.is_err());
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn descriptor_persistence_roundtrip() {
+        let tmp = std::env::temp_dir().join(format!("vi_desc_{}.json", uuid::Uuid::new_v4()));
+        let descriptors = vec![VectorIndexDescriptor {
+            map_name: "maps".to_string(),
+            attribute: "_vec".to_string(),
+            index_name: "vec_idx".to_string(),
+            dimension: 3,
+            distance_metric: DistanceMetric::Cosine,
+            hnsw_m: 16,
+            hnsw_ef_construction: 200,
+            dedup_enabled: true,
+            created_at: "2026-04-14T00:00:00Z".to_string(),
+        }];
+        save_vector_descriptors(&tmp, &descriptors);
+        let loaded = load_vector_descriptors(&tmp);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].index_name, "vec_idx");
+        assert_eq!(loaded[0].dimension, 3);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn load_vector_descriptors_returns_empty_when_file_absent() {
+        let path = std::path::Path::new("/tmp/definitely_does_not_exist_vi.json");
+        let result = load_vector_descriptors(path);
+        assert!(result.is_empty());
+    }
+}
+
+// ── ISO-8601 timestamp helper ─────────────────────────────────────────────────
+
+/// Converts Unix seconds to `(year, month, day, hour, minute, second)` tuple.
+///
+/// Uses a simple division algorithm without any external crate dependency.
+/// Accurate for dates in the range 2000-2100 (sufficient for timestamps).
+#[allow(clippy::cast_possible_truncation)]
+fn secs_to_ymd_hms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
+    let s = secs % 60;
+    let m = (secs / 60) % 60;
+    let h = (secs / 3600) % 24;
+    let days = secs / 86400;
+
+    // Days since 1970-01-01 to Gregorian date (Meeus algorithm, simplified).
+    let z = days + 2_440_588; // Julian Day Number offset
+    let a = (z as f64 - 1_867_216.25) / 36_524.25;
+    let a = z + 1 + a as u64 - (a as u64 / 4);
+    let b = a + 1524;
+    let c = ((b as f64 - 122.1) / 365.25) as u64;
+    let dd = (365.25 * c as f64) as u64;
+    let e = ((b - dd) as f64 / 30.6001) as u64;
+
+    let day = (b - dd - (30.6001 * e as f64) as u64) as u32;
+    let month = if e < 14 { e - 1 } else { e - 13 } as u32;
+    let year = if month > 2 { c - 4716 } else { c - 4715 } as u32;
+
+    (year, month, day, h as u32, m as u32, s as u32)
 }

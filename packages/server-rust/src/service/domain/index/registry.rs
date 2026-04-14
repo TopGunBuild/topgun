@@ -320,6 +320,20 @@ impl IndexRegistry {
     pub fn first_vector_index_attribute(&self) -> Option<String> {
         self.vector_indexes.iter().next().map(|r| r.key().clone())
     }
+
+    /// Returns the attribute name for the vector index with the given `index_name`,
+    /// or `None` if no such index exists.
+    ///
+    /// Used by admin vector handlers that route by `(map, index_name)` rather than
+    /// `(map, attribute)`, matching the admin URL pattern
+    /// `/api/admin/indexes/vector/{map}/{name}`.
+    #[must_use]
+    pub fn find_vector_index_attribute(&self, index_name: &str) -> Option<String> {
+        self.vector_indexes
+            .iter()
+            .find(|r| r.value().index_name() == index_name)
+            .map(|r| r.key().clone())
+    }
 }
 
 impl Default for IndexRegistry {

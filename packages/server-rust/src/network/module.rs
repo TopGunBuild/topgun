@@ -25,9 +25,10 @@ use utoipa::OpenApi;
 use super::config::NetworkConfig;
 use super::connection::{ConnectionRegistry, OutboundMessage};
 use super::handlers::admin::{
-    cluster_status, create_index, create_policy, delete_policy, get_settings,
-    index_backfill_status, list_indexes, list_maps, list_policies, login, remove_index_handler,
-    server_status, update_settings,
+    cluster_status, create_index, create_policy, create_vector_index, delete_policy, get_settings,
+    index_backfill_status, list_indexes, list_maps, list_policies, list_vector_indexes, login,
+    optimize_vector_index_handler, remove_index_handler, remove_vector_index_handler,
+    server_status, update_settings, vector_index_status,
 };
 use super::handlers::auth_provider::{
     AuthProvider, AuthProviderConfig, HmacProvider, JwksProvider, OidcProvider,
@@ -441,6 +442,24 @@ fn build_app(
         .route(
             "/api/admin/indexes/{map}/{attr}/status",
             get(index_backfill_status),
+        )
+        // Vector index admin endpoints — nested under /api/admin/indexes/vector
+        // to avoid collision with the existing /api/admin/indexes/{map}/{attr} routes.
+        .route(
+            "/api/admin/indexes/vector",
+            get(list_vector_indexes).post(create_vector_index),
+        )
+        .route(
+            "/api/admin/indexes/vector/{map}/{name}",
+            delete(remove_vector_index_handler),
+        )
+        .route(
+            "/api/admin/indexes/vector/{map}/{name}/optimize",
+            post(optimize_vector_index_handler),
+        )
+        .route(
+            "/api/admin/indexes/vector/{map}/{name}/status",
+            get(vector_index_status),
         )
         .route_layer(governor_layer);
 
