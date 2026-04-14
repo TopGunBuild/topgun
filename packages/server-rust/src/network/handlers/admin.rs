@@ -1669,6 +1669,53 @@ mod vector_admin_tests {
     }
 
     #[tokio::test]
+    async fn list_vector_indexes_reports_vector_count_after_insert() {
+        use crate::service::domain::index::Index;
+
+        let tmp = std::env::temp_dir().join(format!("vi_list_{}.json", uuid::Uuid::new_v4()));
+        std::env::set_var("TOPGUN_VECTOR_INDEX_PATH", tmp.to_str().unwrap());
+
+        let state = make_state_with_factory();
+        let req = CreateVectorIndexRequest {
+            map_name: "users".to_string(),
+            attribute: "_embedding".to_string(),
+            index_name: "emb_idx".to_string(),
+            dimension: 4,
+            distance_metric: DistanceMetric::Cosine,
+            hnsw_params: None,
+            dedup_enabled: None,
+        };
+        let _ = create_vector_index(make_claims(), State(state.clone()), Json(req)).await;
+
+        // Insert a record directly against the registered index, then commit.
+        let factory = state.index_observer_factory.as_ref().unwrap();
+        let registry = factory.get_registry("users").expect("registry exists");
+        let vi = registry
+            .get_vector_index("_embedding")
+            .expect("vector index registered");
+        let encoded = rmp_serde::to_vec_named(&topgun_core::vector::Vector::F32(vec![
+            0.1, 0.2, 0.3, 0.4,
+        ]))
+        .unwrap();
+        let record = rmpv::Value::Map(vec![(
+            rmpv::Value::String(rmpv::Utf8String::from("_embedding")),
+            rmpv::Value::Binary(encoded),
+        )]);
+        vi.insert("k1", &record);
+        vi.commit_pending();
+
+        let result = list_vector_indexes(make_claims(), State(state)).await;
+        assert!(result.is_ok());
+        let Json(body) = result.unwrap();
+        let indexes = body["indexes"].as_array().unwrap();
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0]["vectorCount"].as_u64().unwrap(), 1);
+
+        let _ = std::fs::remove_file(&tmp);
+        std::env::remove_var("TOPGUN_VECTOR_INDEX_PATH");
+    }
+
+    #[tokio::test]
     async fn remove_vector_index_503_when_no_factory() {
         let state = make_state_no_factory();
         let result = remove_vector_index_handler(
