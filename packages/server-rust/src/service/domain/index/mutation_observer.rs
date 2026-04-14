@@ -213,20 +213,6 @@ impl IndexObserverFactory {
             .collect()
     }
 
-    /// Returns vector index statistics across all maps.
-    ///
-    /// Each entry is `(map_name, Vec<VectorIndexStats>)`. Maps with no
-    /// vector indexes are excluded.
-    #[must_use]
-    pub fn all_vector_index_stats(
-        &self,
-    ) -> Vec<(String, Vec<crate::service::domain::index::registry::VectorIndexStats>)> {
-        self.registries
-            .iter()
-            .map(|r| (r.key().clone(), r.value().vector_index_stats()))
-            .filter(|(_, stats)| !stats.is_empty())
-            .collect()
-    }
 }
 
 impl Default for IndexObserverFactory {

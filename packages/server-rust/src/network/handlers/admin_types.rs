@@ -319,6 +319,20 @@ pub struct CreateVectorIndexRequest {
     pub dedup_enabled: Option<bool>,
 }
 
+impl Default for CreateVectorIndexRequest {
+    fn default() -> Self {
+        Self {
+            map_name: String::new(),
+            attribute: String::new(),
+            index_name: String::new(),
+            dimension: 0,
+            distance_metric: DistanceMetric::Cosine,
+            hnsw_params: None,
+            dedup_enabled: None,
+        }
+    }
+}
+
 /// Wire representation of a vector index for admin API list/create responses.
 #[derive(Serialize, ToSchema, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
