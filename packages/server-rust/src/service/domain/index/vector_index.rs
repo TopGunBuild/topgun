@@ -295,25 +295,26 @@ impl VectorIndex {
 
     /// Triggers an HNSW graph rebuild in a background task.
     ///
-    /// Returns the in-flight `OptimizeHandle` (shared `Arc`). If an optimize is
-    /// already running, returns the existing handle. The `already_running` flag
-    /// in the HTTP response is set by the caller based on whether `finished` was
-    /// already `false` when this call was made.
+    /// Returns `(handle, was_already_running)`:
+    /// - `handle` — shared `Arc<OptimizeHandle>` for this optimize run.
+    /// - `was_already_running` — `true` if an in-flight optimize was reused;
+    ///   `false` when a new optimize was started.
     ///
     /// The rebuild uses a two-phase pattern:
-    /// 1. Build a fresh HNSW graph in the background without taking the read lock.
-    /// 2. Swap the new graph under the write lock (brief blocking window).
+    /// 1. Snapshot committed vectors from the HNSW graph while holding the read lock briefly.
+    /// 2. Build a fresh HNSW graph in a background blocking task (no lock held).
+    /// 3. Swap the new graph under the write lock (brief blocking window).
     ///
     /// Searches continue against the old graph during rebuild.
     /// Only one optimize may run at a time per index; subsequent calls return the
-    /// existing handle.
-    pub fn optimize(self: &Arc<Self>) -> Arc<OptimizeHandle> {
+    /// existing handle with `was_already_running = true`.
+    pub fn optimize(self: &Arc<Self>) -> (Arc<OptimizeHandle>, bool) {
         let mut guard = self.optimize_handle.lock();
 
         // If an optimize is already running (not yet finished), return its handle.
         if let Some(ref existing) = *guard {
             if !existing.finished.load(Ordering::Relaxed) {
-                return Arc::clone(existing);
+                return (Arc::clone(existing), true);
             }
         }
 
@@ -336,23 +337,10 @@ impl VectorIndex {
         *guard = Some(Arc::clone(&handle));
         drop(guard);
 
-        // Snapshot all committed vectors for the rebuild.
-        let vectors_snapshot: Vec<(u64, SharedVector)> = {
-            let hnsw = self.hnsw.read();
-            // Collect element id -> vector from the pending_snapshot + committed.
-            drop(hnsw);
-            self.key_to_id
-                .iter()
-                .filter_map(|r| {
-                    let key = r.key();
-                    let id = *r.value();
-                    // Get vector from pending_snapshot or committed.
-                    self.pending_snapshot
-                        .get(key.as_str())
-                        .map(|v| (id, v.clone()))
-                })
-                .collect()
-        };
+        // Snapshot all committed (non-deleted) vectors from the HNSW graph.
+        // We hold the read lock only for the duration of the snapshot — searches
+        // can proceed concurrently against the current graph during the rebuild.
+        let vectors_snapshot: Vec<(u64, SharedVector)> = self.hnsw.read().all_vectors();
 
         handle.total.store(vectors_snapshot.len() as u64, Ordering::Relaxed);
 
@@ -411,7 +399,7 @@ impl VectorIndex {
             }
         });
 
-        handle
+        (handle, false)
     }
 
     /// Returns the current in-flight `OptimizeHandle`, or `None` if no optimize is running.
@@ -495,7 +483,7 @@ impl VectorIndex {
 /// Formats Unix seconds as a minimal ISO-8601 UTC string: `YYYY-MM-DDTHH:MM:SSZ`.
 #[allow(clippy::cast_possible_truncation)]
 #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
-fn format_iso8601(secs: u64) -> String {
+pub(crate) fn format_iso8601(secs: u64) -> String {
     let sec = secs % 60;
     let min = (secs / 60) % 60;
     let hour = (secs / 3600) % 24;
@@ -1080,7 +1068,9 @@ mod tests {
             "should be None before optimize"
         );
 
-        let handle = idx.optimize();
+        let (handle, was_already_running) = idx.optimize();
+        assert!(!was_already_running, "first optimize should not report already_running");
+
         // Wait for the background task to complete.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
@@ -1104,6 +1094,16 @@ mod tests {
             stats.last_optimized.as_ref().unwrap().starts_with("20"),
             "last_optimized should be a valid ISO-8601 UTC timestamp"
         );
+
+        // Vectors must still be searchable after optimize (Critical #1 guard).
+        assert_eq!(
+            idx.stats().vector_count,
+            2,
+            "optimize must not destroy committed vectors"
+        );
+        let results = idx.search_nearest(&[1.0, 0.0, 0.0, 0.0], 1, 8);
+        assert_eq!(results.len(), 1, "search after optimize should return results");
+        assert_eq!(results[0].0, "k1", "nearest to [1,0,0,0] should be k1");
     }
 
     #[tokio::test]
@@ -1116,12 +1116,15 @@ mod tests {
             false,
         ));
 
-        let h1 = idx.optimize();
-        let h2 = idx.optimize();
+        let (h1, already_running_first) = idx.optimize();
+        assert!(!already_running_first, "first call should not report already_running");
 
-        // While h1 is still running, h2 should return the same handle.
+        let (h2, already_running_second) = idx.optimize();
+
+        // While h1 is still running, h2 should return the same handle with already_running=true.
         if !h1.finished.load(std::sync::atomic::Ordering::Relaxed) {
             assert_eq!(h1.id, h2.id, "in-flight optimize should return same handle");
+            assert!(already_running_second, "second call while running should report already_running=true");
         }
 
         // Wait for completion.

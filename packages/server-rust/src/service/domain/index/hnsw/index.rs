@@ -77,6 +77,19 @@ impl Hnsw {
         self.vectors.contains_key(id) && !self.deleted.contains(id)
     }
 
+    /// Returns all non-deleted (id, vector) pairs currently in the graph.
+    ///
+    /// Used by the two-phase optimize rebuild to snapshot committed state
+    /// before building a fresh HNSW graph in a background task.
+    #[must_use]
+    pub fn all_vectors(&self) -> Vec<(ElementId, SharedVector)> {
+        self.vectors
+            .iter()
+            .filter(|(id, _)| !self.deleted.contains(id))
+            .map(|(id, v)| (*id, v.clone()))
+            .collect()
+    }
+
     // -----------------------------------------------------------------------
     // Distance helpers
     // -----------------------------------------------------------------------
