@@ -10,6 +10,7 @@ use utoipa::ToSchema;
 
 use crate::service::policy::{PermissionAction, PolicyEffect};
 use topgun_core::messages::base::PredicateNode;
+use topgun_core::vector::DistanceMetric;
 
 /// Server operational mode.
 #[derive(Serialize, Deserialize, ToSchema, Clone, Debug, PartialEq)]
@@ -270,6 +271,133 @@ pub struct BackfillProgress {
     pub total: AtomicU64,
     pub processed: AtomicU64,
     pub done: AtomicBool,
+}
+
+// ---------------------------------------------------------------------------
+// Vector index admin types
+// ---------------------------------------------------------------------------
+
+/// HNSW graph-construction parameters for vector index creation.
+///
+/// All fields are optional; defaults match HNSW community best-practice values.
+/// `m` controls graph connectivity (higher = better recall, more memory).
+/// `ef_construction` controls search depth during graph build (higher = better
+/// recall, slower build).
+#[derive(Serialize, Deserialize, ToSchema, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct HnswParams {
+    /// Number of bidirectional links per node (default: 16).
+    /// Stored as `u16` (range 2–256); `u32` is NOT used here — this field lives
+    /// inside the request body and maps to the HNSW graph parameter directly.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub m: Option<u16>,
+    /// Search depth during graph construction (default: 200).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub ef_construction: Option<u32>,
+}
+
+/// Request body for `POST /api/admin/indexes/vector`.
+#[derive(Deserialize, ToSchema, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateVectorIndexRequest {
+    /// Map name to create the vector index on (e.g., "users").
+    pub map_name: String,
+    /// Attribute name to index (e.g., "_embedding").
+    pub attribute: String,
+    /// User-visible name for this index.
+    pub index_name: String,
+    /// Vector dimensionality; must be in range 1–4096.
+    pub dimension: u16,
+    /// Distance metric for ANN queries: "cosine", "euclidean", "dotProduct", "manhattan".
+    #[schema(value_type = String)]
+    pub distance_metric: DistanceMetric,
+    /// HNSW graph-construction parameters. Defaults applied when `None`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub hnsw_params: Option<HnswParams>,
+    /// Enable BLAKE3-based duplicate vector suppression (default: `true`).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub dedup_enabled: Option<bool>,
+}
+
+/// Wire representation of a vector index for admin API list/create responses.
+#[derive(Serialize, ToSchema, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct VectorIndexInfoResponse {
+    /// Attribute name this index covers (e.g., `_embedding`).
+    pub attribute: String,
+    /// User-visible index name.
+    pub index_name: String,
+    /// Vector dimensionality.
+    pub dimension: u16,
+    /// Distance metric used for ANN queries: "cosine", "euclidean", "dotProduct", "manhattan".
+    #[schema(value_type = String)]
+    pub distance_metric: DistanceMetric,
+    /// Committed vector count (does not include pending writes).
+    pub vector_count: u64,
+    /// Estimated HNSW graph memory usage in bytes.
+    pub memory_bytes: u64,
+    /// Number of HNSW graph layers. `u32` for Hazelcast codec parity.
+    pub graph_layers: u32,
+    /// Number of pending (uncommitted) mutations in the write buffer.
+    pub pending_updates: u64,
+    /// ISO-8601 UTC timestamp of the last completed optimize, or `null`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_optimized: Option<String>,
+}
+
+/// Response body for `POST /api/admin/indexes/vector/{map}/{name}/optimize`.
+#[derive(Serialize, ToSchema, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct OptimizeResponse {
+    /// Unique identifier for this optimize run (UUID v4).
+    pub optimization_id: String,
+    /// ISO-8601 UTC timestamp when the optimize started.
+    pub started_at: String,
+    /// `true` when this call returned an already-in-progress optimize;
+    /// `false` when a new optimize was started. Both cases return HTTP 202.
+    pub already_running: bool,
+}
+
+/// Response body for `GET /api/admin/indexes/vector/{map}/{name}/status`.
+#[derive(Serialize, ToSchema, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct VectorIndexStatusResponse {
+    /// Current index statistics.
+    pub stats: VectorIndexInfoResponse,
+    /// Whether an optimize is currently in progress.
+    pub optimize_in_progress: bool,
+    /// Vectors processed so far during the current (or last) optimize.
+    pub optimize_processed: u64,
+    /// Total vectors to process in the current (or last) optimize.
+    pub optimize_total: u64,
+}
+
+/// On-disk descriptor for a registered vector index.
+///
+/// Persisted to `TOPGUN_VECTOR_INDEX_PATH` (default: `./vector_indexes.json`)
+/// as a JSON array. Loaded at startup to re-register vector indexes and rebuild
+/// their HNSW graphs from persisted records.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct VectorIndexDescriptor {
+    /// Map name this index belongs to.
+    pub map_name: String,
+    /// Attribute name this index covers.
+    pub attribute: String,
+    /// User-visible index name.
+    pub index_name: String,
+    /// Vector dimensionality.
+    pub dimension: u16,
+    /// Distance metric.
+    pub distance_metric: DistanceMetric,
+    /// HNSW `m` parameter (bidirectional links per node).
+    pub hnsw_m: u16,
+    /// HNSW `ef_construction` parameter (search depth during graph build).
+    pub hnsw_ef_construction: u32,
+    /// Whether BLAKE3 dedup is enabled for this index.
+    pub dedup_enabled: bool,
+    /// ISO-8601 UTC timestamp when this index was originally created.
+    pub created_at: String,
 }
 
 #[cfg(test)]

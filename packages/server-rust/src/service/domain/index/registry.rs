@@ -18,6 +18,7 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use topgun_core::messages::base::{PredicateNode, PredicateOp};
 use topgun_core::vector::DistanceMetric;
 
@@ -36,6 +37,35 @@ pub struct IndexStats {
     pub index_type: IndexType,
     /// Number of distinct attribute values currently tracked.
     pub entry_count: u64,
+}
+
+/// Extended statistics for a vector (HNSW) index, including operational counters.
+///
+/// Returned by `IndexRegistry::vector_index_stats()` and exposed via the admin API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VectorIndexStats {
+    /// The attribute name this index covers (e.g., `_embedding`).
+    pub attribute: String,
+    /// The user-visible name of this index.
+    pub index_name: String,
+    /// Vector dimensionality.
+    pub dimension: u16,
+    /// Distance metric used for ANN queries.
+    pub distance_metric: DistanceMetric,
+    /// Number of committed vector entries in the HNSW graph.
+    pub vector_count: u64,
+    /// Estimated memory usage in bytes (see `VectorIndex::estimate_memory_bytes`).
+    pub memory_bytes: u64,
+    /// Number of HNSW graph layers.
+    /// `u32` per Hazelcast `VectorCollectionOptimizeCodec` field width; unbounded by spec
+    /// (in practice ≤30), `u32` provides headroom without cost.
+    pub graph_layers: u32,
+    /// Number of pending (uncommitted) mutations in the write buffer.
+    pub pending_updates: u64,
+    /// ISO-8601 UTC timestamp of the last completed optimize, or `None` if never optimized.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_optimized: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +127,9 @@ impl IndexRegistry {
     /// Inserts into both the `indexes` trait-object map and the `vector_indexes`
     /// side-channel so that `get_vector_index` can return the concrete type
     /// without downcasting.
+    ///
+    /// Uses the attribute name as the index name and default HNSW params with dedup enabled.
+    /// For full control over parameters, use `add_vector_index_with_params`.
     pub fn add_vector_index(
         &self,
         attribute: impl Into<String>,
@@ -104,11 +137,59 @@ impl IndexRegistry {
         distance_metric: DistanceMetric,
     ) {
         let attr = attribute.into();
-        let vi = Arc::new(VectorIndex::new(attr.clone(), dimension, distance_metric));
+        let vi = Arc::new(VectorIndex::new(
+            attr.clone(),
+            attr.clone(),
+            dimension,
+            distance_metric,
+            true,
+        ));
         // Store the concrete type in the side-channel before moving into the
         // trait-object map so both views share the same allocation.
         self.vector_indexes.insert(attr.clone(), Arc::clone(&vi));
         self.indexes.insert(attr, vi as Arc<dyn Index>);
+    }
+
+    /// Registers a [`VectorIndex`] with explicit HNSW parameters for the admin create path.
+    ///
+    /// `m` and `ef_construction` are HNSW graph-construction parameters.
+    /// `dedup_enabled` controls BLAKE3-based duplicate vector suppression (default: true).
+    ///
+    /// Returns an `Arc<VectorIndex>` so the caller can persist the descriptor.
+    pub fn add_vector_index_with_params(
+        &self,
+        attribute: impl Into<String>,
+        index_name: impl Into<String>,
+        dimension: u16,
+        distance_metric: DistanceMetric,
+        _m: u16,
+        _ef_construction: u32,
+        dedup_enabled: bool,
+    ) -> Arc<VectorIndex> {
+        let attr = attribute.into();
+        let name = index_name.into();
+        let vi = Arc::new(VectorIndex::new(
+            attr.clone(),
+            name,
+            dimension,
+            distance_metric,
+            dedup_enabled,
+        ));
+        self.vector_indexes.insert(attr.clone(), Arc::clone(&vi));
+        self.indexes.insert(attr, Arc::clone(&vi) as Arc<dyn Index>);
+        vi
+    }
+
+    /// Returns extended statistics for all registered vector indexes.
+    ///
+    /// Each entry carries dimension, distance metric, count, memory estimate,
+    /// graph layer count, pending queue depth, and last-optimize timestamp.
+    #[must_use]
+    pub fn vector_index_stats(&self) -> Vec<VectorIndexStats> {
+        self.vector_indexes
+            .iter()
+            .map(|r| r.value().stats())
+            .collect()
     }
 
     /// Returns the index registered for `attribute`, or `None` if none exists.

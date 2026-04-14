@@ -9,6 +9,8 @@
 //! queries — never for incoming writes.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::Arc;
 
 use dashmap::{DashMap, DashSet};
 use parking_lot::{Mutex, RwLock};
@@ -18,12 +20,31 @@ use tracing::warn;
 use crate::service::domain::index::attribute::AttributeExtractor;
 use crate::service::domain::index::hnsw::{ElementId, Hnsw, HnswParams};
 use crate::service::domain::index::{Index, IndexType};
+use crate::service::domain::index::registry::VectorIndexStats;
 
 /// A queued mutation waiting to be applied to the HNSW graph.
 #[derive(Debug, Clone)]
 pub enum VectorPendingUpdate {
     Upsert { key: String, vector: SharedVector },
     Remove { key: String },
+}
+
+/// Tracks progress of an in-progress HNSW optimize (graph rebuild) operation.
+///
+/// Returned by `VectorIndex::optimize`. Both the background task and the HTTP
+/// status handler share the same `Arc<OptimizeHandle>` — counters are updated
+/// atomically so reads never block.
+pub struct OptimizeHandle {
+    /// Unique identifier for this optimize run (UUID v4).
+    pub id: String,
+    /// ISO-8601 UTC timestamp when the optimize was started.
+    pub started_at: String,
+    /// Number of vectors processed so far during rebuild.
+    pub processed: AtomicU64,
+    /// Total vectors to process (set once before the rebuild loop starts).
+    pub total: AtomicU64,
+    /// Set to `true` atomically when the rebuild completes and the pointer swap occurs.
+    pub finished: AtomicBool,
 }
 
 /// Thread-safe HNSW approximate nearest-neighbor index.
@@ -35,6 +56,8 @@ pub enum VectorPendingUpdate {
 /// through `IndexRegistry::get_vector_index`.
 pub struct VectorIndex {
     attribute: String,
+    /// User-visible name for this index (e.g. "embedding_index").
+    index_name: String,
     dimension: u16,
     distance_metric: DistanceMetric,
     /// Pre-allocated distance implementation, built once in `new` to avoid
@@ -58,15 +81,32 @@ pub struct VectorIndex {
     pending_snapshot: DashMap<String, SharedVector>,
     /// Keys queued for removal — suppressed in read results until commit.
     pending_removed: DashSet<String>,
+    /// When `true`, BLAKE3 hashes of inserted vectors are recorded in `blake3_seen`
+    /// and duplicates skip HNSW insertion. Defaults to `true` (SurrealDB pattern).
+    dedup_enabled: bool,
+    /// BLAKE3-256 hashes of all committed vectors (when dedup is enabled).
+    /// `DashSet::insert` returns `false` for duplicates — the atomic check-and-insert
+    /// prevents double-counting even under concurrent writes.
+    blake3_seen: DashSet<[u8; 32]>,
+    /// ISO-8601 UTC timestamp of the last completed optimize, or `None`.
+    last_optimized: RwLock<Option<String>>,
+    /// In-flight optimize handle, if an optimize is currently running.
+    /// `None` when idle; `Some(Arc<OptimizeHandle>)` while a rebuild is active.
+    optimize_handle: Mutex<Option<Arc<OptimizeHandle>>>,
 }
 
 impl VectorIndex {
     /// Creates a new, empty `VectorIndex` for the given attribute, dimension,
     /// and distance metric.
+    ///
+    /// `index_name` is the user-visible name for this index (used in admin API responses).
+    /// `dedup_enabled` controls BLAKE3-based duplicate vector suppression (default: `true`).
     pub fn new(
         attribute: impl Into<String>,
+        index_name: impl Into<String>,
         dimension: u16,
         distance_metric: DistanceMetric,
+        dedup_enabled: bool,
     ) -> Self {
         let attr = attribute.into();
         let params = HnswParams {
@@ -79,6 +119,7 @@ impl VectorIndex {
         let hnsw = Hnsw::new(params);
         Self {
             attribute: attr,
+            index_name: index_name.into(),
             dimension,
             distance_metric,
             distance,
@@ -90,6 +131,10 @@ impl VectorIndex {
             id_to_key: DashMap::new(),
             pending_snapshot: DashMap::new(),
             pending_removed: DashSet::new(),
+            dedup_enabled,
+            blake3_seen: DashSet::new(),
+            last_optimized: RwLock::new(None),
+            optimize_handle: Mutex::new(None),
         }
     }
 
@@ -217,9 +262,61 @@ impl VectorIndex {
         self.distance_metric
     }
 
+    /// Returns the user-visible index name.
+    pub fn index_name(&self) -> &str {
+        &self.index_name
+    }
+
+    /// Returns a snapshot of statistics for this vector index.
+    ///
+    /// All counts are atomic loads; does not block ongoing searches.
+    pub fn stats(&self) -> VectorIndexStats {
+        let vector_count = self.key_to_id.len() as u64;
+        let pending_updates = self.pending.lock().len() as u64;
+        let memory_bytes = self.estimate_memory_bytes();
+        let last_optimized = self.last_optimized.read().clone();
+        VectorIndexStats {
+            attribute: self.attribute.clone(),
+            index_name: self.index_name.clone(),
+            dimension: self.dimension,
+            distance_metric: self.distance_metric,
+            vector_count,
+            memory_bytes,
+            graph_layers: 0, // populated by G3 once HNSW exposes layer count
+            pending_updates,
+            last_optimized,
+        }
+    }
+
+    /// Triggers an HNSW graph rebuild in a background task.
+    ///
+    /// Returns the in-flight `OptimizeHandle` (shared `Arc`). If an optimize is
+    /// already running, returns the existing handle with the same
+    /// `optimization_id`. The caller checks `handle.finished` to distinguish
+    /// already-running from newly started.
+    ///
+    /// The actual rebuild implementation is added in G3.
+    pub fn optimize(self: &Arc<Self>) -> Arc<OptimizeHandle> {
+        todo!("implement in G3: spawn rebuild task, atomic pointer swap on completion")
+    }
+
     // ------------------------------------------------------------------
     // Private helpers
     // ------------------------------------------------------------------
+
+    /// Estimated memory usage of the HNSW graph in bytes.
+    ///
+    /// Formula: `vector_count * dimension * 4` (f32 components) +
+    /// `vector_count * 16 * 8` (approximate 16 edges per node, 8 bytes each).
+    ///
+    /// This is a documented approximation, not exact allocator accounting.
+    /// The formula is owned here so it stays accurate if edge-pointer width changes.
+    fn estimate_memory_bytes(&self) -> u64 {
+        let vc = self.key_to_id.len() as u64;
+        let dim = self.dimension as u64;
+        // 4 bytes per f32 component + average 16 neighbor pointers at 8 bytes each
+        vc * dim * 4 + vc * 16 * 8
+    }
 
     /// Extracts and decodes a `SharedVector` from the full record `rmpv::Value`.
     ///
@@ -353,7 +450,7 @@ mod tests {
     use super::*;
 
     fn make_index() -> VectorIndex {
-        VectorIndex::new("embedding", 4, DistanceMetric::Cosine)
+        VectorIndex::new("embedding", "embedding_index", 4, DistanceMetric::Cosine, true)
     }
 
     fn make_record(data: &[f32]) -> rmpv::Value {
