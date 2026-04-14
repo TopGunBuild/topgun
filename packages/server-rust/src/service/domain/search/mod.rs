@@ -133,8 +133,8 @@ impl RegistryEntry for HybridSearchSubscription {
 /// Concurrent registry of standing hybrid search subscriptions.
 ///
 /// Type alias for `SubscriptionRegistry<HybridSearchSubscription>` providing
-/// the full API surface (register, unregister, unregister_by_connection,
-/// get_subscriptions_for_map, has_subscriptions_for_map, has_any_subscriptions).
+/// the full API surface (`register`, `unregister`, `unregister_by_connection`,
+/// `get_subscriptions_for_map`, `has_subscriptions_for_map`, `has_any_subscriptions`).
 pub type HybridSearchRegistry = SubscriptionRegistry<HybridSearchSubscription>;
 
 // ---------------------------------------------------------------------------
@@ -254,8 +254,8 @@ impl SearchSubscription {
 /// Concurrent registry of standing text-search subscriptions.
 ///
 /// Type alias for `SubscriptionRegistry<SearchSubscription>` providing
-/// the full API surface (register, unregister, unregister_by_connection,
-/// get_subscriptions_for_map, has_subscriptions_for_map, has_any_subscriptions).
+/// the full API surface (`register`, `unregister`, `unregister_by_connection`,
+/// `get_subscriptions_for_map`, `has_subscriptions_for_map`, `has_any_subscriptions`).
 pub type SearchRegistry = SubscriptionRegistry<SearchSubscription>;
 
 // ---------------------------------------------------------------------------
@@ -806,6 +806,7 @@ fn record_to_rmpv(record_value: &RecordValue) -> rmpv::Value {
 /// Flushes when either `batch_interval` elapses or `batch_flush_threshold` events
 /// have been accumulated, whichever comes first. On shutdown signal, drains
 /// remaining events before exiting.
+#[allow(clippy::too_many_arguments)]
 async fn run_batch_processor(
     mut event_rx: mpsc::UnboundedReceiver<MutationEvent>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
@@ -1679,6 +1680,7 @@ impl SearchService {
     /// Compares new results against cached results and emits ENTER/UPDATE/LEAVE
     /// deltas to each subscriber's connection. Called by the hybrid notifier task
     /// spawned in `spawn_hybrid_notifier`.
+    #[allow(clippy::too_many_lines)]
     pub async fn notify_hybrid_subscriptions_for_map(&self, map_name: &str) {
         let subs = self.hybrid_registry.get_subscriptions_for_map(map_name);
         if subs.is_empty() {
@@ -1715,7 +1717,7 @@ impl SearchService {
 
             let params = crate::service::domain::search::hybrid::HybridSearchParams {
                 map_name: &sub.map_name,
-                index_registry: &registry,
+                index_registry: registry,
                 query_text: &sub.query_text,
                 query_vector: sub.query_vector.as_deref(),
                 predicate: sub.predicate.as_ref(),
