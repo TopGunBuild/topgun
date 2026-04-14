@@ -184,11 +184,24 @@ impl IndexRegistry {
     ///
     /// Each entry carries dimension, distance metric, count, memory estimate,
     /// graph layer count, pending queue depth, and last-optimize timestamp.
+    /// This is a non-blocking read (the underlying `stats()` acquires only brief locks).
     #[must_use]
     pub fn vector_index_stats(&self) -> Vec<VectorIndexStats> {
         self.vector_indexes
             .iter()
             .map(|r| r.value().stats())
+            .collect()
+    }
+
+    /// Returns all registered vector index `Arc` handles.
+    ///
+    /// Used by the startup rebuild path to iterate vector indexes without
+    /// needing to reconstruct them from descriptors.
+    #[must_use]
+    pub fn all_vector_indexes(&self) -> Vec<Arc<VectorIndex>> {
+        self.vector_indexes
+            .iter()
+            .map(|r| Arc::clone(r.value()))
             .collect()
     }
 

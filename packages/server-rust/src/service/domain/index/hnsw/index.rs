@@ -60,6 +60,16 @@ impl Hnsw {
         self.count == 0
     }
 
+    /// Returns the number of layers in the HNSW graph hierarchy.
+    ///
+    /// Layer 0 is the base layer (all elements); higher layers contain
+    /// progressively fewer elements. The layer count grows logarithmically
+    /// with the number of insertions.
+    #[must_use]
+    pub fn layer_count(&self) -> u32 {
+        self.layers.len() as u32
+    }
+
     /// Returns `true` if `id` is present and not deleted.
     #[must_use]
     pub fn contains(&self, id: &ElementId) -> bool {

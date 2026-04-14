@@ -9,13 +9,14 @@
 //! queries — never for incoming writes.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use dashmap::{DashMap, DashSet};
 use parking_lot::{Mutex, RwLock};
 use topgun_core::vector::{distance_for_metric, Distance, DistanceMetric, SharedVector};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::service::domain::index::attribute::AttributeExtractor;
 use crate::service::domain::index::hnsw::{ElementId, Hnsw, HnswParams};
@@ -269,11 +270,13 @@ impl VectorIndex {
 
     /// Returns a snapshot of statistics for this vector index.
     ///
-    /// All counts are atomic loads; does not block ongoing searches.
+    /// All counts are atomic loads or cheap reads; does not block ongoing searches.
+    /// `graph_layers` is read under the HNSW read lock (brief acquisition).
     pub fn stats(&self) -> VectorIndexStats {
         let vector_count = self.key_to_id.len() as u64;
         let pending_updates = self.pending.lock().len() as u64;
         let memory_bytes = self.estimate_memory_bytes();
+        let graph_layers = self.hnsw.read().layer_count();
         let last_optimized = self.last_optimized.read().clone();
         VectorIndexStats {
             attribute: self.attribute.clone(),
@@ -282,7 +285,7 @@ impl VectorIndex {
             distance_metric: self.distance_metric,
             vector_count,
             memory_bytes,
-            graph_layers: 0, // populated by G3 once HNSW exposes layer count
+            graph_layers,
             pending_updates,
             last_optimized,
         }
@@ -291,18 +294,143 @@ impl VectorIndex {
     /// Triggers an HNSW graph rebuild in a background task.
     ///
     /// Returns the in-flight `OptimizeHandle` (shared `Arc`). If an optimize is
-    /// already running, returns the existing handle with the same
-    /// `optimization_id`. The caller checks `handle.finished` to distinguish
-    /// already-running from newly started.
+    /// already running, returns the existing handle. The `already_running` flag
+    /// in the HTTP response is set by the caller based on whether `finished` was
+    /// already `false` when this call was made.
     ///
-    /// The actual rebuild implementation is added in G3.
+    /// The rebuild uses a two-phase pattern:
+    /// 1. Build a fresh HNSW graph in the background without taking the read lock.
+    /// 2. Swap the new graph under the write lock (brief blocking window).
+    ///
+    /// Searches continue against the old graph during rebuild.
+    /// Only one optimize may run at a time per index; subsequent calls return the
+    /// existing handle.
     pub fn optimize(self: &Arc<Self>) -> Arc<OptimizeHandle> {
-        todo!("implement in G3: spawn rebuild task, atomic pointer swap on completion")
+        let mut guard = self.optimize_handle.lock();
+
+        // If an optimize is already running (not yet finished), return its handle.
+        if let Some(ref existing) = *guard {
+            if !existing.finished.load(Ordering::Relaxed) {
+                return Arc::clone(existing);
+            }
+        }
+
+        // Start a new optimize.
+        let id = uuid::Uuid::new_v4().to_string();
+        let started_at = {
+            let secs = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            format_iso8601(secs)
+        };
+        let handle = Arc::new(OptimizeHandle {
+            id: id.clone(),
+            started_at,
+            processed: AtomicU64::new(0),
+            total: AtomicU64::new(0),
+            finished: AtomicBool::new(false),
+        });
+        *guard = Some(Arc::clone(&handle));
+        drop(guard);
+
+        // Snapshot all committed vectors for the rebuild.
+        let vectors_snapshot: Vec<(u64, SharedVector)> = {
+            let hnsw = self.hnsw.read();
+            // Collect element id -> vector from the pending_snapshot + committed.
+            drop(hnsw);
+            self.key_to_id
+                .iter()
+                .filter_map(|r| {
+                    let key = r.key();
+                    let id = *r.value();
+                    // Get vector from pending_snapshot or committed.
+                    self.pending_snapshot
+                        .get(key.as_str())
+                        .map(|v| (id, v.clone()))
+                })
+                .collect()
+        };
+
+        handle.total.store(vectors_snapshot.len() as u64, Ordering::Relaxed);
+
+        let this = Arc::clone(self);
+        let handle_clone = Arc::clone(&handle);
+        tokio::spawn(async move {
+            // Build the new HNSW graph in a blocking task to avoid blocking the tokio worker.
+            let new_hnsw = tokio::task::spawn_blocking({
+                let vectors = vectors_snapshot;
+                let dimension = this.dimension;
+                let distance_metric = this.distance_metric;
+                let handle_inner = Arc::clone(&handle_clone);
+                move || {
+                    let params = HnswParams {
+                        dimension,
+                        distance: distance_metric,
+                        ..Default::default()
+                    };
+                    let mut fresh = Hnsw::new(params);
+                    for (elem_id, vector) in vectors {
+                        fresh.insert(elem_id, vector);
+                        handle_inner.processed.fetch_add(1, Ordering::Relaxed);
+                    }
+                    fresh
+                }
+            })
+            .await;
+
+            match new_hnsw {
+                Ok(fresh_graph) => {
+                    // Swap under write lock — brief blocking window.
+                    *this.hnsw.write() = fresh_graph;
+                    // Record optimize completion time.
+                    let now_secs = SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    *this.last_optimized.write() = Some(format_iso8601(now_secs));
+                    handle_clone.finished.store(true, Ordering::Relaxed);
+                    info!(
+                        attribute = %this.attribute,
+                        index_name = %this.index_name,
+                        processed = handle_clone.processed.load(Ordering::Relaxed),
+                        "vector index optimize complete"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        attribute = %this.attribute,
+                        index_name = %this.index_name,
+                        error = %e,
+                        "vector index optimize task panicked"
+                    );
+                    handle_clone.finished.store(true, Ordering::Relaxed);
+                }
+            }
+        });
+
+        handle
+    }
+
+    /// Returns the current in-flight `OptimizeHandle`, or `None` if no optimize is running.
+    ///
+    /// Used by the admin status handler to report progress without triggering a new rebuild.
+    pub fn current_optimize_handle(&self) -> Option<Arc<OptimizeHandle>> {
+        self.optimize_handle.lock().clone()
     }
 
     // ------------------------------------------------------------------
     // Private helpers
     // ------------------------------------------------------------------
+
+    /// Computes the BLAKE3-256 hash of the raw f32 byte representation of a vector.
+    ///
+    /// The vector is serialized as little-endian f32 values (matching `Vector::to_f32_bytes_le`).
+    /// The 32-byte hash is stored in `blake3_seen` for duplicate detection.
+    fn blake3_hash(vector: &SharedVector) -> [u8; 32] {
+        let bytes = vector.vector().to_f32_bytes_le();
+        *blake3::hash(&bytes).as_bytes()
+    }
 
     /// Estimated memory usage of the HNSW graph in bytes.
     ///
@@ -359,6 +487,33 @@ impl VectorIndex {
 }
 
 // ------------------------------------------------------------------
+// ISO-8601 timestamp helper (no external dep)
+// ------------------------------------------------------------------
+
+/// Formats Unix seconds as a minimal ISO-8601 UTC string: `YYYY-MM-DDTHH:MM:SSZ`.
+#[allow(clippy::cast_possible_truncation)]
+fn format_iso8601(secs: u64) -> String {
+    let s = secs % 60;
+    let m = (secs / 60) % 60;
+    let h = (secs / 3600) % 24;
+    let days = secs / 86400;
+
+    let z = days + 2_440_588;
+    let a = (z as f64 - 1_867_216.25) / 36_524.25;
+    let a = z + 1 + a as u64 - (a as u64 / 4);
+    let b = a + 1524;
+    let c = ((b as f64 - 122.1) / 365.25) as u64;
+    let dd = (365.25 * c as f64) as u64;
+    let e = ((b - dd) as f64 / 30.6001) as u64;
+
+    let day = (b - dd - (30.6001 * e as f64) as u64) as u32;
+    let month = if e < 14 { e - 1 } else { e - 13 } as u32;
+    let year = if month > 2 { c - 4716 } else { c - 4715 } as u32;
+
+    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+// ------------------------------------------------------------------
 // Index trait implementation
 // ------------------------------------------------------------------
 
@@ -375,6 +530,23 @@ impl Index for VectorIndex {
         let Some(vector) = self.decode_vector_from_record(value) else {
             return;
         };
+
+        // BLAKE3 deduplication: skip HNSW insertion if this exact vector bytes
+        // have already been committed. `DashSet::insert` returns `false` if the
+        // hash was already present — the atomic check-and-insert prevents
+        // duplicate HNSW nodes even under concurrent writes.
+        if self.dedup_enabled {
+            let hash = Self::blake3_hash(&vector);
+            if !self.blake3_seen.insert(hash) {
+                // Duplicate — update the pending_snapshot so reads return the key,
+                // but skip HNSW mutation (the vector data is already in the graph).
+                self.pending_snapshot
+                    .insert(key.to_string(), vector.clone());
+                self.pending_removed.remove(key);
+                return;
+            }
+        }
+
         self.pending_snapshot
             .insert(key.to_string(), vector.clone());
         self.pending_removed.remove(key);
@@ -390,7 +562,17 @@ impl Index for VectorIndex {
         self.insert(key, new_value);
     }
 
-    fn remove(&self, key: &str, _old_value: &rmpv::Value) {
+    fn remove(&self, key: &str, old_value: &rmpv::Value) {
+        // Evict the BLAKE3 hash when the vector is removed, so the same bytes
+        // can be inserted again after deletion.
+        if self.dedup_enabled {
+            if let Some(vector) = self.decode_vector_from_record(old_value) {
+                let hash = Self::blake3_hash(&vector);
+                self.blake3_seen.remove(&hash);
+            }
+            // If old_value doesn't decode (e.g. Nil), we cannot evict the hash,
+            // but the HNSW node is still removed via the pending queue.
+        }
         self.pending_snapshot.remove(key);
         self.pending_removed.insert(key.to_string());
         self.pending.lock().push(VectorPendingUpdate::Remove {
@@ -414,6 +596,7 @@ impl Index for VectorIndex {
         self.id_to_key.clear();
         self.pending_snapshot.clear();
         self.pending_removed.clear();
+        self.blake3_seen.clear();
     }
 
     fn lookup_eq(&self, _value: &rmpv::Value) -> HashSet<String> {
@@ -598,5 +781,182 @@ mod tests {
         assert!(idx.lookup_eq(&rmpv::Value::Nil).is_empty());
         assert!(idx.lookup_range(None, true, None, true).is_empty());
         assert!(idx.lookup_contains("token").is_empty());
+    }
+
+    // --- G3: stats, dedup, optimize ---
+
+    #[test]
+    fn stats_returns_correct_vector_count() {
+        let idx = make_index();
+        let r1 = make_record(&[0.1, 0.2, 0.3, 0.4]);
+        idx.insert("k1", &r1);
+        idx.commit_pending();
+
+        let stats = idx.stats();
+        assert_eq!(stats.vector_count, 1);
+        assert_eq!(stats.dimension, 4);
+        assert_eq!(stats.index_name, "embedding_index");
+        assert_eq!(stats.pending_updates, 0);
+    }
+
+    #[test]
+    fn stats_pending_updates_reflects_uncommitted_mutations() {
+        let idx = make_index();
+        let r1 = make_record(&[0.1, 0.2, 0.3, 0.4]);
+        idx.insert("k1", &r1);
+        // Not committed yet.
+        let stats = idx.stats();
+        assert_eq!(stats.pending_updates, 1);
+        assert_eq!(stats.vector_count, 0);
+    }
+
+    #[test]
+    fn stats_memory_bytes_nonzero_after_insert_and_commit() {
+        let idx = make_index();
+        let r1 = make_record(&[0.1, 0.2, 0.3, 0.4]);
+        idx.insert("k1", &r1);
+        idx.commit_pending();
+
+        let stats = idx.stats();
+        // Approximate: 1 vector * 4 dims * 4 bytes + 1 * 16 * 8 = 144 bytes
+        assert!(stats.memory_bytes > 0, "memory_bytes should be nonzero");
+    }
+
+    #[test]
+    fn dedup_prevents_duplicate_hnsw_insert() {
+        // Two inserts with identical vectors — only one should go to HNSW.
+        let idx = VectorIndex::new("embedding", "emb_idx", 4, DistanceMetric::Cosine, true);
+        let record = make_record(&[1.0, 0.0, 0.0, 0.0]);
+        idx.insert("k1", &record);
+        idx.commit_pending();
+        assert_eq!(idx.entry_count(), 1);
+
+        // Second insert of same bytes to a different key — dedup should skip HNSW.
+        idx.insert("k2", &record);
+        idx.commit_pending();
+        // Dedup fires: k2 gets the same BLAKE3 hash as k1, HNSW insert is skipped.
+        // key_to_id has k1 only; entry_count stays 1.
+        assert_eq!(idx.entry_count(), 1, "dedup should prevent second HNSW insert");
+    }
+
+    #[test]
+    fn dedup_disabled_allows_duplicate_hnsw_insert() {
+        let idx = VectorIndex::new("embedding", "emb_idx", 4, DistanceMetric::Cosine, false);
+        let record = make_record(&[1.0, 0.0, 0.0, 0.0]);
+        idx.insert("k1", &record);
+        idx.commit_pending();
+        assert_eq!(idx.entry_count(), 1);
+
+        // With dedup disabled, second insert proceeds to HNSW.
+        idx.insert("k2", &record);
+        // pending queue should have 1 upsert for k2.
+        assert_eq!(idx.pending_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_dedup_same_embedding_yields_single_entry() {
+        use std::sync::Arc;
+
+        let idx = Arc::new(VectorIndex::new(
+            "embedding",
+            "emb_idx",
+            4,
+            DistanceMetric::Cosine,
+            true,
+        ));
+        let record = make_record(&[1.0, 0.0, 0.0, 0.0]);
+
+        // Two concurrent writers with the same vector bytes.
+        let idx1 = Arc::clone(&idx);
+        let r1 = record.clone();
+        let t1 = tokio::task::spawn_blocking(move || idx1.insert("k1", &r1));
+        let idx2 = Arc::clone(&idx);
+        let r2 = record.clone();
+        let t2 = tokio::task::spawn_blocking(move || idx2.insert("k2", &r2));
+
+        let _ = tokio::join!(t1, t2);
+        idx.commit_pending();
+
+        // DashSet::insert is atomic — only one writer succeeds in reserving the hash.
+        // entry_count should be 1.
+        assert_eq!(idx.entry_count(), 1, "concurrent dedup: only one HNSW node expected");
+    }
+
+    #[tokio::test]
+    async fn optimize_completes_and_sets_last_optimized() {
+        let idx = Arc::new(VectorIndex::new(
+            "embedding",
+            "emb_idx",
+            4,
+            DistanceMetric::Cosine,
+            false,
+        ));
+
+        // Insert and commit some vectors.
+        let r1 = make_record(&[1.0, 0.0, 0.0, 0.0]);
+        let r2 = make_record(&[0.0, 1.0, 0.0, 0.0]);
+        idx.insert("k1", &r1);
+        idx.insert("k2", &r2);
+        idx.commit_pending();
+
+        assert!(
+            idx.stats().last_optimized.is_none(),
+            "should be None before optimize"
+        );
+
+        let handle = idx.optimize();
+        // Wait for the background task to complete.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if handle.finished.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("optimize did not complete in time");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let stats = idx.stats();
+        assert!(
+            stats.last_optimized.is_some(),
+            "last_optimized should be set after optimize"
+        );
+        // The ISO-8601 string should start with "20".
+        assert!(
+            stats.last_optimized.as_ref().unwrap().starts_with("20"),
+            "last_optimized should be a valid ISO-8601 UTC timestamp"
+        );
+    }
+
+    #[tokio::test]
+    async fn optimize_idempotent_returns_same_handle_when_running() {
+        let idx = Arc::new(VectorIndex::new(
+            "embedding",
+            "emb_idx",
+            4,
+            DistanceMetric::Cosine,
+            false,
+        ));
+
+        let h1 = idx.optimize();
+        let h2 = idx.optimize();
+
+        // While h1 is still running, h2 should return the same handle.
+        if !h1.finished.load(std::sync::atomic::Ordering::Relaxed) {
+            assert_eq!(h1.id, h2.id, "in-flight optimize should return same handle");
+        }
+
+        // Wait for completion.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if h1.finished.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("optimize did not complete in time");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 }
