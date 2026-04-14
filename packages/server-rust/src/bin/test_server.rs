@@ -422,6 +422,11 @@ impl ObserverFactory for SearchObserverFactory {
         // is dropped and no hybrid deltas will be delivered for this map.
         if let Some(svc) = self.search_service.get() {
             svc.spawn_hybrid_notifier(hybrid_rx);
+        } else {
+            tracing::warn!(
+                map = %map_name,
+                "SearchObserverFactory: search_service not wired — hybrid_rx dropped, no hybrid deltas will be delivered"
+            );
         }
         Some(Arc::new(observer))
     }

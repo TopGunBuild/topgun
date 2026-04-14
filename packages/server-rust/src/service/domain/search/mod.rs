@@ -1829,6 +1829,7 @@ impl ManagedService for SearchService {
         }
         indexes.clear();
         self.registry.subscriptions.clear();
+        self.hybrid_registry.subscriptions.clear();
         self.needs_population.clear();
         Ok(())
     }
