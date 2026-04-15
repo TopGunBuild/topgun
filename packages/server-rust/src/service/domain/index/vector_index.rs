@@ -18,6 +18,7 @@ use parking_lot::{Mutex, RwLock};
 use topgun_core::vector::{distance_for_metric, Distance, DistanceMetric, SharedVector};
 use tracing::{info, warn};
 
+use crate::network::handlers::admin_types::{BackfillProgress, RebuildType};
 use crate::service::domain::index::attribute::AttributeExtractor;
 use crate::service::domain::index::hnsw::{ElementId, Hnsw, HnswParams};
 use crate::service::domain::index::{Index, IndexType};
@@ -674,17 +675,31 @@ pub struct VectorRebuildSpec {
 ///
 /// For each descriptor:
 /// 1. Re-registers the vector index via `registry.add_vector_index_with_params`.
-/// 2. Iterates all partition stores for the map and inserts records containing
-///    the `_embedding` attribute of matching dimension into the rebuilt index.
-/// 3. Calls `commit_pending()` to flush all buffered mutations into the HNSW graph.
-/// 4. Logs progress at INFO level.
+/// 2. Creates a `BackfillProgress` entry with `rebuild_type = StartupRebuild` before iterating.
+/// 3. Iterates all partition stores for the map and inserts records containing
+///    the attribute of matching dimension into the rebuilt index.
+/// 4. Calls `commit_pending()` to flush all buffered mutations into the HNSW graph.
+/// 5. Sets `done = true` on the progress entry.
+/// 6. Logs progress at INFO level.
 ///
 /// Missing `store_factory` records are a no-op (clean first start).
+///
+/// The `backfill_progress` `Arc` is the same instance stored in `AppState` —
+/// progress entries written here are visible through the admin status endpoint
+/// immediately after `set_ready()`.
 pub async fn rebuild_from_store(
     index_factory: &crate::service::domain::index::mutation_observer::IndexObserverFactory,
     store_factory: &RecordStoreFactory,
     specs: &[VectorRebuildSpec],
+    backfill_progress: &Arc<DashMap<(String, String), Arc<BackfillProgress>>>,
 ) {
+    // Emit the Arc strong_count at entry — confirms shared-identity invariant
+    // (count must be >= 2: one in the caller, one passed into this function).
+    tracing::debug!(
+        "rebuild_from_store: Arc strong_count={}",
+        Arc::strong_count(backfill_progress)
+    );
+
     if specs.is_empty() {
         return;
     }
@@ -703,6 +718,21 @@ pub async fn rebuild_from_store(
             spec.dedup_enabled,
         );
 
+        // Create progress entry before iteration so operators can observe liveness
+        // through the backfill status endpoint during the rebuild window.
+        // `total = 0` here because a cheap pre-count API is not available on RecordStore;
+        // `processed` provides a liveness signal, and `done = true` marks completion.
+        let progress = Arc::new(BackfillProgress {
+            total: AtomicU64::new(0),
+            processed: AtomicU64::new(0),
+            done: AtomicBool::new(false),
+            rebuild_type: RebuildType::StartupRebuild,
+        });
+        backfill_progress.insert(
+            (spec.map_name.clone(), spec.attribute.clone()),
+            Arc::clone(&progress),
+        );
+
         let stores = store_factory.get_all_for_map(&spec.map_name);
         let mut count: u64 = 0;
 
@@ -713,6 +743,7 @@ pub async fn rebuild_from_store(
                         let rmpv_val = crate::service::domain::predicate::value_to_rmpv(value);
                         vi.insert(key, &rmpv_val);
                         count += 1;
+                        progress.processed.fetch_add(1, Ordering::Relaxed);
                     }
                 },
                 false,
@@ -721,6 +752,9 @@ pub async fn rebuild_from_store(
 
         // Flush all buffered inserts into the HNSW graph.
         let flushed = vi.commit_pending();
+        // Mark done after commit_pending() — operators see done=true only when
+        // the HNSW graph is fully populated and ready to serve queries.
+        progress.done.store(true, Ordering::Release);
         let elapsed = started.elapsed();
 
         info!(
@@ -743,9 +777,11 @@ pub async fn rebuild_from_store(
 mod rebuild_tests {
     use std::sync::Arc;
 
+    use dashmap::DashMap;
     use topgun_core::vector::DistanceMetric;
 
     use super::VectorRebuildSpec;
+    use crate::network::handlers::admin_types::{BackfillProgress, RebuildType};
     use crate::service::domain::index::mutation_observer::IndexObserverFactory;
     use crate::storage::datastores::NullDataStore;
     use crate::storage::factory::RecordStoreFactory;
@@ -759,12 +795,17 @@ mod rebuild_tests {
         ))
     }
 
+    fn make_backfill_progress() -> Arc<DashMap<(String, String), Arc<BackfillProgress>>> {
+        Arc::new(DashMap::new())
+    }
+
     #[tokio::test]
     async fn rebuild_from_store_no_op_when_empty_specs() {
         let factory = IndexObserverFactory::new();
         let store_factory = make_store_factory();
+        let bp = make_backfill_progress();
         // Should complete without error and without registering any indexes.
-        super::rebuild_from_store(&factory, &store_factory, &[]).await;
+        super::rebuild_from_store(&factory, &store_factory, &[], &bp).await;
         assert_eq!(factory.all_index_stats().len(), 0);
     }
 
@@ -772,6 +813,7 @@ mod rebuild_tests {
     async fn rebuild_from_store_registers_index_when_no_records() {
         let factory = IndexObserverFactory::new();
         let store_factory = make_store_factory();
+        let bp = make_backfill_progress();
         let specs = vec![VectorRebuildSpec {
             map_name: "users".to_string(),
             attribute: "_embedding".to_string(),
@@ -782,7 +824,7 @@ mod rebuild_tests {
             hnsw_ef_construction: 200,
             dedup_enabled: true,
         }];
-        super::rebuild_from_store(&factory, &store_factory, &specs).await;
+        super::rebuild_from_store(&factory, &store_factory, &specs, &bp).await;
         // Index should be registered even with no records (empty store).
         let registry = factory.get_registry("users").expect("registry should exist");
         assert!(registry.get_vector_index("_embedding").is_some());
@@ -790,6 +832,46 @@ mod rebuild_tests {
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].vector_count, 0);
         assert_eq!(stats[0].index_name, "emb_idx");
+    }
+
+    #[tokio::test]
+    async fn rebuild_from_store_progress_done_and_startup_rebuild_type() {
+        use std::sync::atomic::Ordering;
+
+        let factory = IndexObserverFactory::new();
+        let store_factory = make_store_factory();
+        let bp = make_backfill_progress();
+
+        let specs = vec![VectorRebuildSpec {
+            map_name: "users".to_string(),
+            attribute: "_embedding".to_string(),
+            index_name: "emb_idx".to_string(),
+            dimension: 4,
+            distance_metric: DistanceMetric::Cosine,
+            hnsw_m: 16,
+            hnsw_ef_construction: 200,
+            dedup_enabled: true,
+        }];
+
+        super::rebuild_from_store(&factory, &store_factory, &specs, &bp).await;
+
+        // Progress entry must exist after rebuild.
+        let entry = bp
+            .get(&("users".to_string(), "_embedding".to_string()))
+            .expect("progress entry must be created by rebuild_from_store");
+
+        // done must be set after commit_pending() (AC #11).
+        assert!(
+            entry.done.load(Ordering::Acquire),
+            "done must be true after rebuild_from_store returns"
+        );
+
+        // rebuild_type must be StartupRebuild (AC #12).
+        assert_eq!(
+            entry.rebuild_type,
+            RebuildType::StartupRebuild,
+            "startup rebuild must use RebuildType::StartupRebuild"
+        );
     }
 
     #[test]

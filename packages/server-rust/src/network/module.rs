@@ -162,6 +162,9 @@ impl NetworkModule {
                 server_config: self.server_config.clone(),
                 policy_store: self.policy_store.clone(),
                 index_observer_factory: self.index_observer_factory.clone(),
+                // build_router is used in tests and skips the serve() startup path;
+                // provide a fresh empty map (no startup rebuild occurs in this path).
+                backfill_progress: Arc::new(dashmap::DashMap::new()),
             },
         )
     }
@@ -219,6 +222,13 @@ impl NetworkModule {
         let tls = config.tls.take();
         let observability = self.observability.clone();
 
+        // Allocate the backfill progress map BEFORE rebuild_from_store so that
+        // progress entries written during startup rebuild are visible immediately
+        // after set_ready(). The same Arc is threaded into AppState below.
+        // There must be exactly one Arc<DashMap> for backfill progress — this is it.
+        let backfill_progress: Arc<dashmap::DashMap<(String, String), Arc<crate::network::handlers::admin_types::BackfillProgress>>> =
+            Arc::new(dashmap::DashMap::new());
+
         // Rebuild vector indexes from persisted records before serving requests.
         // This must complete before set_ready() so that VECTOR_SEARCH requests
         // are not served against empty indexes during the startup window.
@@ -244,10 +254,12 @@ impl NetworkModule {
                         dedup_enabled: d.dedup_enabled,
                     })
                     .collect();
-                rebuild_from_store(index_factory, store_factory, &specs).await;
+                rebuild_from_store(index_factory, store_factory, &specs, &backfill_progress).await;
             }
         }
 
+        // set_ready() is called AFTER rebuild_from_store() awaits to completion,
+        // ensuring all startup progress entries are written before serving.
         let router = build_app(
             config,
             Arc::clone(&registry),
@@ -259,6 +271,7 @@ impl NetworkModule {
                 server_config: self.server_config,
                 policy_store: self.policy_store,
                 index_observer_factory: self.index_observer_factory,
+                backfill_progress,
             },
         );
 
@@ -292,6 +305,10 @@ struct AppServices {
     server_config: Option<Arc<ArcSwap<ServerConfig>>>,
     policy_store: Option<Arc<dyn PolicyStore>>,
     index_observer_factory: Option<Arc<IndexObserverFactory>>,
+    /// Pre-allocated backfill progress map. Populated by `rebuild_from_store`
+    /// during startup before `set_ready()` and reused as `AppState.backfill_progress`.
+    /// There must be exactly one `Arc` instance — this field carries it.
+    backfill_progress: Arc<dashmap::DashMap<(String, String), Arc<crate::network::handlers::admin_types::BackfillProgress>>>,
 }
 
 /// Builds the complete application router with all routes and middleware.
@@ -312,6 +329,7 @@ fn build_app(
         server_config,
         policy_store,
         index_observer_factory,
+        backfill_progress,
     } = services;
     let layers = build_http_layers(&config);
 
@@ -414,7 +432,9 @@ fn build_app(
         refresh_grant_store: None,
         auth_validator: None,
         index_observer_factory,
-        backfill_progress: Arc::new(dashmap::DashMap::new()),
+        // Use the pre-allocated Arc from serve() — same instance that was passed
+        // to rebuild_from_store, so startup progress entries are already visible.
+        backfill_progress,
     };
 
     // Build a per-IP rate limiter for admin and login endpoints.
