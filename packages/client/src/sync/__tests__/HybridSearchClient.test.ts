@@ -7,10 +7,6 @@
  */
 
 import { HybridSearchClient } from '../HybridSearchClient';
-// Runtime import via moduleNameMapper resolves to core source (which has HybridSearchPayloadSchema).
-// TypeScript type-check resolves to core dist (stale until rebuilt), so we bypass with ts-ignore.
-// The runtime assertion at line below is the meaningful guard against wire-drift with SPEC-207.
-// @ts-ignore — HybridSearchPayloadSchema is present in core source (exported via schemas/index.ts)
 import { HybridSearchPayloadSchema } from '@topgunbuild/core';
 import type { HybridSearchClientResult } from '../types';
 

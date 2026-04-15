@@ -121,9 +121,9 @@ export function useHybridSearch(
     const { enabled: _enabled, ...rest } = options;
     return Object.keys(rest).length > 0 ? rest : undefined;
   }, [
-    options?.methods,
+    methodsKey,
     options?.k,
-    options?.queryVector,
+    queryVectorKey,
     options?.predicate,
     options?.includeValue,
     options?.minScore,
