@@ -30,8 +30,8 @@ import type {
 import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
 import type { IConnectionProvider } from './types';
 import { ConflictResolverClient } from './ConflictResolverClient';
-import { WebSocketManager, BackpressureController, QueryManager, TopicManager, LockManager, WriteConcernManager, CounterManager, EntryProcessorClient, SearchClient, SqlClient, VectorSearchClient, MerkleSyncHandler, ORMapSyncHandler, MessageRouter, registerClientMessageHandlers } from './sync';
-import type { SearchResult, SqlQueryResult, VectorSearchClientOptions, VectorSearchClientResult, IMessageRouter } from './sync';
+import { WebSocketManager, BackpressureController, QueryManager, TopicManager, LockManager, WriteConcernManager, CounterManager, EntryProcessorClient, SearchClient, SqlClient, VectorSearchClient, HybridSearchClient, MerkleSyncHandler, ORMapSyncHandler, MessageRouter, registerClientMessageHandlers } from './sync';
+import type { SearchResult, SqlQueryResult, VectorSearchClientOptions, VectorSearchClientResult, HybridSearchClientOptions, HybridSearchClientResult, IMessageRouter } from './sync';
 
 // Re-export SearchResult and SqlQueryResult from sync module for backwards compatibility
 export type { SearchResult, SqlQueryResult } from './sync';
@@ -137,6 +137,9 @@ export class SyncEngine {
 
   // VectorSearchClient handles ANN vector search requests
   private readonly vectorSearchClient: VectorSearchClient;
+
+  // HybridSearchClient handles tri-hybrid RRF search requests
+  private readonly hybridSearchClient: HybridSearchClient;
 
   // MerkleSyncHandler handles LWWMap sync protocol messages
   private readonly merkleSyncHandler: MerkleSyncHandler;
@@ -272,6 +275,12 @@ export class SyncEngine {
       isAuthenticated: () => this.isAuthenticated(),
     });
 
+    // Initialize HybridSearchClient for tri-hybrid RRF search requests
+    this.hybridSearchClient = new HybridSearchClient({
+      sendMessage: (msg) => this.sendMessage(msg),
+      isAuthenticated: () => this.isAuthenticated(),
+    });
+
     // Initialize MerkleSyncHandler for LWWMap sync protocol
     this.merkleSyncHandler = new MerkleSyncHandler({
       getMap: (name) => this.maps.get(name),
@@ -329,6 +338,7 @@ export class SyncEngine {
         searchClient: this.searchClient,
         sqlClient: this.sqlClient,
         vectorSearchClient: this.vectorSearchClient,
+        hybridSearchClient: this.hybridSearchClient,
         merkleSyncHandler: this.merkleSyncHandler,
         orMapSyncHandler: this.orMapSyncHandler,
       }
@@ -941,6 +951,9 @@ export class SyncEngine {
     // Clean up VectorSearchClient
     this.vectorSearchClient.close(new Error('SyncEngine closed'));
 
+    // Clean up HybridSearchClient
+    this.hybridSearchClient.close(new Error('SyncEngine closed'));
+
     this.stateMachine.transition(SyncState.DISCONNECTED);
     logger.info('SyncEngine closed');
   }
@@ -1341,6 +1354,27 @@ export class SyncEngine {
     options?: VectorSearchClientOptions
   ): Promise<VectorSearchClientResult[]> {
     return this.vectorSearchClient.vectorSearch(mapName, queryVector, options);
+  }
+
+  // ============================================
+  // Hybrid Search API
+  // ============================================
+
+  /**
+   * Perform a tri-hybrid search (exact + fullText + semantic via RRF) on the server.
+   * Delegates to HybridSearchClient.
+   *
+   * @param mapName Name of the map to search
+   * @param queryText Search query text
+   * @param options Search options (methods, k, queryVector, etc.)
+   * @returns Promise resolving to ranked HybridSearchClientResult[]
+   */
+  public async hybridSearch(
+    mapName: string,
+    queryText: string,
+    options?: HybridSearchClientOptions
+  ): Promise<HybridSearchClientResult[]> {
+    return this.hybridSearchClient.hybridSearch(mapName, queryText, options);
   }
 
   // ============================================

@@ -3,7 +3,7 @@ import type { ORMapRecord, LWWRecord, EntryProcessorDef, EntryProcessorResult, S
 import type { IStorageAdapter } from './IStorageAdapter';
 import { SyncEngine } from './SyncEngine';
 import type { BackoffConfig, SqlQueryResult } from './SyncEngine';
-import type { VectorSearchClientOptions, VectorSearchClientResult } from './sync';
+import type { VectorSearchClientOptions, VectorSearchClientResult, HybridSearchClientOptions, HybridSearchClientResult } from './sync';
 import type { AuthProvider } from './auth/types';
 import { QueryHandle } from './QueryHandle';
 import type { QueryFilter } from './QueryHandle';
@@ -692,6 +692,22 @@ export class TopGunClient {
     options?: VectorSearchClientOptions
   ): Promise<VectorSearchClientResult[]> {
     return this.syncEngine.vectorSearch(mapName, queryVector, options);
+  }
+
+  /**
+   * Perform a tri-hybrid search (exact + fullText + semantic via RRF).
+   *
+   * @param mapName Name of the map to search
+   * @param queryText Search query text
+   * @param options Search options (methods, k, queryVector, predicate, etc.)
+   * @returns Promise resolving to ranked HybridSearchClientResult[]
+   */
+  public async hybridSearch(
+    mapName: string,
+    queryText: string,
+    options?: HybridSearchClientOptions
+  ): Promise<HybridSearchClientResult[]> {
+    return this.syncEngine.hybridSearch(mapName, queryText, options);
   }
 
   // ============================================

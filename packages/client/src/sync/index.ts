@@ -41,6 +41,11 @@ export type {
   VectorSearchClientConfig,
   VectorSearchClientOptions,
   VectorSearchClientResult,
+  IHybridSearchClient,
+  HybridSearchClientConfig,
+  HybridSearchClientOptions,
+  HybridSearchClientResult,
+  HybridSearchMethod,
   IMerkleSyncHandler,
   MerkleSyncHandlerConfig,
   IORMapSyncHandler,
@@ -62,6 +67,7 @@ export { EntryProcessorClient } from './EntryProcessorClient';
 export { SearchClient } from './SearchClient';
 export { SqlClient } from './SqlClient';
 export { VectorSearchClient } from './VectorSearchClient';
+export { HybridSearchClient } from './HybridSearchClient';
 export { MerkleSyncHandler } from './MerkleSyncHandler';
 export { ORMapSyncHandler } from './ORMapSyncHandler';
 export { MessageRouter } from './MessageRouter';

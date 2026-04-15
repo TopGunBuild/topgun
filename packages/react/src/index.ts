@@ -21,3 +21,6 @@ export * from './hooks/useHybridQuery';
 
 // Vector Search hooks
 export * from './hooks/useVectorSearch';
+
+// Hybrid Search hooks
+export * from './hooks/useHybridSearch';

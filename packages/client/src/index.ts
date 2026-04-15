@@ -63,6 +63,9 @@ export type { SqlQueryResult } from './SyncEngine';
 // Vector Search exports
 export type { VectorSearchClientOptions, VectorSearchClientResult } from './sync';
 
+// Hybrid Search exports
+export type { HybridSearchClientOptions, HybridSearchClientResult, HybridSearchMethod } from './sync';
+
 // Live Search exports
 export { SearchHandle } from './SearchHandle';
 export type { SearchResultsCallback } from './SearchHandle';

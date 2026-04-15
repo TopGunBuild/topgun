@@ -93,6 +93,19 @@ export interface ManagerDelegates {
       error?: string;
     }): void;
   };
+  hybridSearchClient: {
+    handleResponse(payload: {
+      requestId: string;
+      results: Array<{
+        key: string;
+        score: number;
+        methodScores: Partial<Record<string, number>>;
+        value?: unknown;
+      }>;
+      searchTimeMs: number;
+      error?: string;
+    }): void;
+  };
   merkleSyncHandler: {
     handleSyncRespRoot(payload: SyncRespRootPayload): void;
     handleSyncRespBuckets(payload: SyncRespBucketsPayload): void;
@@ -128,6 +141,7 @@ export const CLIENT_MESSAGE_TYPES = [
   'SEARCH_RESP', 'SEARCH_UPDATE',
   'SQL_QUERY_RESP',
   'VECTOR_SEARCH_RESP',
+  'HYBRID_SEARCH_RESP',
 ] as const;
 
 /**
@@ -241,6 +255,11 @@ export function registerClientMessageHandlers(
     // Vector search handlers
     'VECTOR_SEARCH_RESP': (msg) => {
       managers.vectorSearchClient.handleResponse(msg.payload);
+    },
+
+    // Hybrid search handlers
+    'HYBRID_SEARCH_RESP': (msg) => {
+      managers.hybridSearchClient.handleResponse(msg.payload);
     },
   });
 }
