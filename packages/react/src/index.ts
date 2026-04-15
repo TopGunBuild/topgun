@@ -24,3 +24,6 @@ export * from './hooks/useVectorSearch';
 
 // Hybrid Search hooks
 export * from './hooks/useHybridSearch';
+
+// Hybrid Search subscription hooks
+export * from './hooks/useHybridSearchSubscribe';
