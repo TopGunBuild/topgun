@@ -141,7 +141,7 @@ export const CLIENT_MESSAGE_TYPES = [
   'SEARCH_RESP', 'SEARCH_UPDATE',
   'SQL_QUERY_RESP',
   'VECTOR_SEARCH_RESP',
-  'HYBRID_SEARCH_RESP',
+  'HYBRID_SEARCH_RESP', 'HYBRID_SEARCH_UPDATE',
 ] as const;
 
 /**
@@ -260,6 +260,9 @@ export function registerClientMessageHandlers(
     // Hybrid search handlers
     'HYBRID_SEARCH_RESP': (msg) => {
       managers.hybridSearchClient.handleResponse(msg.payload);
+    },
+    'HYBRID_SEARCH_UPDATE': () => {
+      // HYBRID_SEARCH_UPDATE is consumed by HybridSearchHandle via emitMessage; no-op here.
     },
   });
 }

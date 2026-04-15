@@ -172,8 +172,8 @@ describe('ClientMessageHandlers', () => {
   });
 
   describe('CLIENT_MESSAGE_TYPES', () => {
-    it('should contain 36 message types', () => {
-      expect(CLIENT_MESSAGE_TYPES.length).toBe(36);
+    it('should contain 37 message types', () => {
+      expect(CLIENT_MESSAGE_TYPES.length).toBe(37);
     });
 
     it('should include vector search types', () => {
@@ -182,6 +182,7 @@ describe('ClientMessageHandlers', () => {
 
     it('should include hybrid search types', () => {
       expect(CLIENT_MESSAGE_TYPES).toContain('HYBRID_SEARCH_RESP');
+      expect(CLIENT_MESSAGE_TYPES).toContain('HYBRID_SEARCH_UPDATE');
     });
 
     it('should include all auth types', () => {

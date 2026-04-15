@@ -70,6 +70,14 @@ export type { HybridSearchClientOptions, HybridSearchClientResult, HybridSearchM
 export { SearchHandle } from './SearchHandle';
 export type { SearchResultsCallback } from './SearchHandle';
 
+// Hybrid Search subscription exports
+export { HybridSearchHandle } from './HybridSearchHandle';
+export type {
+  HybridSearchHandleResult,
+  HybridSearchResultsCallback,
+  HybridSearchSubscribeOptions,
+} from './HybridSearchHandle';
+
 // Hybrid Query exports
 export { HybridQueryHandle } from './HybridQueryHandle';
 export type { HybridQueryFilter, HybridResultItem, HybridResultSource } from './HybridQueryHandle';

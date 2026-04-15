@@ -12,6 +12,8 @@ import { TopicHandle } from './TopicHandle';
 import { PNCounterHandle } from './PNCounterHandle';
 import { EventJournalReader } from './EventJournalReader';
 import { SearchHandle } from './SearchHandle';
+import { HybridSearchHandle } from './HybridSearchHandle';
+import type { HybridSearchSubscribeOptions } from './HybridSearchHandle';
 import { HybridQueryHandle } from './HybridQueryHandle';
 import type { HybridQueryFilter } from './HybridQueryHandle';
 import { logger } from './utils/logger';
@@ -754,6 +756,41 @@ export class TopGunClient {
     options?: SearchOptions
   ): SearchHandle<T> {
     return new SearchHandle<T>(this.syncEngine, mapName, query, options);
+  }
+
+  /**
+   * Subscribe to live tri-hybrid search results with real-time delta updates.
+   *
+   * Returns a HybridSearchHandle that sends HYBRID_SEARCH_SUB and receives
+   * ENTER/UPDATE/LEAVE deltas via HYBRID_SEARCH_UPDATE. Mirrors searchSubscribe()
+   * but for the tri-hybrid RRF path.
+   *
+   * @param mapName Name of the map to search
+   * @param queryText Search query text
+   * @param options Subscription options (methods, k, queryVector, predicate, etc.)
+   * @returns HybridSearchHandle for managing the subscription
+   *
+   * @example
+   * ```typescript
+   * const handle = client.hybridSearchSubscribe<Article>('articles', 'machine learning', {
+   *   methods: ['fullText', 'semantic'],
+   *   k: 20,
+   * });
+   *
+   * const unsubscribe = handle.subscribe((results) => {
+   *   setSearchResults(results);
+   * });
+   *
+   * // Cleanup when done
+   * handle.dispose();
+   * ```
+   */
+  public hybridSearchSubscribe<T = unknown>(
+    mapName: string,
+    queryText: string,
+    options?: HybridSearchSubscribeOptions
+  ): HybridSearchHandle<T> {
+    return new HybridSearchHandle<T>(this.syncEngine, mapName, queryText, options);
   }
 
   // ============================================
