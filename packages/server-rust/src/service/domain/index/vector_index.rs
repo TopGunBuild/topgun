@@ -353,12 +353,13 @@ impl VectorIndex {
         let handle_clone = Arc::clone(&handle);
         tokio::spawn(async move {
             // Build the new HNSW graph in a blocking task to avoid blocking the tokio worker.
+            // Returns Some(graph) on completion, None if cancelled cooperatively.
             let new_hnsw = tokio::task::spawn_blocking({
                 let vectors = vectors_snapshot;
                 let dimension = this.dimension;
                 let distance_metric = this.distance_metric;
                 let handle_inner = Arc::clone(&handle_clone);
-                move || {
+                move || -> Option<Hnsw> {
                     let params = HnswParams {
                         dimension,
                         distance: distance_metric,
@@ -366,17 +367,23 @@ impl VectorIndex {
                     };
                     let mut fresh = Hnsw::new(params);
                     for (elem_id, vector) in vectors {
+                        // Cooperative cancellation: check flag before each insert so
+                        // the operator's DELETE request is observed within one insert's
+                        // latency (~microseconds for 384-dim vectors).
+                        if handle_inner.cancelled.load(Ordering::Relaxed) {
+                            return None;
+                        }
                         fresh.insert(elem_id, vector);
                         handle_inner.processed.fetch_add(1, Ordering::Relaxed);
                     }
-                    fresh
+                    Some(fresh)
                 }
             })
             .await;
 
             match new_hnsw {
-                Ok(fresh_graph) => {
-                    // Swap under write lock — brief blocking window.
+                Ok(Some(fresh_graph)) => {
+                    // Successful rebuild: swap under write lock — brief blocking window.
                     *this.hnsw.write() = fresh_graph;
                     // Record optimize completion time.
                     let now_secs = SystemTime::now()
@@ -390,6 +397,16 @@ impl VectorIndex {
                         index_name = %this.index_name,
                         processed = handle_clone.processed.load(Ordering::Relaxed),
                         "vector index optimize complete"
+                    );
+                }
+                Ok(None) => {
+                    // Cancelled: do NOT swap the HNSW graph, do NOT update last_optimized.
+                    // The partial rebuild is dropped here; the live graph is unchanged.
+                    handle_clone.finished.store(true, Ordering::Relaxed);
+                    info!(
+                        attribute = %this.attribute,
+                        index_name = %this.index_name,
+                        "vector index optimize cancelled"
                     );
                 }
                 Err(e) => {
@@ -1144,5 +1161,116 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn cancel_mid_rebuild_does_not_swap_hnsw_graph() {
+        // Build an index with committed vectors; count before and after cancel must match.
+        let idx = Arc::new(VectorIndex::new(
+            "embedding",
+            "emb_idx",
+            4,
+            DistanceMetric::Cosine,
+            false,
+        ));
+
+        let records = vec![
+            make_record(&[1.0, 0.0, 0.0, 0.0]),
+            make_record(&[0.0, 1.0, 0.0, 0.0]),
+            make_record(&[0.0, 0.0, 1.0, 0.0]),
+        ];
+        for (i, rec) in records.iter().enumerate() {
+            idx.insert(&format!("k{i}"), rec);
+        }
+        idx.commit_pending();
+        let count_before = idx.entry_count();
+        let last_optimized_before = idx.stats().last_optimized.clone();
+
+        // Start optimize and immediately signal cancellation.
+        let (handle, _) = idx.optimize();
+        handle.cancelled.store(true, Ordering::Relaxed);
+
+        // Wait for the background task to finish.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if handle.finished.load(Ordering::Relaxed) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "cancelled optimize did not finish in time"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // Invariants: cancelled flag set, finished set, live graph unchanged.
+        assert!(handle.cancelled.load(Ordering::Relaxed), "cancelled flag must be true");
+        assert!(handle.finished.load(Ordering::Relaxed), "finished flag must be true after cancel");
+        assert_eq!(
+            idx.entry_count(),
+            count_before,
+            "live graph vector count must be unchanged after cancel"
+        );
+        assert_eq!(
+            idx.stats().last_optimized,
+            last_optimized_before,
+            "last_optimized must NOT be updated after cancel"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_then_reoptimize_runs_to_completion() {
+        let idx = Arc::new(VectorIndex::new(
+            "embedding",
+            "emb_idx",
+            4,
+            DistanceMetric::Cosine,
+            false,
+        ));
+
+        let r1 = make_record(&[1.0, 0.0, 0.0, 0.0]);
+        let r2 = make_record(&[0.0, 1.0, 0.0, 0.0]);
+        idx.insert("k1", &r1);
+        idx.insert("k2", &r2);
+        idx.commit_pending();
+
+        // First optimize: cancel immediately.
+        let (handle1, _) = idx.optimize();
+        let id1 = handle1.id.clone();
+        handle1.cancelled.store(true, Ordering::Relaxed);
+
+        // Wait for the cancelled optimize to finish.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if handle1.finished.load(Ordering::Relaxed) {
+                break;
+            }
+            assert!(std::time::Instant::now() <= deadline, "first optimize did not finish");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // Second optimize: must start a fresh run with a new optimization_id.
+        let (handle2, was_already_running) = idx.optimize();
+        assert!(!was_already_running, "after cancel+finish, new optimize should not report already_running");
+        assert_ne!(handle2.id, id1, "second optimize must have a distinct optimization_id");
+
+        // Wait for the fresh optimize to complete.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if handle2.finished.load(Ordering::Relaxed) {
+                break;
+            }
+            assert!(std::time::Instant::now() <= deadline, "second optimize did not finish");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // The second optimize completed successfully: last_optimized is now set,
+        // and cancelled is false on handle2.
+        assert!(!handle2.cancelled.load(Ordering::Relaxed), "second optimize must not be cancelled");
+        assert!(
+            idx.stats().last_optimized.is_some(),
+            "last_optimized must be set after successful re-optimize"
+        );
+        assert_eq!(idx.entry_count(), 2, "vectors must be preserved through cancel+reoptimize");
     }
 }
