@@ -48,6 +48,10 @@ pub struct OptimizeHandle {
     pub total: AtomicU64,
     /// Set to `true` atomically when the rebuild completes and the pointer swap occurs.
     pub finished: AtomicBool,
+    /// Set to `true` by the HTTP cancel handler to request cooperative cancellation.
+    /// The rebuild loop checks this flag before each `fresh.insert` call and aborts
+    /// early when `true`, without swapping the HNSW graph.
+    pub cancelled: AtomicBool,
 }
 
 /// Thread-safe HNSW approximate nearest-neighbor index.
@@ -333,6 +337,7 @@ impl VectorIndex {
             processed: AtomicU64::new(0),
             total: AtomicU64::new(0),
             finished: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
         });
         *guard = Some(Arc::clone(&handle));
         drop(guard);

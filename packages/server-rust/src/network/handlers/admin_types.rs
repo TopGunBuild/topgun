@@ -248,6 +248,26 @@ pub struct IndexListResponse {
     pub indexes: Vec<IndexInfoResponse>,
 }
 
+/// Discriminant for the type of rebuild tracked by [`BackfillProgress`].
+///
+/// Set at construction time; never mutated after the entry is inserted into
+/// the `backfill_progress` map. `Copy` so no atomic wrapper is needed.
+#[derive(Serialize, Deserialize, ToSchema, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RebuildType {
+    /// Online backfill triggered by index creation on a populated map.
+    Backfill,
+    /// Startup rebuild replaying records from partition stores into a freshly
+    /// re-registered vector index.
+    StartupRebuild,
+}
+
+impl Default for RebuildType {
+    fn default() -> Self {
+        Self::Backfill
+    }
+}
+
 /// Response body for the backfill status endpoint.
 #[derive(Serialize, ToSchema, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -260,6 +280,9 @@ pub struct BackfillStatusResponse {
     pub processed: u64,
     /// Whether backfill is complete.
     pub done: bool,
+    /// Discriminant indicating whether this is a runtime backfill or a startup
+    /// rebuild. Serializes as camelCase `rebuildType` on the wire.
+    pub rebuild_type: RebuildType,
 }
 
 /// Tracks async backfill progress for a single (map, attribute) index.
@@ -271,6 +294,10 @@ pub struct BackfillProgress {
     pub total: AtomicU64,
     pub processed: AtomicU64,
     pub done: AtomicBool,
+    /// Construction-time discriminant; never mutated after insertion into the map.
+    /// `RebuildType::Backfill` is the default for online backfill paths; startup
+    /// rebuild paths set `RebuildType::StartupRebuild` at construction.
+    pub rebuild_type: RebuildType,
 }
 
 // ---------------------------------------------------------------------------
@@ -379,11 +406,16 @@ pub struct VectorIndexStatusResponse {
     /// Current index statistics.
     pub stats: VectorIndexInfoResponse,
     /// Whether an optimize is currently in progress.
+    /// `true` when a handle exists and `finished == false`.
     pub optimize_in_progress: bool,
     /// Vectors processed so far during the current (or last) optimize.
     pub optimize_processed: u64,
     /// Total vectors to process in the current (or last) optimize.
     pub optimize_total: u64,
+    /// Whether the last (or current) optimize was cancelled.
+    /// `true` iff `cancelled == true && finished == true` on the handle.
+    /// Distinct from `optimize_in_progress` — a cancelled run is always finished.
+    pub optimize_cancelled: bool,
 }
 
 /// On-disk descriptor for a registered vector index.

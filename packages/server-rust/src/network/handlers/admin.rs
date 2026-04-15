@@ -797,6 +797,7 @@ pub async fn create_index(
             total: std::sync::atomic::AtomicU64::new(0),
             processed: std::sync::atomic::AtomicU64::new(0),
             done: std::sync::atomic::AtomicBool::new(false),
+            rebuild_type: crate::network::handlers::admin_types::RebuildType::Backfill,
         });
         backfill_progress.insert((map_name.clone(), attribute.clone()), Arc::clone(&progress));
 
@@ -969,6 +970,7 @@ pub async fn index_backfill_status(
             total: progress.total.load(Ordering::Relaxed),
             processed: progress.processed.load(Ordering::Relaxed),
             done: progress.done.load(Ordering::Relaxed),
+            rebuild_type: progress.rebuild_type,
         }));
     }
 
@@ -996,6 +998,7 @@ pub async fn index_backfill_status(
             total: 0,
             processed: 0,
             done: true,
+            rebuild_type: crate::network::handlers::admin_types::RebuildType::Backfill,
         }));
     }
 
@@ -1449,16 +1452,19 @@ pub async fn vector_index_status(
 
     let vi_stats = vi.stats();
     let optimize_handle = vi.current_optimize_handle();
-    let (optimize_in_progress, optimize_processed, optimize_total) =
+    let (optimize_in_progress, optimize_processed, optimize_total, optimize_cancelled) =
         if let Some(ref h) = optimize_handle {
             let finished = h.finished.load(std::sync::atomic::Ordering::Relaxed);
+            let cancelled = h.cancelled.load(std::sync::atomic::Ordering::Relaxed);
             (
                 !finished,
                 h.processed.load(std::sync::atomic::Ordering::Relaxed),
                 h.total.load(std::sync::atomic::Ordering::Relaxed),
+                // A run is "cancelled" only when it has both the flag set and is finished.
+                cancelled && finished,
             )
         } else {
-            (false, 0, 0)
+            (false, 0, 0, false)
         };
 
     Ok(Json(VectorIndexStatusResponse {
@@ -1466,6 +1472,7 @@ pub async fn vector_index_status(
         optimize_in_progress,
         optimize_processed,
         optimize_total,
+        optimize_cancelled,
     }))
 }
 
