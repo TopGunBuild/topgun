@@ -163,7 +163,11 @@ export function useHybridSearch(
     return () => {
       cancelled = true;
     };
-  }, [client, mapName, queryText, methodsKey, queryVectorKey, options?.k, options?.minScore, options?.includeValue, enabled, searchOptions]);
+    // searchOptions is NOT in deps because its referential identity changes on every render
+    // (it depends on queryVector which may have new identity). The semantically meaningful
+    // deps below (methodsKey, queryVectorKey, etc.) already capture when to re-run.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, mapName, queryText, methodsKey, queryVectorKey, options?.k, options?.minScore, options?.includeValue, enabled]);
 
   return useMemo(() => ({ results, loading, error }), [results, loading, error]);
 }
