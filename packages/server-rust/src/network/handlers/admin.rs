@@ -1476,6 +1476,125 @@ pub async fn vector_index_status(
     }))
 }
 
+/// Cancels an in-flight HNSW optimize for a vector index.
+///
+/// Sets `cancelled = true` cooperatively. The rebuild loop checks this flag
+/// before each `fresh.insert` call and exits early without swapping the graph.
+///
+/// # Returns
+///
+/// - `200 OK` — cancellation flag set (idempotent; calling twice returns 200 both times).
+///
+/// # Errors
+///
+/// - `404 NOT FOUND` — no such map/index, or the in-flight optimize's id does not
+///   match `optimization_id` (stale cancel request).
+/// - `409 CONFLICT` — no in-flight optimize exists for this index (nothing to cancel).
+/// - `503 SERVICE UNAVAILABLE` — index observer factory not configured.
+pub async fn cancel_vector_index_optimize_handler(
+    _claims: AdminClaims,
+    State(state): State<AppState>,
+    Path((map_name, index_name, optimization_id)): Path<(String, String, String)>,
+) -> Result<Json<VectorIndexStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let factory = state.index_observer_factory.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                code: 503,
+                message: "index observer factory not configured".to_string(),
+                field: None,
+            }),
+        )
+    })?;
+
+    let registry = factory.get_registry(&map_name).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                code: 404,
+                message: format!("no vector index '{index_name}' found for map '{map_name}'"),
+                field: None,
+            }),
+        )
+    })?;
+
+    let attribute = registry
+        .find_vector_index_attribute(&index_name)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    code: 404,
+                    message: format!(
+                        "no vector index '{index_name}' found for map '{map_name}'"
+                    ),
+                    field: None,
+                }),
+            )
+        })?;
+
+    let vi = registry.get_vector_index(&attribute).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                code: 404,
+                message: format!("no vector index '{index_name}' found for map '{map_name}'"),
+                field: None,
+            }),
+        )
+    })?;
+
+    let handle = vi.current_optimize_handle().ok_or_else(|| {
+        // No in-flight optimize — nothing to cancel.
+        (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                code: 409,
+                message: format!(
+                    "no in-flight optimize for vector index '{index_name}' on map '{map_name}'"
+                ),
+                field: None,
+            }),
+        )
+    })?;
+
+    // If the handle has already finished, there is no active optimize to cancel.
+    // The optimization_id check below distinguishes "finished with matching id"
+    // from "finished with a different id" (stale cancel).
+    if handle.id != optimization_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                code: 404,
+                message: format!(
+                    "optimization '{optimization_id}' not found; current handle id is '{}'",
+                    handle.id
+                ),
+                field: None,
+            }),
+        ));
+    }
+
+    // Set the cancellation flag cooperatively. Idempotent — setting true twice is fine.
+    handle.cancelled.store(true, Ordering::Relaxed);
+
+    // Return current status immediately; the background task observes the flag
+    // asynchronously and sets finished=true on its next iteration.
+    let vi_stats = vi.stats();
+    let finished = handle.finished.load(Ordering::Relaxed);
+    let cancelled = handle.cancelled.load(Ordering::Relaxed);
+    Ok(Json(VectorIndexStatusResponse {
+        stats: stats_to_response(vi_stats),
+        // The task may still be running at this point; in-progress = !finished.
+        optimize_in_progress: !finished,
+        optimize_processed: handle.processed.load(Ordering::Relaxed),
+        optimize_total: handle.total.load(Ordering::Relaxed),
+        // cancelled && finished: may not yet be true if the task hasn't observed
+        // the flag yet — callers should poll status until this transitions to true.
+        optimize_cancelled: cancelled && finished,
+    }))
+}
+
 // ── ISO-8601 timestamp helper ─────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1868,6 +1987,128 @@ mod vector_admin_tests {
 
         let _ = std::fs::remove_file(&tmp);
         std::env::remove_var("TOPGUN_VECTOR_INDEX_PATH");
+    }
+
+    // ── cancel_vector_index_optimize_handler tests ──────────────────────────────
+
+    async fn setup_index_with_optimize(state: &AppState) -> String {
+        let tmp = std::env::temp_dir().join(format!("vi_cancel_{}.json", uuid::Uuid::new_v4()));
+        std::env::set_var("TOPGUN_VECTOR_INDEX_PATH", tmp.to_str().unwrap());
+
+        let req = CreateVectorIndexRequest {
+            map_name: "users".to_string(),
+            attribute: "_embedding".to_string(),
+            index_name: "emb_idx".to_string(),
+            dimension: 4,
+            distance_metric: DistanceMetric::Cosine,
+            hnsw_params: None,
+            dedup_enabled: None,
+        };
+        let _ = create_vector_index(make_claims(), State(state.clone()), Json(req)).await;
+
+        let result = optimize_vector_index_handler(
+            make_claims(),
+            State(state.clone()),
+            Path(("users".to_string(), "emb_idx".to_string())),
+        )
+        .await
+        .expect("optimize should succeed");
+        let (_, Json(resp)) = result;
+        let _ = std::fs::remove_file(tmp);
+        resp.optimization_id
+    }
+
+    #[tokio::test]
+    async fn cancel_optimize_503_when_no_factory() {
+        let state = make_state_no_factory();
+        let result = cancel_vector_index_optimize_handler(
+            make_claims(),
+            State(state),
+            Path(("users".to_string(), "emb_idx".to_string(), "fake_id".to_string())),
+        )
+        .await;
+        assert!(result.is_err());
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn cancel_optimize_409_when_no_in_flight_optimize() {
+        let tmp = std::env::temp_dir().join(format!("vi_409_{}.json", uuid::Uuid::new_v4()));
+        std::env::set_var("TOPGUN_VECTOR_INDEX_PATH", tmp.to_str().unwrap());
+
+        let state = make_state_with_factory();
+        // Create index but do NOT start an optimize.
+        let req = CreateVectorIndexRequest {
+            map_name: "users".to_string(),
+            attribute: "_embedding".to_string(),
+            index_name: "emb_idx".to_string(),
+            dimension: 4,
+            distance_metric: DistanceMetric::Cosine,
+            hnsw_params: None,
+            dedup_enabled: None,
+        };
+        let _ = create_vector_index(make_claims(), State(state.clone()), Json(req)).await;
+
+        let result = cancel_vector_index_optimize_handler(
+            make_claims(),
+            State(state),
+            Path(("users".to_string(), "emb_idx".to_string(), "any_id".to_string())),
+        )
+        .await;
+        assert!(result.is_err());
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, StatusCode::CONFLICT);
+
+        let _ = std::fs::remove_file(tmp);
+        std::env::remove_var("TOPGUN_VECTOR_INDEX_PATH");
+    }
+
+    #[tokio::test]
+    async fn cancel_optimize_404_when_mismatched_optimization_id() {
+        let state = make_state_with_factory();
+        let _ = setup_index_with_optimize(&state).await;
+
+        // Use a wrong optimization_id.
+        let result = cancel_vector_index_optimize_handler(
+            make_claims(),
+            State(state),
+            Path(("users".to_string(), "emb_idx".to_string(), "wrong_id_xyz".to_string())),
+        )
+        .await;
+        assert!(result.is_err());
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn cancel_optimize_200_happy_path_and_idempotent() {
+        let state = make_state_with_factory();
+        let optimization_id = setup_index_with_optimize(&state).await;
+
+        // First cancel — should return 200.
+        let result = cancel_vector_index_optimize_handler(
+            make_claims(),
+            State(state.clone()),
+            Path(("users".to_string(), "emb_idx".to_string(), optimization_id.clone())),
+        )
+        .await;
+        assert!(result.is_ok(), "first cancel should return 200, got: {:?}", result.err());
+        let Json(resp) = result.unwrap();
+        // cancelled flag should be set on the response immediately.
+        // (optimize_cancelled may be false until the task observes the flag,
+        //  but cancelled is cooperative — the HTTP layer set it; task confirms.)
+        // At minimum: the response struct must be valid.
+        let _ = resp.stats;
+
+        // Second cancel (idempotent) — should also return 200.
+        let result2 = cancel_vector_index_optimize_handler(
+            make_claims(),
+            State(state),
+            Path(("users".to_string(), "emb_idx".to_string(), optimization_id)),
+        )
+        .await;
+        assert!(result2.is_ok(), "second cancel (idempotent) should return 200");
     }
 }
 

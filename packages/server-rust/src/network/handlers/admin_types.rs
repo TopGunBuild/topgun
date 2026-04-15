@@ -252,20 +252,15 @@ pub struct IndexListResponse {
 ///
 /// Set at construction time; never mutated after the entry is inserted into
 /// the `backfill_progress` map. `Copy` so no atomic wrapper is needed.
-#[derive(Serialize, Deserialize, ToSchema, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, ToSchema, Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum RebuildType {
     /// Online backfill triggered by index creation on a populated map.
+    #[default]
     Backfill,
     /// Startup rebuild replaying records from partition stores into a freshly
     /// re-registered vector index.
     StartupRebuild,
-}
-
-impl Default for RebuildType {
-    fn default() -> Self {
-        Self::Backfill
-    }
 }
 
 /// Response body for the backfill status endpoint.

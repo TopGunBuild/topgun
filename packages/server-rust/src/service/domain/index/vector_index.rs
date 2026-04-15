@@ -1256,7 +1256,7 @@ mod tests {
             false,
         ));
 
-        let records = vec![
+        let records = [
             make_record(&[1.0, 0.0, 0.0, 0.0]),
             make_record(&[0.0, 1.0, 0.0, 0.0]),
             make_record(&[0.0, 0.0, 1.0, 0.0]),
