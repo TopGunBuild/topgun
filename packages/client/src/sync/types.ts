@@ -1133,3 +1133,109 @@ export interface IMessageRouter {
    */
   hasHandler(type: string): boolean;
 }
+
+// ============================================
+// HybridSearchClient Types
+// ============================================
+
+/**
+ * The three search methods that can be combined via RRF fusion.
+ */
+export type HybridSearchMethod = 'exact' | 'fullText' | 'semantic';
+
+/**
+ * Configuration for HybridSearchClient.
+ */
+export interface HybridSearchClientConfig {
+  /**
+   * Callback to send messages via SyncEngine/WebSocketManager.
+   * @param message - Message to send
+   * @returns true if sent successfully
+   */
+  sendMessage: (message: any) => boolean;
+
+  /**
+   * Callback to check if authenticated.
+   */
+  isAuthenticated: () => boolean;
+
+  /**
+   * Timeout for hybrid search requests in milliseconds.
+   * Default: 30000 (30 seconds)
+   */
+  timeoutMs?: number;
+}
+
+/**
+ * Options for a hybrid search request.
+ */
+export interface HybridSearchClientOptions {
+  /** Which methods to combine via RRF. Defaults to ['fullText'] if omitted. */
+  methods?: HybridSearchMethod[];
+  /** Number of fused results to return. Default: 10 */
+  k?: number;
+  /** Pre-computed embedding for the semantic leg. Required when 'semantic' is in methods and the server does not auto-embed. */
+  queryVector?: Float32Array | number[];
+  /** Optional predicate tree to restrict the candidate set. */
+  predicate?: unknown;
+  /** Include the full value in each result entry. Default: false */
+  includeValue?: boolean;
+  /** Minimum fused score to include in results. */
+  minScore?: number;
+}
+
+/**
+ * A single result from a hybrid search, containing the RRF-fused score and per-method raw scores.
+ */
+export interface HybridSearchClientResult {
+  key: string;
+  /** Final RRF-fused score */
+  score: number;
+  /** Per-method raw scores (only present for methods that matched this key) */
+  methodScores: Partial<Record<HybridSearchMethod, number>>;
+  /** Document value when includeValue=true */
+  value?: unknown;
+}
+
+/**
+ * Interface for tri-hybrid search (exact + fullText + semantic) with RRF fusion.
+ * Handles one-shot HYBRID_SEARCH request/response over the WebSocket connection.
+ */
+export interface IHybridSearchClient {
+  /**
+   * Perform a hybrid search on the server combining exact, fullText, and/or semantic methods via RRF.
+   * @param mapName - Name of the map to search
+   * @param queryText - Search query text
+   * @param options - Search options (methods, k, queryVector, predicate, etc.)
+   * @returns Promise resolving to ranked HybridSearchClientResult[]
+   */
+  hybridSearch(
+    mapName: string,
+    queryText: string,
+    options?: HybridSearchClientOptions
+  ): Promise<HybridSearchClientResult[]>;
+
+  /**
+   * Handle HYBRID_SEARCH_RESP message from server.
+   * Called by the message router.
+   * @param payload - Response payload (matches HybridSearchRespPayloadSchema)
+   */
+  handleResponse(payload: {
+    requestId: string;
+    results: Array<{
+      key: string;
+      score: number;
+      methodScores: Partial<Record<HybridSearchMethod, number>>;
+      value?: unknown;
+    }>;
+    searchTimeMs: number;
+    error?: string;
+  }): void;
+
+  /**
+   * Clean up resources (clear pending timeouts).
+   * Does NOT reject pending promises — use when shutting down cleanly.
+   * @param error - If provided, reject pending promises with this error.
+   */
+  close(error?: Error): void;
+}
