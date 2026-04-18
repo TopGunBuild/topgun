@@ -308,7 +308,6 @@ async fn main() {
                 top_k: vector_k,
                 duration_secs,
                 ef_search: 64,
-                methods: vec![], // not used by VectorMode dispatch; Hybrid uses fixed [Exact, FullText, Semantic]
                 query_tasks: vector_query_tasks,
             };
             Box::new(VectorSearchScenario::new(config))
@@ -333,8 +332,9 @@ async fn main() {
     metrics_collector.print_report();
 
     // --- Print ops/sec ---
-    let ops_per_sec = if duration_secs > 0 {
-        result.total_ops / duration_secs
+    let elapsed_secs = result.duration.as_secs();
+    let ops_per_sec = if elapsed_secs > 0 {
+        result.total_ops / elapsed_secs
     } else {
         0
     };
