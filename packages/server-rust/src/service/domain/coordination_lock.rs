@@ -706,80 +706,95 @@ mod tests {
     /// Verifies that exactly one of N concurrent `try_acquire` calls wins.
     /// Spawns 100 tasks racing on the same lock name; asserts exactly one
     /// receives `Granted` (`DashMap` entry-level locking ensures mutual exclusion).
-    #[tokio::test]
+    ///
+    /// Uses the multi-threaded tokio runtime and runs 50 iterations to expose
+    /// any check-and-insert race on real multi-core hardware. With the
+    /// current-thread runtime this test would pass even with a broken
+    /// implementation because `try_acquire` has no `.await` points and tasks
+    /// execute serially between polls.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_acquire_only_one_wins() {
-        let reg = registry();
-        let mut handles = Vec::new();
+        for _ in 0..50 {
+            let reg = registry();
+            let mut handles = Vec::new();
 
-        for i in 0u64..100 {
-            let reg_clone = Arc::clone(&reg);
-            handles.push(tokio::spawn(async move {
-                reg_clone
-                    .try_acquire("lock-a", ConnectionId(i), Some(10000))
-                    .unwrap()
-            }));
+            for i in 0u64..100 {
+                let reg_clone = Arc::clone(&reg);
+                handles.push(tokio::spawn(async move {
+                    reg_clone
+                        .try_acquire("lock-a", ConnectionId(i), Some(10000))
+                        .unwrap()
+                }));
+            }
+
+            let results: Vec<LockOutcome> = futures_util::future::join_all(handles)
+                .await
+                .into_iter()
+                .map(|r| r.expect("task panicked"))
+                .collect();
+
+            let granted_count = results
+                .iter()
+                .filter(|o| matches!(o, LockOutcome::Granted { .. }))
+                .count();
+
+            assert_eq!(
+                granted_count, 1,
+                "exactly one task must receive Granted, got {granted_count}"
+            );
+            assert_eq!(reg.lock_count(), 1);
         }
-
-        let results: Vec<LockOutcome> = futures_util::future::join_all(handles)
-            .await
-            .into_iter()
-            .map(|r| r.expect("task panicked"))
-            .collect();
-
-        let granted_count = results
-            .iter()
-            .filter(|o| matches!(o, LockOutcome::Granted { .. }))
-            .count();
-
-        assert_eq!(
-            granted_count, 1,
-            "exactly one task must receive Granted, got {granted_count}"
-        );
-        assert_eq!(reg.lock_count(), 1);
     }
 
     /// Verifies that interleaved concurrent release+acquire on the same lock
     /// name produces a consistent final state: exactly one holder or no holder.
     /// No panic must occur under contention.
-    #[tokio::test]
+    ///
+    /// Uses the multi-threaded tokio runtime and runs 50 iterations so that
+    /// interleaved `release`/`try_acquire` actually execute in parallel on
+    /// different worker threads, exposing any check-and-insert race that a
+    /// current-thread runtime would mask.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_acquire_and_release_is_safe() {
-        let reg = registry();
+        for _ in 0..50 {
+            let reg = registry();
 
-        // Initial acquire.
-        let outcome = reg.try_acquire("lock-a", conn(1), Some(10000)).unwrap();
-        let LockOutcome::Granted {
-            fencing_token: initial_token,
-        } = outcome
-        else {
-            panic!("expected initial Granted");
-        };
+            // Initial acquire.
+            let outcome = reg.try_acquire("lock-a", conn(1), Some(10000)).unwrap();
+            let LockOutcome::Granted {
+                fencing_token: initial_token,
+            } = outcome
+            else {
+                panic!("expected initial Granted");
+            };
 
-        let mut handles = Vec::new();
+            let mut handles = Vec::new();
 
-        // Mix of release and acquire tasks racing against each other.
-        for i in 0u64..50 {
-            let reg_rel = Arc::clone(&reg);
-            let token = initial_token;
-            handles.push(tokio::spawn(async move {
-                let _ = reg_rel.release("lock-a", token);
-            }));
+            // Mix of release and acquire tasks racing against each other.
+            for i in 0u64..50 {
+                let reg_rel = Arc::clone(&reg);
+                let token = initial_token;
+                handles.push(tokio::spawn(async move {
+                    let _ = reg_rel.release("lock-a", token);
+                }));
 
-            let reg_acq = Arc::clone(&reg);
-            handles.push(tokio::spawn(async move {
-                let _ = reg_acq.try_acquire("lock-a", ConnectionId(100 + i), Some(10000));
-            }));
+                let reg_acq = Arc::clone(&reg);
+                handles.push(tokio::spawn(async move {
+                    let _ = reg_acq.try_acquire("lock-a", ConnectionId(100 + i), Some(10000));
+                }));
+            }
+
+            futures_util::future::join_all(handles)
+                .await
+                .into_iter()
+                .for_each(|r| r.expect("task panicked"));
+
+            // Final state must be consistent: 0 or 1 lock held.
+            assert!(
+                reg.lock_count() <= 1,
+                "lock count must be 0 or 1 after concurrent access, got {}",
+                reg.lock_count()
+            );
         }
-
-        futures_util::future::join_all(handles)
-            .await
-            .into_iter()
-            .for_each(|r| r.expect("task panicked"));
-
-        // Final state must be consistent: 0 or 1 lock held.
-        assert!(
-            reg.lock_count() <= 1,
-            "lock count must be 0 or 1 after concurrent access, got {}",
-            reg.lock_count()
-        );
     }
 }
