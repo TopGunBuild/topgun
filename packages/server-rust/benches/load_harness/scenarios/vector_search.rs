@@ -2,8 +2,7 @@
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
-    clippy::doc_markdown,
-    dead_code
+    clippy::doc_markdown
 )]
 /// Vector search benchmark scenario for the `TopGun` load harness.
 ///
@@ -64,14 +63,6 @@ pub enum VectorMode {
     Hybrid,
 }
 
-/// Which search method(s) to invoke in Hybrid mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SearchMethod {
-    Exact,
-    FullText,
-    Semantic,
-}
-
 /// Configuration for the vector search scenario.
 pub struct VectorSearchConfig {
     /// Sub-mode to run.
@@ -86,8 +77,6 @@ pub struct VectorSearchConfig {
     pub duration_secs: u64,
     /// HNSW ef_search parameter.
     pub ef_search: usize,
-    /// Search methods to combine in Hybrid mode.
-    pub methods: Vec<SearchMethod>,
     /// Number of concurrent JoinSet tasks for Query mode.
     /// Defaults to available_parallelism (or 4 as fallback).
     pub query_tasks: usize,
