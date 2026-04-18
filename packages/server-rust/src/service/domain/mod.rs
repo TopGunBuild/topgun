@@ -6,6 +6,9 @@
 pub mod coordination;
 pub use coordination::CoordinationService;
 
+pub mod coordination_lock;
+pub use coordination_lock::{LockError, LockOutcome, LockRegistry};
+
 pub mod crdt;
 pub use crdt::CrdtService;
 
