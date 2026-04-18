@@ -118,10 +118,10 @@ impl Service<Operation> for Arc<CoordinationService> {
                         Ok(svc.handle_partition_map_request(payload.as_ref()))
                     }
                     Operation::LockRequest { ctx, payload } => {
-                        svc.handle_lock_request(&ctx, payload).await
+                        svc.handle_lock_request(&ctx, payload)
                     }
                     Operation::LockRelease { ctx, payload } => {
-                        svc.handle_lock_release(&ctx, payload).await
+                        svc.handle_lock_release(&ctx, payload)
                     }
                     _ => Err(OperationError::WrongService),
                 }
@@ -196,19 +196,21 @@ impl CoordinationService {
     /// - `LOCK_GRANTED` on success (including idempotent re-acquire by the same holder).
     /// - `LOCK_RELEASED { success: false }` on denial (busy, invalid name, zero TTL,
     ///   or missing connection context).
-    async fn handle_lock_request(
+    fn handle_lock_request(
         &self,
         ctx: &crate::service::operation::OperationContext,
         payload: messages::LockRequestPayload,
     ) -> Result<OperationResponse, OperationError> {
         let denied = |name: String| {
-            Ok(OperationResponse::Message(Box::new(Message::LockReleased {
-                payload: messages::LockReleasedPayload {
-                    request_id: payload.request_id.clone(),
-                    name,
-                    success: false,
+            Ok(OperationResponse::Message(Box::new(
+                Message::LockReleased {
+                    payload: messages::LockReleasedPayload {
+                        request_id: payload.request_id.clone(),
+                        name,
+                        success: false,
+                    },
                 },
-            })))
+            )))
         };
 
         // Lock operations require a connection context (cannot be fire-and-forget).
@@ -253,36 +255,41 @@ impl CoordinationService {
     /// Validates the lock name, then delegates to `LockRegistry::release`.
     /// Emits `LOCK_RELEASED { success: true }` on valid release, or
     /// `LOCK_RELEASED { success: false }` on stale token or unknown name.
-    async fn handle_lock_release(
+    #[allow(clippy::unnecessary_wraps)]
+    fn handle_lock_release(
         &self,
         _ctx: &crate::service::operation::OperationContext,
         payload: messages::LockReleasePayload,
     ) -> Result<OperationResponse, OperationError> {
         // Validate name; on failure emit denied response (invariant I1).
         if let Err(LockError::InvalidLockName { ref name }) =
-            LockRegistry::validate_lock_name_pub(&payload.name)
+            LockRegistry::validate_lock_name(&payload.name)
         {
             tracing::warn!(%name, "lock release rejected: invalid lock name");
-            return Ok(OperationResponse::Message(Box::new(Message::LockReleased {
-                payload: messages::LockReleasedPayload {
-                    request_id: payload.request_id.unwrap_or_default(),
-                    name: payload.name,
-                    success: false,
+            return Ok(OperationResponse::Message(Box::new(
+                Message::LockReleased {
+                    payload: messages::LockReleasedPayload {
+                        request_id: payload.request_id.unwrap_or_default(),
+                        name: payload.name,
+                        success: false,
+                    },
                 },
-            })));
+            )));
         }
 
         let success = self
             .lock_registry
             .release(&payload.name, payload.fencing_token);
 
-        Ok(OperationResponse::Message(Box::new(Message::LockReleased {
-            payload: messages::LockReleasedPayload {
-                request_id: payload.request_id.unwrap_or_default(),
-                name: payload.name,
-                success,
+        Ok(OperationResponse::Message(Box::new(
+            Message::LockReleased {
+                payload: messages::LockReleasedPayload {
+                    request_id: payload.request_id.unwrap_or_default(),
+                    name: payload.name,
+                    success,
+                },
             },
-        })))
+        )))
     }
 }
 
@@ -621,7 +628,7 @@ mod tests {
         let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
 
         // Acquire.
-        let op_req = Operation::LockRequest {
+        let acquire_op = Operation::LockRequest {
             ctx: make_ctx_with_conn(service_names::COORDINATION, handle.id),
             payload: messages::LockRequestPayload {
                 request_id: "req-2".to_string(),
@@ -629,7 +636,7 @@ mod tests {
                 ttl: Some(10000),
             },
         };
-        let grant_resp = svc.clone().oneshot(op_req).await.unwrap();
+        let grant_resp = svc.clone().oneshot(acquire_op).await.unwrap();
         let fencing_token = match grant_resp {
             OperationResponse::Message(msg) => match *msg {
                 Message::LockGranted { payload } => payload.fencing_token,
@@ -639,7 +646,7 @@ mod tests {
         };
 
         // Release.
-        let op_rel = Operation::LockRelease {
+        let release_op = Operation::LockRelease {
             ctx: make_ctx(service_names::COORDINATION),
             payload: messages::LockReleasePayload {
                 request_id: Some("req-3".to_string()),
@@ -647,7 +654,7 @@ mod tests {
                 fencing_token,
             },
         };
-        let resp = svc.oneshot(op_rel).await.unwrap();
+        let resp = svc.oneshot(release_op).await.unwrap();
         match resp {
             OperationResponse::Message(msg) => match *msg {
                 Message::LockReleased { payload } => {
@@ -667,7 +674,7 @@ mod tests {
         let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
 
         // Acquire.
-        let op_req = Operation::LockRequest {
+        let acquire_op = Operation::LockRequest {
             ctx: make_ctx_with_conn(service_names::COORDINATION, handle.id),
             payload: messages::LockRequestPayload {
                 request_id: "req-a".to_string(),
@@ -675,10 +682,10 @@ mod tests {
                 ttl: Some(10000),
             },
         };
-        svc.clone().oneshot(op_req).await.unwrap();
+        svc.clone().oneshot(acquire_op).await.unwrap();
 
         // Release with wrong token.
-        let op_rel = Operation::LockRelease {
+        let release_op = Operation::LockRelease {
             ctx: make_ctx(service_names::COORDINATION),
             payload: messages::LockReleasePayload {
                 request_id: None,
@@ -686,7 +693,7 @@ mod tests {
                 fencing_token: 9999,
             },
         };
-        let resp = svc.oneshot(op_rel).await.unwrap();
+        let resp = svc.oneshot(release_op).await.unwrap();
         match resp {
             OperationResponse::Message(msg) => match *msg {
                 Message::LockReleased { payload } => {
@@ -739,7 +746,10 @@ mod tests {
         match resp {
             OperationResponse::Message(msg) => match *msg {
                 Message::LockReleased { payload } => {
-                    assert!(!payload.success, "ttl:0 must be rejected with success:false");
+                    assert!(
+                        !payload.success,
+                        "ttl:0 must be rejected with success:false"
+                    );
                 }
                 other => panic!("expected LockReleased, got {other:?}"),
             },
@@ -757,7 +767,7 @@ mod tests {
             ctx: make_ctx_with_conn(service_names::COORDINATION, handle.id),
             payload: messages::LockRequestPayload {
                 request_id: "req-empty".to_string(),
-                name: "".to_string(),
+                name: String::default(),
                 ttl: Some(5000),
             },
         };
@@ -765,7 +775,10 @@ mod tests {
         match resp {
             OperationResponse::Message(msg) => match *msg {
                 Message::LockReleased { payload } => {
-                    assert!(!payload.success, "empty name must emit LOCK_RELEASED success:false");
+                    assert!(
+                        !payload.success,
+                        "empty name must emit LOCK_RELEASED success:false"
+                    );
                 }
                 other => panic!("expected LockReleased, got {other:?}"),
             },
@@ -819,7 +832,7 @@ mod tests {
         let mut prev_token: u64 = 0;
         for i in 0..5 {
             // Acquire.
-            let op_req = Operation::LockRequest {
+            let acquire_op = Operation::LockRequest {
                 ctx: make_ctx_with_conn(service_names::COORDINATION, handle.id),
                 payload: messages::LockRequestPayload {
                     request_id: format!("req-{i}"),
@@ -827,7 +840,7 @@ mod tests {
                     ttl: Some(10000),
                 },
             };
-            let token = match svc.clone().oneshot(op_req).await.unwrap() {
+            let token = match svc.clone().oneshot(acquire_op).await.unwrap() {
                 OperationResponse::Message(msg) => match *msg {
                     Message::LockGranted { payload } => payload.fencing_token,
                     other => panic!("expected LockGranted, got {other:?}"),
@@ -841,7 +854,7 @@ mod tests {
             );
 
             // Release.
-            let op_rel = Operation::LockRelease {
+            let release_op = Operation::LockRelease {
                 ctx: make_ctx(service_names::COORDINATION),
                 payload: messages::LockReleasePayload {
                     request_id: Some(format!("rel-{i}")),
@@ -849,7 +862,7 @@ mod tests {
                     fencing_token: token,
                 },
             };
-            svc.clone().oneshot(op_rel).await.unwrap();
+            svc.clone().oneshot(release_op).await.unwrap();
             prev_token = token;
         }
     }

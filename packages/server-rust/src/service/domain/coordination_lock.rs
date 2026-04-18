@@ -121,11 +121,11 @@ impl LockRegistry {
 
     /// Validates a lock name against the same pattern as topic names:
     /// non-empty, max 256 characters, only `[A-Za-z0-9_\-.:/]`.
-    pub fn validate_lock_name_pub(name: &str) -> Result<(), LockError> {
-        Self::validate_lock_name(name)
-    }
-
-    fn validate_lock_name(name: &str) -> Result<(), LockError> {
+    ///
+    /// # Errors
+    /// Returns `LockError::InvalidLockName` if the name is empty, longer than
+    /// 256 characters, or contains characters outside the allowed charset.
+    pub fn validate_lock_name(name: &str) -> Result<(), LockError> {
         if name.is_empty() || name.len() > 256 {
             return Err(LockError::InvalidLockName {
                 name: name.to_string(),
@@ -150,8 +150,7 @@ impl LockRegistry {
     /// **Lazy TTL check (invariant I4):** before returning `Busy` for an
     /// entry held by a different holder, evaluates `entry.expires_at <
     /// Instant::now()`; if true, evicts the stale entry and proceeds with
-    /// acquisition. Pattern ported from TiKV's
-    /// `check_txn_status.rs:55` — belt-and-suspenders against tokio timer
+    /// acquisition. Pattern ported from `TiKV`'s `check_txn_status.rs` — belt-and-suspenders against tokio timer
     /// scheduling delay under load. The tokio expiry task still exists for
     /// proactive cleanup.
     ///
@@ -197,10 +196,7 @@ impl LockRegistry {
             }
 
             // Different holder: check lazy TTL (invariant I4).
-            let is_expired = entry
-                .expires_at
-                .map(|exp| exp <= Instant::now())
-                .unwrap_or(false);
+            let is_expired = entry.expires_at.is_some_and(|exp| exp <= Instant::now());
 
             if !is_expired {
                 // Lock is actively held by another holder.
@@ -256,7 +252,7 @@ impl LockRegistry {
         // Update reverse-index.
         self.held_by
             .entry(holder)
-            .or_insert_with(DashSet::new)
+            .or_default()
             .insert(name.to_string());
 
         Ok(LockOutcome::Granted { fencing_token })
@@ -267,6 +263,7 @@ impl LockRegistry {
     /// is not held or the token does not match.
     ///
     /// Cancels any pending TTL expiry task.
+    #[must_use]
     pub fn release(&self, name: &str, fencing_token: u64) -> bool {
         // Use remove_if to atomically check and remove the entry.
         let removed = self
@@ -331,16 +328,19 @@ impl LockRegistry {
     }
 
     /// Returns the current holder of a lock, if any (for testing).
+    #[must_use]
     pub fn holder(&self, name: &str) -> Option<ConnectionId> {
         self.locks.get(name).map(|e| e.holder)
     }
 
     /// Returns the current fencing token for a lock, if held (for testing).
+    #[must_use]
     pub fn current_token(&self, name: &str) -> Option<u64> {
         self.locks.get(name).map(|e| e.fencing_token)
     }
 
     /// Returns the number of active locks (for testing).
+    #[must_use]
     pub fn lock_count(&self) -> usize {
         self.locks.len()
     }
@@ -463,7 +463,10 @@ mod tests {
 
         // New holder acquires with a longer TTL.
         let outcome2 = reg.try_acquire("lock-a", conn(2), Some(5000)).unwrap();
-        let LockOutcome::Granted { fencing_token: token2 } = outcome2 else {
+        let LockOutcome::Granted {
+            fencing_token: token2,
+        } = outcome2
+        else {
             panic!("expected Granted for new holder");
         };
 
@@ -649,7 +652,11 @@ mod tests {
 
             // Either path may have removed the entry; no panic is the invariant.
             // After both paths complete, the lock must be gone.
-            assert_eq!(reg.lock_count(), 0, "no lock must remain after disconnect+TTL race");
+            assert_eq!(
+                reg.lock_count(),
+                0,
+                "no lock must remain after disconnect+TTL race"
+            );
             // The fencing token guard ensures no double-free panic.
             let _ = fencing_token;
         }
@@ -657,7 +664,7 @@ mod tests {
 
     /// Verifies that exactly one of N concurrent `try_acquire` calls wins.
     /// Spawns 100 tasks racing on the same lock name; asserts exactly one
-    /// receives `Granted` (DashMap entry-level locking ensures mutual exclusion).
+    /// receives `Granted` (`DashMap` entry-level locking ensures mutual exclusion).
     #[tokio::test]
     async fn concurrent_acquire_only_one_wins() {
         let reg = registry();
@@ -699,7 +706,10 @@ mod tests {
 
         // Initial acquire.
         let outcome = reg.try_acquire("lock-a", conn(1), Some(10000)).unwrap();
-        let LockOutcome::Granted { fencing_token: initial_token } = outcome else {
+        let LockOutcome::Granted {
+            fencing_token: initial_token,
+        } = outcome
+        else {
             panic!("expected initial Granted");
         };
 
@@ -710,7 +720,7 @@ mod tests {
             let reg_rel = Arc::clone(&reg);
             let token = initial_token;
             handles.push(tokio::spawn(async move {
-                reg_rel.release("lock-a", token);
+                let _ = reg_rel.release("lock-a", token);
             }));
 
             let reg_acq = Arc::clone(&reg);
