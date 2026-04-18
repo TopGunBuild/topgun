@@ -302,13 +302,13 @@ async fn run_fire_and_forget(
     send_interval_ms: u64,
     _metrics: &Arc<dyn crate::traits::MetricsCollector>,
 ) -> (u64, u64, u64) {
+    // A genuinely dead connection bails after at most ~38.2 ms of cumulative backoff.
+    const MAX_CONSECUTIVE_ERRORS: u64 = 10;
+
     let deadline = tokio::time::Instant::now() + Duration::from_secs(duration_secs);
     let mut total_sent: u64 = 0;
     let mut seq: u64 = 0;
     let mut send_errors: u64 = 0;
-
-    // A genuinely dead connection bails after at most ~38.2 ms of cumulative backoff.
-    const MAX_CONSECUTIVE_ERRORS: u64 = 10;
 
     // Send-only: push batches as fast as possible without waiting for ACK.
     // This measures how fast the client can push data into the server pipeline.
