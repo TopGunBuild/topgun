@@ -75,13 +75,6 @@ FAIL [throughput_assertion]: acked ratio 0.72 < 0.80
 
 The `vector_search` scenario benchmarks the HNSW/hybrid-search subsystem directly — bypassing the WebSocket path entirely. It constructs an `Arc<VectorIndex>` (and a minimal `HybridSearchEngine` for Hybrid mode) inline, measures the hot path you actually care about, and records HDR histogram latencies under mode-specific keys.
 
-### When to use which scenario
-
-| Goal | Scenario |
-|------|---------|
-| Measuring full request path (ws → dispatch → CRDT) | `throughput` |
-| Measuring HNSW/hybrid-search hot path | `vector_search` |
-
 ### Sub-modes
 
 | Mode | What it measures | Primary latency key | ops = |
