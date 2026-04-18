@@ -37,6 +37,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use dashmap::mapref::entry::Entry;
 use dashmap::{DashMap, DashSet};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -186,76 +187,116 @@ impl LockRegistry {
             );
         }
 
-        // Invariant I4 + I3: check existing entry.
-        if let Some(mut entry) = self.locks.get_mut(name) {
-            if entry.holder == holder {
-                // Invariant I3: same holder re-acquires — return existing token.
-                return Ok(LockOutcome::Granted {
-                    fencing_token: entry.fencing_token,
+        // Atomic check-and-insert via DashMap Entry API: the shard guard is
+        // held across the entire match, so two concurrent try_acquire calls
+        // on the same name cannot both observe a vacant/expired slot and both
+        // mint distinct fencing tokens. This preserves mutual exclusion
+        // (invariant I1) under the multi-threaded tokio runtime.
+        //
+        // Reverse-index (`held_by`) and counter (`fencing_counters`) updates
+        // target different DashMap instances, so we capture what we need from
+        // inside the guard and apply those updates after the guard is released.
+        let (fencing_token, stale_holder_to_evict) = match self.locks.entry(name.to_string()) {
+            Entry::Occupied(mut occ) => {
+                if occ.get().holder == holder {
+                    // Invariant I3: same holder re-acquires — return the existing
+                    // token unchanged (no new counter increment, no new timer).
+                    return Ok(LockOutcome::Granted {
+                        fencing_token: occ.get().fencing_token,
+                    });
+                }
+
+                // Different holder: apply lazy TTL check (invariant I4).
+                let is_expired = occ
+                    .get()
+                    .expires_at
+                    .is_some_and(|exp| exp <= Instant::now());
+                if !is_expired {
+                    // Actively held by another holder.
+                    return Ok(LockOutcome::Busy);
+                }
+
+                // Stale entry: evict in place while holding the guard. Abort the
+                // old expiry task, remember the stale holder for reverse-index
+                // cleanup below, then overwrite the entry with the new holder.
+                let stale_holder = occ.get().holder;
+                if let Some(task) = occ.get_mut().expiry_task.take() {
+                    task.abort();
+                }
+
+                let new_token = self.next_fencing_token(name);
+                let new_expires_at = ttl_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
+                let new_expiry_task = self.spawn_expiry_task(name, new_token, ttl_ms);
+
+                *occ.get_mut() = LockEntry {
+                    holder,
+                    fencing_token: new_token,
+                    expires_at: new_expires_at,
+                    expiry_task: new_expiry_task,
+                };
+
+                (new_token, Some(stale_holder))
+            }
+            Entry::Vacant(vac) => {
+                let new_token = self.next_fencing_token(name);
+                let new_expires_at = ttl_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
+                let new_expiry_task = self.spawn_expiry_task(name, new_token, ttl_ms);
+
+                vac.insert(LockEntry {
+                    holder,
+                    fencing_token: new_token,
+                    expires_at: new_expires_at,
+                    expiry_task: new_expiry_task,
                 });
+
+                (new_token, None)
             }
+        };
 
-            // Different holder: check lazy TTL (invariant I4).
-            let is_expired = entry.expires_at.is_some_and(|exp| exp <= Instant::now());
-
-            if !is_expired {
-                // Lock is actively held by another holder.
-                return Ok(LockOutcome::Busy);
-            }
-
-            // Lazy eviction: cancel the stale entry's expiry task and fall through
-            // to acquire below. We need to drop the lock entry guard first.
-            if let Some(task) = entry.expiry_task.take() {
-                task.abort();
-            }
-            let stale_holder = entry.holder;
-            drop(entry);
-
-            // Clean up reverse-index for the stale holder.
-            self.locks.remove(name);
-            if let Some(held) = self.held_by.get(&stale_holder) {
+        // Reverse-index maintenance (after the `locks` shard guard is released):
+        // clean up stale holder's entry (if we evicted one) and add the new
+        // holder's entry.
+        if let Some(stale) = stale_holder_to_evict {
+            if let Some(held) = self.held_by.get(&stale) {
                 held.remove(name);
             }
         }
-
-        // Mint a new fencing token (strictly monotonic, invariant I2).
-        let counter = self
-            .fencing_counters
-            .entry(name.to_string())
-            .or_insert_with(|| Arc::new(AtomicU64::new(0)));
-        let fencing_token = counter.fetch_add(1, Ordering::Relaxed) + 1;
-
-        // Compute expiry instant and spawn TTL task if requested.
-        let expires_at = ttl_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
-        let expiry_task = if let Some(ms) = ttl_ms {
-            let registry = Arc::clone(self);
-            let name_owned = name.to_string();
-            Some(tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(ms)).await;
-                registry.expire_if_token_matches(&name_owned, fencing_token);
-            }))
-        } else {
-            None
-        };
-
-        // Insert new entry.
-        self.locks.insert(
-            name.to_string(),
-            LockEntry {
-                holder,
-                fencing_token,
-                expires_at,
-                expiry_task,
-            },
-        );
-
-        // Update reverse-index.
         self.held_by
             .entry(holder)
             .or_default()
             .insert(name.to_string());
 
         Ok(LockOutcome::Granted { fencing_token })
+    }
+
+    /// Mints the next strictly-monotonic fencing token for `name`.
+    /// Separate method so the `try_acquire` guard sites can share the logic.
+    fn next_fencing_token(&self, name: &str) -> u64 {
+        let counter = self
+            .fencing_counters
+            .entry(name.to_string())
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)));
+        counter.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Spawns a TTL-driven expiry task for `(name, fencing_token)` if
+    /// `ttl_ms` is `Some(ms)` with `ms > 0`. Returns `None` when no TTL is
+    /// requested. Callers must ensure `ttl_ms != Some(0)` has already been
+    /// rejected by `try_acquire`.
+    fn spawn_expiry_task(
+        self: &Arc<Self>,
+        name: &str,
+        fencing_token: u64,
+        ttl_ms: Option<u64>,
+    ) -> Option<JoinHandle<()>> {
+        ttl_ms.map(|ms| {
+            let registry = Arc::clone(self);
+            let name_owned = name.to_string();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                registry.expire_if_token_matches(&name_owned, fencing_token);
+            })
+        })
     }
 
     /// Releases a lock if the fencing token matches the currently-held
