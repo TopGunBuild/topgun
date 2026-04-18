@@ -282,7 +282,9 @@ impl HybridSearchEngine {
         }
 
         let options = SearchOptions::default();
-        let scored_docs = self.search_service.search_map(map_name, query_text, &options);
+        let scored_docs = self
+            .search_service
+            .search_map(map_name, query_text, &options);
 
         // Convert score-ordered `ScoredDoc` list to 1-based `RankedEntry` list.
         // Result counts from tantivy are always far below u32::MAX in practice.
@@ -450,7 +452,10 @@ mod tests {
             })
             .await;
 
-        assert!(matches!(result, Err(HybridSearchError::NoEmbeddingProvider)));
+        assert!(matches!(
+            result,
+            Err(HybridSearchError::NoEmbeddingProvider)
+        ));
     }
 
     // -----------------------------------------------------------------------

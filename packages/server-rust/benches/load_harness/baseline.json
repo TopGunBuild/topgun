@@ -7,5 +7,11 @@
     "min_ops_per_sec": 400000,
     "max_p50_us": 1000000
   },
+  "vector_search": {
+    "build":    { "max_p50_us": 2483404, "max_p99_us": 2772172 },
+    "query":    { "max_p50_us": 1048 },
+    "optimize": { "max_p50_us": 23219404, "max_p99_us": 23219404 },
+    "hybrid":   { "max_p50_us": 429 }
+  },
   "regression_tolerance_pct": 20
 }

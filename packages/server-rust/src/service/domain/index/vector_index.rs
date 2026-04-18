@@ -21,8 +21,8 @@ use tracing::{info, warn};
 use crate::network::handlers::admin_types::{BackfillProgress, RebuildType};
 use crate::service::domain::index::attribute::AttributeExtractor;
 use crate::service::domain::index::hnsw::{ElementId, Hnsw, HnswParams};
-use crate::service::domain::index::{Index, IndexType};
 use crate::service::domain::index::registry::VectorIndexStats;
+use crate::service::domain::index::{Index, IndexType};
 use crate::storage::factory::RecordStoreFactory;
 use crate::storage::record::RecordValue;
 
@@ -348,7 +348,9 @@ impl VectorIndex {
         // can proceed concurrently against the current graph during the rebuild.
         let vectors_snapshot: Vec<(u64, SharedVector)> = self.hnsw.read().all_vectors();
 
-        handle.total.store(vectors_snapshot.len() as u64, Ordering::Relaxed);
+        handle
+            .total
+            .store(vectors_snapshot.len() as u64, Ordering::Relaxed);
 
         let this = Arc::clone(self);
         let handle_clone = Arc::clone(&handle);
@@ -522,8 +524,16 @@ pub(crate) fn format_iso8601(secs: u64) -> String {
     let julian_e = ((julian_b - days_in_year) as f64 / 30.6001) as u64;
 
     let day = (julian_b - days_in_year - (30.6001 * julian_e as f64) as u64) as u32;
-    let month = if julian_e < 14 { julian_e - 1 } else { julian_e - 13 } as u32;
-    let year = if month > 2 { julian_c - 4716 } else { julian_c - 4715 } as u32;
+    let month = if julian_e < 14 {
+        julian_e - 1
+    } else {
+        julian_e - 13
+    } as u32;
+    let year = if month > 2 {
+        julian_c - 4716
+    } else {
+        julian_c - 4715
+    } as u32;
 
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
 }
@@ -826,7 +836,9 @@ mod rebuild_tests {
         }];
         super::rebuild_from_store(&factory, &store_factory, &specs, &bp).await;
         // Index should be registered even with no records (empty store).
-        let registry = factory.get_registry("users").expect("registry should exist");
+        let registry = factory
+            .get_registry("users")
+            .expect("registry should exist");
         assert!(registry.get_vector_index("_embedding").is_some());
         let stats = registry.vector_index_stats();
         assert_eq!(stats.len(), 1);
@@ -901,7 +913,13 @@ mod tests {
     use super::*;
 
     fn make_index() -> VectorIndex {
-        VectorIndex::new("embedding", "embedding_index", 4, DistanceMetric::Cosine, true)
+        VectorIndex::new(
+            "embedding",
+            "embedding_index",
+            4,
+            DistanceMetric::Cosine,
+            true,
+        )
     }
 
     fn make_record(data: &[f32]) -> rmpv::Value {
@@ -1104,7 +1122,11 @@ mod tests {
         idx.commit_pending();
         // Dedup fires: k2 gets the same BLAKE3 hash as k1, HNSW insert is skipped.
         // key_to_id has k1 only; entry_count stays 1.
-        assert_eq!(idx.entry_count(), 1, "dedup should prevent second HNSW insert");
+        assert_eq!(
+            idx.entry_count(),
+            1,
+            "dedup should prevent second HNSW insert"
+        );
     }
 
     #[test]
@@ -1147,7 +1169,11 @@ mod tests {
 
         // DashSet::insert is atomic — only one writer succeeds in reserving the hash.
         // entry_count should be 1.
-        assert_eq!(idx.entry_count(), 1, "concurrent dedup: only one HNSW node expected");
+        assert_eq!(
+            idx.entry_count(),
+            1,
+            "concurrent dedup: only one HNSW node expected"
+        );
     }
 
     #[tokio::test]
@@ -1173,7 +1199,10 @@ mod tests {
         );
 
         let (handle, was_already_running) = idx.optimize();
-        assert!(!was_already_running, "first optimize should not report already_running");
+        assert!(
+            !was_already_running,
+            "first optimize should not report already_running"
+        );
 
         // Wait for the background task to complete.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -1206,7 +1235,11 @@ mod tests {
             "optimize must not destroy committed vectors"
         );
         let results = idx.search_nearest(&[1.0, 0.0, 0.0, 0.0], 1, 8);
-        assert_eq!(results.len(), 1, "search after optimize should return results");
+        assert_eq!(
+            results.len(),
+            1,
+            "search after optimize should return results"
+        );
         assert_eq!(results[0].0, "k1", "nearest to [1,0,0,0] should be k1");
     }
 
@@ -1221,14 +1254,20 @@ mod tests {
         ));
 
         let (h1, already_running_first) = idx.optimize();
-        assert!(!already_running_first, "first call should not report already_running");
+        assert!(
+            !already_running_first,
+            "first call should not report already_running"
+        );
 
         let (h2, already_running_second) = idx.optimize();
 
         // While h1 is still running, h2 should return the same handle with already_running=true.
         if !h1.finished.load(std::sync::atomic::Ordering::Relaxed) {
             assert_eq!(h1.id, h2.id, "in-flight optimize should return same handle");
-            assert!(already_running_second, "second call while running should report already_running=true");
+            assert!(
+                already_running_second,
+                "second call while running should report already_running=true"
+            );
         }
 
         // Wait for completion.
@@ -1286,8 +1325,14 @@ mod tests {
         }
 
         // Invariants: cancelled flag set, finished set, live graph unchanged.
-        assert!(handle.cancelled.load(Ordering::Relaxed), "cancelled flag must be true");
-        assert!(handle.finished.load(Ordering::Relaxed), "finished flag must be true after cancel");
+        assert!(
+            handle.cancelled.load(Ordering::Relaxed),
+            "cancelled flag must be true"
+        );
+        assert!(
+            handle.finished.load(Ordering::Relaxed),
+            "finished flag must be true after cancel"
+        );
         assert_eq!(
             idx.entry_count(),
             count_before,
@@ -1327,14 +1372,23 @@ mod tests {
             if handle1.finished.load(Ordering::Relaxed) {
                 break;
             }
-            assert!(std::time::Instant::now() <= deadline, "first optimize did not finish");
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "first optimize did not finish"
+            );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
 
         // Second optimize: must start a fresh run with a new optimization_id.
         let (handle2, was_already_running) = idx.optimize();
-        assert!(!was_already_running, "after cancel+finish, new optimize should not report already_running");
-        assert_ne!(handle2.id, id1, "second optimize must have a distinct optimization_id");
+        assert!(
+            !was_already_running,
+            "after cancel+finish, new optimize should not report already_running"
+        );
+        assert_ne!(
+            handle2.id, id1,
+            "second optimize must have a distinct optimization_id"
+        );
 
         // Wait for the fresh optimize to complete.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -1342,17 +1396,27 @@ mod tests {
             if handle2.finished.load(Ordering::Relaxed) {
                 break;
             }
-            assert!(std::time::Instant::now() <= deadline, "second optimize did not finish");
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "second optimize did not finish"
+            );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
 
         // The second optimize completed successfully: last_optimized is now set,
         // and cancelled is false on handle2.
-        assert!(!handle2.cancelled.load(Ordering::Relaxed), "second optimize must not be cancelled");
+        assert!(
+            !handle2.cancelled.load(Ordering::Relaxed),
+            "second optimize must not be cancelled"
+        );
         assert!(
             idx.stats().last_optimized.is_some(),
             "last_optimized must be set after successful re-optimize"
         );
-        assert_eq!(idx.entry_count(), 2, "vectors must be preserved through cancel+reoptimize");
+        assert_eq!(
+            idx.entry_count(),
+            2,
+            "vectors must be preserved through cancel+reoptimize"
+        );
     }
 }

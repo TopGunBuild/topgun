@@ -48,8 +48,8 @@ use topgun_server::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManag
 use topgun_server::storage::mutation_observer::MutationObserver;
 
 use metrics::HdrMetricsCollector;
-use scenarios::{ThroughputScenario, VectorSearchScenario};
 use scenarios::vector_search::{VectorMode, VectorSearchConfig};
+use scenarios::{ThroughputScenario, VectorSearchScenario};
 use traits::{
     AssertionResult, HarnessContext, JsonAssertionResult, JsonLatency, JsonReport, LoadScenario,
     MetricsCollector,
@@ -78,8 +78,9 @@ async fn main() {
     let mut vector_count: usize = 10_000;
     let mut vector_dim: u16 = 384;
     let mut vector_k: usize = 10;
-    let mut vector_query_tasks: usize =
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let mut vector_query_tasks: usize = std::thread::available_parallelism()
+        .map(std::num::NonZero::get)
+        .unwrap_or(4);
 
     let mut i = 1;
     while i < args.len() {
@@ -293,7 +294,9 @@ async fn main() {
                 "optimize" => VectorMode::Optimize,
                 "hybrid" => VectorMode::Hybrid,
                 other => {
-                    eprintln!("Unknown --vector-mode: {other}. Available: build|query|optimize|hybrid");
+                    eprintln!(
+                        "Unknown --vector-mode: {other}. Available: build|query|optimize|hybrid"
+                    );
                     std::process::exit(1);
                 }
             };
@@ -305,7 +308,7 @@ async fn main() {
                 top_k: vector_k,
                 duration_secs,
                 ef_search: 64,
-                methods: vec![],  // not used by VectorMode dispatch; Hybrid uses fixed [Exact, FullText, Semantic]
+                methods: vec![], // not used by VectorMode dispatch; Hybrid uses fixed [Exact, FullText, Semantic]
                 query_tasks: vector_query_tasks,
             };
             Box::new(VectorSearchScenario::new(config))
@@ -370,11 +373,10 @@ async fn main() {
         // Use the mode-appropriate latency key for the JSON report.
         let latency_key = if scenario_name == "vector_search" {
             match vector_mode.as_str() {
-                "build" => "vector_build_latency",
                 "query" => "vector_query_latency",
                 "optimize" => "vector_optimize_latency",
                 "hybrid" => "hybrid_search_latency",
-                _ => "vector_build_latency",
+                _ => "vector_build_latency", // covers "build" and any unknown sub-mode
             }
         } else {
             "write_latency"
@@ -394,7 +396,11 @@ async fn main() {
             "fire-and-wait".to_string()
         };
         // Vector scenarios use no WebSocket connections; use 0 to keep schema stable for jq consumers.
-        let connections_field = if scenario_name == "vector_search" { 0 } else { num_connections as u64 };
+        let connections_field = if scenario_name == "vector_search" {
+            0
+        } else {
+            num_connections as u64
+        };
         let report = JsonReport {
             scenario: scenario_name,
             mode,
@@ -654,7 +660,8 @@ fn build_services() -> (
         cluster_state,
         Arc::clone(&connection_registry),
     ));
-    let index_observer_factory = Arc::new(topgun_server::service::domain::index::IndexObserverFactory::new());
+    let index_observer_factory =
+        Arc::new(topgun_server::service::domain::index::IndexObserverFactory::new());
     let search_svc = Arc::new(SearchService::new(
         search_registry,
         hybrid_registry,

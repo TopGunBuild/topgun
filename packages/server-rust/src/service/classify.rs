@@ -1094,7 +1094,9 @@ mod tests {
                 min_score: None,
             },
         };
-        let op = svc.classify(msg, Some("client-1".to_string()), CallerOrigin::Client).unwrap();
+        let op = svc
+            .classify(msg, Some("client-1".to_string()), CallerOrigin::Client)
+            .unwrap();
         assert_eq!(op.ctx().service_name, service_names::SEARCH);
         assert!(matches!(op, Operation::HybridSearch { .. }));
         // partition_key=None for hybrid search means no partition_id.

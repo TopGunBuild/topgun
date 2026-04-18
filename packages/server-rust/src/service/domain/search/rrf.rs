@@ -53,11 +53,13 @@ pub fn fuse(ranked_lists: &[Vec<RankedEntry>], k: u32, top_n: usize) -> Vec<Fuse
     for (list_idx, list) in ranked_lists.iter().enumerate() {
         for entry in list {
             let rrf_contribution = 1.0 / (f64::from(k) + f64::from(entry.rank));
-            let fused = accumulator.entry(entry.key.clone()).or_insert_with(|| FusedEntry {
-                key: entry.key.clone(),
-                score: 0.0,
-                method_scores: Vec::new(),
-            });
+            let fused = accumulator
+                .entry(entry.key.clone())
+                .or_insert_with(|| FusedEntry {
+                    key: entry.key.clone(),
+                    score: 0.0,
+                    method_scores: Vec::new(),
+                });
             fused.score += rrf_contribution;
             fused.method_scores.push((list_idx, entry.original_score));
         }
@@ -110,13 +112,19 @@ mod tests {
         let results = fuse(&[list_a, list_b], 60, 10);
 
         // "y" appears in both lists: 1/62 + 1/61
-        let y = results.iter().find(|e| e.key == "y").expect("y must be present");
+        let y = results
+            .iter()
+            .find(|e| e.key == "y")
+            .expect("y must be present");
         let expected_y = 1.0 / 62.0 + 1.0 / 61.0;
         assert!((y.score - expected_y).abs() < 1e-10);
         assert_eq!(y.method_scores.len(), 2);
 
         // "x" appears in list 0 only: 1/61
-        let x = results.iter().find(|e| e.key == "x").expect("x must be present");
+        let x = results
+            .iter()
+            .find(|e| e.key == "x")
+            .expect("x must be present");
         let expected_x = 1.0 / 61.0;
         assert!((x.score - expected_x).abs() < 1e-10);
 
@@ -137,7 +145,10 @@ mod tests {
         let results_large_k = fuse(&[list], 1000, 10);
         let diff_large = results_large_k[0].score - results_large_k[1].score;
 
-        assert!(diff_small > diff_large, "larger k should reduce score differences");
+        assert!(
+            diff_small > diff_large,
+            "larger k should reduce score differences"
+        );
     }
 
     /// `top_n` truncation: only the `top_n` results are returned.

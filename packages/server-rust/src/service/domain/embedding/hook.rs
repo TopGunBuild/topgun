@@ -23,11 +23,11 @@ use topgun_core::types::Value;
 
 use crate::service::domain::embedding::{EmbeddingProvider, VectorConfig};
 use crate::service::domain::predicate::value_to_rmpv;
+use crate::storage::factory::ObserverFactory;
 use crate::storage::factory::RecordStoreFactory;
 use crate::storage::mutation_observer::MutationObserver;
 use crate::storage::record::{Record, RecordValue};
 use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
-use crate::storage::factory::ObserverFactory;
 
 // ---------------------------------------------------------------------------
 // EmbeddingConfig
@@ -134,7 +134,13 @@ impl EmbeddingMutationObserver {
 }
 
 impl MutationObserver for EmbeddingMutationObserver {
-    fn on_put(&self, key: &str, record: &Record, _old_value: Option<&RecordValue>, _is_backup: bool) {
+    fn on_put(
+        &self,
+        key: &str,
+        record: &Record,
+        _old_value: Option<&RecordValue>,
+        _is_backup: bool,
+    ) {
         let rmpv_val = match &record.value {
             RecordValue::Lww { value, .. } => value_to_rmpv(value),
             _ => return,
@@ -386,7 +392,12 @@ async fn flush_batch(
         in_flight.insert((evt.map_name.clone(), evt.key.clone()));
 
         if let Err(err) = store
-            .put(&evt.key, record_value, ExpiryPolicy::NONE, CallerProvenance::CrdtMerge)
+            .put(
+                &evt.key,
+                record_value,
+                ExpiryPolicy::NONE,
+                CallerProvenance::CrdtMerge,
+            )
             .await
         {
             tracing::warn!(
@@ -615,7 +626,10 @@ mod tests {
         );
 
         let obs = factory.create_observer("docs", 0);
-        assert!(obs.is_some(), "should return an observer for configured map");
+        assert!(
+            obs.is_some(),
+            "should return an observer for configured map"
+        );
     }
 
     #[test]
@@ -715,9 +729,7 @@ mod tests {
                 Arc::new(NullDataStore),
                 Vec::new(),
             )
-            .with_observer_factories(vec![
-                embedding_factory.clone() as Arc<dyn ObserverFactory>,
-            ]),
+            .with_observer_factories(vec![embedding_factory.clone() as Arc<dyn ObserverFactory>]),
         );
 
         // Phase 2: inject RecordStoreFactory and spawn background task.
@@ -726,7 +738,10 @@ mod tests {
         // Write a record to a configured map.
         let store = record_store_factory.get_or_create("docs", 0);
         let mut fields = BTreeMap::new();
-        fields.insert("title".to_string(), Value::String("hello world".to_string()));
+        fields.insert(
+            "title".to_string(),
+            Value::String("hello world".to_string()),
+        );
         let record_value = RecordValue::Lww {
             value: Value::Map(fields),
             timestamp: Timestamp {
@@ -736,7 +751,12 @@ mod tests {
             },
         };
         store
-            .put("doc1", record_value, ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "doc1",
+                record_value,
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
 
@@ -745,10 +765,17 @@ mod tests {
 
         // Read back and assert `_embedding` field is present.
         let record = store.get("doc1", false).await.unwrap();
-        assert!(record.is_some(), "record should still exist after write-back");
+        assert!(
+            record.is_some(),
+            "record should still exist after write-back"
+        );
 
         let record = record.unwrap();
-        if let RecordValue::Lww { value: Value::Map(ref m), .. } = record.value {
+        if let RecordValue::Lww {
+            value: Value::Map(ref m),
+            ..
+        } = record.value
+        {
             assert!(
                 m.contains_key("_embedding"),
                 "record should have _embedding field after write-back; got keys: {:?}",
@@ -796,9 +823,7 @@ mod tests {
                 Arc::new(NullDataStore),
                 Vec::new(),
             )
-            .with_observer_factories(vec![
-                embedding_factory.clone() as Arc<dyn ObserverFactory>,
-            ]),
+            .with_observer_factories(vec![embedding_factory.clone() as Arc<dyn ObserverFactory>]),
         );
 
         embedding_factory.init(Arc::clone(&record_store_factory));
@@ -816,7 +841,12 @@ mod tests {
             },
         };
         store
-            .put("doc2", record_value, ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "doc2",
+                record_value,
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .unwrap();
 
@@ -831,7 +861,11 @@ mod tests {
         let record = store.get("doc2", false).await.unwrap();
         assert!(record.is_some());
         if let Some(r) = record {
-            if let RecordValue::Lww { value: Value::Map(ref m), .. } = r.value {
+            if let RecordValue::Lww {
+                value: Value::Map(ref m),
+                ..
+            } = r.value
+            {
                 assert!(
                     m.contains_key("_embedding"),
                     "shutdown drain should have written back _embedding"

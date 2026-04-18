@@ -28,11 +28,11 @@ use tokio::sync::mpsc;
 use tower::Service;
 
 use topgun_core::messages::base::ChangeEventType;
+use topgun_core::messages::hybrid::SearchMethod as WireSearchMethod;
 use topgun_core::messages::hybrid::{
     HybridSearchPayload, HybridSearchRespPayload, HybridSearchResultEntry, HybridSearchSubPayload,
     HybridSearchUnsubPayload, HybridSearchUpdatePayload,
 };
-use topgun_core::messages::hybrid::SearchMethod as WireSearchMethod;
 use topgun_core::messages::search::{
     SearchOptions, SearchRespPayload, SearchResultEntry, SearchUpdatePayload,
 };
@@ -43,7 +43,9 @@ use tracing::Instrument;
 use crate::network::connection::{ConnectionId, ConnectionRegistry, OutboundMessage};
 use crate::service::domain::index::IndexObserverFactory;
 use crate::service::domain::predicate::value_to_rmpv;
-use crate::service::operation::{service_names, Operation, OperationContext, OperationError, OperationResponse};
+use crate::service::operation::{
+    service_names, Operation, OperationContext, OperationError, OperationResponse,
+};
 use crate::service::registry::{ManagedService, ServiceContext};
 use crate::storage::mutation_observer::MutationObserver;
 use crate::storage::record::{Record, RecordValue};
@@ -683,7 +685,9 @@ impl SearchMutationObserver {
     fn enqueue_index(&self, key: &str, value: rmpv::Value, change_type: ChangeEventType) {
         // Skip indexing when neither text-search nor hybrid subscriptions exist for this map.
         let has_text = self.registry.has_subscriptions_for_map(&self.map_name);
-        let has_hybrid = self.hybrid_registry.has_subscriptions_for_map(&self.map_name);
+        let has_hybrid = self
+            .hybrid_registry
+            .has_subscriptions_for_map(&self.map_name);
         if !has_text && !has_hybrid {
             // Mark this map as needing population when a subscription arrives.
             self.needs_population
@@ -710,7 +714,9 @@ impl SearchMutationObserver {
     fn enqueue_remove(&self, key: &str) {
         // Skip indexing when no subscriptions exist for this map.
         let has_text = self.registry.has_subscriptions_for_map(&self.map_name);
-        let has_hybrid = self.hybrid_registry.has_subscriptions_for_map(&self.map_name);
+        let has_hybrid = self
+            .hybrid_registry
+            .has_subscriptions_for_map(&self.map_name);
         if !has_text && !has_hybrid {
             // Mark map as needing population so the first query triggers a full
             // rebuild that correctly excludes the removed key.
@@ -886,7 +892,13 @@ async fn run_batch_processor(
 
         if !batch.is_empty() {
             let current_batch = std::mem::take(&mut batch);
-            process_batch(current_batch, &registry, &indexes, &connection_registry, &hybrid_notify_tx);
+            process_batch(
+                current_batch,
+                &registry,
+                &indexes,
+                &connection_registry,
+                &hybrid_notify_tx,
+            );
         }
     }
 }
@@ -1385,13 +1397,11 @@ impl SearchService {
                 })))
             }
 
-            Operation::SearchUnsubscribe { ctx, payload } => {
-                Ok(handle_unsubscribe(
-                    &self.registry,
-                    &payload.subscription_id,
-                    ctx.call_id,
-                ))
-            }
+            Operation::SearchUnsubscribe { ctx, payload } => Ok(handle_unsubscribe(
+                &self.registry,
+                &payload.subscription_id,
+                ctx.call_id,
+            )),
 
             _ => Err(OperationError::WrongService),
         }
@@ -1709,9 +1719,8 @@ impl SearchService {
                     // but we skip rather than silently return empty deltas.
                     continue;
                 } else {
-                    owned_registry = Arc::new(
-                        crate::service::domain::index::registry::IndexRegistry::new(),
-                    );
+                    owned_registry =
+                        Arc::new(crate::service::domain::index::registry::IndexRegistry::new());
                     &owned_registry
                 };
 
@@ -1735,10 +1744,8 @@ impl SearchService {
             }
 
             // Compute deltas: ENTER, UPDATE, LEAVE.
-            let new_map: HashMap<String, &HybridSearchResult> = new_results
-                .iter()
-                .map(|r| (r.key.clone(), r))
-                .collect();
+            let new_map: HashMap<String, &HybridSearchResult> =
+                new_results.iter().map(|r| (r.key.clone(), r)).collect();
 
             // LEAVE: in cache but not in new results.
             let leaves: Vec<String> = sub
@@ -1877,15 +1884,18 @@ impl Service<Operation> for Arc<SearchService> {
         Box::pin(
             async move {
                 match op {
-                    Operation::HybridSearch { ref ctx, ref payload } => {
-                        svc.handle_hybrid_search(ctx, payload).await
-                    }
-                    Operation::HybridSearchSubscribe { ref ctx, ref payload } => {
-                        svc.handle_hybrid_search_subscribe(ctx, payload).await
-                    }
-                    Operation::HybridSearchUnsubscribe { ref ctx, ref payload } => {
-                        Ok(svc.handle_hybrid_search_unsubscribe(ctx, payload))
-                    }
+                    Operation::HybridSearch {
+                        ref ctx,
+                        ref payload,
+                    } => svc.handle_hybrid_search(ctx, payload).await,
+                    Operation::HybridSearchSubscribe {
+                        ref ctx,
+                        ref payload,
+                    } => svc.handle_hybrid_search_subscribe(ctx, payload).await,
+                    Operation::HybridSearchUnsubscribe {
+                        ref ctx,
+                        ref payload,
+                    } => Ok(svc.handle_hybrid_search_unsubscribe(ctx, payload)),
                     _ => svc.handle(op),
                 }
             }
@@ -2542,7 +2552,10 @@ mod tests {
         match resp {
             OperationResponse::Message(msg) => {
                 if let Message::HybridSearchResp { payload } = *msg {
-                    assert!(payload.error.is_some(), "expected error when engine not set");
+                    assert!(
+                        payload.error.is_some(),
+                        "expected error when engine not set"
+                    );
                 } else {
                     panic!("expected HybridSearchResp, got different message");
                 }
@@ -2586,7 +2599,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            svc.hybrid_registry.get_subscriptions_for_map("my-map").len(),
+            svc.hybrid_registry
+                .get_subscriptions_for_map("my-map")
+                .len(),
             1
         );
 
@@ -2602,14 +2617,20 @@ mod tests {
         );
 
         // Subscription removed.
-        assert!(svc.hybrid_registry.get_subscriptions_for_map("my-map").is_empty());
+        assert!(svc
+            .hybrid_registry
+            .get_subscriptions_for_map("my-map")
+            .is_empty());
     }
 
     #[tokio::test]
     async fn hybrid_search_unsubscribe_nonexistent_returns_ack() {
         // Unsubscribing a non-existent subscription is a no-op that still returns Ack.
         let svc = make_service();
-        let resp = svc.oneshot(make_hybrid_unsub_op("no-such-sub")).await.unwrap();
+        let resp = svc
+            .oneshot(make_hybrid_unsub_op("no-such-sub"))
+            .await
+            .unwrap();
         assert!(
             matches!(resp, OperationResponse::Ack { .. }),
             "expected Ack even for non-existent subscription"

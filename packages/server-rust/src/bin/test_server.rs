@@ -39,15 +39,15 @@ use topgun_server::service::config::ServerConfig;
 use topgun_server::service::dispatch::{DispatchConfig, PartitionDispatcher};
 use topgun_server::service::domain::coordination::CoordinationService;
 use topgun_server::service::domain::crdt::CrdtService;
-use topgun_server::service::domain::messaging::MessagingService;
-use topgun_server::service::domain::persistence::PersistenceService;
-use topgun_server::service::domain::query::{QueryRegistry, QueryService};
-use topgun_server::service::domain::schema::SchemaService;
 use topgun_server::service::domain::embedding::{
     noop::NoopEmbeddingProvider, EmbeddingConfig, EmbeddingObserverFactory, EmbeddingProvider,
     EmbeddingProviderConfig, NoopConfig, VectorConfig as EmbeddingVectorConfig,
 };
 use topgun_server::service::domain::index::IndexObserverFactory;
+use topgun_server::service::domain::messaging::MessagingService;
+use topgun_server::service::domain::persistence::PersistenceService;
+use topgun_server::service::domain::query::{QueryRegistry, QueryService};
+use topgun_server::service::domain::schema::SchemaService;
 use topgun_server::service::domain::search::{
     HybridSearchRegistry, SearchConfig, SearchMutationObserver, SearchRegistry, SearchService,
     TantivyMapIndex,

@@ -1,14 +1,15 @@
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
-    clippy::cast_sign_loss
+    clippy::cast_sign_loss,
+    clippy::doc_markdown,
+    dead_code
 )]
-/// Vector search benchmark scenario for the TopGun load harness.
+/// Vector search benchmark scenario for the `TopGun` load harness.
 ///
 /// Measures HNSW build, query, optimize-cycle, and hybrid search (RRF fusion)
 /// performance directly against `Arc<VectorIndex>` — bypassing the WebSocket
 /// path so only the HNSW/hybrid-search hot path is captured.
-
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -33,9 +34,7 @@ use topgun_server::storage::datastores::NullDataStore;
 use topgun_server::storage::factory::RecordStoreFactory;
 use topgun_server::storage::impls::StorageConfig;
 
-use crate::traits::{
-    Assertion, AssertionResult, HarnessContext, LoadScenario, ScenarioResult,
-};
+use crate::traits::{Assertion, AssertionResult, HarnessContext, LoadScenario, ScenarioResult};
 
 // ---------------------------------------------------------------------------
 // Seeded RNG helpers — deterministic across runs for reproducible baselines
@@ -111,6 +110,7 @@ impl VectorSearchScenario {
 
 #[async_trait]
 impl LoadScenario for VectorSearchScenario {
+    #[allow(clippy::unnecessary_literal_bound)]
     fn name(&self) -> &str {
         "vector_search"
     }
@@ -171,25 +171,18 @@ impl VectorSearchAssertion {
 
 #[async_trait]
 impl Assertion for VectorSearchAssertion {
+    #[allow(clippy::unnecessary_literal_bound)]
     fn name(&self) -> &str {
         "vector_search_assertion"
     }
 
     async fn check(&self, ctx: &HarnessContext, _result: &ScenarioResult) -> AssertionResult {
-        // Read baseline.json from the path relative to the workspace root.
-        let baseline_path = "packages/server-rust/benches/load_harness/baseline.json";
-        let content = match std::fs::read_to_string(baseline_path) {
-            Ok(s) => s,
-            Err(e) => {
-                return AssertionResult::Fail(format!("cannot read baseline.json: {e}"));
-            }
-        };
+        // baseline.json is embedded at compile time so the assertion is path-independent
+        // and works regardless of the working directory when the bench binary is invoked.
+        let baseline_content = include_str!("../baseline.json");
 
-        let baseline: serde_json::Value = match serde_json::from_str(&content) {
-            Ok(v) => v,
-            Err(e) => {
-                return AssertionResult::Fail(format!("cannot parse baseline.json: {e}"));
-            }
+        let Ok(baseline) = serde_json::from_str::<serde_json::Value>(baseline_content) else {
+            return AssertionResult::Fail("cannot parse embedded baseline.json".to_string());
         };
 
         let mode_key = self.mode_key();
@@ -197,23 +190,19 @@ impl Assertion for VectorSearchAssertion {
             .get("vector_search")
             .and_then(|vs| vs.get(mode_key))
             .and_then(|m| m.get("max_p50_us"))
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
 
         // First ever run: no baseline committed yet — pass and note it.
         if threshold == 0 {
-            println!(
-                "[no baseline for vector-{mode_key}; recording first measurement]"
-            );
+            println!("[no baseline for vector-{mode_key}; recording first measurement]");
             return AssertionResult::Pass;
         }
 
         let snapshot = ctx.metrics.snapshot();
         let latency_key = self.latency_metric_key();
         let Some(stats) = snapshot.latencies.get(latency_key) else {
-            return AssertionResult::Fail(format!(
-                "no latency data recorded for {latency_key}"
-            ));
+            return AssertionResult::Fail(format!("no latency data recorded for {latency_key}"));
         };
 
         if stats.p50 <= threshold {
@@ -243,7 +232,9 @@ fn generate_vectors(count: usize, dim: u16, seed: u64) -> Vec<Vec<f32>> {
             // L2-normalise for meaningful cosine distances.
             let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
             if norm > 1e-9 {
-                v.iter_mut().for_each(|x| *x /= norm);
+                for x in &mut v {
+                    *x /= norm;
+                }
             }
             v
         })
@@ -303,9 +294,7 @@ async fn run_build_mode(config: &VectorSearchConfig, ctx: &HarnessContext) -> Sc
 
     let vectors = generate_vectors(count, dim, VEC_SEED);
 
-    println!(
-        "Build mode: inserting {count} vectors (dim={dim}) in batches of {batch_size}..."
-    );
+    println!("Build mode: inserting {count} vectors (dim={dim}) in batches of {batch_size}...");
 
     let mut total_ops: u64 = 0;
     let start = Instant::now();
@@ -327,7 +316,8 @@ async fn run_build_mode(config: &VectorSearchConfig, ctx: &HarnessContext) -> Sc
         .expect("commit_pending task panicked");
 
         let elapsed_us = batch_start.elapsed().as_micros() as u64;
-        ctx.metrics.record_latency("vector_build_latency", elapsed_us);
+        ctx.metrics
+            .record_latency("vector_build_latency", elapsed_us);
         total_ops += chunk.len() as u64;
     }
 
@@ -400,7 +390,9 @@ async fn run_query_mode(config: &VectorSearchConfig, ctx: &HarnessContext) -> Sc
                 let mut q: Vec<f32> = (0..d).map(|_| rng.random::<f32>()).collect();
                 let norm: f32 = q.iter().map(|x| x * x).sum::<f32>().sqrt();
                 if norm > 1e-9 {
-                    q.iter_mut().for_each(|x| *x /= norm);
+                    for x in &mut q {
+                        *x /= norm;
+                    }
                 }
 
                 let call_start = Instant::now();
@@ -520,6 +512,7 @@ fn make_bench_search_service(
 // Hybrid mode
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_lines)]
 async fn run_hybrid_mode(config: &VectorSearchConfig, ctx: &HarnessContext) -> ScenarioResult {
     use topgun_server::service::domain::search::hybrid::{
         HybridSearchEngine, HybridSearchParams, SearchMethod as EngineSearchMethod,
@@ -613,8 +606,11 @@ async fn run_hybrid_mode(config: &VectorSearchConfig, ctx: &HarnessContext) -> S
     let mut query_rng = SmallRng::seed_from_u64(QUERY_SEED);
     let d = dim as usize;
 
-    let methods: &[EngineSearchMethod] =
-        &[EngineSearchMethod::Exact, EngineSearchMethod::FullText, EngineSearchMethod::Semantic];
+    let methods: &[EngineSearchMethod] = &[
+        EngineSearchMethod::Exact,
+        EngineSearchMethod::FullText,
+        EngineSearchMethod::Semantic,
+    ];
 
     while Instant::now() < deadline {
         // Owned data for this iteration — must outlive the borrow in HybridSearchParams.
@@ -622,7 +618,9 @@ async fn run_hybrid_mode(config: &VectorSearchConfig, ctx: &HarnessContext) -> S
         let mut qv: Vec<f32> = (0..d).map(|_| query_rng.random::<f32>()).collect();
         let norm: f32 = qv.iter().map(|x| x * x).sum::<f32>().sqrt();
         if norm > 1e-9 {
-            qv.iter_mut().for_each(|x| *x /= norm);
+            for x in &mut qv {
+                *x /= norm;
+            }
         }
 
         let call_start = Instant::now();
@@ -640,12 +638,16 @@ async fn run_hybrid_mode(config: &VectorSearchConfig, ctx: &HarnessContext) -> S
         // hybrid_search is async (runs semantic via blocking task internally).
         let _ = engine.hybrid_search(params).await;
         let elapsed_us = call_start.elapsed().as_micros() as u64;
-        ctx.metrics.record_latency("hybrid_search_latency", elapsed_us);
+        ctx.metrics
+            .record_latency("hybrid_search_latency", elapsed_us);
         total_ops += 1;
     }
 
     let duration = start.elapsed();
-    println!("Hybrid complete: {total_ops} queries in {:.2}s", duration.as_secs_f64());
+    println!(
+        "Hybrid complete: {total_ops} queries in {:.2}s",
+        duration.as_secs_f64()
+    );
 
     ScenarioResult {
         total_ops,

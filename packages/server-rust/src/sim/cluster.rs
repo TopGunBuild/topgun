@@ -250,7 +250,8 @@ impl SimNode {
         );
 
         let search_needs_population = Arc::new(dashmap::DashMap::new());
-        let index_observer_factory = Arc::new(crate::service::domain::index::IndexObserverFactory::new());
+        let index_observer_factory =
+            Arc::new(crate::service::domain::index::IndexObserverFactory::new());
         let search_svc = Arc::new(SearchService::new(
             Arc::new(SearchRegistry::new()),
             Arc::new(HybridSearchRegistry::new()),

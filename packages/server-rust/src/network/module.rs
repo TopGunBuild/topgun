@@ -31,7 +31,6 @@ use super::handlers::admin::{
     optimize_vector_index_handler, remove_index_handler, remove_vector_index_handler,
     server_status, update_settings, vector_index_status,
 };
-use crate::service::domain::index::vector_index::{rebuild_from_store, VectorRebuildSpec};
 use super::handlers::auth_provider::{
     AuthProvider, AuthProviderConfig, HmacProvider, JwksProvider, OidcProvider,
 };
@@ -45,6 +44,7 @@ use super::shutdown::ShutdownController;
 use crate::cluster::state::ClusterState;
 use crate::service::config::ServerConfig;
 use crate::service::domain::index::mutation_observer::IndexObserverFactory;
+use crate::service::domain::index::vector_index::{rebuild_from_store, VectorRebuildSpec};
 use crate::service::middleware::ObservabilityHandle;
 use crate::service::policy::PolicyStore;
 use crate::storage::factory::RecordStoreFactory;
@@ -227,8 +227,12 @@ impl NetworkModule {
         // progress entries written during startup rebuild are visible immediately
         // after set_ready(). The same Arc is threaded into AppState below.
         // There must be exactly one Arc<DashMap> for backfill progress — this is it.
-        let backfill_progress: Arc<dashmap::DashMap<(String, String), Arc<crate::network::handlers::admin_types::BackfillProgress>>> =
-            Arc::new(dashmap::DashMap::new());
+        let backfill_progress: Arc<
+            dashmap::DashMap<
+                (String, String),
+                Arc<crate::network::handlers::admin_types::BackfillProgress>,
+            >,
+        > = Arc::new(dashmap::DashMap::new());
 
         // Rebuild vector indexes from persisted records before serving requests.
         // This must complete before set_ready() so that VECTOR_SEARCH requests
@@ -309,7 +313,12 @@ struct AppServices {
     /// Pre-allocated backfill progress map. Populated by `rebuild_from_store`
     /// during startup before `set_ready()` and reused as `AppState.backfill_progress`.
     /// There must be exactly one `Arc` instance — this field carries it.
-    backfill_progress: Arc<dashmap::DashMap<(String, String), Arc<crate::network::handlers::admin_types::BackfillProgress>>>,
+    backfill_progress: Arc<
+        dashmap::DashMap<
+            (String, String),
+            Arc<crate::network::handlers::admin_types::BackfillProgress>,
+        >,
+    >,
 }
 
 /// Builds the complete application router with all routes and middleware.

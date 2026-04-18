@@ -38,8 +38,8 @@ use super::admin_types::{
 use super::AppState;
 
 use crate::cluster::types::NodeState;
-use crate::service::domain::index::IndexType;
 use crate::service::domain::index::vector_index::format_iso8601;
+use crate::service::domain::index::IndexType;
 use crate::service::middleware::metrics::total_operations;
 use crate::service::policy::{expr_parser::parse_permission_expr, PermissionPolicy};
 
@@ -1074,7 +1074,9 @@ pub fn save_vector_descriptors(path: &std::path::Path, descriptors: &[VectorInde
 // ── Vector index admin endpoints ──────────────────────────────────────────────
 
 /// Converts a `VectorIndexStats` (domain type) to a `VectorIndexInfoResponse` (wire type).
-fn stats_to_response(stats: crate::service::domain::index::registry::VectorIndexStats) -> VectorIndexInfoResponse {
+fn stats_to_response(
+    stats: crate::service::domain::index::registry::VectorIndexStats,
+) -> VectorIndexInfoResponse {
     VectorIndexInfoResponse {
         attribute: stats.attribute,
         index_name: stats.index_name,
@@ -1118,10 +1120,7 @@ pub async fn create_vector_index(
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(ErrorResponse {
                 code: 422,
-                message: format!(
-                    "dimension must be in range 1..=4096, got {}",
-                    req.dimension
-                ),
+                message: format!("dimension must be in range 1..=4096, got {}", req.dimension),
                 field: Some("dimension".to_string()),
             }),
         ));
@@ -1146,11 +1145,7 @@ pub async fn create_vector_index(
         }
     }
 
-    let hnsw_m = req
-        .hnsw_params
-        .as_ref()
-        .and_then(|p| p.m)
-        .unwrap_or(16);
+    let hnsw_m = req.hnsw_params.as_ref().and_then(|p| p.m).unwrap_or(16);
     let hnsw_ef = req
         .hnsw_params
         .as_ref()
@@ -1287,9 +1282,7 @@ pub async fn remove_vector_index_handler(
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
                     code: 404,
-                    message: format!(
-                        "no vector index '{index_name}' found for map '{map_name}'"
-                    ),
+                    message: format!("no vector index '{index_name}' found for map '{map_name}'"),
                     field: None,
                 }),
             )
@@ -1354,9 +1347,7 @@ pub async fn optimize_vector_index_handler(
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
                     code: 404,
-                    message: format!(
-                        "no vector index '{index_name}' found for map '{map_name}'"
-                    ),
+                    message: format!("no vector index '{index_name}' found for map '{map_name}'"),
                     field: None,
                 }),
             )
@@ -1367,9 +1358,7 @@ pub async fn optimize_vector_index_handler(
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
                 code: 404,
-                message: format!(
-                    "no vector index '{index_name}' found for map '{map_name}'"
-                ),
+                message: format!("no vector index '{index_name}' found for map '{map_name}'"),
                 field: None,
             }),
         )
@@ -1429,9 +1418,7 @@ pub async fn vector_index_status(
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
                     code: 404,
-                    message: format!(
-                        "no vector index '{index_name}' found for map '{map_name}'"
-                    ),
+                    message: format!("no vector index '{index_name}' found for map '{map_name}'"),
                     field: None,
                 }),
             )
@@ -1442,9 +1429,7 @@ pub async fn vector_index_status(
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
                 code: 404,
-                message: format!(
-                    "no vector index '{index_name}' found for map '{map_name}'"
-                ),
+                message: format!("no vector index '{index_name}' found for map '{map_name}'"),
                 field: None,
             }),
         )
@@ -1525,9 +1510,7 @@ pub async fn cancel_vector_index_optimize_handler(
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
                     code: 404,
-                    message: format!(
-                        "no vector index '{index_name}' found for map '{map_name}'"
-                    ),
+                    message: format!("no vector index '{index_name}' found for map '{map_name}'"),
                     field: None,
                 }),
             )
@@ -1819,10 +1802,9 @@ mod vector_admin_tests {
         let vi = registry
             .get_vector_index("_embedding")
             .expect("vector index registered");
-        let encoded = rmp_serde::to_vec_named(&topgun_core::vector::Vector::F32(vec![
-            0.1, 0.2, 0.3, 0.4,
-        ]))
-        .unwrap();
+        let encoded =
+            rmp_serde::to_vec_named(&topgun_core::vector::Vector::F32(vec![0.1, 0.2, 0.3, 0.4]))
+                .unwrap();
         let record = rmpv::Value::Map(vec![(
             rmpv::Value::String(rmpv::Utf8String::from("_embedding")),
             rmpv::Value::Binary(encoded),
@@ -1982,8 +1964,14 @@ mod vector_admin_tests {
         assert!(result.is_ok(), "expected 202, got err: {:?}", result.err());
         let (code, Json(resp)) = result.unwrap();
         assert_eq!(code, StatusCode::ACCEPTED);
-        assert!(!resp.optimization_id.is_empty(), "optimization_id should be set");
-        assert!(!resp.already_running, "new optimize should report already_running=false");
+        assert!(
+            !resp.optimization_id.is_empty(),
+            "optimization_id should be set"
+        );
+        assert!(
+            !resp.already_running,
+            "new optimize should report already_running=false"
+        );
 
         let _ = std::fs::remove_file(&tmp);
         std::env::remove_var("TOPGUN_VECTOR_INDEX_PATH");
@@ -2024,7 +2012,11 @@ mod vector_admin_tests {
         let result = cancel_vector_index_optimize_handler(
             make_claims(),
             State(state),
-            Path(("users".to_string(), "emb_idx".to_string(), "fake_id".to_string())),
+            Path((
+                "users".to_string(),
+                "emb_idx".to_string(),
+                "fake_id".to_string(),
+            )),
         )
         .await;
         assert!(result.is_err());
@@ -2053,7 +2045,11 @@ mod vector_admin_tests {
         let result = cancel_vector_index_optimize_handler(
             make_claims(),
             State(state),
-            Path(("users".to_string(), "emb_idx".to_string(), "any_id".to_string())),
+            Path((
+                "users".to_string(),
+                "emb_idx".to_string(),
+                "any_id".to_string(),
+            )),
         )
         .await;
         assert!(result.is_err());
@@ -2073,7 +2069,11 @@ mod vector_admin_tests {
         let result = cancel_vector_index_optimize_handler(
             make_claims(),
             State(state),
-            Path(("users".to_string(), "emb_idx".to_string(), "wrong_id_xyz".to_string())),
+            Path((
+                "users".to_string(),
+                "emb_idx".to_string(),
+                "wrong_id_xyz".to_string(),
+            )),
         )
         .await;
         assert!(result.is_err());
@@ -2090,10 +2090,18 @@ mod vector_admin_tests {
         let result = cancel_vector_index_optimize_handler(
             make_claims(),
             State(state.clone()),
-            Path(("users".to_string(), "emb_idx".to_string(), optimization_id.clone())),
+            Path((
+                "users".to_string(),
+                "emb_idx".to_string(),
+                optimization_id.clone(),
+            )),
         )
         .await;
-        assert!(result.is_ok(), "first cancel should return 200, got: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "first cancel should return 200, got: {:?}",
+            result.err()
+        );
         let Json(resp) = result.unwrap();
         // cancelled flag should be set on the response immediately.
         // (optimize_cancelled may be false until the task observes the flag,
@@ -2108,7 +2116,9 @@ mod vector_admin_tests {
             Path(("users".to_string(), "emb_idx".to_string(), optimization_id)),
         )
         .await;
-        assert!(result2.is_ok(), "second cancel (idempotent) should return 200");
+        assert!(
+            result2.is_ok(),
+            "second cancel (idempotent) should return 200"
+        );
     }
 }
-

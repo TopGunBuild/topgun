@@ -212,7 +212,6 @@ impl IndexObserverFactory {
             .filter(|(_, stats)| !stats.is_empty())
             .collect()
     }
-
 }
 
 impl Default for IndexObserverFactory {

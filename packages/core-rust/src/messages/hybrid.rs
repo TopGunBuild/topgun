@@ -210,7 +210,11 @@ mod tests {
             request_id: "req-1".to_string(),
             map_name: "my_map".to_string(),
             query_text: "hello world".to_string(),
-            methods: vec![SearchMethod::Exact, SearchMethod::FullText, SearchMethod::Semantic],
+            methods: vec![
+                SearchMethod::Exact,
+                SearchMethod::FullText,
+                SearchMethod::Semantic,
+            ],
             k: 10,
             query_vector: Some(make_query_vector_2d()),
             predicate: None,
@@ -235,13 +239,34 @@ mod tests {
         };
         let bytes = rmp_serde::to_vec_named(&payload).unwrap();
         let keys = extract_keys(&bytes);
-        assert!(keys.contains(&"requestId".to_string()), "missing requestId, keys={keys:?}");
-        assert!(keys.contains(&"mapName".to_string()), "missing mapName, keys={keys:?}");
-        assert!(keys.contains(&"queryText".to_string()), "missing queryText, keys={keys:?}");
-        assert!(keys.contains(&"methods".to_string()), "missing methods, keys={keys:?}");
-        assert!(keys.contains(&"queryVector".to_string()), "missing queryVector, keys={keys:?}");
-        assert!(keys.contains(&"includeValue".to_string()), "missing includeValue, keys={keys:?}");
-        assert!(keys.contains(&"minScore".to_string()), "missing minScore, keys={keys:?}");
+        assert!(
+            keys.contains(&"requestId".to_string()),
+            "missing requestId, keys={keys:?}"
+        );
+        assert!(
+            keys.contains(&"mapName".to_string()),
+            "missing mapName, keys={keys:?}"
+        );
+        assert!(
+            keys.contains(&"queryText".to_string()),
+            "missing queryText, keys={keys:?}"
+        );
+        assert!(
+            keys.contains(&"methods".to_string()),
+            "missing methods, keys={keys:?}"
+        );
+        assert!(
+            keys.contains(&"queryVector".to_string()),
+            "missing queryVector, keys={keys:?}"
+        );
+        assert!(
+            keys.contains(&"includeValue".to_string()),
+            "missing includeValue, keys={keys:?}"
+        );
+        assert!(
+            keys.contains(&"minScore".to_string()),
+            "missing minScore, keys={keys:?}"
+        );
     }
 
     #[test]
@@ -266,9 +291,18 @@ mod tests {
         // Verify optional fields are omitted from wire
         let bytes = rmp_serde::to_vec_named(&payload).unwrap();
         let keys = extract_keys(&bytes);
-        assert!(!keys.contains(&"queryVector".to_string()), "queryVector should be omitted");
-        assert!(!keys.contains(&"includeValue".to_string()), "includeValue should be omitted");
-        assert!(!keys.contains(&"minScore".to_string()), "minScore should be omitted");
+        assert!(
+            !keys.contains(&"queryVector".to_string()),
+            "queryVector should be omitted"
+        );
+        assert!(
+            !keys.contains(&"includeValue".to_string()),
+            "includeValue should be omitted"
+        );
+        assert!(
+            !keys.contains(&"minScore".to_string()),
+            "minScore should be omitted"
+        );
     }
 
     #[test]
@@ -355,7 +389,11 @@ mod tests {
         let val: rmpv::Value = rmp_serde::from_slice(&bytes).unwrap();
         match &val {
             rmpv::Value::String(s) => {
-                assert_eq!(s.as_str(), Some("fullText"), "expected fullText, got {val:?}");
+                assert_eq!(
+                    s.as_str(),
+                    Some("fullText"),
+                    "expected fullText, got {val:?}"
+                );
             }
             other => panic!("expected String, got {other:?}"),
         }
