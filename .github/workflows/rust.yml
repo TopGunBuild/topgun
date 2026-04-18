@@ -199,6 +199,106 @@ jobs:
             results-faf.json
           retention-days: 90
 
+  vector-perf-gate:
+    name: Vector Performance Gate
+    needs: [check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Informational only — baselines measured on M1 Max; Ubuntu runners may differ
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-perf-vector-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-perf-
+            ${{ runner.os }}-cargo-
+
+      - name: Build load harness
+        # Explicit build step surfaces compilation failures before the longer scenario runs begin
+        run: cargo build --release --bench load_harness
+
+      - name: Run vector build scenario
+        run: |
+          cargo bench --bench load_harness -- \
+            --scenario vector_search --vector-mode build \
+            --vector-count 10000 --vector-dim 384 \
+            --json-output results-vec-build.json
+
+      - name: Run vector query scenario
+        run: |
+          cargo bench --bench load_harness -- \
+            --scenario vector_search --vector-mode query \
+            --vector-count 10000 --vector-dim 384 \
+            --vector-k 10 --duration 10 \
+            --json-output results-vec-query.json
+
+      - name: Run vector optimize scenario
+        run: |
+          cargo bench --bench load_harness -- \
+            --scenario vector_search --vector-mode optimize \
+            --vector-count 10000 --vector-dim 384 \
+            --json-output results-vec-optimize.json
+
+      - name: Run vector hybrid scenario
+        run: |
+          cargo bench --bench load_harness -- \
+            --scenario vector_search --vector-mode hybrid \
+            --vector-count 10000 --vector-dim 384 \
+            --duration 10 \
+            --json-output results-vec-hybrid.json
+
+      - name: Validate results against baseline
+        run: |
+          BASELINE=packages/server-rust/benches/load_harness/baseline.json
+          FAILED=0
+
+          for mode in build query optimize hybrid; do
+            MEASURED_P50=$(jq ".latency.p50_us" "results-vec-${mode}.json")
+            THRESHOLD_P50=$(jq ".vector_search.${mode}.max_p50_us" "$BASELINE")
+            echo "vector-${mode}: p50=${MEASURED_P50}µs (max=${THRESHOLD_P50}µs)"
+            if [ "$MEASURED_P50" -gt "$THRESHOLD_P50" ]; then
+              echo "FAIL: vector-${mode} p50 regression"
+              FAILED=1
+            fi
+
+            case "$mode" in
+              build|optimize)
+                MEASURED_P99=$(jq ".latency.p99_us" "results-vec-${mode}.json")
+                THRESHOLD_P99=$(jq ".vector_search.${mode}.max_p99_us" "$BASELINE")
+                echo "vector-${mode}: p99=${MEASURED_P99}µs (max=${THRESHOLD_P99}µs)"
+                if [ "$MEASURED_P99" -gt "$THRESHOLD_P99" ]; then
+                  echo "FAIL: vector-${mode} p99 regression"
+                  FAILED=1
+                fi
+                ;;
+            esac
+          done
+
+          exit $FAILED
+
+      - name: Upload vector performance results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vector-perf-results-${{ github.run_id }}
+          path: |
+            results-vec-build.json
+            results-vec-query.json
+            results-vec-optimize.json
+            results-vec-hybrid.json
+          retention-days: 90
+
   simulation:
     name: Simulation Tests
     needs: [check]
