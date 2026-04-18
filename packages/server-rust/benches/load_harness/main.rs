@@ -48,7 +48,8 @@ use topgun_server::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManag
 use topgun_server::storage::mutation_observer::MutationObserver;
 
 use metrics::HdrMetricsCollector;
-use scenarios::ThroughputScenario;
+use scenarios::{ThroughputScenario, VectorSearchScenario};
+use scenarios::vector_search::{VectorMode, VectorSearchConfig};
 use traits::{
     AssertionResult, HarnessContext, JsonAssertionResult, JsonLatency, JsonReport, LoadScenario,
     MetricsCollector,
@@ -72,6 +73,13 @@ async fn main() {
     let mut send_interval_ms: u64 = 50;
     let mut fire_and_forget = false;
     let mut json_output: Option<String> = None;
+    // Vector search scenario flags
+    let mut vector_mode = "build".to_string();
+    let mut vector_count: usize = 10_000;
+    let mut vector_dim: u16 = 384;
+    let mut vector_k: usize = 10;
+    let mut vector_query_tasks: usize =
+        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
 
     let mut i = 1;
     while i < args.len() {
@@ -131,6 +139,63 @@ async fn main() {
                     i += 2;
                 } else {
                     eprintln!("--json-output requires a path");
+                    std::process::exit(1);
+                }
+            }
+            "--vector-mode" => {
+                if i + 1 < args.len() {
+                    vector_mode = args[i + 1].clone();
+                    i += 2;
+                } else {
+                    eprintln!("--vector-mode requires a value (build|query|optimize|hybrid)");
+                    std::process::exit(1);
+                }
+            }
+            "--vector-count" => {
+                if i + 1 < args.len() {
+                    vector_count = args[i + 1].parse().unwrap_or_else(|_| {
+                        eprintln!("--vector-count requires a numeric value");
+                        std::process::exit(1);
+                    });
+                    i += 2;
+                } else {
+                    eprintln!("--vector-count requires a value");
+                    std::process::exit(1);
+                }
+            }
+            "--vector-dim" => {
+                if i + 1 < args.len() {
+                    vector_dim = args[i + 1].parse().unwrap_or_else(|_| {
+                        eprintln!("--vector-dim requires a numeric value (u16)");
+                        std::process::exit(1);
+                    });
+                    i += 2;
+                } else {
+                    eprintln!("--vector-dim requires a value");
+                    std::process::exit(1);
+                }
+            }
+            "--vector-k" => {
+                if i + 1 < args.len() {
+                    vector_k = args[i + 1].parse().unwrap_or_else(|_| {
+                        eprintln!("--vector-k requires a numeric value");
+                        std::process::exit(1);
+                    });
+                    i += 2;
+                } else {
+                    eprintln!("--vector-k requires a value");
+                    std::process::exit(1);
+                }
+            }
+            "--vector-query-tasks" => {
+                if i + 1 < args.len() {
+                    vector_query_tasks = args[i + 1].parse().unwrap_or_else(|_| {
+                        eprintln!("--vector-query-tasks requires a numeric value");
+                        std::process::exit(1);
+                    });
+                    i += 2;
+                } else {
+                    eprintln!("--vector-query-tasks requires a value");
                     std::process::exit(1);
                 }
             }
@@ -221,8 +286,32 @@ async fn main() {
             };
             Box::new(ThroughputScenario::new(config))
         }
+        "vector_search" => {
+            let mode = match vector_mode.as_str() {
+                "build" => VectorMode::Build,
+                "query" => VectorMode::Query,
+                "optimize" => VectorMode::Optimize,
+                "hybrid" => VectorMode::Hybrid,
+                other => {
+                    eprintln!("Unknown --vector-mode: {other}. Available: build|query|optimize|hybrid");
+                    std::process::exit(1);
+                }
+            };
+            println!("vector-query-tasks: {vector_query_tasks}");
+            let config = VectorSearchConfig {
+                mode,
+                vector_count,
+                vector_dim,
+                top_k: vector_k,
+                duration_secs,
+                ef_search: 64,
+                methods: vec![],  // not used by VectorMode dispatch; Hybrid uses fixed [Exact, FullText, Semantic]
+                query_tasks: vector_query_tasks,
+            };
+            Box::new(VectorSearchScenario::new(config))
+        }
         other => {
-            eprintln!("Unknown scenario: {other}. Available: throughput");
+            eprintln!("Unknown scenario: {other}. Available: throughput, vector_search");
             std::process::exit(1);
         }
     };
@@ -278,23 +367,38 @@ async fn main() {
     // --- Write JSON report if --json-output was provided ---
     if let Some(path) = json_output {
         let snapshot = metrics_collector.snapshot();
-        // Use write_latency key recorded by the throughput scenario, or zeros if absent.
-        let latency_stats = snapshot.latencies.get("write_latency");
+        // Use the mode-appropriate latency key for the JSON report.
+        let latency_key = if scenario_name == "vector_search" {
+            match vector_mode.as_str() {
+                "build" => "vector_build_latency",
+                "query" => "vector_query_latency",
+                "optimize" => "vector_optimize_latency",
+                "hybrid" => "hybrid_search_latency",
+                _ => "vector_build_latency",
+            }
+        } else {
+            "write_latency"
+        };
+        let latency_stats = snapshot.latencies.get(latency_key);
         let json_latency = JsonLatency {
             p50_us: latency_stats.map_or(0, |s| s.p50),
             p95_us: latency_stats.map_or(0, |s| s.p95),
             p99_us: latency_stats.map_or(0, |s| s.p99),
             p999_us: latency_stats.map_or(0, |s| s.p999),
         };
-        let mode = if fire_and_forget {
+        let mode = if scenario_name == "vector_search" {
+            format!("vector-{vector_mode}")
+        } else if fire_and_forget {
             "fire-and-forget".to_string()
         } else {
             "fire-and-wait".to_string()
         };
+        // Vector scenarios use no WebSocket connections; use 0 to keep schema stable for jq consumers.
+        let connections_field = if scenario_name == "vector_search" { 0 } else { num_connections as u64 };
         let report = JsonReport {
             scenario: scenario_name,
             mode,
-            connections: num_connections as u64,
+            connections: connections_field,
             duration_secs,
             total_ops: result.total_ops,
             ops_per_sec,
