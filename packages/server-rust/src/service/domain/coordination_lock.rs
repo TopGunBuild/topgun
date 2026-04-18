@@ -616,4 +616,119 @@ mod tests {
         };
         assert_eq!(t1, t2, "re-entrant acquire must return same fencing token");
     }
+
+    // -- Race condition and concurrent tests (G2b) --
+
+    /// Verifies that concurrent disconnect and TTL expiry settle consistently
+    /// without panic. The race: `release_on_disconnect` removes the entry while
+    /// `expire_if_token_matches` is also trying to remove it. The token-match
+    /// guard in `expire_if_token_matches` ensures the second remover sees
+    /// nothing and no-ops safely.
+    #[tokio::test]
+    async fn disconnect_during_ttl_firing_is_safe() {
+        // Run many iterations to expose any race condition under concurrent access.
+        for _ in 0..50 {
+            let reg = registry();
+            let outcome = reg.try_acquire("lock-a", conn(1), Some(50)).unwrap();
+            let LockOutcome::Granted { fencing_token } = outcome else {
+                panic!("expected Granted");
+            };
+
+            let reg_clone = Arc::clone(&reg);
+            // Spawn a task that calls release_on_disconnect concurrently while
+            // the TTL timer may also be firing.
+            let disconnect_task = tokio::spawn(async move {
+                // Small delay to race with the timer.
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                reg_clone.release_on_disconnect(conn(1));
+            });
+
+            // Also wait for the TTL to potentially fire.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _ = disconnect_task.await;
+
+            // Either path may have removed the entry; no panic is the invariant.
+            // After both paths complete, the lock must be gone.
+            assert_eq!(reg.lock_count(), 0, "no lock must remain after disconnect+TTL race");
+            // The fencing token guard ensures no double-free panic.
+            let _ = fencing_token;
+        }
+    }
+
+    /// Verifies that exactly one of N concurrent `try_acquire` calls wins.
+    /// Spawns 100 tasks racing on the same lock name; asserts exactly one
+    /// receives `Granted` (DashMap entry-level locking ensures mutual exclusion).
+    #[tokio::test]
+    async fn concurrent_acquire_only_one_wins() {
+        let reg = registry();
+        let mut handles = Vec::new();
+
+        for i in 0u64..100 {
+            let reg_clone = Arc::clone(&reg);
+            handles.push(tokio::spawn(async move {
+                reg_clone
+                    .try_acquire("lock-a", ConnectionId(i), Some(10000))
+                    .unwrap()
+            }));
+        }
+
+        let results: Vec<LockOutcome> = futures_util::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|r| r.expect("task panicked"))
+            .collect();
+
+        let granted_count = results
+            .iter()
+            .filter(|o| matches!(o, LockOutcome::Granted { .. }))
+            .count();
+
+        assert_eq!(
+            granted_count, 1,
+            "exactly one task must receive Granted, got {granted_count}"
+        );
+        assert_eq!(reg.lock_count(), 1);
+    }
+
+    /// Verifies that interleaved concurrent release+acquire on the same lock
+    /// name produces a consistent final state: exactly one holder or no holder.
+    /// No panic must occur under contention.
+    #[tokio::test]
+    async fn concurrent_acquire_and_release_is_safe() {
+        let reg = registry();
+
+        // Initial acquire.
+        let outcome = reg.try_acquire("lock-a", conn(1), Some(10000)).unwrap();
+        let LockOutcome::Granted { fencing_token: initial_token } = outcome else {
+            panic!("expected initial Granted");
+        };
+
+        let mut handles = Vec::new();
+
+        // Mix of release and acquire tasks racing against each other.
+        for i in 0u64..50 {
+            let reg_rel = Arc::clone(&reg);
+            let token = initial_token;
+            handles.push(tokio::spawn(async move {
+                reg_rel.release("lock-a", token);
+            }));
+
+            let reg_acq = Arc::clone(&reg);
+            handles.push(tokio::spawn(async move {
+                let _ = reg_acq.try_acquire("lock-a", ConnectionId(100 + i), Some(10000));
+            }));
+        }
+
+        futures_util::future::join_all(handles)
+            .await
+            .into_iter()
+            .for_each(|r| r.expect("task panicked"));
+
+        // Final state must be consistent: 0 or 1 lock held.
+        assert!(
+            reg.lock_count() <= 1,
+            "lock count must be 0 or 1 after concurrent access, got {}",
+            reg.lock_count()
+        );
+    }
 }
