@@ -18,6 +18,7 @@ use tracing::Instrument;
 
 use crate::cluster::state::ClusterState;
 use crate::network::connection::ConnectionRegistry;
+use crate::service::domain::coordination_lock::{LockError, LockOutcome, LockRegistry};
 use crate::service::operation::{service_names, Operation, OperationError, OperationResponse};
 use crate::service::registry::{ManagedService, ServiceContext};
 
@@ -31,10 +32,14 @@ use crate::service::registry::{ManagedService, ServiceContext};
 pub struct CoordinationService {
     cluster_state: Arc<ClusterState>,
     connection_registry: Arc<ConnectionRegistry>,
+    lock_registry: Arc<LockRegistry>,
 }
 
 impl CoordinationService {
     /// Creates a new `CoordinationService` with its required dependencies.
+    ///
+    /// The `LockRegistry` is constructed internally so callsites in `lib.rs`,
+    /// `sim/cluster.rs`, and `bin/test_server.rs` do not need changes.
     #[must_use]
     pub fn new(
         cluster_state: Arc<ClusterState>,
@@ -43,7 +48,16 @@ impl CoordinationService {
         Self {
             cluster_state,
             connection_registry,
+            lock_registry: Arc::new(LockRegistry::new()),
         }
+    }
+
+    /// Returns a reference to the inner lock registry.
+    ///
+    /// Exposed for future disconnect-hook wiring (TODO-267) and for tests.
+    #[must_use]
+    pub fn lock_registry(&self) -> &Arc<LockRegistry> {
+        &self.lock_registry
     }
 }
 
@@ -103,11 +117,11 @@ impl Service<Operation> for Arc<CoordinationService> {
                     Operation::PartitionMapRequest { payload, .. } => {
                         Ok(svc.handle_partition_map_request(payload.as_ref()))
                     }
-                    Operation::LockRequest { ctx, .. } | Operation::LockRelease { ctx, .. } => {
-                        Ok(OperationResponse::NotImplemented {
-                            service_name: service_names::COORDINATION,
-                            call_id: ctx.call_id,
-                        })
+                    Operation::LockRequest { ctx, payload } => {
+                        svc.handle_lock_request(&ctx, payload).await
+                    }
+                    Operation::LockRelease { ctx, payload } => {
+                        svc.handle_lock_release(&ctx, payload).await
                     }
                     _ => Err(OperationError::WrongService),
                 }
@@ -173,6 +187,102 @@ impl CoordinationService {
         } else {
             OperationResponse::Empty
         }
+    }
+
+    /// Handles a `LockRequest` operation.
+    ///
+    /// Validates the lock name and TTL, then delegates to `LockRegistry::try_acquire`.
+    /// Emits exactly one response per invariant I1 (response totality):
+    /// - `LOCK_GRANTED` on success (including idempotent re-acquire by the same holder).
+    /// - `LOCK_RELEASED { success: false }` on denial (busy, invalid name, zero TTL,
+    ///   or missing connection context).
+    async fn handle_lock_request(
+        &self,
+        ctx: &crate::service::operation::OperationContext,
+        payload: messages::LockRequestPayload,
+    ) -> Result<OperationResponse, OperationError> {
+        let denied = |name: String| {
+            Ok(OperationResponse::Message(Box::new(Message::LockReleased {
+                payload: messages::LockReleasedPayload {
+                    request_id: payload.request_id.clone(),
+                    name,
+                    success: false,
+                },
+            })))
+        };
+
+        // Lock operations require a connection context (cannot be fire-and-forget).
+        let Some(conn_id) = ctx.connection_id else {
+            tracing::warn!(
+                lock_name = %payload.name,
+                "lock request has no connection_id — denying"
+            );
+            return denied(payload.name);
+        };
+
+        match self
+            .lock_registry
+            .try_acquire(&payload.name, conn_id, payload.ttl)
+        {
+            Ok(LockOutcome::Granted { fencing_token }) => {
+                Ok(OperationResponse::Message(Box::new(Message::LockGranted {
+                    payload: messages::LockGrantedPayload {
+                        request_id: payload.request_id,
+                        name: payload.name,
+                        fencing_token,
+                    },
+                })))
+            }
+            Ok(LockOutcome::Busy) => {
+                // Explicit denial — invariant I1: no silent path.
+                denied(payload.name)
+            }
+            Err(LockError::InvalidLockName { name }) => {
+                tracing::warn!(%name, "lock request rejected: invalid lock name");
+                denied(name)
+            }
+            Err(LockError::InvalidTtl { ttl_ms }) => {
+                tracing::warn!(ttl_ms, "lock request rejected: invalid ttl");
+                denied(payload.name)
+            }
+        }
+    }
+
+    /// Handles a `LockRelease` operation.
+    ///
+    /// Validates the lock name, then delegates to `LockRegistry::release`.
+    /// Emits `LOCK_RELEASED { success: true }` on valid release, or
+    /// `LOCK_RELEASED { success: false }` on stale token or unknown name.
+    async fn handle_lock_release(
+        &self,
+        _ctx: &crate::service::operation::OperationContext,
+        payload: messages::LockReleasePayload,
+    ) -> Result<OperationResponse, OperationError> {
+        // Validate name; on failure emit denied response (invariant I1).
+        if let Err(LockError::InvalidLockName { ref name }) =
+            LockRegistry::validate_lock_name_pub(&payload.name)
+        {
+            tracing::warn!(%name, "lock release rejected: invalid lock name");
+            return Ok(OperationResponse::Message(Box::new(Message::LockReleased {
+                payload: messages::LockReleasedPayload {
+                    request_id: payload.request_id.unwrap_or_default(),
+                    name: payload.name,
+                    success: false,
+                },
+            })));
+        }
+
+        let success = self
+            .lock_registry
+            .release(&payload.name, payload.fencing_token);
+
+        Ok(OperationResponse::Message(Box::new(Message::LockReleased {
+            payload: messages::LockReleasedPayload {
+                request_id: payload.request_id.unwrap_or_default(),
+                name: payload.name,
+                success,
+            },
+        })))
     }
 }
 
@@ -423,50 +533,325 @@ mod tests {
         );
     }
 
-    // -- AC6: Lock operations return NotImplemented --
+    // Helper: build a context with a connection id.
+    fn make_ctx_with_conn(
+        service_name: &'static str,
+        conn_id: crate::network::connection::ConnectionId,
+    ) -> OperationContext {
+        let mut ctx = make_ctx(service_name);
+        ctx.connection_id = Some(conn_id);
+        ctx
+    }
+
+    // -- Lock handler tests --
 
     #[tokio::test]
-    async fn lock_request_returns_not_implemented() {
-        let (svc, _state) = make_service();
+    async fn lock_request_grants_lock_on_free_name() {
+        let (svc, _state, registry) = make_service_with_registry();
+        let config = crate::network::config::ConnectionConfig::default();
+        let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
+
         let op = Operation::LockRequest {
-            ctx: make_ctx(service_names::COORDINATION),
+            ctx: make_ctx_with_conn(service_names::COORDINATION, handle.id),
             payload: messages::LockRequestPayload {
                 request_id: "req-1".to_string(),
-                name: "test-lock".to_string(),
-                ttl: None,
+                name: "foo".to_string(),
+                ttl: Some(10000),
             },
         };
 
         let resp = svc.oneshot(op).await.unwrap();
-        assert!(matches!(
-            resp,
-            OperationResponse::NotImplemented {
-                service_name: "coordination",
-                ..
-            }
-        ));
+        match resp {
+            OperationResponse::Message(msg) => match *msg {
+                Message::LockGranted { payload } => {
+                    assert_eq!(payload.request_id, "req-1");
+                    assert_eq!(payload.name, "foo");
+                    assert!(payload.fencing_token > 0);
+                }
+                other => panic!("expected LockGranted, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        }
     }
 
     #[tokio::test]
-    async fn lock_release_returns_not_implemented() {
+    async fn lock_request_returns_released_success_false_when_held_by_other() {
+        let (svc, _state, registry) = make_service_with_registry();
+        let config = crate::network::config::ConnectionConfig::default();
+        let (h1, _rx1) = registry.register(ConnectionKind::Client, &config);
+        let (h2, _rx2) = registry.register(ConnectionKind::Client, &config);
+
+        // First holder acquires.
+        let op1 = Operation::LockRequest {
+            ctx: make_ctx_with_conn(service_names::COORDINATION, h1.id),
+            payload: messages::LockRequestPayload {
+                request_id: "req-1".to_string(),
+                name: "foo".to_string(),
+                ttl: Some(10000),
+            },
+        };
+        svc.clone().oneshot(op1).await.unwrap();
+
+        // Second holder is denied.
+        let op2 = Operation::LockRequest {
+            ctx: make_ctx_with_conn(service_names::COORDINATION, h2.id),
+            payload: messages::LockRequestPayload {
+                request_id: "req-2".to_string(),
+                name: "foo".to_string(),
+                ttl: Some(10000),
+            },
+        };
+        let resp = svc.oneshot(op2).await.unwrap();
+        match resp {
+            OperationResponse::Message(msg) => match *msg {
+                Message::LockReleased { payload } => {
+                    assert_eq!(payload.name, "foo");
+                    assert!(!payload.success, "explicit denial must have success: false");
+                }
+                other => panic!("expected LockReleased, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn lock_release_succeeds_with_matching_fencing_token() {
+        let (svc, _state, registry) = make_service_with_registry();
+        let config = crate::network::config::ConnectionConfig::default();
+        let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
+
+        // Acquire.
+        let op_req = Operation::LockRequest {
+            ctx: make_ctx_with_conn(service_names::COORDINATION, handle.id),
+            payload: messages::LockRequestPayload {
+                request_id: "req-2".to_string(),
+                name: "foo".to_string(),
+                ttl: Some(10000),
+            },
+        };
+        let grant_resp = svc.clone().oneshot(op_req).await.unwrap();
+        let fencing_token = match grant_resp {
+            OperationResponse::Message(msg) => match *msg {
+                Message::LockGranted { payload } => payload.fencing_token,
+                other => panic!("expected LockGranted, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        };
+
+        // Release.
+        let op_rel = Operation::LockRelease {
+            ctx: make_ctx(service_names::COORDINATION),
+            payload: messages::LockReleasePayload {
+                request_id: Some("req-3".to_string()),
+                name: "foo".to_string(),
+                fencing_token,
+            },
+        };
+        let resp = svc.oneshot(op_rel).await.unwrap();
+        match resp {
+            OperationResponse::Message(msg) => match *msg {
+                Message::LockReleased { payload } => {
+                    assert!(payload.success);
+                    assert_eq!(payload.name, "foo");
+                }
+                other => panic!("expected LockReleased, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn lock_release_fails_with_stale_token_and_reports_success_false() {
+        let (svc, _state, registry) = make_service_with_registry();
+        let config = crate::network::config::ConnectionConfig::default();
+        let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
+
+        // Acquire.
+        let op_req = Operation::LockRequest {
+            ctx: make_ctx_with_conn(service_names::COORDINATION, handle.id),
+            payload: messages::LockRequestPayload {
+                request_id: "req-a".to_string(),
+                name: "bar".to_string(),
+                ttl: Some(10000),
+            },
+        };
+        svc.clone().oneshot(op_req).await.unwrap();
+
+        // Release with wrong token.
+        let op_rel = Operation::LockRelease {
+            ctx: make_ctx(service_names::COORDINATION),
+            payload: messages::LockReleasePayload {
+                request_id: None,
+                name: "bar".to_string(),
+                fencing_token: 9999,
+            },
+        };
+        let resp = svc.oneshot(op_rel).await.unwrap();
+        match resp {
+            OperationResponse::Message(msg) => match *msg {
+                Message::LockReleased { payload } => {
+                    assert!(!payload.success);
+                }
+                other => panic!("expected LockReleased, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn lock_release_emits_success_false_for_unknown_name() {
         let (svc, _state) = make_service();
         let op = Operation::LockRelease {
             ctx: make_ctx(service_names::COORDINATION),
             payload: messages::LockReleasePayload {
                 request_id: None,
-                name: "test-lock".to_string(),
-                fencing_token: 0,
+                name: "unknown-lock".to_string(),
+                fencing_token: 1,
+            },
+        };
+        let resp = svc.oneshot(op).await.unwrap();
+        match resp {
+            OperationResponse::Message(msg) => match *msg {
+                Message::LockReleased { payload } => {
+                    assert!(!payload.success);
+                }
+                other => panic!("expected LockReleased, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn lock_request_with_ttl_zero_is_rejected_with_success_false() {
+        let (svc, _state, registry) = make_service_with_registry();
+        let config = crate::network::config::ConnectionConfig::default();
+        let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
+
+        let op = Operation::LockRequest {
+            ctx: make_ctx_with_conn(service_names::COORDINATION, handle.id),
+            payload: messages::LockRequestPayload {
+                request_id: "req-ttl0".to_string(),
+                name: "foo".to_string(),
+                ttl: Some(0),
+            },
+        };
+        let resp = svc.oneshot(op).await.unwrap();
+        match resp {
+            OperationResponse::Message(msg) => match *msg {
+                Message::LockReleased { payload } => {
+                    assert!(!payload.success, "ttl:0 must be rejected with success:false");
+                }
+                other => panic!("expected LockReleased, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn lock_name_validation_rejects_empty_emits_released_success_false() {
+        let (svc, _state, registry) = make_service_with_registry();
+        let config = crate::network::config::ConnectionConfig::default();
+        let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
+
+        let op = Operation::LockRequest {
+            ctx: make_ctx_with_conn(service_names::COORDINATION, handle.id),
+            payload: messages::LockRequestPayload {
+                request_id: "req-empty".to_string(),
+                name: "".to_string(),
+                ttl: Some(5000),
+            },
+        };
+        let resp = svc.oneshot(op).await.unwrap();
+        match resp {
+            OperationResponse::Message(msg) => match *msg {
+                Message::LockReleased { payload } => {
+                    assert!(!payload.success, "empty name must emit LOCK_RELEASED success:false");
+                }
+                other => panic!("expected LockReleased, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reacquire_by_same_holder_returns_existing_token_idempotent() {
+        let (svc, _state, registry) = make_service_with_registry();
+        let config = crate::network::config::ConnectionConfig::default();
+        let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
+
+        let make_req = |request_id: &str| Operation::LockRequest {
+            ctx: make_ctx_with_conn(service_names::COORDINATION, handle.id),
+            payload: messages::LockRequestPayload {
+                request_id: request_id.to_string(),
+                name: "foo".to_string(),
+                ttl: Some(10000),
             },
         };
 
-        let resp = svc.oneshot(op).await.unwrap();
-        assert!(matches!(
-            resp,
-            OperationResponse::NotImplemented {
-                service_name: "coordination",
-                ..
-            }
-        ));
+        let resp1 = svc.clone().oneshot(make_req("r1")).await.unwrap();
+        let t1 = match resp1 {
+            OperationResponse::Message(msg) => match *msg {
+                Message::LockGranted { payload } => payload.fencing_token,
+                other => panic!("expected LockGranted, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        };
+
+        // Same holder re-acquires — must get same token (invariant I3).
+        let resp2 = svc.oneshot(make_req("r2")).await.unwrap();
+        let t2 = match resp2 {
+            OperationResponse::Message(msg) => match *msg {
+                Message::LockGranted { payload } => payload.fencing_token,
+                other => panic!("expected LockGranted, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        };
+
+        assert_eq!(t1, t2, "re-entrant acquire must return same fencing token");
+    }
+
+    #[tokio::test]
+    async fn fencing_token_strictly_increases_across_acquire_release_cycles() {
+        let (svc, _state, registry) = make_service_with_registry();
+        let config = crate::network::config::ConnectionConfig::default();
+        let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
+
+        let mut prev_token: u64 = 0;
+        for i in 0..5 {
+            // Acquire.
+            let op_req = Operation::LockRequest {
+                ctx: make_ctx_with_conn(service_names::COORDINATION, handle.id),
+                payload: messages::LockRequestPayload {
+                    request_id: format!("req-{i}"),
+                    name: "foo".to_string(),
+                    ttl: Some(10000),
+                },
+            };
+            let token = match svc.clone().oneshot(op_req).await.unwrap() {
+                OperationResponse::Message(msg) => match *msg {
+                    Message::LockGranted { payload } => payload.fencing_token,
+                    other => panic!("expected LockGranted, got {other:?}"),
+                },
+                other => panic!("expected Message, got {other:?}"),
+            };
+
+            assert!(
+                token > prev_token,
+                "token must be strictly increasing: {token} > {prev_token}"
+            );
+
+            // Release.
+            let op_rel = Operation::LockRelease {
+                ctx: make_ctx(service_names::COORDINATION),
+                payload: messages::LockReleasePayload {
+                    request_id: Some(format!("rel-{i}")),
+                    name: "foo".to_string(),
+                    fencing_token: token,
+                },
+            };
+            svc.clone().oneshot(op_rel).await.unwrap();
+            prev_token = token;
+        }
     }
 
     // -- AC7: Wrong service rejection --

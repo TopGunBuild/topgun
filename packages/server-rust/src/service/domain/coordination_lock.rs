@@ -121,6 +121,10 @@ impl LockRegistry {
 
     /// Validates a lock name against the same pattern as topic names:
     /// non-empty, max 256 characters, only `[A-Za-z0-9_\-.:/]`.
+    pub fn validate_lock_name_pub(name: &str) -> Result<(), LockError> {
+        Self::validate_lock_name(name)
+    }
+
     fn validate_lock_name(name: &str) -> Result<(), LockError> {
         if name.is_empty() || name.len() > 256 {
             return Err(LockError::InvalidLockName {
