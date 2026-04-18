@@ -307,17 +307,34 @@ async fn run_fire_and_forget(
     let mut seq: u64 = 0;
     let mut send_errors: u64 = 0;
 
+    // A genuinely dead connection bails after at most ~38.2 ms of cumulative backoff.
+    const MAX_CONSECUTIVE_ERRORS: u64 = 10;
+
     // Send-only: push batches as fast as possible without waiting for ACK.
     // This measures how fast the client can push data into the server pipeline.
     while tokio::time::Instant::now() < deadline {
         let bytes = build_batch(conn_idx, seq, batch_size);
 
         if let Err(e) = pool.send_to(conn_idx, &bytes).await {
-            tracing::warn!("conn-{conn_idx}: send failed: {e}");
             send_errors += 1;
-            // On send error, break — connection is likely dead
-            break;
+            if send_errors > MAX_CONSECUTIVE_ERRORS {
+                tracing::warn!(
+                    "conn-{conn_idx}: giving up after {send_errors} consecutive errors: {e}"
+                );
+                break;
+            }
+            // Exponential backoff capped at ~6.4 ms (100us << 6).
+            // Gives macOS time to drain the socket send buffer on ENOBUFS.
+            tokio::time::sleep(Duration::from_micros(100 << send_errors.min(6))).await;
+            continue;
         }
+        // Log recovery so validation runs have evidence the retry loop fired.
+        if send_errors > 0 {
+            tracing::debug!(
+                "conn-{conn_idx}: recovered from {send_errors} consecutive send errors"
+            );
+        }
+        send_errors = 0;
 
         seq += batch_size as u64;
         total_sent += batch_size as u64;
