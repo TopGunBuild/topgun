@@ -914,12 +914,12 @@ fn msgpack_response(response: &HttpSyncResponse) -> axum::response::Response {
 mod tests {
     use super::*;
     use crate::network::handlers::auth::{decode_jwt_key, JwtClaims};
-    use crate::network::{ConnectionRegistry, NetworkConfig, ShutdownController};
+    use crate::network::NetworkConfig;
     use arc_swap::ArcSwap;
     use jsonwebtoken::{EncodingKey, Header};
     use serde::Serialize;
     use std::sync::Arc;
-    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{SystemTime, UNIX_EPOCH};
     use topgun_core::messages::HttpSyncRequest;
     use topgun_core::Timestamp;
 
@@ -956,25 +956,7 @@ mod tests {
     }
 
     fn test_state() -> AppState {
-        AppState {
-            registry: Arc::new(ConnectionRegistry::new()),
-            shutdown: Arc::new(ShutdownController::new()),
-            config: Arc::new(NetworkConfig::default()),
-            start_time: Instant::now(),
-            observability: None,
-            operation_service: None,
-            dispatcher: None,
-            jwt_secret: None,
-            cluster_state: None,
-            store_factory: None,
-            server_config: None,
-            policy_store: None,
-            auth_providers: Arc::new(vec![]),
-            refresh_grant_store: None,
-            auth_validator: None,
-            index_observer_factory: None,
-            backfill_progress: Arc::new(dashmap::DashMap::new()),
-        }
+        AppState::for_test()
     }
 
     fn test_state_with_auth(require_auth: bool) -> AppState {
@@ -990,23 +972,10 @@ mod tests {
             ..ServerConfig::default()
         };
         AppState {
-            registry: Arc::new(ConnectionRegistry::new()),
-            shutdown: Arc::new(ShutdownController::new()),
             config: Arc::new(config),
-            start_time: Instant::now(),
-            observability: None,
-            operation_service: None,
-            dispatcher: None,
             jwt_secret: Some(TEST_SECRET.to_owned()),
-            cluster_state: None,
-            store_factory: None,
             server_config: Some(Arc::new(ArcSwap::from_pointee(server_cfg))),
-            policy_store: None,
-            auth_providers: Arc::new(vec![]),
-            refresh_grant_store: None,
-            auth_validator: None,
-            index_observer_factory: None,
-            backfill_progress: Arc::new(dashmap::DashMap::new()),
+            ..AppState::for_test()
         }
     }
 
@@ -1328,23 +1297,8 @@ mod tests {
                 .expect("seeding store should not fail");
         }
         AppState {
-            registry: Arc::new(crate::network::ConnectionRegistry::new()),
-            shutdown: Arc::new(crate::network::ShutdownController::new()),
-            config: Arc::new(crate::network::NetworkConfig::default()),
-            start_time: Instant::now(),
-            observability: None,
-            operation_service: None,
-            dispatcher: None,
-            jwt_secret: None,
-            cluster_state: None,
             store_factory: Some(factory),
-            server_config: None,
-            policy_store: None,
-            auth_providers: Arc::new(vec![]),
-            refresh_grant_store: None,
-            auth_validator: None,
-            index_observer_factory: None,
-            backfill_progress: Arc::new(dashmap::DashMap::new()),
+            ..AppState::for_test()
         }
     }
 
@@ -1779,23 +1733,10 @@ mod tests {
         let mut config = crate::network::config::NetworkConfig::default();
         config.jwt_clock_skew_secs = 60;
         AppState {
-            registry: Arc::new(ConnectionRegistry::new()),
-            shutdown: Arc::new(crate::network::shutdown::ShutdownController::new()),
             config: Arc::new(config),
-            start_time: std::time::Instant::now(),
-            observability: None,
-            operation_service: None,
-            dispatcher: None,
             jwt_secret: Some(TEST_SECRET.to_owned()),
-            cluster_state: None,
-            store_factory: None,
-            server_config: None,
-            policy_store: None,
-            auth_providers: Arc::new(vec![]),
-            refresh_grant_store: None,
             auth_validator: validator,
-            index_observer_factory: None,
-            backfill_progress: Arc::new(dashmap::DashMap::new()),
+            ..AppState::for_test()
         }
     }
 

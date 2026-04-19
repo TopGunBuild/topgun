@@ -238,7 +238,6 @@ pub async fn token_exchange_handler(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::Instant;
 
     use async_trait::async_trait;
     use axum::body::Body;
@@ -251,7 +250,6 @@ mod tests {
     use super::*;
     use crate::network::handlers::auth_provider::{AuthProvider, ExternalClaims};
     use crate::network::handlers::AppState;
-    use crate::network::{ConnectionRegistry, NetworkConfig, ShutdownController};
 
     // ── Stub providers ────────────────────────────────────────────────────────
 
@@ -292,23 +290,9 @@ mod tests {
 
     fn make_state(providers: Vec<Arc<dyn AuthProvider>>, jwt_secret: Option<&str>) -> AppState {
         AppState {
-            registry: Arc::new(ConnectionRegistry::new()),
-            shutdown: Arc::new(ShutdownController::new()),
-            config: Arc::new(NetworkConfig::default()),
-            start_time: Instant::now(),
-            observability: None,
-            operation_service: None,
-            dispatcher: None,
             jwt_secret: jwt_secret.map(ToString::to_string),
-            cluster_state: None,
-            store_factory: None,
-            server_config: None,
-            policy_store: None,
             auth_providers: Arc::new(providers),
-            refresh_grant_store: None,
-            auth_validator: None,
-            index_observer_factory: None,
-            backfill_progress: Arc::new(dashmap::DashMap::new()),
+            ..AppState::for_test()
         }
     }
 
@@ -488,7 +472,6 @@ mod tests {
     /// AC1: token exchange with refresh store returns refreshToken and refreshExpiresAt.
     #[tokio::test]
     async fn token_exchange_with_refresh_store_returns_refresh_token() {
-        use std::time::Instant;
         let provider: Arc<dyn AuthProvider> = Arc::new(AlwaysSucceed {
             name: "hmac".to_string(),
             sub: "user-1".to_string(),
@@ -496,25 +479,12 @@ mod tests {
         });
         let store = Arc::new(InMemoryGrantStore::new(2_592_000));
         let state = AppState {
-            registry: Arc::new(crate::network::ConnectionRegistry::new()),
-            shutdown: Arc::new(crate::network::ShutdownController::new()),
-            config: Arc::new(crate::network::NetworkConfig::default()),
-            start_time: Instant::now(),
-            observability: None,
-            operation_service: None,
-            dispatcher: None,
             jwt_secret: Some("signing-secret".to_string()),
-            cluster_state: None,
-            store_factory: None,
-            server_config: None,
-            policy_store: None,
             auth_providers: Arc::new(vec![provider]),
             refresh_grant_store: Some(
                 store as Arc<dyn crate::network::handlers::RefreshGrantStore>,
             ),
-            auth_validator: None,
-            index_observer_factory: None,
-            backfill_progress: Arc::new(dashmap::DashMap::new()),
+            ..AppState::for_test()
         };
         let app = make_app(state);
         let (status, body) = post_exchange(app, json!({ "token": "any" })).await;

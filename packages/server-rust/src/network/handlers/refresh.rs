@@ -222,7 +222,6 @@ pub async fn refresh_handler(
 mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
-    use std::time::Instant;
 
     use axum::http::{self, Request, StatusCode};
     use axum::routing::post;
@@ -232,7 +231,6 @@ mod tests {
 
     use super::*;
     use crate::network::handlers::AppState;
-    use crate::network::{ConnectionRegistry, NetworkConfig, ShutdownController};
 
     // ── In-memory test store ─────────────────────────────────────────────────
 
@@ -304,45 +302,16 @@ mod tests {
         jwt_secret: Option<&str>,
     ) -> AppState {
         AppState {
-            registry: Arc::new(ConnectionRegistry::new()),
-            shutdown: Arc::new(ShutdownController::new()),
-            config: Arc::new(NetworkConfig::default()),
-            start_time: Instant::now(),
-            observability: None,
-            operation_service: None,
-            dispatcher: None,
             jwt_secret: jwt_secret.map(ToString::to_string),
-            cluster_state: None,
-            store_factory: None,
-            server_config: None,
-            policy_store: None,
-            auth_providers: Arc::new(vec![]),
             refresh_grant_store: Some(store),
-            auth_validator: None,
-            index_observer_factory: None,
-            backfill_progress: Arc::new(dashmap::DashMap::new()),
+            ..AppState::for_test()
         }
     }
 
     fn make_state_no_store(jwt_secret: Option<&str>) -> AppState {
         AppState {
-            registry: Arc::new(ConnectionRegistry::new()),
-            shutdown: Arc::new(ShutdownController::new()),
-            config: Arc::new(NetworkConfig::default()),
-            start_time: Instant::now(),
-            observability: None,
-            operation_service: None,
-            dispatcher: None,
             jwt_secret: jwt_secret.map(ToString::to_string),
-            cluster_state: None,
-            store_factory: None,
-            server_config: None,
-            policy_store: None,
-            auth_providers: Arc::new(vec![]),
-            refresh_grant_store: None,
-            auth_validator: None,
-            index_observer_factory: None,
-            backfill_progress: Arc::new(dashmap::DashMap::new()),
+            ..AppState::for_test()
         }
     }
 

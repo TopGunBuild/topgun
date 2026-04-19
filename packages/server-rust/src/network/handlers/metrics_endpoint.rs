@@ -67,31 +67,12 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::network::{ConnectionRegistry, NetworkConfig, ShutdownController};
     use std::sync::Arc;
-    use std::time::Instant;
+
+    use super::*;
 
     fn test_state_no_obs() -> AppState {
-        AppState {
-            registry: Arc::new(ConnectionRegistry::new()),
-            shutdown: Arc::new(ShutdownController::new()),
-            config: Arc::new(NetworkConfig::default()),
-            start_time: Instant::now(),
-            observability: None,
-            operation_service: None,
-            dispatcher: None,
-            jwt_secret: None,
-            cluster_state: None,
-            store_factory: None,
-            server_config: None,
-            policy_store: None,
-            auth_providers: Arc::new(vec![]),
-            refresh_grant_store: None,
-            auth_validator: None,
-            index_observer_factory: None,
-            backfill_progress: Arc::new(dashmap::DashMap::new()),
-        }
+        AppState::for_test()
     }
 
     #[tokio::test]

@@ -1583,62 +1583,24 @@ pub async fn cancel_vector_index_optimize_handler(
 #[cfg(test)]
 mod vector_admin_tests {
     use std::sync::Arc;
-    use std::time::Instant;
 
     use axum::extract::{Path, State};
     use axum::http::StatusCode;
-    use dashmap::DashMap;
     use topgun_core::vector::DistanceMetric;
 
     use super::*;
-    use crate::network::config::NetworkConfig;
-    use crate::network::connection::ConnectionRegistry;
-    use crate::network::shutdown::ShutdownController;
     use crate::service::domain::index::mutation_observer::IndexObserverFactory;
 
     fn make_state_with_factory() -> AppState {
         let factory = Arc::new(IndexObserverFactory::new());
         AppState {
-            registry: Arc::new(ConnectionRegistry::new()),
-            shutdown: Arc::new(ShutdownController::new()),
-            config: Arc::new(NetworkConfig::default()),
-            start_time: Instant::now(),
-            observability: None,
-            operation_service: None,
-            dispatcher: None,
-            jwt_secret: None,
-            cluster_state: None,
-            store_factory: None,
-            server_config: None,
-            policy_store: None,
-            auth_providers: Arc::new(vec![]),
-            refresh_grant_store: None,
-            auth_validator: None,
             index_observer_factory: Some(factory),
-            backfill_progress: Arc::new(DashMap::new()),
+            ..AppState::for_test()
         }
     }
 
     fn make_state_no_factory() -> AppState {
-        AppState {
-            registry: Arc::new(ConnectionRegistry::new()),
-            shutdown: Arc::new(ShutdownController::new()),
-            config: Arc::new(NetworkConfig::default()),
-            start_time: Instant::now(),
-            observability: None,
-            operation_service: None,
-            dispatcher: None,
-            jwt_secret: None,
-            cluster_state: None,
-            store_factory: None,
-            server_config: None,
-            policy_store: None,
-            auth_providers: Arc::new(vec![]),
-            refresh_grant_store: None,
-            auth_validator: None,
-            index_observer_factory: None,
-            backfill_progress: Arc::new(DashMap::new()),
-        }
+        AppState::for_test()
     }
 
     fn make_claims() -> AdminClaims {
