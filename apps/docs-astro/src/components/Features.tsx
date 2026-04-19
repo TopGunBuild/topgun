@@ -60,7 +60,7 @@ export const Features = () => {
         <FeatureCard
           icon={Shield}
           title="Distributed Locks"
-          description="Pessimistic locking with fencing tokens prevents split-brain scenarios. Essential for critical operations like payments or inventory updates."
+          description="Pessimistic locking with fencing tokens. Single-node deployments are fully consistent; cluster-mode semantics vary — see docs."
         />
         <FeatureCard
           icon={Globe}
