@@ -136,6 +136,15 @@ impl CounterRegistry {
             .unwrap_or_default()
     }
 
+    /// Canonical disconnect-hook entry point.
+    ///
+    /// Removes `conn_id` from all counter subscriber sets. Thin alias over
+    /// `unsubscribe_all` so the three session-scoped registries share a uniform
+    /// `release_on_disconnect` surface used by `handle_socket`'s cleanup path.
+    pub fn release_on_disconnect(&self, conn_id: ConnectionId) {
+        self.unsubscribe_all(conn_id);
+    }
+
     /// Returns the current computed value of the named counter.
     ///
     /// Value = sum(p.values()) - sum(n.values()).

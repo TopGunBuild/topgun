@@ -73,6 +73,16 @@ impl PersistenceService {
         &self.counter_registry
     }
 
+    /// Returns a clone of the inner `Arc<CounterRegistry>`.
+    ///
+    /// Used by production wiring in `build_app()` so `AppState` can hold an
+    /// `Arc<CounterRegistry>` directly without going through the service at
+    /// disconnect time (avoids racing with service shutdown).
+    #[must_use]
+    pub fn counter_registry_arc(&self) -> Arc<CounterRegistry> {
+        Arc::clone(&self.counter_registry)
+    }
+
     /// Returns a reference to the inner journal store (for testing).
     #[must_use]
     pub fn journal_store(&self) -> &JournalStore {

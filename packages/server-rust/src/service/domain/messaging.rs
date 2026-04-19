@@ -137,6 +137,15 @@ impl TopicRegistry {
     pub fn topic_count(&self) -> usize {
         self.topics.len()
     }
+
+    /// Canonical disconnect-hook entry point.
+    ///
+    /// Removes `conn_id` from all topics it is subscribed to. Thin alias over
+    /// `unsubscribe_all` so the three session-scoped registries share a uniform
+    /// `release_on_disconnect` surface used by `handle_socket`'s cleanup path.
+    pub fn release_on_disconnect(&self, conn_id: ConnectionId) {
+        self.unsubscribe_all(conn_id);
+    }
 }
 
 impl Default for TopicRegistry {
@@ -171,6 +180,16 @@ impl MessagingService {
     #[must_use]
     pub fn topic_registry(&self) -> &TopicRegistry {
         &self.topic_registry
+    }
+
+    /// Returns a clone of the inner `Arc<TopicRegistry>`.
+    ///
+    /// Used by production wiring in `build_app()` so `AppState` can hold an
+    /// `Arc<TopicRegistry>` directly without going through the service at
+    /// disconnect time (avoids racing with service shutdown).
+    #[must_use]
+    pub fn topic_registry_arc(&self) -> Arc<TopicRegistry> {
+        Arc::clone(&self.topic_registry)
     }
 }
 
