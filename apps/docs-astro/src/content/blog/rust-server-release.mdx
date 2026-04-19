@@ -38,7 +38,7 @@ Seven domain services, each independently testable:
 | **Search** | Full-text search via tantivy |
 | **Messaging** | Pub/sub topics, ephemeral messages |
 | **Persistence** | PostgreSQL storage via sqlx |
-| **Coordination** | Distributed locks, cluster protocol |
+| **Coordination** | Distributed locks (single-node stable; cluster-mode uses partition-routing — Raft in progress), cluster protocol |
 
 The cluster protocol distributes data across **271 partitions** with consistent hashing. Nodes join, leave, and rebalance without downtime.
 
