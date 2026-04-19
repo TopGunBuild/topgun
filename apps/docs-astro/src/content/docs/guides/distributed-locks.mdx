@@ -8,7 +8,17 @@ import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Lock, ShieldCheck } from 'lucide-react';
 import { AlertBox } from '../../../components/docs/AlertBox';
 
-<AlertBox variant="warning" title="Planned Feature" text="Distributed locks are on the roadmap but not yet implemented in the current Rust server. The coordination service exists as a stub." />
+## Deployment Mode Semantics
+
+| Deployment | Status | Notes |
+|---|---|---|
+| Single-node | Stable | Fencing tokens, TTL-based expiry, disconnect-release API in place |
+| Cluster (current) | Partition-routing | Safe when a single node owns the relevant partition; weaker guarantees under split-brain |
+| Cluster (planned) | Raft-replicated | Via openraft — tracked internally as the Raft track |
+
+Distributed locks in cluster mode currently use partition-routing without Raft consensus. They are safe for deployments where a single node owns the relevant partition, but provide weaker guarantees under split-brain. Raft-backed cluster locks are in development.
+
+See the [Roadmap](/docs/roadmap) for more details on when and what the Raft track delivers.
 
 export const lockCode = `import { TopGunClient } from '@topgunbuild/client';
 
