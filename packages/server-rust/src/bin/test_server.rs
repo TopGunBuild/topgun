@@ -44,7 +44,9 @@ use topgun_server::service::domain::embedding::{
     EmbeddingProviderConfig, NoopConfig, VectorConfig as EmbeddingVectorConfig,
 };
 use topgun_server::service::domain::index::IndexObserverFactory;
-use topgun_server::service::domain::messaging::MessagingService;
+use topgun_server::service::domain::counter::CounterRegistry;
+use topgun_server::service::domain::messaging::{MessagingService, TopicRegistry};
+use topgun_server::service::domain::LockRegistry;
 use topgun_server::service::domain::persistence::PersistenceService;
 use topgun_server::service::domain::query::{QueryRegistry, QueryService};
 use topgun_server::service::domain::schema::SchemaService;
@@ -238,7 +240,7 @@ async fn main() -> anyhow::Result<()> {
 
         // Build domain services, sharing the cluster_state with CoordinationService.
         // Pass the policy evaluator so every client operation is checked against RBAC.
-        let (classify_svc, dispatcher, connection_registry) = build_services(
+        let (classify_svc, dispatcher, connection_registry, lock_registry, topic_registry, counter_registry) = build_services(
             node_id.clone(),
             Arc::clone(&cluster_state),
             Some(Arc::clone(&policy_evaluator)),
@@ -255,24 +257,24 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(Arc::new(reactor).run(change_rx));
 
         (
-            (classify_svc, dispatcher, connection_registry),
+            (classify_svc, dispatcher, connection_registry, lock_registry, topic_registry, counter_registry),
             Some(cluster_state),
         )
     } else {
         // --- Single-node mode (backward-compatible) ---
         let (cs, _rx) = ClusterState::new(Arc::new(ClusterConfig::default()), node_id.clone());
         let cs = Arc::new(cs);
-        let (classify_svc, dispatcher, connection_registry) = build_services(
+        let (classify_svc, dispatcher, connection_registry, lock_registry, topic_registry, counter_registry) = build_services(
             node_id.clone(),
             Arc::clone(&cs),
             Some(Arc::clone(&policy_evaluator)),
         );
 
         // Single-node mode: expose no cluster state to AppState (existing behavior).
-        ((classify_svc, dispatcher, connection_registry), None)
+        ((classify_svc, dispatcher, connection_registry, lock_registry, topic_registry, counter_registry), None)
     };
 
-    let (classify_svc, dispatcher, connection_registry) = cluster_state_for_services;
+    let (classify_svc, dispatcher, connection_registry, lock_registry, topic_registry, counter_registry) = cluster_state_for_services;
 
     // Allow integration test environments to opt in to detailed auth errors.
     let insecure_forward_auth_errors = std::env::var("INSECURE_FORWARD_AUTH_ERRORS")
@@ -301,10 +303,9 @@ async fn main() -> anyhow::Result<()> {
         auth_validator: None,
         index_observer_factory: None,
         backfill_progress: Arc::new(dashmap::DashMap::new()),
-        // Populated in G3 once registry Arcs are threaded through test_server startup.
-        lock_registry: None,
-        topic_registry: None,
-        counter_registry: None,
+        lock_registry: Some(lock_registry),
+        topic_registry: Some(topic_registry),
+        counter_registry: Some(counter_registry),
     };
 
     // Build the axum router with state.
@@ -463,6 +464,9 @@ fn build_services(
     Arc<OperationService>,
     PartitionDispatcher,
     Arc<ConnectionRegistry>,
+    Arc<LockRegistry>,
+    Arc<TopicRegistry>,
+    Arc<CounterRegistry>,
 ) {
     let config = ServerConfig {
         node_id: node_id.clone(),
@@ -605,10 +609,14 @@ fn build_services(
         None,
     ));
     let messaging_svc = Arc::new(MessagingService::new(Arc::clone(&connection_registry)));
+    // Capture Arc<TopicRegistry> before messaging_svc is moved into the closure.
+    let topic_registry_arc = messaging_svc.topic_registry_arc();
     let coordination_svc = Arc::new(CoordinationService::new(
         cluster_state,
         Arc::clone(&connection_registry),
     ));
+    // Capture Arc<LockRegistry> before coordination_svc is moved into the closure.
+    let lock_registry_arc = Arc::clone(coordination_svc.lock_registry());
     let search_svc = Arc::new(SearchService::new(
         search_registry,
         hybrid_registry,
@@ -632,6 +640,8 @@ fn build_services(
         Arc::clone(&connection_registry),
         node_id,
     ));
+    // Capture Arc<CounterRegistry> before persistence_svc is moved into the closure.
+    let counter_registry_arc = persistence_svc.counter_registry_arc();
 
     // Factory closure: creates a fresh OperationRouter + pipeline per worker.
     // Domain services are Arc-cloned (cheap reference count bump), while
@@ -653,7 +663,7 @@ fn build_services(
 
     let dispatch_config = DispatchConfig::default();
     let dispatcher = PartitionDispatcher::new(&dispatch_config, pipeline_factory);
-    (classify_svc, dispatcher, connection_registry)
+    (classify_svc, dispatcher, connection_registry, lock_registry_arc, topic_registry_arc, counter_registry_arc)
 }
 
 // ---------------------------------------------------------------------------

@@ -166,6 +166,11 @@ impl NetworkModule {
                 // build_router is used in tests and skips the serve() startup path;
                 // provide a fresh empty map (no startup rebuild occurs in this path).
                 backfill_progress: Arc::new(dashmap::DashMap::new()),
+                // build_router does not have access to domain service registries;
+                // caller must wire them via AppState after the fact if needed.
+                lock_registry: None,
+                topic_registry: None,
+                counter_registry: None,
             },
         )
     }
@@ -277,6 +282,13 @@ impl NetworkModule {
                 policy_store: self.policy_store,
                 index_observer_factory: self.index_observer_factory,
                 backfill_progress,
+                // Domain service registries are not wired into NetworkModule —
+                // the integration test server (test_server.rs) wires them
+                // directly into AppState. When NetworkModule is used in
+                // production (future), add set_* methods for these registries.
+                lock_registry: None,
+                topic_registry: None,
+                counter_registry: None,
             },
         );
 
@@ -319,6 +331,13 @@ struct AppServices {
             Arc<crate::network::handlers::admin_types::BackfillProgress>,
         >,
     >,
+    /// Arc<LockRegistry> for disconnect cleanup. `None` when the coordination
+    /// service has not been wired into this router (e.g. test_server without locks).
+    lock_registry: Option<Arc<crate::service::domain::LockRegistry>>,
+    /// Arc<TopicRegistry> for disconnect cleanup.
+    topic_registry: Option<Arc<crate::service::domain::messaging::TopicRegistry>>,
+    /// Arc<CounterRegistry> for disconnect cleanup.
+    counter_registry: Option<Arc<crate::service::domain::counter::CounterRegistry>>,
 }
 
 /// Builds the complete application router with all routes and middleware.
@@ -340,6 +359,9 @@ fn build_app(
         policy_store,
         index_observer_factory,
         backfill_progress,
+        lock_registry,
+        topic_registry,
+        counter_registry,
     } = services;
     let layers = build_http_layers(&config);
 
@@ -445,10 +467,9 @@ fn build_app(
         // Use the pre-allocated Arc from serve() — same instance that was passed
         // to rebuild_from_store, so startup progress entries are already visible.
         backfill_progress,
-        // Populated in G3 via AppServices once registry Arcs are threaded through.
-        lock_registry: None,
-        topic_registry: None,
-        counter_registry: None,
+        lock_registry,
+        topic_registry,
+        counter_registry,
     };
 
     // Build a per-IP rate limiter for admin and login endpoints.
