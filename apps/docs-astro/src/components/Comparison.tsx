@@ -74,7 +74,7 @@ export const Comparison = () => {
             />
             <ComparisonRow
               feature="Distributed Locks"
-              tg={<span className="flex items-center gap-1"><Check className="w-4 h-4" /> Fencing Tokens</span>}
+              tg={<span className="flex items-center gap-1" title="Distributed locks in cluster mode currently use partition-routing without Raft consensus. They are safe for deployments where a single node owns the relevant partition, but provide weaker guarantees under split-brain. Raft-backed cluster locks are in development."><Check className="w-4 h-4" /> Fencing Tokens (single-node)</span>}
               es={<span className="flex items-center gap-1 justify-center text-red-500 dark:text-red-400"><X className="w-4 h-4 " /> Not Supported</span>}
               fb={<span className="flex items-center gap-1 justify-center text-red-500 dark:text-red-400"><X className="w-4 h-4" /> Not Supported</span>}
               rx={<span className="flex items-center gap-1 justify-center text-red-500 dark:text-red-400"><X className="w-4 h-4" /> Not Supported</span>}
