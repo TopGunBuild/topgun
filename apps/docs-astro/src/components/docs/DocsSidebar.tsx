@@ -80,6 +80,8 @@ const getInitialExpandedSection = (pathname: string): Record<SectionKey, boolean
         sections.started = true;
     } else if (pathname === '/docs/community' || pathname === '/docs/changelog' || pathname === '/docs/benchmarks') {
         sections.resources = true;
+    } else if (pathname === '/docs/roadmap') {
+        sections.started = true;
     } else {
         sections.started = true;
     }
@@ -117,6 +119,7 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                         <SubItem to="/docs/installation" currentPath={currentPath}>Installation</SubItem>
                         <SubItem to="/docs/quick-start" currentPath={currentPath}>Quick Start</SubItem>
                         <SubItem to="/docs/faq" currentPath={currentPath}>FAQ</SubItem>
+                        <SubItem to="/docs/roadmap" currentPath={currentPath}>Roadmap</SubItem>
                     </div>
                 )}
             </div>
