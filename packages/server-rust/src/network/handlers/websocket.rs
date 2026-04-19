@@ -84,6 +84,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         let auth_handler = AuthHandler::new(secret.clone(), state.auth_validator.clone());
         if let Err(e) = auth_handler.send_auth_required(&mut socket).await {
             warn!("failed to send AUTH_REQUIRED to {:?}: {}", conn_id, e);
+            release_session_state(&state, conn_id);
             state.registry.remove(conn_id);
             return;
         }
@@ -173,6 +174,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                     )
                                     .await
                                     .ok();
+                                    release_session_state(&state, conn_id);
                                     state.registry.remove(conn_id);
                                     debug!("WebSocket disconnected: {:?}", conn_id);
                                     return;
@@ -194,6 +196,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     tokio::time::timeout(std::time::Duration::from_secs(2), outbound_handle)
                         .await
                         .ok();
+                    release_session_state(&state, conn_id);
                     state.registry.remove(conn_id);
                     debug!("WebSocket disconnected: {:?}", conn_id);
                     return;
@@ -217,6 +220,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     tokio::time::timeout(std::time::Duration::from_secs(2), outbound_handle)
                         .await
                         .ok();
+                    release_session_state(&state, conn_id);
                     state.registry.remove(conn_id);
                     debug!("WebSocket disconnected: {:?}", conn_id);
                     return;
@@ -304,8 +308,30 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         .await
         .ok();
 
+    release_session_state(&state, conn_id);
     state.registry.remove(conn_id);
     debug!("WebSocket disconnected: {:?}", conn_id);
+}
+
+/// Releases all session-scoped registry state for a disconnecting connection.
+///
+/// Invoked at every exit point in `handle_socket` BEFORE `registry.remove(conn_id)`
+/// to ensure lock/topic/counter resources are freed even if the connection
+/// closes without explicit release messages from the client.
+///
+/// Each registry field is `Option<Arc<_>>` — `None` is the in-test default
+/// so this function is a no-op in test contexts that do not wire the registries.
+/// Order: Lock -> Topic -> Counter (mirrors the struct field declaration order).
+fn release_session_state(state: &AppState, conn_id: ConnectionId) {
+    if let Some(ref reg) = state.lock_registry {
+        reg.release_on_disconnect(conn_id);
+    }
+    if let Some(ref reg) = state.topic_registry {
+        reg.release_on_disconnect(conn_id);
+    }
+    if let Some(ref reg) = state.counter_registry {
+        reg.release_on_disconnect(conn_id);
+    }
 }
 
 /// Dispatches a single deserialized message through the operation pipeline.
