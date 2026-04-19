@@ -301,6 +301,10 @@ async fn main() -> anyhow::Result<()> {
         auth_validator: None,
         index_observer_factory: None,
         backfill_progress: Arc::new(dashmap::DashMap::new()),
+        // Populated in G3 once registry Arcs are threaded through test_server startup.
+        lock_registry: None,
+        topic_registry: None,
+        counter_registry: None,
     };
 
     // Build the axum router with state.

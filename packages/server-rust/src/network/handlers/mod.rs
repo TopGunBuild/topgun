@@ -40,7 +40,10 @@ use crate::network::handlers::auth_validator::AuthValidator;
 use crate::service::classify::OperationService;
 use crate::service::config::ServerConfig;
 use crate::service::dispatch::PartitionDispatcher;
+use crate::service::domain::counter::CounterRegistry;
 use crate::service::domain::index::mutation_observer::IndexObserverFactory;
+use crate::service::domain::messaging::TopicRegistry;
+use crate::service::domain::LockRegistry;
 use crate::service::middleware::ObservabilityHandle;
 use crate::service::policy::PolicyStore;
 use crate::storage::factory::RecordStoreFactory;
@@ -111,4 +114,64 @@ pub struct AppState {
     /// Backfill progress tracking for async index creation.
     /// Keyed by `(map_name, attribute)`.
     pub backfill_progress: Arc<DashMap<(String, String), Arc<BackfillProgress>>>,
+    /// Lock registry for session-scoped distributed-lock state. `None` in
+    /// network-only tests; populated in production wiring so
+    /// `handle_socket` can release held locks on WebSocket disconnect.
+    pub lock_registry: Option<Arc<LockRegistry>>,
+    /// Topic subscription registry. `None` in network-only tests; populated
+    /// in production wiring so `handle_socket` can release subscriptions
+    /// on WebSocket disconnect.
+    pub topic_registry: Option<Arc<TopicRegistry>>,
+    /// Counter subscription registry. `None` in network-only tests;
+    /// populated in production wiring so `handle_socket` can release
+    /// subscriptions on WebSocket disconnect.
+    pub counter_registry: Option<Arc<CounterRegistry>>,
+}
+
+impl AppState {
+    /// Constructor for test contexts.
+    ///
+    /// Returns an `AppState` with all `Option<_>` fields set to `None`
+    /// and required fields set to in-memory defaults. Tests override
+    /// specific fields with struct-update syntax:
+    ///
+    /// ```ignore
+    /// let state = AppState {
+    ///     operation_service: Some(svc),
+    ///     ..AppState::for_test()
+    /// };
+    /// ```
+    ///
+    /// Production code paths (`module.rs`, `test_server.rs`,
+    /// `load_harness/main.rs`) continue to construct `AppState`
+    /// explicitly so field coverage is compiler-checked.
+    pub fn for_test() -> Self {
+        Self {
+            registry: Arc::new(ConnectionRegistry::new()),
+            // Fresh ShutdownController with an unbroadcast signal so tests
+            // never observe a shutdown-in-progress state unless they drive it.
+            shutdown: Arc::new(ShutdownController::new()),
+            config: Arc::new(NetworkConfig::default()),
+            start_time: Instant::now(),
+            observability: None,
+            operation_service: None,
+            dispatcher: None,
+            jwt_secret: None,
+            cluster_state: None,
+            store_factory: None,
+            server_config: None,
+            policy_store: None,
+            // Empty slice because tests that need auth providers supply them
+            // explicitly via struct-update syntax.
+            auth_providers: Arc::new(vec![]),
+            refresh_grant_store: None,
+            auth_validator: None,
+            index_observer_factory: None,
+            // Fresh empty map; tests that drive backfill supply their own Arc.
+            backfill_progress: Arc::new(DashMap::new()),
+            lock_registry: None,
+            topic_registry: None,
+            counter_registry: None,
+        }
+    }
 }

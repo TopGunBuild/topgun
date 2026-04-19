@@ -241,6 +241,10 @@ async fn main() {
                 auth_validator: None,
                 index_observer_factory: None,
                 backfill_progress: Arc::new(DashMap::new()),
+                // Populated when registry Arcs are threaded into the harness.
+                lock_registry: None,
+                topic_registry: None,
+                counter_registry: None,
             };
 
             let ws_handler = get(topgun_server::network::handlers::ws_upgrade_handler);

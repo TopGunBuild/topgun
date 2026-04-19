@@ -445,6 +445,10 @@ fn build_app(
         // Use the pre-allocated Arc from serve() — same instance that was passed
         // to rebuild_from_store, so startup progress entries are already visible.
         backfill_progress,
+        // Populated in G3 via AppServices once registry Arcs are threaded through.
+        lock_registry: None,
+        topic_registry: None,
+        counter_registry: None,
     };
 
     // Build a per-IP rate limiter for admin and login endpoints.
