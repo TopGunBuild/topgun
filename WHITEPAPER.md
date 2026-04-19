@@ -149,8 +149,10 @@ graph TD
 | **Latency** | ~0ms (In-Memory) | ~5-10ms (SQLite) | Network Dependent | ~5-10ms (IndexedDB) |
 | **Backend Control** | Self-Hosted Cluster | Sync Service | Proprietary | CouchDB / Custom |
 | **Consistency** | HLC + CRDT | Rich CRDTs | LWW (Server) | Revision Trees |
-| **Distributed Locks** | Fencing Tokens | Not Supported | Not Supported | Not Supported |
+| **Distributed Locks** | Fencing Tokens (single-node stable; cluster Raft: in progress) | Not Supported | Not Supported | Not Supported |
 | **License** | Open Source | Open Source | Proprietary | Open Source |
+
+> **Note on distributed locks:** Distributed locks in cluster mode currently use partition-routing without Raft consensus. They are safe for deployments where a single node owns the relevant partition, but provide weaker guarantees under split-brain. Raft-backed cluster locks are in development.
 
 ### Why TopGun?
 -   **vs ElectricSQL**: TopGun operates entirely in-memory for zero-latency reads/writes, whereas ElectricSQL relies on SQLite access (5-10ms).
