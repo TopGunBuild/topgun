@@ -1,0 +1,99 @@
+---
+title: Roadmap
+description: Maturity levels for distributed primitives and the Raft track for cluster-safe guarantees.
+order: 6
+---
+
+<!-- When the Raft track (TODO-273..277) ships, remove the "Cluster (current)" caveats on this page and in all surfaces touched by SPEC-217. A paired follow-up spec must be filed at that time — see TODO-278. -->
+
+import { ChevronRight } from 'lucide-react';
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <span>Get Started</span>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Roadmap</span>
+</div>
+
+# Roadmap
+
+Last updated: 2026-04-19
+
+This page tracks the maturity level of distributed primitives across deployment modes. It exists alongside the feature documentation so that the deployment-mode constraints are visible next to the feature status.
+
+## Distributed Primitives Maturity
+
+<div className="overflow-x-auto mb-8 not-prose">
+  <table className="w-full text-left border-collapse text-sm">
+    <thead>
+      <tr className="border-b border-card-border">
+        <th className="py-3 px-4 font-medium text-neutral-500">Primitive</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">Single-Node</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">Cluster (current)</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">Cluster (planned with Raft)</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Distributed Locks</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable — fencing tokens, TTL-based expiry</td>
+        <td className="py-3 px-4 text-yellow-600 dark:text-yellow-400">Partition-routing, no consensus — safe only when a single node owns the relevant partition</td>
+        <td className="py-3 px-4 text-neutral-500">Raft-replicated via openraft — tracked internally</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Pub/Sub Topics</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable — fan-out, ephemeral messages</td>
+        <td className="py-3 px-4 text-yellow-600 dark:text-yellow-400">Partition-routed — no durable delivery guarantee across node failure</td>
+        <td className="py-3 px-4 text-neutral-500">Durable log-backed delivery — planned</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">PN-Counters</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable — CRDT merge</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable — CRDT semantics tolerate concurrent increments</td>
+        <td className="py-3 px-4 text-neutral-500">No change needed (CRDTs are naturally partition-tolerant)</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Live Queries</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable — subscriptions routed to partition owner</td>
+        <td className="py-3 px-4 text-neutral-500">Cross-partition aggregation — planned</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+## Why This Matters: Split-Brain Risk in Partition-Routing Locks
+
+Distributed locks in cluster mode currently use partition-routing without Raft consensus. They are safe for deployments where a single node owns the relevant partition, but provide weaker guarantees under split-brain. Raft-backed cluster locks are in development.
+
+A split-brain occurs when a network partition causes two nodes to believe they are each the authoritative owner of the same partition. In that scenario, both nodes can independently grant locks for the same resource — violating mutual exclusion. The fencing token mechanism limits damage (stale writes are rejected by storage layers that check tokens), but does not prevent two concurrent lock-holders from being granted tokens by different nodes.
+
+For single-node deployments (or deployments where partition ownership is stable and the network is reliable), this is not a practical concern. The lock implementation is correct and tested.
+
+For multi-node deployments where split-brain is a real risk, wait for the Raft track before relying on distributed locks for critical mutual exclusion (payments, inventory deduplication, leader election).
+
+## The Raft Track
+
+Raft-backed cluster locks (via openraft) will provide:
+
+- **Persistent log:** Lock acquisitions are written to a replicated log before being granted. No lock is granted unless a quorum of nodes acknowledges it.
+- **Leader election:** A Raft leader owns each lock namespace. Split-brain is detected via quorum — the minority partition refuses to grant locks.
+- **Automatic failover:** If the lock-owning leader fails, a new leader is elected and in-flight locks are resolved from the log.
+
+This work is tracked internally. The current partition-routing implementation is a deliberate "ship the single-node path first, add consensus later" decision — not a design flaw.
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/faq" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> FAQ
+    </div>
+  </a>
+  <a href="/docs/guides/distributed-locks" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Related</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Distributed Locks Guide <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>
