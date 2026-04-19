@@ -331,10 +331,10 @@ struct AppServices {
             Arc<crate::network::handlers::admin_types::BackfillProgress>,
         >,
     >,
-    /// Arc<LockRegistry> for disconnect cleanup. `None` when the coordination
-    /// service has not been wired into this router (e.g. test_server without locks).
+    /// `Arc<LockRegistry>` for disconnect cleanup. `None` when the coordination
+    /// service has not been wired into this router (e.g. `test_server` without locks).
     lock_registry: Option<Arc<crate::service::domain::LockRegistry>>,
-    /// Arc<TopicRegistry> for disconnect cleanup.
+    /// `Arc<TopicRegistry>` for disconnect cleanup.
     topic_registry: Option<Arc<crate::service::domain::messaging::TopicRegistry>>,
     /// Arc<CounterRegistry> for disconnect cleanup.
     counter_registry: Option<Arc<crate::service::domain::counter::CounterRegistry>>,

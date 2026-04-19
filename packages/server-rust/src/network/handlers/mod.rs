@@ -145,6 +145,7 @@ impl AppState {
     /// Production code paths (`module.rs`, `test_server.rs`,
     /// `load_harness/main.rs`) continue to construct `AppState`
     /// explicitly so field coverage is compiler-checked.
+    #[must_use]
     pub fn for_test() -> Self {
         Self {
             registry: Arc::new(ConnectionRegistry::new()),

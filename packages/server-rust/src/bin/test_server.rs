@@ -38,15 +38,14 @@ use topgun_server::network::shutdown::ShutdownController;
 use topgun_server::service::config::ServerConfig;
 use topgun_server::service::dispatch::{DispatchConfig, PartitionDispatcher};
 use topgun_server::service::domain::coordination::CoordinationService;
+use topgun_server::service::domain::counter::CounterRegistry;
 use topgun_server::service::domain::crdt::CrdtService;
 use topgun_server::service::domain::embedding::{
     noop::NoopEmbeddingProvider, EmbeddingConfig, EmbeddingObserverFactory, EmbeddingProvider,
     EmbeddingProviderConfig, NoopConfig, VectorConfig as EmbeddingVectorConfig,
 };
 use topgun_server::service::domain::index::IndexObserverFactory;
-use topgun_server::service::domain::counter::CounterRegistry;
 use topgun_server::service::domain::messaging::{MessagingService, TopicRegistry};
-use topgun_server::service::domain::LockRegistry;
 use topgun_server::service::domain::persistence::PersistenceService;
 use topgun_server::service::domain::query::{QueryRegistry, QueryService};
 use topgun_server::service::domain::schema::SchemaService;
@@ -55,6 +54,7 @@ use topgun_server::service::domain::search::{
     TantivyMapIndex,
 };
 use topgun_server::service::domain::sync::SyncService;
+use topgun_server::service::domain::LockRegistry;
 use topgun_server::service::middleware::build_operation_pipeline;
 use topgun_server::service::operation::service_names;
 use topgun_server::service::policy::{InMemoryPolicyStore, PolicyEvaluator, PolicyStore};
@@ -240,7 +240,14 @@ async fn main() -> anyhow::Result<()> {
 
         // Build domain services, sharing the cluster_state with CoordinationService.
         // Pass the policy evaluator so every client operation is checked against RBAC.
-        let (classify_svc, dispatcher, connection_registry, lock_registry, topic_registry, counter_registry) = build_services(
+        let (
+            classify_svc,
+            dispatcher,
+            connection_registry,
+            lock_registry,
+            topic_registry,
+            counter_registry,
+        ) = build_services(
             node_id.clone(),
             Arc::clone(&cluster_state),
             Some(Arc::clone(&policy_evaluator)),
@@ -257,24 +264,55 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(Arc::new(reactor).run(change_rx));
 
         (
-            (classify_svc, dispatcher, connection_registry, lock_registry, topic_registry, counter_registry),
+            (
+                classify_svc,
+                dispatcher,
+                connection_registry,
+                lock_registry,
+                topic_registry,
+                counter_registry,
+            ),
             Some(cluster_state),
         )
     } else {
         // --- Single-node mode (backward-compatible) ---
         let (cs, _rx) = ClusterState::new(Arc::new(ClusterConfig::default()), node_id.clone());
         let cs = Arc::new(cs);
-        let (classify_svc, dispatcher, connection_registry, lock_registry, topic_registry, counter_registry) = build_services(
+        let (
+            classify_svc,
+            dispatcher,
+            connection_registry,
+            lock_registry,
+            topic_registry,
+            counter_registry,
+        ) = build_services(
             node_id.clone(),
             Arc::clone(&cs),
             Some(Arc::clone(&policy_evaluator)),
         );
 
         // Single-node mode: expose no cluster state to AppState (existing behavior).
-        ((classify_svc, dispatcher, connection_registry, lock_registry, topic_registry, counter_registry), None)
+        (
+            (
+                classify_svc,
+                dispatcher,
+                connection_registry,
+                lock_registry,
+                topic_registry,
+                counter_registry,
+            ),
+            None,
+        )
     };
 
-    let (classify_svc, dispatcher, connection_registry, lock_registry, topic_registry, counter_registry) = cluster_state_for_services;
+    let (
+        classify_svc,
+        dispatcher,
+        connection_registry,
+        lock_registry,
+        topic_registry,
+        counter_registry,
+    ) = cluster_state_for_services;
 
     // Allow integration test environments to opt in to detailed auth errors.
     let insecure_forward_auth_errors = std::env::var("INSECURE_FORWARD_AUTH_ERRORS")
@@ -441,6 +479,17 @@ impl ObserverFactory for SearchObserverFactory {
 // Service wiring
 // ---------------------------------------------------------------------------
 
+/// Return type of [`build_services`]: the wired operation service, dispatcher,
+/// connection registry, and the three session-scoped registry Arcs.
+type BuildServicesResult = (
+    Arc<OperationService>,
+    PartitionDispatcher,
+    Arc<ConnectionRegistry>,
+    Arc<LockRegistry>,
+    Arc<TopicRegistry>,
+    Arc<CounterRegistry>,
+);
+
 /// Wires all 7 domain services and builds the partition dispatcher.
 ///
 /// Accepts `node_id`, `cluster_state`, and an optional `PolicyEvaluator` so
@@ -460,14 +509,7 @@ fn build_services(
     node_id: String,
     cluster_state: Arc<ClusterState>,
     policy_evaluator: Option<Arc<PolicyEvaluator>>,
-) -> (
-    Arc<OperationService>,
-    PartitionDispatcher,
-    Arc<ConnectionRegistry>,
-    Arc<LockRegistry>,
-    Arc<TopicRegistry>,
-    Arc<CounterRegistry>,
-) {
+) -> BuildServicesResult {
     let config = ServerConfig {
         node_id: node_id.clone(),
         default_operation_timeout_ms: 5000,
@@ -663,7 +705,14 @@ fn build_services(
 
     let dispatch_config = DispatchConfig::default();
     let dispatcher = PartitionDispatcher::new(&dispatch_config, pipeline_factory);
-    (classify_svc, dispatcher, connection_registry, lock_registry_arc, topic_registry_arc, counter_registry_arc)
+    (
+        classify_svc,
+        dispatcher,
+        connection_registry,
+        lock_registry_arc,
+        topic_registry_arc,
+        counter_registry_arc,
+    )
 }
 
 // ---------------------------------------------------------------------------

@@ -3,8 +3,8 @@
 //! subscriptions).
 //!
 //! Strategy: boot a minimal axum server with real registries wired into
-//! AppState. Connect a WebSocket client, seed the three registries with
-//! the client's ConnectionId, drop the client, and verify all three
+//! `AppState`. Connect a WebSocket client, seed the three registries with
+//! the client's `ConnectionId`, drop the client, and verify all three
 //! registry entries are cleaned within a bounded poll window.
 //!
 //! No JWT is configured so the server skips the auth phase and goes
@@ -79,7 +79,14 @@ async fn start_server_with_registries() -> (
     // Give the server a moment to start.
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    (port, connection_registry, lock_reg, topic_reg, counter_reg, shutdown_tx)
+    (
+        port,
+        connection_registry,
+        lock_reg,
+        topic_reg,
+        counter_reg,
+        shutdown_tx,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -92,7 +99,7 @@ async fn start_server_with_registries() -> (
 /// Steps:
 /// 1. Boot the server with real registries.
 /// 2. Connect a client WebSocket; wait for the server to register it.
-/// 3. Seed the three registries with the client's ConnectionId.
+/// 3. Seed the three registries with the client's `ConnectionId`.
 /// 4. Drop the client connection (no explicit release).
 /// 5. Poll (bounded 1 s) until the server processes the close.
 /// 6. Verify lock is released, topic subscription removed, counter
@@ -111,15 +118,20 @@ async fn disconnect_releases_lock_topic_and_counter_state() {
     // Wait for the server to register the connection.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
     while conn_reg.count() == 0 {
-        if tokio::time::Instant::now() >= deadline {
-            panic!("server did not register the connection within 1 s");
-        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "server did not register the connection within 1 s"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
     // Retrieve the ConnectionId assigned by the server.
     let handles = conn_reg.connections();
-    assert_eq!(handles.len(), 1, "exactly one connection should be registered");
+    assert_eq!(
+        handles.len(),
+        1,
+        "exactly one connection should be registered"
+    );
     let conn_id = handles[0].id;
 
     // Seed the three registries as if this connection holds session state.
@@ -150,9 +162,7 @@ async fn disconnect_releases_lock_topic_and_counter_state() {
     // An explicit Close frame is the most reliable way to signal disconnect
     // without relying on OS-level TCP teardown timing.
     let (mut write_half, _read_half) = ws_stream.split();
-    let _ = write_half
-        .send(WsMessage::Close(None))
-        .await;
+    let _ = write_half.send(WsMessage::Close(None)).await;
     drop(write_half);
 
     // Poll until the server processes the disconnect (bounded 3 s).
