@@ -188,7 +188,7 @@ import { ArrowLeft } from 'lucide-react';
             </tr>
             <tr class="border-b border-card-border">
               <td class="py-2 px-2 font-medium">Distributed Locks</td>
-              <td class="py-2 px-2 bg-brand-subtle/5 border-x border-brand-subtle/10 text-brand">Fencing Tokens</td>
+              <td class="py-2 px-2 bg-brand-subtle/5 border-x border-brand-subtle/10 text-brand" title="Distributed locks in cluster mode currently use partition-routing without Raft consensus. They are safe for deployments where a single node owns the relevant partition, but provide weaker guarantees under split-brain. Raft-backed cluster locks are in development.">Fencing Tokens (single-node stable; cluster Raft: in progress)</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Not Supported</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Not Supported</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Not Supported</td>
@@ -203,6 +203,11 @@ import { ArrowLeft } from 'lucide-react';
           </tbody>
         </table>
       </div>
+
+      <p class="text-sm text-neutral-500 dark:text-neutral-400 mt-2">
+        <strong>Note on distributed locks:</strong> Distributed locks in cluster mode currently use partition-routing without Raft consensus. They are safe for deployments where a single node owns the relevant partition, but provide weaker guarantees under split-brain. Raft-backed cluster locks are in development.
+        See <a href="/docs/roadmap" class="underline hover:text-brand">Roadmap</a>.
+      </p>
 
       <h3>Why TopGun?</h3>
       <ul class="list-disc pl-6 space-y-2 text-neutral-600 dark:text-neutral-300">
