@@ -15,7 +15,7 @@ TopGun v2 is a complete rewrite. It's not a port — it's a new architecture des
 - **CRDT conflict resolution**: LWW-Map and OR-Map with Hybrid Logical Clocks.
 - **Merkle tree sync**: Efficient delta synchronization — only changed data moves over the wire.
 - **Pluggable storage**: PostgreSQL for server, IndexedDB for client, or bring your own adapter.
-- **Cluster-ready**: Server-side partitioning, distributed locks, pub/sub.
+- **Cluster-ready**: Server-side partitioning, pub/sub, and distributed locks (single-node stable; cluster-mode uses partition-routing — Raft-backed cluster locks in progress).
 - **Rust server, TypeScript client**: Type-safe SDK with a high-performance Rust backend.
 
 ## Quick start
