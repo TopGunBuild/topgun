@@ -69,6 +69,9 @@ pub struct NetworkModule {
     server_config: Option<Arc<ArcSwap<ServerConfig>>>,
     policy_store: Option<Arc<dyn PolicyStore>>,
     index_observer_factory: Option<Arc<IndexObserverFactory>>,
+    lock_registry: Option<Arc<crate::service::domain::LockRegistry>>,
+    topic_registry: Option<Arc<crate::service::domain::messaging::TopicRegistry>>,
+    counter_registry: Option<Arc<crate::service::domain::counter::CounterRegistry>>,
 }
 
 impl NetworkModule {
@@ -89,6 +92,9 @@ impl NetworkModule {
             server_config: None,
             policy_store: None,
             index_observer_factory: None,
+            lock_registry: None,
+            topic_registry: None,
+            counter_registry: None,
         }
     }
 
@@ -124,6 +130,36 @@ impl NetworkModule {
     /// Configures the index observer factory for admin index management endpoints.
     pub fn set_index_observer_factory(&mut self, factory: Arc<IndexObserverFactory>) {
         self.index_observer_factory = Some(factory);
+    }
+
+    /// Configures the lock registry for session disconnect cleanup.
+    ///
+    /// When set, active lock leases held by a disconnecting session are released.
+    /// Consumers that do not use distributed locks can omit this call.
+    pub fn set_lock_registry(&mut self, registry: Arc<crate::service::domain::LockRegistry>) {
+        self.lock_registry = Some(registry);
+    }
+
+    /// Configures the topic registry for session disconnect cleanup.
+    ///
+    /// When set, topic subscriptions held by a disconnecting session are cleaned up.
+    /// Consumers that do not use pub/sub topics can omit this call.
+    pub fn set_topic_registry(
+        &mut self,
+        registry: Arc<crate::service::domain::messaging::TopicRegistry>,
+    ) {
+        self.topic_registry = Some(registry);
+    }
+
+    /// Configures the counter registry for session disconnect cleanup.
+    ///
+    /// When set, counter state held by a disconnecting session is released.
+    /// Consumers that do not use counters can omit this call.
+    pub fn set_counter_registry(
+        &mut self,
+        registry: Arc<crate::service::domain::counter::CounterRegistry>,
+    ) {
+        self.counter_registry = Some(registry);
     }
 
     /// Returns a shared reference to the connection registry.
@@ -282,13 +318,15 @@ impl NetworkModule {
                 policy_store: self.policy_store,
                 index_observer_factory: self.index_observer_factory,
                 backfill_progress,
-                // Domain service registries are not wired into NetworkModule —
-                // the integration test server (test_server.rs) wires them
-                // directly into AppState. When NetworkModule is used in
-                // production (future), add set_* methods for these registries.
-                lock_registry: None,
-                topic_registry: None,
-                counter_registry: None,
+                // These registries are optional: callers that need disconnect
+                // cleanup semantics wire them via set_lock_registry(),
+                // set_topic_registry(), and set_counter_registry() before
+                // calling serve(). Callers that omit the setters keep None
+                // and no cleanup runs on disconnect — safe for consumers that
+                // do not use locks, topics, or counters.
+                lock_registry: self.lock_registry,
+                topic_registry: self.topic_registry,
+                counter_registry: self.counter_registry,
             },
         );
 
@@ -708,6 +746,40 @@ mod tests {
     }
 
     // ── Unit tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn set_registry_setters_store_provided_arcs() {
+        use crate::service::domain::counter::CounterRegistry;
+        use crate::service::domain::messaging::TopicRegistry;
+        use crate::service::domain::LockRegistry;
+
+        let mut module = NetworkModule::new(NetworkConfig::default());
+
+        let lock = Arc::new(LockRegistry::new());
+        let topic = Arc::new(TopicRegistry::new());
+        let counter = Arc::new(CounterRegistry::new("test-node".to_string()));
+
+        let lock_clone = Arc::clone(&lock);
+        let topic_clone = Arc::clone(&topic);
+        let counter_clone = Arc::clone(&counter);
+
+        module.set_lock_registry(lock);
+        module.set_topic_registry(topic);
+        module.set_counter_registry(counter);
+
+        assert!(
+            Arc::ptr_eq(module.lock_registry.as_ref().unwrap(), &lock_clone),
+            "set_lock_registry must store the provided Arc"
+        );
+        assert!(
+            Arc::ptr_eq(module.topic_registry.as_ref().unwrap(), &topic_clone),
+            "set_topic_registry must store the provided Arc"
+        );
+        assert!(
+            Arc::ptr_eq(module.counter_registry.as_ref().unwrap(), &counter_clone),
+            "set_counter_registry must store the provided Arc"
+        );
+    }
 
     #[test]
     fn new_creates_module_without_binding() {
