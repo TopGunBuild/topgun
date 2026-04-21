@@ -618,11 +618,37 @@ describe('SyncEngine', () => {
       ws.simulateMessage({ type: 'AUTH_ACK' });
       await jest.runAllTimersAsync();
 
+      // ttl=5000 → response timeout = max(5000 + 5000, 5000) = 10000ms
       const lockPromise = syncEngine.requestLock('my-lock', 'req-1', 5000);
 
-      // Advance time beyond the 30s timeout
-      jest.advanceTimersByTime(31000);
+      // Advance time beyond the TTL-coordinated 10s timeout (5s ttl + 5s grace)
+      jest.advanceTimersByTime(10001);
 
+      await expect(lockPromise).rejects.toThrow('Lock request timed out');
+    });
+
+    test('should use TTL-coordinated response timeout for long-TTL lock request', async () => {
+      syncEngine = new SyncEngine(config);
+      syncEngine.setAuthToken('test-token');
+      await jest.runAllTimersAsync();
+
+      const ws = MockWebSocket.getLastInstance()!;
+      ws.simulateMessage({ type: 'AUTH_ACK' });
+      await jest.runAllTimersAsync();
+
+      // ttl=60000 → response timeout = max(60000 + 5000, 5000) = 65000ms
+      const lockPromise = syncEngine.requestLock('my-lock', 'req-long', 60000);
+
+      // At 30s the lock should NOT have timed out (old hardcoded 30s bug would fail here)
+      jest.advanceTimersByTime(30001);
+      const raceResult = await Promise.race([
+        lockPromise.then(() => 'resolved').catch(() => 'rejected'),
+        Promise.resolve('pending'),
+      ]);
+      expect(raceResult).toBe('pending');
+
+      // Advance to beyond 65s — now it should reject
+      jest.advanceTimersByTime(35000); // total: ~65001ms
       await expect(lockPromise).rejects.toThrow('Lock request timed out');
     });
 
