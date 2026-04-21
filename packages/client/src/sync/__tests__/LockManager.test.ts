@@ -1,6 +1,16 @@
 import { LockManager } from '../LockManager';
 import type { LockManagerConfig } from '../types';
 
+// Hoisted jest.mock so the module is intercepted before LockManager's import of logger resolves
+jest.mock('../../utils/logger', () => ({
+  logger: {
+    debug: jest.fn(),
+    info: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+  },
+}));
+
 // ============================================
 // Helpers
 // ============================================
@@ -23,21 +33,12 @@ describe('LockManager', () => {
 
   beforeEach(() => {
     jest.useFakeTimers();
-    mockDebug = jest.fn();
-    // Provide a mock logger to capture debug calls
-    jest.mock('../../utils/logger', () => ({
-      logger: {
-        debug: mockDebug,
-        info: jest.fn(),
-        warn: jest.fn(),
-        error: jest.fn(),
-      },
-    }));
+    jest.clearAllMocks();
+    mockDebug = require('../../utils/logger').logger.debug;
   });
 
   afterEach(() => {
     jest.useRealTimers();
-    jest.resetModules();
   });
 
   // ============================================
@@ -145,34 +146,54 @@ describe('LockManager', () => {
       await expect(releasePromise).resolves.toBe(false);
     });
 
-    test('resolves false on ACK timeout after 5s', async () => {
+    test('resolves false on ACK timeout after 5s and emits reason: timeout debug log', async () => {
       const config = makeConfig();
       const manager = new LockManager(config);
       const releasePromise = manager.releaseLock('lock-b', 'req-12', 42);
 
       jest.advanceTimersByTime(5001);
       await expect(releasePromise).resolves.toBe(false);
+
+      expect(mockDebug).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'lock-b', requestId: 'req-12', reason: 'timeout' }),
+        expect.any(String),
+      );
     });
 
-    test('resolves false immediately when offline', async () => {
+    test('resolves false immediately when offline and emits reason: offline debug log', async () => {
       const config = makeConfig({ isOnline: jest.fn().mockReturnValue(false) });
       const manager = new LockManager(config);
       const result = await manager.releaseLock('lock-b', 'req-13', 42);
       expect(result).toBe(false);
+
+      expect(mockDebug).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'lock-b', requestId: 'req-13', reason: 'offline' }),
+        expect.any(String),
+      );
     });
 
-    test('resolves false when sendMessage returns false', async () => {
+    test('resolves false when sendMessage returns false and emits reason: send_failed debug log', async () => {
       const config = makeConfig({ sendMessage: jest.fn().mockReturnValue(false) });
       const manager = new LockManager(config);
       const result = await manager.releaseLock('lock-b', 'req-14', 42);
       expect(result).toBe(false);
+
+      expect(mockDebug).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'lock-b', requestId: 'req-14', reason: 'send_failed' }),
+        expect.any(String),
+      );
     });
 
-    test('resolves false when sendMessage throws', async () => {
+    test('resolves false when sendMessage throws and emits reason: send_threw debug log', async () => {
       const config = makeConfig({ sendMessage: jest.fn().mockImplementation(() => { throw new Error('socket closed'); }) });
       const manager = new LockManager(config);
       const result = await manager.releaseLock('lock-b', 'req-15', 42);
       expect(result).toBe(false);
+
+      expect(mockDebug).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'lock-b', requestId: 'req-15', reason: 'send_threw' }),
+        expect.any(String),
+      );
     });
   });
 
@@ -233,6 +254,11 @@ describe('LockManager', () => {
 
       manager.handleLockReleased('req-31', 'lock-d', false);
       await expect(releasePromise).resolves.toBe(false);
+
+      expect(mockDebug).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'lock-d', requestId: 'req-31', reason: 'server_rejected' }),
+        expect.any(String),
+      );
     });
 
     test('is a no-op when requestId has no matching pending entry', () => {
