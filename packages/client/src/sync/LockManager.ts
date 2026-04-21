@@ -34,10 +34,14 @@ const RELEASE_RESPONSE_TIMEOUT_MS = 5000;
 
 /**
  * Pending lock request state.
+ *
+ * Only `resolve` and `timer` are stored on the map entry. The Promise executor's
+ * `reject` is captured in the surrounding closure (for requestLock timeout /
+ * send-failure paths) and never read back off the stored entry, so it is not
+ * kept here.
  */
 interface PendingLockRequest {
   resolve: (res: any) => void;
-  reject: (err: any) => void;
   timer: ReturnType<typeof setTimeout>;
 }
 
@@ -96,7 +100,7 @@ export class LockManager implements ILockManager {
         }
       }, responseTimeoutMs);
 
-      this.pendingLockRequests.set(requestId, { resolve, reject, timer });
+      this.pendingLockRequests.set(requestId, { resolve, timer });
 
       try {
         const sent = this.config.sendMessage({
@@ -139,7 +143,7 @@ export class LockManager implements ILockManager {
       return Promise.resolve(false);
     }
 
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       const timer = setTimeout(() => {
         if (this.pendingLockRequests.has(requestId)) {
           this.pendingLockRequests.delete(requestId);
@@ -148,7 +152,7 @@ export class LockManager implements ILockManager {
         }
       }, RELEASE_RESPONSE_TIMEOUT_MS);
 
-      this.pendingLockRequests.set(requestId, { resolve, reject, timer });
+      this.pendingLockRequests.set(requestId, { resolve, timer });
 
       try {
         const sent = this.config.sendMessage({
