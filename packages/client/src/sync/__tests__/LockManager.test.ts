@@ -212,6 +212,12 @@ describe('LockManager', () => {
       // Fire empty-requestId handler — should not affect req-20
       expect(() => manager.handleLockReleased('', 'lock-c', true)).not.toThrow();
 
+      // Verify the fire-and-forget ACK diagnostic log was emitted
+      expect(mockDebug).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'lock-c', success: true }),
+        expect.stringContaining('empty requestId'),
+      );
+
       // req-20 should still be pending (resolvable normally)
       manager.handleLockReleased('req-20', 'lock-c', true);
       await expect(releasePromise).resolves.toBe(true);
@@ -226,6 +232,12 @@ describe('LockManager', () => {
 
       // Empty requestId call — should be a no-op
       manager.handleLockReleased('', 'lock-c', false);
+
+      // Verify the fire-and-forget ACK diagnostic log was emitted with success: false
+      expect(mockDebug).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'lock-c', success: false }),
+        expect.stringContaining('empty requestId'),
+      );
 
       // The real pending entry should still resolve
       manager.handleLockReleased('req-21', 'lock-c', true);
