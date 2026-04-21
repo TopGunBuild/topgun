@@ -419,19 +419,29 @@ export interface TopicManagerConfig {
 export interface ILockManager {
   /**
    * Request a distributed lock.
+   *
+   * Response timeout is derived from `ttl` as `max(ttl + 5000ms, 5000ms)`.
+   * This ensures the client waits long enough for the server to respond within
+   * the TTL window without leaking pending requests indefinitely.
+   *
    * @param name - Lock name
    * @param requestId - Unique request ID
-   * @param ttl - Time-to-live in milliseconds
-   * @returns Promise that resolves with fencing token
+   * @param ttl - Lock lease duration in milliseconds (server-side)
+   * @returns Promise that resolves with fencing token on grant
    */
   requestLock(name: string, requestId: string, ttl: number): Promise<{ fencingToken: number }>;
 
   /**
    * Release a distributed lock.
+   *
+   * Returns `true` only on server `success: true` ACK. `false` may mean ACK timeout,
+   * offline, send failure (`send_failed`), send exception (`send_threw`), or server
+   * `success: false` (`server_rejected`) — check debug logs for disambiguation.
+   *
    * @param name - Lock name
    * @param requestId - Unique request ID
    * @param fencingToken - Fencing token from lock grant
-   * @returns Promise that resolves with success status
+   * @returns Promise that resolves true only on server success: true ACK
    */
   releaseLock(name: string, requestId: string, fencingToken: number): Promise<boolean>;
 

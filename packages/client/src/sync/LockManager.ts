@@ -2,14 +2,35 @@
  * LockManager - Handles distributed lock operations for SyncEngine
  *
  * Responsibilities:
- * - Lock acquisition with timeout
- * - Lock release with acknowledgment
+ * - Lock acquisition with TTL-coordinated timeout
+ * - Lock release with acknowledgment and diagnostic logging
  * - Pending lock request tracking
  * - Message handlers for LOCK_GRANTED and LOCK_RELEASED
  */
 
 import { logger } from '../utils/logger';
 import type { ILockManager, LockManagerConfig } from './types';
+
+/**
+ * Grace period added to the TTL when computing the client-side response timeout
+ * for lock acquisition. This covers realistic network round-trip and server
+ * processing latency so the client does not give up before the server can respond.
+ */
+const ACQUIRE_RESPONSE_GRACE_MS = 5000;
+
+/**
+ * Minimum client-side response timeout for lock acquisition regardless of TTL.
+ * Ensures very short TTLs (including 0) still wait long enough for a response.
+ */
+const MIN_ACQUIRE_RESPONSE_TIMEOUT_MS = 5000;
+
+/**
+ * Fixed client-side timeout for lock release acknowledgment.
+ * Releases are lighter-weight than acquisitions (no TTL timer setup server-side),
+ * so a shorter fixed bound is appropriate. ACK disambiguation is handled via
+ * debug-level logs rather than by adjusting this value.
+ */
+const RELEASE_RESPONSE_TIMEOUT_MS = 5000;
 
 /**
  * Pending lock request state.
@@ -25,8 +46,8 @@ interface PendingLockRequest {
  *
  * Manages distributed locks with support for:
  * - Request/release pattern with fencing tokens
- * - Timeout handling for lost messages
- * - Server acknowledgment tracking
+ * - TTL-coordinated timeout handling for lost messages
+ * - Server acknowledgment tracking with diagnostic logging
  */
 export class LockManager implements ILockManager {
   private readonly config: LockManagerConfig;
@@ -44,6 +65,18 @@ export class LockManager implements ILockManager {
 
   /**
    * Request a distributed lock.
+   *
+   * The client-side response timeout is derived from the requested TTL:
+   *   `max(ttl + ACQUIRE_RESPONSE_GRACE_MS, MIN_ACQUIRE_RESPONSE_TIMEOUT_MS)`
+   *
+   * This ensures the client waits long enough for the server to respond within
+   * the TTL window. For short TTLs the floor prevents leaking pending requests.
+   * For long TTLs the grace period covers network + server processing latency.
+   *
+   * @param name - Lock name
+   * @param requestId - Unique request ID
+   * @param ttl - Lock lease duration in milliseconds (server-side)
+   * @returns Promise that resolves with fencing token on grant
    */
   public requestLock(name: string, requestId: string, ttl: number): Promise<{ fencingToken: number }> {
     if (!this.config.isAuthenticated()) {
@@ -51,16 +84,17 @@ export class LockManager implements ILockManager {
     }
 
     return new Promise((resolve, reject) => {
-      // Timeout if no response (server might be down or message lost)
-      // We set a client-side timeout slightly larger than TTL if TTL is short,
-      // but usually we want a separate "Wait Timeout".
-      // For now, use a fixed 30s timeout for the *response*.
+      // Response timeout scales with TTL so the client does not reject before
+      // the server's TTL window elapses. The grace period covers network latency
+      // and server processing. The floor prevents indefinite waits for ttl=0.
+      const responseTimeoutMs = Math.max(ttl + ACQUIRE_RESPONSE_GRACE_MS, MIN_ACQUIRE_RESPONSE_TIMEOUT_MS);
+
       const timer = setTimeout(() => {
         if (this.pendingLockRequests.has(requestId)) {
           this.pendingLockRequests.delete(requestId);
           reject(new Error('Lock request timed out waiting for server response'));
         }
-      }, 30000);
+      }, responseTimeoutMs);
 
       this.pendingLockRequests.set(requestId, { resolve, reject, timer });
 
@@ -84,19 +118,35 @@ export class LockManager implements ILockManager {
 
   /**
    * Release a distributed lock.
+   *
+   * Returns `true` only when the server responds with `LOCK_RELEASED { success: true }`.
+   * Returns `false` for all other outcomes (no ACK, offline, send failure, server rejection).
+   * Each failure path emits a `logger.debug` call with a distinct `reason` code for diagnostics:
+   *   - `timeout`      — no ACK arrived within RELEASE_RESPONSE_TIMEOUT_MS
+   *   - `offline`      — client was not online when release was attempted
+   *   - `send_failed`  — sendMessage returned false without throwing
+   *   - `send_threw`   — sendMessage threw an exception
+   *   - `server_rejected` — server responded success: false (emitted from handleLockReleased)
+   *
+   * @param name - Lock name
+   * @param requestId - Unique request ID
+   * @param fencingToken - Fencing token from lock grant
+   * @returns Promise that resolves with true only on server success: true ACK
    */
   public releaseLock(name: string, requestId: string, fencingToken: number): Promise<boolean> {
-    if (!this.config.isOnline()) return Promise.resolve(false);
+    if (!this.config.isOnline()) {
+      logger.debug({ name, requestId, reason: 'offline' }, 'LockManager: release not sent');
+      return Promise.resolve(false);
+    }
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         if (this.pendingLockRequests.has(requestId)) {
           this.pendingLockRequests.delete(requestId);
-          // Resolve false on timeout? Or reject?
-          // Release is usually fire-and-forget but we wanted ACK.
+          logger.debug({ name, requestId, reason: 'timeout' }, 'LockManager: release ACK timeout');
           resolve(false);
         }
-      }, 5000);
+      }, RELEASE_RESPONSE_TIMEOUT_MS);
 
       this.pendingLockRequests.set(requestId, { resolve, reject, timer });
 
@@ -108,11 +158,13 @@ export class LockManager implements ILockManager {
         if (!sent) {
           clearTimeout(timer);
           this.pendingLockRequests.delete(requestId);
+          logger.debug({ name, requestId, reason: 'send_failed' }, 'LockManager: release send failed');
           resolve(false);
         }
       } catch (e) {
         clearTimeout(timer);
         this.pendingLockRequests.delete(requestId);
+        logger.debug({ name, requestId, reason: 'send_threw', error: (e as Error).message }, 'LockManager: release send threw');
         resolve(false);
       }
     });
@@ -132,13 +184,22 @@ export class LockManager implements ILockManager {
 
   /**
    * Handle lock released message from server.
+   *
+   * Empty requestId (fire-and-forget ACK per SPEC-216 Assumption #7) is a safe
+   * no-op — no pending-map lookup is performed to avoid corruption.
    */
-  public handleLockReleased(requestId: string, _name: string, success: boolean): void {
-    const req = this.pendingLockRequests.get(requestId);
-    if (req) {
-      clearTimeout(req.timer);
-      this.pendingLockRequests.delete(requestId);
-      req.resolve(success);
+  public handleLockReleased(requestId: string, name: string, success: boolean): void {
+    if (requestId === '') {
+      logger.debug({ name, success }, 'LockManager: LOCK_RELEASED with empty requestId (fire-and-forget ACK)');
+      return;
     }
+    const pending = this.pendingLockRequests.get(requestId);
+    if (!pending) return;
+    this.pendingLockRequests.delete(requestId);
+    clearTimeout(pending.timer);
+    if (!success) {
+      logger.debug({ name, requestId, reason: 'server_rejected' }, 'LockManager: release rejected by server');
+    }
+    pending.resolve(success);
   }
 }
