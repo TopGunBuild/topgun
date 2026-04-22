@@ -9,7 +9,6 @@ import { ChevronRight, Lightbulb, Zap, Shield, Settings } from 'lucide-react';
 import { FeatureCard } from '../../../components/docs/FeatureCard';
 import { AlertBox } from '../../../components/docs/AlertBox';
 
-<AlertBox variant="warning" title="Planned Feature" text="This feature is on the roadmap but not yet implemented in the current Rust server. The API shown below represents the planned design." />
 
 export const advisorCode = `import { IndexedLWWMap, simpleAttribute, HLC } from '@topgunbuild/core';
 
@@ -217,6 +216,8 @@ const products = new IndexedLWWMap<string, Product>(hlc, {
 const suggestions = products.getIndexSuggestions();
 // Apply only what's actually needed based on real usage`;
 
+<AlertBox variant="danger" title="Not Implemented — Design Only" text="Adaptive Indexing does not exist in the current Rust server. The API described below is a design sketch for a future release, not reference documentation (see /docs/roadmap)." />
+
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
   <span className="text-foreground font-medium">Docs</span>
   <ChevronRight className="w-4 h-4" />
@@ -227,7 +228,7 @@ const suggestions = products.getIndexSuggestions();
 
 # Adaptive Indexing
 
-TopGun's **Adaptive Indexing** system tracks your query patterns and either suggests indexes (production mode) or automatically creates them (development mode). This eliminates guesswork and ensures optimal performance.
+**Adaptive Indexing** is a planned design for future releases. The Rust server does not implement it today. The API described below is how we intend to ship it — see [/docs/roadmap](/docs/roadmap) for status.
 
 <div className="grid md:grid-cols-3 gap-6 mb-16 not-prose">
   <FeatureCard

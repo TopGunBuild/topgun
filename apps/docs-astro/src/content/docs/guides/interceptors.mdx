@@ -8,7 +8,6 @@ import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Plug, Shield, Zap, Brain, Filter, Bell } from 'lucide-react';
 import { AlertBox } from '../../../components/docs/AlertBox';
 
-<AlertBox variant="warning" title="Planned Feature" text="This feature is on the roadmap but not yet implemented in the current Rust server. The API shown below represents the planned design." />
 
 export const basicInterceptorCode = `# The Rust server provides built-in interceptor functionality
 # via its Tower middleware pipeline. Configure via environment variables:
@@ -255,6 +254,8 @@ interface OpContext {
   fromCluster: boolean;   // True if op came from another node
 }`;
 
+<AlertBox variant="danger" title="Not Implemented — Design Only" text="Interceptors do not exist in the current Rust server. The API described below is a design sketch for a future release, not reference documentation (see /docs/roadmap)." />
+
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap not-prose">
   <span className="text-foreground font-medium">Docs</span>
   <ChevronRight className="w-4 h-4" />
@@ -270,7 +271,7 @@ interface OpContext {
   <h1 className="text-4xl font-bold text-foreground">Interceptors</h1>
 </div>
 
-**Interceptors** provide server-side hooks to intercept, validate, enrich, or reject operations before and after they're applied. Unlike [Entry Processors](/docs/guides/entry-processor) which run in a sandbox, interceptors have full access to Node.js APIs, enabling integration with external services, ML models, and third-party APIs.
+**Interceptors** are a planned design for future releases. The Rust server does not implement them today. The API described below is how we intend to ship it — see [/docs/roadmap](/docs/roadmap) for status.
 
 <div className="grid md:grid-cols-3 gap-4 my-6 not-prose">
   <div className="p-4 bg-purple-50 dark:bg-purple-900/20 rounded-lg border border-purple-200 dark:border-purple-800">

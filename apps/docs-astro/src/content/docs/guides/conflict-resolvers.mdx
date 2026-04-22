@@ -8,7 +8,6 @@ import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Shield, AlertTriangle, Lock, Users } from 'lucide-react';
 import { AlertBox } from '../../../components/docs/AlertBox';
 
-<AlertBox variant="warning" title="Planned Feature" text="Custom conflict resolvers are on the roadmap but not yet implemented in the current Rust server. The server currently uses LWW (Last-Write-Wins) resolution only." />
 
 export const problemCode = `// The LWW Problem: Two users book the same seat concurrently
 
@@ -271,6 +270,8 @@ const { register, unregister, list, loading, error, registered } =
 const { rejections, lastRejection, clear } =
   useMergeRejections({ mapName, maxHistory: 100 });`;
 
+<AlertBox variant="danger" title="Not Implemented — Design Only" text="Custom Conflict Resolvers do not exist in the current Rust server. The server uses LWW resolution only. The API described below is a design sketch for a future release, not reference documentation (see /docs/roadmap)." />
+
 <div className="not-prose mb-8 rounded-lg border border-yellow-500/20 bg-yellow-500/10 p-4">
   <div className="flex items-start gap-3">
     <AlertTriangle className="h-5 w-5 text-yellow-500 mt-0.5" />
@@ -286,7 +287,7 @@ const { rejections, lastRejection, clear } =
 
 ## The Problem with LWW
 
-Last-Write-Wins (LWW) works great for many scenarios, but fails for business-critical cases:
+**Conflict Resolvers** are a planned design for future releases. The Rust server does not implement them today — it uses LWW (Last-Write-Wins) resolution only. The API described below is how we intend to ship it — see [/docs/roadmap](/docs/roadmap) for status. LWW fails for business-critical cases such as:
 
 <CodeBlock code={problemCode} lang="typescript" title="Race Condition Example" />
 
