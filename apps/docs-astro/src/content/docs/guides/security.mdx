@@ -7,6 +7,7 @@ order: 19
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Shield, Lock, Key, Server, AlertTriangle, CheckCircle, Database, HardDrive } from 'lucide-react';
 import { ApiParam, ApiConstructor } from '../../../components/docs/ApiMethod';
+import { AlertBox } from '../../../components/docs/AlertBox';
 
 export const serverTlsCode = `# PLANNED — these TLS environment variables do not exist yet.
 # A standalone topgun-server production binary with env-var TLS config is planned.
@@ -236,6 +237,8 @@ openssl s_client -connect localhost:443 -tls1_3
 # View full certificate chain
 openssl s_client -showcerts -connect topgun.example.com:443`;
 
+<AlertBox variant="danger" title="Production Deployment — Read This First" text="TopGun's security model is partially shipped. JWT authentication, map-level ACLs, HLC sanitization, trusted-origin pipeline, and client-side EncryptedStorageAdapter are stable and enforced today. The standalone topgun-server CLI binary with env-var TLS configuration, mTLS for cluster communication, and a first-class RBAC role abstraction are not yet implemented. For production today: embed topgun-server programmatically with TlsConfig, or terminate TLS at a reverse proxy. See /docs/roadmap for maturity status." />
+
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
   <span className="text-foreground font-medium">Docs</span>
   <ChevronRight className="w-4 h-4" />
@@ -249,7 +252,7 @@ openssl s_client -showcerts -connect topgun.example.com:443`;
 <div className="flex items-center gap-3 mb-6 not-prose">
   <Shield className="w-10 h-10 text-green-600 dark:text-green-400" />
   <p className="text-lg text-neutral-600 dark:text-neutral-300">
-    Secure your TopGun deployment with TLS encryption for all network communications.
+    TopGun ships JWT authentication, map-level ACL enforcement, HLC sanitization, trusted-origin pipeline, and client-side <code>EncryptedStorageAdapter</code> today. The standalone CLI binary with env-var TLS config, mTLS for cluster communication, and a first-class RBAC role abstraction are not yet available — see the Production Deployment banner above and the Deployment Mode Semantics section below, or visit <a href="/docs/roadmap">/docs/roadmap</a> for maturity status.
   </p>
 </div>
 
@@ -279,6 +282,59 @@ server.start().await?;
 
 A standalone `topgun-server` production binary with full env-var configuration (including TLS) is **planned** but does not yet exist.
 
+## Deployment Mode Semantics
+
+<div className="overflow-x-auto mb-8 not-prose">
+  <table className="w-full text-left border-collapse text-sm">
+    <thead>
+      <tr className="border-b border-card-border">
+        <th className="py-3 px-4 font-medium text-neutral-500">Capability</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">JWT Authentication</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable — HMAC + RSA, <code>JWT_SECRET</code> env var works today</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Map-level ACL</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable — per-connection, per-map read/write permissions via <code>WriteValidator</code></td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">HLC Sanitization</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable — server-generated timestamps replace client-provided ones</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Value Size Limits</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable — enforced via <code>SecurityConfig</code></td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Trusted-Origin Bypass</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable — <code>CallerOrigin::Forwarded</code>/<code>Backup</code>/<code>Wan</code>/<code>System</code> skip <code>WriteValidator</code></td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">TLS for Client Connections</td>
+        <td className="py-3 px-4 text-yellow-600 dark:text-yellow-400">Partial — programmatic via <code>TlsConfig</code> stable; standalone binary with env-var config planned</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">mTLS for Cluster Communication</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Not implemented — planned v3.0; cluster traffic is plaintext TCP today</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">First-Class RBAC Roles</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Not implemented as a dedicated surface — ACL + auth-backed principals cover most use cases</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Encrypted Storage Adapter (client-side)</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable — <code>EncryptedStorageAdapter</code> exported from <code>@topgunbuild/client</code></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+For full maturity tracking across deployment modes, see [/docs/roadmap](/docs/roadmap).
+
 ## Security Model
 
 <div className="flex items-center gap-2 mb-4 not-prose">
@@ -306,7 +362,7 @@ Client write --> Auth check --> Map ACL check --> HLC sanitization --> CRDT merg
 | **Map-level ACL** | Per-connection, per-map read/write permissions. Simple allow/deny rules control which maps a client can access. |
 | **HLC Sanitization** | The server replaces client-provided HLC timestamps with server-generated ones, preventing future-timestamp attacks that would "win" all LWW conflicts. |
 | **Value Size Limits** | The server enforces maximum value size per write to prevent abuse. |
-| **RBAC** | Role-based access control allows defining roles with specific permissions. Roles are assigned to connections and checked against map ACLs. |
+| **RBAC** | The server enforces per-connection, per-map permissions via `WriteValidator`. Principals are identified via JWT `sub` claims; ACLs are checked per operation. A dedicated role abstraction (role definitions and role-to-ACL bindings) is not a separate surface — see `/docs/roadmap`. |
 
 </div>
 
