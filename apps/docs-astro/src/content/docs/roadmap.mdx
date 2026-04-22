@@ -18,7 +18,7 @@ import { ChevronRight } from 'lucide-react';
 
 # Roadmap
 
-Last updated: 2026-04-19
+Last updated: 2026-04-22
 
 This page tracks the maturity level of distributed primitives across deployment modes. It exists alongside the feature documentation so that the deployment-mode constraints are visible next to the feature status.
 
@@ -58,6 +58,12 @@ This page tracks the maturity level of distributed primitives across deployment 
         <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable</td>
         <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable — subscriptions routed to partition owner</td>
         <td className="py-3 px-4 text-neutral-500">Cross-partition aggregation — planned</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Cluster Consensus (Raft)</td>
+        <td className="py-3 px-4 text-neutral-500">N/A — single-node needs no consensus</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Not implemented — partition-routing only; no Raft leader election, no split-brain protection</td>
+        <td className="py-3 px-4 text-neutral-500">Raft-replicated via openraft — planned; enables QUORUM/STRONG consistency, safe distributed locks, cluster mTLS</td>
       </tr>
     </tbody>
   </table>
