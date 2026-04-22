@@ -8,7 +8,7 @@ import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Database, RefreshCw, Shield, Zap, Server, Copy } from 'lucide-react';
 import { AlertBox } from '../../../components/docs/AlertBox';
 
-<AlertBox variant="warning" title="Partially Implemented" text="Several features on this page are marked as planned, including: environment variable cluster configuration, QUORUM/STRONG consistency modes, read replica routing, and replication metrics. Sections describing real behavior (partitioning, gossip discovery, failure detection, anti-entropy design) are accurate." />
+<AlertBox variant="danger" title="Cluster Mode — No Raft Consensus" text="TopGun's cluster implementation is partially shipped. Single-node is production-ready. Cluster mode currently uses partition-routing without Raft consensus — safe when a single node owns the relevant partition, but not safe under split-brain. Cross-node replication via Raft, QUORUM/STRONG consistency levels, read replica routing, and the standalone topgun-server CLI binary with env-var cluster config are all planned (see /docs/roadmap)." />
 
 export const clusterSetupCode = `# These env vars are planned — the server does not currently parse them.
 #
@@ -172,8 +172,84 @@ services:
   <h1 className="text-4xl font-bold text-foreground">Cluster Replication</h1>
 </div>
 
-TopGun clusters automatically replicate data across nodes for high availability and fault tolerance.
-This guide covers server-side replication configuration, consistency levels, and anti-entropy repair.
+TopGun's cluster implementation is **partially shipped**. Single-node is production-ready. Cluster mode uses partition-routing without Raft consensus — safe when a single node owns the relevant partition, but not safe under split-brain. Cross-node replication via Raft is on the roadmap. See [/docs/roadmap](/docs/roadmap) for maturity status. For a feature-by-feature breakdown, see the Deployment Mode Semantics section below.
+
+## Deployment Mode Semantics
+
+<div className="overflow-x-auto mb-8 not-prose">
+  <table className="w-full text-left border-collapse text-sm">
+    <thead>
+      <tr className="border-b border-card-border">
+        <th className="py-3 px-4 font-medium text-neutral-500">Feature</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">Single-Node</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">Cluster (current)</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">Cluster (planned with Raft)</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Partitioning (271 partitions, consistent hashing)</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable</td>
+        <td className="py-3 px-4 text-neutral-500">No change</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">CRDT Merge (HLC-based)</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable</td>
+        <td className="py-3 px-4 text-neutral-500">No change (CRDTs are partition-tolerant)</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Gossip Discovery (JoinRequest/JoinResponse)</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable</td>
+        <td className="py-3 px-4 text-neutral-500">No change</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Phi Accrual Failure Detector</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable</td>
+        <td className="py-3 px-4 text-neutral-500">No change</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Anti-Entropy (Merkle-tree)</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable (design + programmatic tuning)</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable (operational; programmatic-only tuning)</td>
+        <td className="py-3 px-4 text-neutral-500">No change</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Consistency Levels</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">EVENTUAL stable</td>
+        <td className="py-3 px-4 text-yellow-600 dark:text-yellow-400">EVENTUAL stable; QUORUM/STRONG planned</td>
+        <td className="py-3 px-4 text-neutral-500">QUORUM/STRONG planned</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Read Replica Routing</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Not implemented</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Not implemented</td>
+        <td className="py-3 px-4 text-neutral-500">Planned</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Distributed Live Subscriptions</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable — cluster-wide registration and live delta delivery</td>
+        <td className="py-3 px-4 text-neutral-500">Cross-partition aggregation planned</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Cross-Node Replication Consensus</td>
+        <td className="py-3 px-4 text-neutral-500">N/A</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Not implemented — partition-routing only, no consensus</td>
+        <td className="py-3 px-4 text-neutral-500">Raft-replicated via openraft — planned</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Standalone CLI Binary (env-var config)</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Not available (embed-only)</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Not available</td>
+        <td className="py-3 px-4 text-neutral-500">Planned</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
 
 ## Overview
 
