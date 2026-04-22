@@ -73,6 +73,49 @@ For single-node deployments (or deployments where partition ownership is stable 
 
 For multi-node deployments where split-brain is a real risk, wait for the Raft track before relying on distributed locks for critical mutual exclusion (payments, inventory deduplication, leader election).
 
+## Roadmap-Only Features
+
+The features below are **not implemented** in the current Rust server. The guide pages linked here are design sketches — not reference documentation. They describe the intended API for future releases.
+
+<div className="overflow-x-auto mb-8 not-prose">
+  <table className="w-full text-left border-collapse text-sm">
+    <thead>
+      <tr className="border-b border-card-border">
+        <th className="py-3 px-4 font-medium text-neutral-500">Feature</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">Status</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">Planned design reference</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Indexing</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Not implemented</td>
+        <td className="py-3 px-4"><a href="/docs/guides/indexing" className="text-brand hover:underline">/docs/guides/indexing</a></td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Adaptive Indexing</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Not implemented</td>
+        <td className="py-3 px-4"><a href="/docs/guides/adaptive-indexing" className="text-brand hover:underline">/docs/guides/adaptive-indexing</a></td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Entry Processor</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Not implemented</td>
+        <td className="py-3 px-4"><a href="/docs/guides/entry-processor" className="text-brand hover:underline">/docs/guides/entry-processor</a></td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Conflict Resolvers</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Not implemented</td>
+        <td className="py-3 px-4"><a href="/docs/guides/conflict-resolvers" className="text-brand hover:underline">/docs/guides/conflict-resolvers</a></td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Interceptors</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Not implemented</td>
+        <td className="py-3 px-4"><a href="/docs/guides/interceptors" className="text-brand hover:underline">/docs/guides/interceptors</a></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
 ## The Raft Track
 
 Raft-backed cluster locks (via openraft) will provide:
