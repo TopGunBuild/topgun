@@ -1,7 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { TopGunProvider } from '@topgunbuild/react';
-import { createTopGunClient } from '../_shared/providerFactory';
+import { createTopGunClient } from '../../_shared/providerFactory';
 import { todosConflictResolver } from './lib/conflictResolver';
 import App from './App';
 import './styles.css';
@@ -13,7 +13,7 @@ const client = createTopGunClient('topgun-template-todo');
 // Register the conflict resolver once before the UI mounts. Calling register()
 // here (outside of any React component) avoids React 18 strict-mode
 // double-registration that would occur inside a useEffect.
-client.getConflictResolvers().register('todos', todosConflictResolver).catch((err) => {
+client.getConflictResolvers().register('todos', todosConflictResolver).catch((err: unknown) => {
   console.warn('[TopGun] Conflict resolver registration deferred (not yet connected):', err);
 });
 

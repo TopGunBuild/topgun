@@ -19,7 +19,7 @@ export function createTopGunClient(dbName: string): TopGunClient {
   // so we kick off initialisation here to warm the connection before the UI
   // mounts. The returned promise is intentionally not awaited — failures will
   // surface as storage errors on first write, which is acceptable for a demo.
-  adapter.initialize(dbName).catch((err) => {
+  adapter.initialize(dbName).catch((err: unknown) => {
     console.error(`[TopGun] Failed to open IndexedDB "${dbName}":`, err);
   });
 

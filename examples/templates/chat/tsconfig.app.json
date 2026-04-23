@@ -16,7 +16,15 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "noUncheckedSideEffectImports": true
+    "noUncheckedSideEffectImports": true,
+    "types": ["vite/client"],
+    "baseUrl": ".",
+    "paths": {
+      "@topgunbuild/client": ["./node_modules/@topgunbuild/client/dist/index.d.ts"],
+      "@topgunbuild/adapters": ["./node_modules/@topgunbuild/adapters/dist/index.d.ts"],
+      "@topgunbuild/core": ["./node_modules/@topgunbuild/core/dist/index.d.ts"],
+      "@topgunbuild/react": ["./node_modules/@topgunbuild/react/dist/index.d.ts"]
+    }
   },
   "include": ["src", "../_shared"]
 }

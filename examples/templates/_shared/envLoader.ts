@@ -4,7 +4,7 @@
  * silent WebSocket connection failure.
  */
 export function loadTopGunUrl(): string {
-  const url = (import.meta.env as Record<string, string>)['VITE_TOPGUN_URL'];
+  const url = import.meta.env['VITE_TOPGUN_URL'] as string | undefined;
   if (!url) {
     throw new Error(
       'VITE_TOPGUN_URL is not set.\n' +

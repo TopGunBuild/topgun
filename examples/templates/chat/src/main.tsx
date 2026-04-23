@@ -1,7 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { TopGunProvider } from '@topgunbuild/react';
-import { createTopGunClient } from '../_shared/providerFactory';
+import { createTopGunClient } from '../../_shared/providerFactory';
 import App from './App';
 import './styles.css';
 

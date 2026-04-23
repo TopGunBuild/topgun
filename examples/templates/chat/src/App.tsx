@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { getGuestIdentity } from '../_shared/guestIdentity';
+import { getGuestIdentity } from '../../_shared/guestIdentity';
 import { RoomPicker } from './components/RoomPicker';
 import { MessageList } from './components/MessageList';
 import { Composer } from './components/Composer';
