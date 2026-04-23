@@ -906,9 +906,12 @@ describe('SyncEngine', () => {
   describe('topic offline queue', () => {
     it('queues topic messages when offline', async () => {
       syncEngine = new SyncEngine(config);
-      await jest.runAllTimersAsync();
+      // Advance only enough to flush onopen (0ms timer), not the 500ms grace timer.
+      // Without a token, the engine waits for AUTH_REQUIRED during the grace window —
+      // messages published during this window are queued (not yet authenticated).
+      jest.advanceTimersByTime(0);
+      await Promise.resolve();
 
-      // Not authenticated = offline
       syncEngine.publishTopic('chat', { message: 'hello' });
       syncEngine.publishTopic('chat', { message: 'world' });
 
@@ -922,7 +925,9 @@ describe('SyncEngine', () => {
         ...config,
         topicQueue: { maxSize: 3, strategy: 'drop-oldest' },
       });
-      await jest.runAllTimersAsync();
+      // Advance only enough to flush onopen, not the 500ms grace timer.
+      jest.advanceTimersByTime(0);
+      await Promise.resolve();
 
       // Queue 5 messages with maxSize 3
       for (let i = 0; i < 5; i++) {
@@ -939,7 +944,9 @@ describe('SyncEngine', () => {
         ...config,
         topicQueue: { maxSize: 2, strategy: 'drop-newest' },
       });
-      await jest.runAllTimersAsync();
+      // Advance only enough to flush onopen, not the 500ms grace timer.
+      jest.advanceTimersByTime(0);
+      await Promise.resolve();
 
       syncEngine.publishTopic('chat', { index: 0 });
       syncEngine.publishTopic('chat', { index: 1 });
@@ -958,44 +965,34 @@ describe('SyncEngine', () => {
     });
 
     it('flushes queued messages on AUTH_ACK', async () => {
+      // Use a token-configured engine so it enters AUTHENTICATING immediately
+      // (waiting for AUTH_ACK) — messages published in this window are queued.
       syncEngine = new SyncEngine(config);
       syncEngine.setAuthToken('test-token');
-      await jest.runAllTimersAsync();
+
+      // Flush onopen without running the full timer chain.
+      jest.advanceTimersByTime(0);
+      await Promise.resolve();
 
       const ws = MockWebSocket.getLastInstance()!;
-
-      // Queue messages while not yet authenticated
-      // (AUTH was sent but not yet ACK'd)
+      // Engine is in AUTHENTICATING (AUTH was sent, waiting for AUTH_ACK).
       ws.sentMessages = [];
 
-      // Manually queue by calling publishTopic when not authenticated
-      // Need to close and recreate to be in unauthenticated state
-      syncEngine.close();
-
-      syncEngine = new SyncEngine(config);
-      await jest.runAllTimersAsync();
-
-      // Publish while offline (not authenticated)
+      // Publish while in AUTHENTICATING — not yet fully authenticated.
       syncEngine.publishTopic('chat', { message: 'queued1' });
       syncEngine.publishTopic('chat', { message: 'queued2' });
 
       expect(syncEngine.getTopicQueueStatus().size).toBe(2);
 
-      // Set token and get AUTH_ACK
-      syncEngine.setAuthToken('test-token');
-      await jest.runAllTimersAsync();
-
-      const ws2 = MockWebSocket.getLastInstance()!;
-      ws2.sentMessages = [];
-
-      ws2.simulateMessage({ type: 'AUTH_ACK' });
+      // Simulate AUTH_ACK → drives to CONNECTED and flushes queue.
+      ws.simulateMessage({ type: 'AUTH_ACK' });
       await jest.runAllTimersAsync();
 
       // Queue should be flushed
       expect(syncEngine.getTopicQueueStatus().size).toBe(0);
 
       // Messages should have been sent
-      const topicPubs = ws2.sentMessages.filter((m) => m.type === 'TOPIC_PUB');
+      const topicPubs = ws.sentMessages.filter((m) => m.type === 'TOPIC_PUB');
       expect(topicPubs).toHaveLength(2);
       expect(topicPubs[0].payload.data).toEqual({ message: 'queued1' });
       expect(topicPubs[1].payload.data).toEqual({ message: 'queued2' });
