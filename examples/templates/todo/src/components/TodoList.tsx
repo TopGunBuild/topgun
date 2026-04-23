@@ -1,6 +1,5 @@
 import { useState } from 'react';
-import { useORMap } from '@topgunbuild/react';
-import { useClient } from '@topgunbuild/react';
+import { useORMap, useClient } from '@topgunbuild/react';
 import { TodoItem } from './TodoItem';
 
 /**
