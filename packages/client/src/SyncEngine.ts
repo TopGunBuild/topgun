@@ -156,6 +156,12 @@ export class SyncEngine {
   private authToken: string | null = null;
   private tokenProvider: (() => Promise<string | null>) | null = null;
 
+  // Grace timer: gives the server a bounded window to send AUTH_REQUIRED after WS open.
+  // If AUTH_REQUIRED arrives, the timer is cancelled and existing auth behaviour runs.
+  // If the window expires without AUTH_REQUIRED, the auth-optional fast-path fires.
+  private authRequiredGraceTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly AUTH_REQUIRED_GRACE_MS = 500;
+
   // BackpressureController handles all backpressure operations
   private readonly backpressureConfig: BackpressureConfig;
   private readonly backpressureController: BackpressureController;
@@ -318,6 +324,7 @@ export class SyncEngine {
       this.messageRouter,
       {
         sendAuth: () => this.sendAuth(),
+        handleAuthRequired: () => this.handleAuthRequired(),
         handleAuthAck: () => this.handleAuthAck(),
         handleAuthFail: (msg) => this.handleAuthFail(msg),
         handleOpAck: (msg) => this.handleOpAck(msg),
@@ -359,19 +366,34 @@ export class SyncEngine {
    */
   private handleConnectionEstablished(): void {
     if (this.authToken || this.tokenProvider) {
+      // Client already has credentials — send auth immediately without waiting
+      // for AUTH_REQUIRED (preserves today's behaviour; matches servers that
+      // expect the client to speak first, e.g. token auto-auth flows).
       logger.info('Connection established. Sending auth...');
       this.stateMachine.transition(SyncState.AUTHENTICATING);
       this.sendAuth();
-    } else {
-      logger.info('Connection established. Waiting for auth token...');
-      this.stateMachine.transition(SyncState.AUTHENTICATING);
+      return;
     }
+
+    // Auth-optional wait: allow the server AUTH_REQUIRED_GRACE_MS to send
+    // AUTH_REQUIRED. If nothing arrives, assume auth-optional and drive to CONNECTED.
+    logger.info({ graceMs: this.AUTH_REQUIRED_GRACE_MS }, 'Connection established. Waiting briefly for AUTH_REQUIRED...');
+    this.authRequiredGraceTimer = setTimeout(() => {
+      this.authRequiredGraceTimer = null;
+      this.completeAuthOptionalConnection();
+    }, this.AUTH_REQUIRED_GRACE_MS);
   }
 
   /**
    * Called when connection is lost.
    */
   private handleConnectionLost(): void {
+    // Cancel any pending grace timer to prevent it firing during reconnection
+    // and driving state transitions on a stale connection.
+    if (this.authRequiredGraceTimer) {
+      clearTimeout(this.authRequiredGraceTimer);
+      this.authRequiredGraceTimer = null;
+    }
     // WebSocketManager already stopped heartbeat and transitioned state
     // SyncEngine can do additional cleanup if needed
   }
@@ -383,6 +405,69 @@ export class SyncEngine {
     if (this.authToken || this.tokenProvider) {
       this.stateMachine.transition(SyncState.AUTHENTICATING);
       this.sendAuth();
+      return;
+    }
+
+    // Auth-optional wait on reconnect: same grace-timeout logic as initial connect.
+    logger.info({ graceMs: this.AUTH_REQUIRED_GRACE_MS }, 'Reconnected. Waiting briefly for AUTH_REQUIRED...');
+    this.authRequiredGraceTimer = setTimeout(() => {
+      this.authRequiredGraceTimer = null;
+      this.completeAuthOptionalConnection();
+    }, this.AUTH_REQUIRED_GRACE_MS);
+  }
+
+  /**
+   * Auth-optional fast path: server did not demand authentication within the
+   * grace window, so drive the state machine through AUTHENTICATING → SYNCING → CONNECTED
+   * without sending an AUTH frame. Runs the same post-auth wiring as handleAuthAck()
+   * (heartbeat start, merkle sync kickoff, query/topic resubscribe, backoff reset).
+   */
+  private completeAuthOptionalConnection(): void {
+    // Clear grace timer (idempotent — safe if called from timer callback itself).
+    if (this.authRequiredGraceTimer) {
+      clearTimeout(this.authRequiredGraceTimer);
+      this.authRequiredGraceTimer = null;
+    }
+
+    // Only run if still in a pre-auth state — guard against races where
+    // AUTH_REQUIRED or disconnect arrived concurrently.
+    const state = this.stateMachine.getState();
+    if (state !== SyncState.CONNECTING && state !== SyncState.AUTHENTICATING) {
+      return;
+    }
+
+    logger.info('No AUTH_REQUIRED received within grace window — assuming auth-optional server.');
+    // Traverse the canonical pre-auth → ready path (no new state transitions added).
+    this.stateMachine.transition(SyncState.AUTHENTICATING);
+    this.handleAuthAck();  // Reuses existing SYNCING → CONNECTED wiring.
+  }
+
+  /**
+   * AUTH_REQUIRED received from server: cancel any grace timer and send auth
+   * if a token is available, otherwise park in AUTHENTICATING waiting for
+   * setAuthToken(). Preserves existing no-token-but-server-requires-auth behaviour.
+   *
+   * Guards the state transition: only moves to AUTHENTICATING if the current
+   * state is CONNECTING. This prevents AUTHENTICATING → AUTHENTICATING when
+   * AUTH_REQUIRED arrives after the token-configured path has already transitioned
+   * (e.g., a server protocol ping or session re-auth frame), which would otherwise
+   * produce an "Invalid state transition" log and violate AC #4.
+   */
+  private handleAuthRequired(): void {
+    if (this.authRequiredGraceTimer) {
+      clearTimeout(this.authRequiredGraceTimer);
+      this.authRequiredGraceTimer = null;
+    }
+    // Only transition to AUTHENTICATING from CONNECTING. If we are already in
+    // AUTHENTICATING (token-configured path), skip the transition to avoid an
+    // invalid self-transition.
+    if (this.stateMachine.getState() === SyncState.CONNECTING) {
+      this.stateMachine.transition(SyncState.AUTHENTICATING);
+    }
+    if (this.authToken || this.tokenProvider) {
+      this.sendAuth();
+    } else {
+      logger.info('AUTH_REQUIRED received but no token configured. Waiting for setAuthToken().');
     }
   }
 
@@ -931,6 +1016,13 @@ export class SyncEngine {
    * Closes the WebSocket connection and cleans up resources.
    */
   public close(): void {
+    // Cancel any pending grace timer before tearing down — prevents stale
+    // timer callbacks from firing after the engine is closed or recreated.
+    if (this.authRequiredGraceTimer) {
+      clearTimeout(this.authRequiredGraceTimer);
+      this.authRequiredGraceTimer = null;
+    }
+
     this.webSocketManager.close();
 
     // Cancel pending Write Concern promises (delegates to WriteConcernManager)
