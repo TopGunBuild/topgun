@@ -65,11 +65,8 @@ export function useRoom({ room, skewEnabled, guestId, displayName }: UseRoomOpti
     }
   }, [commitMessage]);
 
-  // Subscribe to the room's topic
-  useTopic(`chat:${room}`, handleTopicMessage);
-
-  // Publish topic handle (stable — useTopic returns the same handle per topic name)
-  const topic = useTopic(`chat:${room}`);
+  // Subscribe to the room's topic and capture the handle for publishing
+  const topic = useTopic(`chat:${room}`, handleTopicMessage);
 
   const sendMessage = useCallback((text: string) => {
     const msg = {
