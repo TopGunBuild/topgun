@@ -7,7 +7,8 @@
  * delivery, demonstrating that TopGun's ordering is timestamp-based, not
  * arrival-order-based.
  *
- * A real TopGunClient.setClockOffset() API is tracked as TODO-287.
+ * When a public clock-offset API is available on TopGunClient, this panel
+ * can buffer outgoing timestamps instead of incoming ones.
  */
 
 interface SkewClockPanelUIProps {
