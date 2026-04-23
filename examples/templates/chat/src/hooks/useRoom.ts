@@ -46,8 +46,10 @@ export function useRoom({ room, skewEnabled, guestId, displayName }: UseRoomOpti
     return () => clearInterval(tick);
   }, [commitMessage]);
 
-  // Subscribe to the room's topic
-  useTopic(`chat:${room}`, (data) => {
+  // Stable callback prevents useTopic's subscription effect from tearing down
+  // and resubscribing on every render — messages arriving during teardown
+  // would otherwise be silently dropped.
+  const handleTopicMessage = useCallback((data: unknown) => {
     if (!isRawMessage(data)) return;
     const msg: ChatMessage = {
       id: data.id,
@@ -61,7 +63,10 @@ export function useRoom({ room, skewEnabled, guestId, displayName }: UseRoomOpti
     } else {
       commitMessage(msg);
     }
-  });
+  }, [commitMessage]);
+
+  // Subscribe to the room's topic
+  useTopic(`chat:${room}`, handleTopicMessage);
 
   // Publish topic handle (stable — useTopic returns the same handle per topic name)
   const topic = useTopic(`chat:${room}`);
