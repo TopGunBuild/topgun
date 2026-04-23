@@ -9,6 +9,7 @@ describe('ClientMessageHandlers', () => {
       // Create mock delegates
       const mockDelegates = {
         sendAuth: jest.fn(),
+        handleAuthRequired: jest.fn(),
         handleAuthAck: jest.fn(),
         handleAuthFail: jest.fn(),
         handleOpAck: jest.fn(),
@@ -54,6 +55,7 @@ describe('ClientMessageHandlers', () => {
 
       const mockDelegates = {
         sendAuth: jest.fn(),
+        handleAuthRequired: jest.fn(),
         handleAuthAck: jest.fn(),
         handleAuthFail: jest.fn(),
         handleOpAck: jest.fn(),
@@ -93,6 +95,7 @@ describe('ClientMessageHandlers', () => {
 
       const mockDelegates = {
         sendAuth: jest.fn(),
+        handleAuthRequired: jest.fn(),
         handleAuthAck: jest.fn(),
         handleAuthFail: jest.fn(),
         handleOpAck: jest.fn(),
@@ -131,6 +134,7 @@ describe('ClientMessageHandlers', () => {
 
       const mockDelegates = {
         sendAuth: jest.fn(),
+        handleAuthRequired: jest.fn(),
         handleAuthAck: jest.fn(),
         handleAuthFail: jest.fn(),
         handleOpAck: jest.fn(),

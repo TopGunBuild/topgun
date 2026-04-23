@@ -37,6 +37,7 @@ import type {
  */
 export interface MessageHandlerDelegates {
   sendAuth(): Promise<void>;
+  handleAuthRequired(): void;
   handleAuthAck(): void;
   handleAuthFail(message: AuthFailMessage): void;
   handleOpAck(message: OpAckMessage): void;
@@ -158,7 +159,7 @@ export function registerClientMessageHandlers(
 ): void {
   router.registerHandlers({
     // AUTH handlers
-    'AUTH_REQUIRED': () => delegates.sendAuth(),
+    'AUTH_REQUIRED': () => delegates.handleAuthRequired(),
     'AUTH_ACK': () => delegates.handleAuthAck(),
     'AUTH_FAIL': (msg) => delegates.handleAuthFail(msg),
 
