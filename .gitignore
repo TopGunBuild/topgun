@@ -61,6 +61,9 @@ coverage/
 # k6 benchmark results (machine-specific)
 tests/k6/results/
 
+# Template QA run outputs (screenshots + summaries, machine-specific)
+examples/templates/qa/results/
+
 # V8 profiling output (machine-specific, regenerate with profile scripts)
 profiles/
 isolate-*.log
