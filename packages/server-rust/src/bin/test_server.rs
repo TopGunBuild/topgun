@@ -319,6 +319,13 @@ async fn main() -> anyhow::Result<()> {
         .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"))
         .unwrap_or(false);
 
+    // When set to 1 or true, omit the JWT secret so templates and QA harness
+    // can connect without auth tokens. Default preserves existing behaviour so
+    // all integration tests that rely on jwt_secret remain unaffected.
+    let no_auth = std::env::var("TOPGUN_NO_AUTH")
+        .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"))
+        .unwrap_or(false);
+
     let shutdown = Arc::new(ShutdownController::new());
     let state = AppState {
         registry: connection_registry,
@@ -331,7 +338,7 @@ async fn main() -> anyhow::Result<()> {
         observability: None,
         operation_service: Some(classify_svc),
         dispatcher: Some(Arc::new(dispatcher)),
-        jwt_secret: Some("test-e2e-secret".to_string()),
+        jwt_secret: if no_auth { None } else { Some("test-e2e-secret".to_string()) },
         cluster_state: cluster_state_for_app,
         store_factory: None,
         server_config: None,
