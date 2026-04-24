@@ -9,8 +9,8 @@ Drives [gsd-browser](https://github.com/koristuvac/gsd-browser) through five rea
 Open three terminals:
 
 ```bash
-# Terminal 1 — Rust backend
-pnpm start:server                              # ws://localhost:8080/ws
+# Terminal 1 — Rust backend (auth-optional mode; see Hardening Notes)
+TOPGUN_NO_AUTH=1 pnpm start:server             # ws://localhost:8080/ws
 
 # Terminal 2 — todo dev server
 pnpm --filter @topgun-examples/todo dev        # http://localhost:5174
