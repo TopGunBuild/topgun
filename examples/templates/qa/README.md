@@ -40,7 +40,7 @@ Screenshots and logs land in `examples/templates/qa/results/<timestamp>/<scenari
 |----|------------------|-----------|
 | **AC #5** | Real-time todo sync between two distinct guests | Two isolated Chrome sessions; tab A adds a uniquely-marked todo; tab B (separate localStorage = different `guestId`) opens fresh and waits for it to appear |
 | **AC #6** | Offline edit → reconnect → `<SyncStatus>` shows "merged N pending writes" | Single session; `block-urls 'ws://localhost:8080/*'` + reload → page can't connect → write while offline → `clear-routes` + reload → expect Connected/Synced/merged label |
-| **AC #7** | `<ConflictLog>` renders when server resolver rejects a write | Two sessions; tab A goes offline, both add competing entries, tab A reconnects with older HLC. **Informational** — depends on whether the registered LWW resolver actually fires for the `todos` ORMap; if not, the network log is dumped for inspection |
+| **AC #7** | `<ConflictLog>` panel is wired into the UI | **INFO verdict (DOWNGRADE).** The `todosConflictResolver` targets the `todos` ORMap, whose unique-tag add semantics cannot produce merge rejections — so no live conflict path exists to assert on. Scenario captures a single screenshot documenting the panel's presence; see `### AC #7 disposition` below for the full investigation. |
 | **AC #8** | HLC-ordered chat across two distinct guests in the same room | Two sessions on `${CHAT_URL}/#room-name`; A sends, B sends, both should see both messages |
 | **AC #9** | `<SkewClockPanel>` buffers incoming messages +5s, then delivers them in HLC order | Two sessions; B toggles skew checkbox; A sends two messages; B should NOT see them immediately, then both appear after ~5s drain |
 
@@ -69,10 +69,7 @@ results/2026-04-23_18-42-17/
 │   ├── 03-queued-while-offline.png
 │   └── 04-reconnected-merged.png    # or 04-NO-RECONNECT.png on fail
 ├── ac7-conflict/
-│   ├── 01-tab-a-offline-write.png
-│   ├── 02-tab-b-online-write.png
-│   ├── 03-tab-a-reconnected.png
-│   └── network-tab-a.json           # dumped on no-rejection for debugging
+│   └── 01-conflict-log-panel-presence.png   # INFO — see AC #7 disposition
 ├── ac8-chat-order/
 │   ├── 01-tab-a-empty.png
 │   ├── 01-tab-b-empty.png
@@ -90,7 +87,8 @@ The script exits 0 if all selected scenarios pass, non-zero otherwise. Per-scena
 
 - `✓ AC #N PASS` — assertion succeeded
 - `✗ AC #N FAIL` — assertion failed; check the `*-MISSING` / `*-NO-RECONNECT` screenshot
-- `⚠ AC #N PARTIAL/NO-REJECTION` — a yellow non-fatal note (currently only AC #6 partial-drain and AC #7 no-rejection)
+- `ℹ AC #N INFO` — informational, non-fatal (AC #7 by design; see `### AC #7 disposition`)
+- `⚠ AC #N PARTIAL` — yellow non-fatal note (currently only AC #6 partial-drain)
 
 ## Environment overrides
 
