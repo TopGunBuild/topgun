@@ -213,7 +213,7 @@ client.getMap('users').set(userId, { name: 'Alice', age: 30 });
 // QueryHandle.subscribe receives server-pushed deltas,
 // filtered server-side — mirrors onSnapshot query semantics.
 const query = client.query('users', {
-  where: Predicates.eq('id', userId),
+  predicate: Predicates.equal('id', userId),
 });
 const unsub = query.subscribe((results) => {
   console.log(results);
