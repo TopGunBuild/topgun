@@ -1,0 +1,341 @@
+---
+title: Migrating from Firebase
+description: Map Firebase (Firestore and Realtime Database) concepts to TopGun, with side-by-side code patterns for auth, realtime reads/writes, and batched updates. Self-hosted, OSS, offline-first.
+order: 5
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight } from 'lucide-react';
+import { AlertBox } from '../../../components/docs/AlertBox';
+
+<AlertBox variant="danger" title="Read this first — what's shipped vs. planned" text="Shipped today (single-node): JWT auth, per-map ACL booleans (read/write), JWT roles claim extraction, LWW-Map and OR-Map CRDTs, IndexedDB offline storage, WebSocket realtime sync, full-text search (tantivy), HLC-ordered pub/sub topics. Planned (not yet available): First-class RBAC role abstraction, map-pattern security policies (users:*, public:*), field-level allow-lists, cluster mTLS, Raft-replicated multi-region. See /docs/roadmap for the full maturity matrix." />
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Migrating from Firebase</span>
+</div>
+
+# Migrating from Firebase
+
+This guide is for Firestore users, Firebase Realtime Database users, and anyone considering leaving Firebase due to vendor lock-in, per-MAU cost surprises, or the inability to write data offline without waiting for a round-trip. TopGun maps most Firebase data primitives directly — with local-first reads and writes, CRDT conflict resolution, and a self-hosted OSS alternative to Firebase's proprietary platform. Before diving in, cross-check any Firebase feature you rely on against the Concept Mapping table below and the [roadmap](/docs/roadmap) to confirm it is available today.
+
+## Concept Mapping
+
+<div className="overflow-x-auto mb-8 not-prose">
+  <table className="w-full text-left border-collapse text-sm">
+    <thead>
+      <tr className="border-b border-card-border">
+        <th className="py-3 px-4 font-medium text-neutral-500">Firebase concept</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">TopGun equivalent</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">Notes</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Firestore Document</td>
+        <td className="py-3 px-4 text-foreground"><code>client.getMap('users').get(userId)</code></td>
+        <td className="py-3 px-4 text-neutral-500">Local-first; no network round-trip on read</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Firestore Collection</td>
+        <td className="py-3 px-4 text-foreground"><code>client.getMap('users')</code></td>
+        <td className="py-3 px-4 text-neutral-500">Server-side full-text and SQL-style queries available</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>onSnapshot()</code> realtime listener</td>
+        <td className="py-3 px-4 text-foreground"><code>client.query(name, filter).subscribe(callback)</code> (vanilla JS) / <code>useQuery()</code> React hook</td>
+        <td className="py-3 px-4 text-neutral-500">Server-pushed deltas via WebSocket; filter-aware — mirrors Firebase <code>onSnapshot</code> query semantics</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>serverTimestamp()</code></td>
+        <td className="py-3 px-4 text-foreground">Hybrid Logical Clock (automatic, server-sanitized)</td>
+        <td className="py-3 px-4 text-neutral-500">HLCs are causality-aware; no clock-skew bugs</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Batched write / <code>runTransaction</code></td>
+        <td className="py-3 px-4 text-foreground">Implicit batching in SyncEngine outbox</td>
+        <td className="py-3 px-4 text-neutral-500">Writes coalesce automatically into a single OpBatch over WebSocket; no explicit batch API needed</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Last-write-wins conflict</td>
+        <td className="py-3 px-4 text-foreground">LWW-Map merge by HLC + node-id tiebreak</td>
+        <td className="py-3 px-4 text-neutral-500">Deterministic across clients; no "lost update" surprises</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Set-add / set-remove</td>
+        <td className="py-3 px-4 text-foreground">OR-Map (Observed-Remove)</td>
+        <td className="py-3 px-4 text-neutral-500">Concurrent adds/removes via ORMap never lose data</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Realtime Database <code>ref.on('value')</code></td>
+        <td className="py-3 px-4 text-foreground"><code>client.getMap(name).onChange(callback)</code></td>
+        <td className="py-3 px-4 text-neutral-500">Local LWWMap change notification — fires on any write to the map (local or synced); callback receives no arguments, caller reads <code>getMap().get(key)</code> for current value</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Presence (<code>onDisconnect</code>)</td>
+        <td className="py-3 px-4 text-foreground">Server <code>release_on_disconnect</code> API for locks/topics/counters</td>
+        <td className="py-3 px-4 text-neutral-500">Single-node only today; cluster presence wiring is planned (see <a href="/docs/roadmap">/docs/roadmap</a>)</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Offline persistence (<code>enableIndexedDbPersistence</code>)</td>
+        <td className="py-3 px-4 text-foreground">First-class via <code>IDBAdapter</code></td>
+        <td className="py-3 px-4 text-neutral-500">Always-on; reads/writes never wait for network</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Firestore Security Rules</td>
+        <td className="py-3 px-4 text-foreground">JWT auth + per-map ACL <code>read</code>/<code>write</code> booleans</td>
+        <td className="py-3 px-4 text-neutral-500">Pattern-based rules (<code>users/{"{userId}"}</code>) on roadmap (TODO-171, see <a href="/docs/roadmap">/docs/roadmap</a>)</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Cloud Functions onWrite trigger</td>
+        <td className="py-3 px-4 text-foreground">Not yet shipped — Entry Processor is design-only (see <a href="/docs/guides/entry-processor">/docs/guides/entry-processor</a>)</td>
+        <td className="py-3 px-4 text-neutral-500">No current server-side equivalent; see <a href="/docs/roadmap">/docs/roadmap</a> for planned delivery</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Per-MAU billing</td>
+        <td className="py-3 px-4 text-foreground">None — self-hosted, OSS (Apache-2.0)</td>
+        <td className="py-3 px-4 text-neutral-500">Cost = your infra; no usage-based pricing</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Vendor lock-in</td>
+        <td className="py-3 px-4 text-foreground">None — open source, MsgPack wire protocol, plain Postgres durable store</td>
+        <td className="py-3 px-4 text-neutral-500">Migrate off TopGun via <code>pg_dump</code></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+## Side-by-Side Code Patterns
+
+### Pattern A — Initialize and authenticate
+
+<div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">Firebase</div>
+
+```javascript
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInWithEmailAndPassword } from 'firebase/auth';
+
+const app = initializeApp({
+  apiKey: '...',
+  authDomain: 'my-app.firebaseapp.com',
+  projectId: 'my-app',
+});
+
+const auth = getAuth(app);
+await signInWithEmailAndPassword(
+  auth,
+  'user@example.com',
+  'password'
+);
+```
+
+  </div>
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">TopGun</div>
+
+```typescript
+import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+const client = new TopGunClient({
+  serverUrl: 'wss://topgun.example.com',
+  storage: new IDBAdapter(),
+});
+
+// JWT issuance is handled by your own auth server.
+// See /docs/guides/authentication for integration options.
+const jwt = await myAuthServer.signIn(email, password);
+client.setAuthToken(jwt);
+```
+
+  </div>
+</div>
+
+TopGun does not issue JWTs itself. Bring your own auth provider (BetterAuth, Clerk, Firebase Auth, or any OIDC-compatible issuer) and pass the resulting JWT via `client.setAuthToken()`. See the [Authentication guide](/docs/guides/authentication) for step-by-step setup.
+
+### Pattern B — Read, write, and subscribe to realtime updates
+
+<div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">Firebase (Firestore)</div>
+
+```javascript
+import {
+  getFirestore,
+  doc,
+  getDoc,
+  setDoc,
+  onSnapshot,
+} from 'firebase/firestore';
+
+const db = getFirestore(app);
+const ref = doc(db, 'users', userId);
+
+// Read — requires a network round-trip on cache miss
+const snap = await getDoc(ref);
+console.log(snap.data());
+
+// Write
+await setDoc(ref, { name: 'Alice', age: 30 });
+
+// Realtime subscription
+const unsub = onSnapshot(ref, (snap) => {
+  console.log(snap.data());
+});
+```
+
+  </div>
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">TopGun</div>
+
+```typescript
+import { TopGunClient, Predicates } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+const client = new TopGunClient({
+  serverUrl: 'wss://topgun.example.com',
+  storage: new IDBAdapter(),
+});
+
+// Read — synchronous, local-first (no await)
+const record = client.getMap('users').get(userId);
+console.log(record?.value);
+
+// Write — synchronous, local-first; syncs in background
+client.getMap('users').set(userId, { name: 'Alice', age: 30 });
+
+// Realtime subscription (vanilla JS):
+// QueryHandle.subscribe receives server-pushed deltas,
+// filtered server-side — mirrors onSnapshot query semantics.
+const query = client.query('users', {
+  where: Predicates.eq('id', userId),
+});
+const unsub = query.subscribe((results) => {
+  console.log(results);
+});
+
+// React shortcut — wraps the same QueryHandle:
+// const results = useQuery('users', { where: ... });
+
+// Raw local-change notifications (no filter):
+const unsubLocal = client.getMap('users').onChange(() => {
+  const record = client.getMap('users').get(userId);
+  console.log(record?.value);
+});
+```
+
+  </div>
+</div>
+
+TopGun reads and writes are **synchronous** because data lives in local memory first. The `SyncEngine` syncs changes to the server in the background. The `client.query().subscribe()` path delivers server-pushed, filter-aware deltas — the closest equivalent to Firestore's `onSnapshot` query listener. `client.getMap().onChange()` is a lower-level notification that fires on any write to the local LWWMap (local or synced), with no filter; the callback receives no arguments and the caller reads the current value by calling `get()`.
+
+### Pattern C — Batched writes
+
+<div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">Firebase (Firestore)</div>
+
+```javascript
+import { getFirestore, writeBatch, doc } from 'firebase/firestore';
+
+const db = getFirestore(app);
+const batch = writeBatch(db);
+
+batch.set(doc(db, 'users', 'alice'), { name: 'Alice' });
+batch.set(doc(db, 'users', 'bob'), { name: 'Bob' });
+batch.set(doc(db, 'posts', 'p1'), { title: 'Hello' });
+
+// Explicit commit required
+await batch.commit();
+```
+
+  </div>
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">TopGun</div>
+
+```typescript
+// Multiple .set() calls are automatically coalesced
+// by the SyncEngine outbox into a single OpBatch
+// sent over WebSocket. No explicit batch API needed.
+// CRDT semantics make per-key writes commutative.
+
+client.getMap('users').set('alice', { name: 'Alice' });
+client.getMap('users').set('bob', { name: 'Bob' });
+client.getMap('posts').set('p1', { title: 'Hello' });
+
+// All three writes are batched automatically
+// and delivered as one OpBatch to the server.
+```
+
+  </div>
+</div>
+
+## Deployment Mode Semantics
+
+<div className="overflow-x-auto mb-8 not-prose">
+  <table className="w-full text-left border-collapse text-sm">
+    <thead>
+      <tr className="border-b border-card-border">
+        <th className="py-3 px-4 font-medium text-neutral-500">Deployment</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">Status</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">Notes</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Single-node (recommended for migration)</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable</td>
+        <td className="py-3 px-4 text-neutral-500">All Firestore/RTDB capabilities mapped above are production-ready in single-node mode</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Cluster (current)</td>
+        <td className="py-3 px-4 text-yellow-600 dark:text-yellow-400">Partition-routing, no Raft</td>
+        <td className="py-3 px-4 text-neutral-500">Safe when one node owns the partition; weaker guarantees under node failure — see <a href="/docs/guides/cluster-replication">Cluster Replication</a></td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Cluster (planned)</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Raft-replicated — planned</td>
+        <td className="py-3 px-4 text-neutral-500">Multi-region with QUORUM/STRONG consistency on roadmap — see <a href="/docs/roadmap">/docs/roadmap</a></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+For a first migration, start on single-node. The partition-routed cluster mode works but does not yet have Raft-backed consensus; consult the [Cluster Replication guide](/docs/guides/cluster-replication) before running cluster in production.
+
+## Why migrate?
+
+- **Local-first reads/writes:** Operations never wait for network; the UI updates immediately. Compare to Firestore's `getDoc`, which requires a network round-trip on a cache miss.
+- **CRDT conflict resolution:** LWW-Map and OR-Map merge deterministically via HLC. No "lost update" surprises when two clients write the same key offline.
+- **Self-hosted, OSS (Apache-2.0):** Run TopGun on your own cloud, your own Postgres. No proprietary platform, no vendor agreement required.
+- **Plain Postgres durable store:** Migrate data off TopGun with `pg_dump`. Your data is always in a table you can query directly.
+- **Performance:** 483K ops/sec fire-and-forget, ~37K ops/sec fire-and-wait at 1.5ms p50 on M1 Max (200 connections). See [benchmarks](/docs/benchmarks) for methodology.
+
+## Migration checklist
+
+1. Audit which Firebase features you use — Firestore, Realtime Database, Authentication, Cloud Functions, Storage, etc.
+2. Cross-reference each feature against the Concept Mapping table above.
+3. Flag any planned-only items (Cloud Functions trigger, map-pattern security rules, cluster mTLS) against [/docs/roadmap](/docs/roadmap) and decide whether to wait or work around.
+4. Port auth: replace Firebase Auth with a JWT issuer of your choice and configure `client.setAuthToken()`. See [Authentication](/docs/guides/authentication).
+5. Port reads/writes one collection at a time: replace `doc()` / `getDoc()` / `setDoc()` with `getMap().get()` / `getMap().set()`, and replace `onSnapshot` with `client.query().subscribe()` (vanilla JS) or `useQuery()` (React).
+6. Backfill existing data via a one-time import script that reads from Firestore and writes to TopGun via the client SDK or direct Postgres insert.
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/authentication" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Authentication
+    </div>
+  </a>
+  <a href="/docs/guides/security" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next Guide</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Security (TLS) <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>
