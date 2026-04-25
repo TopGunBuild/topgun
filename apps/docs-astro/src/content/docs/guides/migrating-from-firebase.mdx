@@ -204,7 +204,7 @@ const client = new TopGunClient({
 
 // Read — synchronous, local-first (no await)
 const record = client.getMap('users').get(userId);
-console.log(record?.value);
+console.log(record);
 
 // Write — synchronous, local-first; syncs in background
 client.getMap('users').set(userId, { name: 'Alice', age: 30 });
@@ -225,7 +225,7 @@ const unsub = query.subscribe((results) => {
 // Raw local-change notifications (no filter):
 const unsubLocal = client.getMap('users').onChange(() => {
   const record = client.getMap('users').get(userId);
-  console.log(record?.value);
+  console.log(record);
 });
 ```
 
