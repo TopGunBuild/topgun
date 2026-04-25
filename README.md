@@ -1,6 +1,8 @@
 # TopGun
 
-> **Alpha** — API may change
+[![License](https://img.shields.io/github/license/TopGunBuild/topgun)](LICENSE) [![CI](https://img.shields.io/github/actions/workflow/status/TopGunBuild/topgun/rust.yml?branch=main&label=CI)](.github/workflows/rust.yml) [![npm](https://img.shields.io/npm/v/@topgunbuild/client)](https://www.npmjs.com/package/@topgunbuild/client) [![Discord](https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/NDpMG4dmJu) [![GitHub Stars](https://img.shields.io/github/stars/TopGunBuild/topgun?style=social)](https://github.com/TopGunBuild/topgun)
+
+> **v2.0 — single-node stable; cluster features in progress.** The TypeScript client and Rust server APIs are stable for single-node deployments. Cluster-mode capabilities (Raft-backed distributed locks, cross-node replication) are being actively developed.
 
 Hybrid offline-first in-memory data grid. Zero-latency reads and writes via local CRDTs, real-time sync via WebSockets, durable storage on your own infrastructure.
 
@@ -123,6 +125,17 @@ pnpm install
 pnpm start
 ```
 
+## Performance
+
+Measured on Apple M1 Max, 200 concurrent WebSocket connections, using the in-process load harness (`packages/server-rust/benches/load_harness/`):
+
+| Mode | Throughput | Latency |
+|------|-----------|---------|
+| Fire-and-forget | **483K ops/sec** | — |
+| Fire-and-wait | **~37K ops/sec** | **1.5ms p50** |
+
+> Numbers are from an in-process load harness on Apple M1 Max with 200 concurrent connections. Performance on your hardware will differ. See [`packages/server-rust/benches/load_harness/baseline.json`](packages/server-rust/benches/load_harness/baseline.json) for CI thresholds and [`packages/server-rust/docs/profiling/FLAMEGRAPH_ANALYSIS.md`](packages/server-rust/docs/profiling/FLAMEGRAPH_ANALYSIS.md) for methodology.
+
 ## Performance Testing
 
 ### Quick Smoke Test
@@ -141,6 +154,12 @@ pnpm --filter @topgunbuild/core bench
 ```
 
 See [tests/benchmark/README.md](tests/benchmark/README.md) for details.
+
+## Community
+
+- **Discord**: [discord.gg/NDpMG4dmJu](https://discord.gg/NDpMG4dmJu) — ask questions, share what you're building
+- **GitHub Discussions**: [github.com/topgunbuild/topgun/discussions](https://github.com/topgunbuild/topgun/discussions) — longer-form Q&A and proposals
+- **GitHub Issues**: [github.com/topgunbuild/topgun/issues](https://github.com/topgunbuild/topgun/issues) — bug reports and feature requests
 
 ## TopGun v1
 
