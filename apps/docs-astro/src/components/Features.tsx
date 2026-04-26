@@ -60,7 +60,7 @@ export const Features = () => {
         <FeatureCard
           icon={Shield}
           title="Distributed Locks"
-          description="Pessimistic locking with fencing tokens. Single-node deployments are fully consistent; cluster-mode semantics vary — see docs."
+          description="Pessimistic locking with fencing tokens (single-node; cluster-safe with Raft — on roadmap). Essential for payments and inventory."
         />
         <FeatureCard
           icon={Globe}
