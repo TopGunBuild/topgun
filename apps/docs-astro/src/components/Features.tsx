@@ -1,5 +1,5 @@
 import React from 'react';
-import { WifiOff, Zap, RefreshCw, Database, Lock, Globe, Shield, Search } from 'lucide-react';
+import { WifiOff, Zap, RefreshCw, Database, Lock, Globe, Shield, Search, Bot } from 'lucide-react';
 
 const FeatureCard = ({ icon: Icon, title, description, colSpan = 1 }: { icon: any, title: string, description: string, colSpan?: number }) => (
   <div className={`group relative overflow-hidden rounded-xl border border-card-border bg-card p-8 hover:border-neutral-300 dark:hover:border-white/20 transition-colors shadow-sm dark:shadow-none ${colSpan === 2 ? 'md:col-span-2' : ''}`}>
@@ -72,6 +72,11 @@ export const Features = () => {
           icon={Globe}
           title="Real-Time"
           description="Push-based architecture via WebSockets ensures all active clients receive updates instantly."
+        />
+        <FeatureCard
+          icon={Bot}
+          title="Native AI Access"
+          description="Built-in MCP (Model Context Protocol) server. Claude, Cursor, and other agents query and mutate your live data with zero glue code. Shipped, not roadmap."
         />
       </div>
     </section>
