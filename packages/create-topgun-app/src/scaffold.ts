@@ -3,7 +3,7 @@
 import fsExtra from 'fs-extra';
 const { copy, readJson, writeJson, pathExists, readdir } = fsExtra;
 import { join } from 'node:path';
-import { rename } from 'node:fs/promises';
+import { readFile, rename, writeFile } from 'node:fs/promises';
 
 /**
  * Slugify an app name to a valid npm package name.
@@ -46,14 +46,24 @@ export async function scaffold({ appName, targetDir, templateDir }: ScaffoldOpti
   // 1. Copy template → targetDir (fs-extra handles recursive copy + dir creation).
   await copy(templateDir!, targetDir, { overwrite: false, errorOnExist: false });
 
+  const slug = slugify(appName);
+
   // 2. Rewrite package.json name and strip private field.
   const pkgPath = join(targetDir, 'package.json');
   const pkg = await readJson(pkgPath);
-  pkg.name = slugify(appName);
+  pkg.name = slug;
   delete pkg.private;
   await writeJson(pkgPath, pkg, { spaces: 2 });
 
-  // 3. Rename .gitignore.template → .gitignore.
+  // 3. Substitute {{appName}} mustache token in README.md so onboarding `cd`
+  //    instructions match the actual scaffolded directory name.
+  const readmePath = join(targetDir, 'README.md');
+  if (await pathExists(readmePath)) {
+    const readme = await readFile(readmePath, 'utf-8');
+    await writeFile(readmePath, readme.replace(/\{\{appName\}\}/g, slug), 'utf-8');
+  }
+
+  // 4. Rename .gitignore.template → .gitignore.
   //    npm strips bare .gitignore files when publishing — .template suffix is the workaround.
   const gitignoreTemplatePath = join(targetDir, '.gitignore.template');
   const gitignorePath = join(targetDir, '.gitignore');

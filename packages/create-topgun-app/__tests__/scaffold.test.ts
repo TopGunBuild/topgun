@@ -1,5 +1,5 @@
 import { join, resolve } from 'node:path';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import fsExtra from 'fs-extra';
 const { pathExists, readJson } = fsExtra;
@@ -90,5 +90,19 @@ describe('scaffold', () => {
     // (the template name "topgun-app" must have been replaced with the slugified appName).
     expect(pkg.name).not.toBe('topgun-app');
     expect(pkg.name).toBe('dep-check-app');
+  });
+
+  test('Test 5: README {{appName}} placeholder is substituted with slugified name', async () => {
+    const appName = 'My Cool App';
+    const targetDir = join(tmpDir, 'my-cool-app');
+
+    await scaffold({ appName, targetDir, templateDir: TEMPLATE_DIR });
+
+    const readme = await readFile(join(targetDir, 'README.md'), 'utf-8');
+
+    // Slugified name should be substituted into the cd instruction.
+    expect(readme).toContain('cd my-cool-app');
+    // Raw token should not survive scaffolding.
+    expect(readme).not.toContain('{{appName}}');
   });
 });

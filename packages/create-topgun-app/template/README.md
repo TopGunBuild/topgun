@@ -5,7 +5,7 @@ This app was scaffolded by `create-topgun-app`. It runs in offline-first local m
 ## Next 5 commands
 
 ```sh
-1. cd <your-app-name>
+1. cd {{appName}}
 2. pnpm install   (or npm install)
 3. pnpm dev
 4. Open http://localhost:5173
