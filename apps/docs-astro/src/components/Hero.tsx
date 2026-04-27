@@ -18,6 +18,51 @@ todos.set('task-1', {
   done: false
 }); // Resolves in ~0.5ms`;
 
+const CLI_COMMAND = 'npx create-topgun-app';
+
+const CommandBlock = () => {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(CLI_COMMAND);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Mirror CodeSnippet behavior: silently log, leave icon unchanged.
+      console.error('Failed to copy to clipboard');
+    }
+  };
+
+  return (
+    <div className="mt-8 mb-2">
+      <div className="flex items-center justify-between w-full rounded-lg border border-white/10 bg-black/5 dark:bg-white/5 px-4 py-3 font-mono text-sm sm:text-base">
+        <div className="flex items-center gap-2 min-w-0">
+          <Terminal className="w-4 h-4 text-neutral-500 shrink-0" />
+          <span className="text-neutral-500 shrink-0">$</span>
+          <span className="text-foreground truncate">{CLI_COMMAND}</span>
+        </div>
+        <button
+          onClick={handleCopy}
+          aria-label={copied ? 'Copied' : 'Copy command'}
+          className="ml-3 shrink-0 text-neutral-500 hover:text-foreground transition-all active:scale-90 min-w-[40px] min-h-[40px] flex items-center justify-center"
+        >
+          {copied ? (
+            <Check className="w-4 h-4 text-green-500 transition-opacity duration-200" />
+          ) : (
+            <Copy className="w-4 h-4 transition-opacity duration-200" />
+          )}
+        </button>
+      </div>
+      <p className="mt-2 text-sm text-neutral-500 dark:text-neutral-400 text-center lg:text-left">
+        <a href="/docs/intro" className="hover:text-foreground transition-colors underline underline-offset-2">
+          Or read the docs first →
+        </a>
+      </p>
+    </div>
+  );
+};
+
 const CodeSnippet = () => {
   const [copied, setCopied] = useState(false);
   const { html: highlightedCode } = useShiki(HERO_CODE, 'typescript');
@@ -49,8 +94,8 @@ const CodeSnippet = () => {
       </div>
       <div className="p-4 overflow-x-auto">
         {highlightedCode ? (
-          <div 
-            dangerouslySetInnerHTML={{ __html: highlightedCode }} 
+          <div
+            dangerouslySetInnerHTML={{ __html: highlightedCode }}
             className="text-sm font-mono leading-relaxed [&_pre]:!bg-transparent [&_pre]:!p-0 [&_pre]:!m-0 [&_code]:!bg-transparent"
           />
         ) : (
@@ -73,19 +118,21 @@ export const Hero = () => {
               <span className="flex h-2 w-2 rounded-full bg-brand animate-pulse"></span>
               The Hybrid Offline-First In-Memory Data Grid
             </div>
-            
+
             <h1 className="text-5xl sm:text-6xl lg:text-7xl font-bold tracking-tight text-foreground mb-6">
               Invert Your <br/>
               <span className="text-transparent bg-clip-text bg-gradient-to-r from-brand via-purple-600 to-black dark:via-purple-400 dark:to-white animate-pulse-slow">Data Architecture.</span>
             </h1>
-            
+
             <p className="text-lg text-neutral-600 dark:text-neutral-300 mb-8 max-w-2xl mx-auto lg:mx-0 leading-relaxed">
-              Stop building "dumb" clients. TopGun turns your client into a replica. 
-              Zero-latency reads/writes, offline-first reliability, and real-time sync 
+              Stop building "dumb" clients. TopGun turns your client into a replica.
+              Zero-latency reads/writes, offline-first reliability, and real-time sync
               powered by CRDTs and Merkle Trees.
             </p>
 
-            <div className="flex flex-col sm:flex-row items-center gap-4 justify-center lg:justify-start">
+            <CommandBlock />
+
+            <div className="flex flex-col sm:flex-row items-center gap-4 justify-center lg:justify-start mt-6">
               <a
                 href="/docs/intro"
                 className="h-12 px-8 rounded-lg bg-foreground text-background font-semibold hover:opacity-90 transition-opacity flex items-center gap-2"
@@ -100,12 +147,6 @@ export const Hero = () => {
                 Read Whitepaper
               </a>
             </div>
-            
-            <div className="mt-10 flex items-center justify-center lg:justify-start gap-4 text-sm text-neutral-500 dark:text-neutral-300 font-mono">
-              <span className="flex items-center gap-2">
-                <Terminal className="w-4 h-4" /> npm install @topgunbuild/client
-              </span>
-            </div>
          </div>
 
          {/* Visual/Code */}
@@ -114,7 +155,7 @@ export const Hero = () => {
                {/* Decorative Glow */}
                <div className="absolute -inset-1 bg-gradient-to-r from-brand to-purple-600 rounded-xl blur opacity-20"></div>
                <CodeSnippet />
-               
+
             </div>
          </div>
        </div>
