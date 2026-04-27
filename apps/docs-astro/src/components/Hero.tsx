@@ -2,19 +2,20 @@ import React, { useState } from 'react';
 import { ArrowRight, Terminal, Copy, Check } from 'lucide-react';
 import { useShiki } from '../hooks/useShiki';
 
-const HERO_CODE = `import { TopGun } from '@topgunbuild/client';
+const HERO_CODE = `import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
 
-// 1. Initialize Local-First DB
-const db = new TopGun({
-  sync: 'wss://api.topgun.build',
-  persist: 'indexeddb'
+// 1. Initialize Local-First Client
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080',
+  storage: new IDBAdapter()
 });
 
 // 2. Zero-Latency Write (Optimistic)
-await db.todos.set({
-  id: 'task-1',
+const todos = client.getMap('todos');
+todos.set('task-1', {
   text: 'Ship v2',
-  status: 'pending'
+  done: false
 }); // Resolves in ~0.5ms`;
 
 const CodeSnippet = () => {
