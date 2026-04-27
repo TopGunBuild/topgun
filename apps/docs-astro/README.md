@@ -1,10 +1,15 @@
-# Astro Starter Kit: Minimal
+# TopGun Docs Site (`apps/docs-astro`)
 
-```sh
-npm create astro@latest -- --template minimal
-```
+Source for https://topgun.build — Astro + MDX + React docs site.
 
-> 🧑‍🚀 **Seasoned astronaut?** Delete this file. Have fun!
+## 🚢 Deployment
+
+Production https://topgun.build is hosted on **Cloudflare Pages** with GitHub Git integration. Identified 2026-04-27 via response-header probe (`server: cloudflare`, `cf-ray:`); no in-repo deploy config exists because the project is wired GitHub-side.
+
+- **Trigger:** automatic on push to `main`. No CLI step required.
+- **Manual retrigger:** Cloudflare Pages dashboard → project → Deployments → Redeploy.
+- **Build source:** this directory (`apps/docs-astro/`); output dir `dist/`.
+- **Do not commit** `vercel.json` / `netlify.toml` / `wrangler.toml` — a new in-repo config would conflict with the existing platform integration.
 
 ## 🚀 Project Structure
 
