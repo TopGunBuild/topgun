@@ -1,18 +1,9 @@
-import { copy, readJson, writeJson, pathExists, readdir } from 'fs-extra';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+// fs-extra is a CommonJS module — use default import and destructure to avoid
+// named-export resolution failures in ESM contexts (Node.js v22+).
+import fsExtra from 'fs-extra';
+const { copy, readJson, writeJson, pathExists, readdir } = fsExtra;
+import { join } from 'node:path';
 import { rename } from 'node:fs/promises';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-
-/**
- * Return path to the bundled template directory.
- * When installed, template/ sits next to dist/ in the package root.
- */
-function getTemplateDir(): string {
-  // dist/index.js → package root → template/
-  return join(__dirname, '..', 'template');
-}
 
 /**
  * Slugify an app name to a valid npm package name.
@@ -29,6 +20,8 @@ function slugify(name: string): string {
 export interface ScaffoldOptions {
   appName: string;
   targetDir: string;
+  /** Path to the template directory. Defaults to ../template relative to this file at runtime. */
+  templateDir?: string;
 }
 
 /**
@@ -39,9 +32,7 @@ export interface ScaffoldOptions {
  *  2. Rewrite package.json with the slugified appName and strip private field.
  *  3. Rename .gitignore.template → .gitignore (npm strips bare .gitignore on publish).
  */
-export async function scaffold({ appName, targetDir }: ScaffoldOptions): Promise<void> {
-  const templateDir = getTemplateDir();
-
+export async function scaffold({ appName, targetDir, templateDir }: ScaffoldOptions): Promise<void> {
   // Guard: target directory must not be non-empty.
   if (await pathExists(targetDir)) {
     const entries = await readdir(targetDir);
@@ -53,7 +44,7 @@ export async function scaffold({ appName, targetDir }: ScaffoldOptions): Promise
   }
 
   // 1. Copy template → targetDir (fs-extra handles recursive copy + dir creation).
-  await copy(templateDir, targetDir, { overwrite: false, errorOnExist: false });
+  await copy(templateDir!, targetDir, { overwrite: false, errorOnExist: false });
 
   // 2. Rewrite package.json name and strip private field.
   const pkgPath = join(targetDir, 'package.json');

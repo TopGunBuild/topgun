@@ -12,10 +12,9 @@ const config: Config = {
       'ts-jest',
       {
         useESM: true,
-        tsconfig: {
-          module: 'ESNext',
-          moduleResolution: 'Bundler',
-        },
+        // Use a local tsconfig that explicitly sets module: ESNext so ts-jest
+        // does not fall back to CommonJS resolution (which rejects import.meta).
+        tsconfig: '<rootDir>/tsconfig.jest.json',
       },
     ],
   },

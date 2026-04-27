@@ -1,5 +1,6 @@
 import pc from 'picocolors';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { scaffold } from './scaffold.js';
 
 const appName = process.argv[2];
@@ -9,11 +10,15 @@ if (!appName) {
   process.exit(1);
 }
 
+// Resolve the template directory relative to this CLI entry file.
+// dist/index.js → package root → template/
+const packageRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+const templateDir = join(packageRoot, 'template');
 const targetDir = join(process.cwd(), appName);
 
 async function main() {
   try {
-    await scaffold({ appName, targetDir });
+    await scaffold({ appName, targetDir, templateDir });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(pc.red(`Error: ${message}`));

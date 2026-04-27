@@ -1,8 +1,14 @@
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { pathExists, readJson } from 'fs-extra';
+import fsExtra from 'fs-extra';
+const { pathExists, readJson } = fsExtra;
 import { scaffold } from '../src/scaffold.js';
+
+// Resolve the template directory relative to the package root.
+// __dirname in CJS Jest context = packages/create-topgun-app/__tests__
+// → walk up one level to package root, then into template/
+const TEMPLATE_DIR = resolve(__dirname, '..', 'template');
 
 let tmpDir: string;
 
@@ -21,7 +27,7 @@ describe('scaffold', () => {
     const appName = 'my-test-app';
     const targetDir = join(tmpDir, appName);
 
-    await scaffold({ appName, targetDir });
+    await scaffold({ appName, targetDir, templateDir: TEMPLATE_DIR });
 
     const pkgPath = join(targetDir, 'package.json');
     expect(await pathExists(pkgPath)).toBe(true);
@@ -31,10 +37,10 @@ describe('scaffold', () => {
   });
 
   test('Test 2: scaffolds .gitignore (renamed from .gitignore.template)', async () => {
-    const appName = 'my-test-app';
+    const appName = 'my-test-app-2';
     const targetDir = join(tmpDir, appName);
 
-    await scaffold({ appName, targetDir });
+    await scaffold({ appName, targetDir, templateDir: TEMPLATE_DIR });
 
     expect(await pathExists(join(targetDir, '.gitignore'))).toBe(true);
     // The .gitignore.template source file should no longer exist after rename.
@@ -46,10 +52,10 @@ describe('scaffold', () => {
     const targetDir = join(tmpDir, appName);
 
     // Scaffold once to populate the directory.
-    await scaffold({ appName, targetDir });
+    await scaffold({ appName, targetDir, templateDir: TEMPLATE_DIR });
 
     // Scaffolding into the same (now non-empty) directory must throw.
-    await expect(scaffold({ appName, targetDir })).rejects.toThrow(
+    await expect(scaffold({ appName, targetDir, templateDir: TEMPLATE_DIR })).rejects.toThrow(
       /already exists and is not empty/
     );
   });
@@ -58,7 +64,7 @@ describe('scaffold', () => {
     const appName = 'dep-check-app';
     const targetDir = join(tmpDir, appName);
 
-    await scaffold({ appName, targetDir });
+    await scaffold({ appName, targetDir, templateDir: TEMPLATE_DIR });
 
     const pkg = await readJson(join(targetDir, 'package.json'));
     const runtimeDeps = Object.keys(pkg.dependencies ?? {});
