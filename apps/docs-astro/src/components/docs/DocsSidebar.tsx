@@ -178,6 +178,7 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                         <SubItem to="/docs/guides/security" currentPath={currentPath}>Security (TLS)</SubItem>
                         <SubItem to="/docs/guides/rbac" currentPath={currentPath}>RBAC</SubItem>
                         <SubItem to="/docs/guides/live-queries" currentPath={currentPath}>Live Queries</SubItem>
+                        <SubItem to="/docs/guides/sync-state" currentPath={currentPath}>Sync State</SubItem>
                         <SubItem to="/docs/guides/sql-queries" currentPath={currentPath}>SQL Queries</SubItem>
                         <SubItem to="/docs/guides/schema" currentPath={currentPath}>Schema & Type Safety</SubItem>
                         <SubItem to="/docs/guides/indexing" currentPath={currentPath}>Indexing</SubItem>

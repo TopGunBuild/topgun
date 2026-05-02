@@ -1,0 +1,181 @@
+---
+title: Sync State
+description: Always know if your data has hit the server. Per-record sync-state tags expose synced / pending / local-only / conflicted for every row in a query.
+order: 13
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+
+# Sync State
+
+**Always know if your data has hit the server.**
+
+Most local-first libraries hide sync state behind opaque "synced/syncing" booleans at the connection level. TopGun exposes it **per-record**: every row returned by `useQuery`, `useMapWithSyncState`, or `useORMapWithSyncState` carries a sync-state tag your app can render as a trust signal — a spinner while the write is in flight, a badge when the server rejected it, a banner when the user is offline.
+
+## The Four States
+
+| State | Meaning | When you see it |
+|-------|---------|-----------------|
+| `synced` | Server `OP_ACK` received | Steady-state once the write has been durably accepted. Default for any record this client never wrote. |
+| `pending` | Local write in flight | The op is in the local opLog and the connection is up — transmission attempted or in progress. Render a small spinner. |
+| `local-only` | Local write, awaiting reconnect | The op is in the local opLog but the connection is down. The user is offline; the write will go out on reconnect. Render an offline indicator. |
+| `conflicted` | Server-side resolver rejected the write | A registered conflict resolver downgraded or rejected this write. The local optimistic value is no longer authoritative. Render a conflict badge. |
+
+The state for a key transitions naturally: a fresh local write goes from `pending` (online) or `local-only` (offline) to `synced` once the server acknowledges it. If a custom conflict resolver rejects the write, it flips to `conflicted` and clears once a subsequent retry write is acknowledged.
+
+## Reading Sync State in `useQuery`
+
+The `syncState` accessor on a `useQuery` result is a `Map<key, RecordSyncState>` filtered to the keys present in the current result set. Look up by `_key`:
+
+export const useQuerySyncStateCode = `import { useQuery } from '@topgunbuild/react';
+
+function TodoList() {
+  const { data, syncState } = useQuery('todos');
+
+  return (
+    <ul>
+      {data.map(todo => {
+        const state = syncState.get(todo._key);
+        return (
+          <li key={todo._key}>
+            {todo.text}
+            {state === 'pending' && <Spinner />}
+            {state === 'conflicted' && <ConflictBadge />}
+            {state === 'local-only' && <OfflineDot />}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}`;
+
+<CodeBlock language="tsx" code={useQuerySyncStateCode} />
+
+The Map identity is stable across renders unless at least one relevant key changes state, so it is safe to use as a `useMemo` or `useEffect` dependency without re-render churn.
+
+## Spinner on Pending
+
+Show a small inline spinner next to any row whose write is still in flight to the server:
+
+export const spinnerCode = `function TodoRow({ todo, syncState }) {
+  const state = syncState.get(todo._key);
+  return (
+    <div className="todo-row">
+      <span>{todo.text}</span>
+      {state === 'pending' && <span className="spinner" aria-label="Saving" />}
+    </div>
+  );
+}`;
+
+<CodeBlock language="tsx" code={spinnerCode} />
+
+## Conflict Badge
+
+When a registered conflict resolver rejects a write, surface that to the user so they can retry or reconcile:
+
+export const conflictCode = `function TodoRow({ todo, syncState }) {
+  const state = syncState.get(todo._key);
+  return (
+    <div className="todo-row">
+      <span>{todo.text}</span>
+      {state === 'conflicted' && (
+        <span className="badge badge-warn" title="Server rejected this change">
+          Conflict — review
+        </span>
+      )}
+    </div>
+  );
+}`;
+
+<CodeBlock language="tsx" code={conflictCode} />
+
+The `conflicted` state clears automatically once a subsequent acknowledged write lands for the same key, so a simple "Retry" action that re-issues the put is sufficient — no manual state-reset API needed.
+
+## Offline Banner
+
+For a coarse-grained offline indicator at the top of the page, count the rows in `local-only` state:
+
+export const offlineCode = `function OfflineBanner() {
+  const { data, syncState } = useQuery('todos');
+  const offlineCount = data.filter(t => syncState.get(t._key) === 'local-only').length;
+  if (offlineCount === 0) return null;
+  return (
+    <div className="banner">
+      You are offline — {offlineCount} change(s) will sync when you reconnect.
+    </div>
+  );
+}`;
+
+<CodeBlock language="tsx" code={offlineCode} />
+
+## Single-Record Reads
+
+Outside a query context (e.g. a single record detail page), use `useSyncState` to subscribe directly to a `(mapName, key)` pair:
+
+export const singleReadCode = `import { useSyncState } from '@topgunbuild/react';
+
+function TodoDetail({ todoKey }) {
+  const state = useSyncState('todos', todoKey);
+  return <SyncStateBadge state={state} />;
+}`;
+
+<CodeBlock language="tsx" code={singleReadCode} />
+
+## Companion Hooks for `useMap` / `useORMap`
+
+`useMap` and `useORMap` continue to return the bare map instance — that signature is preserved. For sync state alongside a CRDT map, use the `*WithSyncState` companions:
+
+export const companionHookCode = `import { useMapWithSyncState, useORMapWithSyncState } from '@topgunbuild/react';
+
+function CartView() {
+  const { map, syncState } = useMapWithSyncState('cart');
+  const items = Array.from(map.entries());
+  return (
+    <ul>
+      {items.map(([key, item]) => (
+        <li key={key}>
+          {item.name}
+          {syncState.get(key) === 'pending' && <Spinner />}
+        </li>
+      ))}
+    </ul>
+  );
+}`;
+
+<CodeBlock language="tsx" code={companionHookCode} />
+
+## Deployment Mode Semantics
+
+Sync state behavior is identical across deployment modes — the four states are derived entirely from existing client-observable signals (opLog, connection state, MergeRejection stream) with no server protocol changes:
+
+| Deployment | `synced` source | `conflicted` source |
+|------------|-----------------|---------------------|
+| Single-node | Server `OP_ACK` from the one node | Conflict resolver registered on that node |
+| Cluster | Server `OP_ACK` from the partition owner | Conflict resolver registered cluster-wide; server-side resolution is authoritative regardless of which node accepted the write |
+
+If you have not registered any custom conflict resolvers, the `conflicted` state will not appear in practice — server-side merge defaults to last-write-wins via HLC ordering and never rejects. Once you register a resolver (e.g. first-write-wins for booking slots), the `conflicted` state surfaces resolver verdicts directly to the UI.
+
+## TypeScript Type
+
+The four-state union is exported as a type from `@topgunbuild/react` (re-exported from `@topgunbuild/client`):
+
+export const typeImportCode = `import type { RecordSyncState } from '@topgunbuild/react';
+
+// RecordSyncState = 'synced' | 'pending' | 'conflicted' | 'local-only'
+
+function badgeFor(state: RecordSyncState): string {
+  switch (state) {
+    case 'synced': return '';
+    case 'pending': return 'Saving...';
+    case 'local-only': return 'Offline';
+    case 'conflicted': return 'Conflict';
+  }
+}`;
+
+<CodeBlock language="ts" code={typeImportCode} />
+
+## See Also
+
+- [Live Queries](/docs/guides/live-queries) — the underlying `useQuery` API that surfaces sync state.
+- [Conflict Resolvers](/docs/guides/conflict-resolvers) — register server-side resolvers that emit the `conflicted` state.
+- [Write Concern](/docs/guides/write-concern) — opt into stronger per-write durability guarantees.
