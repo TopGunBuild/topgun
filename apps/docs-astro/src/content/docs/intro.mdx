@@ -23,6 +23,38 @@ and <strong className="text-foreground">Offline-First Client Databases</strong> 
 It allows you to build applications that are instant, reliable, and collaborative by default.
 Try the [live demo](https://demo.topgun.build/) to see real-time CRDT sync in action.
 
+## Quick start
+
+### Drop-in (5 minutes)
+
+Scaffold a working app:
+
+```bash
+npx create-topgun-app my-app
+cd my-app && pnpm install && pnpm dev
+```
+
+In a separate terminal, boot the single-node backend:
+
+```bash
+docker compose up server
+```
+
+The server runs on `ws://localhost:8080`. Single-command bring-up — Postgres + server start together. No env vars, no auth required — for local development.
+
+### Production
+
+Production deployments need Postgres and explicit auth. TopGun v2 is **single-node stable**; multi-node Raft consensus is on the [roadmap](/docs/roadmap).
+
+| Step | Status | Notes |
+|------|--------|-------|
+| Postgres DSN | Required | Set `DATABASE_URL`; schema applied on first boot |
+| Server env vars | Required | `JWT_SECRET`, `TOPGUN_NO_AUTH=0`; ACL via `/docs/security` |
+| Single-node deploy | Stable | `docker compose up --build` or `cargo run --bin test-server --release` |
+| Multi-node cluster | Roadmap | Raft consensus pending — see [/docs/roadmap](/docs/roadmap) |
+| Backup/restore | Planned | Use `pg_dump` today; operational tooling tracked in TODO-139 |
+| Monitoring hooks | Planned | Prometheus + structured-log hooks pending |
+
 ## Features
 
 TopGun aims to be the standard for local-first state management. It provides a robust sync engine out of the box.
