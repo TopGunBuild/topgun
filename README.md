@@ -63,7 +63,7 @@ export TOPGUN_NO_AUTH=0                       # 0 = enforce auth, 1 = dev-only b
 
 **3. Single-node deployment**
 
-Single-node is fully consistent and production-ready for workloads that fit one server (per SPEC-217..231 honesty-pass lineage):
+Single-node is fully consistent and production-ready for workloads that fit one server:
 
 ```bash
 docker compose up --build
