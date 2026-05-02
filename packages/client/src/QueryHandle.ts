@@ -2,6 +2,7 @@ import { SyncEngine } from './SyncEngine';
 import { ChangeTracker, ChangeEvent } from './ChangeTracker';
 import { logger } from './utils/logger';
 import type { PredicateNode } from '@topgunbuild/core';
+import type { RecordSyncState } from './RecordSyncState';
 
 export interface QueryFilter {
   where?: Record<string, any>;
@@ -49,6 +50,12 @@ export class QueryHandle<T> {
   // Pagination info
   private _paginationInfo: PaginationInfo = { hasMore: false, cursorStatus: 'none' };
   private paginationListeners: Set<(info: PaginationInfo) => void> = new Set();
+
+  // Per-record sync-state subscription. Lazily wired on first onSyncStateChange
+  // or syncState read so QueryHandles that never observe syncState pay nothing.
+  private syncStateListeners: Set<(snapshot: ReadonlyMap<string, RecordSyncState>) => void> = new Set();
+  private syncStateUnsubscribe: (() => void) | null = null;
+  private cachedSyncStateSnapshot: ReadonlyMap<string, RecordSyncState> | null = null;
 
   /** Field projection list — only these fields are returned by the server when set */
   public readonly fields: string[] | undefined;
@@ -283,6 +290,9 @@ export class QueryHandle<T> {
     for (const listener of this.listeners) {
       listener(results);
     }
+    // Result-set membership may have changed (keys added/removed). Re-evaluate
+    // the filtered sync-state snapshot — only emits when content differs.
+    this.notifySyncStateListenersIfChanged();
   }
 
   private getSortedResults(): (T & { _key: string })[] {
@@ -362,5 +372,113 @@ export class QueryHandle<T> {
         logger.error({ err: e }, 'QueryHandle pagination listener error');
       }
     }
+  }
+
+  // ============== Per-Record Sync State ==============
+
+  /**
+   * Snapshot of per-record sync-state for keys present in this query's result
+   * set. Returns 'synced' (default) for keys with no opLog entry and no
+   * rejection. Map identity is stable until at least one key in the result
+   * set changes its projected state — safe to use as a useMemo / useEffect
+   * dependency without churn.
+   *
+   * The marketing line behind this accessor: "Always know if your data has
+   * hit the server."
+   */
+  public get syncState(): ReadonlyMap<string, RecordSyncState> {
+    if (this.cachedSyncStateSnapshot) return this.cachedSyncStateSnapshot;
+    const fresh = this.computeFilteredSyncState();
+    this.cachedSyncStateSnapshot = fresh;
+    return fresh;
+  }
+
+  /**
+   * Subscribe to sync-state changes for keys in this query's result set.
+   * Listener is invoked with a fresh snapshot only when at least one
+   * relevant key's state changes — irrelevant per-record state changes for
+   * other queries do NOT trigger re-renders here.
+   *
+   * Returns an unsubscribe function.
+   */
+  public onSyncStateChange(
+    cb: (snapshot: ReadonlyMap<string, RecordSyncState>) => void,
+  ): () => void {
+    this.syncStateListeners.add(cb);
+    this.ensureSyncStateSubscription();
+    // Immediate emission with current snapshot — matches the existing
+    // onPaginationChange / onChanges idioms.
+    try {
+      cb(this.syncState);
+    } catch (e) {
+      logger.error({ err: e }, 'QueryHandle syncState listener error (initial)');
+    }
+    return () => {
+      this.syncStateListeners.delete(cb);
+      if (this.syncStateListeners.size === 0) {
+        this.teardownSyncStateSubscription();
+      }
+    };
+  }
+
+  /**
+   * Called by onResult / onUpdate to re-evaluate the filtered snapshot when
+   * the result set itself changes (keys added/removed). If the filtered
+   * snapshot's content differs from the cached one, emit to listeners.
+   */
+  private notifySyncStateListenersIfChanged(): void {
+    if (this.syncStateListeners.size === 0 && this.cachedSyncStateSnapshot === null) {
+      return;
+    }
+    const fresh = this.computeFilteredSyncState();
+    const prev = this.cachedSyncStateSnapshot;
+    if (prev && this.syncStateMapsEqual(prev, fresh)) return;
+    this.cachedSyncStateSnapshot = fresh;
+    for (const listener of this.syncStateListeners) {
+      try {
+        listener(fresh);
+      } catch (e) {
+        logger.error({ err: e }, 'QueryHandle syncState listener error');
+      }
+    }
+  }
+
+  private ensureSyncStateSubscription(): void {
+    if (this.syncStateUnsubscribe) return;
+    const tracker = this.syncEngine.getRecordSyncStateTracker();
+    this.syncStateUnsubscribe = tracker.onChange(this.mapName, () => {
+      // Tracker fired for this map — recompute filtered snapshot. The
+      // filtered snapshot may NOT change if the tracker change concerned a
+      // key that's not in this query's result set; the equality check
+      // suppresses the no-op emission.
+      this.notifySyncStateListenersIfChanged();
+    });
+  }
+
+  private teardownSyncStateSubscription(): void {
+    if (!this.syncStateUnsubscribe) return;
+    this.syncStateUnsubscribe();
+    this.syncStateUnsubscribe = null;
+    this.cachedSyncStateSnapshot = null;
+  }
+
+  private computeFilteredSyncState(): ReadonlyMap<string, RecordSyncState> {
+    const tracker = this.syncEngine.getRecordSyncStateTracker();
+    const out = new Map<string, RecordSyncState>();
+    for (const key of this.currentResults.keys()) {
+      out.set(key, tracker.get(this.mapName, key));
+    }
+    return out;
+  }
+
+  private syncStateMapsEqual(
+    a: ReadonlyMap<string, RecordSyncState>,
+    b: ReadonlyMap<string, RecordSyncState>,
+  ): boolean {
+    if (a.size !== b.size) return false;
+    for (const [k, v] of a) {
+      if (b.get(k) !== v) return false;
+    }
+    return true;
   }
 }

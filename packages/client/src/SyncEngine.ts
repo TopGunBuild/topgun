@@ -30,6 +30,7 @@ import type {
 import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
 import type { IConnectionProvider } from './types';
 import { ConflictResolverClient } from './ConflictResolverClient';
+import { RecordSyncStateTracker } from './RecordSyncState';
 import { WebSocketManager, BackpressureController, QueryManager, TopicManager, LockManager, WriteConcernManager, CounterManager, EntryProcessorClient, SearchClient, SqlClient, VectorSearchClient, HybridSearchClient, MerkleSyncHandler, ORMapSyncHandler, MessageRouter, registerClientMessageHandlers } from './sync';
 import type { SearchResult, SqlQueryResult, VectorSearchClientOptions, VectorSearchClientResult, HybridSearchClientOptions, HybridSearchClientResult, IMessageRouter } from './sync';
 
@@ -168,6 +169,10 @@ export class SyncEngine {
 
   // Conflict Resolver client
   private readonly conflictResolverClient: ConflictResolverClient;
+
+  // Per-record sync-state tracker — projects opLog mutations + connection
+  // state + MergeRejection stream into a four-state tag per (mapName, key).
+  private readonly recordSyncStateTracker: RecordSyncStateTracker;
 
   constructor(config: SyncEngineConfig) {
     // Validate config: connectionProvider is required
@@ -315,6 +320,19 @@ export class SyncEngine {
 
     // Initialize Conflict Resolver client
     this.conflictResolverClient = new ConflictResolverClient(this);
+
+    // Initialize per-record sync-state tracker. Wire connection-state and
+    // merge-rejection subscriptions through the tracker's disposer registry
+    // so they are torn down with dispose() in close().
+    this.recordSyncStateTracker = new RecordSyncStateTracker(this.stateMachine.getState());
+    const offState = this.stateMachine.onStateChange((event) => {
+      this.recordSyncStateTracker.onConnectionStateChange(event.to);
+    });
+    this.recordSyncStateTracker.registerDisposer(offState);
+    const offRejection = this.conflictResolverClient.onRejection((rejection) => {
+      this.recordSyncStateTracker.onRejection(rejection);
+    });
+    this.recordSyncStateTracker.registerDisposer(offRejection);
 
     // Initialize MessageRouter and register all handlers
     this.messageRouter = new MessageRouter({
@@ -555,11 +573,15 @@ export class SyncEngine {
     // Clear and push to existing array (preserves BackpressureController reference)
     this.opLog.length = 0;
     for (const op of pendingOps) {
-      this.opLog.push({
+      const restored = {
         ...op,
         id: String(op.id),
         synced: false,
-      } as unknown as OpLogEntry);
+      } as unknown as OpLogEntry;
+      this.opLog.push(restored);
+      // Surface restored pending ops to the per-record sync-state tracker so
+      // they project to 'pending' or 'local-only' immediately on engine boot.
+      this.recordSyncStateTracker.onAppend(restored);
     }
 
     if (this.opLog.length > 0) {
@@ -599,6 +621,8 @@ export class SyncEngine {
     opLogEntry.id = String(id);
 
     this.opLog.push(opLogEntry as OpLogEntry);
+    // Notify per-record sync-state tracker on fresh local write.
+    this.recordSyncStateTracker.onAppend(opLogEntry as OpLogEntry);
 
     // Check high water mark after adding operation (delegates to BackpressureController)
     this.backpressureController.checkHighWaterMark();
@@ -866,6 +890,8 @@ export class SyncEngine {
         if (op && !op.synced) {
           op.synced = true;
           logger.debug({ opId: result.opId, achievedLevel: result.achievedLevel, success: result.success }, 'Op ACK with Write Concern');
+          // Notify per-record sync-state tracker that this op flipped synced=true.
+          this.recordSyncStateTracker.onAcknowledge(op);
         }
         // Resolve pending Write Concern promise if exists (delegates to WriteConcernManager)
         this.writeConcernManager.resolveWriteConcernPromise(result.opId, result);
@@ -885,8 +911,12 @@ export class SyncEngine {
           if (!isNaN(opIdNum) && opIdNum <= lastIdNum) {
             if (!op.synced) {
               ackedCount++;
+              // Per-record sync-state tracker — emit only on the actual flip.
+              op.synced = true;
+              this.recordSyncStateTracker.onAcknowledge(op);
+            } else {
+              op.synced = true;
             }
-            op.synced = true;
             if (opIdNum > maxSyncedId) {
               maxSyncedId = opIdNum;
             }
@@ -901,6 +931,8 @@ export class SyncEngine {
         if (!op.synced) {
           ackedCount++;
           op.synced = true;
+          // Per-record sync-state tracker — emit only on the actual flip.
+          this.recordSyncStateTracker.onAcknowledge(op);
           const opIdNum = parseInt(op.id, 10);
           if (!isNaN(opIdNum) && opIdNum > maxSyncedId) {
             maxSyncedId = opIdNum;
@@ -1045,6 +1077,10 @@ export class SyncEngine {
 
     // Clean up HybridSearchClient
     this.hybridSearchClient.close(new Error('SyncEngine closed'));
+
+    // Tear down per-record sync-state tracker — disposes its registered
+    // state-change + rejection subscriptions and clears internal tables.
+    this.recordSyncStateTracker.dispose();
 
     this.stateMachine.transition(SyncState.DISCONNECTED);
     logger.info('SyncEngine closed');
@@ -1479,6 +1515,15 @@ export class SyncEngine {
    */
   public getConflictResolverClient(): ConflictResolverClient {
     return this.conflictResolverClient;
+  }
+
+  /**
+   * Get the per-record sync-state tracker. Used by QueryHandle to project
+   * sync-state snapshots filtered to its result-set keys, and by the
+   * useSyncState React hook for ad-hoc per-key reads.
+   */
+  public getRecordSyncStateTracker(): RecordSyncStateTracker {
+    return this.recordSyncStateTracker;
   }
 
   // ============================================

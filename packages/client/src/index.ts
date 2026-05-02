@@ -54,6 +54,10 @@ export type { JournalEventData, JournalSubscribeOptions } from './EventJournalRe
 export { ConflictResolverClient } from './ConflictResolverClient';
 export type { ResolverInfo, RegisterResult } from './ConflictResolverClient';
 
+// Per-record sync-state exports
+export { RecordSyncStateTracker } from './RecordSyncState';
+export type { RecordSyncState } from './RecordSyncState';
+
 // Full-Text Search exports
 export type { SearchResult } from './SyncEngine';
 
