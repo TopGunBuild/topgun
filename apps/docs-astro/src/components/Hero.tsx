@@ -20,6 +20,52 @@ todos.set('task-1', {
 
 const CLI_COMMAND = 'npx create-topgun-app';
 
+const DROP_IN_CMD = 'docker compose up server';
+const PROD_LINK = '/docs/roadmap';
+
+const QuickStartTabs = () => {
+  const [tab, setTab] = useState<'drop-in' | 'production'>('drop-in');
+
+  return (
+    <div className="mt-2 mb-2">
+      <div role="tablist" aria-label="Quick start path" className="inline-flex rounded-lg border border-white/10 bg-black/5 dark:bg-white/5 p-1 text-sm">
+        <button
+          role="tab"
+          aria-selected={tab === 'drop-in'}
+          onClick={() => setTab('drop-in')}
+          className={`px-3 py-1 rounded-md transition-colors ${tab === 'drop-in' ? 'bg-foreground text-background' : 'text-neutral-500 hover:text-foreground'}`}
+        >
+          Drop-in
+        </button>
+        <button
+          role="tab"
+          aria-selected={tab === 'production'}
+          onClick={() => setTab('production')}
+          className={`px-3 py-1 rounded-md transition-colors ${tab === 'production' ? 'bg-foreground text-background' : 'text-neutral-500 hover:text-foreground'}`}
+        >
+          Production
+        </button>
+      </div>
+      <div className="mt-2 text-sm text-neutral-600 dark:text-neutral-300">
+        {tab === 'drop-in' ? (
+          <p>
+            Single-node backend in a separate terminal: <code className="px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-xs">{DROP_IN_CMD}</code>. Single-command bring-up — Postgres + server start together. No auth required — local exploration.
+          </p>
+        ) : (
+          <>
+            <p>
+              Postgres + JWT + single-node deployment. Multi-node clustering is on the <a href={PROD_LINK} className="underline underline-offset-2 hover:text-foreground">roadmap (Raft consensus)</a>.
+            </p>
+            <p className="mt-1">
+              <a href="/docs/intro#production" className="hover:text-foreground hover:underline underline-offset-2">See production checklist →</a>
+            </p>
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
 const CommandBlock = () => {
   const [copied, setCopied] = useState(false);
 
@@ -131,6 +177,7 @@ export const Hero = () => {
             </p>
 
             <CommandBlock />
+            <QuickStartTabs />
 
             <div className="flex flex-col sm:flex-row items-center gap-4 justify-center lg:justify-start mt-6">
               <a
