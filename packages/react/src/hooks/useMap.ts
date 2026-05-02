@@ -36,10 +36,10 @@ const EMPTY_SYNC_STATE: ReadonlyMap<string, RecordSyncState> = new Map();
 /**
  * Companion to `useMap` — returns the underlying LWWMap alongside a
  * `syncState` snapshot tracking each key's per-record sync state. The
- * bare `useMap` signature is preserved (returning only the map) for
- * SPEC-223 template compatibility; this hook adds the syncState accessor
- * for callers that want to render trust signals (spinner / conflict
- * badge / offline indicator) per row.
+ * bare `useMap` signature is preserved (returning only the map) so
+ * existing code that does not need sync state requires no changes; this
+ * hook adds the syncState accessor for callers that want to render
+ * trust signals (spinner / conflict badge / offline indicator) per row.
  *
  * @example
  * ```tsx

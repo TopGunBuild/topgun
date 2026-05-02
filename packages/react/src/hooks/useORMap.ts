@@ -33,8 +33,8 @@ const EMPTY_OR_SYNC_STATE: ReadonlyMap<string, RecordSyncState> = new Map();
 /**
  * Companion to `useORMap` — returns the underlying ORMap alongside a
  * `syncState` snapshot tracking each key's per-record sync state. The
- * bare `useORMap` signature is preserved for SPEC-223 template
- * compatibility.
+ * bare `useORMap` signature is preserved so existing code that does not
+ * need sync state requires no changes.
  */
 export function useORMapWithSyncState<K = string, V = any>(
     mapName: string,
