@@ -22,9 +22,68 @@ TopGun v2 is a complete rewrite. It's not a port — it's a new architecture des
 
 ## Quick start
 
+### Drop-in (5 minutes)
+
+Scaffold a working app with one command:
+
 ```bash
-npm install @topgunbuild/client @topgunbuild/adapters @topgunbuild/react
+npx create-topgun-app my-app
+cd my-app && pnpm install && pnpm dev
 ```
+
+This boots a Vite app with a working LWW-Map todo demo. For the backend, in a separate terminal:
+
+```bash
+docker compose up server
+```
+
+Single-command bring-up — Postgres + server start together. No env vars, no auth required — meant for local development and exploring the API.
+
+### Production
+
+Production deployments need Postgres for durability and explicit auth configuration. The TopGun v2 server is **single-node stable**; multi-node Raft consensus is on the roadmap (see [`/docs/roadmap`](https://topgun.build/docs/roadmap)).
+
+**1. Postgres setup**
+
+Provision a Postgres database and set the DSN:
+
+```bash
+export DATABASE_URL=postgres://user:pass@host:5432/topgun
+```
+
+The server applies its schema on first boot. Retention policy (op-log truncation, snapshot cadence) is configured per-map.
+
+**2. Server-side env vars**
+
+```bash
+export JWT_SECRET=<random-32-byte-secret>     # Required for signed tokens
+export TOPGUN_NO_AUTH=0                       # 0 = enforce auth, 1 = dev-only bypass
+# ACL config: see /docs/security for per-map and per-op rules
+```
+
+**3. Single-node deployment**
+
+Single-node is fully consistent and production-ready for workloads that fit one server (per SPEC-217..231 honesty-pass lineage):
+
+```bash
+docker compose up --build
+# Or run the Rust server directly
+cargo run --bin test-server --release
+```
+
+**4. Multi-node cluster** *(on roadmap — Raft consensus)*
+
+Multi-node deployments today use partition-routing without Raft consensus. **Cluster-safe distributed locks and split-brain protection require Raft, which is on the roadmap.** See [`/docs/roadmap`](https://topgun.build/docs/roadmap) for status.
+
+**5. Backup and restore** *(coming with TODO-139)*
+
+Operational backup/restore tooling is planned. Today, take Postgres-level backups (`pg_dump`) and restore via standard Postgres workflows.
+
+**6. Monitoring hooks** *(coming)*
+
+Prometheus metrics endpoint and structured-log hooks are planned.
+
+**Client wiring (both paths):**
 
 ```typescript
 import { TopGunClient } from '@topgunbuild/client';
