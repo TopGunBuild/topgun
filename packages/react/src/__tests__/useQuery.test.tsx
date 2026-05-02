@@ -8,10 +8,12 @@ import React from 'react';
 const mockSubscribe = jest.fn();
 const mockOnChanges = jest.fn();
 const mockOnPaginationChange = jest.fn();
+const mockOnSyncStateChange = jest.fn();
 const mockQuery = jest.fn().mockReturnValue({
   subscribe: mockSubscribe,
   onChanges: mockOnChanges,
   onPaginationChange: mockOnPaginationChange,
+  onSyncStateChange: mockOnSyncStateChange,
 });
 const mockClient = {
   query: mockQuery,
@@ -23,6 +25,7 @@ describe('useQuery', () => {
     mockSubscribe.mockReturnValue(() => {}); // Unsubscribe function
     mockOnChanges.mockReturnValue(() => {}); // Unsubscribe function for changes
     mockOnPaginationChange.mockReturnValue(() => {});
+    mockOnSyncStateChange.mockReturnValue(() => {});
   });
 
   const wrapper = ({ children }: { children: React.ReactNode }) => (

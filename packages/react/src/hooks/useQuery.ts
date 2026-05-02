@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { QueryFilter, QueryResultItem, ChangeEvent, QueryHandle, CursorStatus, PaginationInfo } from '@topgunbuild/client';
+import type { RecordSyncState } from '@topgunbuild/client';
 import { useClient } from './useClient';
+
+const EMPTY_SYNC_STATE: ReadonlyMap<string, RecordSyncState> = new Map();
 
 /**
  * Options for useQuery change callbacks.
@@ -44,6 +47,13 @@ export interface UseQueryResult<T> {
   hasMore: boolean;
   /** Debug info: status of input cursor processing */
   cursorStatus: CursorStatus;
+  /**
+   * Per-record sync-state filtered to keys present in `data`.
+   * Lookup with `syncState.get(item._key)` to render trust signals
+   * (spinner / conflict badge / offline indicator). Map identity is
+   * stable across renders unless at least one relevant key changes state.
+   */
+  syncState: ReadonlyMap<string, RecordSyncState>;
 }
 
 /**
@@ -117,6 +127,8 @@ export function useQuery<T = any>(
     hasMore: false,
     cursorStatus: 'none',
   });
+
+  const [syncState, setSyncState] = useState<ReadonlyMap<string, RecordSyncState>>(EMPTY_SYNC_STATE);
 
   // Use a ref to track if the component is mounted to avoid state updates on unmounted components
   const isMounted = useRef(true);
@@ -209,11 +221,18 @@ export function useQuery<T = any>(
         }
       });
 
+      const unsubscribeSyncState = handle.onSyncStateChange((snapshot) => {
+        if (isMounted.current) {
+          setSyncState(snapshot);
+        }
+      });
+
       return () => {
         isMounted.current = false;
         unsubscribeData();
         unsubscribeChanges();
         unsubscribePagination();
+        unsubscribeSyncState();
         handleRef.current = null;
       };
     } catch (err) {
@@ -239,7 +258,11 @@ export function useQuery<T = any>(
       nextCursor: paginationInfo.nextCursor,
       hasMore: paginationInfo.hasMore,
       cursorStatus: paginationInfo.cursorStatus,
+      syncState,
     }),
-    [data, loading, error, lastChange, changes, clearChanges, paginationInfo]
+    [data, loading, error, lastChange, changes, clearChanges, paginationInfo, syncState]
   );
 }
+
+// Re-export the type so consumers can `import type { RecordSyncState } from '@topgunbuild/react'`.
+export type { RecordSyncState } from '@topgunbuild/client';

@@ -4,7 +4,11 @@ export * from './hooks/useQuery';
 export * from './hooks/useMutation';
 export * from './hooks/useMap';
 export * from './hooks/useORMap';
+export * from './hooks/useSyncState';
 export * from './hooks/useTopic';
+
+// Per-record sync-state type re-export from @topgunbuild/client
+export type { RecordSyncState } from '@topgunbuild/client';
 export * from './hooks/usePNCounter';
 export * from './hooks/useEntryProcessor';
 export * from './hooks/useEventJournal';

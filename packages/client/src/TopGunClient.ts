@@ -1029,4 +1029,15 @@ export class TopGunClient {
   public getConflictResolvers() {
     return this.syncEngine.getConflictResolverClient();
   }
+
+  /**
+   * Get the per-record sync-state tracker — projects opLog mutations,
+   * connection state, and merge rejections into a four-state tag per
+   * (mapName, key). Used by React hooks (`useSyncState`, the
+   * `*WithSyncState` companions) and by advanced consumers reading
+   * sync state outside a query context.
+   */
+  public getRecordSyncStateTracker() {
+    return this.syncEngine.getRecordSyncStateTracker();
+  }
 }

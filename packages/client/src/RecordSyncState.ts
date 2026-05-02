@@ -1,7 +1,33 @@
-import { HLC } from '@topgunbuild/core';
 import type { MergeRejection, Timestamp } from '@topgunbuild/core';
-import type { OpLogEntry } from './SyncEngine';
 import { SyncState } from './SyncState';
+
+/**
+ * Compare two HLC timestamps lexicographically on (millis, counter, nodeId).
+ * Mirrors `compareTimestamps` from @topgunbuild/core but inlined here so this
+ * module has no runtime dependency on core's serializer chain (which pulls
+ * in msgpackr ESM and breaks downstream jest jsdom environments). Returns
+ * negative if a < b, positive if a > b, 0 if equal.
+ */
+function compareTimestamps(a: Timestamp, b: Timestamp): number {
+  if (a.millis !== b.millis) return a.millis - b.millis;
+  if (a.counter !== b.counter) return a.counter - b.counter;
+  if (a.nodeId === b.nodeId) return 0;
+  return a.nodeId < b.nodeId ? -1 : 1;
+}
+
+/**
+ * Minimal structural shape the tracker reads from an opLog entry. Decoupled
+ * from `SyncEngine.OpLogEntry` (in-memory) and `IStorageAdapter.OpLogEntry`
+ * (storage layer) to keep this module independent of either concrete shape
+ * — the tracker only needs (mapName, key, timestamp, synced) to project
+ * its four-state rule.
+ */
+export interface TrackedOpLogEntry {
+  mapName: string;
+  key: string;
+  timestamp: Timestamp;
+  synced: boolean;
+}
 
 /**
  * Per-record sync-state tag exposed to applications via QueryHandle, useQuery,
@@ -36,13 +62,13 @@ export interface OpLogObserver {
    * Fires for both fresh appends in `recordOperation` and restored pending
    * ops in `loadOpLog`.
    */
-  onAppend(entry: OpLogEntry): void;
+  onAppend(entry: TrackedOpLogEntry): void;
   /**
    * Called when an entry's synced flag flips true (server OP_ACK received).
    * Fires per-entry inside the per-result and per-batch forEach loops in
    * `handleOpAck`.
    */
-  onAcknowledge(entry: OpLogEntry): void;
+  onAcknowledge(entry: TrackedOpLogEntry): void;
 }
 
 /**
@@ -120,7 +146,7 @@ export class RecordSyncStateTracker {
    * Covers both fresh writes (recordOperation) and restored pending ops
    * (loadOpLog).
    */
-  onAppend(entry: OpLogEntry): void {
+  onAppend(entry: TrackedOpLogEntry): void {
     if (this.disposed) return;
     const slot = this.ensureEntry(entry.mapName, entry.key);
     // Fresh append always supersedes prior single-slot timestamp for this key.
@@ -138,7 +164,7 @@ export class RecordSyncStateTracker {
    * to true (server OP_ACK received). Fires per-entry inside the per-result
    * and per-batch forEach loops in handleOpAck.
    */
-  onAcknowledge(entry: OpLogEntry): void {
+  onAcknowledge(entry: TrackedOpLogEntry): void {
     if (this.disposed) return;
     const inner = this.entries.get(entry.mapName);
     const slot = inner?.get(entry.key);
@@ -155,7 +181,7 @@ export class RecordSyncStateTracker {
     // Only flip when this ack matches the tracker's latest observed timestamp
     // for the key. If a newer write has been pushed after this op, the slot
     // reflects that newer write — we don't downgrade it.
-    if (slot.latestOpTimestamp && HLC.compare(entry.timestamp, slot.latestOpTimestamp) === 0) {
+    if (slot.latestOpTimestamp && compareTimestamps(entry.timestamp, slot.latestOpTimestamp) === 0) {
       slot.syncedFlag = true;
       // A successful subsequent ack clears `conflicted` per spec §2:
       // "Conflicted state clears when a subsequent write for the same
@@ -217,7 +243,7 @@ export class RecordSyncStateTracker {
         // merge authority. Treat as conflicted.
         return 'conflicted';
       }
-      const cmp = HLC.compare(slot.rejection.timestamp, slot.latestOpTimestamp);
+      const cmp = compareTimestamps(slot.rejection.timestamp, slot.latestOpTimestamp);
       if (cmp >= 0) {
         return 'conflicted';
       }

@@ -1,6 +1,5 @@
 import { RecordSyncStateTracker } from '../RecordSyncState';
-import type { OpLogObserver } from '../RecordSyncState';
-import type { OpLogEntry } from '../SyncEngine';
+import type { OpLogObserver, TrackedOpLogEntry } from '../RecordSyncState';
 import { SyncState } from '../SyncState';
 import type { MergeRejection, Timestamp } from '@topgunbuild/core';
 
@@ -15,16 +14,8 @@ function makeOp(
   key: string,
   timestamp: Timestamp,
   synced = false,
-  id = `op-${mapName}-${key}-${timestamp.millis}-${timestamp.counter}`,
-): OpLogEntry {
-  return {
-    id,
-    mapName,
-    opType: 'PUT',
-    key,
-    timestamp,
-    synced,
-  };
+): TrackedOpLogEntry {
+  return { mapName, key, timestamp, synced };
 }
 
 function makeRejection(
