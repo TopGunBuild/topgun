@@ -33,5 +33,28 @@
     "ts-jest": "^29.3.0",
     "tsup": "^8.4.0",
     "typescript": "~5.9.0"
-  }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TopGunBuild/topgun.git",
+    "directory": "packages/create-topgun-app"
+  },
+  "homepage": "https://topgun.build",
+  "bugs": {
+    "url": "https://github.com/TopGunBuild/topgun/issues"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "topgun",
+    "scaffold",
+    "create-app",
+    "offline-first",
+    "crdt",
+    "real-time",
+    "local-first"
+  ]
 }
