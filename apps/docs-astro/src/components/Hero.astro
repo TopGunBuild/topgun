@@ -1,5 +1,6 @@
 ---
 import { HeroCodeSnippet } from './HeroCodeSnippet';
+import HeroQuickStart from './HeroQuickStart';
 ---
 
 <section class="relative pt-32 pb-20 lg:pt-48 lg:pb-32 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto">
@@ -22,7 +23,9 @@ import { HeroCodeSnippet } from './HeroCodeSnippet';
         powered by CRDTs and Merkle Trees.
       </p>
 
-      <div class="flex flex-col sm:flex-row items-center gap-4 justify-center lg:justify-start">
+      <HeroQuickStart client:visible />
+
+      <div class="flex flex-col sm:flex-row items-center gap-4 justify-center lg:justify-start mt-6">
         <a
           href="/docs/intro"
           class="h-12 px-8 rounded-lg bg-foreground text-background font-semibold hover:opacity-90 transition-opacity flex items-center gap-2"
@@ -38,12 +41,6 @@ import { HeroCodeSnippet } from './HeroCodeSnippet';
         </a>
       </div>
 
-      <div class="mt-10 flex items-center justify-center lg:justify-start gap-4 text-sm text-neutral-500 dark:text-neutral-300 font-mono">
-        <span class="flex items-center gap-2">
-          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>
-          npm install @topgunbuild/client
-        </span>
-      </div>
     </div>
 
     <!-- Visual/Code (Client-side for interactivity) -->
