@@ -150,15 +150,14 @@ TopGun does not issue JWTs itself. Bring your own auth provider (BetterAuth, Cle
 
 ### Pattern B — Channel-subscribe vs query-subscribe
 
-Supabase Realtime exposes two listening shapes — `broadcast` (fan-out messages) and `postgres_changes` (CDC from the WAL). TopGun maps these onto two distinct primitives: pub/sub topics and CRDT-backed query subscriptions.
-
-#### B.1 — Broadcast event
+Supabase Realtime exposes two listening shapes — `broadcast` (fan-out messages) and `postgres_changes` (CDC from the WAL). TopGun maps these onto two distinct primitives: pub/sub topics and CRDT-backed query subscriptions. Both pairs are shown below.
 
 <div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
   <div className="p-4 border border-card-border rounded-lg">
     <div className="mb-3 font-semibold text-foreground text-sm">Supabase Realtime</div>
 
 ```javascript
+// Broadcast — fan-out messages
 const channel = supabase.channel('room-1');
 
 channel
@@ -167,42 +166,16 @@ channel
   })
   .subscribe();
 
-// Send a broadcast event
 channel.send({
   type: 'broadcast',
   event: 'msg',
   payload: { text: 'hello' },
 });
-```
 
-  </div>
-  <div className="p-4 border border-card-border rounded-lg">
-    <div className="mb-3 font-semibold text-foreground text-sm">TopGun</div>
+// postgres_changes — CDC from the WAL
+const todosChannel = supabase.channel('todos-changes');
 
-```typescript
-const topic = client.getTopic('room-1');
-
-const unsub = topic.subscribe((payload) => {
-  console.log('topic', payload);
-});
-
-// Publish to the topic
-topic.publish({ text: 'hello' });
-```
-
-  </div>
-</div>
-
-#### B.2 — `postgres_changes` vs CRDT query
-
-<div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
-  <div className="p-4 border border-card-border rounded-lg">
-    <div className="mb-3 font-semibold text-foreground text-sm">Supabase Realtime</div>
-
-```javascript
-const channel = supabase.channel('todos-changes');
-
-channel
+todosChannel
   .on(
     'postgres_changes',
     { event: 'INSERT', schema: 'public', table: 'todos' },
@@ -218,11 +191,21 @@ channel
     <div className="mb-3 font-semibold text-foreground text-sm">TopGun</div>
 
 ```typescript
+// Pub/sub topic — fan-out messages
+const topic = client.getTopic('room-1');
+
+const unsub = topic.subscribe((payload) => {
+  console.log('topic', payload);
+});
+
+topic.publish({ text: 'hello' });
+
+// CRDT-backed query subscription
 // Server-pushed deltas via WebSocket; emitted from
 // CRDT merge, not from Postgres WAL.
 const query = client.query('todos');
 
-const unsub = query.subscribe((results) => {
+const unsubQuery = query.subscribe((results) => {
   console.log('todos', results);
 });
 ```
