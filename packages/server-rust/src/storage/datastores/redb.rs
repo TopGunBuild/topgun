@@ -377,3 +377,256 @@ impl MapDataStore for RedbDataStore {
         // in-memory queue. (Matches PostgresDataStore::reset.)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use topgun_core::hlc::Timestamp;
+    use topgun_core::types::Value;
+
+    /// Build a `RedbDataStore` over a fresh tempdir-backed file.
+    fn fresh_store() -> (RedbDataStore, tempfile::TempDir) {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("test.redb");
+        let store = RedbDataStore::new(&path).expect("redb open");
+        (store, dir)
+    }
+
+    fn dummy_value(s: &str) -> RecordValue {
+        RecordValue::Lww {
+            value: Value::String(s.to_string()),
+            timestamp: Timestamp {
+                millis: 0,
+                counter: 0,
+                node_id: String::new(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn add_then_load_returns_value() {
+        let (store, _dir) = fresh_store();
+        store.add("users", "alice", &dummy_value("v1"), 0, 1000).await.unwrap();
+        let got = store.load("users", "alice").await.unwrap().expect("present");
+        assert!(matches!(got, RecordValue::Lww { value: Value::String(ref s), .. } if s == "v1"));
+    }
+
+    #[tokio::test]
+    async fn add_overwrites_previous_value() {
+        let (store, _dir) = fresh_store();
+        store.add("users", "alice", &dummy_value("v1"), 0, 1000).await.unwrap();
+        store.add("users", "alice", &dummy_value("v2"), 0, 1001).await.unwrap();
+        let got = store.load("users", "alice").await.unwrap().expect("present");
+        assert!(matches!(got, RecordValue::Lww { value: Value::String(ref s), .. } if s == "v2"));
+    }
+
+    #[tokio::test]
+    async fn add_backup_is_isolated_from_primary() {
+        let (store, _dir) = fresh_store();
+        store.add("users", "alice", &dummy_value("primary"), 0, 1000).await.unwrap();
+        store.add_backup("users", "alice", &dummy_value("backup"), 0, 1000).await.unwrap();
+        let got = store.load("users", "alice").await.unwrap().expect("primary");
+        assert!(matches!(got, RecordValue::Lww { value: Value::String(ref s), .. } if s == "primary"));
+    }
+
+    #[tokio::test]
+    async fn remove_deletes_value() {
+        let (store, _dir) = fresh_store();
+        store.add("users", "alice", &dummy_value("v1"), 0, 1000).await.unwrap();
+        store.remove("users", "alice", 1001).await.unwrap();
+        assert!(store.load("users", "alice").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_missing_key_is_ok() {
+        let (store, _dir) = fresh_store();
+        // Both nonexistent table and nonexistent key paths must be no-op.
+        store.remove("never_written", "k", 1000).await.unwrap();
+        store.add("users", "bob", &dummy_value("v"), 0, 1000).await.unwrap();
+        store.remove("users", "alice_not_present", 1000).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn remove_backup_only_affects_backup() {
+        let (store, _dir) = fresh_store();
+        store.add("users", "alice", &dummy_value("primary"), 0, 1000).await.unwrap();
+        store.add_backup("users", "alice", &dummy_value("backup"), 0, 1000).await.unwrap();
+        store.remove_backup("users", "alice", 1001).await.unwrap();
+        // Primary survives.
+        assert!(store.load("users", "alice").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn load_missing_returns_none() {
+        let (store, _dir) = fresh_store();
+        // Table never created path:
+        assert!(store.load("never", "k").await.unwrap().is_none());
+        // Table exists but key missing path:
+        store.add("users", "alice", &dummy_value("v"), 0, 1000).await.unwrap();
+        assert!(store.load("users", "ghost").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn load_all_returns_subset() {
+        let (store, _dir) = fresh_store();
+        store.add("m", "a", &dummy_value("a"), 0, 1000).await.unwrap();
+        store.add("m", "b", &dummy_value("b"), 0, 1000).await.unwrap();
+        let got = store
+            .load_all("m", &["a".to_string(), "b".to_string(), "missing".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 2, "missing key silently absent");
+    }
+
+    #[tokio::test]
+    async fn load_all_on_missing_table_returns_empty() {
+        let (store, _dir) = fresh_store();
+        let got = store
+            .load_all("never", &["a".to_string()])
+            .await
+            .unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[tokio::test]
+    async fn remove_all_atomic_per_map() {
+        let (store, _dir) = fresh_store();
+        for k in ["a", "b", "c"] {
+            store.add("m", k, &dummy_value(k), 0, 1000).await.unwrap();
+        }
+        store
+            .remove_all("m", &["a".to_string(), "b".to_string()])
+            .await
+            .unwrap();
+        assert!(store.load("m", "a").await.unwrap().is_none());
+        assert!(store.load("m", "b").await.unwrap().is_none());
+        assert!(store.load("m", "c").await.unwrap().is_some());
+    }
+
+    #[test]
+    fn is_loadable_returns_true() {
+        let (store, _dir) = fresh_store();
+        assert!(store.is_loadable("any-key"));
+    }
+
+    #[test]
+    fn pending_operation_count_returns_zero() {
+        let (store, _dir) = fresh_store();
+        assert_eq!(store.pending_operation_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn soft_flush_returns_zero() {
+        let (store, _dir) = fresh_store();
+        assert_eq!(store.soft_flush().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn hard_flush_returns_ok() {
+        let (store, _dir) = fresh_store();
+        store.hard_flush().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn flush_key_writes_through() {
+        let (store, _dir) = fresh_store();
+        store.flush_key("m", "k", &dummy_value("v"), false).await.unwrap();
+        let got = store.load("m", "k").await.unwrap().expect("present");
+        assert!(matches!(got, RecordValue::Lww { value: Value::String(ref s), .. } if s == "v"));
+    }
+
+    #[test]
+    fn reset_is_noop() {
+        let (store, _dir) = fresh_store();
+        store.reset();
+    }
+
+    #[test]
+    fn is_null_returns_false_via_trait_default() {
+        let (store, _dir) = fresh_store();
+        // Per is_null contract: RedbDataStore must NOT override the default.
+        // Only NullDataStore returns true.
+        assert!(!store.is_null());
+    }
+
+    #[tokio::test]
+    async fn durability_across_reopen() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("durable.redb");
+        {
+            let store = RedbDataStore::new(&path).unwrap();
+            store.add("m", "k", &dummy_value("persisted"), 0, 1000).await.unwrap();
+            store.close().await.unwrap();
+            // Drop releases the redb lockfile.
+        }
+        // Reopen on the same path -- value must survive.
+        let store = RedbDataStore::new(&path).unwrap();
+        let got = store.load("m", "k").await.unwrap().expect("survives reopen");
+        assert!(matches!(got, RecordValue::Lww { value: Value::String(ref s), .. } if s == "persisted"));
+    }
+
+    #[tokio::test]
+    async fn map_name_injection_rejected() {
+        let (store, _dir) = fresh_store();
+        let bad = "foo; DROP TABLE x";
+        let err = store.add(bad, "k", &dummy_value("v"), 0, 1000).await;
+        assert!(err.is_err(), "metacharacter map name must be rejected");
+        let msg = format!("{}", err.unwrap_err());
+        assert!(msg.contains("Invalid map name"), "error message names the violation");
+    }
+
+    #[tokio::test]
+    async fn empty_map_name_rejected() {
+        let (store, _dir) = fresh_store();
+        let err = store.add("", "k", &dummy_value("v"), 0, 1000).await;
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn concurrent_writers_serialize_cleanly() {
+        // redb is single-writer; concurrent writes serialize on the write
+        // lock. Spawn two write tasks against the same store and verify both
+        // succeed and both values are observable. This exercises the
+        // serialization path without asserting any particular ordering.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("concurrent.redb");
+        let store = Arc::new(RedbDataStore::new(&path).unwrap());
+
+        let s1 = Arc::clone(&store);
+        let s2 = Arc::clone(&store);
+        let h1 = tokio::spawn(async move {
+            for i in 0..10 {
+                s1.add("m", &format!("a{i}"), &dummy_value("A"), 0, 1000).await.unwrap();
+            }
+        });
+        let h2 = tokio::spawn(async move {
+            for i in 0..10 {
+                s2.add("m", &format!("b{i}"), &dummy_value("B"), 0, 1000).await.unwrap();
+            }
+        });
+        h1.await.unwrap();
+        h2.await.unwrap();
+
+        for i in 0..10 {
+            assert!(store.load("m", &format!("a{i}")).await.unwrap().is_some());
+            assert!(store.load("m", &format!("b{i}")).await.unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn is_valid_map_name_accepts_canonical() {
+        assert!(is_valid_map_name("users"));
+        assert!(is_valid_map_name("_internal"));
+        assert!(is_valid_map_name("Users123"));
+    }
+
+    #[test]
+    fn is_valid_map_name_rejects_metacharacters() {
+        assert!(!is_valid_map_name(""));
+        assert!(!is_valid_map_name("123leading_digit"));
+        assert!(!is_valid_map_name("foo bar"));
+        assert!(!is_valid_map_name("foo;DROP"));
+        assert!(!is_valid_map_name("foo--backup"));
+    }
+}

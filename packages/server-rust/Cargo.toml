@@ -74,6 +74,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util", "
 tokio-tungstenite = "0.26"
 hdrhistogram = "7"
 proptest = "1"
+tempfile = "3"
 
 [[bench]]
 name = "load_harness"
