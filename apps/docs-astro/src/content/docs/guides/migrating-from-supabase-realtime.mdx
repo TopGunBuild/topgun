@@ -1,0 +1,353 @@
+---
+title: Migrating from Supabase Realtime
+description: Map Supabase Realtime (channels, broadcast, presence, postgres_changes) concepts to TopGun. Offline-first, CRDT auto-merge, your-own-Postgres.
+order: 8
+---
+
+import { ChevronRight } from 'lucide-react';
+import { AlertBox } from '../../../components/docs/AlertBox';
+
+<AlertBox variant="danger" title="Read this first — what's shipped vs. planned" text="TopGun does NOT replace Supabase's full BaaS. TopGun is a sync layer in front of YOUR Postgres — it does not replace Supabase Auth, Edge Functions, Storage buckets, or row-level security policies. TopGun ships per-map ACL booleans (read/write) plus JWT roles claim extraction; first-class RBAC and Postgres RLS-style policies are on the roadmap (see /docs/guides/rbac). Supabase postgres_changes (CDC from the Postgres write-ahead log) maps loosely to TopGun's CRDT-write notifications, but TopGun owns the write path — clients write through the TopGun client, not directly to Postgres. Reference: /docs/roadmap." />
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Migrating from Supabase Realtime</span>
+</div>
+
+# Migrating from Supabase Realtime
+
+Supabase Realtime is a Postgres-native real-time library: clients open WebSocket channels, receive broadcast events, track presence, and listen to `postgres_changes` derived from the write-ahead log. TopGun is an offline-first sync layer that sits in front of YOUR Postgres — clients read and write locally, and the TopGun server merges and persists. This guide maps Supabase Realtime primitives one-to-one onto TopGun and names the gaps along the way.
+
+## Concept Mapping
+
+<div className="overflow-x-auto mb-8 not-prose">
+  <table className="w-full text-left border-collapse text-sm">
+    <thead>
+      <tr className="border-b border-card-border">
+        <th className="py-3 px-4 font-medium text-neutral-500">Supabase Concept</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">TopGun Equivalent</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">Notes</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Channel (<code>supabase.channel('room-1')</code>)</td>
+        <td className="py-3 px-4 text-foreground"><code>client.getTopic('room-1')</code></td>
+        <td className="py-3 px-4 text-neutral-500">Named pub/sub topic; HLC-ordered delivery</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Broadcast event (<code>channel.send(&#123;type:'broadcast'&#125;)</code>)</td>
+        <td className="py-3 px-4 text-foreground"><code>topic.publish(payload)</code> / <code>topic.subscribe(cb)</code></td>
+        <td className="py-3 px-4 text-neutral-500">Fan-out to all subscribers of the topic</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Presence (<code>channel.track(state)</code> / <code>channel.on('presence', ...)</code>)</td>
+        <td className="py-3 px-4 text-foreground"><code>release_on_disconnect</code> (single-node only)</td>
+        <td className="py-3 px-4 text-neutral-500">Cross-client presence broadcast is on the roadmap; <code>release_on_disconnect</code> is a lock-cleanup primitive</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>postgres_changes</code> event</td>
+        <td className="py-3 px-4 text-foreground">CRDT write notification via <code>client.query().subscribe()</code></td>
+        <td className="py-3 px-4 text-neutral-500">TopGun owns the write path; notifications are emitted from CRDT merge, not Postgres WAL</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Row Level Security (RLS) policies</td>
+        <td className="py-3 px-4 text-foreground">Per-map ACL booleans (<code>read</code>/<code>write</code>)</td>
+        <td className="py-3 px-4 text-neutral-500">Full RLS-style policies on roadmap — see <a href="/docs/guides/rbac">/docs/guides/rbac</a></td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Supabase Auth (<code>signInWithPassword</code>, etc.)</td>
+        <td className="py-3 px-4 text-foreground">BYO JWT issuer + <code>client.setAuthToken(jwt)</code></td>
+        <td className="py-3 px-4 text-neutral-500">TopGun does not issue JWTs; pair with BetterAuth, Clerk, Supabase Auth, or any OIDC issuer</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Supabase Edge Functions</td>
+        <td className="py-3 px-4 text-foreground">Not in scope</td>
+        <td className="py-3 px-4 text-neutral-500">Use your own server endpoints (Node, Bun, Deno, Go, Rust, etc.)</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Supabase Storage buckets</td>
+        <td className="py-3 px-4 text-foreground">Not in scope</td>
+        <td className="py-3 px-4 text-neutral-500">Continue using Supabase Storage, S3, or any object store independently</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>createClient(url, anonKey)</code></td>
+        <td className="py-3 px-4 text-foreground"><code>new TopGunClient(&#123; serverUrl, storage &#125;)</code></td>
+        <td className="py-3 px-4 text-neutral-500">Single client entry point; storage adapter pluggable (IndexedDB in browsers)</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Client packages (<code>@supabase/realtime-js</code>, <code>supabase-js</code>)</td>
+        <td className="py-3 px-4 text-foreground"><code>@topgunbuild/client</code></td>
+        <td className="py-3 px-4 text-neutral-500">One package covers data + realtime; auth/storage are BYO</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Pricing tiers (Free / Pro / Team / Enterprise)</td>
+        <td className="py-3 px-4 text-foreground">Self-hosted, OSS (Apache-2.0)</td>
+        <td className="py-3 px-4 text-neutral-500">Cost = your infra; no usage-based pricing</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Postgres-native (your-own-Postgres framing)</td>
+        <td className="py-3 px-4 text-foreground">TopGun also runs in front of YOUR Postgres</td>
+        <td className="py-3 px-4 text-neutral-500">Parity — durable store is plain Postgres; <code>pg_dump</code> works</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Offline writes</td>
+        <td className="py-3 px-4 text-foreground">First-class via <code>IDBAdapter</code></td>
+        <td className="py-3 px-4 text-neutral-500">Not supported in Supabase Realtime; TopGun queues writes locally and syncs on reconnect</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+## Side-by-Side Code Patterns
+
+### Pattern A — Initialize and authenticate
+
+<div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">Supabase Realtime</div>
+
+```javascript
+import { createClient } from '@supabase/supabase-js';
+
+const supabase = createClient(
+  'https://my-project.supabase.co',
+  'public-anon-key',
+);
+
+await supabase.auth.signInWithPassword({
+  email: 'user@example.com',
+  password: 'password',
+});
+```
+
+  </div>
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">TopGun</div>
+
+```typescript
+import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+const client = new TopGunClient({
+  serverUrl: 'wss://topgun.example.com',
+  storage: new IDBAdapter(),
+});
+
+// JWT issuance is handled by your own auth server.
+// See /docs/guides/authentication for integration options.
+const jwt = await myAuthServer.signIn(email, password);
+client.setAuthToken(jwt);
+```
+
+  </div>
+</div>
+
+TopGun does not issue JWTs itself. Bring your own auth provider (BetterAuth, Clerk, Supabase Auth, or any OIDC-compatible issuer) and pass the resulting JWT via `client.setAuthToken()`. See the [Authentication guide](/docs/guides/authentication) for step-by-step setup.
+
+### Pattern B — Channel-subscribe vs query-subscribe
+
+Supabase Realtime exposes two listening shapes — `broadcast` (fan-out messages) and `postgres_changes` (CDC from the WAL). TopGun maps these onto two distinct primitives: pub/sub topics and CRDT-backed query subscriptions.
+
+#### B.1 — Broadcast event
+
+<div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">Supabase Realtime</div>
+
+```javascript
+const channel = supabase.channel('room-1');
+
+channel
+  .on('broadcast', { event: 'msg' }, (payload) => {
+    console.log('broadcast', payload);
+  })
+  .subscribe();
+
+// Send a broadcast event
+channel.send({
+  type: 'broadcast',
+  event: 'msg',
+  payload: { text: 'hello' },
+});
+```
+
+  </div>
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">TopGun</div>
+
+```typescript
+const topic = client.getTopic('room-1');
+
+const unsub = topic.subscribe((payload) => {
+  console.log('topic', payload);
+});
+
+// Publish to the topic
+topic.publish({ text: 'hello' });
+```
+
+  </div>
+</div>
+
+#### B.2 — `postgres_changes` vs CRDT query
+
+<div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">Supabase Realtime</div>
+
+```javascript
+const channel = supabase.channel('todos-changes');
+
+channel
+  .on(
+    'postgres_changes',
+    { event: 'INSERT', schema: 'public', table: 'todos' },
+    (payload) => {
+      console.log('row inserted', payload.new);
+    },
+  )
+  .subscribe();
+```
+
+  </div>
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">TopGun</div>
+
+```typescript
+// Server-pushed deltas via WebSocket; emitted from
+// CRDT merge, not from Postgres WAL.
+const query = client.query('todos');
+
+const unsub = query.subscribe((results) => {
+  console.log('todos', results);
+});
+```
+
+  </div>
+</div>
+
+Supabase delivers WAL-derived row events; TopGun delivers CRDT-merge deltas. Functionally similar for "show me changes to this collection," but TopGun owns the write path — see Pattern C.
+
+### Pattern C — Write to Postgres + listen vs CRDT write via client
+
+<div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">Supabase Realtime</div>
+
+```javascript
+// Write goes through PostgREST (network round-trip).
+await supabase.from('users').insert({
+  id: 'alice',
+  name: 'Alice',
+  age: 30,
+});
+
+// Listen for the change via postgres_changes
+// (separate WebSocket subscription).
+const channel = supabase.channel('users-changes');
+channel
+  .on(
+    'postgres_changes',
+    { event: 'INSERT', schema: 'public', table: 'users' },
+    (payload) => {
+      console.log('row inserted', payload.new);
+    },
+  )
+  .subscribe();
+```
+
+  </div>
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">TopGun</div>
+
+```typescript
+// Synchronous, local-first write. The CRDT merge
+// propagates to the server (and to other clients
+// subscribing via client.query) automatically.
+client.getMap('users').set('alice', {
+  id: 'alice',
+  name: 'Alice',
+  age: 30,
+});
+
+// Listen via the same query subscription; merges
+// from this client and others both arrive here.
+const query = client.query('users');
+const unsub = query.subscribe((results) => {
+  console.log('users', results);
+});
+```
+
+  </div>
+</div>
+
+In Supabase, the write path is `client → PostgREST → Postgres → WAL → Realtime → subscribers`. In TopGun, the write path is `client (local LWWMap) → SyncEngine → server → CRDT merge → subscribers`, and the durable Postgres write happens server-side. Clients do not write to Postgres directly.
+
+## Deployment Mode Semantics
+
+<div className="overflow-x-auto mb-8 not-prose">
+  <table className="w-full text-left border-collapse text-sm">
+    <thead>
+      <tr className="border-b border-card-border">
+        <th className="py-3 px-4 font-medium text-neutral-500">Deployment</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">Status</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">Notes</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Single-node (recommended for migration)</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable</td>
+        <td className="py-3 px-4 text-neutral-500">All Supabase Realtime capabilities mapped above are production-ready in single-node mode</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Cluster (current)</td>
+        <td className="py-3 px-4 text-yellow-600 dark:text-yellow-400">Partition-routing, no Raft</td>
+        <td className="py-3 px-4 text-neutral-500">Safe when one node owns the partition; weaker guarantees under node failure — see <a href="/docs/guides/cluster-replication">Cluster Replication</a></td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Cluster (planned)</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Raft-replicated — planned</td>
+        <td className="py-3 px-4 text-neutral-500">Multi-region with QUORUM/STRONG consistency on roadmap — see <a href="/docs/roadmap">/docs/roadmap</a></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+For a first migration, start on single-node. The partition-routed cluster mode works but does not yet have Raft-backed consensus; consult the [Cluster Replication guide](/docs/guides/cluster-replication) before running cluster in production.
+
+## Why migrate?
+
+- **Local-first reads/writes:** Operations never wait for network; the UI updates immediately. Supabase Realtime is read-only on the client; writes still go through PostgREST + a network round-trip.
+- **Offline persistence:** First-class via `IDBAdapter`. Supabase Realtime has no offline mode.
+- **CRDT auto-merge:** LWW-Map and OR-Map merge deterministically via HLC. No "lost update" surprises when two clients write the same key offline.
+- **Your-own-Postgres:** Parity with Supabase's "you own your Postgres" framing. TopGun's durable store is plain Postgres; `pg_dump` works.
+- **Performance:** 483K ops/sec fire-and-forget, ~37K ops/sec fire-and-wait at 1.5ms p50 on M1 Max (200 connections). See [benchmarks](/docs/benchmarks) for methodology.
+
+## Migration checklist
+
+1. Audit Supabase Realtime features in use (channels, broadcast, presence, `postgres_changes`, RLS).
+2. Cross-reference each against the Concept Mapping table above; mark mappings vs gaps.
+3. Audit which Supabase services you use beyond Realtime (Auth, Storage, Edge Functions, RLS) — TopGun replaces only the Realtime + sync surface; the others stay on Supabase or move to alternative providers. Make explicit decisions per service.
+4. Port the client layer: replace `createClient(url, anonKey)` + the auth flow with `new TopGunClient({ serverUrl, storage })` + `setAuthToken` (BYO JWT). See [Authentication](/docs/guides/authentication).
+5. Port channels/queries one resource at a time: replace `channel.on('broadcast', ...)` with `client.getTopic().subscribe()`, replace `channel.on('postgres_changes', ...)` with `client.query().subscribe()`, and replace direct `supabase.from().insert()` with `client.getMap().set()` (the write path moves through TopGun, not directly to Postgres).
+6. Backfill data via a one-time migration script that reads from Postgres (or via `supabase-js`) and writes to TopGun via the client SDK or direct Postgres insert (TopGun owns the write path going forward).
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/migrating-from-replicache" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Migrating from Replicache
+    </div>
+  </a>
+  <a href="/docs/guides/security" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next Guide</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Security (TLS) <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>
