@@ -195,6 +195,18 @@ Measured on Apple M1 Max, 200 concurrent WebSocket connections, using the in-pro
 
 > Numbers are from an in-process load harness on Apple M1 Max with 200 concurrent connections. Performance on your hardware will differ. See [`packages/server-rust/benches/load_harness/baseline.json`](packages/server-rust/benches/load_harness/baseline.json) for CI thresholds and [`packages/server-rust/docs/profiling/FLAMEGRAPH_ANALYSIS.md`](packages/server-rust/docs/profiling/FLAMEGRAPH_ANALYSIS.md) for methodology.
 
+## Coming from X
+
+Migrating from another sync stack? Each guide names what TopGun does not replace, up front.
+
+| Coming from | Why migrate | Migration guide | Status |
+|-------------|-------------|-----------------|--------|
+| Firebase Realtime | SQL, FTS, no vendor lock-in | [Guide](https://topgun.build/docs/guides/migrating-from-firebase) | Live |
+| Y.js / Automerge | Server backend + SQL queries | [Guide](https://topgun.build/docs/guides/migrating-from-yjs) | Live |
+| Replicache | Open source, no SaaS invoice | [Guide](https://topgun.build/docs/guides/migrating-from-replicache) | Live |
+| Supabase Realtime | Offline-first, CRDT auto-merge | [Guide](https://topgun.build/docs/guides/migrating-from-supabase-realtime) | Live |
+| Liveblocks | Self-hosted option | (planned) | Q3 2026 |
+
 ## Performance Testing
 
 ### Quick Smoke Test
