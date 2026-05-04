@@ -214,6 +214,22 @@ Format: `type(scope): description`
 
 Types: `feat`, `fix`, `docs`, `test`, `chore`, `refactor`, `perf`
 
+## Contributor License Agreement (CLA)
+
+All contributions to TopGun are governed by a Contributor License Agreement (CLA) — specifically, the [Apache Individual Contributor License Agreement](.github/CLA.md). Signing the CLA grants TopGun the right to distribute and sublicense your contribution, including under future licenses for enterprise modules.
+
+**How it works:**
+
+1. Open a PR as usual.
+2. The [cla-assistant.io](https://cla-assistant.io) bot will comment with a sign-link if you have not yet signed.
+3. Click the link, sign in with GitHub, and accept the CLA. Takes about 30 seconds.
+4. The bot's status check turns green; your PR is then mergeable (subject to normal review).
+5. You only sign once. Future PRs from the same GitHub account auto-pass.
+
+**Existing committers:** Anyone with merged commits in `TopGunBuild/topgun` prior to CLA introduction (see [`legal/GRANDFATHERED_COMMITTERS.md`](legal/GRANDFATHERED_COMMITTERS.md)) is grandfathered under the existing Apache License 2.0 grant. No retroactive signing required for past contributions.
+
+**Questions about the CLA:** Open a GitHub Discussion or contact the maintainer.
+
 ## Code Style
 
 ### TypeScript
