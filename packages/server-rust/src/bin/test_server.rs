@@ -62,10 +62,63 @@ use topgun_server::service::router::OperationRouter;
 use topgun_server::service::security::{SecurityConfig, WriteValidator};
 use topgun_server::service::OperationService;
 use topgun_server::storage::datastores::NullDataStore;
+#[cfg(feature = "redb")]
+use topgun_server::storage::datastores::RedbDataStore;
+use topgun_server::storage::map_data_store::MapDataStore;
 use topgun_server::storage::factory::{ObserverFactory, RecordStoreFactory};
 use topgun_server::storage::impls::StorageConfig;
 use topgun_server::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
 use topgun_server::storage::mutation_observer::MutationObserver;
+
+// ---------------------------------------------------------------------------
+// Storage backend selection
+// ---------------------------------------------------------------------------
+
+/// Resolve the storage backend at startup.
+///
+/// Reads `STORAGE_BACKEND` (default: `redb`) and constructs the matching
+/// `Arc<dyn MapDataStore>`. Each branch is responsible for any per-backend
+/// initialization (e.g. opening a redb file, connecting to Postgres).
+///
+/// The default is `redb` so a developer running `pnpm start:server` with no
+/// env vars gets durable embedded storage out of the box. Set
+/// `STORAGE_BACKEND=null` for ephemeral integration-test fixtures, or
+/// `STORAGE_BACKEND=postgres` (with the `postgres` feature compiled in) for
+/// production deployments.
+async fn select_datastore() -> anyhow::Result<Arc<dyn MapDataStore>> {
+    let backend = std::env::var("STORAGE_BACKEND").unwrap_or_else(|_| "redb".to_string());
+    match backend.as_str() {
+        "null" => Ok(Arc::new(NullDataStore)),
+        #[cfg(feature = "redb")]
+        "redb" => {
+            let path =
+                std::env::var("TOPGUN_REDB_PATH").unwrap_or_else(|_| "./topgun.redb".to_string());
+            let store = RedbDataStore::new(&path)?;
+            store.initialize().await?;
+            Ok(Arc::new(store))
+        }
+        #[cfg(not(feature = "redb"))]
+        "redb" => anyhow::bail!(
+            "STORAGE_BACKEND=redb requested but topgun-server was built without the `redb` feature"
+        ),
+        #[cfg(feature = "postgres")]
+        "postgres" => {
+            let url = std::env::var("DATABASE_URL")
+                .map_err(|_| anyhow::anyhow!("STORAGE_BACKEND=postgres requires DATABASE_URL"))?;
+            let pool = sqlx::PgPool::connect(&url).await?;
+            let store = topgun_server::storage::datastores::PostgresDataStore::new(pool, None)?;
+            store.initialize().await?;
+            Ok(Arc::new(store))
+        }
+        #[cfg(not(feature = "postgres"))]
+        "postgres" => anyhow::bail!(
+            "STORAGE_BACKEND=postgres requested but topgun-server was built without the `postgres` feature"
+        ),
+        other => anyhow::bail!(
+            "Unknown STORAGE_BACKEND='{other}' (expected: redb, postgres, null)"
+        ),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // CLI argument definition
@@ -152,6 +205,11 @@ async fn main() -> anyhow::Result<()> {
     let policy_evaluator = Arc::new(PolicyEvaluator::new(
         policy_store.clone() as Arc<dyn PolicyStore>
     ));
+
+    // Resolve the persistence backend once per process. The default branch
+    // creates ./topgun.redb in the working directory; STORAGE_BACKEND=null
+    // preserves the legacy ephemeral integration-test behavior.
+    let datastore = select_datastore().await?;
 
     let (cluster_state_for_services, cluster_state_for_app) = if cluster_mode {
         // --- Cluster mode ---
@@ -251,6 +309,7 @@ async fn main() -> anyhow::Result<()> {
             node_id.clone(),
             Arc::clone(&cluster_state),
             Some(Arc::clone(&policy_evaluator)),
+            Arc::clone(&datastore),
         );
 
         // Wire up the membership reactor (partition rebalancing on member changes).
@@ -289,6 +348,7 @@ async fn main() -> anyhow::Result<()> {
             node_id.clone(),
             Arc::clone(&cs),
             Some(Arc::clone(&policy_evaluator)),
+            Arc::clone(&datastore),
         );
 
         // Single-node mode: expose no cluster state to AppState (existing behavior).
@@ -516,6 +576,7 @@ fn build_services(
     node_id: String,
     cluster_state: Arc<ClusterState>,
     policy_evaluator: Option<Arc<PolicyEvaluator>>,
+    datastore: Arc<dyn MapDataStore>,
 ) -> BuildServicesResult {
     let config = ServerConfig {
         node_id: node_id.clone(),
@@ -609,12 +670,8 @@ fn build_services(
     };
 
     let record_store_factory = Arc::new(
-        RecordStoreFactory::new(
-            StorageConfig::default(),
-            Arc::new(NullDataStore),
-            Vec::new(),
-        )
-        .with_observer_factories(observer_factories),
+        RecordStoreFactory::new(StorageConfig::default(), datastore, Vec::new())
+            .with_observer_factories(observer_factories),
     );
 
     // Phase 2: inject the factory Arc and spawn the background embedding task.
