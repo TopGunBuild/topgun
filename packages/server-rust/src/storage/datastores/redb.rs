@@ -340,32 +340,40 @@ impl MapDataStore for RedbDataStore {
     }
 
     fn is_loadable(&self, _key: &str) -> bool {
-        unimplemented!("RedbDataStore::is_loadable — implemented in G2")
+        // Write-through: every successful add/remove has already committed
+        // to redb before the call returned, so every key is loadable.
+        true
     }
 
     fn pending_operation_count(&self) -> u64 {
-        unimplemented!("RedbDataStore::pending_operation_count — implemented in G2")
+        // Write-through: nothing is queued.
+        0
     }
 
     async fn soft_flush(&self) -> anyhow::Result<u64> {
-        unimplemented!("RedbDataStore::soft_flush — implemented in G2")
+        // Nothing to flush -- writes are already durable.
+        Ok(0)
     }
 
     async fn hard_flush(&self) -> anyhow::Result<()> {
-        unimplemented!("RedbDataStore::hard_flush — implemented in G2")
+        // Nothing to flush -- writes are already durable on commit.
+        Ok(())
     }
 
     async fn flush_key(
         &self,
-        _map: &str,
-        _key: &str,
-        _value: &RecordValue,
-        _is_backup: bool,
+        map: &str,
+        key: &str,
+        value: &RecordValue,
+        is_backup: bool,
     ) -> anyhow::Result<()> {
-        unimplemented!("RedbDataStore::flush_key — implemented in G2")
+        // For write-through, "flush this key" is equivalent to "write it
+        // through right now". Mirrors the Postgres flush_key semantics.
+        write_one(&self.db, map, key, value, is_backup)
     }
 
     fn reset(&self) {
-        unimplemented!("RedbDataStore::reset — implemented in G2")
+        // Nothing to reset -- redb's data lives on disk and has no
+        // in-memory queue. (Matches PostgresDataStore::reset.)
     }
 }
