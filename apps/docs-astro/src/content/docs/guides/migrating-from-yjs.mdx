@@ -1,0 +1,285 @@
+---
+title: Migrating from Y.js
+description: Map Y.js (Y.Doc, Y.Map, Y.Array, Y.Text, providers, awareness) concepts to TopGun, with side-by-side code patterns. Whole-document sync, server backend, offline-first.
+order: 6
+---
+
+import { AlertBox } from '../../../components/docs/AlertBox';
+import { ChevronRight } from 'lucide-react';
+
+<AlertBox variant="danger" title="Read this first — what's shipped vs. planned" text="TopGun does NOT replace Y.js's CRDT-as-data-structure model. TopGun provides whole-document/whole-map sync (LWW-Map and OR-Map keyed by HLC), not character-level operational transform / Y.Text. Y.Awareness (cursor presence, user metadata broadcast) has no direct TopGun equivalent — single-node `release_on_disconnect` is a partial primitive only. Y.UndoManager (per-document undo/redo with origin tracking) has no direct TopGun equivalent. Rich-text editor bindings (ProseMirror, Quill, Monaco, TipTap) are not in scope. See /docs/roadmap for the full maturity matrix." />
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Migrating from Y.js</span>
+</div>
+
+# Migrating from Y.js
+
+This guide is for Y.js users who want a server-backed, offline-first data layer with durable Postgres storage and server-side queries. The mapping is one-to-one for whole-document and whole-map use cases (Y.Map / Y.Doc), but Y.js features built on character-level operational transform (Y.Text, RelativePosition) and presence (Y.Awareness, UndoManager) do not have direct TopGun equivalents — cross-check the Concept Mapping table and the [roadmap](/docs/roadmap) before porting.
+
+## Concept Mapping
+
+<div className="overflow-x-auto mb-8 not-prose">
+  <table className="w-full text-left border-collapse text-sm">
+    <thead>
+      <tr className="border-b border-card-border">
+        <th className="py-3 px-4 font-medium text-neutral-500">Y.js Concept</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">TopGun Equivalent</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">Notes</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>Y.Doc</code></td>
+        <td className="py-3 px-4 text-foreground"><code>TopGunClient</code> instance</td>
+        <td className="py-3 px-4 text-neutral-500">A single client owns many maps; there is no per-document boundary as in Y.js</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>Y.Map</code></td>
+        <td className="py-3 px-4 text-foreground"><code>client.getMap(name)</code> (LWW-Map)</td>
+        <td className="py-3 px-4 text-neutral-500">Same key/value semantics; conflict resolution by HLC + node-id tiebreak instead of Y.js's per-key state vectors</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>Y.Array</code></td>
+        <td className="py-3 px-4 text-foreground">No direct equivalent</td>
+        <td className="py-3 px-4 text-neutral-500">Use OR-Map keyed by stable id, or store a JSON array as a single LWW-Map value; ordered-list CRDT semantics are not provided</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>Y.Text</code></td>
+        <td className="py-3 px-4 text-foreground">Not supported</td>
+        <td className="py-3 px-4 text-neutral-500">TopGun is whole-document sync, not character-level OT; rich-text editor bindings (ProseMirror, Quill, Monaco, TipTap) are out of scope</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>Y.Awareness</code></td>
+        <td className="py-3 px-4 text-foreground"><code>release_on_disconnect</code> (locks/topics/counters; single-node only)</td>
+        <td className="py-3 px-4 text-neutral-500">Different semantics: Y.Awareness broadcasts presence/cursor metadata; <code>release_on_disconnect</code> is a lock-cleanup primitive. Cross-client cursor presence is on the roadmap — see <a href="/docs/roadmap">/docs/roadmap</a></td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>doc.observe()</code> / <code>map.observe()</code></td>
+        <td className="py-3 px-4 text-foreground"><code>client.getMap(name).onChange(callback)</code> or <code>client.query(name, filter).subscribe(callback)</code></td>
+        <td className="py-3 px-4 text-neutral-500">Use <code>onChange</code> for raw local notifications; use <code>query().subscribe()</code> for filter-aware server-pushed deltas</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>Y.transact(() =&gt; {"{...}"})</code></td>
+        <td className="py-3 px-4 text-foreground">Implicit batching by SyncEngine outbox</td>
+        <td className="py-3 px-4 text-neutral-500">Multiple <code>set()</code> calls coalesce automatically into a single OpBatch over WebSocket; no explicit transact API</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>IndexeddbPersistence(name, doc)</code></td>
+        <td className="py-3 px-4 text-foreground"><code>IDBAdapter</code> (passed to TopGunClient constructor)</td>
+        <td className="py-3 px-4 text-neutral-500">Always-on; reads/writes never wait for network</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>WebsocketProvider(url, name, doc)</code></td>
+        <td className="py-3 px-4 text-foreground">TopGunClient <code>serverUrl</code> config</td>
+        <td className="py-3 px-4 text-neutral-500">Single WebSocket connection per client multiplexes all maps and queries</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>Y.UndoManager</code></td>
+        <td className="py-3 px-4 text-foreground">Not supported</td>
+        <td className="py-3 px-4 text-neutral-500">No per-document undo/redo with origin tracking; build at the application layer if needed</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>Y.RelativePosition</code></td>
+        <td className="py-3 px-4 text-foreground">Not supported</td>
+        <td className="py-3 px-4 text-neutral-500">No character-level OT cursors — TopGun has no character-position concept</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>encodeStateAsUpdate</code> / <code>applyUpdate</code></td>
+        <td className="py-3 px-4 text-foreground">MerkleTree-based delta sync</td>
+        <td className="py-3 px-4 text-neutral-500">Automatic on reconnect; not a public API — clients exchange Merkle hashes to determine deltas</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Authentication</td>
+        <td className="py-3 px-4 text-foreground">JWT via <code>client.setAuthToken()</code></td>
+        <td className="py-3 px-4 text-neutral-500">Y.js providers do not include auth — bring-your-own-issuer in both projects. See <a href="/docs/guides/authentication">Authentication</a></td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Server-side query</td>
+        <td className="py-3 px-4 text-foreground">SQL-style queries via <code>client.query()</code> + full-text search (tantivy)</td>
+        <td className="py-3 px-4 text-neutral-500">Y.js has no server-side query layer — clients download the full document and filter locally; both projects ship under permissive OSS licenses (Apache-2.0)</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+## Side-by-Side Code Patterns
+
+### Pattern A — Initialize and connect
+
+<div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">Y.js</div>
+
+```javascript
+import * as Y from 'yjs';
+import { WebsocketProvider } from 'y-websocket';
+import { IndexeddbPersistence } from 'y-indexeddb';
+
+const doc = new Y.Doc();
+
+// Offline persistence
+const idb = new IndexeddbPersistence('my-room', doc);
+
+// Realtime sync
+const provider = new WebsocketProvider(
+  'wss://yjs.example.com',
+  'my-room',
+  doc,
+);
+```
+
+  </div>
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">TopGun</div>
+
+```typescript
+import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+const client = new TopGunClient({
+  serverUrl: 'wss://topgun.example.com',
+  storage: new IDBAdapter(),
+});
+
+// JWT issuance is handled by your own auth server.
+// See /docs/guides/authentication for integration options.
+const jwt = await myAuthServer.signIn(email, password);
+client.setAuthToken(jwt);
+```
+
+  </div>
+</div>
+
+In Y.js, a `Y.Doc` is the unit of sync — each room/document gets its own provider and persistence. In TopGun, a single `TopGunClient` owns many maps and queries over one WebSocket connection; the per-document boundary disappears.
+
+### Pattern B — Read, write, and observe
+
+<div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">Y.js</div>
+
+```javascript
+const yMap = doc.getMap('todos');
+
+// Read
+const todo = yMap.get('todo-1');
+console.log(todo);
+
+// Write
+yMap.set('todo-1', { title: 'Write guide', done: false });
+
+// Observe — fires on any change to this Y.Map
+yMap.observe((event) => {
+  event.changes.keys.forEach((change, key) => {
+    console.log(key, change.action, yMap.get(key));
+  });
+});
+```
+
+  </div>
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">TopGun</div>
+
+```typescript
+import { Predicates } from '@topgunbuild/client';
+
+// Read — synchronous, local-first (no await)
+const todo = client.getMap('todos').get('todo-1');
+console.log(todo);
+
+// Write — synchronous, local-first; syncs in background
+client.getMap('todos').set('todo-1', {
+  title: 'Write guide',
+  done: false,
+});
+
+// Raw local-change notifications (no filter):
+const unsubLocal = client.getMap('todos').onChange(() => {
+  const todo = client.getMap('todos').get('todo-1');
+  console.log(todo);
+});
+
+// Filter-aware server-pushed deltas:
+const query = client.query('todos', {
+  predicate: Predicates.equal('done', false),
+});
+const unsub = query.subscribe((results) => {
+  console.log(results);
+});
+```
+
+  </div>
+</div>
+
+`yMap.observe` and `client.getMap().onChange()` are the closest match — both fire on any write to the local map. For filter-aware deltas (e.g. "only show open todos"), use `client.query().subscribe()`, which Y.js does not provide because all filtering in Y.js is client-side over the full document.
+
+## Deployment Mode Semantics
+
+<div className="overflow-x-auto mb-8 not-prose">
+  <table className="w-full text-left border-collapse text-sm">
+    <thead>
+      <tr className="border-b border-card-border">
+        <th className="py-3 px-4 font-medium text-neutral-500">Deployment</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">Status</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">Notes</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Single-node (recommended for migration)</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable</td>
+        <td className="py-3 px-4 text-neutral-500">All Y.Map/Y.Doc capabilities mapped above are production-ready in single-node mode</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Cluster (current)</td>
+        <td className="py-3 px-4 text-yellow-600 dark:text-yellow-400">Partition-routing, no Raft</td>
+        <td className="py-3 px-4 text-neutral-500">Safe when one node owns the partition; weaker guarantees under node failure — see <a href="/docs/guides/cluster-replication">Cluster Replication</a></td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Cluster (planned)</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Raft-replicated — planned</td>
+        <td className="py-3 px-4 text-neutral-500">Cluster-safe distributed locks and split-brain protection require Raft consensus, on roadmap — see <a href="/docs/roadmap">/docs/roadmap</a></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+For a first migration, start on single-node. The partition-routed cluster mode works but does not yet have Raft-backed consensus; consult the [Cluster Replication guide](/docs/guides/cluster-replication) before running cluster in production.
+
+## Why migrate?
+
+- **Local-first reads/writes:** Operations never wait for network; the UI updates immediately (parity with Y.js).
+- **Server-side filtering and indexing:** Y.js requires you to download the full document client-side and filter locally. TopGun supports `client.query(filter)` so the server returns only matching rows.
+- **Server-side queries:** SQL-style queries and full-text search (tantivy) on the server. Y.js has no server-side query layer.
+- **Plain Postgres durable store:** Migrate data off TopGun via `pg_dump`. Y.js typically pairs with a custom server (y-websocket, y-redis, y-leveldb) — TopGun ships with the durable store.
+- **Offline persistence via `IDBAdapter`:** Always-on parity with `IndexeddbPersistence`.
+- **CRDT conflict resolution by HLC:** Deterministic across clients (parity with Y.js's CRDT semantics, but at whole-document granularity, not character-level).
+
+## Migration checklist
+
+1. Audit Y.js features in use — Y.Doc, Y.Map, Y.Array, Y.Text, Y.Awareness, Y.UndoManager, and the provider stack (y-websocket, y-indexeddb, y-leveldb, y-redis, etc.).
+2. Cross-reference each against the Concept Mapping table above; mark mappings vs. gaps.
+3. Flag any feature that maps to a "Not supported" or "Roadmap" cell — those need an explicit decision (drop, work around, or wait for the roadmap item).
+4. Port the provider layer: replace `Y.Doc + WebsocketProvider + IndexeddbPersistence` with `new TopGunClient({ serverUrl, storage: new IDBAdapter() })` and `client.setAuthToken(jwt)`.
+5. Port reads/writes/observes one map at a time: replace `yMap.set` / `yMap.get` / `yMap.observe` with `client.getMap().set` / `.get` / `.onChange` (and `client.query().subscribe` for filter-aware server-pushed deltas).
+6. Backfill data: write a one-time migration script that reads from your Y.js persistence (e.g. y-leveldb / y-redis / y-mongodb) and writes to TopGun via the client SDK or directly to Postgres.
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/migrating-from-firebase" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Migrating from Firebase
+    </div>
+  </a>
+  <a href="/docs/guides/migrating-from-replicache" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next Guide</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Migrating from Replicache <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>
