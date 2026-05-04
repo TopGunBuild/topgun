@@ -146,6 +146,11 @@ impl RedbDataStore {
     /// # Errors
     ///
     /// Reserved for future schema migrations; never errors today.
+    // Async signature is intentional: `select_datastore()` in `test_server.rs` calls
+    // `store.initialize().await` uniformly across backends. `PostgresDataStore::initialize`
+    // is genuinely async (runs DDL migrations); keeping the same signature here lets the
+    // bootstrap code branch on the backend without conditional `.await`.
+    #[allow(clippy::unused_async)]
     pub async fn initialize(&self) -> anyhow::Result<()> {
         Ok(())
     }
@@ -160,13 +165,16 @@ impl RedbDataStore {
     /// # Errors
     ///
     /// Reserved for future explicit-flush behavior; never errors today.
+    // Async signature is intentional: matches the `PostgresDataStore::close` signature for
+    // interface parity, so callers can call `.close().await` uniformly without branching.
+    #[allow(clippy::unused_async)]
     pub async fn close(&self) -> anyhow::Result<()> {
         Ok(())
     }
 }
 
 /// Insert (or overwrite) a single record under the given `(map, key, is_backup)`
-/// tuple. Validates the map name, opens (or creates) the per-(map, is_backup)
+/// tuple. Validates the map name, opens (or creates) the per-(map, `is_backup`)
 /// table inside one `WriteTransaction`, serializes the value via msgpack, and
 /// commits.
 fn write_one(
@@ -303,7 +311,7 @@ impl MapDataStore for RedbDataStore {
         let mut results = Vec::with_capacity(keys.len());
         for key in keys {
             if let Some(b) = table.get(key.as_str())? {
-                let value: RecordValue = rmp_serde::from_slice(&b.value().to_vec())?;
+                let value: RecordValue = rmp_serde::from_slice(b.value())?;
                 results.push((key.clone(), value));
             }
         }
