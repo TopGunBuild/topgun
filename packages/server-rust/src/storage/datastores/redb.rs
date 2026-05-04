@@ -49,8 +49,9 @@
 //! to `3.x`, either ship a migration step or document a "rebuild from
 //! Postgres" path. See follow-up TODO-335 for the migration plan.
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::bail;
 use async_trait::async_trait;
@@ -88,20 +89,29 @@ fn table_name_for(map: &str, is_backup: bool) -> String {
     }
 }
 
-/// Macro that builds a `TableDefinition<&str, &[u8]>` whose lifetime is
-/// tied to the borrowed `name: &str`. `redb::TableDefinition::new` is a
-/// `const fn` and the resulting handle holds a `&'static str` reference;
-/// since we build the name dynamically, we leak it via the leak-on-first-
-/// use pattern below at each callsite.
+/// Module-level intern cache: maps a table name string to a leaked `&'static str`.
+///
+/// redb 2.x requires `&'static str` for `TableDefinition::new`. We satisfy this by
+/// leaking one `Box<str>` per *distinct* table name encountered at runtime and caching
+/// the resulting `&'static str`. Repeat calls for the same name return the cached
+/// pointer without a new allocation, bounding leak growth to the number of distinct
+/// `(map, is_backup)` combinations ever seen — a small, schema-fixed set in practice.
+static LEAKED_TABLE_NAMES: OnceLock<Mutex<HashMap<String, &'static str>>> = OnceLock::new();
+
+/// Return a `TableDefinition` whose name pointer is stable for the process lifetime.
+///
+/// On the first call for a given `name`, a single `Box<str>` is leaked and the
+/// resulting `&'static str` is cached in `LEAKED_TABLE_NAMES`. Subsequent calls for
+/// the same `name` return the cached pointer — no allocation, no additional leak.
+/// Total leaked memory is bounded by the number of distinct table names (one per
+/// `(map, is_backup)` combination), which is small and fixed by the application schema.
 fn table_def(name: &str) -> TableDefinition<'_, &'static str, &'static [u8]> {
-    // redb 2.x table-definition API requires a `&'static str` for the table
-    // name. Leaking a Box keeps the per-(map, is_backup) string alive for
-    // the process lifetime. The number of distinct map names is bounded by
-    // application schema (small, fixed at startup), so leak growth is
-    // negligible compared to the alternative (a full HashMap-backed cache
-    // with mutex on hot path).
-    let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
-    TableDefinition::new(leaked)
+    let cache = LEAKED_TABLE_NAMES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().expect("LEAKED_TABLE_NAMES mutex poisoned");
+    let static_name = guard
+        .entry(name.to_string())
+        .or_insert_with(|| Box::leak(name.to_string().into_boxed_str()));
+    TableDefinition::new(static_name)
 }
 
 /// Embedded `redb`-backed `MapDataStore`.
@@ -636,5 +646,25 @@ mod tests {
         assert!(!is_valid_map_name("foo bar"));
         assert!(!is_valid_map_name("foo;DROP"));
         assert!(!is_valid_map_name("foo--backup"));
+    }
+
+    #[test]
+    fn table_def_cache_returns_pointer_identical_static_str() {
+        // Two calls for the same name must return the exact same &'static str pointer,
+        // confirming the intern cache hits on the second call and does not leak a second
+        // allocation for the same distinct name.
+        let def1 = table_def("map__cache_test");
+        let def2 = table_def("map__cache_test");
+        // TableDefinition::name() returns the &'static str used at construction.
+        assert!(
+            std::ptr::eq(def1.name(), def2.name()),
+            "second call must reuse cached pointer, not allocate a new &'static str"
+        );
+        // A different name must produce a different pointer (distinct intern entries).
+        let def3 = table_def("map__cache_test__backup");
+        assert!(
+            !std::ptr::eq(def1.name(), def3.name()),
+            "distinct names must have distinct pointers"
+        );
     }
 }
