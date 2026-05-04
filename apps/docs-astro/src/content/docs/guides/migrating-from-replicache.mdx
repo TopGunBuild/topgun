@@ -1,0 +1,330 @@
+---
+title: Migrating from Replicache
+description: Map Replicache (mutators, pull/push, subscribe, indexes) concepts to TopGun. CRDT-merge semantics, OSS, no SaaS invoice.
+order: 7
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight } from 'lucide-react';
+import { AlertBox } from '../../../components/docs/AlertBox';
+
+<AlertBox variant="danger" title="Read this first — what's shipped vs. planned" text="TopGun does NOT replicate Replicache's server-mutator + client-side optimistic-mutation model. CRDT-merge semantics (LWW-Map / OR-Map by HLC) remove the need for explicit mutator functions, but they also mean there is no server-authoritative custom mutation logic. Replicache's Pull/Push protocol and per-mutator validation logic must be re-architected, not ported: validation in TopGun runs as per-map ACL booleans plus (planned) Entry Processor — not as per-mutation server functions. Replicache useSubscribe with query.scan and pluggable indexes maps to client.query() with predicates, but pluggable secondary indexes are still on the roadmap (see /docs/guides/indexing). Reference: /docs/roadmap." />
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Migrating from Replicache</span>
+</div>
+
+# Migrating from Replicache
+
+This guide is for Replicache users (including those on the deprecated upstream) and anyone evaluating Replicache as an architecture pattern. TopGun replaces Replicache's mutator + Pull/Push round-trip with CRDT-merge sync, but the architectural shift is real: validate every Replicache feature you depend on against the Concept Mapping table and the [roadmap](/docs/roadmap) before committing to a port.
+
+## Concept Mapping
+
+<div className="overflow-x-auto mb-8 not-prose">
+  <table className="w-full text-left border-collapse text-sm">
+    <thead>
+      <tr className="border-b border-card-border">
+        <th className="py-3 px-4 font-medium text-neutral-500">Replicache Concept</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">TopGun Equivalent</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">Notes</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>ReplicacheClient</code></td>
+        <td className="py-3 px-4 text-foreground"><code>TopGunClient</code></td>
+        <td className="py-3 px-4 text-neutral-500">Single client entry point; constructed with <code>serverUrl</code> and a storage adapter</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>mutators</code> (custom server-side functions)</td>
+        <td className="py-3 px-4 text-foreground">CRDT writes via <code>getMap().set()</code></td>
+        <td className="py-3 px-4 text-neutral-500">No equivalent for custom server-side mutator logic — CRDT-merge replaces explicit mutators; rewrite, do not port</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>replicache.query(tx =&gt; tx.scan().toArray())</code></td>
+        <td className="py-3 px-4 text-foreground"><code>client.query(name, predicate)</code></td>
+        <td className="py-3 px-4 text-neutral-500">Server-side filter via predicate; results are local-first when cached</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>replicache.subscribe(tx =&gt; tx.scan(), {"{ onData }"})</code></td>
+        <td className="py-3 px-4 text-foreground"><code>client.query().subscribe()</code></td>
+        <td className="py-3 px-4 text-neutral-500">Server-pushed deltas via WebSocket; predicate-aware subscription</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>pullURL</code> / <code>pushURL</code></td>
+        <td className="py-3 px-4 text-foreground">WebSocket <code>serverUrl</code></td>
+        <td className="py-3 px-4 text-neutral-500">Single bidirectional WebSocket — no separate pull/push HTTP endpoints to host</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>ClientGroupID</code></td>
+        <td className="py-3 px-4 text-foreground">ClientID + JWT subject</td>
+        <td className="py-3 px-4 text-neutral-500">Client identity is per-connection ClientID; user identity comes from the JWT <code>sub</code> claim</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Pluggable indexes</td>
+        <td className="py-3 px-4 text-foreground">Planned</td>
+        <td className="py-3 px-4 text-neutral-500">Pluggable secondary indexes are on the roadmap — see <a href="/docs/guides/indexing">/docs/guides/indexing</a></td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Replicache license fee</td>
+        <td className="py-3 px-4 text-foreground">OSS Apache-2.0</td>
+        <td className="py-3 px-4 text-neutral-500">No per-MAU pricing; cost = your infra</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground"><code>useSubscribe</code> React hook</td>
+        <td className="py-3 px-4 text-foreground"><code>useQuery()</code> React hook</td>
+        <td className="py-3 px-4 text-neutral-500">Wraps <code>client.query().subscribe()</code> and re-renders on delta</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">SaaS server hosting</td>
+        <td className="py-3 px-4 text-foreground">Self-hosted Rust server</td>
+        <td className="py-3 px-4 text-neutral-500">No SaaS invoice — run the Rust server alongside your own Postgres</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Optimistic mutations</td>
+        <td className="py-3 px-4 text-foreground">CRDT-merge auto-resolves conflicts</td>
+        <td className="py-3 px-4 text-neutral-500">Local writes apply immediately; HLC-ordered merge converges deterministically — no custom optimistic logic required</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Per-mutator validation</td>
+        <td className="py-3 px-4 text-foreground">Per-map ACL booleans</td>
+        <td className="py-3 px-4 text-neutral-500">Coarser than per-mutator hooks today; planned: Entry Processor for fine-grained server-side hooks (see <a href="/docs/roadmap">/docs/roadmap</a>)</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">IndexedDB persistence</td>
+        <td className="py-3 px-4 text-foreground"><code>IDBAdapter</code> (passed to <code>TopGunClient</code>)</td>
+        <td className="py-3 px-4 text-neutral-500">Always-on local persistence; reads/writes never wait for network</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Authentication</td>
+        <td className="py-3 px-4 text-foreground">JWT via <code>client.setAuthToken()</code></td>
+        <td className="py-3 px-4 text-neutral-500">BYO JWT issuer (BetterAuth, Clerk, OIDC, etc.) — TopGun does not issue JWTs itself</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+## Side-by-Side Code Patterns
+
+### Pattern A — Initialize and authenticate
+
+<div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">Replicache</div>
+
+```javascript
+import { Replicache } from 'replicache';
+
+const rep = new Replicache({
+  name: 'user-123',
+  mutators: {
+    createTodo: async (tx, { id, text }) => {
+      await tx.set(`todo/${id}`, { id, text });
+    },
+  },
+  pushURL: '/api/replicache-push',
+  pullURL: '/api/replicache-pull',
+  auth: jwt,
+});
+```
+
+  </div>
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">TopGun</div>
+
+```typescript
+import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+const client = new TopGunClient({
+  serverUrl: 'wss://topgun.example.com',
+  storage: new IDBAdapter(),
+});
+
+// JWT issuance is handled by your own auth server.
+// See /docs/guides/authentication for integration options.
+const jwt = await myAuthServer.signIn(email, password);
+client.setAuthToken(jwt);
+```
+
+  </div>
+</div>
+
+In Replicache, the client is configured with a `mutators` map and separate `pushURL`/`pullURL` HTTP endpoints that you implement on your own server. In TopGun, there are no mutator functions and no push/pull endpoints to host: the client opens a single WebSocket to `serverUrl` and writes go directly through CRDT-merge. JWT issuance is your responsibility in both systems.
+
+### Pattern B — Read, write, subscribe
+
+<div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">Replicache</div>
+
+```javascript
+import { useSubscribe } from 'replicache-react';
+
+// Write — via mutator
+await rep.mutate.createTodo({
+  id: '1',
+  text: 'Buy milk',
+});
+
+// Or, inside a mutator function:
+//   await tx.set('todo/1', { id: '1', text: 'Buy milk' });
+
+// Subscribe — re-runs on any matching change
+const todos = useSubscribe(
+  rep,
+  async (tx) =>
+    (await tx.scan({ prefix: 'todo/' }).toArray()),
+  [],
+);
+```
+
+  </div>
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">TopGun</div>
+
+```typescript
+// Write — synchronous, local-first (no await)
+client.getMap('todos').set('1', {
+  id: '1',
+  text: 'Buy milk',
+});
+
+// React subscription — re-renders on delta
+const todos = useQuery('todos');
+
+// Vanilla JS subscription:
+const query = client.query('todos');
+const unsub = query.subscribe((results) => {
+  console.log(results);
+});
+```
+
+  </div>
+</div>
+
+Replicache writes route through a named mutator that calls `tx.set` server-side; reads use `tx.scan` and `useSubscribe` re-runs the scan whenever data changes. TopGun writes go directly through `getMap().set` — no mutator wrapper — and `useQuery()` (or `client.query().subscribe()` in vanilla JS) delivers server-pushed deltas filtered server-side.
+
+### Pattern C — Multi-key writes
+
+<div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">Replicache</div>
+
+```javascript
+// Multi-key writes happen inside one mutator
+const rep = new Replicache({
+  name: 'user-123',
+  mutators: {
+    createTodoWithTags: async (tx, { id, text, tags }) => {
+      await tx.set(`todo/${id}`, { id, text });
+      for (const tag of tags) {
+        await tx.set(`tag/${tag}/${id}`, true);
+      }
+      await tx.set(`stats/todoCount`, (await tx.get('stats/todoCount') ?? 0) + 1);
+    },
+  },
+  pushURL: '/api/replicache-push',
+  pullURL: '/api/replicache-pull',
+});
+
+await rep.mutate.createTodoWithTags({
+  id: '1',
+  text: 'Buy milk',
+  tags: ['shopping', 'urgent'],
+});
+```
+
+  </div>
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="mb-3 font-semibold text-foreground text-sm">TopGun</div>
+
+```typescript
+// Multiple .set() calls are automatically coalesced
+// by the SyncEngine outbox into a single OpBatch
+// sent over WebSocket. No mutator wrapper needed.
+
+client.getMap('todos').set('1', { id: '1', text: 'Buy milk' });
+client.getMap('tags').set('shopping/1', true);
+client.getMap('tags').set('urgent/1', true);
+
+// Counter increment uses an OR-Map or a dedicated
+// counter primitive — see /docs/guides/counters.
+
+// All writes are batched automatically into one
+// OpBatch and delivered to the server in order.
+```
+
+  </div>
+</div>
+
+Replicache groups multi-key writes inside a single mutator function so they apply atomically on the server. TopGun has no mutator wrapper: separate `getMap().set` calls are coalesced by the `SyncEngine` outbox into a single `OpBatch`. CRDT semantics make per-key writes commutative, so atomicity is replaced by deterministic per-key convergence.
+
+## Deployment Mode Semantics
+
+<div className="overflow-x-auto mb-8 not-prose">
+  <table className="w-full text-left border-collapse text-sm">
+    <thead>
+      <tr className="border-b border-card-border">
+        <th className="py-3 px-4 font-medium text-neutral-500">Deployment</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">Status</th>
+        <th className="py-3 px-4 font-medium text-neutral-500">Notes</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Single-node (recommended for migration)</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable</td>
+        <td className="py-3 px-4 text-neutral-500">All Replicache mappings above are production-ready in single-node mode</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Cluster (current)</td>
+        <td className="py-3 px-4 text-yellow-600 dark:text-yellow-400">Partition-routing, no Raft</td>
+        <td className="py-3 px-4 text-neutral-500">Safe when one node owns the partition; weaker guarantees under node failure — see <a href="/docs/guides/cluster-replication">Cluster Replication</a></td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Cluster (planned)</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Raft-replicated — planned</td>
+        <td className="py-3 px-4 text-neutral-500">Multi-region with QUORUM/STRONG consistency on roadmap — see <a href="/docs/roadmap">/docs/roadmap</a></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+For a first migration, start on single-node. The partition-routed cluster mode works but does not yet have Raft-backed consensus; consult the [Cluster Replication guide](/docs/guides/cluster-replication) before running cluster in production.
+
+## Why migrate?
+
+- **Local-first reads/writes:** Synchronous local reads and writes — parity with Replicache optimistic mutations, without the mutator wrapper.
+- **CRDT-merge auto-resolves conflicts:** LWW-Map and OR-Map merge deterministically via HLC; no need to design custom mutators for conflict-free operations.
+- **OSS Apache-2.0:** No per-MAU pricing, no SaaS invoice — run the Rust server on your own infra.
+- **Self-hosted on your own Postgres:** Plain Postgres durable store; migrate data off TopGun with `pg_dump`.
+- **Performance:** 483K ops/sec fire-and-forget, ~37K ops/sec fire-and-wait at 1.5ms p50 on M1 Max (200 connections). See [benchmarks](/docs/benchmarks) for methodology.
+
+## Migration checklist
+
+1. Audit Replicache features in use (mutators, pull/push, subscribe, indexes, ClientGroupID, etc.).
+2. Cross-reference each against the Concept Mapping table; flag mappings vs gaps.
+3. Flag any feature mapping to "Not supported" / "Roadmap" cells — explicit decision needed (drop, work around, wait for roadmap).
+4. Rewrite mutator-based logic as CRDT writes (`getMap().set`), or move custom validation into per-map ACL hooks (planned: Entry Processor for fine-grained server-side hooks).
+5. Port reads/writes/subscribes one collection at a time: replace `tx.set` / `tx.scan` / `useSubscribe` with `getMap().set` / `client.query()` / `useQuery()`.
+6. Backfill data via a one-time migration script that reads from Replicache's IndexedDB (or your server-side Replicache cache store) and writes to TopGun via the client SDK or direct Postgres insert.
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/migrating-from-yjs" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Migrating from Y.js
+    </div>
+  </a>
+  <a href="/docs/guides/migrating-from-supabase-realtime" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next Guide</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Migrating from Supabase Realtime <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>
