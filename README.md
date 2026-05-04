@@ -34,10 +34,12 @@ cd my-app && pnpm install && pnpm dev
 This boots a Vite app with a working LWW-Map todo demo. For the backend, in a separate terminal:
 
 ```bash
-docker compose up server
+pnpm start:server
 ```
 
-Single-command bring-up — Postgres + server start together. No env vars, no auth required — meant for local development and exploring the API.
+The server runs on `ws://localhost:8080` with embedded storage at `./topgun.redb` — writes survive restart, no Postgres, no Docker required. Stop with `Ctrl-C`, restart, and your data is still there. Backup is a single-file copy.
+
+For users who prefer containers, `docker compose up server` works too — it spins up Postgres alongside the server in one command.
 
 ### Production
 

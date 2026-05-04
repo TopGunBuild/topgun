@@ -37,10 +37,12 @@ cd my-app && pnpm install && pnpm dev
 In a separate terminal, boot the single-node backend:
 
 ```bash
-docker compose up server
+pnpm start:server
 ```
 
-The server runs on `ws://localhost:8080`. Single-command bring-up — Postgres + server start together. No env vars, no auth required — for local development.
+The server runs on `ws://localhost:8080` with embedded storage at `./topgun.redb` — writes survive restart. No Postgres, no Docker required. Run a second `pnpm start:server` only after stopping the first; redb's lockfile prevents two processes from opening the same file at once.
+
+For users who prefer containers, `docker compose up server` works too — it brings up Postgres alongside the server in one command.
 
 ### Production
 

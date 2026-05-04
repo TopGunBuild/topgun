@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import { Terminal, Copy, Check } from 'lucide-react';
 
 const CLI_COMMAND = 'npx create-topgun-app';
-const DROP_IN_CMD = 'docker compose up server';
+const DROP_IN_CMD = 'pnpm start:server';
+const DROP_IN_DOCKER_ALT = 'docker compose up server';
 const PROD_LINK = '/docs/roadmap';
 
 const QuickStartTabs = () => {
@@ -33,7 +34,7 @@ const QuickStartTabs = () => {
       <div className="mt-2 text-sm text-neutral-600 dark:text-neutral-300">
         {tab === 'drop-in' ? (
           <p>
-            Single-node backend in a separate terminal: <code className="px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-xs">{DROP_IN_CMD}</code>. Single-command bring-up — Postgres + server start together. No auth required — local exploration.
+            Single-node backend in a separate terminal: <code className="px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-xs">{DROP_IN_CMD}</code>. Zero config — embedded storage at <code className="px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-xs">./topgun.redb</code>, no Docker, no Postgres. (Docker alternative: <code className="px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-xs">{DROP_IN_DOCKER_ALT}</code>.) No auth required — local exploration.
           </p>
         ) : (
           <>
