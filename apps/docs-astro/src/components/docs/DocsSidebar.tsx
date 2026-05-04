@@ -175,6 +175,9 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                         <SubItem to="/docs/guides" currentPath={currentPath}>All Guides</SubItem>
                         <SubItem to="/docs/guides/authentication" currentPath={currentPath}>Authentication</SubItem>
                         <SubItem to="/docs/guides/migrating-from-firebase" currentPath={currentPath}>Migrating from Firebase</SubItem>
+                        <SubItem to="/docs/guides/migrating-from-replicache" currentPath={currentPath}>Migrating from Replicache</SubItem>
+                        <SubItem to="/docs/guides/migrating-from-supabase-realtime" currentPath={currentPath}>Migrating from Supabase Realtime</SubItem>
+                        <SubItem to="/docs/guides/migrating-from-yjs" currentPath={currentPath}>Migrating from Y.js</SubItem>
                         <SubItem to="/docs/guides/security" currentPath={currentPath}>Security (TLS)</SubItem>
                         <SubItem to="/docs/guides/rbac" currentPath={currentPath}>RBAC</SubItem>
                         <SubItem to="/docs/guides/live-queries" currentPath={currentPath}>Live Queries</SubItem>
