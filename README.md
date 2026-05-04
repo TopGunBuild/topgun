@@ -228,6 +228,12 @@ pnpm --filter @topgunbuild/core bench
 
 See [tests/benchmark/README.md](tests/benchmark/README.md) for details.
 
+## Contributing
+
+PRs welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the dev workflow (fork, branch, test, PR).
+
+All contributions require signing the [Contributor License Agreement](.github/CLA.md) — the [cla-assistant.io](https://cla-assistant.io) bot prompts automatically on PR open. Takes ~30 seconds; you sign once.
+
 ## Community
 
 - **Discord**: [discord.gg/NDpMG4dmJu](https://discord.gg/NDpMG4dmJu) — ask questions, share what you're building
