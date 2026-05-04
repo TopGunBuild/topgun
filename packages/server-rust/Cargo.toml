@@ -9,8 +9,9 @@ description = "TopGun server: axum, tokio, clustering, storage"
 workspace = true
 
 [features]
-default = []
+default = ["redb"]
 postgres = ["dep:sqlx"]
+redb = ["dep:redb"]
 simulation = ["dep:madsim"]
 datafusion = ["dep:datafusion", "dep:arrow"]
 
@@ -45,6 +46,7 @@ ahash = "0.8"
 ordered-float = "4"
 regex = "1"
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres"], optional = true }
+redb = { version = "2", optional = true }
 madsim = { workspace = true, optional = true }
 datafusion = { version = "45", optional = true }
 arrow = { version = "54", optional = true }
