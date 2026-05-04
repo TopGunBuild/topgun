@@ -52,10 +52,57 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use anyhow::bail;
 use async_trait::async_trait;
+use redb::{TableDefinition, TableHandle};
 
 use crate::storage::map_data_store::MapDataStore;
 use crate::storage::record::RecordValue;
+
+/// Validate that a map name matches `^[a-zA-Z_][a-zA-Z0-9_]*$`.
+///
+/// Map names are interpolated into redb table-definition strings via
+/// `format!("map__{name}")`; rejecting metacharacters prevents collision
+/// between user-supplied maps and reserved table names. Mirrors the
+/// `is_valid_table_name` check in `PostgresDataStore`.
+fn is_valid_map_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Build the redb table name for a `(map, is_backup)` tuple.
+///
+/// Caller must have already validated `map` via `is_valid_map_name`.
+fn table_name_for(map: &str, is_backup: bool) -> String {
+    if is_backup {
+        format!("map__{map}__backup")
+    } else {
+        format!("map__{map}")
+    }
+}
+
+/// Macro that builds a `TableDefinition<&str, &[u8]>` whose lifetime is
+/// tied to the borrowed `name: &str`. `redb::TableDefinition::new` is a
+/// `const fn` and the resulting handle holds a `&'static str` reference;
+/// since we build the name dynamically, we leak it via the leak-on-first-
+/// use pattern below at each callsite.
+fn table_def(name: &str) -> TableDefinition<'_, &'static str, &'static [u8]> {
+    // redb 2.x table-definition API requires a `&'static str` for the table
+    // name. Leaking a Box keeps the per-(map, is_backup) string alive for
+    // the process lifetime. The number of distinct map names is bounded by
+    // application schema (small, fixed at startup), so leak growth is
+    // negligible compared to the alternative (a full HashMap-backed cache
+    // with mutex on hot path).
+    let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+    TableDefinition::new(leaked)
+}
 
 /// Embedded `redb`-backed `MapDataStore`.
 ///
@@ -118,52 +165,178 @@ impl RedbDataStore {
     }
 }
 
+/// Insert (or overwrite) a single record under the given `(map, key, is_backup)`
+/// tuple. Validates the map name, opens (or creates) the per-(map, is_backup)
+/// table inside one `WriteTransaction`, serializes the value via msgpack, and
+/// commits.
+fn write_one(
+    db: &redb::Database,
+    map: &str,
+    key: &str,
+    value: &RecordValue,
+    is_backup: bool,
+) -> anyhow::Result<()> {
+    if !is_valid_map_name(map) {
+        bail!("Invalid map name '{map}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
+    }
+    let bytes = rmp_serde::to_vec_named(value)?;
+    let table_name = table_name_for(map, is_backup);
+    let def = table_def(&table_name);
+    let txn = db.begin_write()?;
+    {
+        let mut table = txn.open_table(def)?;
+        table.insert(key, bytes.as_slice())?;
+    }
+    txn.commit()?;
+    Ok(())
+}
+
+/// Delete a single record under the given `(map, key, is_backup)` tuple.
+/// No-op if the table or key does not exist.
+fn delete_one(db: &redb::Database, map: &str, key: &str, is_backup: bool) -> anyhow::Result<()> {
+    if !is_valid_map_name(map) {
+        bail!("Invalid map name '{map}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
+    }
+    let table_name = table_name_for(map, is_backup);
+    let def = table_def(&table_name);
+
+    // Cheap pre-check: is this table even known to the database? If not,
+    // the key cannot exist; skip the WriteTransaction round trip entirely.
+    {
+        let read_txn = db.begin_read()?;
+        if !table_exists(&read_txn, &table_name) {
+            return Ok(());
+        }
+    }
+
+    let txn = db.begin_write()?;
+    {
+        let mut table = txn.open_table(def)?;
+        table.remove(key)?;
+    }
+    txn.commit()?;
+    Ok(())
+}
+
+/// Check whether a table with the given name has ever been created in the
+/// database. Used by the delete and remove-all paths to short-circuit when
+/// the table has never been written to.
+fn table_exists(read_txn: &redb::ReadTransaction, table_name: &str) -> bool {
+    match read_txn.list_tables() {
+        Ok(iter) => iter
+            .into_iter()
+            .any(|h| h.name() == table_name),
+        Err(_) => false,
+    }
+}
+
 #[async_trait]
 impl MapDataStore for RedbDataStore {
     async fn add(
         &self,
-        _map: &str,
-        _key: &str,
-        _value: &RecordValue,
+        map: &str,
+        key: &str,
+        value: &RecordValue,
         _expiration_time: i64,
         _now: i64,
     ) -> anyhow::Result<()> {
-        unimplemented!("RedbDataStore::add — implemented in G2")
+        write_one(&self.db, map, key, value, false)
     }
 
     async fn add_backup(
         &self,
-        _map: &str,
-        _key: &str,
-        _value: &RecordValue,
+        map: &str,
+        key: &str,
+        value: &RecordValue,
         _expiration_time: i64,
         _now: i64,
     ) -> anyhow::Result<()> {
-        unimplemented!("RedbDataStore::add_backup — implemented in G2")
+        write_one(&self.db, map, key, value, true)
     }
 
-    async fn remove(&self, _map: &str, _key: &str, _now: i64) -> anyhow::Result<()> {
-        unimplemented!("RedbDataStore::remove — implemented in G2")
+    async fn remove(&self, map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
+        delete_one(&self.db, map, key, false)
     }
 
-    async fn remove_backup(&self, _map: &str, _key: &str, _now: i64) -> anyhow::Result<()> {
-        unimplemented!("RedbDataStore::remove_backup — implemented in G2")
+    async fn remove_backup(&self, map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
+        delete_one(&self.db, map, key, true)
     }
 
-    async fn load(&self, _map: &str, _key: &str) -> anyhow::Result<Option<RecordValue>> {
-        unimplemented!("RedbDataStore::load — implemented in G2")
+    async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+        if !is_valid_map_name(map) {
+            bail!("Invalid map name '{map}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
+        }
+        let table_name = table_name_for(map, false);
+        let def = table_def(&table_name);
+        let txn = self.db.begin_read()?;
+        let table = match txn.open_table(def) {
+            Ok(t) => t,
+            // If the table has never been written to, `open_table` returns
+            // a `TableDoesNotExist` error -- treat as "no value".
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let bytes = match table.get(key)? {
+            Some(b) => b.value().to_vec(),
+            None => return Ok(None),
+        };
+        let value: RecordValue = rmp_serde::from_slice(&bytes)?;
+        Ok(Some(value))
     }
 
     async fn load_all(
         &self,
-        _map: &str,
-        _keys: &[String],
+        map: &str,
+        keys: &[String],
     ) -> anyhow::Result<Vec<(String, RecordValue)>> {
-        unimplemented!("RedbDataStore::load_all — implemented in G2")
+        if !is_valid_map_name(map) {
+            bail!("Invalid map name '{map}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
+        }
+        let table_name = table_name_for(map, false);
+        let def = table_def(&table_name);
+        let txn = self.db.begin_read()?;
+        let table = match txn.open_table(def) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut results = Vec::with_capacity(keys.len());
+        for key in keys {
+            if let Some(b) = table.get(key.as_str())? {
+                let value: RecordValue = rmp_serde::from_slice(&b.value().to_vec())?;
+                results.push((key.clone(), value));
+            }
+        }
+        Ok(results)
     }
 
-    async fn remove_all(&self, _map: &str, _keys: &[String]) -> anyhow::Result<()> {
-        unimplemented!("RedbDataStore::remove_all — implemented in G2")
+    async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+        if !is_valid_map_name(map) {
+            bail!("Invalid map name '{map}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
+        }
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let table_name = table_name_for(map, false);
+        let def = table_def(&table_name);
+
+        // Skip the WriteTransaction if the table has never been created.
+        {
+            let read_txn = self.db.begin_read()?;
+            if !table_exists(&read_txn, &table_name) {
+                return Ok(());
+            }
+        }
+
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(def)?;
+            for key in keys {
+                table.remove(key.as_str())?;
+            }
+        }
+        txn.commit()?;
+        Ok(())
     }
 
     fn is_loadable(&self, _key: &str) -> bool {
