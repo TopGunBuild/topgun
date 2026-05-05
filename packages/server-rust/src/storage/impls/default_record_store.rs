@@ -387,6 +387,18 @@ impl RecordStore for DefaultRecordStore {
         self.config.max_entry_count > 0 && self.engine.len() as u64 >= self.config.max_entry_count
     }
 
+    fn evict_lru(&self, _target_count: u32, _is_backup: bool) -> u32 {
+        // LRU eviction implementation lives in SPEC-243b.
+        // This stub satisfies the trait contract until the full implementation lands.
+        0
+    }
+
+    fn dirty_count(&self) -> u64 {
+        // Full dirty-record tracking lives in SPEC-243b.
+        // This stub satisfies the trait contract until the full implementation lands.
+        0
+    }
+
     // --- Lifecycle ---
 
     fn init(&mut self) {
