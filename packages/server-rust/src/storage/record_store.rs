@@ -72,6 +72,15 @@ pub enum ExpiryReason {
 /// Orchestrates Layer 1 ([`StorageEngine`]) and Layer 3 ([`MapDataStore`]),
 /// adding metadata tracking, expiry, eviction, and mutation observation.
 ///
+/// **never-evict-dirty invariant:** Any record whose
+/// [`RecordMetadata::is_dirty`](super::record::RecordMetadata::is_dirty) returns
+/// `true` MUST NOT be evicted by [`RecordStore::evict_lru`]. Evicting a dirty
+/// record discards an acknowledged write that has not yet been flushed to the
+/// backing [`MapDataStore`], violating the durability contract. All
+/// implementations that handle LRU eviction are required to enforce this
+/// invariant; the orchestrator surfaces violations via [`RecordStore::dirty_count`]
+/// backpressure logging.
+///
 /// Used as `Arc<dyn RecordStore>`.
 #[async_trait]
 pub trait RecordStore: Send + Sync {
@@ -172,6 +181,26 @@ pub trait RecordStore: Send + Sync {
 
     /// Whether eviction should be triggered based on current memory usage.
     fn should_evict(&self) -> bool;
+
+    /// Evict up to `target_count` least-recently-used non-dirty records.
+    ///
+    /// MUST skip records where `metadata.is_dirty()` is true — evicting a
+    /// dirty record discards an acked write that has not yet flushed to the
+    /// backend, violating durability. This is the never-evict-dirty invariant.
+    ///
+    /// Returns the number of records actually evicted (may be less than
+    /// `target_count` if fewer non-dirty candidates exist).
+    ///
+    /// Implementations MUST use saturating cast (`u32::try_from(...).unwrap_or(u32::MAX)`)
+    /// when converting the internal `usize` eviction count to the `u32` return type.
+    /// Exceeding `u32::MAX` evictions in a single call is unreachable in practice
+    /// but MUST NOT panic.
+    fn evict_lru(&self, target_count: u32, is_backup: bool) -> u32;
+
+    /// Number of records currently dirty (in-memory mutation not yet
+    /// flushed to the backing `MapDataStore`). Surfaced for orchestrator
+    /// backpressure logging.
+    fn dirty_count(&self) -> u64;
 
     // --- Lifecycle ---
 
