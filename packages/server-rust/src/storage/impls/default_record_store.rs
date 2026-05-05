@@ -388,14 +388,14 @@ impl RecordStore for DefaultRecordStore {
     }
 
     fn evict_lru(&self, _target_count: u32, _is_backup: bool) -> u32 {
-        // LRU eviction implementation lives in SPEC-243b.
-        // This stub satisfies the trait contract until the full implementation lands.
+        // Stub — returns 0 until the LRU sort-and-evict loop lands; crate compiles
+        // while that implementation is deferred.
         0
     }
 
     fn dirty_count(&self) -> u64 {
-        // Full dirty-record tracking lives in SPEC-243b.
-        // This stub satisfies the trait contract until the full implementation lands.
+        // Stub — returns 0; per-record dirty tracking is reserved for the full
+        // eviction implementation.
         0
     }
 
