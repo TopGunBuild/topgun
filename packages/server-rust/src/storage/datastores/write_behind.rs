@@ -55,6 +55,90 @@ impl Default for WriteBehindConfig {
     }
 }
 
+impl WriteBehindConfig {
+    /// Construct [`WriteBehindConfig`] from environment variables.
+    ///
+    /// Reads three env vars; any missing or unparseable var falls back to the
+    /// corresponding [`Self::default`] field and emits a `tracing::warn!`. The
+    /// server never panics due to a misconfigured write-behind env var.
+    ///
+    /// | Env var | Field | Default |
+    /// |---|---|---|
+    /// | `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` | `flush_interval_ms` | 1000 ms |
+    /// | `TOPGUN_WRITEBEHIND_BATCH_SIZE` | `batch_size` | 100 |
+    /// | `TOPGUN_WRITEBEHIND_CAPACITY` | `capacity` | 10 000 |
+    ///
+    /// Fields not covered by env vars (`write_delay_ms`, `max_retries`,
+    /// `backoff_base_ms`, `backoff_cap_ms`) retain their [`Self::default`] values.
+    #[must_use]
+    pub fn from_env() -> Self {
+        let defaults = Self::default();
+        let mut cfg = defaults.clone();
+
+        // Parse TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS → flush_interval_ms (u64)
+        if let Ok(raw) = std::env::var("TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS") {
+            match raw.trim().parse::<u64>() {
+                Ok(ms) => {
+                    cfg.flush_interval_ms = ms;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "topgun_server::storage::write_behind",
+                        var = "TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS",
+                        value = %raw,
+                        error = %err,
+                        default = defaults.flush_interval_ms,
+                        "Failed to parse env var; using default"
+                    );
+                    cfg.flush_interval_ms = defaults.flush_interval_ms;
+                }
+            }
+        }
+
+        // Parse TOPGUN_WRITEBEHIND_BATCH_SIZE → batch_size (u32)
+        if let Ok(raw) = std::env::var("TOPGUN_WRITEBEHIND_BATCH_SIZE") {
+            match raw.trim().parse::<u32>() {
+                Ok(size) => {
+                    cfg.batch_size = size;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "topgun_server::storage::write_behind",
+                        var = "TOPGUN_WRITEBEHIND_BATCH_SIZE",
+                        value = %raw,
+                        error = %err,
+                        default = defaults.batch_size,
+                        "Failed to parse env var; using default"
+                    );
+                    cfg.batch_size = defaults.batch_size;
+                }
+            }
+        }
+
+        // Parse TOPGUN_WRITEBEHIND_CAPACITY → capacity (u64)
+        if let Ok(raw) = std::env::var("TOPGUN_WRITEBEHIND_CAPACITY") {
+            match raw.trim().parse::<u64>() {
+                Ok(cap) => {
+                    cfg.capacity = cap;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "topgun_server::storage::write_behind",
+                        var = "TOPGUN_WRITEBEHIND_CAPACITY",
+                        value = %raw,
+                        error = %err,
+                        default = defaults.capacity,
+                        "Failed to parse env var; using default"
+                    );
+                    cfg.capacity = defaults.capacity;
+                }
+            }
+        }
+
+        cfg
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Delayed operation types
 // ---------------------------------------------------------------------------
