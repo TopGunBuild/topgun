@@ -174,6 +174,20 @@ impl RecordStoreFactory {
             .map(|entry| Arc::clone(entry.value()))
             .collect()
     }
+
+    /// Returns a snapshot of all live stores across all maps and partitions.
+    ///
+    /// Allocates a Vec + clones every Arc per call — O(N stores). Negligible at
+    /// 1s eviction interval; becomes the hot path if `interval_ms` < ~50. A
+    /// `for_each_store` callback variant would eliminate the alloc if profiling
+    /// targets this.
+    #[must_use]
+    pub fn all_stores(&self) -> Vec<Arc<dyn RecordStore>> {
+        self.store_cache
+            .iter()
+            .map(|entry| Arc::clone(entry.value()))
+            .collect()
+    }
 }
 
 #[cfg(test)]
