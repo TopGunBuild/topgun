@@ -14,6 +14,7 @@
 pub mod datastores;
 pub mod engine;
 pub mod engines;
+pub mod eviction_config;
 pub mod factory;
 pub mod impls;
 pub mod map_data_store;
@@ -26,6 +27,7 @@ pub mod record_store;
 pub use datastores::*;
 pub use engine::*;
 pub use engines::*;
+pub use eviction_config::*;
 pub use factory::*;
 pub use impls::*;
 pub use map_data_store::*;
