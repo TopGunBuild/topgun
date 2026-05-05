@@ -387,16 +387,47 @@ impl RecordStore for DefaultRecordStore {
         self.config.max_entry_count > 0 && self.engine.len() as u64 >= self.config.max_entry_count
     }
 
-    fn evict_lru(&self, _target_count: u32, _is_backup: bool) -> u32 {
-        // Stub — returns 0 until the LRU sort-and-evict loop lands; crate compiles
-        // while that implementation is deferred.
-        0
+    fn evict_lru(&self, target_count: u32, is_backup: bool) -> u32 {
+        // Snapshot once to get a stable, mutation-tolerant view of all entries.
+        let mut candidates: Vec<(String, Record)> = self
+            .engine
+            .snapshot_iter()
+            .into_iter()
+            // Never evict dirty records — evicting a dirty record discards an
+            // acked write that has not yet been flushed to the backing store,
+            // violating the durability contract (never-evict-dirty invariant).
+            .filter(|(_, r)| !r.metadata.is_dirty())
+            .collect();
+
+        // Sort ascending by last_access_time so the oldest (least-recently-used)
+        // candidates appear first. i64 is Copy + Ord so sort_by_key is idiomatic.
+        candidates.sort_by_key(|(_, r)| r.metadata.last_access_time);
+
+        // Evict only up to target_count of the oldest non-dirty candidates.
+        let mut evicted: usize = 0;
+        for (key, _) in candidates.into_iter().take(target_count as usize) {
+            if self.evict(&key, is_backup).is_some() {
+                evicted += 1;
+            }
+        }
+
+        // Saturating cast: usize → u32 so that a very large candidate set
+        // (unreachable in practice, but mandated by the trait contract) does not
+        // wrap or panic.
+        u32::try_from(evicted).unwrap_or(u32::MAX)
     }
 
     fn dirty_count(&self) -> u64 {
-        // Stub — returns 0; per-record dirty tracking is reserved for the full
-        // eviction implementation.
-        0
+        // Count records whose in-memory state has not yet been flushed to the
+        // backing MapDataStore (last_update_time > last_stored_time).
+        let count = self
+            .engine
+            .snapshot_iter()
+            .into_iter()
+            .filter(|(_, r)| r.metadata.is_dirty())
+            .count();
+        // Saturating cast: snapshot sizes are far below u64::MAX in practice.
+        count as u64
     }
 
     // --- Lifecycle ---
@@ -1101,5 +1132,228 @@ mod tests {
         let mut count = 0_usize;
         store.for_each_boxed(&mut |_key, _record| count += 1, false);
         assert_eq!(count, 0, "expired entries should be skipped");
+    }
+
+    // --- Helper: build a clean record with a specific last_access_time ---
+    //
+    // A clean record has last_stored_time >= last_update_time so that is_dirty()
+    // returns false. This lets us verify evict_lru skips dirty records and
+    // correctly selects the oldest clean ones.
+    fn make_clean_record(last_access_time: i64) -> Record {
+        let metadata = RecordMetadata {
+            version: 1,
+            creation_time: 1,
+            last_access_time,
+            last_update_time: 1,
+            last_stored_time: 1, // equal to last_update_time => not dirty
+            hits: 0,
+            cost: 0,
+        };
+        Record {
+            value: make_value("clean"),
+            metadata,
+        }
+    }
+
+    // --- Helper: build a dirty record ---
+    //
+    // A dirty record has last_update_time > last_stored_time. Records created
+    // via store.put() are already dirty (last_stored_time=0, last_update_time=now).
+    // This constructor makes the dirty state explicit for clarity in tests.
+    fn make_dirty_record() -> Record {
+        let metadata = RecordMetadata {
+            version: 1,
+            creation_time: 1,
+            last_access_time: 1,
+            last_update_time: 1000,
+            last_stored_time: 0, // never stored => dirty
+            hits: 0,
+            cost: 0,
+        };
+        Record {
+            value: make_value("dirty"),
+            metadata,
+        }
+    }
+
+    // --- AC #1: evict_lru(0, false) returns 0 ---
+
+    #[test]
+    fn evict_lru_zero_target_returns_zero() {
+        let store = make_store();
+        // Insert a clean record; evict_lru(0) must still return 0.
+        store.storage().put("k1", make_clean_record(1000));
+        let evicted = store.evict_lru(0, false);
+        assert_eq!(evicted, 0, "target_count=0 must evict nothing");
+    }
+
+    // --- AC #1 + #1: evict_lru(N) never returns more than N ---
+
+    #[test]
+    fn evict_lru_never_exceeds_target_count() {
+        let store = make_store();
+        // Insert 5 clean records; request eviction of only 3.
+        for i in 0..5_u32 {
+            store
+                .storage()
+                .put(&format!("k{i}"), make_clean_record(i64::from(i) + 100));
+        }
+        let evicted = store.evict_lru(3, false);
+        assert!(
+            evicted <= 3,
+            "evict_lru must never return more than target_count; got {evicted}"
+        );
+    }
+
+    // --- AC #2: never-evict-dirty invariant ---
+    //
+    // With all records dirty, evict_lru must return 0 regardless of target.
+
+    #[test]
+    fn evict_lru_skips_all_dirty_records() {
+        let store = make_store();
+        // Insert 5 dirty records.
+        for i in 0..5_u32 {
+            store.storage().put(&format!("k{i}"), make_dirty_record());
+        }
+        let evicted = store.evict_lru(100, false);
+        assert_eq!(
+            evicted, 0,
+            "dirty records must never be evicted; expected 0 but got {evicted}"
+        );
+    }
+
+    // --- AC #3: LRU order — oldest last_access_time evicted first ---
+
+    #[test]
+    fn evict_lru_selects_oldest_access_time_first() {
+        let store = make_store();
+        // Insert 3 clean records with distinct last_access_time values.
+        // k_old: access time 100 (oldest), k_mid: 200, k_new: 300 (newest).
+        store.storage().put("k_old", make_clean_record(100));
+        store.storage().put("k_mid", make_clean_record(200));
+        store.storage().put("k_new", make_clean_record(300));
+
+        // Evict only 1 — must be the oldest.
+        let evicted = store.evict_lru(1, false);
+        assert_eq!(evicted, 1, "expected exactly 1 eviction");
+        assert!(
+            !store.exists_in_memory("k_old"),
+            "k_old (oldest access time) must be evicted first"
+        );
+        // The two newer records must remain.
+        assert!(store.exists_in_memory("k_mid"), "k_mid must survive");
+        assert!(store.exists_in_memory("k_new"), "k_new must survive");
+    }
+
+    // --- AC #3 (mixed dirty/clean): only clean records are selected ---
+
+    #[test]
+    fn evict_lru_skips_dirty_in_mixed_snapshot() {
+        let store = make_store();
+        // dirty record with "older" timestamp — must be skipped.
+        let mut dirty = make_dirty_record();
+        dirty.metadata.last_access_time = 50;
+        store.storage().put("k_dirty", dirty);
+
+        // Two clean records.
+        store.storage().put("k_clean_old", make_clean_record(100));
+        store.storage().put("k_clean_new", make_clean_record(200));
+
+        // Evict 1 — must pick the oldest CLEAN record, not the dirty one.
+        let evicted = store.evict_lru(1, false);
+        assert_eq!(evicted, 1);
+        assert!(
+            store.exists_in_memory("k_dirty"),
+            "dirty record must not be evicted"
+        );
+        assert!(
+            !store.exists_in_memory("k_clean_old"),
+            "oldest clean record must be evicted"
+        );
+        assert!(
+            store.exists_in_memory("k_clean_new"),
+            "newer clean record must survive"
+        );
+    }
+
+    // --- AC #4: dirty_count matches manual iteration ---
+
+    #[test]
+    fn dirty_count_matches_manual_count() {
+        let store = make_store();
+        // Insert 3 dirty + 2 clean records.
+        for i in 0..3_u32 {
+            store.storage().put(&format!("dirty_{i}"), make_dirty_record());
+        }
+        for i in 0..2_u32 {
+            store
+                .storage()
+                .put(&format!("clean_{i}"), make_clean_record(1000));
+        }
+
+        // Manual count via snapshot.
+        let manual: u64 = store
+            .storage()
+            .snapshot_iter()
+            .iter()
+            .filter(|(_, r)| r.metadata.is_dirty())
+            .count() as u64;
+
+        assert_eq!(
+            store.dirty_count(),
+            manual,
+            "dirty_count() must match manual iteration count"
+        );
+        assert_eq!(store.dirty_count(), 3, "expected exactly 3 dirty records");
+    }
+
+    // --- AC #5: evict_lru fires on_evict via self.evict() per record ---
+
+    #[test]
+    fn evict_lru_fires_evict_observer_per_record() {
+        let observer = Arc::new(CountingObserver::new());
+        let store = make_store_with_observer(observer.clone(), StorageConfig::default());
+
+        // Insert 4 clean records.
+        for i in 0..4_u32 {
+            store
+                .storage()
+                .put(&format!("k{i}"), make_clean_record(i64::from(i) * 100 + 100));
+        }
+
+        // Evict 3 of the 4 clean records.
+        let evicted = store.evict_lru(3, false);
+        assert_eq!(evicted, 3, "expected 3 evictions");
+
+        // The observer must have received exactly 3 on_evict calls, one per
+        // record removed, because evict_lru delegates to self.evict() per entry.
+        assert_eq!(
+            observer.evict_count.load(Ordering::Relaxed),
+            3,
+            "on_evict must fire exactly once per evicted record"
+        );
+    }
+
+    // --- AC #9: saturating-cast — evict_lru(u32::MAX) on small snapshot returns snapshot len ---
+
+    #[test]
+    fn evict_lru_saturating_cast_does_not_panic() {
+        let store = make_store();
+        // Insert a small number of clean records.
+        for i in 0..5_u32 {
+            store
+                .storage()
+                .put(&format!("k{i}"), make_clean_record(i64::from(i) * 100 + 1));
+        }
+
+        // Call with u32::MAX — iterator exhausts before target_count is reached.
+        // Must return the actual count (5) without panicking.
+        let evicted = store.evict_lru(u32::MAX, false);
+        assert_eq!(
+            evicted, 5,
+            "must return the actual eviction count, not wrap or panic"
+        );
+        assert!(store.is_empty(), "all clean records must be evicted");
     }
 }
