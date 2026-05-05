@@ -7,6 +7,13 @@ use serde::{Deserialize, Serialize};
 use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
 
+/// Minimum elapsed milliseconds before a read access updates `last_access_time`.
+///
+/// Coalesces recency updates to bound write amplification under read-heavy load
+/// (Cassandra SEDA pattern). Updates within this window still increment `hits`
+/// for LFU compatibility but do not write to the LRU timestamp field.
+pub const RECENCY_COALESCE_MS: i64 = 100;
+
 /// Metadata tracked for every record in the [`RecordStore`](super::RecordStore).
 ///
 /// Server-internal -- NOT serialized to the wire protocol.
@@ -47,10 +54,17 @@ impl RecordMetadata {
         }
     }
 
-    /// Records a read access: increments `hits` and updates `last_access_time`.
+    /// Records a read access: increments `hits` and conditionally updates `last_access_time`.
+    ///
+    /// Coalesces recency updates to bound write amplification under read-heavy load
+    /// (Cassandra SEDA pattern). `hits` always increments for LFU compatibility;
+    /// `last_access_time` only advances when the elapsed time exceeds
+    /// [`RECENCY_COALESCE_MS`] to avoid thrashing on burst reads.
     pub fn on_access(&mut self, now: i64) {
         self.hits = self.hits.saturating_add(1);
-        self.last_access_time = now;
+        if now > self.last_access_time + RECENCY_COALESCE_MS {
+            self.last_access_time = now;
+        }
     }
 
     /// Records a write: increments `version` and updates `last_update_time`.
