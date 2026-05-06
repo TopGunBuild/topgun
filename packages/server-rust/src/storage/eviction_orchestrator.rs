@@ -84,7 +84,7 @@ impl EvictionOrchestrator {
 
         // Step 1: Sum cost and record count across all live stores.
         // size() returns usize; widen to u64 at call site to match current_ram width.
-        // Do NOT modify the RecordStore trait (SPEC-243a archived surface).
+        // Do NOT modify the RecordStore trait — the trait surface is archived; cast to u64 at the orchestrator call site instead.
         let mut current_ram: u64 = 0;
         let mut total_record_count: u64 = 0;
         for store in &stores {
