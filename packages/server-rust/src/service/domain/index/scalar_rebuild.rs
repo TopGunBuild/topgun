@@ -266,4 +266,71 @@ mod tests {
         assert!(real_entry.value().done.load(Ordering::Relaxed));
     }
 
+    /// AC #13 — descriptor-boundary round-trip test.
+    ///
+    /// Writes scalar descriptors via `save_scalar_descriptors`, reads them
+    /// back via `load_scalar_descriptors`, then drives
+    /// `rebuild_scalar_from_store` over the resulting specs and asserts both
+    /// progress entries and index registration. Exercises the same code path
+    /// a real-process restart would, at the descriptor-file boundary, in a
+    /// tempdir-backed sidecar so the production sidecar file is untouched.
+    /// End-to-end real-process-restart durability is verified manually via
+    /// Validation Checklist #1.
+    #[tokio::test]
+    async fn descriptor_boundary_roundtrip() {
+        use crate::network::handlers::admin::{load_scalar_descriptors, save_scalar_descriptors};
+        use crate::network::handlers::admin_types::ScalarIndexDescriptor;
+
+        // Sidecar lives in a tempdir so concurrent test runs do not collide on
+        // a shared `./scalar_indexes.json` path.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sidecar = dir.path().join("scalar_indexes.json");
+
+        let descriptors = vec![
+            ScalarIndexDescriptor {
+                map_name: "users".to_string(),
+                attribute: "email".to_string(),
+                index_type: IndexTypeParam::Hash,
+                created_at: "2026-05-06T00:00:00Z".to_string(),
+            },
+            ScalarIndexDescriptor {
+                map_name: "events".to_string(),
+                attribute: "kind".to_string(),
+                index_type: IndexTypeParam::Inverted,
+                created_at: "2026-05-06T00:00:01Z".to_string(),
+            },
+        ];
+
+        // Write -> read -> assert round-trip at the descriptor shape level.
+        save_scalar_descriptors(&sidecar, &descriptors).expect("save");
+        let loaded = load_scalar_descriptors(&sidecar);
+        assert_eq!(loaded.len(), 2, "round-trip preserves descriptor count");
+        assert_eq!(loaded[0].map_name, "users");
+        assert_eq!(loaded[0].attribute, "email");
+        assert_eq!(loaded[1].map_name, "events");
+        assert_eq!(loaded[1].attribute, "kind");
+
+        // Drive the rebuild path with the loaded descriptors, then assert the
+        // observable post-restart state: progress entries + index registration.
+        let (index_factory, store_factory) = fresh_factories();
+        let progress: Arc<DashMap<(String, String), Arc<BackfillProgress>>> =
+            Arc::new(DashMap::new());
+        let specs: Vec<ScalarRebuildSpec> = loaded
+            .into_iter()
+            .map(|d| ScalarRebuildSpec {
+                map_name: d.map_name,
+                attribute: d.attribute,
+                index_type: d.index_type,
+            })
+            .collect();
+        rebuild_scalar_from_store(&index_factory, &store_factory, &specs, &progress).await;
+
+        assert_eq!(progress.len(), 2);
+        assert!(index_factory.register_map("users").has_index("email"));
+        assert!(index_factory.register_map("events").has_index("kind"));
+        for entry in progress.iter() {
+            assert_eq!(entry.value().rebuild_type, RebuildType::StartupRebuild);
+            assert!(entry.value().done.load(Ordering::Relaxed));
+        }
+    }
 }

@@ -362,6 +362,7 @@ async fn main() -> anyhow::Result<()> {
             topic_registry,
             counter_registry,
             record_store_factory,
+            index_observer_factory,
         ) = build_services(
             node_id.clone(),
             Arc::clone(&cluster_state),
@@ -388,6 +389,7 @@ async fn main() -> anyhow::Result<()> {
                 topic_registry,
                 counter_registry,
                 record_store_factory,
+                index_observer_factory,
             ),
             Some(cluster_state),
         )
@@ -403,6 +405,7 @@ async fn main() -> anyhow::Result<()> {
             topic_registry,
             counter_registry,
             record_store_factory,
+            index_observer_factory,
         ) = build_services(
             node_id.clone(),
             Arc::clone(&cs),
@@ -420,6 +423,7 @@ async fn main() -> anyhow::Result<()> {
                 topic_registry,
                 counter_registry,
                 record_store_factory,
+                index_observer_factory,
             ),
             None,
         )
@@ -433,6 +437,7 @@ async fn main() -> anyhow::Result<()> {
         topic_registry,
         counter_registry,
         record_store_factory,
+        index_observer_factory,
     ) = cluster_state_for_services;
 
     // Spawn the eviction orchestrator after services are wired so it observes
@@ -490,12 +495,52 @@ async fn main() -> anyhow::Result<()> {
         auth_providers: Arc::new(vec![]),
         refresh_grant_store: None,
         auth_validator: None,
-        index_observer_factory: None,
+        index_observer_factory: Some(Arc::clone(&index_observer_factory)),
         backfill_progress: Arc::new(dashmap::DashMap::new()),
         lock_registry: Some(lock_registry),
         topic_registry: Some(topic_registry),
         counter_registry: Some(counter_registry),
     };
+
+    // Mirror NetworkModule::serve()'s scalar index rebuild for the test_server
+    // path, which builds its router directly without going through NetworkModule.
+    // Runs BEFORE set_ready() so queries arriving immediately after readiness see
+    // populated indexes instead of empty-state false negatives. Reuses the
+    // AppState backfill_progress Arc so progress entries written here are visible
+    // to GET /api/admin/indexes/{map}/{attr}/status after set_ready. Must run
+    // BEFORE `.with_state(state)` consumes the AppState.
+    let scalar_path = std::path::PathBuf::from(
+        std::env::var("TOPGUN_INDEX_PATH")
+            .unwrap_or_else(|_| "./scalar_indexes.json".to_string()),
+    );
+    let descriptors =
+        topgun_server::network::handlers::admin::load_scalar_descriptors(&scalar_path);
+    let scalar_count = descriptors.len();
+    if scalar_count > 0 {
+        let specs: Vec<topgun_server::service::domain::index::scalar_rebuild::ScalarRebuildSpec> =
+            descriptors
+                .into_iter()
+                .map(|d| {
+                    topgun_server::service::domain::index::scalar_rebuild::ScalarRebuildSpec {
+                        map_name: d.map_name,
+                        attribute: d.attribute,
+                        index_type: d.index_type,
+                    }
+                })
+                .collect();
+        topgun_server::service::domain::index::scalar_rebuild::rebuild_scalar_from_store(
+            &index_observer_factory,
+            &record_store_factory,
+            &specs,
+            &state.backfill_progress,
+        )
+        .await;
+    }
+    tracing::info!(
+        target: "topgun_server::bootstrap",
+        count = scalar_count,
+        "scalar index restore complete"
+    );
 
     // Build the axum router with state.
     // Serve WebSocket on both /ws (integration tests) and / (browser clients).
@@ -642,6 +687,7 @@ type BuildServicesResult = (
     Arc<TopicRegistry>,
     Arc<CounterRegistry>,
     Arc<RecordStoreFactory>,
+    Arc<IndexObserverFactory>,
 );
 
 /// Wires all 7 domain services and builds the partition dispatcher.
@@ -864,6 +910,7 @@ fn build_services(
         topic_registry_arc,
         counter_registry_arc,
         record_store_factory,
+        Arc::clone(&index_observer_factory),
     )
 }
 

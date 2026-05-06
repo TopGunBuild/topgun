@@ -304,6 +304,51 @@ impl NetworkModule {
             }
         }
 
+        // Mirror the vector rebuild for scalar (Hash / Navigable / Inverted) indexes.
+        // Runs synchronously before set_ready() so that queries arriving immediately
+        // after readiness see populated indexes instead of empty-state false negatives.
+        let mut scalar_count: usize = 0;
+        if let (Some(ref index_factory), Some(ref store_factory)) =
+            (&self.index_observer_factory, &self.store_factory)
+        {
+            let scalar_path = std::path::PathBuf::from(
+                std::env::var("TOPGUN_INDEX_PATH")
+                    .unwrap_or_else(|_| "./scalar_indexes.json".to_string()),
+            );
+            let descriptors =
+                crate::network::handlers::admin::load_scalar_descriptors(&scalar_path);
+            scalar_count = descriptors.len();
+            if scalar_count > 0 {
+                let specs: Vec<crate::service::domain::index::scalar_rebuild::ScalarRebuildSpec> =
+                    descriptors
+                        .into_iter()
+                        .map(|d| {
+                            crate::service::domain::index::scalar_rebuild::ScalarRebuildSpec {
+                                map_name: d.map_name,
+                                attribute: d.attribute,
+                                index_type: d.index_type,
+                            }
+                        })
+                        .collect();
+                crate::service::domain::index::scalar_rebuild::rebuild_scalar_from_store(
+                    index_factory,
+                    store_factory,
+                    &specs,
+                    &backfill_progress,
+                )
+                .await;
+            }
+        }
+        // Emit the boot-log line UNCONDITIONALLY — even if either factory is None,
+        // operators grepping `topgun_server::bootstrap` for the boot fingerprint must
+        // see the line with `count=0` rather than a silent no-emit. Symmetric with the
+        // test-server path's unconditional emission.
+        tracing::info!(
+            target: "topgun_server::bootstrap",
+            count = scalar_count,
+            "scalar index restore complete"
+        );
+
         // set_ready() is called AFTER rebuild_from_store() awaits to completion,
         // ensuring all startup progress entries are written before serving.
         let router = build_app(
