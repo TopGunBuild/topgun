@@ -146,6 +146,22 @@ Examples:
 - Integration tests (TS client to Rust server): `pnpm test:integration-rust`
 - Run TS tests sequentially in CI to avoid port conflicts: `pnpm test -- --runInBand`
 
+## Production Defaults (Memory + Persistence)
+
+The server reads the following environment variables at startup. Defaults are tuned so a freshly-cloned demo server won't OOM under load — set the override before starting the process if your deployment needs different ceilings.
+
+- `TOPGUN_MAX_RAM_MB` (default: `1024`) — RAM ceiling for the in-memory record cache; eviction engages above the high water mark.
+- `TOPGUN_EVICTION_HIGH_PCT` (default: `85`) — high water mark percent. Eviction starts when in-memory cost exceeds this fraction of `TOPGUN_MAX_RAM_MB`.
+- `TOPGUN_EVICTION_LOW_PCT` (default: `70`) — low water mark percent. Eviction stops once in-memory cost drops to this fraction.
+- `TOPGUN_EVICTION_INTERVAL_MS` (default: `1000`) — orchestrator tick interval.
+- `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` (default: `1000`) — how often the write-behind buffer flushes to the durable backend.
+- `TOPGUN_WRITEBEHIND_BATCH_SIZE` (default: `100`) — maximum records flushed per write-behind tick.
+- `TOPGUN_WRITEBEHIND_CAPACITY` (default: `10000`) — bounded buffer size; once full, writes apply pressure to the producer rather than allocating without limit.
+
+At startup the server emits a single `tracing::info!` line containing the effective `max_ram_mb`, water marks, eviction interval, and `write_behind_enabled` so operators can confirm the active configuration without reading source.
+
+Note: Write-Behind buffers acked writes for ~1s before persisting to disk. Acceptable for the demo server tier; crash-safe shutdown drain + WAL recovery land separately (TODO-339, post-HN). Until that lands, an unclean shutdown can lose buffered writes that have not yet been flushed.
+
 ## Simulation Testing
 
 The simulation testing framework provides deterministic testing of distributed behavior under network faults and node failures, without real networking or timers.
