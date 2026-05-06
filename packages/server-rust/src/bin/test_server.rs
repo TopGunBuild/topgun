@@ -61,9 +61,11 @@ use topgun_server::service::policy::{InMemoryPolicyStore, PolicyEvaluator, Polic
 use topgun_server::service::router::OperationRouter;
 use topgun_server::service::security::{SecurityConfig, WriteValidator};
 use topgun_server::service::OperationService;
-use topgun_server::storage::datastores::NullDataStore;
+use topgun_server::storage::datastores::{NullDataStore, WriteBehindConfig, WriteBehindDataStore};
 #[cfg(feature = "redb")]
 use topgun_server::storage::datastores::RedbDataStore;
+use topgun_server::storage::eviction_config::EvictionConfig;
+use topgun_server::storage::eviction_orchestrator::EvictionOrchestrator;
 use topgun_server::storage::map_data_store::MapDataStore;
 use topgun_server::storage::factory::{ObserverFactory, RecordStoreFactory};
 use topgun_server::storage::impls::StorageConfig;
@@ -74,28 +76,45 @@ use topgun_server::storage::mutation_observer::MutationObserver;
 // Storage backend selection
 // ---------------------------------------------------------------------------
 
+/// Identifies the active persistence backend so the bootstrap can decide
+/// whether to wrap the data store with `WriteBehindDataStore` (skipped for the
+/// `Null` backend because buffering writes to a no-op store wastes overhead).
+#[derive(Debug, Clone, Copy)]
+enum StorageBackend {
+    Null,
+    Redb,
+    // Constructed only under `feature = "postgres"`; the variant is still listed
+    // here so the bootstrap match arms compile in every feature configuration.
+    #[allow(dead_code)]
+    Postgres,
+}
+
 /// Resolve the storage backend at startup.
 ///
 /// Reads `STORAGE_BACKEND` (default: `redb`) and constructs the matching
 /// `Arc<dyn MapDataStore>`. Each branch is responsible for any per-backend
 /// initialization (e.g. opening a redb file, connecting to Postgres).
 ///
+/// Returns the constructed store paired with a `StorageBackend` discriminant
+/// so the bootstrap can branch on backend variant when deciding whether to
+/// wrap with `WriteBehindDataStore` without re-reading the env var.
+///
 /// The default is `redb` so a developer running `pnpm start:server` with no
 /// env vars gets durable embedded storage out of the box. Set
 /// `STORAGE_BACKEND=null` for ephemeral integration-test fixtures, or
 /// `STORAGE_BACKEND=postgres` (with the `postgres` feature compiled in) for
 /// production deployments.
-async fn select_datastore() -> anyhow::Result<Arc<dyn MapDataStore>> {
+async fn select_datastore() -> anyhow::Result<(Arc<dyn MapDataStore>, StorageBackend)> {
     let backend = std::env::var("STORAGE_BACKEND").unwrap_or_else(|_| "redb".to_string());
     match backend.as_str() {
-        "null" => Ok(Arc::new(NullDataStore)),
+        "null" => Ok((Arc::new(NullDataStore), StorageBackend::Null)),
         #[cfg(feature = "redb")]
         "redb" => {
             let path =
                 std::env::var("TOPGUN_REDB_PATH").unwrap_or_else(|_| "./topgun.redb".to_string());
             let store = RedbDataStore::new(&path)?;
             store.initialize().await?;
-            Ok(Arc::new(store))
+            Ok((Arc::new(store), StorageBackend::Redb))
         }
         #[cfg(not(feature = "redb"))]
         "redb" => anyhow::bail!(
@@ -108,7 +127,7 @@ async fn select_datastore() -> anyhow::Result<Arc<dyn MapDataStore>> {
             let pool = sqlx::PgPool::connect(&url).await?;
             let store = topgun_server::storage::datastores::PostgresDataStore::new(pool, None)?;
             store.initialize().await?;
-            Ok(Arc::new(store))
+            Ok((Arc::new(store), StorageBackend::Postgres))
         }
         #[cfg(not(feature = "postgres"))]
         "postgres" => anyhow::bail!(
@@ -197,6 +216,19 @@ async fn main() -> anyhow::Result<()> {
     // cluster background services (HeartbeatService, etc.).
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
+    // Clone the shutdown receiver for the eviction orchestrator before any of the
+    // cluster background services move `shutdown_rx`. Cluster-mode HeartbeatService
+    // spawn (below) consumes `shutdown_rx` by value; without an early clone the
+    // orchestrator spawn would fail to compile with use-of-moved-value.
+    let orchestrator_shutdown = shutdown_rx.clone();
+
+    // Resolve eviction + write-behind tunables from the operator's environment as
+    // early as possible so the bootstrap can branch on backend variant when wrapping
+    // the data store and emit a single boot-time summary log without duplicating
+    // env-var reads later in the function.
+    let eviction_config = EvictionConfig::from_env();
+    let write_behind_config = WriteBehindConfig::from_env();
+
     // Create the policy store early so it can be shared between the admin HTTP API
     // (AppState.policy_store) and the authorization middleware (PolicyEvaluator).
     // Both hold Arc references to the same underlying InMemoryPolicyStore, so
@@ -209,7 +241,31 @@ async fn main() -> anyhow::Result<()> {
     // Resolve the persistence backend once per process. The default branch
     // creates ./topgun.redb in the working directory; STORAGE_BACKEND=null
     // preserves the legacy ephemeral integration-test behavior.
-    let datastore = select_datastore().await?;
+    let (inner_data_store, backend) = select_datastore().await?;
+
+    // Wrap durable backends in WriteBehindDataStore so client OP_ACK round-trips
+    // do not block on disk fsync. The Null backend is intentionally skipped:
+    // buffering writes to a no-op store wastes overhead with no durability win.
+    let datastore: Arc<dyn MapDataStore> = match backend {
+        StorageBackend::Redb | StorageBackend::Postgres => {
+            tracing::debug!(
+                target: "topgun_server::bootstrap",
+                backend = ?backend,
+                "write-behind wrap applied"
+            );
+            // WriteBehindDataStore::new returns Arc<Self> directly (it spawns its
+            // own background flush task). Wrapping with Arc::new here would
+            // produce Arc<Arc<...>>, which cannot coerce to Arc<dyn MapDataStore>.
+            WriteBehindDataStore::new(inner_data_store, write_behind_config.clone())
+        }
+        StorageBackend::Null => {
+            tracing::debug!(
+                target: "topgun_server::bootstrap",
+                "write-behind skipped for null backend"
+            );
+            inner_data_store
+        }
+    };
 
     let (cluster_state_for_services, cluster_state_for_app) = if cluster_mode {
         // --- Cluster mode ---
@@ -305,6 +361,7 @@ async fn main() -> anyhow::Result<()> {
             lock_registry,
             topic_registry,
             counter_registry,
+            record_store_factory,
         ) = build_services(
             node_id.clone(),
             Arc::clone(&cluster_state),
@@ -330,6 +387,7 @@ async fn main() -> anyhow::Result<()> {
                 lock_registry,
                 topic_registry,
                 counter_registry,
+                record_store_factory,
             ),
             Some(cluster_state),
         )
@@ -344,6 +402,7 @@ async fn main() -> anyhow::Result<()> {
             lock_registry,
             topic_registry,
             counter_registry,
+            record_store_factory,
         ) = build_services(
             node_id.clone(),
             Arc::clone(&cs),
@@ -360,6 +419,7 @@ async fn main() -> anyhow::Result<()> {
                 lock_registry,
                 topic_registry,
                 counter_registry,
+                record_store_factory,
             ),
             None,
         )
@@ -372,7 +432,31 @@ async fn main() -> anyhow::Result<()> {
         lock_registry,
         topic_registry,
         counter_registry,
+        record_store_factory,
     ) = cluster_state_for_services;
+
+    // Spawn the eviction orchestrator after services are wired so it observes
+    // every store the factory will create. The orchestrator terminates within
+    // one `interval_ms` of `shutdown_tx.send(true)` via the cloned receiver
+    // captured at the top of `main`.
+    let orchestrator = EvictionOrchestrator::new(
+        eviction_config.clone(),
+        Arc::clone(&record_store_factory),
+        orchestrator_shutdown,
+    );
+    tokio::spawn(orchestrator.run());
+
+    // Single operator-facing summary line. Reads against this line are how an
+    // operator confirms the effective ceiling and whether write-behind is
+    // wrapping the durable backend without reading source.
+    tracing::info!(
+        max_ram_mb = eviction_config.max_ram_bytes / (1024 * 1024),
+        high_water_pct = eviction_config.high_water_pct,
+        low_water_pct = eviction_config.low_water_pct,
+        interval_ms = eviction_config.interval_ms,
+        write_behind_enabled = !matches!(backend, StorageBackend::Null),
+        "eviction + write-behind initialized"
+    );
 
     // Allow integration test environments to opt in to detailed auth errors.
     let insecure_forward_auth_errors = std::env::var("INSECURE_FORWARD_AUTH_ERRORS")
@@ -547,7 +631,9 @@ impl ObserverFactory for SearchObserverFactory {
 // ---------------------------------------------------------------------------
 
 /// Return type of [`build_services`]: the wired operation service, dispatcher,
-/// connection registry, and the three session-scoped registry Arcs.
+/// connection registry, the three session-scoped registry Arcs, and the
+/// `RecordStoreFactory` so the bootstrap can hand it to `EvictionOrchestrator`
+/// without reaching into `build_services` internals.
 type BuildServicesResult = (
     Arc<OperationService>,
     PartitionDispatcher,
@@ -555,6 +641,7 @@ type BuildServicesResult = (
     Arc<LockRegistry>,
     Arc<TopicRegistry>,
     Arc<CounterRegistry>,
+    Arc<RecordStoreFactory>,
 );
 
 /// Wires all 7 domain services and builds the partition dispatcher.
@@ -776,6 +863,7 @@ fn build_services(
         lock_registry_arc,
         topic_registry_arc,
         counter_registry_arc,
+        record_store_factory,
     )
 }
 
