@@ -15,6 +15,7 @@ pub mod mutation_observer;
 pub mod navigable_index;
 pub mod query_optimizer;
 pub mod registry;
+pub mod scalar_rebuild;
 pub mod vector_cache;
 pub mod vector_index;
 
