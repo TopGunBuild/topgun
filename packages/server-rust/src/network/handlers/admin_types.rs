@@ -248,6 +248,30 @@ pub struct IndexListResponse {
     pub indexes: Vec<IndexInfoResponse>,
 }
 
+/// On-disk descriptor for a registered scalar (Hash / Navigable / Inverted) index.
+///
+/// Persisted to `TOPGUN_INDEX_PATH` (default: `./scalar_indexes.json`) as a JSON
+/// array. Loaded at startup to re-register scalar indexes and backfill them
+/// from persisted records. Mirrors `VectorIndexDescriptor` but excludes vector-
+/// specific fields (`dimension`, `distanceMetric`, HNSW params, dedup flag).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ScalarIndexDescriptor {
+    /// Map name this index belongs to.
+    pub map_name: String,
+    /// Attribute name this index covers.
+    pub attribute: String,
+    /// Index strategy: `Hash`, `Navigable`, or `Inverted`. The descriptor
+    /// rejects `Vector` at the application layer (vector indexes use a
+    /// separate descriptor file); the enum reuse keeps the wire shape parallel
+    /// to `CreateIndexRequest.indexType` so a single `IndexTypeParam` round-
+    /// trips through both API and disk without translation.
+    pub index_type: IndexTypeParam,
+    /// ISO-8601 UTC timestamp when this index was originally created (set by
+    /// `create_index` at the moment of the in-memory registration).
+    pub created_at: String,
+}
+
 /// Discriminant for the type of rebuild tracked by [`BackfillProgress`].
 ///
 /// Set at construction time; never mutated after the entry is inserted into
@@ -259,7 +283,7 @@ pub enum RebuildType {
     #[default]
     Backfill,
     /// Startup rebuild replaying records from partition stores into a freshly
-    /// re-registered vector index.
+    /// re-registered vector or scalar index.
     StartupRebuild,
 }
 
