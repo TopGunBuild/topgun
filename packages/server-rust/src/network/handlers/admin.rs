@@ -737,6 +737,7 @@ pub async fn delete_policy(
 ///
 /// Returns 409 if the index already exists, 503 if the index observer factory
 /// is not configured.
+#[allow(clippy::too_many_lines)]
 pub async fn create_index(
     _claims: AdminClaims,
     State(state): State<AppState>,
@@ -1115,6 +1116,11 @@ pub fn load_scalar_descriptors(path: &std::path::Path) -> Vec<ScalarIndexDescrip
 /// helper propagates I/O errors so the `create_index` handler can implement
 /// durability-before-ack: if the disk write fails, the in-memory registration
 /// is rolled back and the client receives 500.
+///
+/// # Errors
+///
+/// Returns the underlying `std::io::Error` if serialization fails (mapped via
+/// `std::io::Error::other`) or if the disk write fails.
 pub fn save_scalar_descriptors(
     path: &std::path::Path,
     descriptors: &[ScalarIndexDescriptor],

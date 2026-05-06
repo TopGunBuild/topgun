@@ -42,6 +42,11 @@ pub struct ScalarRebuildSpec {
 /// than panicking, but the calling site in `module.rs::serve` should never
 /// pass a Vector spec because the JSON file is written only by the scalar
 /// admin handlers.
+// `async` is preserved for parity with `vector_index::rebuild_from_store` and
+// to allow future migration to a streaming/spawning rebuild without a
+// signature change. The current body has no `.await` because `for_each_boxed`
+// is synchronous; the `unused_async` lint is suppressed deliberately.
+#[allow(clippy::unused_async)]
 pub async fn rebuild_scalar_from_store(
     factory: &Arc<IndexObserverFactory>,
     store_factory: &Arc<RecordStoreFactory>,

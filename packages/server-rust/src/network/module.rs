@@ -248,6 +248,7 @@ impl NetworkModule {
     /// # Panics
     ///
     /// Panics if `start()` was not called before `serve()`.
+    #[allow(clippy::too_many_lines)]
     pub async fn serve(
         self,
         shutdown: impl Future<Output = ()> + Send + 'static,
