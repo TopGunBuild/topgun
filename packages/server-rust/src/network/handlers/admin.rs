@@ -31,9 +31,10 @@ use super::admin_types::{
     self, BackfillProgress, BackfillStatusResponse, ClusterStatusResponse, CreateIndexRequest,
     CreatePolicyRequest, CreateVectorIndexRequest, ErrorResponse, IndexInfoResponse,
     IndexListResponse, IndexTypeParam, LoginRequest, LoginResponse, MapInfo, MapsListResponse,
-    NodeStatus, OptimizeResponse, PartitionInfo, PolicyListResponse, PolicyResponse, ServerMode,
-    ServerStatusResponse, SettingsResponse, SettingsUpdateRequest, VectorIndexDescriptor,
-    VectorIndexInfoResponse, VectorIndexStatusResponse,
+    NodeStatus, OptimizeResponse, PartitionInfo, PolicyListResponse, PolicyResponse,
+    ScalarIndexDescriptor, ServerMode, ServerStatusResponse, SettingsResponse,
+    SettingsUpdateRequest, VectorIndexDescriptor, VectorIndexInfoResponse,
+    VectorIndexStatusResponse,
 };
 use super::AppState;
 
@@ -786,6 +787,38 @@ pub async fn create_index(
         }
     }
 
+    // Persist the descriptor so a subsequent restart can rebuild this index.
+    // This MUST succeed before we return 201 — the durability-before-ack contract.
+    let path = scalar_descriptor_path();
+    let mut descriptors = load_scalar_descriptors(&path);
+    let now_iso = {
+        let secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        crate::service::domain::index::vector_index::format_iso8601(secs)
+    };
+    descriptors.push(ScalarIndexDescriptor {
+        map_name: req.map_name.clone(),
+        attribute: req.attribute.clone(),
+        index_type: req.index_type.clone(),
+        created_at: now_iso,
+    });
+    if let Err(e) = save_scalar_descriptors(&path, &descriptors) {
+        // Roll back the in-memory registration so the persisted state matches
+        // the state visible to clients. Using the registry handle we just
+        // acquired.
+        let _ = registry.remove_index(&req.attribute);
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                code: 500,
+                message: format!("failed to persist index descriptor: {e}"),
+                field: None,
+            }),
+        ));
+    }
+
     // Spawn a background backfill task to populate the new index with existing records.
     if let Some(store_factory) = state.store_factory.clone() {
         let backfill_progress = Arc::clone(&state.backfill_progress);
@@ -941,6 +974,26 @@ pub async fn remove_index_handler(
         .backfill_progress
         .remove(&(map_name.clone(), attribute.clone()));
 
+    // Drop the descriptor entry from disk so a subsequent restart does not
+    // re-register a removed index. Disk write failures are logged but do not
+    // fail the request — the in-memory removal succeeded and that is the
+    // user-observable contract for DELETE.
+    let path = scalar_descriptor_path();
+    let mut descriptors = load_scalar_descriptors(&path);
+    let before = descriptors.len();
+    descriptors.retain(|d| !(d.map_name == map_name && d.attribute == attribute));
+    if descriptors.len() != before {
+        if let Err(e) = save_scalar_descriptors(&path, &descriptors) {
+            tracing::warn!(
+                target: "topgun_server::index_persistence",
+                map = %map_name,
+                attribute = %attribute,
+                error = %e,
+                "failed to persist scalar index descriptor removal; in-memory state already removed"
+            );
+        }
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1010,6 +1063,64 @@ pub async fn index_backfill_status(
             field: None,
         }),
     ))
+}
+
+// ── Scalar index descriptor persistence ──────────────────────────────────────
+
+/// Path for the scalar index descriptor sidecar JSON file.
+///
+/// Configured via `TOPGUN_INDEX_PATH`; defaults to `./scalar_indexes.json`.
+/// Distinct from `TOPGUN_VECTOR_INDEX_PATH` so the two file rewrites never
+/// race each other.
+fn scalar_descriptor_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        std::env::var("TOPGUN_INDEX_PATH")
+            .unwrap_or_else(|_| "./scalar_indexes.json".to_string()),
+    )
+}
+
+/// Loads all persisted `ScalarIndexDescriptor` entries from the sidecar JSON file.
+///
+/// Returns an empty `Vec` if the file does not exist (first start). Any parse
+/// error is logged and treated as empty to avoid a crash loop on corrupt data.
+/// Mirrors `load_vector_descriptors` semantics 1:1.
+pub fn load_scalar_descriptors(path: &std::path::Path) -> Vec<ScalarIndexDescriptor> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|e| {
+            tracing::warn!(
+                target: "topgun_server::index_persistence",
+                path = %path.display(),
+                error = %e,
+                "failed to parse scalar index descriptor file; treating as empty"
+            );
+            vec![]
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+        Err(e) => {
+            tracing::warn!(
+                target: "topgun_server::index_persistence",
+                path = %path.display(),
+                error = %e,
+                "failed to read scalar index descriptor file; treating as empty"
+            );
+            vec![]
+        }
+    }
+}
+
+/// Persists the full list of `ScalarIndexDescriptor` entries to the sidecar JSON file.
+///
+/// Returns `Ok(())` on success or the underlying `std::io::Error` on failure.
+/// Unlike `save_vector_descriptors` (which is intentionally infallible), this
+/// helper propagates I/O errors so the `create_index` handler can implement
+/// durability-before-ack: if the disk write fails, the in-memory registration
+/// is rolled back and the client receives 500.
+pub fn save_scalar_descriptors(
+    path: &std::path::Path,
+    descriptors: &[ScalarIndexDescriptor],
+) -> std::io::Result<()> {
+    let json = serde_json::to_string_pretty(descriptors).map_err(std::io::Error::other)?;
+    std::fs::write(path, json)
 }
 
 // ── Vector index descriptor persistence ──────────────────────────────────────
