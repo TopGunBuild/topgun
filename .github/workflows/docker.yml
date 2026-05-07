@@ -1,0 +1,118 @@
+name: Docker
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - 'deploy/Dockerfile.server'
+      - 'packages/core-rust/**'
+      - 'packages/server-rust/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/docker.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deploy/Dockerfile.server'
+      - 'packages/core-rust/**'
+      - 'packages/server-rust/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/docker.yml'
+  workflow_dispatch:  # allow manual runs
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-${{ github.ref }}
+  # Cancel queued PR builds when a newer push to the same PR ref arrives (saves CI minutes during PR iteration);
+  # NEVER cancel in-progress publishes on main / tag refs — they may have already pushed partial tags to GHCR
+  # and a mid-flight cancel would leave the registry in an inconsistent state.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/topgunbuild/topgun-server
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,format=short,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build smoke-test image (amd64)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: deploy/Dockerfile.server
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: topgun-server:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run smoke test
+        run: |
+          docker run -d --name topgun-smoke -p 8080:8080 -e TOPGUN_NO_AUTH=1 topgun-server:smoke
+          echo "Waiting for /health to return 200..."
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/health; then
+              echo ""
+              echo "Health check passed on attempt $i"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Health check failed after 30 seconds"
+          exit 1
+
+      - name: Capture smoke-test logs
+        if: always()
+        run: docker logs topgun-smoke || true
+
+      - name: Stop and remove smoke-test container
+        if: always()
+        run: docker rm -f topgun-smoke || true
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: deploy/Dockerfile.server
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
