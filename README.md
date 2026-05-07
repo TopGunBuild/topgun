@@ -1,6 +1,6 @@
 # TopGun
 
-[![License](https://img.shields.io/github/license/TopGunBuild/topgun)](LICENSE) [![CI](https://img.shields.io/github/actions/workflow/status/TopGunBuild/topgun/rust.yml?branch=main&label=CI)](.github/workflows/rust.yml) [![npm](https://img.shields.io/npm/v/@topgunbuild/client)](https://www.npmjs.com/package/@topgunbuild/client) [![Discord](https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/NDpMG4dmJu) [![GitHub Stars](https://img.shields.io/github/stars/TopGunBuild/topgun?style=social)](https://github.com/TopGunBuild/topgun)
+[![License](https://img.shields.io/github/license/TopGunBuild/topgun)](LICENSE) [![CI](https://img.shields.io/github/actions/workflow/status/TopGunBuild/topgun/rust.yml?branch=main&label=CI)](.github/workflows/rust.yml) [![Docker](https://github.com/TopGunBuild/topgun/actions/workflows/docker.yml/badge.svg)](https://github.com/TopGunBuild/topgun/actions/workflows/docker.yml) [![npm](https://img.shields.io/npm/v/@topgunbuild/client)](https://www.npmjs.com/package/@topgunbuild/client) [![Discord](https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/NDpMG4dmJu) [![GitHub Stars](https://img.shields.io/github/stars/TopGunBuild/topgun?style=social)](https://github.com/TopGunBuild/topgun)
 
 > **v2.0 — single-node stable; cluster features in progress.** The TypeScript client and Rust server APIs are stable for single-node deployments. Cluster-mode capabilities (Raft-backed distributed locks, cross-node replication) are being actively developed.
 
@@ -40,6 +40,17 @@ pnpm start:server
 The server runs on `ws://localhost:8080` with embedded storage at `./topgun.redb` — writes survive restart, no Postgres, no Docker required. Stop with `Ctrl-C`, restart, and your data is still there. Backup is a single-file copy.
 
 For users who prefer containers, `docker compose up server` works too — it spins up Postgres alongside the server in one command.
+
+### Pull pre-built image (Docker)
+
+If you have Docker installed, skip the build entirely:
+
+```bash
+docker pull ghcr.io/topgunbuild/topgun-server:latest
+docker run -p 8080:8080 -e TOPGUN_NO_AUTH=1 ghcr.io/topgunbuild/topgun-server:latest
+```
+
+The image is multi-arch (linux/amd64 + linux/arm64) and is rebuilt on every push to `main`. For tagged releases use `:v2.0.0` (or `:2`, `:2.0`) instead of `:latest`.
 
 ### Production
 
