@@ -561,6 +561,28 @@ async fn main() -> anyhow::Result<()> {
             "/api/admin/policies/{id}",
             delete(topgun_server::network::handlers::admin::delete_policy),
         )
+        // Auth login + scalar index admin endpoints. Mounting here mirrors the
+        // route set NetworkModule::serve registers in production. Without this,
+        // `pnpm start:server` hits the test_server binary's hand-built router
+        // which previously omitted login + /api/admin/indexes/*, leaving the
+        // SPEC-244 persistence path unreachable end-to-end.
+        .route(
+            "/api/auth/login",
+            post(topgun_server::network::handlers::admin::login),
+        )
+        .route(
+            "/api/admin/indexes",
+            get(topgun_server::network::handlers::admin::list_indexes)
+                .post(topgun_server::network::handlers::admin::create_index),
+        )
+        .route(
+            "/api/admin/indexes/{map}/{attr}",
+            delete(topgun_server::network::handlers::admin::remove_index_handler),
+        )
+        .route(
+            "/api/admin/indexes/{map}/{attr}/status",
+            get(topgun_server::network::handlers::admin::index_backfill_status),
+        )
         .route(
             "/sync",
             post(topgun_server::network::handlers::http_sync_handler),
