@@ -1,3 +1,4 @@
+@import '@fontsource-variable/inter';
 @import "tailwindcss";
 
 /* Enable class-based dark mode (use .dark class instead of prefers-color-scheme) */
