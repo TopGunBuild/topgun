@@ -10,7 +10,7 @@ interface MergeBannerProps {
  * just happened (HLC auto-merge) so first-time visitors understand the result.
  * Auto-dismisses after 8s so it stays out of the way without requiring action.
  */
-export function MergeBanner({ conflictCount, onDismiss }: MergeBannerProps): JSX.Element | null {
+export function MergeBanner({ conflictCount, onDismiss }: MergeBannerProps) {
   useEffect(() => {
     if (conflictCount <= 0) return;
     const timer = setTimeout(onDismiss, 8000);

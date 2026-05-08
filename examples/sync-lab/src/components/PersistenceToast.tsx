@@ -9,7 +9,7 @@ const EVENT_NAME = 'topgun-sync-lab:first-todo-added';
  * Uses a CustomEvent from DevicePanel so we avoid prop-drilling through
  * ConflictArena — this is a one-shot notification, not ongoing state.
  */
-export function PersistenceToast(): JSX.Element | null {
+export function PersistenceToast() {
   const [visible, setVisible] = useState(false);
 
   useEffect(() => {

@@ -15,7 +15,7 @@ const STEPS = [
  * Caller gates rendering on !embed && !demo — this component only handles the
  * localStorage check so subsequent renders are instant (no flash on page reload).
  */
-export function GuidedTour(): JSX.Element | null {
+export function GuidedTour() {
   // Lazy initializer reads localStorage once on mount; avoids one-frame flash
   const [dismissed, setDismissed] = useState<boolean>(
     () => localStorage.getItem(STORAGE_KEY) === '1'
