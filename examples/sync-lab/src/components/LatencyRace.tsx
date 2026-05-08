@@ -67,8 +67,9 @@ export function LatencyRace() {
   return (
     <div>
       <p className="mb-4 text-sm text-text-muted">
-        Compare write latency online vs offline. TopGun writes are sub-millisecond
-        in both modes — because writes never wait for network.
+        Compare TopGun write latency online vs offline — both are sub-millisecond,
+        because writes never wait for the network. A typical REST round-trip blocks
+        the UI for 80–200ms per write. With TopGun, the UI never blocks.
       </p>
 
       {/* Control panel */}
@@ -118,7 +119,8 @@ export function LatencyRace() {
             Offline avg: <span className="font-mono text-success">{offlineStats.avg.toFixed(3)}ms</span>
           </p>
           <p className="mt-2 text-sm text-text-muted">
-            Both sub-millisecond — TopGun writes never block on network.
+            Both sub-millisecond. A REST equivalent would block the UI for 80–200ms per
+            write. TopGun never blocks — writes apply locally, sync in the background.
           </p>
         </div>
       )}
