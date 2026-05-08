@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { CodeSnippets } from '@/components/CodeSnippets';
 import { ConflictArena } from '@/components/ConflictArena';
 import { LatencyRace } from '@/components/LatencyRace';
+import { PersistenceToast } from '@/components/PersistenceToast';
 import { getSessionId, getShareUrl } from '@/lib/session';
 
 type Tab = 'conflict-arena' | 'latency-race';
@@ -174,6 +175,9 @@ export default function App() {
 
       {/* Code snippets hidden in embed mode */}
       {!embed && <CodeSnippets />}
+
+      {/* Persistence hint toast — shown once per session after first todo add; hidden in embed/demo */}
+      {!embed && !demo && <PersistenceToast />}
 
       {/* Performance badge when ?demo is set */}
       {demo && <PerformanceBadge />}

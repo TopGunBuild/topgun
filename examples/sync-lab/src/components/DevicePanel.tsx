@@ -20,13 +20,15 @@ interface DevicePanelProps {
   deviceId: string;
   label: string;
   showTimestamps: boolean;
+  /** Called after a Reconnect that detects conflicts, with the total per-field conflict count. */
+  onMergeDetected?: (count: number) => void;
 }
 
 /**
  * A single "device" panel with its own TopGunClient, todo list,
  * disconnect/reconnect controls, and merge conflict visualization.
  */
-export function DevicePanel({ deviceId, label, showTimestamps }: DevicePanelProps) {
+export function DevicePanel({ deviceId, label, showTimestamps, onMergeDetected }: DevicePanelProps) {
   const {
     client,
     map,
@@ -55,6 +57,16 @@ export function DevicePanel({ deviceId, label, showTimestamps }: DevicePanelProp
     loggedSet(map, todoKey(id, 'done'), false);
     loggedSet(map, todoKey(id, 'color'), getRandomColor());
     loggedSet(map, todoKey(id, '_exists'), true);
+
+    // Dispatch a one-shot event so the PersistenceToast (mounted at App level)
+    // can reveal that todos survive a page refresh via IndexedDB. Write the
+    // sessionStorage flag here as defense-in-depth: in ?embed mode the toast
+    // never mounts, so without this write the event would fire on every add.
+    if (sessionStorage.getItem('topgun-sync-lab-persistence-hint-shown') !== '1') {
+      sessionStorage.setItem('topgun-sync-lab-persistence-hint-shown', '1');
+      window.dispatchEvent(new CustomEvent('topgun-sync-lab:first-todo-added'));
+    }
+
     setNewTitle('');
   }, [map, newTitle, loggedSet]);
 
@@ -116,9 +128,19 @@ export function DevicePanel({ deviceId, label, showTimestamps }: DevicePanelProp
         }
       }
       setMergeResults(results);
+
+      // Notify parent with the total per-field conflict count so it can show
+      // a banner naming what just happened (HLC auto-merge). Fires once per
+      // Reconnect-with-conflicts — the setTimeout callback runs exactly once.
+      if (onMergeDetected) {
+        let totalConflicts = 0;
+        results.forEach(r => { totalConflicts += r.conflicts.length; });
+        onMergeDetected(totalConflicts);
+      }
+
       preReconnectStateRef.current = null;
     }, 500);
-  }, [reconnect]);
+  }, [reconnect, onMergeDetected]);
 
   return (
     <div className="flex flex-col rounded-xl border border-border bg-surface p-4">
