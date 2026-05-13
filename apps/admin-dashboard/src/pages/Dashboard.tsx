@@ -1,5 +1,6 @@
 import { useQuery } from '@topgunbuild/react';
 import { Server } from 'lucide-react';
+import { OpsChart } from '../components/OpsChart';
 import { getMetricValue, formatBytes, createLookupByKey } from '../utils/metrics';
 import type { ClusterMember, EnrichedClusterMember } from '../types/system';
 
@@ -43,6 +44,8 @@ export function Dashboard() {
         stats: statsById[member._key] || statsById[member.id] || {}
     }));
 
+    const totalOps = enrichedMembers.reduce((acc, member) => acc + getMetricValue(member.stats.topgun_ops_total), 0);
+
     return (
         <div className="p-6">
             <h1 className="text-3xl font-bold mb-6 text-foreground">System Overview</h1>
@@ -54,9 +57,7 @@ export function Dashboard() {
                 </div>
                 <div className="bg-card p-6 rounded-lg shadow border border-border">
                     <h3 className="text-muted-foreground text-sm font-bold uppercase">Total Ops</h3>
-                    <p className="text-4xl font-bold text-foreground">
-                        {enrichedMembers.reduce((acc, member) => acc + getMetricValue(member.stats.topgun_ops_total), 0)}
-                    </p>
+                    <p className="text-4xl font-bold text-foreground">{totalOps}</p>
                 </div>
                 <div className="bg-card p-6 rounded-lg shadow border border-border">
                     <h3 className="text-muted-foreground text-sm font-bold uppercase">Memory Usage</h3>
@@ -71,6 +72,8 @@ export function Dashboard() {
                     </p>
                 </div>
             </div>
+
+            <OpsChart totalOps={totalOps} />
 
             <h2 className="text-2xl font-bold mb-4 text-foreground">Nodes</h2>
             <div className="bg-card shadow rounded-lg overflow-hidden border border-border">
