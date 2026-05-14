@@ -2,20 +2,19 @@ import React, { useState } from 'react';
 import { Copy, Check } from 'lucide-react';
 import { useShiki } from '../hooks/useShiki';
 
-const HERO_CODE = `import { TopGunClient, IDBAdapter } from '@topgunbuild/client';
+const HERO_CODE = `import { useQuery, useMutation } from '@topgunbuild/react';
+import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
 
-// 1. Initialize Local-First Client
-const client = new TopGunClient({
-  serverUrl: 'ws://localhost:8080',
-  storage: new IDBAdapter()
-});
+const client = new TopGunClient({ serverUrl: 'ws://localhost:8080', storage: new IDBAdapter() });
 await client.start();
 
-// 2. Zero-Latency Write (Optimistic)
-client.getMap('todos').set('task-1', {
-  text: 'Ship v2',
-  status: 'pending'
-}); // Local write in ~0.5ms; syncs in background`;
+function TodoApp() {
+  const { data: todos = [] } = useQuery('todos');
+  const { create } = useMutation('todos');
+  const addTodo = () => create(crypto.randomUUID(), { text: 'New todo' });
+  return <ul>{todos.map(t => <li key={t._key}>{t.text}</li>)}</ul>;
+}`;
 
 export const HeroCodeSnippet = () => {
   const [copied, setCopied] = useState(false);
@@ -40,7 +39,7 @@ export const HeroCodeSnippet = () => {
           <div className="w-3 h-3 rounded-full bg-green-500/20 border border-green-500/50"></div>
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-xs text-neutral-500 font-mono">client.ts</span>
+          <span className="text-xs text-neutral-500 font-mono">app.tsx</span>
           <button onClick={handleCopy} className="text-neutral-500 hover:text-white transition-colors">
             {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
           </button>
