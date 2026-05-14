@@ -204,7 +204,6 @@ async function main() {
     '> Source: https://github.com/TopGunBuild/topgun\n\n';
 
   const pageParts = [];
-  let totalBytes = Buffer.byteLength(header, 'utf8');
 
   for (const relativePath of ALLOWLIST) {
     const filePath = join(CONTENT_DOCS, relativePath);
@@ -227,7 +226,6 @@ async function main() {
     console.log(`[build-llms-full] ${relativePath}: ${pageBytes} bytes`);
 
     pageParts.push(pageContribution);
-    totalBytes += pageBytes;
   }
 
   const output = header + pageParts.join('');
