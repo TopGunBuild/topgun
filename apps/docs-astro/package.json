@@ -4,6 +4,7 @@
   "version": "0.10.1",
   "scripts": {
     "dev": "astro dev",
+    "prebuild": "node scripts/build-llms-full.mjs",
     "build": "astro build",
     "preview": "astro preview",
     "astro": "astro"
