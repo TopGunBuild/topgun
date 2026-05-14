@@ -118,23 +118,22 @@ TopGun aims to be the standard for local-first state management. It provides a r
 # Quick Start Guide
 
 Build your first Local-First application with TopGun in less than 5 minutes.
-This guide will walk you through installation, initialization, and basic data operations.
 Want to see it running first? Try the [live demo](https://demo.topgun.build/).
 
 ## 1. Installation
 
   <p className="text-neutral-600 dark:text-neutral-300 mb-4">
-    Install the core client, adapters, and the React hooks package.
+    Install the core client, adapters, the React hooks package, and Zod for schema definitions.
   </p>
   <CodeBlock
     title="terminal"
-    code="npm install @topgunbuild/client @topgunbuild/adapters @topgunbuild/react"
+    code="npm install @topgunbuild/client @topgunbuild/adapters @topgunbuild/react zod"
   />
 
 ## 2. Start the Server
 
   <p className="text-neutral-600 dark:text-neutral-300 mb-4">
-    Start the TopGun server (a Rust binary) with a PostgreSQL connection for durability.
+    Start the TopGun server locally. This boots a zero-config server with embedded storage.
   </p>
   <CodeBlock
     title="terminal"
@@ -142,45 +141,77 @@ Want to see it running first? Try the [live demo](https://demo.topgun.build/).
     code={serverStartCode}
   />
 
+> **Note:** Today `pnpm start:server` compiles the server from source and requires the Rust toolchain. A zero-install `npx @topgunbuild/server` binary distribution is on the roadmap (see TODO-365) and will replace this step.
+
   <h3 className="text-lg font-semibold text-brand mb-2 !mt-0">Server Configuration</h3>
   <span className="text-brand">The TopGun server is configured via environment variables. For the full configuration reference including TLS, clustering, and the Rust embed API, see the <a href="/docs/reference/server" className="underline">Server API reference</a>. For a gradual adoption approach, see the <a href="/docs/guides/adoption-path" className="underline">Adoption Path guide</a>.</span>
 
-## 3. Initialization
+## 3. The Canonical App
 
-  <p className="text-neutral-600 dark:text-neutral-300 mb-4">
-    Create a TopGun client instance, configure persistence, and wrap your app.
-    The client starts immediately—no loading state needed!
-  </p>
+Hook-first is the simple way to read and write data with React. One read hook (`useQuery`) gives you the list and re-renders when data changes. One write hook (`useMutation`) adds new items. One type-safe `Todo` shape ties them together. The whole loop fits in 24 lines, and your list shows up instantly then keeps itself in sync as data changes.
+
   <CodeBlock
-    title="src/main.tsx"
+    title="src/app.tsx"
     language="tsx"
-    code={initCode}
+    code={canonicalAppCode}
   />
 
-## 4. Writing Data
-
-  <p className="text-neutral-600 dark:text-neutral-300 mb-4">
-    TopGun organizes data in Maps. Use <code className="px-1.5 py-0.5 rounded bg-neutral-100 dark:bg-neutral-800 text-sm">getMap()</code> to access a collection and <code className="px-1.5 py-0.5 rounded bg-neutral-100 dark:bg-neutral-800 text-sm">set()</code> to save data.
-  </p>
   <CodeBlock
-    title="src/components/AddTodo.tsx"
-    language="tsx"
-    code={addTodoCode}
+    title="src/schema.ts"
+    language="ts"
+    code={canonicalSchemaCode}
   />
 
-## 5. Reading (Live Query)
+## 4. How It Works
 
-  <p className="text-neutral-600 dark:text-neutral-300 mb-4">
-    Use the <code className="px-1.5 py-0.5 rounded bg-neutral-100 dark:bg-neutral-800 text-sm">useQuery</code> hook to subscribe to a map. The component will automatically re-render when data changes locally or comes in from the server.
-  </p>
+Here is a step-by-step breakdown of the canonical snippet above:
+
+**Lines 1–4: Imports.** Three packages installed in step 1 (`@topgunbuild/react`, `@topgunbuild/client`, `@topgunbuild/adapters`) plus the `Todo` type derived from your schema.
+
+**Lines 6–9: Client init.** `TopGunClient` takes a `serverUrl` for the WebSocket connection and a `storage` adapter for local persistence. `IDBAdapter` writes to IndexedDB so your data survives page reloads.
+
+**Line 10: Start.** `await client.start()` initializes IndexedDB asynchronously. Top-level await is supported by Vite, esbuild, and Next.js 14+.
+
+**Line 13: Read hook.** `useQuery<Todo>('todos')` subscribes to the `todos` map. The component re-renders automatically whenever data changes locally or arrives from the server.
+
+**Line 14: Write hook.** `useMutation<Todo>('todos')` returns `{ create, update, remove }`. Call `create(key, value)` to add a new item. The write lands in memory immediately (zero-latency) and syncs to the server in the background.
+
+**Line 15: Add function.** A plain function that calls `create` with a random UUID key and the new todo shape. No loading state, no async/await in the component — the write is always instant.
+
+**Lines 16–21: Render.** Standard React JSX. `todos.map(t => ...)` iterates the live list. Use `t._key` as the React key — this is the string key you passed to `create`, exposed on every query result item.
+
+**Line 24: Provider.** `TopGunProvider` makes the client available to all hooks in the tree via React context.
+
+## End-to-End Types
+
+No manual `interface` needed — the type flows from the Zod schema through the hook generic:
+
+```ts
+// schema.ts
+export type Todo = z.infer<typeof TodoSchema>;
+```
+
+```tsx
+// app.tsx
+const { data: todos = [] } = useQuery<Todo>('todos');
+```
+
+`z.infer<typeof TodoSchema>` produces `{ text: string; done: boolean }`. Pass that as the generic to `useQuery<Todo>` and TypeScript knows the shape of every item in `todos` — autocomplete works, typos are caught at compile time, and you never have to keep a manual interface in sync with your schema.
+
+## Imperative API (advanced)
+
+Use when outside React — service workers, Node scripts, non-component utilities, or when you need direct map access without hooks.
+
   <CodeBlock
-    title="src/components/TodoList.tsx"
-    language="tsx"
-    code={todoListCode}
+    title="example.ts"
+    language="ts"
+    code={imperativeCode}
   />
+
+`client.getMap('todos')` returns the map directly. `.set(key, value)` writes to local memory immediately and queues the change for sync. This is not the recommended path for UI code — prefer `useQuery` and `useMutation` in React components.
 
   <h3 className="text-lg font-semibold text-green-800 dark:text-green-300 mb-2 !mt-0">Non-Blocking Initialization</h3>
-  <span className="text-green-700 dark:text-green-400">IndexedDB can take 50-500ms to initialize. TopGun queues write operations in memory and persists them once ready—your UI renders instantly with zero blocking time. If using the simplified <code className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-800/50 text-sm">TopGun</code> API, use <code className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-800/50 text-sm">await db.waitForReady()</code> only if you need guaranteed persistence before proceeding.</span>
+  <span className="text-green-700 dark:text-green-400">IndexedDB can take 50-500ms to initialize. TopGun queues write operations in memory and persists them once ready — your UI renders instantly with zero blocking time. Call <code className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-800/50 text-sm">await client.start()</code> at module scope before mounting your app to ensure the storage layer is ready before the first hook fires.</span>
 
   <h3 className="text-lg font-semibold text-brand mb-2 !mt-0">Persistence</h3>
   <span className="text-brand">By using <code className="px-1.5 py-0.5 rounded bg-brand-subtle/10 text-sm">IDBAdapter</code>, your data is automatically saved to IndexedDB. Even if the user refreshes the page or closes the browser, the state is preserved locally.</span>
