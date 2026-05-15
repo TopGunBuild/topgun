@@ -173,9 +173,14 @@ Use when outside React — service workers, Node scripts, non-component utilitie
   <span className="text-yellow-700 dark:text-yellow-400">In production, always use <code className="px-1.5 py-0.5 rounded bg-yellow-100 dark:bg-yellow-800/50 text-sm">wss://</code> instead of <code className="px-1.5 py-0.5 rounded bg-yellow-100 dark:bg-yellow-800/50 text-sm">ws://</code> to encrypt data in transit. See the <a href="/docs/guides/security" className="underline">Security Guide</a> for TLS configuration.</span>
 </div>
 
-<div className="bg-purple-50 dark:bg-purple-900/20 border border-purple-100 dark:border-purple-800 rounded-xl p-6 mb-16 not-prose">
+<div className="bg-purple-50 dark:bg-purple-900/20 border border-purple-100 dark:border-purple-800 rounded-xl p-6 mb-6 not-prose">
   <h3 className="text-lg font-semibold text-purple-800 dark:text-purple-300 mb-2 !mt-0">Optional: Encrypt Local Storage</h3>
   <span className="text-purple-700 dark:text-purple-400">For sensitive data, wrap your adapter with <code className="px-1.5 py-0.5 rounded bg-purple-100 dark:bg-purple-800/50 text-sm">EncryptedStorageAdapter</code> to encrypt data at rest. See the <a href="/docs/guides/security#client-side-encryption-data-at-rest" className="underline">Client-Side Encryption section</a> in the Security Guide.</span>
+</div>
+
+<div className="bg-purple-50 dark:bg-purple-900/20 border border-purple-100 dark:border-purple-800 rounded-xl p-6 mb-16 not-prose">
+  <h3 className="text-lg font-semibold text-purple-800 dark:text-purple-300 mb-2 !mt-0">Building with an AI Agent?</h3>
+  <span className="text-purple-700 dark:text-purple-400">TopGun ships with a built-in MCP server for Claude Desktop, Cursor, and other AI tools. See the <a href="/docs/guides/mcp-server" className="underline">MCP Server guide</a> for configuration.</span>
 </div>
 
 ## Next Steps
