@@ -1,7 +1,8 @@
 //! Test server binary for integration tests.
 //!
-//! Wires all 7 domain services, starts on port 0, and prints `PORT=<number>`
-//! to stdout. The TS test harness reads the port from stdout to connect.
+//! Wires all 7 domain services, starts on the configured port (default 8080),
+//! and prints `PORT=<number>` to stdout. The TS test harness passes `--port 0`
+//! to opt into an ephemeral port and reads it from stdout to connect.
 //!
 //! Uses `NullDataStore` (no `PostgreSQL` dependency) and JWT secret `test-e2e-secret`
 //! to match the TS test helpers.
