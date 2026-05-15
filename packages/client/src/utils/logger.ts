@@ -15,7 +15,9 @@ export const logger = pino({
     options: {
       colorize: true,
       translateTime: 'SYS:standard',
-      ignore: 'pid,hostname'
+      ignore: 'pid,hostname',
+      // stderr — pino-pretty defaults to stdout, which breaks stdio-protocol consumers (MCP JSON-RPC)
+      destination: 2
     }
   } : undefined,
   browser: {
