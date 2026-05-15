@@ -73,11 +73,13 @@ export const Features = () => {
           title="Real-Time"
           description="Push-based architecture via WebSockets ensures all active clients receive updates instantly."
         />
-        <FeatureCard
-          icon={Bot}
-          title="Native AI Access"
-          description="Built-in MCP (Model Context Protocol) server. Claude, Cursor, and other agents query and mutate your live data with zero glue code. Shipped, not roadmap."
-        />
+        <a href="/docs/guides/mcp-server" className="block">
+          <FeatureCard
+            icon={Bot}
+            title="Native AI Access"
+            description="Built-in MCP (Model Context Protocol) server. Claude, Cursor, and other agents query and mutate your live data with zero glue code. Shipped, not roadmap."
+          />
+        </a>
       </div>
     </section>
   );
