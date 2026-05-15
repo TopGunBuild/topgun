@@ -222,6 +222,9 @@ Use when outside React — service workers, Node scripts, non-component utilitie
   <h3 className="text-lg font-semibold text-purple-800 dark:text-purple-300 mb-2 !mt-0">Optional: Encrypt Local Storage</h3>
   <span className="text-purple-700 dark:text-purple-400">For sensitive data, wrap your adapter with <code className="px-1.5 py-0.5 rounded bg-purple-100 dark:bg-purple-800/50 text-sm">EncryptedStorageAdapter</code> to encrypt data at rest. See the <a href="/docs/guides/security#client-side-encryption-data-at-rest" className="underline">Client-Side Encryption section</a> in the Security Guide.</span>
 
+  <h3 className="text-lg font-semibold text-purple-800 dark:text-purple-300 mb-2 !mt-0">Building with an AI Agent?</h3>
+  <span className="text-purple-700 dark:text-purple-400">TopGun ships with a built-in MCP server for Claude Desktop, Cursor, and other AI tools. See the <a href="/docs/guides/mcp-server" className="underline">MCP Server guide</a> for configuration.</span>
+
 ## Next Steps
 
   <a href="/docs/concepts" className="block p-6 border border-card-border rounded-lg hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
