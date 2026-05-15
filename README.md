@@ -239,6 +239,28 @@ pnpm --filter @topgunbuild/core bench
 
 See [tests/benchmark/README.md](tests/benchmark/README.md) for details.
 
+## AI Agents
+
+TopGun ships with a built-in MCP (Model Context Protocol) server, enabling AI assistants like Claude Desktop and Cursor to query and mutate your live data through natural language.
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "topgun": {
+      "command": "npx",
+      "args": ["@topgunbuild/mcp-server"],
+      "env": {
+        "TOPGUN_URL": "ws://localhost:8080"
+      }
+    }
+  }
+}
+```
+
+Full guide: [topgun.build/docs/guides/mcp-server](https://topgun.build/docs/guides/mcp-server)
+
 ## Contributing
 
 PRs welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the dev workflow (fork, branch, test, PR).
