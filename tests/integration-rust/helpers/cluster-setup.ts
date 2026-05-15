@@ -9,9 +9,20 @@
  *   Node 1: WebSocket port 11002, cluster port 12002
  *   Node 2: WebSocket port 11003, cluster port 12003
  *
- * Each node is spawned with `STORAGE_BACKEND=null` so the 3-node cluster uses
- * the in-memory `NullDataStore` and avoids the redb single-writer file lock at
- * `./topgun.redb` (see `helpers/index.ts:spawnRustServer` for the full rationale).
+ * Each node is spawned with two fixed env overrides:
+ *
+ * `STORAGE_BACKEND=null` — uses the in-memory `NullDataStore` and avoids the
+ * redb single-writer file lock at `./topgun.redb`. Three nodes spawned in
+ * parallel from the same CWD would otherwise race on the file lock and fail
+ * with `Database already open. Cannot acquire lock.`
+ *
+ * `TOPGUN_NO_AUTH=true` — disables JWT authentication on the server so the
+ * `ClusterClient` (which connects without an auth token in these routing tests)
+ * can reach Phase 2 of the WebSocket handler. Without this, the server sits in
+ * Phase 1 (auth loop) and silently drops every non-AUTH frame — including
+ * `PARTITION_MAP_REQUEST` — so the client never receives the partition map and
+ * `isRoutingActive()` never becomes true. These tests exercise routing logic,
+ * not authentication, so no-auth is the correct posture for this cluster.
  */
 
 import * as child_process from 'child_process';
@@ -84,7 +95,7 @@ export async function spawnCluster(
         cwd: REPO_ROOT,
         detached: true,
         stdio: ['ignore', 'pipe', 'inherit'],
-        env: { ...process.env, STORAGE_BACKEND: 'null' },
+        env: { ...process.env, STORAGE_BACKEND: 'null', TOPGUN_NO_AUTH: 'true' },
       });
     } else {
       proc = child_process.spawn(
@@ -94,7 +105,7 @@ export async function spawnCluster(
           cwd: REPO_ROOT,
           detached: true,
           stdio: ['ignore', 'pipe', 'inherit'],
-          env: { ...process.env, STORAGE_BACKEND: 'null' },
+          env: { ...process.env, STORAGE_BACKEND: 'null', TOPGUN_NO_AUTH: 'true' },
         }
       );
     }
@@ -128,6 +139,11 @@ export async function spawnCluster(
     const proc = spawnNode(index);
     processes[index] = proc;
     await waitForPort(proc, timeoutMs, NODE_CONFIGS[index].wsPort);
+    // Wait for the restarted node to complete its seed discovery handshake and
+    // establish TCP peer connections with other cluster nodes. PORT= is printed
+    // before seed discovery starts, so the WebSocket port being ready does not
+    // guarantee the node has rejoined the cluster yet.
+    await new Promise<void>(resolve => setTimeout(resolve, 2_000));
   }
 
   async function cleanup(): Promise<void> {
