@@ -131,11 +131,18 @@ where
 
         // All transport handlers (WebSocket, HTTP) set ctx.principal eagerly before
         // pipeline dispatch, so the middleware reads only ctx.principal.
-        let Some(principal) = ctx.principal.clone() else {
-            return Box::pin(async { Err(OperationError::Unauthorized) });
-        };
+        //
+        // When auth is disabled at the server level (TOPGUN_NO_AUTH=true), WebSocket
+        // connections arrive as CallerOrigin::Client with no principal. Rather than
+        // returning Unauthorized immediately, fall through to call_with_principal with
+        // None so the per-operation bypass group check in classify_operation() can
+        // allow operations like PartitionMapRequest that do not require auth.
+        let principal = ctx.principal.clone();
+        if principal.is_none() {
+            return self.call_with_principal(op, None);
+        }
 
-        self.call_with_principal(op, Some(principal))
+        self.call_with_principal(op, principal)
     }
 }
 

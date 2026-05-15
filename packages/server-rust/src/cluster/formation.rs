@@ -19,7 +19,7 @@ use super::messages::{
     ClusterMessage, JoinRequestPayload, JoinResponsePayload, MembersUpdatePayload,
 };
 use super::peer_connection::PeerConnectionMap;
-use super::state::{ClusterState, InboundClusterMessage};
+use super::state::{ClusterChange, ClusterState, InboundClusterMessage};
 use super::types::{ClusterConfig, MemberInfo, MembersView, NodeState};
 
 // ---------------------------------------------------------------------------
@@ -168,11 +168,31 @@ impl ClusterFormationService {
             }
         }
 
-        // Cleanup: remove peer from connection map
+        // Cleanup: remove peer from connection map and mark it Dead so the
+        // MembershipReactor can rebalance partitions without waiting for heartbeat
+        // timeout (phi-accrual would otherwise require ~15 s to declare failure).
         let node_id = peer_node_id.lock().await;
         if let Some(ref id) = *node_id {
             let _ = self.peers.remove(id);
             info!(node_id = %id, "Peer disconnected");
+
+            // Find the member in the current view and emit MemberRemoved so the
+            // MembershipReactor rebalances immediately on TCP disconnect.
+            let current = self.cluster_state.current_view();
+            if let Some(pos) = current.members.iter().position(|m| &m.node_id == id) {
+                let mut members = current.members.clone();
+                members[pos].state = NodeState::Dead;
+                let dead_member = members[pos].clone();
+                let new_view = MembersView {
+                    version: current.version + 1,
+                    members,
+                };
+                self.cluster_state.update_view(new_view);
+                let _ = self
+                    .cluster_state
+                    .change_sender()
+                    .send(ClusterChange::MemberRemoved(dead_member));
+            }
         }
         write_handle.abort();
     }
@@ -497,7 +517,9 @@ impl ClusterFormationService {
             join_version: 0, // Will be set to current view version + 1
         };
 
-        // Get current view and add new member
+        // Get current view and add (or re-activate) the new member.
+        // A node may rejoin after a disconnect; update the existing entry in-place
+        // rather than appending a duplicate, which would corrupt active_members() results.
         let current_view = self.cluster_state.current_view();
         let new_version = current_view.version + 1;
 
@@ -505,7 +527,13 @@ impl ClusterFormationService {
 
         let mut active_member = new_member;
         active_member.join_version = new_version;
-        members.push(active_member);
+
+        if let Some(pos) = members.iter().position(|m| m.node_id == active_member.node_id) {
+            // Node already exists (e.g., rejoining after failure) — update in-place.
+            members[pos] = active_member.clone();
+        } else {
+            members.push(active_member.clone());
+        }
 
         let updated_view = MembersView {
             version: new_version,
@@ -524,6 +552,15 @@ impl ClusterFormationService {
         self.cluster_state
             .partition_table
             .apply_assignments(&assignments);
+
+        // Notify the MembershipReactor so it recomputes assignments and broadcasts
+        // the updated partition map to all connected clients. Without this signal
+        // the reactor never fires and clients never receive PARTITION_MAP.
+        let new_member_info = active_member;
+        let _ = self
+            .cluster_state
+            .change_sender()
+            .send(super::state::ClusterChange::MemberAdded(new_member_info));
 
         // Respond with JoinResponse
         let response = ClusterMessage::JoinResponse(JoinResponsePayload {
