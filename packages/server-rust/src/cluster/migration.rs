@@ -22,6 +22,7 @@ use super::traits::MigrationService;
 use super::types::{ActiveMigration, MembersView, MigrationPhase, MigrationTask, PartitionState};
 use crate::network::connection::{ConnectionKind, ConnectionRegistry, OutboundMessage};
 use topgun_core::messages::cluster::PartitionMapPayload;
+use topgun_core::messages::Message;
 
 // ---------------------------------------------------------------------------
 // MapProvider trait
@@ -420,16 +421,22 @@ pub fn not_owner_response(
 
 /// Broadcasts the current partition map to all connected clients.
 ///
-/// Serializes the partition map via `rmp_serde::to_vec_named()` and sends
-/// it to all connections with `ConnectionKind::Client`. Cluster peers are
-/// not targeted.
+/// Wraps the payload in the `Message::PartitionMap` envelope before
+/// serializing, so the TS/JS client's `PartitionRouter` recognises the
+/// `type === "PARTITION_MAP"` field and applies the update. Sending the raw
+/// `PartitionMapPayload` without the envelope causes the client to silently
+/// discard the broadcast because no `type` field is present.
+///
+/// Only `ConnectionKind::Client` connections receive the broadcast; cluster
+/// peers are excluded.
 pub fn broadcast_partition_map(
     table: &ClusterPartitionTable,
     members: &MembersView,
     registry: &ConnectionRegistry,
 ) {
-    let map = table.to_partition_map(members);
-    match rmp_serde::to_vec_named(&map) {
+    let payload = table.to_partition_map(members);
+    let msg = Message::PartitionMap { payload };
+    match rmp_serde::to_vec_named(&msg) {
         Ok(bytes) => registry.broadcast(&bytes, ConnectionKind::Client),
         Err(e) => tracing::warn!("Failed to serialize partition map for broadcast: {e}"),
     }
