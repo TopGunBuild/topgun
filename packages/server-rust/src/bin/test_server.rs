@@ -162,7 +162,9 @@ struct Args {
     host: String,
 
     /// Client WebSocket port. Reads PORT env var if not set; 0 means OS-assigned.
-    #[arg(long, env = "PORT", default_value_t = 0)]
+    /// Default 8080 matches every documented quick-start surface (README, intro.mdx,
+    /// quick-start.mdx, mcp-server.mdx, Hero snippet).
+    #[arg(long, env = "PORT", default_value_t = 8080)]
     port: u16,
 
     /// Inter-node cluster TCP port. 0 means OS-assigned.
