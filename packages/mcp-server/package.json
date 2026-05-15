@@ -1,6 +1,6 @@
 {
   "name": "@topgunbuild/mcp-server",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "description": "MCP Server for TopGun - enables AI assistants to interact with TopGun databases",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -24,6 +24,7 @@
   },
   "scripts": {
     "build": "tsup",
+    "prepublishOnly": "pnpm build",
     "test": "jest",
     "test:coverage": "jest --coverage",
     "start": "node dist/cli.js"
