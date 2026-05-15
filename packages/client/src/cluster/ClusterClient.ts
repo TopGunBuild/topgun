@@ -532,17 +532,36 @@ export class ClusterClient implements IConnectionProvider {
     const results = new Map<string, boolean>();
 
     if (this.config.routingMode === 'direct' && this.routingActive) {
-      // Group by target node
-      const nodeMessages = new Map<string, any[]>();
+      // Group by target node, tracking per-key routing decisions for metrics.
+      const nodeMessages = new Map<string, Array<{ key: string; message: any; isDirect: boolean }>>();
 
       for (const { key, message } of operations) {
+        this.routingMetrics.totalRoutes++;
         const routing = this.partitionRouter.route(key);
-        const nodeId = routing?.nodeId ?? 'primary';
+
+        let nodeId: string;
+        let isDirect: boolean;
+
+        if (routing && this.connectionPool.isNodeConnected(routing.nodeId)) {
+          nodeId = routing.nodeId;
+          isDirect = true;
+          this.routingMetrics.directRoutes++;
+        } else if (!routing) {
+          // No partition map entry for this key
+          nodeId = 'primary';
+          isDirect = false;
+          this.routingMetrics.partitionMisses++;
+        } else {
+          // Owner not connected — fall back to any healthy node
+          nodeId = 'primary';
+          isDirect = false;
+          this.routingMetrics.fallbackRoutes++;
+        }
 
         if (!nodeMessages.has(nodeId)) {
           nodeMessages.set(nodeId, []);
         }
-        nodeMessages.get(nodeId)!.push({ key, message });
+        nodeMessages.get(nodeId)!.push({ key, message, isDirect });
       }
 
       // Send to each node
@@ -565,11 +584,14 @@ export class ClusterClient implements IConnectionProvider {
         }
       }
     } else {
-      // Forward all to primary
+      // Forward all to primary (fallback or forward mode)
       const success = this.connectionPool.sendToPrimary({
         type: 'OP_BATCH',
         payload: { ops: operations.map(o => o.message) },
       });
+
+      this.routingMetrics.totalRoutes += operations.length;
+      this.routingMetrics.fallbackRoutes += operations.length;
 
       for (const { key } of operations) {
         results.set(key, success);

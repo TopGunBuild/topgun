@@ -273,12 +273,18 @@ export class ConnectionPool {
 
     const data = serialize(message);
 
-    if (connection.state === 'AUTHENTICATED' && connection.socket?.readyState === WebSocket.OPEN) {
+    // Send immediately when the socket is open. Connections that have completed
+    // auth (AUTHENTICATED) or are on an auth-optional server (CONNECTED) are
+    // both ready to send application frames.
+    if (
+      (connection.state === 'AUTHENTICATED' || connection.state === 'CONNECTED') &&
+      connection.socket?.readyState === WebSocket.OPEN
+    ) {
       connection.socket.send(data);
       return true;
     }
 
-    // Queue message for later
+    // Queue message for later (e.g., still connecting or authenticating)
     if (connection.pendingMessages.length < 1000) {
       connection.pendingMessages.push(data);
       return true;
