@@ -35,6 +35,11 @@ export interface RustTestContext {
  * Spawns the Rust test server binary and waits for it to print `PORT=<number>`
  * to stdout.
  *
+ * Passes `--port 0` explicitly so the OS assigns an ephemeral port, allowing
+ * parallel test runs without conflicts. The `test_server` CLI default is 8080
+ * (matches the documented quick-start); ephemeral allocation is opt-in here
+ * for test isolation.
+ *
  * By default this runs `cargo run --bin test-server --release` from the
  * repository root, which will trigger a cargo build on the first invocation.
  * In CI, set the `RUST_SERVER_BINARY` environment variable to the path of a
@@ -68,18 +73,22 @@ export async function spawnRustServer(
   let proc: child_process.ChildProcess;
 
   if (binaryPath) {
-    // Pre-built binary: single process, no cargo wrapper
-    proc = child_process.spawn(binaryPath, [], {
+    // Pre-built binary: single process, no cargo wrapper.
+    // Pass --port 0 explicitly to request an OS-assigned ephemeral port,
+    // since the binary's CLI default is 8080 (matches the documented quick-start).
+    proc = child_process.spawn(binaryPath, ['--port', '0'], {
       cwd: REPO_ROOT,
       detached: true,
       stdio: ['ignore', 'pipe', 'inherit'],
       env: { ...process.env, ...options.env },
     });
   } else {
-    // Development: let cargo build and run the binary
+    // Development: let cargo build and run the binary.
+    // Pass --port 0 explicitly to request an OS-assigned ephemeral port,
+    // since the binary's CLI default is 8080 (matches the documented quick-start).
     proc = child_process.spawn(
       'cargo',
-      ['run', '--bin', 'test-server', '--release'],
+      ['run', '--bin', 'test-server', '--release', '--', '--port', '0'],
       {
         cwd: REPO_ROOT,
         detached: true,
