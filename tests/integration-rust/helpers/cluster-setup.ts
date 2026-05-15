@@ -8,6 +8,10 @@
  *   Node 0: WebSocket port 11001, cluster port 12001
  *   Node 1: WebSocket port 11002, cluster port 12002
  *   Node 2: WebSocket port 11003, cluster port 12003
+ *
+ * Each node is spawned with `STORAGE_BACKEND=null` so the 3-node cluster uses
+ * the in-memory `NullDataStore` and avoids the redb single-writer file lock at
+ * `./topgun.redb` (see `helpers/index.ts:spawnRustServer` for the full rationale).
  */
 
 import * as child_process from 'child_process';
@@ -80,7 +84,7 @@ export async function spawnCluster(
         cwd: REPO_ROOT,
         detached: true,
         stdio: ['ignore', 'pipe', 'inherit'],
-        env: { ...process.env },
+        env: { ...process.env, STORAGE_BACKEND: 'null' },
       });
     } else {
       proc = child_process.spawn(
@@ -90,7 +94,7 @@ export async function spawnCluster(
           cwd: REPO_ROOT,
           detached: true,
           stdio: ['ignore', 'pipe', 'inherit'],
-          env: { ...process.env },
+          env: { ...process.env, STORAGE_BACKEND: 'null' },
         }
       );
     }
