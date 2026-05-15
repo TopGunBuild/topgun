@@ -40,6 +40,17 @@ export interface RustTestContext {
  * (matches the documented quick-start); ephemeral allocation is opt-in here
  * for test isolation.
  *
+ * Sets `STORAGE_BACKEND=null` in the spawn env so each child uses the in-memory
+ * `NullDataStore`. This is required because `redb` (the documented
+ * `pnpm start:server` default) is single-writer and file-locked at
+ * `./topgun.redb`; Jest spawns multiple `test-server` instances in parallel
+ * from the same CWD, and the second-and-later opens would otherwise fail with
+ * `Error: Database already open. Cannot acquire lock.` The null backend has no
+ * file lock and is correct for stateless WebSocket-protocol integration tests.
+ * Callers MAY override via `options.env.STORAGE_BACKEND` if a test specifically
+ * needs persistence behavior; the default does NOT change the documented
+ * `pnpm start:server` redb default.
+ *
  * By default this runs `cargo run --bin test-server --release` from the
  * repository root, which will trigger a cargo build on the first invocation.
  * In CI, set the `RUST_SERVER_BINARY` environment variable to the path of a
@@ -80,7 +91,7 @@ export async function spawnRustServer(
       cwd: REPO_ROOT,
       detached: true,
       stdio: ['ignore', 'pipe', 'inherit'],
-      env: { ...process.env, ...options.env },
+      env: { ...process.env, STORAGE_BACKEND: 'null', ...options.env },
     });
   } else {
     // Development: let cargo build and run the binary.
@@ -93,7 +104,7 @@ export async function spawnRustServer(
         cwd: REPO_ROOT,
         detached: true,
         stdio: ['ignore', 'pipe', 'inherit'],
-        env: { ...process.env, ...options.env },
+        env: { ...process.env, STORAGE_BACKEND: 'null', ...options.env },
       }
     );
   }
