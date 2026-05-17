@@ -479,15 +479,39 @@ impl ClusterFormationService {
                     );
                     self.self_promote_as_master();
 
-                    // Promote the held streams into peer connections so
-                    // MasterElected reaches them via the write channel.
-                    let (ids, streams): (Vec<_>, Vec<_>) =
-                        held_streams.drain(..).unzip();
-                    self.broadcast_master_elected();
+                    // Serialize MasterElected once; send directly over each held
+                    // stream before promoting them to persistent peer connections.
+                    // broadcast_master_elected() relies on self.peers, which is empty
+                    // here because the held streams have not been registered yet.
+                    // Writing directly avoids the ordering gap.
+                    let broadcast_bytes: Option<Vec<u8>> = {
+                        let payload = MasterElectedPayload {
+                            master_address: format!(
+                                "{}:{}",
+                                self.local_member.host, self.local_member.cluster_port
+                            ),
+                            master_node_id: self.local_member.node_id.clone(),
+                            term: 1,
+                            election_id: Uuid::new_v4().to_string(),
+                        };
+                        rmp_serde::to_vec_named(&ClusterMessage::MasterElected(payload)).ok()
+                    };
 
-                    for (responder_id, stream) in ids.into_iter().zip(streams) {
+                    // Promote held streams: send MasterElected then hand off to read loop.
+                    for (responder_id, stream) in held_streams.drain(..) {
                         let this = Arc::clone(self);
+                        let bytes_opt = broadcast_bytes.clone();
                         tokio::spawn(async move {
+                            // Wrap in a Framed codec to write the length-prefixed frame,
+                            // then recover the stream for the persistent read/write loop.
+                            let stream = if let Some(bytes) = bytes_opt {
+                                let mut framed =
+                                    Framed::new(stream, LengthDelimitedCodec::new());
+                                let _ = framed.send(bytes.into()).await;
+                                framed.into_inner()
+                            } else {
+                                stream
+                            };
                             this.handle_peer_connection(stream, Some(responder_id)).await;
                         });
                     }
@@ -737,12 +761,41 @@ impl ClusterFormationService {
     ///
     /// Processing is serialized via `join_mutex` to prevent stale-view races
     /// from concurrent joiners.
+    #[allow(clippy::too_many_lines)]
     async fn handle_join_request(
         &self,
         payload: JoinRequestPayload,
         write_tx: &mpsc::UnboundedSender<Vec<u8>>,
         peer_node_id: &Arc<Mutex<Option<String>>>,
     ) {
+        // Reject permanently if the joiner's cluster_id does not match ours.
+        // This guard runs before the is_master() check so a non-master node
+        // still rejects wrong-cluster joiners with a permanent code rather than
+        // NotMasterYet, preventing the joiner from entering WaitForMasterElection.
+        if payload.cluster_id != self.config.cluster_id {
+            warn!(
+                joiner = %payload.node_id,
+                joiner_cluster_id = %payload.cluster_id,
+                our_cluster_id = %self.config.cluster_id,
+                "Join rejected: cluster_id mismatch"
+            );
+            let response = ClusterMessage::JoinResponse(JoinResponsePayload {
+                accepted: false,
+                reject_reason: Some(format!(
+                    "cluster_id mismatch: expected {}, got {}",
+                    self.config.cluster_id, payload.cluster_id
+                )),
+                reject_code: Some(JoinRejectReason::WrongClusterId),
+                responder_node_id: None,
+                members_view: None,
+                partition_assignments: None,
+            });
+            if let Ok(bytes) = rmp_serde::to_vec_named(&response) {
+                let _ = write_tx.send(bytes);
+            }
+            return;
+        }
+
         // Only master handles join requests
         if !self.cluster_state.is_master() {
             let master_addr = self.get_master_address();

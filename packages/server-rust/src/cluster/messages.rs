@@ -106,7 +106,7 @@ pub enum ClusterMessage {
     LeaveRequest(LeaveRequestPayload),
     /// Broadcast by the elected master after winning deterministic tiebreak.
     /// Nodes in `WaitForMasterElection` state re-target their join attempt;
-    /// already-joined nodes ignore it (MembershipReactor does not observe it).
+    /// already-joined nodes ignore it (`MembershipReactor` does not observe it).
     MasterElected(MasterElectedPayload),
 
     // -- Heartbeat (3) -----------------------------------------------------
