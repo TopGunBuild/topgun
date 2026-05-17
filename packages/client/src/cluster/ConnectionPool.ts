@@ -440,7 +440,11 @@ export class ConnectionPool {
       };
 
       socket.onclose = () => {
-        const wasConnected = connection.state === 'AUTHENTICATED';
+        // Both AUTHENTICATED (auth-server path) and CONNECTED (no-auth-server
+        // path) count as "was connected" — without this, no-auth servers never
+        // emit node:disconnected because their state stays 'CONNECTED'.
+        const wasConnected =
+          connection.state === 'AUTHENTICATED' || connection.state === 'CONNECTED';
         connection.state = 'DISCONNECTED';
         connection.socket = null;
         connection.cachedConnection = null;
