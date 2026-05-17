@@ -18,11 +18,12 @@
  *
  * `TOPGUN_NO_AUTH=true` — disables JWT authentication on the server so the
  * `ClusterClient` (which connects without an auth token in these routing tests)
- * can reach Phase 2 of the WebSocket handler. Without this, the server sits in
- * Phase 1 (auth loop) and silently drops every non-AUTH frame — including
- * `PARTITION_MAP_REQUEST` — so the client never receives the partition map and
- * `isRoutingActive()` never becomes true. These tests exercise routing logic,
- * not authentication, so no-auth is the correct posture for this cluster.
+ * can reach the application-message stage of the WebSocket handler. Without
+ * this, the server sits in the auth-handshake loop and silently drops every
+ * non-AUTH frame — including `PARTITION_MAP_REQUEST` — so the client never
+ * receives the partition map and `isRoutingActive()` never becomes true. These
+ * tests exercise routing logic, not authentication, so no-auth is the correct
+ * posture for this cluster.
  */
 
 import * as child_process from 'child_process';
