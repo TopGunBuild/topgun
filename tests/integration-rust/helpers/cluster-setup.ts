@@ -143,7 +143,20 @@ export async function spawnCluster(
     // establish TCP peer connections with other cluster nodes. PORT= is printed
     // before seed discovery starts, so the WebSocket port being ready does not
     // guarantee the node has rejoined the cluster yet.
-    await new Promise<void>(resolve => setTimeout(resolve, 2_000));
+    //
+    // The seed-discovery → TCP-peer-connect → JoinResponse → MembershipReactor
+    // → broadcast_partition_map chain takes noticeably longer than the WebSocket
+    // listener bind, especially under parallel-test load when the spawned binary
+    // is competing for CPU. Empirically a 2s grace was insufficient (~50% flake
+    // rate on the "partition map version increments after failover" test); 5s
+    // gives enough margin to cover the cluster-side gossip path while the test
+    // layer's own `waitUntil(..., 15s)` continues to act as the outer safety net.
+    //
+    // Server-side tracing logs go to stderr (inherited, not piped from JS), so a
+    // log-poll for the join-completed line is not feasible without restructuring
+    // stdio capture — a fixed sleep with a generous margin is the simplest
+    // robust option for this test-helper layer.
+    await new Promise<void>(resolve => setTimeout(resolve, 5_000));
   }
 
   async function cleanup(): Promise<void> {
