@@ -29,6 +29,7 @@
 import * as child_process from 'child_process';
 import * as path from 'path';
 import * as readline from 'readline';
+import { ClusterClient } from '@topgunbuild/client';
 
 /** Repository root — three levels up from tests/integration-rust/helpers/. */
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
@@ -37,6 +38,15 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const DEFAULT_CLUSTER_TIMEOUT_MS = 60_000;
 
 const NODE_COUNT = 3;
+
+/**
+ * Budget for the post-restart join verification poll inside `restartNode()`.
+ * The poll exits as soon as the cluster reports all NODE_COUNT members, so on
+ * a fast machine this typically resolves in 1–3s. The 20s ceiling covers the
+ * worst observed cold-build CPU-contention case where the seed-discovery →
+ * TCP-peer-connect → JoinResponse → broadcast_partition_map chain stalls.
+ */
+const VERIFY_REJOIN_BUDGET_MS = 20_000;
 
 /** Fixed port configuration for each cluster node. */
 const NODE_CONFIGS = [
@@ -72,15 +82,44 @@ export async function spawnCluster(
 
   const processes: Array<child_process.ChildProcess | null> = new Array(NODE_COUNT).fill(null);
 
-  function buildSeedNodes(excludeIndex: number): string {
-    return NODE_CONFIGS.filter((_, i) => i !== excludeIndex)
+  /**
+   * Builds the `--seed-nodes` CLI arg for the node at `index`.
+   *
+   * `mode: 'boot'` — return self + lower-indexed peers (already spawned by the
+   * sequential boot loop). The server's discover_seeds_and_join filters self,
+   * so node-0 effectively sees an empty seed list and self-promotes; node-i
+   * (i>0) sees nodes 0..i-1 and joins the existing cluster. We include self
+   * (rather than passing empty) so `cluster_mode` stays true on node-0 — the
+   * server skips ALL cluster machinery when seed_list is empty, which would
+   * leave node-0 unable to accept later JoinRequests.
+   *
+   * Including all peers (the old behavior) caused split-brain at boot: all
+   * three nodes spawn in parallel, each tries to contact the others before
+   * any has self-promoted, every JoinRequest is rejected with "not master;
+   * master address: unknown", and each falls through to self_promote — leaving
+   * 3 independent single-node masters that never reliably merge. Downstream
+   * tests then see partial membership views (Test 4's rejoin leaves master with
+   * view={node-0, node-1} missing node-2; Test 5's failover times out waiting
+   * for a mapVersion bump because the cluster never had 3 members to begin with).
+   *
+   * `mode: 'restart'` — return ALL other peers (excluding self). At restart time
+   * the other peers are already running, so the rejoining node should contact
+   * any of them to find the current master.
+   */
+  function buildSeedNodes(index: number, mode: 'boot' | 'restart'): string {
+    if (mode === 'boot') {
+      return NODE_CONFIGS.filter((_, i) => i <= index)
+        .map(c => `localhost:${c.clusterPort}`)
+        .join(',');
+    }
+    return NODE_CONFIGS.filter((_, i) => i !== index)
       .map(c => `localhost:${c.clusterPort}`)
       .join(',');
   }
 
-  function spawnNode(index: number): child_process.ChildProcess {
+  function spawnNode(index: number, mode: 'boot' | 'restart' = 'restart'): child_process.ChildProcess {
     const cfg = NODE_CONFIGS[index];
-    const seedNodes = buildSeedNodes(index);
+    const seedNodes = buildSeedNodes(index, mode);
 
     const args = [
       '--node-id', cfg.nodeId,
@@ -115,15 +154,26 @@ export async function spawnCluster(
     return proc;
   }
 
-  // Spawn all three nodes in parallel
+  // Spawn nodes SEQUENTIALLY with per-node join verification. Parallel boot
+  // causes a split-brain because each node simultaneously tries to contact the
+  // others before any has self-promoted as master — every JoinRequest is rejected
+  // with "not master; master address: unknown", and each node falls through to
+  // self_promote_as_master. The cluster then has 3 independent single-node
+  // masters that never reliably merge, which causes downstream tests to see
+  // partial membership views (Test 4's rejoin leaves master with view={node-0,
+  // node-1} missing node-2; Test 5's failover then times out waiting for a
+  // mapVersion bump because the cluster's view never had 3 members to begin with).
+  //
+  // Sequential boot with post-spawn membership verification ensures node-0
+  // self-promotes alone first, then node-1 joins it as a non-master peer, then
+  // node-2 joins the now-2-node cluster. After each spawn we poll the cluster
+  // via a temporary ClusterClient connected to already-confirmed nodes until
+  // the broadcast partition map reports the expected nodeCount.
   for (let i = 0; i < NODE_COUNT; i++) {
-    processes[i] = spawnNode(i);
+    processes[i] = spawnNode(i, 'boot');
+    await waitForPort(processes[i]!, timeoutMs, NODE_CONFIGS[i].wsPort);
+    await waitForClusterMembership(i + 1, /* observerIndex */ 0);
   }
-
-  // Wait for all nodes to signal readiness
-  await Promise.all(
-    processes.map((proc, i) => waitForPort(proc!, timeoutMs, NODE_CONFIGS[i].wsPort))
-  );
 
   async function stopNode(index: number): Promise<void> {
     const proc = processes[index];
@@ -140,27 +190,59 @@ export async function spawnCluster(
     const proc = spawnNode(index);
     processes[index] = proc;
     await waitForPort(proc, timeoutMs, NODE_CONFIGS[index].wsPort);
-    // Wait for the restarted node to complete its seed discovery handshake and
-    // establish TCP peer connections with other cluster nodes. PORT= is printed
-    // before seed discovery starts, so the WebSocket port being ready does not
-    // guarantee the node has rejoined the cluster yet.
-    //
-    // The seed-discovery → TCP-peer-connect → JoinResponse → MembershipReactor
-    // → broadcast_partition_map chain takes noticeably longer than the WebSocket
-    // listener bind, especially under parallel-test load when the spawned binary
-    // is competing for CPU. Empirically a 2s grace was insufficient (~50% flake
-    // rate on the "partition map version increments after failover" test); 5s
-    // was an improvement but still left a residual race (observed ~7s worst-case
-    // before TCP peer connections to all other seeds are fully established under
-    // parallel-test CPU contention). An 8s grace covers the empirically-observed
-    // worst-case while the test layer's own `waitUntil(..., 15s)` continues to
-    // act as the outer safety net.
-    //
-    // Server-side tracing logs go to stderr (inherited, not piped from JS), so a
-    // log-poll for the join-completed line is not feasible without restructuring
-    // stdio capture — a fixed sleep with a generous margin is the simplest
-    // robust option for this test-helper layer.
-    await new Promise<void>(resolve => setTimeout(resolve, 8_000));
+    // Wait until the cluster (observed via a stable peer) reports the restarted
+    // node back in the membership. See waitForClusterMembership for rationale.
+    const observerIndex = (index + 1) % NODE_COUNT;
+    await waitForClusterMembership(NODE_COUNT, observerIndex);
+  }
+
+  /**
+   * Polls the broadcast partition map until the cluster reports
+   * `expectedNodeCount` members. Connects via a temporary ClusterClient to the
+   * seed at `observerIndex` (which MUST already be a confirmed cluster member
+   * with full membership view). The poll resolves as soon as the expected
+   * nodeCount is reached, typically in 1–3s on a warm machine.
+   *
+   * Earlier iterations used fixed-sleep grace periods (2s → 5s → 8s) but
+   * timing estimates remained flaky because the seed-discovery → TCP-peer-connect
+   * → JoinResponse → MembershipReactor → broadcast_partition_map chain has no
+   * deterministic upper bound under parallel-test CPU contention. Active
+   * polling provides a positive correctness signal instead of an estimate.
+   *
+   * Connecting to the just-spawned node would let the verifier read that node's
+   * own partition map (which sees only itself until seed gossip completes),
+   * giving a false low nodeCount — so the observer MUST be a stable peer.
+   */
+  async function waitForClusterMembership(
+    expectedNodeCount: number,
+    observerIndex: number
+  ): Promise<void> {
+    const observerSeed = `ws://localhost:${NODE_CONFIGS[observerIndex].wsPort}/ws`;
+    const verifier = new ClusterClient({
+      enabled: true,
+      seedNodes: [observerSeed],
+      routingMode: 'direct',
+    });
+    try {
+      await verifier.connect();
+      const deadline = Date.now() + VERIFY_REJOIN_BUDGET_MS;
+      while (Date.now() < deadline) {
+        if (verifier.isRoutingActive()) {
+          const stats = verifier.getRouterStats();
+          if (stats && stats.nodeCount === expectedNodeCount) {
+            return;
+          }
+        }
+        await new Promise<void>(r => setTimeout(r, 100));
+      }
+      const finalStats = verifier.getRouterStats();
+      throw new Error(
+        `waitForClusterMembership: expected ${expectedNodeCount} members via ${observerSeed} within ${VERIFY_REJOIN_BUDGET_MS}ms ` +
+          `(final nodeCount=${finalStats?.nodeCount ?? 'unknown'}, mapVersion=${finalStats?.mapVersion ?? 'unknown'})`
+      );
+    } finally {
+      verifier.close();
+    }
   }
 
   async function cleanup(): Promise<void> {
