@@ -463,9 +463,14 @@ mod tests {
         );
     }
 
-    /// Missing principal on a Client-origin operation returns Unauthorized.
+    /// A Client-origin operation with `principal = None` is the `TOPGUN_NO_AUTH=true`
+    /// posture: the WebSocket handler accepted the connection without an auth token.
+    /// The middleware no longer rejects the request outright — instead it forwards
+    /// to `call_with_principal(op, None)` and lets `classify_operation()` decide
+    /// per-operation. Bypass-group operations (Ping, `PartitionMapRequest`, ...)
+    /// pass through, which is what no-auth cluster routing depends on.
     #[tokio::test]
-    async fn missing_principal_returns_unauthorized() {
+    async fn no_auth_client_with_bypass_op_passes_through() {
         let store = Arc::new(InMemoryPolicyStore::new());
         let evaluator = Arc::new(PolicyEvaluator::new(store));
 
@@ -474,7 +479,7 @@ mod tests {
 
         let mut ctx = OperationContext::new(3, service_names::COORDINATION, make_timestamp(), 5000);
         ctx.caller_origin = CallerOrigin::Client;
-        // principal deliberately left as None
+        // principal deliberately left as None (no-auth-server posture).
         let op = Operation::Ping {
             ctx,
             payload: topgun_core::messages::PingData { timestamp: 0 },
@@ -482,8 +487,63 @@ mod tests {
 
         let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
         assert!(
-            matches!(result, Err(OperationError::Unauthorized)),
-            "missing principal should return Unauthorized, got {result:?}"
+            result.is_ok(),
+            "Client+None on a bypass-group op (Ping) should pass through, got {result:?}"
+        );
+    }
+
+    /// A Client-origin write with `principal = None` must still be denied when a
+    /// policy-gated path is exercised and no Allow-Write policy matches. Proves
+    /// that the no-auth bypass for the bypass-group does not open a security
+    /// hole for policy-gated operations: writes without a principal cannot
+    /// satisfy any write policy, so default-deny applies.
+    #[tokio::test]
+    async fn no_auth_client_with_policy_gated_write_is_denied() {
+        use crate::service::policy::{PermissionPolicy, PolicyEffect};
+
+        let store = Arc::new(InMemoryPolicyStore::new());
+        // Only a Read allow policy — write has no Allow, default-deny applies.
+        store
+            .upsert_policy(PermissionPolicy {
+                id: "allow-read-all".to_string(),
+                map_pattern: "*".to_string(),
+                action: PermissionAction::Read,
+                effect: PolicyEffect::Allow,
+                condition: None,
+            })
+            .await
+            .unwrap();
+
+        let evaluator = Arc::new(PolicyEvaluator::new(store));
+
+        let layer = AuthorizationLayer::new(evaluator);
+        let mut svc = layer.layer(AlwaysOkService);
+
+        // Build a ClientOp write with CallerOrigin::Client and no principal.
+        let record = topgun_core::LWWRecord {
+            value: Some(rmpv::Value::Boolean(true)),
+            timestamp: make_timestamp(),
+            ttl_ms: None,
+        };
+        let mut ctx = OperationContext::new(22, service_names::CRDT, make_timestamp(), 5000);
+        ctx.caller_origin = CallerOrigin::Client;
+        // principal deliberately left as None.
+        let op = Operation::ClientOp {
+            ctx,
+            payload: topgun_core::messages::sync::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    map_name: "public-map".to_string(),
+                    key: "k".to_string(),
+                    record: Some(Some(record)),
+                    ..Default::default()
+                },
+            },
+        };
+
+        let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
+        assert!(
+            matches!(result, Err(OperationError::Forbidden { .. })),
+            "Client+None on a policy-gated write should be Forbidden when no Allow-Write matches, got {result:?}"
         );
     }
 
