@@ -416,13 +416,15 @@ export class ConnectionPool {
         logger.info({ nodeId }, 'Connected to node');
         this.emit('node:connected', nodeId);
 
-        // Send auth if we have token
         if (this.authToken) {
+          // Auth path: AUTH frame goes out now; pending app frames stay queued
+          // until AUTH_ACK arrives (handled in handleMessage).
           this.sendAuth(connection);
+        } else {
+          // No-auth path (e.g. TOPGUN_NO_AUTH=true server): no AUTH_ACK will
+          // ever arrive, so flush queued frames as soon as the socket is open.
+          this.flushPendingMessages(connection);
         }
-
-        // Flush pending messages after auth
-        // Note: Messages will be sent after AUTH_ACK
       };
 
       socket.onmessage = (event) => {
@@ -514,14 +516,21 @@ export class ConnectionPool {
   }
 
   private flushPendingMessages(connection: NodeConnection): void {
-    if (!connection.socket || connection.state !== 'AUTHENTICATED') return;
+    if (!connection.socket) return;
+    // Drain when AUTHENTICATED (post-AUTH_ACK on auth servers) or when CONNECTED
+    // on no-auth servers — same readiness condition as send() above.
+    const ready =
+      connection.state === 'AUTHENTICATED' ||
+      (connection.state === 'CONNECTED' && this.authToken === null);
+    if (!ready) return;
 
+    const socket = connection.socket;
     const pending = connection.pendingMessages;
     connection.pendingMessages = [];
 
     for (const data of pending) {
-      if (connection.socket.readyState === WebSocket.OPEN) {
-        connection.socket.send(data);
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(data);
       }
     }
 
