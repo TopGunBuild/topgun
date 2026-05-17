@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use super::assignment::compute_assignment;
 use super::messages::{
-    ClusterMessage, JoinRequestPayload, JoinResponsePayload, MembersUpdatePayload,
+    ClusterMessage, JoinRejectReason, JoinRequestPayload, JoinResponsePayload, MembersUpdatePayload,
 };
 use super::peer_connection::PeerConnectionMap;
 use super::state::{ClusterChange, ClusterState, InboundClusterMessage};
@@ -481,6 +481,12 @@ impl ClusterFormationService {
             let response = ClusterMessage::JoinResponse(JoinResponsePayload {
                 accepted: false,
                 reject_reason: Some(reject_reason),
+                // Machine-readable code so the joiner can enter WaitForMasterElection
+                // without parsing the human-readable reject_reason string.
+                reject_code: Some(JoinRejectReason::NotMasterYet),
+                // Joiner uses this to populate the deterministic-tiebreak set;
+                // the connection stays open so this node can later broadcast MasterElected.
+                responder_node_id: Some(self.local_member.node_id.clone()),
                 members_view: None,
                 partition_assignments: None,
             });
@@ -566,6 +572,8 @@ impl ClusterFormationService {
         let response = ClusterMessage::JoinResponse(JoinResponsePayload {
             accepted: true,
             reject_reason: None,
+            reject_code: None,
+            responder_node_id: None,
             members_view: Some(updated_view.clone()),
             partition_assignments: Some(assignments),
         });

@@ -36,10 +36,11 @@ pub use traits::{
 // messages
 pub use messages::{
     ClusterMessage, DeltaOp, ExplicitSuspicionPayload, HeartbeatComplaintPayload, HeartbeatPayload,
-    JoinRequestPayload, JoinResponsePayload, LeaveRequestPayload, MapStateChunk, MapType,
-    MembersUpdatePayload, MergeRequestPayload, MigrateCancelPayload, MigrateDataPayload,
-    MigrateFinalizePayload, MigrateReadyPayload, MigrateStartPayload, OpForwardPayload,
-    PartitionTableUpdatePayload, SplitBrainProbePayload, SplitBrainProbeResponsePayload,
+    JoinRejectReason, JoinRequestPayload, JoinResponsePayload, LeaveRequestPayload, MapStateChunk,
+    MapType, MasterElectedPayload, MembersUpdatePayload, MergeRequestPayload, MigrateCancelPayload,
+    MigrateDataPayload, MigrateFinalizePayload, MigrateReadyPayload, MigrateStartPayload,
+    OpForwardPayload, PartitionTableUpdatePayload, SplitBrainProbePayload,
+    SplitBrainProbeResponsePayload,
 };
 
 // state

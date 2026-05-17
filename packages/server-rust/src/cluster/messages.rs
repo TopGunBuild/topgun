@@ -39,7 +39,56 @@ pub struct DeltaOp {
 }
 
 // ---------------------------------------------------------------------------
-// ClusterMessage enum (18 variants)
+// Master-election types
+// ---------------------------------------------------------------------------
+
+/// Machine-readable category for join rejections.
+///
+/// Allows the joiner to distinguish retry-able from permanent rejection
+/// without parsing the human-readable `reject_reason` string. Older peers
+/// that omit `reject_code` are treated as `NotMasterYet` (retry-able via
+/// the master-election wait).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum JoinRejectReason {
+    /// Receiver is not (yet) the master; joiner should wait for the
+    /// elected master's `MasterElected` broadcast and re-target.
+    NotMasterYet,
+    /// Receiver rejected the join due to authentication failure.
+    AuthFailed,
+    /// Receiver does not support the joiner's `protocol_version`.
+    ProtocolVersionMismatch,
+    /// Joiner's `cluster_id` does not match the receiver's.
+    WrongClusterId,
+    /// Receiver's cluster has reached its configured member cap.
+    ClusterFull,
+}
+
+/// Broadcast by the elected master immediately after `self_promote_as_master`.
+///
+/// Recipients in `WaitForMasterElection` state use this to re-target their
+/// join attempt; recipients that are already members ignore it (their
+/// `MembershipReactor` does not interpret this variant — election happens
+/// at the `ClusterMessage` layer, not the `ClusterChange` layer).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MasterElectedPayload {
+    /// `host:cluster_port` of the elected master, dial-able by other nodes.
+    pub master_address: String,
+    /// `node_id` of the elected master (lexicographically lowest in the formation).
+    pub master_node_id: String,
+    /// Monotonic election term, incremented on each new election. Initialized
+    /// to 1 on first election; reserved for future master-failover elections
+    /// (v1 always sets term = 1).
+    pub term: u64,
+    /// Unique identifier for this election round (UUID v4 string). Recipients
+    /// use this to deduplicate identical broadcasts that may arrive via multiple
+    /// held peer connections.
+    pub election_id: String,
+}
+
+// ---------------------------------------------------------------------------
+// ClusterMessage enum (19 variants)
 // ---------------------------------------------------------------------------
 
 /// Top-level cluster protocol message.
@@ -50,11 +99,15 @@ pub struct DeltaOp {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ClusterMessage {
-    // -- Membership (4) ----------------------------------------------------
+    // -- Membership (5) ----------------------------------------------------
     JoinRequest(JoinRequestPayload),
     JoinResponse(JoinResponsePayload),
     MembersUpdate(MembersUpdatePayload),
     LeaveRequest(LeaveRequestPayload),
+    /// Broadcast by the elected master after winning deterministic tiebreak.
+    /// Nodes in `WaitForMasterElection` state re-target their join attempt;
+    /// already-joined nodes ignore it (MembershipReactor does not observe it).
+    MasterElected(MasterElectedPayload),
 
     // -- Heartbeat (3) -----------------------------------------------------
     Heartbeat(HeartbeatPayload),
@@ -114,6 +167,17 @@ pub struct JoinResponsePayload {
     pub accepted: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub reject_reason: Option<String>,
+    /// Machine-readable rejection category. `None` on accepted responses and
+    /// on responses from older peers that predate this field; treated as
+    /// `NotMasterYet` by the state machine (safe retry-able default).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reject_code: Option<JoinRejectReason>,
+    /// The responding node's own `node_id`. Populated on `NotMasterYet`
+    /// rejections so the joiner can build the deterministic-tiebreak set
+    /// without relying on an (empty) `members_view`. `None` on older peers
+    /// that predate this field; joiner falls back to self-only tiebreak set.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub responder_node_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub members_view: Option<MembersView>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
