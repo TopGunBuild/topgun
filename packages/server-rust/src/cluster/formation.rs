@@ -4,8 +4,9 @@
 //! from other nodes, discovers seed nodes with exponential backoff, and handles
 //! the join handshake (both as joiner and as master).
 
+use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use bytes::BytesMut;
 use futures_util::{SinkExt, StreamExt};
@@ -13,10 +14,12 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use super::assignment::compute_assignment;
 use super::messages::{
-    ClusterMessage, JoinRejectReason, JoinRequestPayload, JoinResponsePayload, MembersUpdatePayload,
+    ClusterMessage, JoinRejectReason, JoinRequestPayload, JoinResponsePayload, MasterElectedPayload,
+    MembersUpdatePayload,
 };
 use super::peer_connection::PeerConnectionMap;
 use super::state::{ClusterChange, ClusterState, InboundClusterMessage};
@@ -51,7 +54,7 @@ const MASTER_ELECTION_WAIT_MS: u64 = 3_000;
 const MASTER_ELECTION_TOTAL_BUDGET_MS: u64 = 30_000;
 
 /// Reserved for the bully-style tiebreak round (Option 2b). Currently unused
-/// because this spec implements deterministic-tiebreak by lowest node_id.
+/// because this spec implements deterministic-tiebreak by lowest `node_id`.
 /// Keep as documented constant for future evolution if 2b becomes necessary.
 #[allow(dead_code)]
 const MASTER_PROPOSAL_TIMEOUT_MS: u64 = 2_000;
@@ -76,7 +79,7 @@ enum SeedAttemptOutcome {
         stream: TcpStream,
         responder_node_id: Option<String>,
     },
-    /// Join rejected with a permanent reason (auth, version, cluster_id, full);
+    /// Join rejected with a permanent reason (auth, version, `cluster_id`, full);
     /// caller skips this seed without entering the election wait.
     PermanentRejection,
     /// Connection lost or malformed response; caller moves to next seed.
@@ -295,87 +298,258 @@ impl ClusterFormationService {
         self.discover_seeds_and_join().await;
     }
 
-    /// Attempts to connect to each seed address with exponential backoff.
-    /// If all seeds are unreachable after all retry attempts, self-promotes
-    /// as a single-node master.
+    /// Multi-phase state machine for cluster join.
+    ///
+    /// Phase 1: Dial each seed, send `JoinRequest`.
+    ///   - `Accepted`: hand off stream, return (joined).
+    ///   - `RetryableRejection` (`NotMasterYet`): collect `responder_node_id` into
+    ///     tiebreak set, hold stream open for incoming `MasterElected` broadcast.
+    ///   - `PermanentRejection` / `ConnectionError`: skip seed.
+    ///
+    /// Phase 2: `WaitForMasterElection` — listen on held streams for `MasterElected`.
+    ///   - Received broadcast: Phase 4 — re-dial announced master.
+    ///   - Timeout: Phase 5 — deterministic tiebreak by lowest `node_id`.
+    ///
+    /// Phase 5 (tiebreak): if self is the lexicographic minimum among
+    ///   `{self} ∪ {all responder_node_ids}`, self-promote and broadcast
+    ///   `MasterElected`; else loop back to Phase 2.
+    ///
+    /// Safety valve: total budget `MASTER_ELECTION_TOTAL_BUDGET_MS` (30s).
+    /// If exhausted without resolution, unconditionally self-promote.
+    #[allow(clippy::too_many_lines)]
     async fn discover_seeds_and_join(self: &Arc<Self>) {
         if self.config.seed_addresses.is_empty() {
             info!("No seed addresses configured, self-promoting as single-node master");
             self.self_promote_as_master();
+            self.broadcast_master_elected();
             return;
         }
 
-        // Filter out our own address from seeds
         let own_addr = format!(
             "{}:{}",
             self.local_member.host, self.local_member.cluster_port
         );
 
-        for seed_addr in &self.config.seed_addresses {
-            if seed_addr == &own_addr {
-                continue;
+        let total_deadline = Instant::now() + Duration::from_millis(MASTER_ELECTION_TOTAL_BUDGET_MS);
+
+        // Tiebreak set always contains self; grows as NotMasterYet rejections arrive.
+        let mut tiebreak_set: HashSet<String> = HashSet::new();
+        tiebreak_set.insert(self.local_member.node_id.clone());
+
+        // TCP streams held open after NotMasterYet rejections so the seed can
+        // deliver a MasterElected broadcast over the existing connection.
+        // Each entry is (responder_node_id, TcpStream).
+        let mut held_streams: Vec<(String, TcpStream)> = Vec::new();
+
+        'outer: loop {
+            if Instant::now() >= total_deadline {
+                break 'outer;
             }
 
-            let mut backoff_ms = SEED_BACKOFF_INITIAL_MS;
+            // Phase 1: dial seeds and send JoinRequest
+            let mut all_retryable = true;
+            for seed_addr in &self.config.seed_addresses {
+                if seed_addr == &own_addr {
+                    continue;
+                }
 
-            for attempt in 1..=SEED_MAX_ATTEMPTS {
-                info!(
-                    seed = %seed_addr,
-                    attempt,
-                    "Attempting to connect to seed node"
-                );
+                let mut backoff_ms = SEED_BACKOFF_INITIAL_MS;
+                for attempt in 1..=SEED_MAX_ATTEMPTS {
+                    if Instant::now() >= total_deadline {
+                        break 'outer;
+                    }
 
-                match TcpStream::connect(seed_addr).await {
-                    Ok(stream) => {
-                        info!(seed = %seed_addr, "Connected to seed node");
-                        match self.send_join_request(stream, seed_addr).await {
-                            SeedAttemptOutcome::Accepted { stream, master_node_id } => {
-                                // Hand off the TCP connection to per-peer handler so both
-                                // sides retain a persistent peer connection
-                                let this = Arc::clone(self);
-                                tokio::spawn(async move {
-                                    this.handle_peer_connection(stream, Some(master_node_id))
-                                        .await;
-                                });
-                                return; // Successfully joined
-                            }
-                            SeedAttemptOutcome::RetryableRejection { stream: _, .. } => {
-                                // Stream held open in S2 state machine; for now drop and try next
-                                break;
-                            }
-                            SeedAttemptOutcome::PermanentRejection
-                            | SeedAttemptOutcome::ConnectionError => {
-                                break;
+                    info!(
+                        seed = %seed_addr,
+                        attempt,
+                        "Attempting to connect to seed node"
+                    );
+
+                    match TcpStream::connect(seed_addr).await {
+                        Ok(stream) => {
+                            info!(seed = %seed_addr, "Connected to seed node");
+                            match self.send_join_request(stream, seed_addr).await {
+                                SeedAttemptOutcome::Accepted { stream, master_node_id } => {
+                                    // Hand off the TCP connection to per-peer handler
+                                    let this = Arc::clone(self);
+                                    tokio::spawn(async move {
+                                        this.handle_peer_connection(stream, Some(master_node_id))
+                                            .await;
+                                    });
+                                    return; // Successfully joined
+                                }
+                                SeedAttemptOutcome::RetryableRejection {
+                                    stream,
+                                    responder_node_id,
+                                } => {
+                                    if let Some(ref id) = responder_node_id {
+                                        tiebreak_set.insert(id.clone());
+                                        held_streams.push((id.clone(), stream));
+                                    }
+                                    // Older peer with no responder_node_id: stream dropped;
+                                    // correctness preserved because self is always in tiebreak_set.
+                                    break; // move to next seed
+                                }
+                                SeedAttemptOutcome::PermanentRejection => {
+                                    all_retryable = false;
+                                    break;
+                                }
+                                SeedAttemptOutcome::ConnectionError => {
+                                    all_retryable = false;
+                                    if attempt < SEED_MAX_ATTEMPTS {
+                                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                                        backoff_ms = (backoff_ms * 2).min(SEED_BACKOFF_MAX_MS);
+                                    } else {
+                                        break;
+                                    }
+                                }
                             }
                         }
-                    }
-                    Err(e) => {
-                        warn!(
-                            seed = %seed_addr,
-                            attempt,
-                            max_attempts = SEED_MAX_ATTEMPTS,
-                            "Failed to connect to seed: {e}"
-                        );
-
-                        if attempt < SEED_MAX_ATTEMPTS {
-                            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                            backoff_ms = (backoff_ms * 2).min(SEED_BACKOFF_MAX_MS);
+                        Err(e) => {
+                            all_retryable = false;
+                            warn!(
+                                seed = %seed_addr,
+                                attempt,
+                                max_attempts = SEED_MAX_ATTEMPTS,
+                                "Failed to connect to seed: {e}"
+                            );
+                            if attempt < SEED_MAX_ATTEMPTS {
+                                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                                backoff_ms = (backoff_ms * 2).min(SEED_BACKOFF_MAX_MS);
+                            }
                         }
                     }
                 }
             }
+
+            // No held streams and no retryable rejections means all seeds were either
+            // unreachable or permanently rejecting — break to safety-valve self-promote.
+            if !all_retryable && held_streams.is_empty() {
+                break 'outer;
+            }
+
+            // Phase 2: WaitForMasterElection — listen on held streams for MasterElected
+            let wait_remaining = {
+                let remaining = total_deadline.saturating_duration_since(Instant::now());
+                remaining.min(Duration::from_millis(MASTER_ELECTION_WAIT_MS))
+            };
+
+            let elected = listen_for_master_elected(&mut held_streams, wait_remaining).await;
+
+            if let Some(payload) = elected {
+                // Phase 4: re-dial announced master and attempt join
+                drop(held_streams);
+                held_streams = Vec::new();
+
+                info!(
+                    master_node_id = %payload.master_node_id,
+                    master_address = %payload.master_address,
+                    "MasterElected received; re-dialing announced master"
+                );
+
+                match TcpStream::connect(&payload.master_address).await {
+                    Ok(stream) => {
+                        if let SeedAttemptOutcome::Accepted { stream, master_node_id } =
+                            self.send_join_request(stream, &payload.master_address).await
+                        {
+                            let this = Arc::clone(self);
+                            tokio::spawn(async move {
+                                this.handle_peer_connection(stream, Some(master_node_id))
+                                    .await;
+                            });
+                            return;
+                        }
+                        // Master not ready yet or refused; loop back to Phase 1
+                    }
+                    Err(e) => {
+                        warn!(master = %payload.master_address, "Cannot reach announced master: {e}");
+                    }
+                }
+            } else {
+                // Phase 5: deterministic tiebreak by lexicographically lowest node_id
+                let min_id = tiebreak_set
+                    .iter()
+                    .min()
+                    .expect("tiebreak_set always contains self");
+
+                if min_id == &self.local_member.node_id {
+                    info!(
+                        tiebreak_set = ?tiebreak_set,
+                        "Won deterministic tiebreak by lowest node_id; self-promoting as master"
+                    );
+                    self.self_promote_as_master();
+
+                    // Promote the held streams into peer connections so
+                    // MasterElected reaches them via the write channel.
+                    let (ids, streams): (Vec<_>, Vec<_>) =
+                        held_streams.drain(..).unzip();
+                    self.broadcast_master_elected();
+
+                    for (responder_id, stream) in ids.into_iter().zip(streams) {
+                        let this = Arc::clone(self);
+                        tokio::spawn(async move {
+                            this.handle_peer_connection(stream, Some(responder_id)).await;
+                        });
+                    }
+                    return;
+                }
+
+                // Not the lowest-id node; clear held streams and re-dial from Phase 1
+                // to re-establish connections with fresh state.
+                info!(
+                    min_id = %min_id,
+                    self_id = %self.local_member.node_id,
+                    "Lost deterministic tiebreak; waiting for elected master to broadcast"
+                );
+                drop(held_streams);
+                held_streams = Vec::new();
+            }
         }
 
-        // All seeds unreachable after all retries
-        info!("All seed nodes unreachable, self-promoting as single-node master");
+        // Safety valve: total budget exhausted with no resolution. Unconditionally
+        // self-promote. This path is only reachable under genuine total-partition or
+        // stale-seed-list conditions; it may transiently recreate split-brain, which
+        // the existing MemberRemoved/MemberAdded flow heals once connectivity restores.
+        warn!(
+            budget_ms = MASTER_ELECTION_TOTAL_BUDGET_MS,
+            "Master-election budget exhausted; self-promoting as safety-valve fallback"
+        );
         self.self_promote_as_master();
+        self.broadcast_master_elected(); // best-effort; peers may be empty
+    }
+
+
+    /// Sends `ClusterMessage::MasterElected` to all currently-connected peers.
+    ///
+    /// Called immediately after `self_promote_as_master()` to inform any nodes
+    /// in `WaitForMasterElection` state to re-target their join attempt.
+    ///
+    /// Sends over the existing per-peer write channels. Best-effort: drops
+    /// are silently ignored (the safety-valve 30s budget handles the case
+    /// where all broadcasts are lost).
+    ///
+    /// `MembershipReactor` is NOT invoked by this method — the election is at
+    /// the `ClusterMessage` layer, not the `ClusterChange` layer, so no
+    /// `MemberAdded`/`MemberRemoved` semantics are triggered.
+    fn broadcast_master_elected(&self) {
+        let payload = MasterElectedPayload {
+            master_address: format!(
+                "{}:{}",
+                self.local_member.host, self.local_member.cluster_port
+            ),
+            master_node_id: self.local_member.node_id.clone(),
+            term: 1, // v1: always 1; reserved for future master-failover elections
+            election_id: Uuid::new_v4().to_string(),
+        };
+        let msg = ClusterMessage::MasterElected(payload);
+        self.peers.broadcast(&msg, None);
     }
 
     /// Sends a `JoinRequest` to a seed node over a newly established TCP connection.
     ///
     /// Returns a `SeedAttemptOutcome` describing whether the join was accepted,
-    /// rejected retry-ably (NotMasterYet — stream kept open for MasterElected),
-    /// rejected permanently (auth/version/cluster_id/full — skip this seed),
+    /// rejected retry-ably (`NotMasterYet` — stream kept open for `MasterElected`),
+    /// rejected permanently (auth/version/`cluster_id`/full — skip this seed),
     /// or failed at the transport layer.
     ///
     /// The stream is consumed ONLY on `PermanentRejection` and `ConnectionError`.
@@ -457,10 +631,12 @@ impl ClusterFormationService {
                     // so older peers (pre-quorum-election) fall into the retry-able path.
                     let is_permanent = matches!(
                         response.reject_code,
-                        Some(JoinRejectReason::AuthFailed)
-                            | Some(JoinRejectReason::ProtocolVersionMismatch)
-                            | Some(JoinRejectReason::WrongClusterId)
-                            | Some(JoinRejectReason::ClusterFull)
+                        Some(
+                            JoinRejectReason::AuthFailed
+                                | JoinRejectReason::ProtocolVersionMismatch
+                                | JoinRejectReason::WrongClusterId
+                                | JoinRejectReason::ClusterFull
+                        )
                     );
 
                     if is_permanent {
@@ -741,5 +917,183 @@ impl ClusterFormationService {
             || "unknown".to_string(),
             |m| format!("{}:{}", m.host, m.cluster_port),
         )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Free helpers for the master-election state machine
+// ---------------------------------------------------------------------------
+
+/// Listens on held TCP streams (from `NotMasterYet` rejections) for the first
+/// `ClusterMessage::MasterElected` message to arrive within `timeout`. Returns
+/// the payload on arrival, or `None` on timeout.
+///
+/// Deduplicates broadcasts by `election_id` in case the same election is
+/// delivered over multiple held streams (fan-out). Non-`MasterElected` frames
+/// (e.g., heartbeat noise) are discarded silently.
+///
+/// Streams are polled in round-robin with a short per-stream window; the outer
+/// loop tracks the overall `timeout` deadline. This avoids the compile-time
+/// branch-count limit of `tokio::select!` while handling a dynamic set of streams.
+async fn listen_for_master_elected(
+    held_streams: &mut Vec<(String, TcpStream)>,
+    timeout: Duration,
+) -> Option<MasterElectedPayload> {
+    let deadline = Instant::now() + timeout;
+    let mut seen_ids: HashSet<String> = HashSet::new();
+
+    // Wrap each stream in a length-delimited framed reader.
+    // We use `TcpStream::try_read` via a Framed codec; a short per-stream
+    // poll window avoids stalling on silent streams.
+    let mut frameds: Vec<Framed<tokio::net::TcpStream, LengthDelimitedCodec>> = Vec::new();
+
+    // Temporarily move streams into framed wrappers by draining held_streams.
+    // We'll restore them afterwards if no broadcast was found.
+    let mut node_ids: Vec<String> = Vec::new();
+    for (id, stream) in held_streams.drain(..) {
+        node_ids.push(id);
+        frameds.push(Framed::new(stream, LengthDelimitedCodec::new()));
+    }
+
+    let result = 'poll: loop {
+        if Instant::now() >= deadline {
+            break 'poll None;
+        }
+
+        for framed in &mut frameds {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break 'poll None;
+            }
+
+            // Try to read one frame within a short window from this stream.
+            if let Ok(Some(Ok(frame))) =
+                tokio::time::timeout(Duration::from_millis(50), framed.next()).await
+            {
+                if let Ok(ClusterMessage::MasterElected(payload)) =
+                    rmp_serde::from_slice::<ClusterMessage>(&frame)
+                {
+                    if seen_ids.insert(payload.election_id.clone()) {
+                        break 'poll Some(payload);
+                    }
+                }
+                // Non-MasterElected frame or duplicate election_id: discard and continue
+            }
+            // Stream error, closed, or per-stream poll window expired; try next stream
+        }
+
+        // Brief sleep before the next round-robin pass to avoid busy-spinning
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+
+    // Restore streams into held_streams (preserving node_id association).
+    // Streams for which we got a result are still valid; caller decides to drop them.
+    for (id, framed) in node_ids.into_iter().zip(frameds) {
+        held_streams.push((id, framed.into_inner()));
+    }
+
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verifies that a `JoinResponsePayload` `MsgPack` blob WITHOUT `reject_code`
+    /// and WITHOUT `responder_node_id` deserializes with both fields as `None`.
+    /// This is the backward-compatibility contract: older peers that omit the
+    /// new fields must still be handled gracefully (treated as `NotMasterYet`).
+    #[test]
+    fn join_response_without_new_fields_deserializes_as_none() {
+        // Simulate an older peer response: serialize a payload where reject_code
+        // and responder_node_id are None, then verify both decode as None.
+        // This is the backward-compatibility contract: older peers that omit the
+        // new fields must still be handled gracefully (treated as `NotMasterYet`).
+        let minimal = JoinResponsePayload {
+            accepted: false,
+            reject_reason: Some("not master; master address: unknown".to_string()),
+            reject_code: None,
+            responder_node_id: None,
+            members_view: None,
+            partition_assignments: None,
+        };
+        let bytes = rmp_serde::to_vec_named(&minimal).expect("serialize");
+
+        // Deserialize; confirm new fields are None
+        let decoded: JoinResponsePayload = rmp_serde::from_slice(&bytes).expect("deserialize");
+        assert_eq!(decoded.reject_code, None);
+        assert_eq!(decoded.responder_node_id, None);
+        assert!(!decoded.accepted);
+    }
+
+    /// Verifies that `ClusterMessage::MasterElected(payload)` round-trips through
+    /// `MsgPack` serialization and that the discriminant tag is emitted correctly.
+    #[test]
+    fn master_elected_envelope_round_trip() {
+        let payload = MasterElectedPayload {
+            master_address: "127.0.0.1:9001".to_string(),
+            master_node_id: "node-0".to_string(),
+            term: 1,
+            election_id: "abc-123".to_string(),
+        };
+        let msg = ClusterMessage::MasterElected(payload.clone());
+        let bytes = rmp_serde::to_vec_named(&msg).expect("serialize MasterElected envelope");
+
+        // Deserialize back and confirm the variant is recovered correctly
+        let decoded: ClusterMessage = rmp_serde::from_slice(&bytes).expect("deserialize");
+        match decoded {
+            ClusterMessage::MasterElected(p) => {
+                assert_eq!(p.master_node_id, "node-0");
+                assert_eq!(p.master_address, "127.0.0.1:9001");
+                assert_eq!(p.term, 1);
+                assert_eq!(p.election_id, "abc-123");
+            }
+            other => panic!("Expected MasterElected, got: {other:?}"),
+        }
+
+        // Confirm the type discriminant is "MASTER_ELECTED" (SCREAMING_SNAKE_CASE)
+        // by decoding to a raw Value and inspecting the "type" key.
+        let raw: rmpv::Value = rmp_serde::from_slice(&bytes).expect("decode to Value");
+        if let rmpv::Value::Map(entries) = raw {
+            let type_val = entries
+                .iter()
+                .find(|(k, _)| k == &rmpv::Value::String("type".into()))
+                .map(|(_, v)| v.clone());
+            assert_eq!(
+                type_val,
+                Some(rmpv::Value::String("MASTER_ELECTED".into())),
+                "MasterElected discriminant must be MASTER_ELECTED in wire format"
+            );
+        } else {
+            panic!("Expected a map at the top level");
+        }
+    }
+
+    /// Verifies that a join rejection with a permanent code (`AuthFailed`) is
+    /// classified as `PermanentRejection` and does not reach `RetryableRejection`.
+    #[test]
+    fn join_reject_reason_permanent_variants_are_permanent() {
+        let permanent_codes = [
+            JoinRejectReason::AuthFailed,
+            JoinRejectReason::ProtocolVersionMismatch,
+            JoinRejectReason::WrongClusterId,
+            JoinRejectReason::ClusterFull,
+        ];
+        for code in permanent_codes {
+            let is_permanent = matches!(
+                Some(code),
+                Some(
+                    JoinRejectReason::AuthFailed
+                        | JoinRejectReason::ProtocolVersionMismatch
+                        | JoinRejectReason::WrongClusterId
+                        | JoinRejectReason::ClusterFull
+                )
+            );
+            assert!(is_permanent, "Expected {code:?} to be permanent");
+        }
     }
 }

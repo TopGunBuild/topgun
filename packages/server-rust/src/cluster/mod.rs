@@ -146,6 +146,8 @@ mod integration_tests {
         round_trip(&ClusterMessage::JoinResponse(JoinResponsePayload {
             accepted: true,
             reject_reason: None,
+            reject_code: None,
+            responder_node_id: None,
             members_view: Some(view),
             partition_assignments: Some(vec![PartitionAssignment {
                 partition_id: 0,
@@ -160,6 +162,8 @@ mod integration_tests {
         round_trip(&ClusterMessage::JoinResponse(JoinResponsePayload {
             accepted: false,
             reject_reason: Some("cluster full".to_string()),
+            reject_code: Some(JoinRejectReason::ClusterFull),
+            responder_node_id: None,
             members_view: None,
             partition_assignments: None,
         }));
