@@ -300,19 +300,19 @@ impl ClusterFormationService {
 
     /// Multi-phase state machine for cluster join.
     ///
-    /// Phase 1: Dial each seed, send `JoinRequest`.
+    /// Seed dial: Dial each seed, send `JoinRequest`.
     ///   - `Accepted`: hand off stream, return (joined).
     ///   - `RetryableRejection` (`NotMasterYet`): collect `responder_node_id` into
     ///     tiebreak set, hold stream open for incoming `MasterElected` broadcast.
     ///   - `PermanentRejection` / `ConnectionError`: skip seed.
     ///
-    /// Phase 2: `WaitForMasterElection` — listen on held streams for `MasterElected`.
-    ///   - Received broadcast: Phase 4 — re-dial announced master.
-    ///   - Timeout: Phase 5 — deterministic tiebreak by lowest `node_id`.
+    /// `WaitForMasterElection`: listen on held streams for `MasterElected`.
+    ///   - Received broadcast: re-dial announced master.
+    ///   - Timeout: deterministic tiebreak by lowest `node_id`.
     ///
-    /// Phase 5 (tiebreak): if self is the lexicographic minimum among
+    /// Tiebreak: if self is the lexicographic minimum among
     ///   `{self} ∪ {all responder_node_ids}`, self-promote and broadcast
-    ///   `MasterElected`; else loop back to Phase 2.
+    ///   `MasterElected`; else loop back to `WaitForMasterElection`.
     ///
     /// Safety valve: total budget `MASTER_ELECTION_TOTAL_BUDGET_MS` (30s).
     /// If exhausted without resolution, unconditionally self-promote.
@@ -346,7 +346,7 @@ impl ClusterFormationService {
                 break 'outer;
             }
 
-            // Phase 1: dial seeds and send JoinRequest
+            // Dial seeds and send JoinRequest
             let mut all_retryable = true;
             for seed_addr in &self.config.seed_addresses {
                 if seed_addr == &own_addr {
@@ -428,7 +428,7 @@ impl ClusterFormationService {
                 break 'outer;
             }
 
-            // Phase 2: WaitForMasterElection — listen on held streams for MasterElected
+            // WaitForMasterElection — listen on held streams for MasterElected
             let wait_remaining = {
                 let remaining = total_deadline.saturating_duration_since(Instant::now());
                 remaining.min(Duration::from_millis(MASTER_ELECTION_WAIT_MS))
@@ -437,7 +437,7 @@ impl ClusterFormationService {
             let elected = listen_for_master_elected(&mut held_streams, wait_remaining).await;
 
             if let Some(payload) = elected {
-                // Phase 4: re-dial announced master and attempt join
+                // Re-dial announced master and attempt join
                 drop(held_streams);
                 held_streams = Vec::new();
 
@@ -459,14 +459,14 @@ impl ClusterFormationService {
                             });
                             return;
                         }
-                        // Master not ready yet or refused; loop back to Phase 1
+                        // Master not ready yet or refused; loop back to seed-dial
                     }
                     Err(e) => {
                         warn!(master = %payload.master_address, "Cannot reach announced master: {e}");
                     }
                 }
             } else {
-                // Phase 5: deterministic tiebreak by lexicographically lowest node_id
+                // Deterministic tiebreak by lexicographically lowest node_id
                 let min_id = tiebreak_set
                     .iter()
                     .min()
@@ -518,7 +518,7 @@ impl ClusterFormationService {
                     return;
                 }
 
-                // Not the lowest-id node; clear held streams and re-dial from Phase 1
+                // Not the lowest-id node; clear held streams and re-dial from seed-dial
                 // to re-establish connections with fresh state.
                 info!(
                     min_id = %min_id,
