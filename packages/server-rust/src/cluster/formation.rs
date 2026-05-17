@@ -26,14 +26,62 @@ use super::types::{ClusterConfig, MemberInfo, MembersView, NodeState};
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Initial backoff delay for seed connection attempts.
+/// Initial backoff delay for seed connection attempts (TCP-connect retry,
+/// distinct from the master-election wait below).
 const SEED_BACKOFF_INITIAL_MS: u64 = 500;
 
 /// Maximum backoff delay for seed connection attempts.
 const SEED_BACKOFF_MAX_MS: u64 = 5_000;
 
-/// Maximum number of seed connection retry attempts.
+/// Maximum number of seed TCP-connect retry attempts before moving to the next seed.
 const SEED_MAX_ATTEMPTS: u32 = 10;
+
+/// Maximum time the joiner waits for a `MasterElected` broadcast after
+/// receiving `NotMasterYet` rejections from all reachable seeds. On expiry,
+/// the joiner enters the deterministic-tiebreak phase. Tuned for intra-host
+/// loopback TCP convergence (~50ms typical broadcast latency); the safety-valve
+/// `MASTER_ELECTION_TOTAL_BUDGET_MS` (30s) absorbs pathological cases.
+const MASTER_ELECTION_WAIT_MS: u64 = 3_000;
+
+/// Total time budget for the entire master-election phase, including
+/// repeated wait-and-tiebreak cycles. On expiry, the joiner unconditionally
+/// self-promotes as a safety valve against total broadcast loss / full
+/// network partition. Tuned to cover cold-build CPU-contention parallel-spawn
+/// convergence on CI machines.
+const MASTER_ELECTION_TOTAL_BUDGET_MS: u64 = 30_000;
+
+/// Reserved for the bully-style tiebreak round (Option 2b). Currently unused
+/// because this spec implements deterministic-tiebreak by lowest node_id.
+/// Keep as documented constant for future evolution if 2b becomes necessary.
+#[allow(dead_code)]
+const MASTER_PROPOSAL_TIMEOUT_MS: u64 = 2_000;
+
+// ---------------------------------------------------------------------------
+// Private types for the seed-discovery state machine
+// ---------------------------------------------------------------------------
+
+/// Outcome of a single `send_join_request` call.
+///
+/// Used by `discover_seeds_and_join` to decide whether to enter the
+/// master-election wait, skip a seed, or return early on success.
+enum SeedAttemptOutcome {
+    /// Join accepted; caller hands stream off to `handle_peer_connection`.
+    Accepted {
+        stream: TcpStream,
+        master_node_id: String,
+    },
+    /// Join rejected with `NotMasterYet`; caller adds `responder_node_id`
+    /// to the tiebreak set and holds the stream open for `MasterElected`.
+    RetryableRejection {
+        stream: TcpStream,
+        responder_node_id: Option<String>,
+    },
+    /// Join rejected with a permanent reason (auth, version, cluster_id, full);
+    /// caller skips this seed without entering the election wait.
+    PermanentRejection,
+    /// Connection lost or malformed response; caller moves to next seed.
+    ConnectionError,
+}
 
 // ---------------------------------------------------------------------------
 // ClusterFormationService
@@ -280,20 +328,26 @@ impl ClusterFormationService {
                 match TcpStream::connect(seed_addr).await {
                     Ok(stream) => {
                         info!(seed = %seed_addr, "Connected to seed node");
-                        if let Some((stream, master_node_id)) =
-                            self.send_join_request(stream, seed_addr).await
-                        {
-                            // Hand off the TCP connection to per-peer handler so both
-                            // sides retain a persistent peer connection
-                            let this = Arc::clone(self);
-                            tokio::spawn(async move {
-                                this.handle_peer_connection(stream, Some(master_node_id))
-                                    .await;
-                            });
-                            return; // Successfully joined
+                        match self.send_join_request(stream, seed_addr).await {
+                            SeedAttemptOutcome::Accepted { stream, master_node_id } => {
+                                // Hand off the TCP connection to per-peer handler so both
+                                // sides retain a persistent peer connection
+                                let this = Arc::clone(self);
+                                tokio::spawn(async move {
+                                    this.handle_peer_connection(stream, Some(master_node_id))
+                                        .await;
+                                });
+                                return; // Successfully joined
+                            }
+                            SeedAttemptOutcome::RetryableRejection { stream: _, .. } => {
+                                // Stream held open in S2 state machine; for now drop and try next
+                                break;
+                            }
+                            SeedAttemptOutcome::PermanentRejection
+                            | SeedAttemptOutcome::ConnectionError => {
+                                break;
+                            }
                         }
-                        // Join request failed (rejected or connection lost), try next seed
-                        break;
                     }
                     Err(e) => {
                         warn!(
@@ -318,13 +372,20 @@ impl ClusterFormationService {
     }
 
     /// Sends a `JoinRequest` to a seed node over a newly established TCP connection.
-    /// Returns `Some((TcpStream, master_node_id))` on successful join so the caller
-    /// can hand off the stream to `handle_peer_connection` for persistent connectivity.
+    ///
+    /// Returns a `SeedAttemptOutcome` describing whether the join was accepted,
+    /// rejected retry-ably (NotMasterYet — stream kept open for MasterElected),
+    /// rejected permanently (auth/version/cluster_id/full — skip this seed),
+    /// or failed at the transport layer.
+    ///
+    /// The stream is consumed ONLY on `PermanentRejection` and `ConnectionError`.
+    /// On `Accepted` and `RetryableRejection` the stream is returned inside the
+    /// variant so the caller can keep the TCP connection alive.
     async fn send_join_request(
         &self,
         stream: TcpStream,
         seed_addr: &str,
-    ) -> Option<(TcpStream, String)> {
+    ) -> SeedAttemptOutcome {
         let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
 
         let join_req = ClusterMessage::JoinRequest(JoinRequestPayload {
@@ -341,13 +402,13 @@ impl ClusterFormationService {
             Ok(b) => b,
             Err(e) => {
                 warn!("Failed to serialize JoinRequest: {e}");
-                return None;
+                return SeedAttemptOutcome::ConnectionError;
             }
         };
 
         if framed.send(bytes.into()).await.is_err() {
             warn!(seed = %seed_addr, "Failed to send JoinRequest to seed");
-            return None;
+            return SeedAttemptOutcome::ConnectionError;
         }
 
         // Wait for JoinResponse
@@ -357,7 +418,7 @@ impl ClusterFormationService {
                     Ok(m) => m,
                     Err(e) => {
                         warn!(seed = %seed_addr, "Failed to deserialize seed response: {e}");
-                        return None;
+                        return SeedAttemptOutcome::ConnectionError;
                     }
                 };
 
@@ -380,31 +441,63 @@ impl ClusterFormationService {
                             // The codec's internal buffer is empty after reading a complete
                             // frame, so no data is lost.
                             let stream = framed.into_inner();
-                            return Some((stream, node_id));
+                            return SeedAttemptOutcome::Accepted {
+                                stream,
+                                master_node_id: node_id,
+                            };
                         }
 
-                        // Accepted but no master in view (shouldn't happen in practice)
+                        // Accepted but no master in view (should not happen in practice).
+                        // Treat as a connection error so the caller retries.
                         warn!(seed = %seed_addr, "Join accepted but no master in members view");
-                        return None;
+                        return SeedAttemptOutcome::ConnectionError;
                     }
-                    warn!(
-                        seed = %seed_addr,
-                        reason = ?response.reject_reason,
-                        "Join rejected by seed node"
+
+                    // Rejected — classify by reject_code; absent code defaults to NotMasterYet
+                    // so older peers (pre-quorum-election) fall into the retry-able path.
+                    let is_permanent = matches!(
+                        response.reject_code,
+                        Some(JoinRejectReason::AuthFailed)
+                            | Some(JoinRejectReason::ProtocolVersionMismatch)
+                            | Some(JoinRejectReason::WrongClusterId)
+                            | Some(JoinRejectReason::ClusterFull)
                     );
-                    return None;
+
+                    if is_permanent {
+                        warn!(
+                            seed = %seed_addr,
+                            reason = ?response.reject_reason,
+                            code = ?response.reject_code,
+                            "Join permanently rejected by seed node; skipping"
+                        );
+                        return SeedAttemptOutcome::PermanentRejection;
+                    }
+
+                    // NotMasterYet (or unknown older peer): keep stream open so this
+                    // seed can deliver a MasterElected broadcast once it or another
+                    // node wins the deterministic tiebreak.
+                    info!(
+                        seed = %seed_addr,
+                        responder = ?response.responder_node_id,
+                        "Seed not yet master; holding connection for MasterElected broadcast"
+                    );
+                    let stream = framed.into_inner();
+                    return SeedAttemptOutcome::RetryableRejection {
+                        stream,
+                        responder_node_id: response.responder_node_id,
+                    };
                 }
 
                 warn!(seed = %seed_addr, "Unexpected response from seed (expected JoinResponse)");
-                None
+                SeedAttemptOutcome::ConnectionError
             }
             Some(Err(e)) => {
                 warn!(seed = %seed_addr, "Error reading seed response: {e}");
-                None
+                SeedAttemptOutcome::ConnectionError
             }
             None => {
                 warn!(seed = %seed_addr, "Seed connection closed before response");
-                None
+                SeedAttemptOutcome::ConnectionError
             }
         }
     }
