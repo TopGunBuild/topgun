@@ -83,43 +83,21 @@ export async function spawnCluster(
   const processes: Array<child_process.ChildProcess | null> = new Array(NODE_COUNT).fill(null);
 
   /**
-   * Builds the `--seed-nodes` CLI arg for the node at `index`.
-   *
-   * `mode: 'boot'` — return self + lower-indexed peers (already spawned by the
-   * sequential boot loop). The server's discover_seeds_and_join filters self,
-   * so node-0 effectively sees an empty seed list and self-promotes; node-i
-   * (i>0) sees nodes 0..i-1 and joins the existing cluster. We include self
-   * (rather than passing empty) so `cluster_mode` stays true on node-0 — the
-   * server skips ALL cluster machinery when seed_list is empty, which would
-   * leave node-0 unable to accept later JoinRequests.
-   *
-   * Including all peers (the old behavior) caused split-brain at boot: all
-   * three nodes spawn in parallel, each tries to contact the others before
-   * any has self-promoted, every JoinRequest is rejected with "not master;
-   * master address: unknown", and each falls through to self_promote — leaving
-   * 3 independent single-node masters that never reliably merge. Downstream
-   * tests then see partial membership views (Test 4's rejoin leaves master with
-   * view={node-0, node-1} missing node-2; Test 5's failover times out waiting
-   * for a mapVersion bump because the cluster never had 3 members to begin with).
-   *
-   * `mode: 'restart'` — return ALL other peers (excluding self). At restart time
-   * the other peers are already running, so the rejoining node should contact
-   * any of them to find the current master.
+   * Builds the `--seed-nodes` CLI arg for the node at `index`: all other peers
+   * (excluding self). Parallel boot is safe — `discover_seeds_and_join` uses
+   * protocol-level master election with deterministic tiebreak by lowest
+   * `node_id`, so simultaneous `JoinRequest`s converge to a single master rather
+   * than recreating the split-brain that staggered boot used to mitigate.
    */
-  function buildSeedNodes(index: number, mode: 'boot' | 'restart'): string {
-    if (mode === 'boot') {
-      return NODE_CONFIGS.filter((_, i) => i <= index)
-        .map(c => `localhost:${c.clusterPort}`)
-        .join(',');
-    }
+  function buildSeedNodes(index: number): string {
     return NODE_CONFIGS.filter((_, i) => i !== index)
       .map(c => `localhost:${c.clusterPort}`)
       .join(',');
   }
 
-  function spawnNode(index: number, mode: 'boot' | 'restart' = 'restart'): child_process.ChildProcess {
+  function spawnNode(index: number): child_process.ChildProcess {
     const cfg = NODE_CONFIGS[index];
-    const seedNodes = buildSeedNodes(index, mode);
+    const seedNodes = buildSeedNodes(index);
 
     const args = [
       '--node-id', cfg.nodeId,
@@ -154,26 +132,16 @@ export async function spawnCluster(
     return proc;
   }
 
-  // Spawn nodes SEQUENTIALLY with per-node join verification. Parallel boot
-  // causes a split-brain because each node simultaneously tries to contact the
-  // others before any has self-promoted as master — every JoinRequest is rejected
-  // with "not master; master address: unknown", and each node falls through to
-  // self_promote_as_master. The cluster then has 3 independent single-node
-  // masters that never reliably merge, which causes downstream tests to see
-  // partial membership views (Test 4's rejoin leaves master with view={node-0,
-  // node-1} missing node-2; Test 5's failover then times out waiting for a
-  // mapVersion bump because the cluster's view never had 3 members to begin with).
-  //
-  // Sequential boot with post-spawn membership verification ensures node-0
-  // self-promotes alone first, then node-1 joins it as a non-master peer, then
-  // node-2 joins the now-2-node cluster. After each spawn we poll the cluster
-  // via a temporary ClusterClient connected to already-confirmed nodes until
-  // the broadcast partition map reports the expected nodeCount.
+  // Spawn all nodes in parallel; the Rust quorum-election protocol
+  // (discover_seeds_and_join + MasterElected broadcast + deterministic tiebreak
+  // by lowest node_id) ensures exactly one master emerges without staggering.
   for (let i = 0; i < NODE_COUNT; i++) {
-    processes[i] = spawnNode(i, 'boot');
-    await waitForPort(processes[i]!, timeoutMs, NODE_CONFIGS[i].wsPort);
-    await waitForClusterMembership(i + 1, /* observerIndex */ 0);
+    processes[i] = spawnNode(i);
   }
+  await Promise.all(
+    processes.map((proc, i) => waitForPort(proc!, timeoutMs, NODE_CONFIGS[i].wsPort))
+  );
+  await waitForClusterMembership(NODE_COUNT, /* observerIndex */ 0);
 
   async function stopNode(index: number): Promise<void> {
     const proc = processes[index];
