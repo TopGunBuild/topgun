@@ -36,12 +36,12 @@ use topgun_server::cluster::state::{ClusterState, InboundClusterMessage};
 /// `MASTER_ELECTION_TOTAL_BUDGET_MS` (30s) + 5s slack for CI CPU contention.
 const CONVERGENCE_BUDGET_MS: u64 = 35_000;
 
-/// Number of proptest tiebreak iterations. Kept deliberately small because each
-/// iteration spawns 3 real `TcpListener` + 3 TCP connections on the loopback
-/// interface and runs the full election protocol. Cargo runs integration tests
-/// concurrently by default, so the proptest iterations must be light enough not
-/// to starve other tests in this file via port or CPU exhaustion.
-const PROPTEST_ITERATIONS: u32 = 10;
+/// Number of proptest tiebreak iterations. All 4 tests in this file are annotated
+/// with `#[serial_test::serial]`, which forces cargo to schedule them one at a time
+/// regardless of `--test-threads` setting. Serial execution eliminates the port and
+/// CPU contention that would otherwise starve follower nodes under default parallelism,
+/// making 100 iterations safe and matching AC #5.
+const PROPTEST_ITERATIONS: u32 = 100;
 
 // ---------------------------------------------------------------------------
 // Test harness helpers
