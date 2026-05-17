@@ -96,6 +96,7 @@ async fn wait_for_convergence(nodes: &[Arc<ClusterFormationService>], budget_ms:
 /// converge to exactly one master — the node with the lexicographically lowest
 /// `node_id` — within `CONVERGENCE_BUDGET_MS` on loopback TCP.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
 async fn parallel_boot_elects_single_master() {
     // Step 1: bind all cluster listeners to get OS-assigned ports
     let (l0, p0) = bind_listener().await;
@@ -224,6 +225,7 @@ async fn parallel_boot_elects_single_master() {
 /// (50–500ms per node) to simulate cold-build CPU-contention startup skew.
 /// The lowest-id node (`node-0`) must still win.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
 async fn parallel_boot_with_loopback_delays() {
     let (l0, p0) = bind_listener().await;
     let (l1, p1) = bind_listener().await;
@@ -323,6 +325,7 @@ async fn parallel_boot_with_loopback_delays() {
 /// Bridge pattern; `multi_thread` flavor is required because `block_in_place`
 /// panics on a single-threaded runtime.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
 #[allow(clippy::too_many_lines)]
 async fn deterministic_tiebreak_property() {
     use proptest::prelude::*;
@@ -478,6 +481,7 @@ async fn deterministic_tiebreak_property() {
 /// Verifies AC #9: permanent rejections short-circuit to the next seed without
 /// triggering election wait.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
 async fn permanent_rejection_does_not_trigger_election() {
     // Bootstrap a normal 2-node cluster first
     let (l0, p0) = bind_listener().await;
