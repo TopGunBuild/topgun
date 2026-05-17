@@ -150,14 +150,17 @@ export async function spawnCluster(
     // listener bind, especially under parallel-test load when the spawned binary
     // is competing for CPU. Empirically a 2s grace was insufficient (~50% flake
     // rate on the "partition map version increments after failover" test); 5s
-    // gives enough margin to cover the cluster-side gossip path while the test
-    // layer's own `waitUntil(..., 15s)` continues to act as the outer safety net.
+    // was an improvement but still left a residual race (observed ~7s worst-case
+    // before TCP peer connections to all other seeds are fully established under
+    // parallel-test CPU contention). An 8s grace covers the empirically-observed
+    // worst-case while the test layer's own `waitUntil(..., 15s)` continues to
+    // act as the outer safety net.
     //
     // Server-side tracing logs go to stderr (inherited, not piped from JS), so a
     // log-poll for the join-completed line is not feasible without restructuring
     // stdio capture — a fixed sleep with a generous margin is the simplest
     // robust option for this test-helper layer.
-    await new Promise<void>(resolve => setTimeout(resolve, 5_000));
+    await new Promise<void>(resolve => setTimeout(resolve, 8_000));
   }
 
   async function cleanup(): Promise<void> {
