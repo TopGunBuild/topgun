@@ -138,10 +138,24 @@ export async function spawnCluster(
   for (let i = 0; i < NODE_COUNT; i++) {
     processes[i] = spawnNode(i);
   }
-  await Promise.all(
-    processes.map((proc, i) => waitForPort(proc!, timeoutMs, NODE_CONFIGS[i].wsPort))
-  );
-  await waitForClusterMembership(NODE_COUNT, /* observerIndex */ 0);
+  try {
+    await Promise.all(
+      processes.map((proc, i) => waitForPort(proc!, timeoutMs, NODE_CONFIGS[i].wsPort))
+    );
+    await waitForClusterMembership(NODE_COUNT, /* observerIndex */ 0);
+  } catch (err) {
+    // Kill any processes that were spawned before the error so their stdout
+    // pipes are closed — otherwise Jest keeps the process alive waiting for
+    // pipe EOF even though no test cleanup will run (cluster was never returned).
+    await Promise.all(
+      processes.map((proc, i) => {
+        if (!proc) return Promise.resolve();
+        processes[i] = null;
+        return makeCleanup(proc)();
+      })
+    );
+    throw err;
+  }
 
   async function stopNode(index: number): Promise<void> {
     const proc = processes[index];
