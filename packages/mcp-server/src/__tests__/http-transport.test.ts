@@ -86,7 +86,7 @@ describe('HTTP Transport', () => {
     if (server) {
       const client = server.getClient();
       if (client) {
-        client.close();
+        await client.close();
       }
     }
   });
@@ -202,7 +202,7 @@ describe('HTTP Transport', () => {
       await transport.stop();
       const client = server.getClient();
       if (client) {
-        client.close();
+        await client.close();
       }
 
       server = new TopGunMCPServer();
@@ -391,7 +391,7 @@ describe('HTTP Transport', () => {
       await transport.stop();
       const client = server.getClient();
       if (client) {
-        client.close();
+        await client.close();
       }
 
       server = new TopGunMCPServer({

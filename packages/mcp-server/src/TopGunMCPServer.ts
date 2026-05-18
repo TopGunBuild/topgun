@@ -248,7 +248,7 @@ export class TopGunMCPServer {
     await this.server.close();
 
     if (!this.externalClient) {
-      this.client.close();
+      await this.client.close();
     }
 
     this.isStarted = false;

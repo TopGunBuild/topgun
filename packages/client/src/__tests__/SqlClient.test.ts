@@ -229,7 +229,7 @@ describe('Client SQL', () => {
       expect(mockSql).toHaveBeenCalledWith('SELECT id, name FROM users');
       expect(result).toEqual(mockResult);
 
-      client.close();
+      await client.close();
     });
   });
 

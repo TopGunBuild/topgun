@@ -358,7 +358,7 @@ describe('VectorSearchClient', () => {
       expect(mockVectorSearch).toHaveBeenCalledWith('notes', queryVector, { k: 5 });
       expect(result).toEqual(mockResults);
 
-      client.close();
+      await client.close();
     });
   });
 });

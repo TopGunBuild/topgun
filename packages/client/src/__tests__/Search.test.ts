@@ -217,7 +217,7 @@ describe('Client Search', () => {
       expect(mockSearch).toHaveBeenCalledWith('articles', 'test query', { limit: 10 });
       expect(results).toEqual(mockResults);
 
-      client.close();
+      await client.close();
     });
   });
 
@@ -625,7 +625,7 @@ describe('Client Search', () => {
   });
 
   describe('TopGunClient.searchSubscribe()', () => {
-    it('should create SearchHandle', () => {
+    it('should create SearchHandle', async () => {
       const mockStorage = createMockStorage();
       const client = new TopGunClient({
         serverUrl: 'ws://localhost:8080',
@@ -639,7 +639,7 @@ describe('Client Search', () => {
       expect(handle.query).toBe('test query');
 
       handle.dispose();
-      client.close();
+      await client.close();
     });
   });
 });

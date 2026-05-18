@@ -17,7 +17,7 @@ describe('MCP Integration', () => {
     if (server) {
       const client = server.getClient();
       if (client) {
-        client.close();
+        await client.close();
       }
     }
   });

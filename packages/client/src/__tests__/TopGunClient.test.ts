@@ -427,9 +427,9 @@ describe('TopGunClient', () => {
       });
     });
 
-    afterEach(() => {
-      clusterClient.close();
-      singleClient.close();
+    afterEach(async () => {
+      await clusterClient.close();
+      await singleClient.close();
     });
 
     test('isCluster() should return true for cluster mode', () => {
@@ -498,13 +498,13 @@ describe('TopGunClient', () => {
       await expect(singleClient.refreshPartitionMap()).resolves.not.toThrow();
     });
 
-    test('close() should not throw in cluster mode', () => {
+    test('close() should not throw in cluster mode', async () => {
       const tempClient = new TopGunClient({
         cluster: { seeds: ['ws://node1:8080'] },
         storage
       });
 
-      expect(() => tempClient.close()).not.toThrow();
+      await expect(tempClient.close()).resolves.not.toThrow();
     });
   });
 });

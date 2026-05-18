@@ -415,11 +415,18 @@ export class TopGunClient {
 
   /**
    * Closes the client, disconnecting from the server and cleaning up resources.
+   * Returns a Promise so callers can await full teardown, including cluster
+   * reconnect timers that would otherwise outlive the close() call and leave
+   * dangling setTimeout handles in the process.
    */
-  public close(): void {
+  public async close(): Promise<void> {
     this.authProvider?.destroy?.();
     if (this.clusterClient) {
-      this.clusterClient.close();
+      // Await cluster teardown so reconnect timers are cleared before the method
+      // returns — otherwise the process may keep dangling setTimeout handles alive
+      // from the WebSocket onclose → scheduleReconnect race that fires after
+      // close() returns.
+      await this.clusterClient.close();
     }
     this.syncEngine.close();
   }
