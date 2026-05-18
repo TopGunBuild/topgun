@@ -293,9 +293,25 @@ impl ClusterState {
         self.membership.load_full()
     }
 
-    /// Replaces the current membership view atomically.
+    /// Replaces the current membership view atomically, but only if the new
+    /// view's version is strictly greater than the current one. Older or equal
+    /// versions are silently dropped.
+    ///
+    /// Monotonicity matters because two paths can deliver views concurrently —
+    /// the inbound `MembersUpdate` broadcast from the master and the joiner's
+    /// own `apply_join_response` after a `JoinRequest` — and a stale
+    /// `JoinResponse` view (captured at join time) must not clobber a newer
+    /// broadcast view that landed first on the wire. Without this guard,
+    /// `ArcSwap::store` permits last-write-wins regardless of version order.
     pub fn update_view(&self, view: MembersView) {
-        self.membership.store(Arc::new(view));
+        let new = Arc::new(view);
+        self.membership.rcu(|current| {
+            if new.version > current.version {
+                Arc::clone(&new)
+            } else {
+                Arc::clone(current)
+            }
+        });
     }
 
     /// Returns `true` if the local node is the current cluster master.
