@@ -209,7 +209,7 @@ export async function spawnCluster(
           `(final nodeCount=${finalStats?.nodeCount ?? 'unknown'}, mapVersion=${finalStats?.mapVersion ?? 'unknown'})`
       );
     } finally {
-      verifier.close();
+      await verifier.close();
     }
   }
 
