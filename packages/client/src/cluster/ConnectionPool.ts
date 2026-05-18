@@ -376,14 +376,17 @@ export class ConnectionPool {
   }
 
   /**
-   * Close all connections and cleanup
+   * Close all connections and cleanup.
+   * Awaits all removeNode() Promises via Promise.all so that per-connection
+   * reconnect timers are fully cleared before the method resolves — without
+   * this, the fire-and-forget loop can leave a scheduleReconnect setTimeout
+   * queued on the next tick after close() returns.
    */
-  public close(): void {
+  public async close(): Promise<void> {
     this.stopHealthCheck();
 
-    for (const nodeId of this.connections.keys()) {
-      this.removeNode(nodeId);
-    }
+    const nodeIds = Array.from(this.connections.keys());
+    await Promise.all(nodeIds.map(nodeId => this.removeNode(nodeId)));
 
     this.connections.clear();
     this.primaryNodeId = null;

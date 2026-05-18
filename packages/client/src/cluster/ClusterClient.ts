@@ -680,7 +680,7 @@ export class ClusterClient implements IConnectionProvider {
       this.partitionMapRequestTimer = null;
     }
     this.partitionRouter.close();
-    this.connectionPool.close();
+    await this.connectionPool.close();
     this.initialized = false;
     this.routingActive = false;
     logger.info('Cluster client closed');
