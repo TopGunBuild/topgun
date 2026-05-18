@@ -109,7 +109,8 @@ describe('Integration: 3-node cluster smart routing', () => {
   }, 70_000);
 
   afterAll(async () => {
-    await cluster.cleanup();
+    // Guard against the case where beforeAll threw before cluster was assigned
+    if (cluster) await cluster.cleanup();
   });
 
   // ----------------------------------------------------------------
@@ -142,7 +143,7 @@ describe('Integration: 3-node cluster smart routing', () => {
         expect(stats.partitionCount).toBe(PARTITION_COUNT);
       }
     } finally {
-      client.close();
+      await client.close();
     }
   }, 30_000);
 
@@ -182,7 +183,7 @@ describe('Integration: 3-node cluster smart routing', () => {
       expect(metrics.directRoutes).toBeGreaterThan(0);
       expect(metrics.partitionMisses).toBe(0);
     } finally {
-      topgun.close();
+      await topgun.close();
     }
   }, 30_000);
 
@@ -221,8 +222,8 @@ describe('Integration: 3-node cluster smart routing', () => {
       const value = map.get(testKey);
       expect(value).toBe(testValue);
     } finally {
-      topgun.close();
-      clusterClient.close();
+      await topgun.close();
+      await clusterClient.close();
     }
   }, 30_000);
 
@@ -264,7 +265,7 @@ describe('Integration: 3-node cluster smart routing', () => {
       expect(totalRouted).toBeGreaterThan(0);
       expect(metrics.partitionMisses).toBe(0);
     } finally {
-      topgun.close();
+      await topgun.close();
       // Restart node 1 for subsequent tests
       await cluster.restartNode(1);
       await waitMs(3_000);
@@ -330,10 +331,10 @@ describe('Integration: 3-node cluster smart routing', () => {
         expect(metrics.directRoutes).toBeGreaterThan(0);
         expect(metrics.partitionMisses).toBe(0);
       } finally {
-        topgun.close();
+        await topgun.close();
       }
     } finally {
-      clusterClient.close();
+      await clusterClient.close();
       // Restart node 1 for subsequent tests
       await cluster.restartNode(1);
       await waitMs(3_000);
@@ -375,7 +376,7 @@ describe('Integration: 3-node cluster smart routing', () => {
       // After reset timeout, circuit moves to half-open — node becomes usable again
       expect(clusterClient.canUseNode(testNodeId)).toBe(true);
     } finally {
-      clusterClient.close();
+      await clusterClient.close();
     }
   }, 30_000);
 
@@ -437,10 +438,10 @@ describe('Integration: 3-node cluster smart routing', () => {
         expect(expectedPartitionId).toBeGreaterThanOrEqual(0);
         expect(expectedPartitionId).toBeLessThan(PARTITION_COUNT);
       } finally {
-        topgun.close();
+        await topgun.close();
       }
     } finally {
-      clusterClient.close();
+      await clusterClient.close();
     }
   }, 30_000);
 });
