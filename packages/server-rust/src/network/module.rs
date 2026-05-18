@@ -905,7 +905,12 @@ mod tests {
         drop(shutdown_tx);
     }
 
+    // Serialize against other tests in this module to prevent CPU/scheduler
+    // contention from starving the WebSocket close-detection path; under
+    // default parallelism the 2-second deregistration budget below can
+    // otherwise be exceeded.
     #[tokio::test]
+    #[serial_test::serial]
     async fn websocket_upgrade_and_registry_tracking() {
         let (port, registry, _shutdown_ctrl, shutdown_tx, _handle) = start_server().await;
 
