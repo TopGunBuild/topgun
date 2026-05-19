@@ -8,6 +8,8 @@ import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Network, Shield, Zap, Server, RefreshCw } from 'lucide-react';
 
 export const quickStartCode = `import { TopGunClient, IDBAdapter } from '@topgunbuild/client';
+import { TopGunProvider, useQuery, useMutation } from '@topgunbuild/react';
+import { type Todo } from './schema';
 
 const client = new TopGunClient({
   cluster: {
@@ -21,11 +23,22 @@ const client = new TopGunClient({
   storage: new IDBAdapter(),
 });
 
-await client.start();
+client.start();
 
-// Use normally - routing is automatic
-const users = client.getMap('users');
-users.set('alice', { name: 'Alice', role: 'admin' });`;
+function TodoApp() {
+  const { data: todos } = useQuery<Todo>('todos');
+  const { create } = useMutation<Todo>('todos');
+  const add = () => create(crypto.randomUUID(), { text: 'Ship v2', done: false });
+  return (
+    <>
+      <button onClick={add}>Add</button>
+      <ul>{todos.map(t => <li key={t._key}>{t.text}</li>)}</ul>
+    </>
+  );
+}
+
+// Wrap your app with TopGunProvider
+// <TopGunProvider client={client}><TodoApp /></TopGunProvider>`;
 
 export const seedNodesCode = `cluster: {
   seeds: [
@@ -60,14 +73,17 @@ export const circuitBreakerCode = `cluster: {
 }`;
 
 export const failoverCode = `// Your code doesn't need to handle failover explicitly
-const users = client.getMap('users');
-
-// This works even if the primary node is down
 // The client automatically routes to available nodes
-await users.set('key', { data: 'value' });
+// Hooks continue working through failover — routing is transparent
 
-// Reads also work - served from any replica
-const user = users.get('key');`;
+function TodoApp() {
+  const { data: todos } = useQuery<Todo>('todos');
+  const { create } = useMutation<Todo>('todos');
+  // This works even if the primary node is down —
+  // hook writes queue locally and sync when a healthy node responds
+  const add = () => create(crypto.randomUUID(), { text: 'New item', done: false });
+  return <ul>{todos.map(t => <li key={t._key}>{t.text}</li>)}</ul>;
+}`;
 
 export const connectionStateCode = `// Listen for connection state changes
 client.onConnectionChange((state) => {
