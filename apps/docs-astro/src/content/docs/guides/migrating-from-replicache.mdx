@@ -10,7 +10,7 @@ import { AlertBox } from '../../../components/docs/AlertBox';
 
 <AlertBox variant="danger" title="Read this first — what's shipped vs. planned" text="TopGun does NOT replicate Replicache's server-mutator + client-side optimistic-mutation model. CRDT-merge semantics (LWW-Map / OR-Map by HLC) remove the need for explicit mutator functions, but they also mean there is no server-authoritative custom mutation logic. Replicache's Pull/Push protocol and per-mutator validation logic must be re-architected, not ported: validation in TopGun runs as per-map ACL booleans plus (planned) Entry Processor — not as per-mutation server functions. Replicache useSubscribe with query.scan and pluggable indexes maps to client.query() with predicates, but pluggable secondary indexes are still on the roadmap (see /docs/guides/indexing). Reference: /docs/roadmap." />
 
-<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+<div className="flex items-center gap-2 text-sm text-neutral-500 mt-8 mb-8 overflow-hidden whitespace-nowrap">
   <span className="text-foreground font-medium">Docs</span>
   <ChevronRight className="w-4 h-4" />
   <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
@@ -185,29 +185,29 @@ const todos = useSubscribe(
 
   </div>
   <div className="p-4 border border-card-border rounded-lg">
-    <div className="mb-3 font-semibold text-foreground text-sm">TopGun</div>
+    <div className="mb-3 font-semibold text-foreground text-sm">TopGun (React)</div>
 
-```typescript
-// Write — synchronous, local-first (no await)
-client.getMap('todos').set('1', {
-  id: '1',
-  text: 'Buy milk',
-});
+```tsx
+import { useQuery, useMutation } from '@topgunbuild/react';
+import { type Todo } from './schema';
 
-// React subscription — re-renders on delta
-const todos = useQuery('todos');
-
-// Vanilla JS subscription:
-const query = client.query('todos');
-const unsub = query.subscribe((results) => {
-  console.log(results);
-});
+function TodoList() {
+  const { data: todos } = useQuery<Todo>('todos');
+  const { create } = useMutation<Todo>('todos');
+  const add = () => create(crypto.randomUUID(), { text: 'Buy milk', done: false });
+  return (
+    <>
+      <button onClick={add}>Add</button>
+      <ul>{todos.map(t => <li key={t._key}>{t.text}</li>)}</ul>
+    </>
+  );
+}
 ```
 
   </div>
 </div>
 
-Replicache writes route through a named mutator that calls `tx.set` server-side; reads use `tx.scan` and `useSubscribe` re-runs the scan whenever data changes. TopGun writes go directly through `getMap().set` — no mutator wrapper — and `useQuery()` (or `client.query().subscribe()` in vanilla JS) delivers server-pushed deltas filtered server-side.
+Replicache writes route through a named mutator that calls `tx.set` server-side; reads use `tx.scan` and `useSubscribe` re-runs the scan whenever data changes. TopGun writes go directly through `useMutation` — no mutator wrapper — and `useQuery()` delivers server-pushed deltas filtered server-side. Because Replicache's typical usage is React-component-centric, the hook-first API is the natural replacement.
 
 ### Pattern C — Multi-key writes
 
