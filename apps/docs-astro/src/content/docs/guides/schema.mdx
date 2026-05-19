@@ -5,8 +5,11 @@ order: 13
 ---
 
 import { ChevronRight } from 'lucide-react';
+import { AlertBox } from '../../../components/docs/AlertBox';
 
 # Schema & Type Safety
+
+<AlertBox variant="info" title="Hook-first API for React UI code" text="For most React UI code, the canonical hook-first API (useQuery<Todo>('todos') + useMutation<Todo>('todos') with type Todo = z.infer<typeof TodoSchema>) provides type safety via the Zod schema flow shown at /docs/quick-start. This page documents the lower-level imperative TopGun<T>.collection() and TopGunClient.getMap<K, V>() paths used in non-React contexts (Node.js scripts, service workers, testing) or for advanced typed-collection access patterns." />
 
 TopGun provides compile-time type safety for your data through the `TopGun<T extends TopGunSchema>` generic class. This guide shows you how to define typed schemas and get full TypeScript autocomplete and error checking for your map operations.
 
