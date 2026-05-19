@@ -12,7 +12,7 @@ import { hashString, PARTITION_COUNT } from '@topgunbuild/core';
 
 describe('Partition Routing', () => {
   describe('Hash Compatibility', () => {
-    test('client hash algorithm matches server (hashString % 271)', () => {
+    test('client hash algorithm matches server (hashString % 271)', async () => {
       // Same keys should produce same partition IDs on client and server
       const testKeys = [
         'users:abc123',
@@ -29,14 +29,14 @@ describe('Partition Routing', () => {
       }
     });
 
-    test('hash produces consistent results', () => {
+    test('hash produces consistent results', async () => {
       const key = 'consistent-key-test';
       const hash1 = Math.abs(hashString(key)) % PARTITION_COUNT;
       const hash2 = Math.abs(hashString(key)) % PARTITION_COUNT;
       expect(hash1).toBe(hash2);
     });
 
-    test('different keys distribute across partitions', () => {
+    test('different keys distribute across partitions', async () => {
       const partitions = new Set<number>();
 
       for (let i = 0; i < 1000; i++) {
@@ -49,7 +49,7 @@ describe('Partition Routing', () => {
       expect(partitions.size).toBeGreaterThan(200);
     });
 
-    test('PARTITION_COUNT is 271', () => {
+    test('PARTITION_COUNT is 271', async () => {
       expect(PARTITION_COUNT).toBe(271);
     });
   });
@@ -58,7 +58,7 @@ describe('Partition Routing', () => {
     // Import ClusterClient for metrics testing
     const { ClusterClient } = require('../cluster/ClusterClient');
 
-    test('should initialize with zero metrics', () => {
+    test('should initialize with zero metrics', async () => {
       const client = new ClusterClient({
         seedNodes: ['ws://localhost:9001'],
         routingMode: 'direct',
@@ -70,10 +70,10 @@ describe('Partition Routing', () => {
       expect(metrics.partitionMisses).toBe(0);
       expect(metrics.totalRoutes).toBe(0);
 
-      client.close();
+      await client.close();
     });
 
-    test('should reset routing metrics', () => {
+    test('should reset routing metrics', async () => {
       const client = new ClusterClient({
         seedNodes: ['ws://localhost:9001'],
         routingMode: 'direct',
@@ -90,10 +90,10 @@ describe('Partition Routing', () => {
       expect(resetMetrics.partitionMisses).toBe(0);
       expect(resetMetrics.totalRoutes).toBe(0);
 
-      client.close();
+      await client.close();
     });
 
-    test('should return metrics copy (not reference)', () => {
+    test('should return metrics copy (not reference)', async () => {
       const client = new ClusterClient({
         seedNodes: ['ws://localhost:9001'],
         routingMode: 'direct',
@@ -105,25 +105,25 @@ describe('Partition Routing', () => {
       const metrics2 = client.getRoutingMetrics();
       expect(metrics2.directRoutes).toBe(0);
 
-      client.close();
+      await client.close();
     });
   });
 
   describe('ConnectionPool isConnected', () => {
     const { ConnectionPool } = require('../cluster/ConnectionPool');
 
-    test('should return false for unknown node', () => {
+    test('should return false for unknown node', async () => {
       const pool = new ConnectionPool({});
       expect(pool.isConnected('unknown-node')).toBe(false);
       expect(pool.isNodeConnected('unknown-node')).toBe(false);
-      pool.close();
+      await pool.close();
     });
 
-    test('isConnected should be alias for isNodeConnected', () => {
+    test('isConnected should be alias for isNodeConnected', async () => {
       const pool = new ConnectionPool({});
       // Both methods should return same result for any node
       expect(pool.isConnected('node-1')).toBe(pool.isNodeConnected('node-1'));
-      pool.close();
+      await pool.close();
     });
   });
 
@@ -131,7 +131,7 @@ describe('Partition Routing', () => {
     const { PartitionRouter } = require('../cluster/PartitionRouter');
     const { ConnectionPool } = require('../cluster/ConnectionPool');
 
-    test('should return null when no partition map', () => {
+    test('should return null when no partition map', async () => {
       const pool = new ConnectionPool({});
       const router = new PartitionRouter(pool, {});
 
@@ -139,10 +139,10 @@ describe('Partition Routing', () => {
       expect(result).toBeNull();
 
       router.close();
-      pool.close();
+      await pool.close();
     });
 
-    test('getPartitionId should return consistent values', () => {
+    test('getPartitionId should return consistent values', async () => {
       const pool = new ConnectionPool({});
       const router = new PartitionRouter(pool, {});
 
@@ -154,10 +154,10 @@ describe('Partition Routing', () => {
       expect(p1).toBeLessThan(PARTITION_COUNT);
 
       router.close();
-      pool.close();
+      await pool.close();
     });
 
-    test('should track partition map version', () => {
+    test('should track partition map version', async () => {
       const pool = new ConnectionPool({});
       const router = new PartitionRouter(pool, {});
 
@@ -165,14 +165,14 @@ describe('Partition Routing', () => {
       expect(router.hasPartitionMap()).toBe(false);
 
       router.close();
-      pool.close();
+      await pool.close();
     });
   });
 
   describe('ClusterClient getConnection behavior', () => {
     const { ClusterClient } = require('../cluster/ClusterClient');
 
-    test('should throw when not connected', () => {
+    test('should throw when not connected', async () => {
       const client = new ClusterClient({
         seedNodes: ['ws://localhost:9001'],
         routingMode: 'direct',
@@ -181,10 +181,10 @@ describe('Partition Routing', () => {
       // Not initialized, no connections
       expect(() => client.getConnection('any-key')).toThrow('ClusterClient not connected');
 
-      client.close();
+      await client.close();
     });
 
-    test('should throw when getAnyConnection and not connected', () => {
+    test('should throw when getAnyConnection and not connected', async () => {
       const client = new ClusterClient({
         seedNodes: ['ws://localhost:9001'],
         routingMode: 'direct',
@@ -192,10 +192,10 @@ describe('Partition Routing', () => {
 
       expect(() => client.getAnyConnection()).toThrow('No healthy connection available');
 
-      client.close();
+      await client.close();
     });
 
-    test('isRoutingActive should be false initially', () => {
+    test('isRoutingActive should be false initially', async () => {
       const client = new ClusterClient({
         seedNodes: ['ws://localhost:9001'],
         routingMode: 'direct',
@@ -203,10 +203,10 @@ describe('Partition Routing', () => {
 
       expect(client.isRoutingActive()).toBe(false);
 
-      client.close();
+      await client.close();
     });
 
-    test('should default to direct routing mode', () => {
+    test('should default to direct routing mode', async () => {
       const client = new ClusterClient({
         seedNodes: ['ws://localhost:9001'],
       });
@@ -214,14 +214,14 @@ describe('Partition Routing', () => {
       // No routingMode specified, should use default from config
       expect(client.isInitialized()).toBe(false);
 
-      client.close();
+      await client.close();
     });
   });
 
   describe('Routing Mode Configuration', () => {
     const { ClusterClient } = require('../cluster/ClusterClient');
 
-    test('should accept forward routing mode', () => {
+    test('should accept forward routing mode', async () => {
       const client = new ClusterClient({
         seedNodes: ['ws://localhost:9001'],
         routingMode: 'forward',
@@ -230,10 +230,10 @@ describe('Partition Routing', () => {
       // In forward mode, all operations go to primary
       expect(client.isRoutingActive()).toBe(false);
 
-      client.close();
+      await client.close();
     });
 
-    test('should accept direct routing mode', () => {
+    test('should accept direct routing mode', async () => {
       const client = new ClusterClient({
         seedNodes: ['ws://localhost:9001'],
         routingMode: 'direct',
@@ -241,7 +241,7 @@ describe('Partition Routing', () => {
 
       expect(client.isRoutingActive()).toBe(false);
 
-      client.close();
+      await client.close();
     });
   });
 });

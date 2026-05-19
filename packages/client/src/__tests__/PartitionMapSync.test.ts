@@ -52,7 +52,7 @@ describe('Partition Map Sync', () => {
     const { PartitionRouter } = require('../cluster/PartitionRouter');
     const { ConnectionPool } = require('../cluster/ConnectionPool');
 
-    test('should accept partition map on first update', () => {
+    test('should accept partition map on first update', async () => {
       const pool = new ConnectionPool({});
       const router = new PartitionRouter(pool, {});
 
@@ -64,10 +64,10 @@ describe('Partition Map Sync', () => {
       expect(router.hasPartitionMap()).toBe(true);
 
       router.close();
-      pool.close();
+      await pool.close();
     });
 
-    test('should accept newer version', () => {
+    test('should accept newer version', async () => {
       const pool = new ConnectionPool({});
       const router = new PartitionRouter(pool, {});
 
@@ -78,10 +78,10 @@ describe('Partition Map Sync', () => {
       expect(router.getMapVersion()).toBe(2);
 
       router.close();
-      pool.close();
+      await pool.close();
     });
 
-    test('should reject older version', () => {
+    test('should reject older version', async () => {
       const pool = new ConnectionPool({});
       const router = new PartitionRouter(pool, {});
 
@@ -92,10 +92,10 @@ describe('Partition Map Sync', () => {
       expect(router.getMapVersion()).toBe(5);
 
       router.close();
-      pool.close();
+      await pool.close();
     });
 
-    test('should reject same version', () => {
+    test('should reject same version', async () => {
       const pool = new ConnectionPool({});
       const router = new PartitionRouter(pool, {});
 
@@ -106,10 +106,10 @@ describe('Partition Map Sync', () => {
       expect(router.getMapVersion()).toBe(2);
 
       router.close();
-      pool.close();
+      await pool.close();
     });
 
-    test('should emit partitionMap:updated event on successful update', () => {
+    test('should emit partitionMap:updated event on successful update', async () => {
       const pool = new ConnectionPool({});
       const router = new PartitionRouter(pool, {});
       const handler = jest.fn();
@@ -120,7 +120,7 @@ describe('Partition Map Sync', () => {
       expect(handler).toHaveBeenCalledWith(1, PARTITION_COUNT);
 
       router.close();
-      pool.close();
+      await pool.close();
     });
   });
 
@@ -128,7 +128,7 @@ describe('Partition Map Sync', () => {
     const { PartitionRouter } = require('../cluster/PartitionRouter');
     const { ConnectionPool } = require('../cluster/ConnectionPool');
 
-    test('should update single partition', () => {
+    test('should update single partition', async () => {
       const pool = new ConnectionPool({});
       const router = new PartitionRouter(pool, {});
 
@@ -142,10 +142,10 @@ describe('Partition Map Sync', () => {
       expect(partition?.backupNodeIds).toEqual(['node-6', 'node-7']);
 
       router.close();
-      pool.close();
+      await pool.close();
     });
 
-    test('should do nothing if no map loaded', () => {
+    test('should do nothing if no map loaded', async () => {
       const pool = new ConnectionPool({});
       const router = new PartitionRouter(pool, {});
 
@@ -154,7 +154,7 @@ describe('Partition Map Sync', () => {
       expect(router.getMap()).toBeNull();
 
       router.close();
-      pool.close();
+      await pool.close();
     });
   });
 
@@ -162,17 +162,17 @@ describe('Partition Map Sync', () => {
     const { PartitionRouter } = require('../cluster/PartitionRouter');
     const { ConnectionPool } = require('../cluster/ConnectionPool');
 
-    test('should return null when no map', () => {
+    test('should return null when no map', async () => {
       const pool = new ConnectionPool({});
       const router = new PartitionRouter(pool, {});
 
       expect(router.getOwner('any-key')).toBeNull();
 
       router.close();
-      pool.close();
+      await pool.close();
     });
 
-    test('should return owner for key', () => {
+    test('should return owner for key', async () => {
       const pool = new ConnectionPool({});
       const router = new PartitionRouter(pool, {});
 
@@ -183,10 +183,10 @@ describe('Partition Map Sync', () => {
       expect(owner).toMatch(/^node-\d+$/);
 
       router.close();
-      pool.close();
+      await pool.close();
     });
 
-    test('should return consistent owner for same key', () => {
+    test('should return consistent owner for same key', async () => {
       const pool = new ConnectionPool({});
       const router = new PartitionRouter(pool, {});
 
@@ -197,7 +197,7 @@ describe('Partition Map Sync', () => {
       expect(owner1).toBe(owner2);
 
       router.close();
-      pool.close();
+      await pool.close();
     });
   });
 
@@ -205,17 +205,17 @@ describe('Partition Map Sync', () => {
     const { PartitionRouter } = require('../cluster/PartitionRouter');
     const { ConnectionPool } = require('../cluster/ConnectionPool');
 
-    test('should return empty array when no map', () => {
+    test('should return empty array when no map', async () => {
       const pool = new ConnectionPool({});
       const router = new PartitionRouter(pool, {});
 
       expect(router.getBackups('any-key')).toEqual([]);
 
       router.close();
-      pool.close();
+      await pool.close();
     });
 
-    test('should return backups for key', () => {
+    test('should return backups for key', async () => {
       const pool = new ConnectionPool({});
       const router = new PartitionRouter(pool, {});
 
@@ -226,7 +226,7 @@ describe('Partition Map Sync', () => {
       expect(backups.length).toBeGreaterThan(0);
 
       router.close();
-      pool.close();
+      await pool.close();
     });
   });
 
@@ -234,17 +234,17 @@ describe('Partition Map Sync', () => {
     const { PartitionRouter } = require('../cluster/PartitionRouter');
     const { ConnectionPool } = require('../cluster/ConnectionPool');
 
-    test('should return null when no map', () => {
+    test('should return null when no map', async () => {
       const pool = new ConnectionPool({});
       const router = new PartitionRouter(pool, {});
 
       expect(router.getMap()).toBeNull();
 
       router.close();
-      pool.close();
+      await pool.close();
     });
 
-    test('should return full map', () => {
+    test('should return full map', async () => {
       const pool = new ConnectionPool({});
       const router = new PartitionRouter(pool, {});
 
@@ -257,14 +257,14 @@ describe('Partition Map Sync', () => {
       expect(result?.partitions.length).toBe(PARTITION_COUNT);
 
       router.close();
-      pool.close();
+      await pool.close();
     });
   });
 
   describe('ClusterClient partition map events', () => {
     const { ClusterClient } = require('../cluster/ClusterClient');
 
-    test('should emit partitionMapUpdated on router update', () => {
+    test('should emit partitionMapUpdated on router update', async () => {
       const client = new ClusterClient({
         seedNodes: ['ws://localhost:9001'],
         routingMode: 'direct',
@@ -279,10 +279,10 @@ describe('Partition Map Sync', () => {
 
       expect(handler).toHaveBeenCalled();
 
-      client.close();
+      await client.close();
     });
 
-    test('should emit partitionMap:ready with version', () => {
+    test('should emit partitionMap:ready with version', async () => {
       const client = new ClusterClient({
         seedNodes: ['ws://localhost:9001'],
         routingMode: 'direct',
@@ -296,10 +296,10 @@ describe('Partition Map Sync', () => {
 
       expect(handler).toHaveBeenCalledWith(5);
 
-      client.close();
+      await client.close();
     });
 
-    test('should activate routing on first map update', () => {
+    test('should activate routing on first map update', async () => {
       const client = new ClusterClient({
         seedNodes: ['ws://localhost:9001'],
         routingMode: 'direct',
@@ -316,12 +316,12 @@ describe('Partition Map Sync', () => {
       expect(handler).toHaveBeenCalled();
       expect(client.isRoutingActive()).toBe(true);
 
-      client.close();
+      await client.close();
     });
   });
 
   describe('PartitionMapRequestMessage type', () => {
-    test('should be exported from core', () => {
+    test('should be exported from core', async () => {
       const core = require('@topgunbuild/core');
       // Type is exported if this doesn't throw
       const msgType: typeof core.PartitionMapRequestMessage = undefined;
