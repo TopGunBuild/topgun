@@ -90,7 +90,7 @@ TopGun aims to be the standard for local-first state management. It provides a r
   />
   <FeatureGridCard 
     title="Agent-Operable Backend" 
-    desc="Built-in MCP server (@topgunbuild/mcp-server) lets Claude, Cursor, and other AI agents query and mutate your live data with zero glue code." 
+    desc="Built-in MCP server lets Claude, Cursor, and other AI agents query and mutate your live data. See the AI Builder guide to get started." 
   />
 
     <a href="/docs/comparison" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
@@ -223,7 +223,7 @@ Use when outside React — service workers, Node scripts, non-component utilitie
   <span className="text-purple-700 dark:text-purple-400">For sensitive data, wrap your adapter with <code className="px-1.5 py-0.5 rounded bg-purple-100 dark:bg-purple-800/50 text-sm">EncryptedStorageAdapter</code> to encrypt data at rest. See the <a href="/docs/guides/security#client-side-encryption-data-at-rest" className="underline">Client-Side Encryption section</a> in the Security Guide.</span>
 
   <h3 className="text-lg font-semibold text-purple-800 dark:text-purple-300 mb-2 !mt-0">Building with an AI Agent?</h3>
-  <span className="text-purple-700 dark:text-purple-400">TopGun ships with a built-in MCP server for Claude Desktop, Cursor, and other AI tools. See the <a href="/docs/guides/mcp-server" className="underline">MCP Server guide</a> for configuration.</span>
+  <span className="text-purple-700 dark:text-purple-400">See the <a href="/docs/guides/building-with-ai" className="underline">AI Builder guide</a> for prompt templates, agent setup, and live database access via MCP.</span>
 
 ## Next Steps
 
@@ -1189,6 +1189,195 @@ const server = new TopGunMCPServer({
   <a href="/docs/guides/performance" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Previous</span>
       <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Performance Tuning
+  </a>
+  <a href="/docs/reference" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+      API Reference <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+  </a>
+
+
+---
+
+# Building TopGun Apps with AI Coding Agents
+
+> How to build a TopGun app using Claude Code, Cursor, or Codex — prompt templates, context to seed the conversation, common pitfalls, and live database access via MCP.
+
+
+
+
+
+
+
+
+  <span className="text-foreground font-medium">Docs</span>
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <span className="text-foreground font-medium">Building with AI</span>
+
+# Building TopGun Apps with AI Coding Agents
+
+Drop the right context into Claude Code, Cursor, or Codex once, and your agent will scaffold a working TopGun app in under five minutes — no manual API discovery required. This guide walks through the prompt template, context block, common pitfalls to pre-empt, and how to give your agent live database access via MCP.
+
+## 1. Pick your agent
+
+TopGun works with any AI coding agent. Three are well-suited for this workflow:
+
+| Agent | Best for | Install / docs |
+|-------|----------|---------------|
+| [Claude Code](https://claude.ai/code) | Agentic CLI sessions — reads your repo, runs commands, commits code | [docs.anthropic.com/claude-code](https://docs.anthropic.com/en/docs/claude-code/overview) |
+| [Cursor](https://cursor.sh) | IDE-integrated workflow — inline completions + Agent panel in VS Code fork | [cursor.sh/docs](https://docs.cursor.com/) |
+| [Codex](https://platform.openai.com/docs/guides/codex) | API-driven pipelines — scriptable, headless, OpenAI-native | [platform.openai.com/docs/guides/codex](https://platform.openai.com/docs/guides/codex) |
+
+TopGun is post-LLM pretraining cutoff, so all three agents need the context block in section 2 to produce correct code on first iteration — they will not have TopGun in their training data.
+
+## 2. Give it context
+
+The key step: give your agent the `llms-full.txt` bundle so it has the full API surface in its context window.
+
+**Paste this block at the start of every new TopGun session:**
+
+<CodeBlock
+  title="Paste this into your agent"
+  language="markdown"
+  code={seedPromptCode}
+/>
+
+This gives your agent three things:
+
+1. The complete API reference loaded from [`https://topgun.build/llms-full.txt`](https://topgun.build/llms-full.txt)
+2. The canonical hook-first snippet (the same shape as the [Quick Start canonical app](/docs/quick-start#the-canonical-app))
+3. A one-line mental model: **hooks for reads (`useQuery`), `useMutation` for writes, schema in Zod, `pnpm start:server` for the local backend**
+
+Without this block, agents reliably hallucinate methods like `client.subscribe()` or reach for `client.getMap()` for reads (which won't re-render on data changes).
+
+## 3. Recommended prompt template
+
+After giving your agent the context block above, describe what you want to build. Use this template as your starting point:
+
+<CodeBlock
+  title="Prompt template"
+  language="markdown"
+  code={promptTemplateCode}
+/>
+
+**Examples:**
+
+- `Build me a todo app using TopGun. Schema: text:string, done:boolean. Permissions: open.`
+- `Build me a chat app using TopGun. Schema: author:string, body:string, ts:number. Permissions: per-user.`
+- `Build me a drawing app using TopGun. Schema: x:number, y:number, color:string. Permissions: open.`
+
+Replace the brackets with your actual requirements. The `Use the hook-first API` line is load-bearing — include it verbatim to steer the agent toward `useQuery` / `useMutation` from the first generation.
+
+## 4. Common agent mistakes and how to fix them
+
+**Mistake 1: Used `client.getMap` instead of `useQuery`**
+
+*Symptom:* The app renders initial data but doesn't update when other users add or change records.
+
+*Why it happens:* `client.getMap('todos')` returns a raw map object — it doesn't subscribe to React state. The agent reaches for it because it looks like a standard getter.
+
+*Fix:* Swap every read to `useQuery<T>('mapName')`. Cross-reference: [Quick Start canonical app](/docs/quick-start#the-canonical-app).
+
+```tsx
+// Wrong — no re-renders when data changes
+const map = client.getMap('todos');
+
+// Correct — live-updating, re-renders on every change
+const { data: todos = [] } = useQuery<Todo>('todos');
+```
+
+**Mistake 2: Hallucinated a method that doesn't exist**
+
+*Symptom:* The agent generates code calling `client.subscribe()`, `client.watch()`, `client.on()`, or a similar method that doesn't exist in the TopGun client API.
+
+*Why it happens:* Agents extrapolate from Firebase / Supabase patterns they were trained on.
+
+*Fix:* Connect the agent to the MCP server (see section 5). With live database access, the agent can call `topgun_list_maps` and `topgun_schema` tools to introspect the real API surface, eliminating hallucination. See the [MCP Server guide](/docs/guides/mcp-server).
+
+**Mistake 3: Forgot the server bootstrap**
+
+*Symptom:* `WebSocket connection to 'ws://localhost:8080' failed` or `ECONNREFUSED` errors in the browser console.
+
+*Why it happens:* The agent generates correct client code but doesn't know a server needs to be running locally.
+
+*Fix:* Run `pnpm start:server` in a second terminal before opening the app. See [Quick Start — Start the Server](/docs/quick-start#2-start-the-server).
+
+```bash
+# In a second terminal — keep this running while you develop
+pnpm start:server
+```
+
+## 5. Live database access via MCP
+
+Connect your agent to a running TopGun server so it can query your real data, introspect the schema, and avoid hallucination entirely.
+
+TopGun ships `@topgunbuild/mcp-server`, which implements the [Model Context Protocol](https://modelcontextprotocol.io/) and exposes `topgun_query`, `topgun_get`, `topgun_set`, `topgun_schema`, and `topgun_list_maps` tools to any MCP-compatible agent.
+
+**Step 1:** Make sure `pnpm start:server` is running.
+
+**Step 2:** Add the TopGun MCP server to your agent's config.
+
+**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+{/* Config reproduced from guides/mcp-server.mdx claudeConfigCode export — that file is the source of truth; update both if TOPGUN_URL key or @topgunbuild/mcp-server package name ever change */}
+<CodeBlock
+  title="Claude Desktop config"
+  language="json"
+  code={claudeConfigCode}
+/>
+
+**Cursor** (`.cursor/mcp.json`):
+
+{/* Config reproduced from guides/mcp-server.mdx cursorConfigCode export — that file is the source of truth; update both if TOPGUN_URL key or @topgunbuild/mcp-server package name ever change */}
+<CodeBlock
+  title="Cursor MCP config"
+  language="json"
+  code={cursorConfigCode}
+/>
+
+For the full MCP reference — all available tools, authentication, and remote server configuration — see the [MCP Server guide](/docs/guides/mcp-server).
+
+## 6. Worked example
+
+Here is a complete session transcript: one context paste, one prompt, one correction, working app.
+
+---
+
+**User (context block paste + prompt):**
+
+> You are building a TopGun app. TopGun is a local-first real-time sync library.
+> Load the full API reference from: https://topgun.build/llms-full.txt
+> [... seed prompt from section 2 ...]
+>
+> Build me a task list app using TopGun. Schema: text:string, done:boolean. Permissions: open.
+> Use the hook-first API: useQuery for reads, useMutation for writes.
+
+**Agent (first generation):**
+
+The agent reads `llms-full.txt`, sees the canonical hook-first snippet, and produces:
+
+<CodeBlock
+  title="app.tsx (first generation)"
+  language="tsx"
+  code={workedExampleAppCode}
+/>
+
+**User (one correction):**
+
+> The checkbox isn't persisting after reload. The `update` call looks right — make sure `await client.start()` runs before the component mounts, not inside it.
+
+**Agent (correction):**
+
+The agent moves `await client.start()` to module scope (before the component function), which is already correct in the example above. With `await client.start()` at module level, the client is connected before the first render, and `update` calls go through immediately.
+
+**Result:** Working app in under five minutes. Data persists across reloads via IndexedDB and syncs across browser tabs in real time.
+
+---
+
+**Why this works reliably:** The `llms-full.txt` bundle gives the agent ~120 KB of accurate TopGun API documentation in its context window. Agents don't need to be pre-trained on TopGun — they just need accurate docs at the start of the session.
+
+  <a href="/docs/guides/mcp-server" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> MCP Server
   </a>
   <a href="/docs/reference" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Next</span>
