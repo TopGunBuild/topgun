@@ -53,6 +53,7 @@ const ALLOWLIST = [
   'concepts/data-structures.mdx',
   'guides/schema.mdx',
   'guides/mcp-server.mdx',
+  'guides/building-with-ai.mdx',     // Linked from llms.txt — agents should find it via their RAG
   'guides/authentication.mdx',
   'reference/client.mdx',
   'reference/react-hooks.mdx',

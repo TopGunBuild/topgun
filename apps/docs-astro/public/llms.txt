@@ -9,6 +9,7 @@ TopGun is a hybrid offline-first in-memory data grid — zero-latency reads/writ
 - [Core Concepts](https://topgun.build/concepts/): Understand the distributed systems theory behind TopGun: local-first architecture, CRDTs, Hybrid Logical Clocks, and the sync protocol.
 - [Schema & Type Safety](https://topgun.build/guides/schema/): Add TypeScript type safety to TopGun maps using the TopGun<T> generic class.
 - [MCP Server](https://topgun.build/guides/mcp-server/): Connect AI assistants like Claude Desktop and Cursor to your TopGun database using the Model Context Protocol.
+- [AI Builder Guide](https://topgun.build/guides/building-with-ai/): Build a TopGun app using Claude Code, Cursor, or Codex — prompt templates, common pitfalls, and live database access via MCP.
 - [API Reference](https://topgun.build/reference/): Full reference for TopGunClient, React hooks, data structures, server API, and the wire protocol.
 - [Comparison](https://topgun.build/comparison/): How TopGun compares to Firebase, Supabase Realtime, Replicache, and Yjs — trade-offs, migration paths, and positioning.
 
