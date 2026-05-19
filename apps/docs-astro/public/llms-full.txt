@@ -1247,7 +1247,7 @@ This gives your agent three things:
 2. The canonical hook-first snippet (the same shape as the [Quick Start canonical app](/docs/quick-start#the-canonical-app))
 3. A one-line mental model: **hooks for reads (`useQuery`), `useMutation` for writes, schema in Zod, `pnpm start:server` for the local backend**
 
-Without this block, agents reliably hallucinate methods like `client.subscribe()` or reach for `client.getMap()` for reads (which won't re-render on data changes).
+Without this block, agents reliably hallucinate methods like `client.subscribe()` or reach for raw map getters for reads, which won't re-render on data changes.
 
 ## 3. Recommended prompt template
 
