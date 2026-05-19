@@ -7,6 +7,7 @@ order: 14
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Timer, Database, Trash2 } from 'lucide-react';
 import { FeatureCard } from '../../../components/docs/FeatureCard';
+import { AlertBox } from '../../../components/docs/AlertBox';
 
 export const lwwMapCode = `const sessions = client.getMap('sessions');
 
@@ -15,10 +16,15 @@ sessions.set('user:123', { token: 'abc-123' }, 3600 * 1000);
 
 // After 1 hour, 'user:123' will effectively disappear from the map.`;
 
-export const orMapCode = `const activeGames = client.getORMap('games:active');
+export const orMapCode = `import { useORMap } from '@topgunbuild/react';
 
-// Add a game lobby that expires in 5 minutes if not updated
-activeGames.add('lobby:555', { status: 'waiting' }, 5 * 60 * 1000);`;
+function GameLobbies() {
+  const orMap = useORMap<string, { status: string }>('games:active');
+  // useORMap returns the raw ORMap<K, V> instance — call imperative methods directly
+  const addLobby = (id: string, ttlMs: number) =>
+    orMap.add(id, { status: 'waiting' }, ttlMs);
+  return <ul>{/* iterate orMap entries */}</ul>;
+}`;
 
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
   <span className="text-foreground font-medium">Docs</span>
@@ -60,6 +66,8 @@ You can attach a `ttlMs` (TTL in milliseconds) to individual records in both **L
 ## Usage with LWW-Map
 
 Pass the `ttlMs` option as the third argument to `.set()`.
+
+<AlertBox variant="info" title="Imperative-by-design" text="TTL is set at the imperative API layer via getMap().set(key, value, ttlMs). useMutation does not accept a TTL option argument — for React components, call useMutation(...).map.set(key, value, ttlMs) or use useClient() + client.getMap(...) directly. This is imperative-by-design: the TTL option lives on MapSetOptions at the CRDT level, below the hook surface. For everyday React UI code without TTL, see the hook-first API at /docs/quick-start." />
 
 <div className="not-prose">
   <CodeBlock title="src/sessions/manager.ts" language="typescript" code={lwwMapCode} />
