@@ -10,7 +10,7 @@ import { AlertBox } from '../../../components/docs/AlertBox';
 
 <AlertBox variant="danger" title="Read this first — what's shipped vs. planned" text="Shipped today (single-node): JWT auth, per-map ACL booleans (read/write), JWT roles claim extraction, LWW-Map and OR-Map CRDTs, IndexedDB offline storage, WebSocket realtime sync, full-text search (tantivy), HLC-ordered pub/sub topics. Planned (not yet available): First-class RBAC role abstraction, map-pattern security policies (users:*, public:*), field-level allow-lists, cluster mTLS, Raft-replicated multi-region. See /docs/roadmap for the full maturity matrix." />
 
-<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+<div className="flex items-center gap-2 text-sm text-neutral-500 mt-8 mb-8 overflow-hidden whitespace-nowrap">
   <span className="text-foreground font-medium">Docs</span>
   <ChevronRight className="w-4 h-4" />
   <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
@@ -234,6 +234,21 @@ const unsubLocal = client.getMap('users').onChange(() => {
 
 TopGun reads and writes are **synchronous** because data lives in local memory first. The `SyncEngine` syncs changes to the server in the background. The `client.query().subscribe()` path delivers server-pushed, filter-aware deltas — the closest equivalent to Firestore's `onSnapshot` query listener. `client.getMap().onChange()` is a lower-level notification that fires on any write to the local LWWMap (local or synced), with no filter; the callback receives no arguments and the caller reads the current value by calling `get()`.
 
+#### If you're using React
+
+```tsx
+import { useQuery, useMutation } from '@topgunbuild/react';
+import { type UserProfile } from './schema';
+
+function UserCard({ userId }: { userId: string }) {
+  const { data: users } = useQuery<UserProfile>('users');
+  const { update } = useMutation<UserProfile>('users');
+  const profile = users.find(u => u._key === userId);
+  const setOnline = () => update(userId, { name: profile?.name ?? '', status: 'online' });
+  return <button onClick={setOnline}>{profile?.name}</button>;
+}
+```
+
 ### Pattern C — Batched writes
 
 <div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
@@ -274,6 +289,8 @@ client.getMap('posts').set('p1', { title: 'Hello' });
 
   </div>
 </div>
+
+The same auto-batching applies to multiple `useMutation` `.create()` / `.update()` calls inside a React render or event handler.
 
 ## Deployment Mode Semantics
 
