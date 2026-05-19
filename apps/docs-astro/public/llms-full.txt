@@ -719,14 +719,14 @@ TopGun provides two primary CRDT-based data structures: **LWW-Map** (Last-Write-
 The **LWW-Map** is the default map structure in TopGun. As the name suggests, it resolves conflicts by accepting the update with the highest timestamp (Last-Write-Wins).
 
   <p className="text-sm text-yellow-800 dark:text-yellow-200">
-    <strong>Best for:</strong> Key-Value stores where keys represent unique entities or fields that are overwritten (e.g., User Profile, Configuration, Document Fields).
+    <strong>Use when:</strong> Each item in the collection is a unique entity identified by a stable key (e.g., a user profile by UUID, a document by ID). The LWW-Map is collection-oriented — `useQuery<T>(mapName)` returns an array of all items, each with a `_key` property.
   </p>
 
 ### How it works
 
 - Each key holds a single value and a timestamp.
 - When two nodes update the same key, the one with the later timestamp wins.
-- If you use it for a list/collection by generating random keys, you might encounter issues if multiple users try to "add" to the list simultaneously and happen to generate colliding keys (rare) or if you try to manage the list as a single value (overwrites).
+- The collection pattern uses stable UUID keys (e.g., one profile per user) so concurrent updates to different profiles never collide.
 
 ### Usage
 
@@ -741,7 +741,7 @@ The **LWW-Map** is the default map structure in TopGun. As the name suggests, it
 The **OR-Map** is designed for Sets and Collections. It allows you to add multiple items to a key without them overwriting each other, even if they have the same value (depending on implementation) or if they are added concurrently. In TopGun, the OR-Map is implemented as a map where values are "observed" and can be removed without race conditions affecting re-additions.
 
   <p className="text-sm text-brand">
-    <strong>Best for:</strong> Collections, Lists, Sets, and scenarios where multiple users might add/remove items concurrently (e.g., Todo Lists, Chat Messages in a channel, Tags).
+    <strong>Use when:</strong> Collections, Lists, Sets, and scenarios where multiple users might add/remove items concurrently (e.g., Todo Lists, Chat Messages in a channel, Tags).
   </p>
 
 ### Why LWW is bad for Sets
@@ -806,9 +806,9 @@ When you delete data in TopGun, the record isn't immediately removed from storag
         <td className="p-4 text-neutral-600 dark:text-neutral-300">Tag added to tombstone set</td>
       </tr>
       <tr>
-        <td className="p-4 font-medium text-foreground">API Method</td>
-        <td className="p-4 text-neutral-600 dark:text-neutral-300"><code className="px-1.5 py-0.5 rounded bg-neutral-200 dark:bg-neutral-700 text-xs">client.getMap()</code></td>
-        <td className="p-4 text-neutral-600 dark:text-neutral-300"><code className="px-1.5 py-0.5 rounded bg-neutral-200 dark:bg-neutral-700 text-xs">client.getORMap()</code></td>
+        <td className="p-4 font-medium text-foreground">Hook (UI)</td>
+        <td className="p-4 text-neutral-600 dark:text-neutral-300"><code className="px-1.5 py-0.5 rounded bg-neutral-200 dark:bg-neutral-700 text-xs">useQuery / useMutation</code></td>
+        <td className="p-4 text-neutral-600 dark:text-neutral-300"><code className="px-1.5 py-0.5 rounded bg-neutral-200 dark:bg-neutral-700 text-xs">useORMap</code></td>
       </tr>
     </tbody>
   </table>
@@ -832,6 +832,8 @@ When you delete data in TopGun, the record isn't immediately removed from storag
 
 
 # Schema & Type Safety
+
+<AlertBox variant="info" title="Hook-first API for React UI code" text="For most React UI code, the canonical hook-first API (useQuery<Todo>('todos') + useMutation<Todo>('todos') with type Todo = z.infer<typeof TodoSchema>) provides type safety via the Zod schema flow shown at /docs/quick-start. This page documents the lower-level imperative TopGun<T>.collection() and TopGunClient.getMap<K, V>() paths used in non-React contexts (Node.js scripts, service workers, testing) or for advanced typed-collection access patterns." />
 
 TopGun provides compile-time type safety for your data through the `TopGun<T extends TopGunSchema>` generic class. This guide shows you how to define typed schemas and get full TypeScript autocomplete and error checking for your map operations.
 
@@ -1419,6 +1421,8 @@ Here's how the authentication handshake works at the WebSocket level:
 
 
   <h1 className="text-4xl font-bold text-foreground">Client API</h1>
+
+<AlertBox variant="info" title="Hook-first API for React UI code" text="For React UI code, prefer the hook-first API: useQuery<Todo>('todos') for reads, useMutation<Todo>('todos') for writes (see /docs/quick-start for the canonical pattern). This reference page documents the lower-level TopGunClient API surface used inside hooks and in non-React contexts (Node.js, service workers, testing)." />
 
 The `TopGunClient` is the main entry point for interacting with the TopGun cluster.
 It handles connection management, offline synchronization, and provides access to distributed data structures.
