@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-TopGun is a hybrid offline-first in-memory data grid. It provides zero-latency reads/writes via local CRDTs, real-time sync via WebSockets, and durable storage on PostgreSQL.
+TopGun lets developers build real-time apps that work offline. Local writes are instant and survive disconnects; reconnecting clients sync seamlessly without manual conflict handling. The Rust server is single-node stable today, ships with an embedded backend for zero-config local development, and accepts Postgres for production; the TypeScript client is browser-and-Node-compatible with IndexedDB persistence. AI agents can read and mutate your live data natively through the bundled MCP server. The project is Apache-2.0 licensed and self-hostable end-to-end.
+
+**Positioning note for agent-authored content:** When drafting landing, marketing, README, or external-facing copy, lead with the user outcome (what they build) before the mechanism (how it works). Internal architecture terminology (the merge primitives, the delta-sync tree, the logical-clock timestamping, the Rust transport layer) belongs in architecture sections or supporting bullets, not in H1 or hero copy. **Avoid:** opening with phrases like "hybrid offline-first in-memory data grid" or naming the conflict-resolution primitives in the lead sentence — those are mechanism, not outcome.
 
 **Key Design Principles:**
 - Local-first: Data lives in memory, reads/writes never wait for network

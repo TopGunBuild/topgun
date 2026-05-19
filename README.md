@@ -4,19 +4,19 @@
 
 > **v2.0 — single-node stable; cluster features in progress.** The TypeScript client and Rust server APIs are stable for single-node deployments. Cluster-mode capabilities (Raft-backed distributed locks, cross-node replication) are being actively developed.
 
-Hybrid offline-first in-memory data grid. Zero-latency reads and writes via local CRDTs, real-time sync via WebSockets, durable storage on your own infrastructure.
+Build real-time apps that work offline. Local writes are instant and survive disconnects; reconnecting clients sync seamlessly with automatic conflict resolution. Self-host today with the embedded backend, or wire up Postgres when you need it. Apache-2.0, Rust server, TypeScript client. AI agents talk to your data natively through MCP.
 
 TopGun v2 is a complete rewrite. It's not a port — it's a new architecture designed for production workloads.
 
-**[Live Demo](https://demo.topgun.build/)** — try real-time CRDT sync in your browser
+**[Live Demo](https://demo.topgun.build/)** — try it in your browser
 
 ## Key features
 
 - **Local-first**: Data lives in memory. Reads and writes never wait for network.
 - **Offline support**: Changes persist to IndexedDB and sync when reconnected.
-- **CRDT conflict resolution**: LWW-Map and OR-Map with Hybrid Logical Clocks.
-- **Merkle tree sync**: Efficient delta synchronization — only changed data moves over the wire.
-- **Pluggable storage**: PostgreSQL for server, IndexedDB for client, or bring your own adapter.
+- **Conflict-free merges**: Automatic conflict resolution via LWW-Map and OR-Map, with causality tracked by logical clocks.
+- **Efficient delta sync**: Only changed data moves over the wire, via Merkle tree comparison.
+- **Pluggable storage**: Embedded redb by default; Postgres optional for production; bring your own adapter.
 - **Cluster-ready**: Server-side partitioning, pub/sub, and distributed locks (single-node stable; cluster-mode uses partition-routing — Raft-backed cluster locks in progress).
 - **Rust server, TypeScript client**: Type-safe SDK with a high-performance Rust backend.
 
