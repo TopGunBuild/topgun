@@ -10,7 +10,7 @@ import { AlertBox } from '../../../components/docs/AlertBox';
 
 <AlertBox variant="warning" title="Partially Implemented" text="Write concern levels beyond the default are not yet configurable. The server currently acknowledges writes at the local level only." />
 
-<AlertBox variant="info" title="Hook-first API for React UI code" text="Write Concern is an option at the imperative API layer — getMap().set(key, value, { writeConcern, timeout }). useMutation does not pass through a WriteOptions argument; for React components that need explicit write-concern control, use useClient() + client.getMap(...) directly. The examples below document the WriteOptions shape; for everyday UI code, prefer the hook-first API shown at /docs/quick-start." />
+<AlertBox variant="info" title="Hook-first API for React UI code" text="Write Concern is an option at the imperative API layer — getMap().set(key, value, { writeConcern, timeout }). useMutation does not pass through a WriteOptions argument; for React components that need explicit write-concern control, use useClient() (from @topgunbuild/react) + client.getMap(...) directly. The examples below document the WriteOptions shape; for everyday UI code, prefer the hook-first API shown at /docs/quick-start." />
 
 export const basicUsageCode = `import { TopGunClient, WriteConcern } from '@topgunbuild/client';
 
