@@ -9,7 +9,7 @@ import { AlertBox } from '../../../components/docs/AlertBox';
 
 <AlertBox variant="danger" title="Read this first — what's shipped vs. planned" text="TopGun does NOT replace Supabase's full BaaS. TopGun is a sync layer in front of YOUR Postgres — it does not replace Supabase Auth, Edge Functions, Storage buckets, or row-level security policies. TopGun ships per-map ACL booleans (read/write) plus JWT roles claim extraction; first-class RBAC and Postgres RLS-style policies are on the roadmap (see /docs/guides/rbac). Supabase postgres_changes (CDC from the Postgres write-ahead log) maps loosely to TopGun's CRDT-write notifications, but TopGun owns the write path — clients write through the TopGun client, not directly to Postgres. Reference: /docs/roadmap." />
 
-<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+<div className="flex items-center gap-2 text-sm text-neutral-500 mt-8 mb-8 overflow-hidden whitespace-nowrap">
   <span className="text-foreground font-medium">Docs</span>
   <ChevronRight className="w-4 h-4" />
   <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
@@ -269,6 +269,25 @@ const unsub = query.subscribe((results) => {
 </div>
 
 In Supabase, the write path is `client → PostgREST → Postgres → WAL → Realtime → subscribers`. In TopGun, the write path is `client (local LWWMap) → SyncEngine → server → CRDT merge → subscribers`, and the durable Postgres write happens server-side. Clients do not write to Postgres directly.
+
+#### If you're using React
+
+```tsx
+import { useQuery, useMutation } from '@topgunbuild/react';
+import { type User } from './schema';
+
+function UserList() {
+  const { data: users } = useQuery<User>('users');
+  const { create } = useMutation<User>('users');
+  const add = () => create(crypto.randomUUID(), { name: 'Alice', age: 30 });
+  return (
+    <>
+      <button onClick={add}>Add User</button>
+      <ul>{users.map(u => <li key={u._key}>{u.name}</li>)}</ul>
+    </>
+  );
+}
+```
 
 ## Deployment Mode Semantics
 
