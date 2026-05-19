@@ -7,28 +7,36 @@ order: 9
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight } from 'lucide-react';
 
-export const lwwMapCode = `// Get an LWW-Map
-const profile = client.getMap('user:123');
+export const lwwMapCode = `import { useQuery, useMutation } from '@topgunbuild/react';
+import { type UserProfile } from './schema';
 
-// Set a value (overwrites existing)
-profile.set('name', 'Alice');
-profile.set('status', 'online');
+function ProfileList() {
+  const { data: profiles } = useQuery<UserProfile>('profiles');
+  const { update } = useMutation<UserProfile>('profiles');
 
-// Remove a key
-profile.remove('status');`;
+  const setOnline = (profileId: string) =>
+    update(profileId, { status: 'online' });
 
-export const orMapCode = `// Get an OR-Map
-const todos = client.getORMap('todos:project-a');
+  return (
+    <ul>
+      {profiles.map(p => (
+        <li key={p._key} onClick={() => setOnline(p._key)}>
+          {p.name} — {p.status}
+        </li>
+      ))}
+    </ul>
+  );
+}`;
 
-// Add items (treated as a Set/Collection)
-// .add() returns an ORMapRecord with a unique 'tag' and timestamp
-const record1 = todos.add('active', { title: 'Write docs' });
-const record2 = todos.add('active', { title: 'Fix bugs' });
+export const orMapCode = `import { useORMap } from '@topgunbuild/react';
 
-// Removing an item
-// In OR-Map, you remove by key AND exact value
-// This marks all observed instances of this value as removed
-todos.remove('active', { title: 'Write docs' });`;
+function ActiveGames() {
+  const orMap = useORMap<string, Game>('games:active');
+  // useORMap returns the raw ORMap<K, V> instance — call imperative methods directly
+  const addGame = (id: string, game: Game) => orMap.add(id, game);
+  const removeGame = (id: string, game: Game) => orMap.remove(id, game);
+  return <ul>{/* iterate orMap entries */}</ul>;
+}`;
 
 # Data Structures
 
@@ -40,7 +48,7 @@ The **LWW-Map** is the default map structure in TopGun. As the name suggests, it
 
 <div className="bg-yellow-50 dark:bg-yellow-900/20 border-l-4 border-yellow-500 p-4 my-6 not-prose">
   <p className="text-sm text-yellow-800 dark:text-yellow-200">
-    <strong>Best for:</strong> Key-Value stores where keys represent unique entities or fields that are overwritten (e.g., User Profile, Configuration, Document Fields).
+    <strong>Use when:</strong> Each item in the collection is a unique entity identified by a stable key (e.g., a user profile by UUID, a document by ID). The LWW-Map is collection-oriented — `useQuery<T>(mapName)` returns an array of all items, each with a `_key` property.
   </p>
 </div>
 
@@ -48,7 +56,7 @@ The **LWW-Map** is the default map structure in TopGun. As the name suggests, it
 
 - Each key holds a single value and a timestamp.
 - When two nodes update the same key, the one with the later timestamp wins.
-- If you use it for a list/collection by generating random keys, you might encounter issues if multiple users try to "add" to the list simultaneously and happen to generate colliding keys (rare) or if you try to manage the list as a single value (overwrites).
+- The collection pattern uses stable UUID keys (e.g., one profile per user) so concurrent updates to different profiles never collide.
 
 ### Usage
 
@@ -66,7 +74,7 @@ The **OR-Map** is designed for Sets and Collections. It allows you to add multip
 
 <div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-6 not-prose">
   <p className="text-sm text-brand">
-    <strong>Best for:</strong> Collections, Lists, Sets, and scenarios where multiple users might add/remove items concurrently (e.g., Todo Lists, Chat Messages in a channel, Tags).
+    <strong>Use when:</strong> Collections, Lists, Sets, and scenarios where multiple users might add/remove items concurrently (e.g., Todo Lists, Chat Messages in a channel, Tags).
   </p>
 </div>
 
@@ -143,9 +151,9 @@ When you delete data in TopGun, the record isn't immediately removed from storag
         <td className="p-4 text-neutral-600 dark:text-neutral-300">Tag added to tombstone set</td>
       </tr>
       <tr>
-        <td className="p-4 font-medium text-foreground">API Method</td>
-        <td className="p-4 text-neutral-600 dark:text-neutral-300"><code className="px-1.5 py-0.5 rounded bg-neutral-200 dark:bg-neutral-700 text-xs">client.getMap()</code></td>
-        <td className="p-4 text-neutral-600 dark:text-neutral-300"><code className="px-1.5 py-0.5 rounded bg-neutral-200 dark:bg-neutral-700 text-xs">client.getORMap()</code></td>
+        <td className="p-4 font-medium text-foreground">Hook (UI)</td>
+        <td className="p-4 text-neutral-600 dark:text-neutral-300"><code className="px-1.5 py-0.5 rounded bg-neutral-200 dark:bg-neutral-700 text-xs">useQuery / useMutation</code></td>
+        <td className="p-4 text-neutral-600 dark:text-neutral-300"><code className="px-1.5 py-0.5 rounded bg-neutral-200 dark:bg-neutral-700 text-xs">useORMap</code></td>
       </tr>
     </tbody>
   </table>
