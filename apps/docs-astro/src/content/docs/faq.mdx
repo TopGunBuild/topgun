@@ -39,6 +39,8 @@ PowerSync and ElectricSQL are better if you already have a PostgreSQL database a
 TopGun has its own query protocol optimized for real-time subscriptions and CRDT sync. However, you can layer GraphQL on top:
 
 ```typescript
+// GraphQL resolvers run on the Node.js server, so they use the imperative
+// client.getMap() API directly — React hooks are for component code.
 // Example: GraphQL resolver reading from TopGun
 const resolvers = {
   Query: {
