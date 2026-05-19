@@ -7,13 +7,13 @@ order: 24
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Layers, Zap, Database, Server } from 'lucide-react';
 
-export const tier1ServerCode = `# Start the TopGun server
-DATABASE_URL=postgres://user:pass@localhost/myapp PORT=8080 cargo run --bin test-server --release`;
+export const tier1ServerCode = `# Start the TopGun server (zero-config embedded storage)
+pnpm start:server`;
 
 export const tier1ClientCode = `import React from 'react';
 import { TopGunClient } from '@topgunbuild/client';
 import { IDBAdapter } from '@topgunbuild/adapters';
-import { TopGunProvider, useQuery, useClient } from '@topgunbuild/react';
+import { TopGunProvider, useQuery, useMutation } from '@topgunbuild/react';
 
 // 1. Create client (your existing app stays unchanged)
 const client = new TopGunClient({
@@ -24,18 +24,16 @@ client.start();
 
 // 2. Add a real-time collaborative component
 function KanbanBoard({ boardId }: { boardId: string }) {
-  const client = useClient();
   const { data: cards } = useQuery('kanban-' + boardId);
+  const { update } = useMutation('kanban-' + boardId);
 
   const moveCard = (cardId: string, column: string) => {
-    client.getMap('kanban-' + boardId).set(cardId, {
-      column, movedAt: Date.now()
-    });
+    update(cardId, { column, movedAt: Date.now() });
   };
 
   return (
     <div>{cards.map(card => (
-      <div key={card.id}>{card.column}: {card.id}</div>
+      <div key={card._key}>{card.column}: {card._key}</div>
     ))}</div>
   );
 }`;
