@@ -9,7 +9,7 @@ import { ChevronRight } from 'lucide-react';
 
 <AlertBox variant="danger" title="Read this first — what's shipped vs. planned" text="TopGun does NOT replace Y.js's CRDT-as-data-structure model. TopGun provides whole-document/whole-map sync (LWW-Map and OR-Map keyed by HLC), not character-level operational transform / Y.Text. Y.Awareness (cursor presence, user metadata broadcast) has no direct TopGun equivalent — single-node `release_on_disconnect` is a partial primitive only. Y.UndoManager (per-document undo/redo with origin tracking) has no direct TopGun equivalent. Rich-text editor bindings (ProseMirror, Quill, Monaco, TipTap) are not in scope. See /docs/roadmap for the full maturity matrix." />
 
-<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+<div className="flex items-center gap-2 text-sm text-neutral-500 mt-8 mb-8 overflow-hidden whitespace-nowrap">
   <span className="text-foreground font-medium">Docs</span>
   <ChevronRight className="w-4 h-4" />
   <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
@@ -222,6 +222,25 @@ const unsub = query.subscribe((results) => {
 </div>
 
 `yMap.observe` and `client.getMap().onChange()` are the closest match — both fire on any write to the local map. For filter-aware deltas (e.g. "only show open todos"), use `client.query().subscribe()`, which Y.js does not provide because all filtering in Y.js is client-side over the full document.
+
+#### If you're using React
+
+```tsx
+import { useQuery, useMutation } from '@topgunbuild/react';
+import { type Todo } from './schema';
+
+function TodoList() {
+  const { data: todos } = useQuery<Todo>('todos');
+  const { create } = useMutation<Todo>('todos');
+  const add = () => create(crypto.randomUUID(), { title: 'Write guide', done: false });
+  return (
+    <>
+      <button onClick={add}>Add</button>
+      <ul>{todos.map(t => <li key={t._key}>{t.title}</li>)}</ul>
+    </>
+  );
+}
+```
 
 ## Deployment Mode Semantics
 
