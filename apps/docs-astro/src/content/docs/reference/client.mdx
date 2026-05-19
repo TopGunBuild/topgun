@@ -7,6 +7,7 @@ order: 21
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Code2, Zap, Database, MessageSquare, Lock, Network, Shield } from 'lucide-react';
 import { ApiParam, ApiConstructor } from '../../../components/docs/ApiMethod';
+import { AlertBox } from '../../../components/docs/AlertBox';
 
 export const startCode = `await client.start();`;
 
@@ -191,6 +192,8 @@ await users.set('key', { data: 'value' });`;
   <Code2 className="w-10 h-10 text-brand" />
   <h1 className="text-4xl font-bold text-foreground">Client API</h1>
 </div>
+
+<AlertBox variant="info" title="Hook-first API for React UI code" text="For React UI code, prefer the hook-first API: useQuery<Todo>('todos') for reads, useMutation<Todo>('todos') for writes (see /docs/quick-start for the canonical pattern). This reference page documents the lower-level TopGunClient API surface used inside hooks and in non-React contexts (Node.js, service workers, testing)." />
 
 The `TopGunClient` is the main entry point for interacting with the TopGun cluster.
 It handles connection management, offline synchronization, and provides access to distributed data structures.
