@@ -1,7 +1,5 @@
 import { SyncEngine } from './SyncEngine';
 import { TopGunClient, DEFAULT_CLUSTER_CONFIG } from './TopGunClient';
-import { TopGun } from './TopGun';
-export * from './adapters/IDBAdapter';
 export * from './adapters/EncryptedStorageAdapter';
 import { QueryHandle } from './QueryHandle';
 import { ChangeTracker } from './ChangeTracker';
@@ -34,7 +32,7 @@ import type {
 } from './BackpressureConfig';
 
 // Value exports
-export { SyncEngine, TopGunClient, TopGun, QueryHandle, LWWMap, Predicates, TopicHandle };
+export { SyncEngine, TopGunClient, QueryHandle, LWWMap, Predicates, TopicHandle };
 export { SyncState, VALID_TRANSITIONS, isValidTransition, SyncStateMachine };
 export { BackpressureError, DEFAULT_BACKPRESSURE_CONFIG, DEFAULT_CLUSTER_CONFIG };
 export { logger } from './utils/logger';

@@ -479,4 +479,52 @@ describe('IDBAdapter', () => {
       expect(result.length).toBe(3);
     });
   });
+
+  describe('non-blocking queue behaviour', () => {
+    // These tests verify that the memory-first / operation-queue implementation
+    // allows writes before IndexedDB is ready and flushes them on init complete.
+
+    it('should allow operations before waitForReady completes (non-blocking)', async () => {
+      const freshAdapter = new IDBAdapter();
+      const dbName = getUniqueDbName();
+
+      // Call initialize (returns immediately — non-blocking)
+      freshAdapter.initialize(dbName);
+
+      // Put should queue in memory before IndexedDB is open
+      await freshAdapter.put('immediate-1', { val: 'works' });
+
+      // waitForReady resolves after IDB opens and queue is flushed
+      await freshAdapter.waitForReady();
+
+      // Value should now be persisted
+      const result = await freshAdapter.get('immediate-1');
+      expect(result).toEqual({ val: 'works' });
+
+      await freshAdapter.close();
+    });
+
+    it('should queue operations and persist them after IndexedDB is ready', async () => {
+      const freshAdapter = new IDBAdapter();
+      const dbName = getUniqueDbName();
+
+      // Non-blocking init — IDB not yet open
+      freshAdapter.initialize(dbName);
+
+      // Multiple rapid writes before IndexedDB is ready
+      await freshAdapter.put('t1', { text: 'Task 1' });
+      await freshAdapter.put('t2', { text: 'Task 2' });
+      await freshAdapter.put('t3', { text: 'Task 3' });
+
+      // Wait for IDB to be open and queue to flush
+      await freshAdapter.waitForReady();
+
+      // All values should be persisted
+      expect(await freshAdapter.get('t1')).toEqual({ text: 'Task 1' });
+      expect(await freshAdapter.get('t2')).toEqual({ text: 'Task 2' });
+      expect(await freshAdapter.get('t3')).toEqual({ text: 'Task 3' });
+
+      await freshAdapter.close();
+    });
+  });
 });
