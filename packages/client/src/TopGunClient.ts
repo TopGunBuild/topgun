@@ -94,7 +94,7 @@ export interface TopGunClientConfig {
   auth?: AuthProvider;
 }
 
-export class TopGunClient {
+export class TopGunClient<TSchema extends Record<string, any> = any> {
   private readonly nodeId: string;
   private readonly syncEngine: SyncEngine;
   private readonly maps: Map<string, LWWMap<any, any> | ORMap<any, any>> = new Map();
@@ -204,9 +204,14 @@ export class TopGunClient {
 
   /**
    * Creates a live query subscription for a map.
+   *
+   * When TSchema is concrete, passing a schema key narrows the QueryHandle
+   * value type to TSchema[K]. The untyped overload preserves back-compat.
    */
-  public query<T>(mapName: string, filter: QueryFilter): QueryHandle<T> {
-    return new QueryHandle<T>(this.syncEngine, mapName, filter);
+  public query<K extends keyof TSchema & string>(mapName: K, filter: QueryFilter): QueryHandle<TSchema[K]>;
+  public query<T = any>(mapName: string, filter: QueryFilter): QueryHandle<T>;
+  public query(mapName: string, filter: QueryFilter): QueryHandle<any> {
+    return new QueryHandle<any>(this.syncEngine, mapName, filter);
   }
 
   /**
@@ -259,19 +264,26 @@ export class TopGunClient {
 
   /**
    * Retrieves an LWWMap instance. If the map doesn't exist locally, it's created.
+   *
+   * When TSchema is concrete, passing a key that exists in the schema narrows
+   * the return type to LWWMap<string, TSchema[K]>. The untyped overload
+   * preserves back-compat for callers that supply explicit type parameters.
+   *
    * @param name The name of the map.
    * @returns An LWWMap instance.
    */
-  public getMap<K, V>(name: string): LWWMap<K, V> {
+  public getMap<K extends keyof TSchema & string>(name: K): LWWMap<string, TSchema[K]>;
+  public getMap<K = string, V = any>(name: string): LWWMap<K, V>;
+  public getMap(name: string): LWWMap<any, any> {
     if (this.maps.has(name)) {
       const map = this.maps.get(name);
       if (map instanceof LWWMap) {
-        return map as LWWMap<K, V>;
+        return map as LWWMap<any, any>;
       }
       throw new Error(`Map ${name} exists but is not an LWWMap`);
     }
 
-    const lwwMap = new LWWMap<K, V>(this.syncEngine.getHLC());
+    const lwwMap = new LWWMap<any, any>(this.syncEngine.getHLC());
     this.maps.set(name, lwwMap);
     this.syncEngine.registerMap(name, lwwMap);
 
@@ -313,19 +325,25 @@ export class TopGunClient {
 
   /**
    * Retrieves an ORMap instance. If the map doesn't exist locally, it's created.
+   *
+   * When TSchema is concrete, the return type narrows to ORMap<string, TSchema[K]>.
+   * The untyped overload preserves back-compat for explicit type-parameter callers.
+   *
    * @param name The name of the map.
    * @returns An ORMap instance.
    */
-  public getORMap<K, V>(name: string): ORMap<K, V> {
+  public getORMap<K extends keyof TSchema & string>(name: K): ORMap<string, TSchema[K]>;
+  public getORMap<K = string, V = any>(name: string): ORMap<K, V>;
+  public getORMap(name: string): ORMap<any, any> {
     if (this.maps.has(name)) {
       const map = this.maps.get(name);
       if (map instanceof ORMap) {
-        return map as ORMap<K, V>;
+        return map as ORMap<any, any>;
       }
       throw new Error(`Map ${name} exists but is not an ORMap`);
     }
 
-    const orMap = new ORMap<K, V>(this.syncEngine.getHLC());
+    const orMap = new ORMap<any, any>(this.syncEngine.getHLC());
     this.maps.set(name, orMap);
     this.syncEngine.registerMap(name, orMap);
 
