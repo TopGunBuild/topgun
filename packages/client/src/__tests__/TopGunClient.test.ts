@@ -353,10 +353,13 @@ describe('TopGunClient', () => {
       })).toThrow('Cannot specify both serverUrl and cluster config');
     });
 
-    test('should require at least one config (serverUrl or cluster)', () => {
-      expect(() => new TopGunClient({
+    test('should create client in local-only mode when no serverUrl or cluster provided', () => {
+      const localClient = new TopGunClient({
         storage
-      } as any)).toThrow('Must specify either serverUrl or cluster config');
+      });
+
+      expect(localClient).toBeInstanceOf(TopGunClient);
+      expect(localClient.isCluster()).toBe(false);
     });
 
     test('should require at least one seed in cluster config', () => {
