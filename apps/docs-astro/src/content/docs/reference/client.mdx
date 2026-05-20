@@ -60,14 +60,16 @@ if (await lock.lock()) {
 
 export const authCode = `client.setAuthToken('jwt-token-here');`;
 
-export const singleServerCode = `import { TopGunClient, IDBAdapter } from '@topgunbuild/client';
+export const singleServerCode = `import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
 
 const client = new TopGunClient({
   serverUrl: 'ws://localhost:8765',
   storage: new IDBAdapter(),
 });`;
 
-export const clusterModeCode = `import { TopGunClient, IDBAdapter } from '@topgunbuild/client';
+export const clusterModeCode = `import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
 
 const client = new TopGunClient({
   cluster: {

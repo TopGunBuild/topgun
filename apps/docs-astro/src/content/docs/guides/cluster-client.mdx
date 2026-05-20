@@ -7,7 +7,8 @@ order: 16
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Network, Shield, Zap, Server, RefreshCw } from 'lucide-react';
 
-export const quickStartCode = `import { TopGunClient, IDBAdapter } from '@topgunbuild/client';
+export const quickStartCode = `import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
 import { TopGunProvider, useQuery, useMutation } from '@topgunbuild/react';
 import { type Todo } from './schema';
 
@@ -113,7 +114,8 @@ client.onSyncStateChange((state) => {
 });`;
 
 export const reactClientCode = `// src/lib/topgun.ts
-import { TopGunClient, IDBAdapter } from '@topgunbuild/client';
+import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
 
 export const client = new TopGunClient({
   cluster: {

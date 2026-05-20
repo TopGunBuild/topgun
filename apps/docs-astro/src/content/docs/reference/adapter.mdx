@@ -33,19 +33,24 @@ export const interfaceCode = `interface IStorageAdapter {
   getAllKeys(): Promise<string[]>;
 }`;
 
-export const idbAdapterCode = `import { TopGun } from '@topgunbuild/client';
+export const idbAdapterCode = `import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
 
-// No loading state needed!
-const db = new TopGun({
-  sync: 'wss://example.com',
-  persist: 'indexeddb'
+// No loading state needed — IDBAdapter is memory-first
+const adapter = new IDBAdapter();
+const client = new TopGunClient({
+  serverUrl: 'wss://example.com',
+  storage: adapter
 });
 
-// Start using immediately - writes are queued in memory
-db.todos.set({ id: '1', text: 'Hello' });
+await client.start();
 
-// Optional: wait for IndexedDB if needed
-await db.waitForReady();`;
+// Start using immediately — writes are queued in memory
+// and flushed once IndexedDB is ready
+client.getMap('todos').set('task-1', { text: 'Hello' });
+
+// Optional: wait for IndexedDB if you need to read what you just wrote
+await adapter.waitForReady();`;
 
 export const customAdapterCode = `class MyCustomAdapter implements IStorageAdapter {
   async initialize(dbName: string) {
@@ -83,7 +88,8 @@ topgun-server
 # creates tables, and manages the storage lifecycle.
 # See: /docs/reference/server`;
 
-export const encryptedAdapterCode = `import { TopGunClient, EncryptedStorageAdapter, IDBAdapter } from '@topgunbuild/client';
+export const encryptedAdapterCode = `import { TopGunClient, EncryptedStorageAdapter } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
 
 // 1. Create the base adapter (IndexedDB)
 const baseAdapter = new IDBAdapter();

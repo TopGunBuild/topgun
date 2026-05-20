@@ -259,7 +259,6 @@ Use when outside React — service workers, Node scripts, non-component utilitie
 
 
 
-
   <span className="text-foreground font-medium">Docs</span>
   <span>Get Started</span>
   <span className="text-foreground font-medium">Installation</span>
@@ -287,16 +286,6 @@ Use when outside React — service workers, Node scripts, non-component utilitie
   />
 
     <span className="text-sm text-neutral-700 dark:text-neutral-300"><span className="font-semibold text-brand">Note:</span> TopGunClient provides full control over configuration and lifecycle. Use this for production apps.</span>
-
-  <h3 className="text-lg font-semibold text-foreground mb-2">Simplified API (Experimental)</h3>
-  <p className="text-neutral-600 dark:text-neutral-300 mb-4">
-    For quick prototyping, you can use the <code className="px-1.5 py-0.5 rounded bg-neutral-100 dark:bg-neutral-800 text-sm">TopGun</code> facade which abstracts some boilerplate.
-  </p>
-  <CodeBlock
-    title="src/store.ts"
-    language="typescript"
-    code={simplifiedCode}
-  />
 
   <h3 className="text-lg font-semibold text-foreground mb-2">Server Development</h3>
   <p className="text-neutral-600 dark:text-neutral-300 mb-4">
