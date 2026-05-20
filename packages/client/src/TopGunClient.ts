@@ -27,6 +27,7 @@ import type {
 } from './BackpressureConfig';
 import { ClusterClient } from './cluster/ClusterClient';
 import { SingleServerProvider } from './connection/SingleServerProvider';
+import { NullConnectionProvider } from './connection/NullConnectionProvider';
 import type { NodeHealth } from '@topgunbuild/core';
 
 // ============================================
@@ -107,12 +108,9 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
   private readonly authProvider?: AuthProvider;
 
   constructor(config: TopGunClientConfig) {
-    // Validate: either serverUrl or cluster, not both
+    // Supplying both serverUrl and cluster is ambiguous — fail early
     if (config.serverUrl && config.cluster) {
       throw new Error('Cannot specify both serverUrl and cluster config');
-    }
-    if (!config.serverUrl && !config.cluster) {
-      throw new Error('Must specify either serverUrl or cluster config');
     }
 
     this.nodeId = config.nodeId || crypto.randomUUID();
@@ -159,11 +157,11 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
       });
 
       logger.info({ seeds: this.clusterConfig.seeds }, 'TopGunClient initialized in cluster mode');
-    } else {
+    } else if (config.serverUrl) {
       // Single-server mode: create SingleServerProvider from serverUrl
       // Map BackoffConfig to SingleServerProviderConfig for unified retry behavior
       const singleServerProvider = new SingleServerProvider({
-        url: config.serverUrl!,
+        url: config.serverUrl,
         maxReconnectAttempts: config.backoff?.maxRetries,
         reconnectDelayMs: config.backoff?.initialDelayMs,
         backoffMultiplier: config.backoff?.multiplier,
@@ -179,6 +177,18 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
       });
 
       logger.info({ serverUrl: config.serverUrl }, 'TopGunClient initialized in single-server mode');
+    } else {
+      // Local-only mode: no sync target — use NullConnectionProvider so SyncEngine
+      // is wired correctly but never opens a socket or enters reconnect loops
+      const nullProvider = new NullConnectionProvider();
+      this.syncEngine = new SyncEngine({
+        nodeId: this.nodeId,
+        connectionProvider: nullProvider,
+        storageAdapter: this.storageAdapter,
+        backoff: config.backoff,
+        backpressure: config.backpressure,
+      });
+      logger.info({}, 'TopGunClient initialized in local-only mode (no sync target)');
     }
 
     // Wire auth provider if supplied
@@ -293,11 +303,11 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
       for (const fullKey of keys) {
         if (fullKey.startsWith(mapPrefix)) {
           const record = await this.storageAdapter.get(fullKey);
-          if (record && (record as LWWRecord<V>).timestamp && !(record as any).tag) {
+          if (record && (record as LWWRecord<any>).timestamp && !(record as any).tag) {
             // Strip prefix to get actual key
-            const key = fullKey.substring(mapPrefix.length) as unknown as K;
+            const key = fullKey.substring(mapPrefix.length) as unknown as any;
             // Merge into in-memory map without triggering new ops
-            lwwMap.merge(key, record as LWWRecord<V>);
+            lwwMap.merge(key, record as LWWRecord<any>);
           }
         }
       }
@@ -305,7 +315,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
 
     // Wrap LWWMap with IMap interface logic
     const originalSet = lwwMap.set.bind(lwwMap);
-    lwwMap.set = (key: K, value: V, ttlMs?: number) => {
+    lwwMap.set = (key: any, value: any, ttlMs?: number) => {
       const record = originalSet(key, value, ttlMs);
       this.storageAdapter.put(`${name}:${key}`, record).catch(err => logger.error({ err }, 'Failed to put record to storage'));
       this.syncEngine.recordOperation(name, 'PUT', String(key), { record, timestamp: record.timestamp }).catch(err => logger.error({ err }, 'Failed to record PUT op'));
@@ -313,7 +323,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     };
 
     const originalRemove = lwwMap.remove.bind(lwwMap);
-    lwwMap.remove = (key: K) => {
+    lwwMap.remove = (key: any) => {
       const tombstone = originalRemove(key);
       this.storageAdapter.put(`${name}:${key}`, tombstone).catch(err => logger.error({ err }, 'Failed to put tombstone to storage'));
       this.syncEngine.recordOperation(name, 'REMOVE', String(key), { record: tombstone, timestamp: tombstone.timestamp }).catch(err => logger.error({ err }, 'Failed to record REMOVE op'));
@@ -352,9 +362,9 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
 
     // Wrap ORMap methods to record operations
     const originalAdd = orMap.add.bind(orMap);
-    orMap.add = (key: K, value: V, ttlMs?: number) => {
+    orMap.add = (key: any, value: any, ttlMs?: number) => {
       const record = originalAdd(key, value, ttlMs);
-      
+
       // Persist records
       this.persistORMapKey(name, orMap, key);
 
@@ -363,7 +373,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     };
 
     const originalRemove = orMap.remove.bind(orMap);
-    orMap.remove = (key: K, value: V) => {
+    orMap.remove = (key: any, value: any) => {
       const tombstones = originalRemove(key, value);
       const timestamp = this.syncEngine.getHLC().now(); 
       
