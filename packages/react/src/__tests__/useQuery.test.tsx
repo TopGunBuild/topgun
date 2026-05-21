@@ -6,12 +6,12 @@ import React from 'react';
 
 // Mock TopGunClient
 const mockSubscribe = jest.fn();
-const mockOnChanges = jest.fn();
+const mockOnDelta = jest.fn();
 const mockOnPaginationChange = jest.fn();
 const mockOnSyncStateChange = jest.fn();
 const mockQuery = jest.fn().mockReturnValue({
   subscribe: mockSubscribe,
-  onChanges: mockOnChanges,
+  onDelta: mockOnDelta,
   onPaginationChange: mockOnPaginationChange,
   onSyncStateChange: mockOnSyncStateChange,
 });
@@ -23,7 +23,7 @@ describe('useQuery', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockSubscribe.mockReturnValue(() => {}); // Unsubscribe function
-    mockOnChanges.mockReturnValue(() => {}); // Unsubscribe function for changes
+    mockOnDelta.mockReturnValue(() => {}); // Unsubscribe function for changes
     mockOnPaginationChange.mockReturnValue(() => {});
     mockOnSyncStateChange.mockReturnValue(() => {});
   });

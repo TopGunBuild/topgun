@@ -16,7 +16,7 @@ export function useMap<K = string, V = any>(mapName: string): LWWMap<K, V> {
         isMounted.current = true;
 
         // Subscribe to map changes
-        const unsubscribe = map.onChange(() => {
+        const unsubscribe = map.subscribe(() => {
             if (isMounted.current) {
                 setTick(t => t + 1);
             }
@@ -62,7 +62,7 @@ export function useMapWithSyncState<K = string, V = any>(
     useEffect(() => {
         isMounted.current = true;
 
-        const unsubscribeMap = map.onChange(() => {
+        const unsubscribeMap = map.subscribe(() => {
             if (isMounted.current) {
                 setTick(t => t + 1);
             }

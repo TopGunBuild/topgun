@@ -13,7 +13,7 @@ export function useORMap<K = string, V = any>(mapName: string): ORMap<K, V> {
     useEffect(() => {
         isMounted.current = true;
 
-        const unsubscribe = map.onChange(() => {
+        const unsubscribe = map.subscribe(() => {
             if (isMounted.current) {
                 setTick(t => t + 1);
             }
@@ -49,7 +49,7 @@ export function useORMapWithSyncState<K = string, V = any>(
     useEffect(() => {
         isMounted.current = true;
 
-        const unsubscribeMap = map.onChange(() => {
+        const unsubscribeMap = map.subscribe(() => {
             if (isMounted.current) {
                 setTick(t => t + 1);
             }

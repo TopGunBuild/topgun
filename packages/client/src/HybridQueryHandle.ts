@@ -210,9 +210,10 @@ export class HybridQueryHandle<T> {
   }
 
   /**
-   * Subscribe to change events.
+   * Subscribe to delta change events (add / update / remove per record).
+   * For the full result set, use subscribe(). Returns an unsubscribe function.
    */
-  public onChanges(listener: (changes: ChangeEvent<T>[]) => void): () => void {
+  public onDelta(listener: (changes: ChangeEvent<T>[]) => void): () => void {
     this.changeListeners.add(listener);
     return () => this.changeListeners.delete(listener);
   }

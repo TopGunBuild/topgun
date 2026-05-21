@@ -168,7 +168,7 @@ export function useQuery<T = any>(
         }
       });
 
-      const unsubscribeChanges = handle.onChanges((newChanges) => {
+      const unsubscribeChanges = handle.onDelta((newChanges) => {
         if (!isMounted.current) return;
 
         const maxChanges = optionsRef.current?.maxChanges ?? 1000;

@@ -64,9 +64,9 @@ export class ORMap<K, V> {
     this.merkleTree = new ORMapMerkleTree();
   }
 
-  private listeners: Array<() => void> = [];
+  private listeners: Array<(entries: Array<[K, V[]]>) => void> = [];
 
-  public onChange(callback: () => void): () => void {
+  public subscribe(callback: (entries: Array<[K, V[]]>) => void): () => void {
     this.listeners.push(callback);
     return () => {
       this.listeners = this.listeners.filter(cb => cb !== callback);
@@ -74,7 +74,15 @@ export class ORMap<K, V> {
   }
 
   private notify(): void {
-    this.listeners.forEach(cb => cb());
+    if (this.listeners.length === 0) return;
+    const snapshot: Array<[K, V[]]> = [];
+    for (const key of this.allKeys()) {
+      const values = this.get(key);
+      if (values.length > 0) {
+        snapshot.push([key, values]);
+      }
+    }
+    this.listeners.forEach(cb => cb(snapshot));
   }
 
   public get size(): number {

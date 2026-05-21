@@ -18,7 +18,7 @@ export interface LWWRecord<V> {
 export class LWWMap<K, V> {
   private data: Map<K, LWWRecord<V>>;
   private readonly hlc: HLC;
-  private listeners: Array<() => void> = [];
+  private listeners: Array<(entries: Array<[K, V]>) => void> = [];
   private merkleTree: MerkleTree;
 
   constructor(hlc: HLC) {
@@ -27,7 +27,7 @@ export class LWWMap<K, V> {
     this.merkleTree = new MerkleTree();
   }
 
-  public onChange(callback: () => void): () => void {
+  public subscribe(callback: (entries: Array<[K, V]>) => void): () => void {
     this.listeners.push(callback);
     return () => {
       this.listeners = this.listeners.filter(cb => cb !== callback);
@@ -35,7 +35,9 @@ export class LWWMap<K, V> {
   }
 
   private notify(): void {
-    this.listeners.forEach(cb => cb());
+    if (this.listeners.length === 0) return;
+    const snapshot = Array.from(this.entries()) as Array<[K, V]>;
+    this.listeners.forEach(cb => cb(snapshot));
   }
 
   public getMerkleTree(): MerkleTree {
