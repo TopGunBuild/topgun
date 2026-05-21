@@ -18,7 +18,6 @@ const client = new TopGunClient({
   serverUrl: 'ws://localhost:8080',
   storage: new IDBAdapter(),
 });
-await client.start();
 
 function TodoApp() {
   const { data: todos = [] } = useQuery<Todo>('todos');
@@ -112,19 +111,17 @@ Here is a step-by-step breakdown of the canonical snippet above:
 
 **Lines 1–4: Imports.** Three packages installed in step 1 (`@topgunbuild/react`, `@topgunbuild/client`, `@topgunbuild/adapters`) plus the `Todo` type derived from your schema.
 
-**Lines 6–9: Client init.** `TopGunClient` takes a `serverUrl` for the WebSocket connection and a `storage` adapter for local persistence. `IDBAdapter` writes to IndexedDB so your data survives page reloads.
+**Lines 6–9: Client init.** `TopGunClient` takes a `serverUrl` for the WebSocket connection and a `storage` adapter for local persistence. `IDBAdapter` writes to IndexedDB so your data survives page reloads. No explicit `start()` call is needed — the adapter initializes lazily in the background and queues any operations issued before it's ready.
 
-**Line 10: Start.** `await client.start()` initializes IndexedDB asynchronously. Top-level await is supported by Vite, esbuild, and Next.js 14+.
+**Line 12: Read hook.** `useQuery<Todo>('todos')` subscribes to the `todos` map. The component re-renders automatically whenever data changes locally or arrives from the server.
 
-**Line 13: Read hook.** `useQuery<Todo>('todos')` subscribes to the `todos` map. The component re-renders automatically whenever data changes locally or arrives from the server.
+**Line 13: Write hook.** `useMutation<Todo>('todos')` returns `{ create, update, remove }`. Call `create(key, value)` to add a new item. The write lands in memory immediately (zero-latency) and syncs to the server in the background.
 
-**Line 14: Write hook.** `useMutation<Todo>('todos')` returns `{ create, update, remove }`. Call `create(key, value)` to add a new item. The write lands in memory immediately (zero-latency) and syncs to the server in the background.
+**Line 14: Add function.** A plain function that calls `create` with a random UUID key and the new todo shape. No loading state, no async/await in the component — the write is always instant.
 
-**Line 15: Add function.** A plain function that calls `create` with a random UUID key and the new todo shape. No loading state, no async/await in the component — the write is always instant.
+**Lines 15–20: Render.** Standard React JSX. `todos.map(t => ...)` iterates the live list. Use `t._key` as the React key — this is the string key you passed to `create`, exposed on every query result item.
 
-**Lines 16–21: Render.** Standard React JSX. `todos.map(t => ...)` iterates the live list. Use `t._key` as the React key — this is the string key you passed to `create`, exposed on every query result item.
-
-**Line 24: Provider.** `TopGunProvider` makes the client available to all hooks in the tree via React context.
+**Line 23: Provider.** `TopGunProvider` makes the client available to all hooks in the tree via React context.
 
 ## End-to-End Types
 
@@ -160,7 +157,7 @@ Use when outside React — service workers, Node scripts, non-component utilitie
 
 <div className="bg-green-50 dark:bg-green-900/20 border border-green-100 dark:border-green-800 rounded-xl p-6 mb-6 not-prose">
   <h3 className="text-lg font-semibold text-green-800 dark:text-green-300 mb-2 !mt-0">Non-Blocking Initialization</h3>
-  <span className="text-green-700 dark:text-green-400">IndexedDB can take 50-500ms to initialize. TopGun queues write operations in memory and persists them once ready — your UI renders instantly with zero blocking time. Call <code className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-800/50 text-sm">await client.start()</code> at module scope before mounting your app to ensure the storage layer is ready before the first hook fires.</span>
+  <span className="text-green-700 dark:text-green-400">IndexedDB can take 50-500ms to initialize. TopGun's <code className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-800/50 text-sm">IDBAdapter</code> initializes lazily in the background and queues reads and writes until the store is ready — your UI renders instantly with zero blocking time and no <code className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-800/50 text-sm">await</code> ceremony. If you need a hard signal that persistence is ready (e.g., before a critical migration step), keep a reference to the adapter and call <code className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-800/50 text-sm">await adapter.waitForReady()</code>.</span>
 </div>
 
 <div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-6 mb-6 not-prose">

@@ -102,27 +102,18 @@ Prometheus metrics endpoint and structured-log hooks are planned.
 import { TopGunClient } from '@topgunbuild/client';
 import { IDBAdapter } from '@topgunbuild/adapters';
 
-const adapter = new IDBAdapter();
 const client = new TopGunClient({
-  serverUrl: 'ws://localhost:8080',
-  storage: adapter,
+  serverUrl: 'ws://localhost:8080',  // optional — omit for local-only
+  storage: new IDBAdapter('my-app'),
 });
-
 client.start();
 
-// Write data (instant, works offline)
+// Reactive read — fires immediately and on every change
 const todos = client.getMap('todos');
-todos.set('todo-1', {
-  id: 'todo-1',
-  text: 'Buy milk',
-  done: false,
-});
+todos.subscribe((entries) => render(entries));
 
-// Read data
-const todo = todos.get('todo-1');
-
-// Subscribe to changes via live queries
-// See useQuery hook for React integration
+// Optimistic write — applies locally, syncs in background
+todos.set('todo-1', { text: 'Buy milk', done: false });
 ```
 
 With React:
