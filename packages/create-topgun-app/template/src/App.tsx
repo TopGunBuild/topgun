@@ -5,15 +5,13 @@
 import React, { useState } from 'react';
 import { TopGunClient } from '@topgunbuild/client';
 import { IDBAdapter } from '@topgunbuild/adapters';
-import { useQuery } from '@topgunbuild/react';
+import { useQuery, useMutation } from '@topgunbuild/react';
 
-const client = new TopGunClient({
-  storage: new IDBAdapter('topgun-app'),
+export const client = new TopGunClient({
+  storage: new IDBAdapter(),
   // Uncomment the line below to connect to a TopGun server:
   // serverUrl: 'ws://localhost:8080',
 });
-
-const todos = client.getMap('todos');
 
 interface TodoItem {
   text: string;
@@ -23,18 +21,18 @@ interface TodoItem {
 export default function App() {
   const [input, setInput] = useState('');
 
-  const { data: todoEntries } = useQuery<TodoItem>(todos);
+  const { data: todos = [] } = useQuery<TodoItem>('todos');
+  const { create, update } = useMutation<TodoItem>('todos');
 
   const addTodo = () => {
     const text = input.trim();
     if (!text) return;
-    const id = `todo-${Date.now()}`;
-    todos.set(id, { text, done: false });
+    create(`todo-${Date.now()}`, { text, done: false });
     setInput('');
   };
 
   const toggleTodo = (id: string, item: TodoItem) => {
-    todos.set(id, { ...item, done: !item.done });
+    update(id, { ...item, done: !item.done });
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -78,11 +76,11 @@ export default function App() {
         </button>
       </div>
 
-      {todoEntries && todoEntries.length > 0 ? (
+      {todos.length > 0 ? (
         <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-          {todoEntries.map(({ key, value }) => (
+          {todos.map(item => (
             <li
-              key={key}
+              key={item._key}
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -91,21 +89,21 @@ export default function App() {
                 borderBottom: '1px solid #f0f0f0',
                 cursor: 'pointer',
               }}
-              onClick={() => toggleTodo(key, value)}
+              onClick={() => toggleTodo(item._key, item)}
             >
               <input
                 type="checkbox"
-                checked={value.done}
+                checked={item.done}
                 readOnly
                 style={{ width: 16, height: 16, cursor: 'pointer' }}
               />
               <span
                 style={{
-                  textDecoration: value.done ? 'line-through' : 'none',
-                  color: value.done ? '#aaa' : '#111',
+                  textDecoration: item.done ? 'line-through' : 'none',
+                  color: item.done ? '#aaa' : '#111',
                 }}
               >
-                {value.text}
+                {item.text}
               </span>
             </li>
           ))}
