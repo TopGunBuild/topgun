@@ -1,0 +1,127 @@
+---
+/**
+ * Side-by-side anti-pattern block: classic REST round-trip vs TopGun local-first.
+ * Same code intent, different latency profile — meant to be visceral, not exhaustive.
+ *
+ * Code blocks are stored as raw HTML strings to dodge Astro's expression parser
+ * (curly braces in JS literals would otherwise be read as {...} expressions).
+ */
+
+const dim = 'color: var(--color-fg-dim)';
+const accent = 'color: var(--color-accent)';
+const warn = 'color: var(--color-warn)';
+
+const restCode = `<span style="${dim}">// every interaction round-trips the server</span>
+const res = <span style="${warn}">await</span> fetch(<span style="${accent}">'/api/todos'</span>);
+const todos = <span style="${warn}">await</span> res.json();
+render(todos);
+
+<span style="${dim}">// user types &rarr; optimistic UI? you write it</span>
+<span style="${dim}">// loses internet? you handle that too</span>`;
+
+const topgunCode = `<span style="${dim}">// reads are local — always</span>
+<span style="${warn}">const</span> todos = client.<span style="${accent}">getMap</span>(<span style="${accent}">'todos'</span>);
+todos.<span style="${accent}">subscribe</span>(render);
+
+<span style="${dim}">// writes apply instantly, sync in background</span>
+todos.<span style="${accent}">set</span>(id, &#123; text, done: <span style="${warn}">false</span> &#125;);
+
+<span style="${dim}">// offline? still works. reconnect? auto-merge.</span>`;
+---
+
+<section id="how" style="background-color: var(--color-bg-sunken)">
+  <div class="mx-auto max-w-6xl px-6 py-28 md:py-36">
+    <div class="mb-14 max-w-2xl">
+      <p class="section-label">~ the.difference</p>
+      <h2
+        class="mt-3 text-4xl font-bold tracking-tight md:text-5xl"
+        style="color: var(--color-fg); line-height: 1.1;"
+      >
+        Round-trip every read?<br />
+        <span style="color: var(--color-accent)">Or just read.</span>
+      </h2>
+      <p class="mt-5 text-lg leading-relaxed" style="color: var(--color-fg-muted)">
+        TopGun keeps a live copy of your data on the device. Reads and writes
+        never wait for the network. Sync happens in the background and never
+        blocks the UI.
+      </p>
+    </div>
+
+    <div class="grid grid-cols-1 gap-5 md:grid-cols-2">
+      <!-- BEFORE: classic REST -->
+      <article
+        class="relative overflow-hidden rounded-xl p-6 md:p-7"
+        style="background-color: var(--color-bg-elevated); border: 1px solid var(--color-border);"
+      >
+        <header class="mb-5 flex items-center justify-between">
+          <span class="font-mono text-xs" style="color: var(--color-fg-dim)">
+            // classic.rest
+          </span>
+          <span
+            class="rounded-full px-2 py-0.5 font-mono text-[11px]"
+            style="background-color: var(--color-warn-soft); color: var(--color-warn);"
+          >
+            ~ 220 ms
+          </span>
+        </header>
+
+        <pre
+          class="overflow-x-auto font-mono text-[11px] leading-relaxed md:text-[13px]"
+          style="color: var(--color-fg)"
+        ><code set:html={restCode}></code></pre>
+
+        <footer class="mt-6 flex flex-wrap gap-x-5 gap-y-1.5 font-mono text-[11px]" style="color: var(--color-fg-dim)">
+          <span>· server roundtrip</span>
+          <span>· spinner UX</span>
+          <span>· offline = broken</span>
+        </footer>
+      </article>
+
+      <!-- AFTER: TopGun -->
+      <article
+        class="relative overflow-hidden rounded-xl p-6 md:p-7"
+        style="background-color: var(--color-bg-elevated); border: 1px solid var(--color-accent-soft); box-shadow: 0 0 0 1px color-mix(in oklab, var(--color-accent) 15%, transparent);"
+      >
+        <header class="mb-5 flex items-center justify-between">
+          <span class="font-mono text-xs" style="color: var(--color-accent)">
+            // topgun.local-first
+          </span>
+          <span
+            class="rounded-full px-2 py-0.5 font-mono text-[11px]"
+            style="background-color: color-mix(in oklab, var(--color-accent) 18%, transparent); color: var(--color-accent);"
+          >
+            ~ 0 ms
+          </span>
+        </header>
+
+        <pre
+          class="overflow-x-auto font-mono text-[11px] leading-relaxed md:text-[13px]"
+          style="color: var(--color-fg)"
+        ><code set:html={topgunCode}></code></pre>
+
+        <footer class="mt-6 flex flex-wrap gap-x-5 gap-y-1.5 font-mono text-[11px]" style="color: var(--color-accent)">
+          <span>· instant local read</span>
+          <span>· optimistic by default</span>
+          <span>· offline = normal</span>
+        </footer>
+      </article>
+    </div>
+
+    <p
+      class="mx-auto mt-10 max-w-2xl text-center text-sm"
+      style="color: var(--color-fg-dim)"
+    >
+      Same UX. No spinners. Works offline.
+      &nbsp;&nbsp;
+      <a
+        href="https://demo.topgun.build/?tab=latency-race"
+        target="_blank"
+        rel="noopener"
+        class="font-mono transition-colors hover:text-[var(--color-accent)]"
+        style="color: var(--color-fg-muted); text-decoration: underline; text-decoration-color: var(--color-border-strong); text-underline-offset: 4px;"
+      >
+        → race them yourself
+      </a>
+    </p>
+  </div>
+</section>

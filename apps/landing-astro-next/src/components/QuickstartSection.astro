@@ -1,0 +1,132 @@
+---
+/**
+ * Quickstart — shows the smallest possible TopGun program (connect / read / write)
+ * alongside numbered callouts so the reader can map line ↔ explanation at a glance.
+ *
+ * Code is rendered via set:html to avoid Astro's expression parser eating
+ * the `{ ... }` object literals in the JavaScript snippet.
+ */
+
+const dim = 'color: var(--color-fg-dim)';
+const accent = 'color: var(--color-accent)';
+const warn = 'color: var(--color-warn)';
+const fg = 'color: var(--color-fg)';
+
+const code = `<span style="${warn}">import</span> &#123; <span style="${accent}">TopGunClient</span> &#125; <span style="${warn}">from</span> <span style="${accent}">'@topgunbuild/client'</span>;
+<span style="${warn}">import</span> &#123; <span style="${accent}">IDBAdapter</span> &#125; <span style="${warn}">from</span> <span style="${accent}">'@topgunbuild/adapters'</span>;
+
+<span style="${dim}">// 1. connect — local-first by default, no server required</span>
+<span style="${warn}">const</span> client = <span style="${warn}">new</span> <span style="${accent}">TopGunClient</span>(&#123;
+  storage: <span style="${warn}">new</span> <span style="${accent}">IDBAdapter</span>(<span style="${accent}">'my-app'</span>),
+&#125;);
+client.<span style="${accent}">start</span>();
+
+<span style="${dim}">// 2. read — reactive, local, instant</span>
+<span style="${warn}">const</span> todos = client.<span style="${accent}">getMap</span>(<span style="${accent}">'todos'</span>);
+todos.<span style="${accent}">subscribe</span>(render);
+
+<span style="${dim}">// 3. write — optimistic, persists to IndexedDB</span>
+todos.<span style="${accent}">set</span>(<span style="${accent}">'todo-1'</span>, &#123; text, done: <span style="${warn}">false</span> &#125;);`;
+
+const steps = [
+  {
+    n: '01',
+    title: 'Connect',
+    body: 'Construct the client with a storage adapter, then call start() once to wire up IndexedDB. No server required for local-first apps — add a serverUrl later when you want sync.',
+  },
+  {
+    n: '02',
+    title: 'Read',
+    body: 'getMap() returns a reactive CRDT. subscribe() fires whenever edits land — render straight from the map, no fetch state, no spinners.',
+  },
+  {
+    n: '03',
+    title: 'Write',
+    body: 'set(key, value) applies instantly to memory and persists to IndexedDB. With a serverUrl, edits sync in the background; offline writes land on reconnect.',
+  },
+];
+---
+
+<section id="quickstart" class="relative">
+  <div
+    class="bg-dotgrid bg-dotgrid-mask pointer-events-none absolute inset-0 opacity-50"
+    aria-hidden="true"
+  ></div>
+
+  <div class="relative mx-auto max-w-6xl px-6 py-28 md:py-36">
+    <div class="mx-auto mb-14 max-w-2xl text-center">
+      <p class="section-label">~ quickstart</p>
+      <h2
+        class="mt-3 text-4xl font-bold tracking-tight md:text-5xl"
+        style="color: var(--color-fg); line-height: 1.1;"
+      >
+        Install. Connect.<br />
+        <span style="color: var(--color-accent)">Sync.</span>
+      </h2>
+      <p class="mx-auto mt-5 max-w-xl text-lg leading-relaxed" style="color: var(--color-fg-muted)">
+        Three lines of code to a real-time, offline-first app. The defaults
+        get you running; the knobs are there when you need them.
+      </p>
+    </div>
+
+    <div class="grid grid-cols-1 items-start gap-8 lg:grid-cols-[1.3fr_1fr]">
+      <!-- Code panel -->
+      <article
+        class="relative overflow-hidden rounded-xl"
+        style="background-color: var(--color-bg-elevated); border: 1px solid var(--color-border);"
+      >
+        <header
+          class="flex items-center justify-between px-5 py-3 font-mono text-xs"
+          style="border-bottom: 1px solid var(--color-border); color: var(--color-fg-dim);"
+        >
+          <span>// app.ts</span>
+          <span>typescript</span>
+        </header>
+        <pre
+          class="overflow-x-auto px-5 py-6 font-mono text-[12px] leading-relaxed md:text-sm"
+          style="color: var(--color-fg)"
+        ><code set:html={code}></code></pre>
+      </article>
+
+      <!-- Numbered callouts -->
+      <ol class="space-y-5">
+        {
+          steps.map((s) => (
+            <li
+              class="rounded-xl p-5"
+              style="background-color: var(--color-bg-elevated); border: 1px solid var(--color-border);"
+            >
+              <div class="flex items-start gap-4">
+                <span
+                  class="flex h-9 w-9 shrink-0 items-center justify-center rounded-md font-mono text-sm font-semibold"
+                  style="background-color: color-mix(in oklab, var(--color-accent) 18%, transparent); color: var(--color-accent); border: 1px solid var(--color-accent-soft);"
+                >
+                  {s.n}
+                </span>
+                <div>
+                  <h3 class="text-base font-semibold" style="color: var(--color-fg)">
+                    {s.title}
+                  </h3>
+                  <p class="mt-1.5 text-sm leading-relaxed" style="color: var(--color-fg-muted)">
+                    {s.body}
+                  </p>
+                </div>
+              </div>
+            </li>
+          ))
+        }
+      </ol>
+    </div>
+
+    <div class="mt-12 flex flex-wrap items-center justify-center gap-3 text-sm" style="color: var(--color-fg-muted)">
+      <span>Want React?</span>
+      <a
+        href="/docs/react"
+        class="font-medium transition-colors hover:text-[var(--color-accent)]"
+        style="color: var(--color-fg)"
+      >
+        useQuery / useMutation hooks &rarr;
+      </a>
+    </div>
+  </div>
+</section>

@@ -1,0 +1,205 @@
+---
+/**
+ * Use-cases / persona tabs — three patterns the visitor might recognise
+ * themselves in, each swaps a code sample and a one-line tagline.
+ *
+ * Tab switching is vanilla JS at the bottom of this file (no React).  Code
+ * samples are rendered via set:html so the literal `{` / `}` characters in
+ * the JavaScript stay text, not Astro expressions.
+ */
+
+const dim = 'color: var(--color-fg-dim)';
+const accent = 'color: var(--color-accent)';
+const warn = 'color: var(--color-warn)';
+
+// All snippets assume `client` is a started TopGunClient (see Quickstart below).
+const personas = [
+  {
+    id: 'realtime-collab',
+    label: 'realtime.collab',
+    file: 'cursors.ts',
+    tagline:
+      'Figma-style cursors. Notion-style edits. Every client sees changes within one frame — no manual fan-out, no shared-state plumbing.',
+    code:
+      `<span style="${dim}">// shared map — every user writes to their own key</span>\n` +
+      `<span style="${warn}">const</span> cursors = client.<span style="${accent}">getMap</span>(<span style="${accent}">'cursors:doc-1'</span>);\n` +
+      `\n` +
+      `cursors.<span style="${accent}">subscribe</span>((entries) =&gt; render(entries));\n` +
+      `\n` +
+      `<span style="${dim}">// my cursor updates as I move</span>\n` +
+      `cursors.<span style="${accent}">set</span>(myUserId, &#123; x, y, selection &#125;);`,
+  },
+  {
+    id: 'offline-first',
+    label: 'offline.first',
+    file: 'todos.ts',
+    tagline:
+      'Apps that work on a plane, in a tunnel, in a hotel with bad wifi. Every write applies locally and syncs when the network returns.',
+    code:
+      `<span style="${dim}">// reads + writes are local — the network is optional</span>\n` +
+      `<span style="${warn}">const</span> todos = client.<span style="${accent}">getMap</span>(<span style="${accent}">'todos'</span>);\n` +
+      `\n` +
+      `todos.<span style="${accent}">subscribe</span>((entries) =&gt; render(entries));\n` +
+      `\n` +
+      `<span style="${dim}">// writes apply instantly; sync runs whenever it can</span>\n` +
+      `todos.<span style="${accent}">set</span>(id, &#123; text, done: <span style="${warn}">false</span> &#125;);`,
+  },
+  {
+    id: 'live-notifications',
+    label: 'live.notifications',
+    file: 'feed.ts',
+    tagline:
+      'Live notifications. Presence pings. Broadcast events. Fan-out to every subscribed client without writing pub/sub plumbing.',
+    code:
+      `<span style="${dim}">// pub/sub topic — fire-and-forget, no persistence</span>\n` +
+      `<span style="${warn}">const</span> feed = client.<span style="${accent}">topic</span>(<span style="${accent}">'feed:user-42'</span>);\n` +
+      `\n` +
+      `feed.<span style="${accent}">subscribe</span>((msg) =&gt; render(msg));\n` +
+      `\n` +
+      `<span style="${dim}">// publish from anywhere — server fans out</span>\n` +
+      `feed.<span style="${accent}">publish</span>(&#123;\n` +
+      `  kind: <span style="${accent}">'comment.new'</span>,\n` +
+      `  commentId,\n` +
+      `  author,\n` +
+      `&#125;);`,
+  },
+];
+---
+
+<section id="use-cases" class="relative">
+  <div
+    class="bg-dotgrid bg-dotgrid-mask pointer-events-none absolute inset-0 opacity-40"
+    aria-hidden="true"
+  ></div>
+
+  <div class="relative mx-auto max-w-6xl px-6 py-28 md:py-36">
+    <div class="mx-auto mb-10 max-w-2xl text-center">
+      <p class="section-label">~ use.cases</p>
+      <h2
+        class="mt-3 text-4xl font-bold tracking-tight md:text-5xl"
+        style="color: var(--color-fg); line-height: 1.1;"
+      >
+        Pick a pattern.<br />
+        <span style="color: var(--color-accent)">See the code.</span>
+      </h2>
+    </div>
+
+    <!-- Tabs -->
+    <div
+      class="mx-auto mb-7 flex max-w-3xl flex-wrap items-center justify-center gap-2"
+      role="tablist"
+      aria-label="Use case pattern selector"
+    >
+      {
+        personas.map((p, i) => (
+          <button
+            type="button"
+            role="tab"
+            class="persona-tab rounded-md px-3.5 py-2 font-mono text-xs transition-colors"
+            data-persona-tab={p.id}
+            data-active={i === 0 ? 'true' : 'false'}
+            aria-controls={`panel-${p.id}`}
+            aria-selected={i === 0 ? 'true' : 'false'}
+            tabindex={i === 0 ? 0 : -1}
+          >
+            [ {p.label} ]
+          </button>
+        ))
+      }
+    </div>
+
+    <!-- Tagline (one is visible at a time) -->
+    <div class="mb-8 min-h-[4.5rem] text-center md:min-h-[3.5rem]">
+      {
+        personas.map((p, i) => (
+          <p
+            data-persona-tagline={p.id}
+            class="mx-auto max-w-2xl text-base leading-relaxed md:text-lg"
+            style={`color: var(--color-fg-muted); display: ${i === 0 ? 'block' : 'none'};`}
+          >
+            {p.tagline}
+          </p>
+        ))
+      }
+    </div>
+
+    <!-- Code panels -->
+    <div class="mx-auto max-w-3xl">
+      {
+        personas.map((p, i) => (
+          <article
+            id={`panel-${p.id}`}
+            data-persona-panel={p.id}
+            role="tabpanel"
+            aria-labelledby={`tab-${p.id}`}
+            class="overflow-hidden rounded-xl"
+            style={`background-color: var(--color-bg-elevated); border: 1px solid var(--color-border); display: ${i === 0 ? 'block' : 'none'};`}
+          >
+            <header
+              class="flex items-center justify-between px-5 py-3 font-mono text-xs"
+              style="border-bottom: 1px solid var(--color-border); color: var(--color-fg-dim);"
+            >
+              <span>// {p.file}</span>
+              <span>typescript</span>
+            </header>
+            <pre
+              class="overflow-x-auto px-5 py-6 font-mono text-[12px] leading-relaxed md:text-sm"
+              style="color: var(--color-fg)"
+            ><code set:html={p.code}></code></pre>
+          </article>
+        ))
+      }
+    </div>
+
+    <p
+      class="mx-auto mt-9 max-w-2xl text-center text-sm"
+      style="color: var(--color-fg-dim)"
+    >
+      Whatever shape your app takes — TopGun handles the sync.
+    </p>
+  </div>
+</section>
+
+<script>
+  // Vanilla JS — toggle persona panels on tab click.  Pure DOM, no framework.
+  const tabs = document.querySelectorAll<HTMLButtonElement>('[data-persona-tab]');
+  const taglines = document.querySelectorAll<HTMLElement>('[data-persona-tagline]');
+  const panels = document.querySelectorAll<HTMLElement>('[data-persona-panel]');
+
+  function activate(id: string) {
+    tabs.forEach((b) => {
+      const match = b.dataset.personaTab === id;
+      b.dataset.active = match ? 'true' : 'false';
+      b.setAttribute('aria-selected', match ? 'true' : 'false');
+      b.tabIndex = match ? 0 : -1;
+    });
+    taglines.forEach((el) => {
+      el.style.display = el.dataset.personaTagline === id ? 'block' : 'none';
+    });
+    panels.forEach((el) => {
+      el.style.display = el.dataset.personaPanel === id ? 'block' : 'none';
+    });
+  }
+
+  tabs.forEach((tab) => {
+    tab.addEventListener('click', () => {
+      const id = tab.dataset.personaTab;
+      if (id) activate(id);
+    });
+  });
+
+  // Arrow-key navigation between tabs (a11y)
+  const tabList = Array.from(tabs);
+  tabs.forEach((tab) => {
+    tab.addEventListener('keydown', (e) => {
+      const idx = tabList.indexOf(tab);
+      if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+        e.preventDefault();
+        const next = tabList[(idx + (e.key === 'ArrowRight' ? 1 : -1) + tabList.length) % tabList.length];
+        next.focus();
+        const id = next.dataset.personaTab;
+        if (id) activate(id);
+      }
+    });
+  });
+</script>

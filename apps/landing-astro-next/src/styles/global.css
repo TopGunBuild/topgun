@@ -1,0 +1,184 @@
+@import '@fontsource-variable/inter';
+@import '@fontsource-variable/jetbrains-mono';
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, 'SFMono-Regular', monospace;
+
+  /* Surfaces */
+  --color-bg: #0a0e14;
+  --color-bg-elevated: #11161f;
+  --color-bg-sunken: #070a0f;
+
+  /* Text — all WCAG AA on --color-bg */
+  --color-fg: #e6edf6;
+  --color-fg-muted: #94a3b8;
+  --color-fg-dim: #64748b;
+
+  /* Borders */
+  --color-border: #1f2937;
+  --color-border-strong: #334155;
+
+  /* Single accent: signal cyan */
+  --color-accent: #22d3ee;
+  --color-accent-strong: #06b6d4;
+  --color-accent-soft: #0e7490;
+
+  /* Anti-pattern warning — only used in contrast blocks */
+  --color-warn: #fbbf24;
+  --color-warn-soft: #78350f;
+}
+
+html {
+  background-color: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-fg);
+  min-height: 100vh;
+}
+
+/* Selection */
+::selection {
+  background-color: color-mix(in oklab, var(--color-accent) 30%, transparent);
+  color: var(--color-fg);
+}
+
+/* Focus rings — visible, accent-coloured */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+/* Dot-grid ambient (full-page background, subtle) */
+.bg-dotgrid {
+  background-image: radial-gradient(
+    circle at 1px 1px,
+    color-mix(in oklab, var(--color-border-strong) 70%, transparent) 1px,
+    transparent 0
+  );
+  background-size: 32px 32px;
+  background-position: 0 0;
+}
+
+/* Vignette mask so dots fade at the edges */
+.bg-dotgrid-mask {
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 40%, black 30%, transparent 90%);
+  -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 40%, black 30%, transparent 90%);
+}
+
+/* Radar sweep — the arm rotates around the scope centre.
+   The SVG that uses this class must place the rotation centre at
+   user-coord origin (0, 0); transform-origin then resolves correctly
+   in the SVG coordinate system. */
+@keyframes radar-sweep {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+.radar-sweep {
+  animation: radar-sweep 6s linear infinite;
+  transform-origin: 0 0;
+}
+
+/* Blip pulse — short flash, then long quiet — meant to read as
+   "ping detected when sweep arm crosses". Stagger via animation-delay
+   so different blips flash at different points in the 6s sweep cycle. */
+@keyframes blip-pulse {
+  0%   { fill-opacity: 0.35; r: 5; }
+  3%   { fill-opacity: 1;    r: 8; }
+  10%  { fill-opacity: 0.7;  r: 5; }
+  100% { fill-opacity: 0.35; r: 5; }
+}
+
+.blip-pulse {
+  animation: blip-pulse 6s linear infinite;
+}
+
+/* Outer halo of a blip — quiet always-on glow */
+@keyframes blip-glow {
+  0%, 100% { opacity: 0.2; }
+  50%      { opacity: 0.5; }
+}
+
+.blip-glow {
+  animation: blip-glow 2.4s ease-in-out infinite;
+}
+
+/* Status-indicator dot — used on cards (online/sync/etc) */
+@keyframes node-blink {
+  0%, 100% { opacity: 0.4; }
+  50%      { opacity: 1; }
+}
+
+.node-blink {
+  animation: node-blink 2s ease-in-out infinite;
+}
+
+/* Soft pulsing ring around badges */
+@keyframes sync-glow {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--color-accent) 50%, transparent); }
+  50%      { box-shadow: 0 0 0 8px color-mix(in oklab, var(--color-accent) 0%, transparent); }
+}
+
+.sync-glow {
+  animation: sync-glow 2.4s ease-in-out infinite;
+}
+
+/* Respect reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+  .radar-sweep,
+  .blip-pulse,
+  .blip-glow,
+  .sync-glow,
+  .node-blink {
+    animation: none;
+  }
+}
+
+/* Section label primitive — used everywhere a "~ section.name" appears */
+.section-label {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  letter-spacing: 0.02em;
+  color: var(--color-accent);
+  text-transform: lowercase;
+}
+
+/* Persona tabs — used by the use-cases section to switch between code samples.
+   The active tab uses the accent color; inactive tabs blend into the surface. */
+.persona-tab {
+  background-color: transparent;
+  color: var(--color-fg-muted);
+  border: 1px solid var(--color-border);
+  cursor: pointer;
+}
+.persona-tab:hover {
+  color: var(--color-fg);
+  border-color: var(--color-border-strong);
+}
+.persona-tab[data-active='true'] {
+  background-color: color-mix(in oklab, var(--color-accent) 12%, transparent);
+  color: var(--color-accent);
+  border-color: var(--color-accent-soft);
+}
+.persona-tab[data-active='true']:hover {
+  color: var(--color-accent);
+}
+
+/* Mono inline code (not blocks) */
+code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  background-color: var(--color-bg-elevated);
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  border: 1px solid var(--color-border);
+}

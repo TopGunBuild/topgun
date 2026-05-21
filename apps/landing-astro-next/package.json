@@ -1,0 +1,20 @@
+{
+  "name": "apps-landing-astro-next",
+  "type": "module",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "astro dev --port 4322",
+    "build": "astro build",
+    "preview": "astro preview --port 4322",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/sitemap": "^3.6.0",
+    "@fontsource-variable/inter": "^5",
+    "@fontsource-variable/jetbrains-mono": "^5",
+    "@tailwindcss/vite": "^4.1.17",
+    "astro": "^5.16.3",
+    "tailwindcss": "^4.1.17"
+  }
+}
