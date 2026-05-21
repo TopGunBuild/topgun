@@ -12,19 +12,21 @@ This app was scaffolded by `create-topgun-app`. It runs in offline-first local m
 5. Edit src/App.tsx and watch live reload
 ```
 
-## How to connect to a server
+## How to connect to a server (optional)
 
-By default, the app operates fully offline using IndexedDB for local storage. To sync data with a TopGun server:
+By default, this app stores all data locally in IndexedDB — no server, no internet, no setup. To sync data across devices or share state with other users:
 
-1. Start a TopGun server (see [topgun.build/docs/intro](https://topgun.build/docs/intro))
-2. In `src/App.tsx`, uncomment the `serverUrl` line:
+1. In `src/App.tsx`, uncomment the `serverUrl` line:
    ```ts
    const client = new TopGunClient({
-     storage: new IDBAdapter('topgun-app'),
+     storage: new IDBAdapter(),
      serverUrl: 'ws://localhost:8080',
    });
    ```
-3. Restart `pnpm dev`
+2. Point `serverUrl` at any running TopGun server. For a quick local server, see [topgun.build/docs/intro](https://topgun.build/docs/intro).
+3. Restart `pnpm dev`.
+
+The app keeps working offline either way — writes apply instantly, and any backlog syncs when the connection returns.
 
 ## Where to learn more
 
