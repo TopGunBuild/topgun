@@ -347,7 +347,7 @@ TopGun ensures your app feels native and responsive, regardless of network condi
     <FeatureItem
       emoji="💾"
       title="Offline Capability"
-      description="Data is persisted to IndexedDB (Browser) or SQLite (Mobile/Desktop). Your app works without internet."
+      description="Data is persisted to IndexedDB in the browser. Your app works without internet."
       color="purple"
     />
     <FeatureItem
@@ -619,14 +619,14 @@ Each request carries full client context -- `clientId`, `clientHlc`, and `syncMa
 
 ## Server Architecture
 
-While clients are "Local-First", TopGun is backed by a robust server cluster for persistence and scalability.
+While clients are "Local-First", TopGun is backed by a Rust server (single-node stable today; cluster mode in development).
 
     <h4 className="font-bold text-foreground">1. Gateway Node</h4>
     <p className="text-sm text-neutral-600 dark:text-neutral-300 mt-1">Handles WebSocket connections and routes traffic.</p>
     <h4 className="font-bold text-foreground">2. Partition Engine</h4>
     <p className="text-sm text-neutral-600 dark:text-neutral-300 mt-1">In-memory sharding logic that distributes data across the cluster.</p>
     <h4 className="font-bold text-foreground">3. Persistence Layer</h4>
-    <p className="text-sm text-neutral-600 dark:text-neutral-300 mt-1">Async write-behind to PostgreSQL (or in-memory for development).</p>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300 mt-1">Async write-behind to the configured backend (redb embedded default, PostgreSQL optional for production).</p>
     <h4 className="font-bold text-foreground">4. Pub/Sub Bus</h4>
     <p className="text-sm text-neutral-600 dark:text-neutral-300 mt-1">Broadcasts updates to other connected clients in real-time.</p>
 
@@ -714,9 +714,9 @@ When you delete data in TopGun, the record isn't immediately removed from storag
     </pre>
 
   <p className="text-sm text-purple-800 dark:text-purple-200">
-    <strong>Garbage Collection:</strong> Tombstones are periodically cleaned up via GC.
-    The server coordinates this process to ensure all replicas have seen the deletion
-    before permanently removing the tombstone. This prevents "resurrection" of deleted data.
+    <strong>Garbage Collection:</strong> Tombstones are eligible for cleanup once all replicas
+    have acknowledged the deletion. The <code>LWWMap.pruneTombstones()</code> method removes tombstones
+    older than a given threshold, preventing "resurrection" of deleted data.
   </p>
 
 ## Summary
@@ -2731,58 +2731,71 @@ How TopGun compares to other solutions in the ecosystem.
         <th className="py-4 px-4 text-center bg-brand-subtle/5 border-t border-x border-brand-subtle/10 rounded-t-lg">
           <span className="text-foreground font-bold text-lg">TopGun</span>
         </th>
-        <th className="py-4 px-4 text-center text-neutral-500 font-medium">ElectricSQL</th>
         <th className="py-4 px-4 text-center text-neutral-500 font-medium">Firebase</th>
+        <th className="py-4 px-4 text-center text-neutral-500 font-medium">Supabase Realtime</th>
+        <th className="py-4 px-4 text-center text-neutral-500 font-medium">Yjs</th>
         <th className="py-4 px-4 text-center text-neutral-500 font-medium">RxDB</th>
-        <th className="py-4 px-4 text-center text-neutral-500 font-medium">Replicache/Zero</th>
-        <th className="py-4 px-4 text-center text-neutral-500 font-medium">Durable Objects</th>
+        <th className="py-4 px-4 text-center text-neutral-500 font-medium">Replicache</th>
+        <th className="py-4 px-4 text-center text-neutral-500 font-medium">InstantDB</th>
       </tr>
     </thead>
     <tbody>
+      {/* TopGun claims sourced from packages/core/src/, packages/client/src/, packages/server-rust/src/ — verified 2026-05-21 */}
+      {/* Firebase claims sourced from https://firebase.google.com/docs/firestore — verified 2026-05-21 */}
+      {/* Supabase Realtime claims sourced from https://supabase.com/docs/guides/realtime — verified 2026-05-21 */}
+      {/* Yjs claims sourced from https://github.com/yjs/yjs — verified 2026-05-21 */}
+      {/* RxDB claims sourced from https://rxdb.info/replication.html — verified 2026-05-21 */}
+      {/* Replicache claims sourced from https://doc.replicache.dev/ — verified 2026-05-21 */}
+      {/* InstantDB claims sourced from https://www.instantdb.com/docs and https://github.com/instantdb/instant — verified 2026-05-21 */}
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Primary Model</td>
-        <td className="py-3 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10">Local-First IMDG</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Postgres Sync</td>
+        <td className="py-3 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10">Local-First CRDT grid</td>
         <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Cloud Doc DB</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Postgres pub/sub</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Collaborative CRDT framework</td>
         <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Local-First DB</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Client Auth Sync</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Edge Stateful</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Client-auth sync</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Local-first graph DB</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Offline Support</td>
         <td className="py-3 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10 text-green-600 dark:text-green-400">First-Class</td>
-        <td className="py-3 px-4 text-center text-green-600 dark:text-green-400">Good</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Good</td>
-        <td className="py-3 px-4 text-center text-green-600 dark:text-green-400">Excellent</td>
         <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Good</td>
         <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Limited</td>
+        <td className="py-3 px-4 text-center text-green-600 dark:text-green-400">Excellent</td>
+        <td className="py-3 px-4 text-center text-green-600 dark:text-green-400">Excellent</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Good</td>
+        <td className="py-3 px-4 text-center text-green-600 dark:text-green-400">First-Class</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Latency</td>
-        <td className="py-3 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10">~0ms (In-Memory)</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">~5-10ms (SQLite)</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Network Dependent</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">~5-10ms (IndexedDB)</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">~5-10ms</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Edge-fast</td>
+        <td className="py-3 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10">~0ms (in-memory)</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Network-dependent</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Network-dependent</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">~0ms (in-memory)</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">~5–10ms (IndexedDB)</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">~0ms local / server-validated</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">~0ms (in-memory)</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Backend Control</td>
-        <td className="py-3 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10">Self-Hosted Cluster</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Sync Service</td>
+        <td className="py-3 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10">Self-host (Apache-2.0)</td>
         <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Proprietary</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Self-host or Supabase Cloud</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">BYO transport / provider</td>
         <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">CouchDB / Custom</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Self-Host or Cloud</td>
-        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Cloudflare Only</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Self-host or Replicache Cloud</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">InstantDB Cloud (self-host community)</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Consistency</td>
         <td className="py-3 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10">HLC + CRDT</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Server-authoritative LWW</td>
         <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Server Authority</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">LWW (Server)</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">CRDT (Y-types)</td>
         <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Revision Trees</td>
         <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Server Authority</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Single-Object</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Server-authoritative with optimistic UI</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Distributed Locks</td>
@@ -2791,16 +2804,18 @@ How TopGun compares to other solutions in the ecosystem.
         <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Not Supported</td>
         <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Not Supported</td>
         <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Not Supported</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Per-Object</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Not Supported</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Not Supported</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">License</td>
-        <td className="py-3 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10">Open Source</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Open Source</td>
+        <td className="py-3 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10">Apache-2.0</td>
         <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Proprietary</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Open Source</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Open Source</td>
-        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Proprietary</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Apache-2.0</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">MIT</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Apache-2.0 / Proprietary (Premium)</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Apache-2.0</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">MIT (client) + proprietary cloud</td>
       </tr>
     </tbody>
   </table>
@@ -2812,33 +2827,39 @@ How TopGun compares to other solutions in the ecosystem.
 
 <ul className="space-y-4 text-neutral-600 dark:text-neutral-300 not-prose">
   <li className="flex gap-3">
-    <span className="mt-1 text-brand">vs ElectricSQL:</span>
+    <span className="mt-1 text-brand">vs Firebase:</span>
     <p>
-      TopGun operates entirely in-memory for zero-latency reads/writes, whereas ElectricSQL relies on SQLite access (5-10ms).
+      TopGun gives you ownership of your data. Run it on your own cloud, use your own backend, and never get locked into a proprietary platform.
     </p>
   </li>
   <li className="flex gap-3">
-    <span className="mt-1 text-brand">vs Firebase:</span>
+    <span className="mt-1 text-brand">vs Supabase Realtime:</span>
     <p>
-      TopGun gives you ownership of your data. Run it on your own cloud, use your own Postgres DB, and never get locked into a proprietary platform.
+      Supabase Realtime is Postgres pub/sub — great for server-driven events, but not designed for offline-first local writes. TopGun persists data locally in IndexedDB and syncs seamlessly when the network returns.
+    </p>
+  </li>
+  <li className="flex gap-3">
+    <span className="mt-1 text-brand">vs Yjs:</span>
+    <p>
+      Yjs is an excellent CRDT framework for collaborative text editing but requires you to bring your own transport, persistence, and server. TopGun ships with a full server, IndexedDB persistence, and a React SDK out of the box.
     </p>
   </li>
   <li className="flex gap-3">
     <span className="mt-1 text-brand">vs RxDB:</span>
     <p>
-      TopGun includes a powerful, sharded server cluster for handling massive datasets and complex server-side logic, rather than just replication.
+      RxDB is a mature local-first database with good offline support, but its writes go through IndexedDB (5–10ms). TopGun operates entirely in-memory for zero-latency reads/writes, with async write-behind to the configured backend.
     </p>
   </li>
   <li className="flex gap-3">
-    <span className="mt-1 text-brand">vs Replicache/Zero:</span>
+    <span className="mt-1 text-brand">vs Replicache:</span>
     <p>
-      TopGun uses CRDTs for automatic conflict resolution; mutations apply locally first and merge deterministically. Replicache/Zero is server-authoritative — mutations queue and the server validates them. Both projects are Apache-2.0 open source. Zero additionally offers a managed cloud (Cloud Zero); TopGun is self-host today, with managed on the roadmap.
+      TopGun uses CRDTs for automatic conflict resolution — mutations apply locally first and merge deterministically. Replicache is server-authoritative: mutations queue and the server validates them. Related: Zero (also from Rocicorp) offers a similar server-authoritative model with a managed cloud option. Both Replicache and TopGun are Apache-2.0 open source.
     </p>
   </li>
   <li className="flex gap-3">
-    <span className="mt-1 text-brand">vs Durable Objects:</span>
+    <span className="mt-1 text-brand">vs InstantDB:</span>
     <p>
-      TopGun runs on your own infrastructure with full control over data and deployment. Durable Objects are locked to the Cloudflare platform with per-object pricing. TopGun provides a complete data grid (clustering, partitioning, search), not just edge state.
+      InstantDB is a local-first graph database with an excellent developer experience. It currently runs on InstantDB Cloud (community-led self-hosting available via the open-source repo). TopGun is fully self-hostable under Apache-2.0 with no cloud dependency.
     </p>
   </li>
 </ul>
