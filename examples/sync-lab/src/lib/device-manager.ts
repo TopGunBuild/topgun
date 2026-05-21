@@ -43,7 +43,6 @@ export async function createDevice(deviceId: string, mapName: string): Promise<D
     storage,
     backoff: { maxRetries: Infinity },
   });
-  await client.start();
   client.setAuthToken(getDemoToken());
   const map = client.getMap<string, any>(mapName);
 
