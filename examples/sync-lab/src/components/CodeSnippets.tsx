@@ -4,10 +4,11 @@ const snippets = [
   {
     title: 'Create a client and map',
     code: `import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
 
 const client = new TopGunClient({
   serverUrl: 'ws://localhost:8080',
-  storage: new MemoryStorageAdapter(),
+  storage: new IDBAdapter(),
 });
 
 const todos = client.getMap('todos');`,
