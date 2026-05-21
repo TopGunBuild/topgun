@@ -106,3 +106,9 @@ topgun.runtime.json
 
 # Vector index descriptor (generated at runtime; path configurable via TOPGUN_VECTOR_INDEX_PATH)
 vector_indexes.json
+
+# Embedded redb backend file (generated at runtime by `pnpm start:server`)
+topgun.redb
+
+# Local scratch directories (not part of the release)
+my-test-review/
