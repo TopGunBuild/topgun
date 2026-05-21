@@ -1,10 +1,10 @@
 ---
 title: API Reference
-description: Detailed documentation for TopGun's client libraries, server configurations, and protocol specifications.
+description: Detailed documentation for TopGun's client libraries, server configuration, and protocol specifications.
 order: 20
 ---
 
-import { ChevronRight, BookOpen, Code2, Database, Globe, Server, Zap, Terminal } from 'lucide-react';
+import { ChevronRight, BookOpen, Bot, Code2, Database, Globe, Server, Zap } from 'lucide-react';
 import { ReferenceCard } from '../../../components/docs/ReferenceCard';
 
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
@@ -15,56 +15,56 @@ import { ReferenceCard } from '../../../components/docs/ReferenceCard';
 
 # API Reference
 
-Detailed documentation for TopGun's client libraries, server configurations, and protocol specifications.
+Detailed documentation for TopGun's client libraries, server configuration, and protocol specifications.
 
 <div className="grid md:grid-cols-2 gap-6 not-prose">
   <ReferenceCard
     href="/docs/reference/client"
     icon={Code2}
-    title="Client API"
-    description="@topgunbuild/client and @topgunbuild/react hooks API documentation."
-    linkText="View Client API"
+    title="Client"
+    description="TopGunClient — the imperative SDK surface that React hooks call into."
+    linkText="View Client"
   />
   <ReferenceCard
-    href="/docs/reference/data-structures"
+    href="/docs/reference/core"
     icon={Database}
-    title="Data Structures API"
-    description="Complete CRUD reference for LWWMap and ORMap data structures."
-    linkText="View Data Structures"
+    title="Core"
+    description="LWWMap, ORMap, HLC, and MerkleTree — the CRDT primitives shared by client and server."
+    linkText="View Core"
   />
   <ReferenceCard
-    href="/docs/reference/react-hooks"
+    href="/docs/reference/react"
     icon={Zap}
-    title="React Hooks"
-    description="Hooks for reactive data fetching and state management."
-    linkText="View React Hooks"
+    title="React"
+    description="Hooks for reactive data, mutations, sync state, and search."
+    linkText="View React"
+  />
+  <ReferenceCard
+    href="/docs/reference/adapters"
+    icon={BookOpen}
+    title="Adapters"
+    description="IDBAdapter, IStorageAdapter contract, and EncryptedStorageAdapter."
+    linkText="View Adapters"
   />
   <ReferenceCard
     href="/docs/reference/server"
     icon={Server}
-    title="Server API"
-    description="Configuration, deployment, and the Rust server embed API."
-    linkText="View Server API"
+    title="Server & CLI"
+    description="Rust server — CLI flags, environment variables, endpoints, and embed API."
+    linkText="View Server & CLI"
   />
   <ReferenceCard
-    href="/docs/reference/cli"
-    icon={Terminal}
-    title="CLI Reference"
-    description="Unified command-line interface for development, testing, and cluster management."
-    linkText="View CLI Reference"
-  />
-  <ReferenceCard
-    href="/docs/reference/adapter"
-    icon={BookOpen}
-    title="Adapters"
-    description="Storage adapters for IndexedDB and encrypted storage."
-    linkText="View Adapter API"
+    href="/docs/reference/mcp"
+    icon={Bot}
+    title="MCP"
+    description="Model Context Protocol tools that let AI assistants read and mutate TopGun data."
+    linkText="View MCP"
   />
   <ReferenceCard
     href="/docs/reference/protocol"
     icon={Globe}
     title="Protocol"
     description="Wire format and synchronization protocol specification."
-    linkText="View Protocol Spec"
+    linkText="View Protocol"
   />
 </div>

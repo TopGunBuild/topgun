@@ -12,6 +12,11 @@ export default defineConfig({
   trailingSlash: 'never',
   redirects: {
     '/docs/quick-start': '/docs/quickstart',
+    '/docs/reference/data-structures': '/docs/reference/core',
+    '/docs/reference/react-hooks': '/docs/reference/react',
+    '/docs/reference/adapter': '/docs/reference/adapters',
+    '/docs/reference/cli': '/docs/reference/server',
+    '/docs/guides/mcp-server': '/docs/reference/mcp',
   },
   build: {
     format: 'file',

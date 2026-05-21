@@ -202,7 +202,6 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                         <SubItem to="/docs/guides/cluster-replication" currentPath={currentPath}>Cluster Replication</SubItem>
                         <SubItem to="/docs/guides/observability" currentPath={currentPath}>Observability</SubItem>
                         <SubItem to="/docs/guides/performance" currentPath={currentPath}>Performance</SubItem>
-                        <SubItem to="/docs/guides/mcp-server" currentPath={currentPath}>MCP Server</SubItem>
                         <SubItem to="/docs/guides/troubleshooting" currentPath={currentPath}>Troubleshooting</SubItem>
                     </div>
                 )}
@@ -220,12 +219,12 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                 {expandedSections.reference && (
                     <div className="mt-1 space-y-1">
                         <SubItem to="/docs/reference" currentPath={currentPath}>Overview</SubItem>
-                        <SubItem to="/docs/reference/client" currentPath={currentPath}>Client API</SubItem>
-                        <SubItem to="/docs/reference/data-structures" currentPath={currentPath}>Data Structures API</SubItem>
-                        <SubItem to="/docs/reference/server" currentPath={currentPath}>Server API</SubItem>
-                        <SubItem to="/docs/reference/cli" currentPath={currentPath}>CLI Reference</SubItem>
-                        <SubItem to="/docs/reference/adapter" currentPath={currentPath}>Adapter API</SubItem>
-                        <SubItem to="/docs/reference/react-hooks" currentPath={currentPath}>React Hooks</SubItem>
+                        <SubItem to="/docs/reference/client" currentPath={currentPath}>Client</SubItem>
+                        <SubItem to="/docs/reference/core" currentPath={currentPath}>Core</SubItem>
+                        <SubItem to="/docs/reference/react" currentPath={currentPath}>React</SubItem>
+                        <SubItem to="/docs/reference/adapters" currentPath={currentPath}>Adapters</SubItem>
+                        <SubItem to="/docs/reference/server" currentPath={currentPath}>Server & CLI</SubItem>
+                        <SubItem to="/docs/reference/mcp" currentPath={currentPath}>MCP</SubItem>
                         <SubItem to="/docs/reference/protocol" currentPath={currentPath}>Protocol</SubItem>
                     </div>
                 )}
