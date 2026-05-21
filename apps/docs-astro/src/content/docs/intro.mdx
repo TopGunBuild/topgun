@@ -1,6 +1,6 @@
 ---
-title: Introduction
-description: TopGun is a next-generation data platform designed for the modern "Local-First" web.
+title: Welcome
+description: Build real-time apps that work offline — instant local reads/writes, automatic sync when online, no conflict handling required.
 order: 1
 ---
 
@@ -12,54 +12,33 @@ import { ChevronRight } from 'lucide-react';
   <ChevronRight className="w-4 h-4" />
   <span>Get Started</span>
   <ChevronRight className="w-4 h-4" />
-  <span className="text-foreground font-medium">Introduction</span>
+  <span className="text-foreground font-medium">Welcome</span>
 </div>
 
-# Introduction
+# Welcome
 
-TopGun is a next-generation data platform designed for the modern "Local-First" web. 
-It bridges the gap between scalable <strong className="text-foreground">In-Memory Data Grids (IMDG)</strong> like Hazelcast 
-and <strong className="text-foreground">Offline-First Client Databases</strong> like RxDB.
-It allows you to build applications that are instant, reliable, and collaborative by default.
-Try the [live demo](https://demo.topgun.build/) to see real-time CRDT sync in action.
+Build real-time apps that work offline. Local writes are instant and survive disconnects — reconnecting clients sync automatically without you writing conflict-handling code. Try the [live demo](https://demo.topgun.build/) to see it in action, or jump straight to the [Quickstart](/docs/quickstart) to scaffold a working app in under 5 minutes.
 
-## Quick start
+## What you can build
 
-### Drop-in (5 minutes)
+TopGun is well-suited for collaborative tools, offline-first mobile and desktop web apps, local-first developer tools, and any app where users expect data to survive a flaky connection. You scaffold a React project, drop in a few hooks, and get instant local reads/writes with background sync — no custom sync logic, no conflict resolution ceremony.
 
-Scaffold a working app:
+## When to use TopGun
 
-```bash
-npx create-topgun-app my-app
-cd my-app && pnpm install && pnpm dev
-```
+- **Real-time collaboration** — shared docs, whiteboards, live editing
+- **Offline-first web and mobile apps** — todos, notes, forms that keep working without a signal
+- **Local-first developer tools** — IDEs, CLI tools, dashboards that feel instant
+- **Multi-tab / multi-device sync** — changes in one tab appear in another automatically
+- **AI-assisted apps** — agents can read and mutate live data via the built-in MCP server
 
-In a separate terminal, boot the single-node backend:
+## When not to use TopGun
 
-```bash
-pnpm start:server
-```
-
-The server runs on `ws://localhost:8080` with embedded storage at `./topgun.redb` — writes survive restart. No Postgres, no Docker required. Run a second `pnpm start:server` only after stopping the first; redb's lockfile prevents two processes from opening the same file at once.
-
-For users who prefer containers, `docker compose up server` works too — it brings up Postgres alongside the server in one command.
-
-### Production
-
-Production deployments need Postgres and explicit auth. TopGun v2 is **single-node stable**; multi-node Raft consensus is on the [roadmap](/docs/roadmap).
-
-| Step | Status | Notes |
-|------|--------|-------|
-| Postgres DSN | Required | Set `DATABASE_URL`; schema applied on first boot |
-| Server env vars | Required | `JWT_SECRET`, `TOPGUN_NO_AUTH=0`; ACL via `/docs/security` |
-| Single-node deploy | Stable | `docker compose up --build` or `cargo run --bin test-server --release` |
-| Multi-node cluster | Roadmap | Raft consensus pending — see [/docs/roadmap](/docs/roadmap) |
-| Backup/restore | Planned | Use `pg_dump` today; operational tooling tracked in TODO-139 |
-| Monitoring hooks | Planned | Prometheus + structured-log hooks pending |
+- Pure server-side analytical or reporting workloads where all reads/writes happen server-side
+- Single-writer admin tools where local-first overhead and offline persistence add no value
+- Scenarios requiring strong cross-document ACID transactions across many maps
+- Apps where all clients are always online and eventual consistency is an unacceptable trade-off
 
 ## Features
-
-TopGun aims to be the standard for local-first state management. It provides a robust sync engine out of the box.
 
 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-2 gap-4 mb-16">
   <FeatureGridCard 
@@ -71,20 +50,12 @@ TopGun aims to be the standard for local-first state management. It provides a r
     desc="The client is the replica. Reads/Writes are instant against local memory." 
   />
   <FeatureGridCard 
-    title="Conflict Resolution" 
-    desc="Automatic convergence using Hybrid Logical Clocks (HLC) and CRDTs." 
-  />
-  <FeatureGridCard 
     title="Offline Capable" 
-    desc="Persists to IndexedDB or SQLite. Queues operations and syncs when online." 
-  />
-  <FeatureGridCard 
-    title="Real-Time Sync" 
-    desc="Push-based architecture via WebSockets. Merkle Trees ensure bandwidth efficiency." 
+    desc="Persists to IndexedDB. Queues operations and syncs when online." 
   />
   <FeatureGridCard 
     title="Scalable Backend" 
-    desc="Server cluster handles partitioning, authority, and durable storage on PostgreSQL." 
+    desc="Server cluster handles partitioning, authority, and durable storage." 
   />
   <FeatureGridCard 
     title="Agent-Operable Backend" 
@@ -93,10 +64,10 @@ TopGun aims to be the standard for local-first state management. It provides a r
 </div>
 
 <div className="flex justify-end pt-10 mt-10 border-t border-card-border">
-    <a href="/docs/comparison" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <a href="/docs/quickstart" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Next Page</span>
     <div className="flex items-center gap-2 text-foreground font-semibold whitespace-nowrap">
-        Comparison <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+        Quickstart <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
     </div>
     </a>
 </div>
