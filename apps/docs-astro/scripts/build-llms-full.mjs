@@ -44,7 +44,7 @@ const OUTPUT_PATH = join(DOCS_ROOT, 'public', 'llms-full.txt');
 // (deployment/observability/performance — irrelevant to "build a todo app").
 const ALLOWLIST = [
   'intro.mdx',
-  'quick-start.mdx',
+  'quickstart.mdx',
   'installation.mdx',
   'concepts/index.mdx',
   'concepts/local-first.mdx',

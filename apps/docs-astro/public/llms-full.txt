@@ -8,61 +8,40 @@
 
 ---
 
-# Introduction
+# Welcome
 
-> TopGun is a next-generation data platform designed for the modern "Local-First" web.
+> Build real-time apps that work offline — instant local reads/writes, automatic sync when online, no conflict handling required.
 
 
 
   <span className="text-foreground font-medium">Docs</span>
   <span>Get Started</span>
-  <span className="text-foreground font-medium">Introduction</span>
+  <span className="text-foreground font-medium">Welcome</span>
 
-# Introduction
+# Welcome
 
-TopGun is a next-generation data platform designed for the modern "Local-First" web. 
-It bridges the gap between scalable <strong className="text-foreground">In-Memory Data Grids (IMDG)</strong> like Hazelcast 
-and <strong className="text-foreground">Offline-First Client Databases</strong> like RxDB.
-It allows you to build applications that are instant, reliable, and collaborative by default.
-Try the [live demo](https://demo.topgun.build/) to see real-time CRDT sync in action.
+Build real-time apps that work offline. Local writes are instant and survive disconnects — reconnecting clients sync automatically without you writing conflict-handling code. Try the [live demo](https://demo.topgun.build/) to see it in action, or jump straight to the [Quickstart](/docs/quickstart) to scaffold a working app in under 5 minutes.
 
-## Quick start
+## What you can build
 
-### Drop-in (5 minutes)
+TopGun is well-suited for collaborative tools, offline-first mobile and desktop web apps, local-first developer tools, and any app where users expect data to survive a flaky connection. You scaffold a React project, drop in a few hooks, and get instant local reads/writes with background sync — no custom sync logic, no conflict resolution ceremony.
 
-Scaffold a working app:
+## When to use TopGun
 
-```bash
-npx create-topgun-app my-app
-cd my-app && pnpm install && pnpm dev
-```
+- **Real-time collaboration** — shared docs, whiteboards, live editing
+- **Offline-first web and mobile apps** — todos, notes, forms that keep working without a signal
+- **Local-first developer tools** — IDEs, CLI tools, dashboards that feel instant
+- **Multi-tab / multi-device sync** — changes in one tab appear in another automatically
+- **AI-assisted apps** — agents can read and mutate live data via the built-in MCP server
 
-In a separate terminal, boot the single-node backend:
+## When not to use TopGun
 
-```bash
-pnpm start:server
-```
-
-The server runs on `ws://localhost:8080` with embedded storage at `./topgun.redb` — writes survive restart. No Postgres, no Docker required. Run a second `pnpm start:server` only after stopping the first; redb's lockfile prevents two processes from opening the same file at once.
-
-For users who prefer containers, `docker compose up server` works too — it brings up Postgres alongside the server in one command.
-
-### Production
-
-Production deployments need Postgres and explicit auth. TopGun v2 is **single-node stable**; multi-node Raft consensus is on the [roadmap](/docs/roadmap).
-
-| Step | Status | Notes |
-|------|--------|-------|
-| Postgres DSN | Required | Set `DATABASE_URL`; schema applied on first boot |
-| Server env vars | Required | `JWT_SECRET`, `TOPGUN_NO_AUTH=0`; ACL via `/docs/security` |
-| Single-node deploy | Stable | `docker compose up --build` or `cargo run --bin test-server --release` |
-| Multi-node cluster | Roadmap | Raft consensus pending — see [/docs/roadmap](/docs/roadmap) |
-| Backup/restore | Planned | Use `pg_dump` today; operational tooling tracked in TODO-139 |
-| Monitoring hooks | Planned | Prometheus + structured-log hooks pending |
+- Pure server-side analytical or reporting workloads where all reads/writes happen server-side
+- Single-writer admin tools where local-first overhead and offline persistence add no value
+- Scenarios requiring strong cross-document ACID transactions across many maps
+- Apps where all clients are always online and eventual consistency is an unacceptable trade-off
 
 ## Features
-
-TopGun aims to be the standard for local-first state management. It provides a robust sync engine out of the box.
 
   <FeatureGridCard 
     title="Framework Agnostic" 
@@ -73,38 +52,29 @@ TopGun aims to be the standard for local-first state management. It provides a r
     desc="The client is the replica. Reads/Writes are instant against local memory." 
   />
   <FeatureGridCard 
-    title="Conflict Resolution" 
-    desc="Automatic convergence using Hybrid Logical Clocks (HLC) and CRDTs." 
-  />
-  <FeatureGridCard 
     title="Offline Capable" 
-    desc="Persists to IndexedDB or SQLite. Queues operations and syncs when online." 
-  />
-  <FeatureGridCard 
-    title="Real-Time Sync" 
-    desc="Push-based architecture via WebSockets. Merkle Trees ensure bandwidth efficiency." 
+    desc="Persists to IndexedDB. Queues operations and syncs when online." 
   />
   <FeatureGridCard 
     title="Scalable Backend" 
-    desc="Server cluster handles partitioning, authority, and durable storage on PostgreSQL." 
+    desc="Server cluster handles partitioning, authority, and durable storage." 
   />
   <FeatureGridCard 
     title="Agent-Operable Backend" 
     desc="Built-in MCP server lets Claude, Cursor, and other AI agents query and mutate your live data. See the [AI Builder guide](/docs/guides/building-with-ai) to get started." 
   />
 
-    <a href="/docs/comparison" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <a href="/docs/quickstart" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Next Page</span>
-        Comparison <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+        Quickstart <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
     </a>
 
 
 ---
 
-# Quick Start
+# Quickstart
 
-> Build your first Local-First application with TopGun in less than 5 minutes.
-
+> Build a local-first React app in under 5 minutes — works offline by default.
 
 
 
@@ -113,11 +83,11 @@ TopGun aims to be the standard for local-first state management. It provides a r
 
   <span className="text-foreground font-medium">Docs</span>
   <span>Get Started</span>
-  <span className="text-foreground font-medium">Quick Start</span>
+  <span className="text-foreground font-medium">Quickstart</span>
 
-# Quick Start Guide
+# Quickstart
 
-Build your first Local-First application with TopGun in less than 5 minutes.
+Build your first local-first application with TopGun in under 5 minutes. No server required to start — the app works offline by default and syncs when you add one.
 Want to see it running first? Try the [live demo](https://demo.topgun.build/).
 
 ## 1. Installation
@@ -130,23 +100,7 @@ Want to see it running first? Try the [live demo](https://demo.topgun.build/).
     code="npm install @topgunbuild/client @topgunbuild/adapters @topgunbuild/react zod"
   />
 
-## 2. Start the Server
-
-  <p className="text-neutral-600 dark:text-neutral-300 mb-4">
-    Start the TopGun server locally. This boots a zero-config server with embedded storage.
-  </p>
-  <CodeBlock
-    title="terminal"
-    language="bash"
-    code={serverStartCode}
-  />
-
-> **Note:** Today `pnpm start:server` compiles the server from source and requires the Rust toolchain. A zero-install `npx @topgunbuild/server` binary distribution is on the roadmap (see TODO-365) and will replace this step.
-
-  <h3 className="text-lg font-semibold text-brand mb-2 !mt-0">Server Configuration</h3>
-  <span className="text-brand">The TopGun server is configured via environment variables. For the full configuration reference including TLS, clustering, and the Rust embed API, see the <a href="/docs/reference/server" className="underline">Server API reference</a>. For a gradual adoption approach, see the <a href="/docs/guides/adoption-path" className="underline">Adoption Path guide</a>.</span>
-
-## 3. The Canonical App
+## 2. The Canonical App
 
 Hook-first is the simple way to read and write data with React. One read hook (`useQuery`) gives you the list and re-renders when data changes. One write hook (`useMutation`) adds new items. One type-safe `Todo` shape ties them together. The whole loop fits in 24 lines, and your list shows up instantly then keeps itself in sync as data changes.
 
@@ -162,25 +116,25 @@ Hook-first is the simple way to read and write data with React. One read hook (`
     code={canonicalSchemaCode}
   />
 
-## 4. How It Works
+## 3. How It Works
 
 Here is a step-by-step breakdown of the canonical snippet above:
 
 **Lines 1–4: Imports.** Three packages installed in step 1 (`@topgunbuild/react`, `@topgunbuild/client`, `@topgunbuild/adapters`) plus the `Todo` type derived from your schema.
 
-**Lines 6–9: Client init.** `TopGunClient` takes a `serverUrl` for the WebSocket connection and a `storage` adapter for local persistence. `IDBAdapter` writes to IndexedDB so your data survives page reloads. No explicit `start()` call is needed — the adapter initializes lazily in the background and queues any operations issued before it's ready.
+**Lines 6–9: Client init.** `TopGunClient` takes a `storage` adapter for local persistence. `IDBAdapter` writes to IndexedDB so your data survives page reloads. No explicit `start()` call is needed in module-level code — the adapter initializes lazily in the background. Uncomment `serverUrl` to connect to a sync server.
 
 **Line 12: Read hook.** `useQuery<Todo>('todos')` subscribes to the `todos` map. The component re-renders automatically whenever data changes locally or arrives from the server.
 
-**Line 13: Write hook.** `useMutation<Todo>('todos')` returns `{ create, update, remove }`. Call `create(key, value)` to add a new item. The write lands in memory immediately (zero-latency) and syncs to the server in the background.
+**Line 13: Write hook.** `useMutation<Todo>('todos')` returns `{ create, update, remove }`. Call `create(key, value)` to add a new item. The write lands in memory immediately (zero-latency) and syncs to the server in the background when a server is configured.
 
-**Line 14: Add function.** A plain function that calls `create` with a random UUID key and the new todo shape. No loading state, no async/await in the component — the write is always instant.
+**Line 14: Add function.** A plain function that calls `create` with a timestamp-based key and the new todo shape. No loading state, no async/await in the component — the write is always instant.
 
 **Lines 15–20: Render.** Standard React JSX. `todos.map(t => ...)` iterates the live list. Use `t._key` as the React key — this is the string key you passed to `create`, exposed on every query result item.
 
 **Line 23: Provider.** `TopGunProvider` makes the client available to all hooks in the tree via React context.
 
-## End-to-End Types
+## 4. End-to-End Types
 
 No manual `interface` needed — the type flows from the Zod schema through the hook generic:
 
@@ -196,7 +150,7 @@ const { data: todos = [] } = useQuery<Todo>('todos');
 
 `z.infer<typeof TodoSchema>` produces `{ text: string; done: boolean }`. Pass that as the generic to `useQuery<Todo>` and TypeScript knows the shape of every item in `todos` — autocomplete works, typos are caught at compile time, and you never have to keep a manual interface in sync with your schema.
 
-## Imperative API (advanced)
+## 5. Imperative API (advanced)
 
 Use when outside React — service workers, Node scripts, non-component utilities, or when you need direct map access without hooks.
 
@@ -214,37 +168,36 @@ Use when outside React — service workers, Node scripts, non-component utilitie
   <h3 className="text-lg font-semibold text-brand mb-2 !mt-0">Persistence</h3>
   <span className="text-brand">By using <code className="px-1.5 py-0.5 rounded bg-brand-subtle/10 text-sm">IDBAdapter</code>, your data is automatically saved to IndexedDB. Even if the user refreshes the page or closes the browser, the state is preserved locally.</span>
 
-  <h3 className="text-lg font-semibold text-yellow-800 dark:text-yellow-300 mb-2 !mt-0">Production: Use Secure WebSocket (WSS)</h3>
-  <span className="text-yellow-700 dark:text-yellow-400">In production, always use <code className="px-1.5 py-0.5 rounded bg-yellow-100 dark:bg-yellow-800/50 text-sm">wss://</code> instead of <code className="px-1.5 py-0.5 rounded bg-yellow-100 dark:bg-yellow-800/50 text-sm">ws://</code> to encrypt data in transit. See the <a href="/docs/guides/security" className="underline">Security Guide</a> for TLS configuration.</span>
-
   <h3 className="text-lg font-semibold text-purple-800 dark:text-purple-300 mb-2 !mt-0">Optional: Encrypt Local Storage</h3>
   <span className="text-purple-700 dark:text-purple-400">For sensitive data, wrap your adapter with <code className="px-1.5 py-0.5 rounded bg-purple-100 dark:bg-purple-800/50 text-sm">EncryptedStorageAdapter</code> to encrypt data at rest. See the <a href="/docs/guides/security#client-side-encryption-data-at-rest" className="underline">Client-Side Encryption section</a> in the Security Guide.</span>
 
   <h3 className="text-lg font-semibold text-purple-800 dark:text-purple-300 mb-2 !mt-0">Building with an AI Agent?</h3>
   <span className="text-purple-700 dark:text-purple-400">See the <a href="/docs/guides/building-with-ai" className="underline">AI Builder guide</a> for prompt templates, agent setup, and live database access via MCP.</span>
 
-## Next Steps
+## 6. Add real-time sync (optional)
 
-  <a href="/docs/concepts" className="block p-6 border border-card-border rounded-lg hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <h3 className="font-semibold text-foreground mb-2">Core Concepts</h3>
-    <p className="text-sm text-neutral-600 dark:text-neutral-300">
-      Learn about Local-First, CRDTs, and how TopGun achieves eventual consistency.
-    </p>
-  </a>
-  <a href="/docs/guides" className="block p-6 border border-card-border rounded-lg hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <h3 className="font-semibold text-foreground mb-2">Guides</h3>
-    <p className="text-sm text-neutral-600 dark:text-neutral-300">
-      Deep dive into specific topics like Authentication, Encryption, and patterns.
-    </p>
-  </a>
+By default the app runs in local-only mode — data persists in IndexedDB and works offline without a server. To add real-time sync across browsers and devices:
 
-  <a href="/docs/installation" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+1. Uncomment the `serverUrl` line in the client init above.
+2. Start the TopGun server in a second terminal:
+
+```bash
+pnpm start:server
+```
+
+The server boots in seconds with embedded storage (`./topgun.redb`) — no Postgres, no Docker required.
+
+3. Open your app in two browser tabs and watch changes sync in real time.
+
+In production, always use `wss://` instead of `ws://` to encrypt data in transit. See the [Security Guide](/docs/guides/security) for TLS configuration.
+
+  <a href="/docs/intro" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Previous</span>
-      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Installation
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Welcome
   </a>
-  <a href="/docs/concepts" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+  <a href="/docs/tutorials/todo-app" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Next Section</span>
-      Concepts <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+      Tutorial: Real-time Todo <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
   </a>
 
 
@@ -307,9 +260,9 @@ PORT=8080 cargo run --bin test-server --release`}
     <span className="text-xs text-neutral-500">Previous</span>
       <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Comparison
   </a>
-  <a href="/docs/quick-start" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+  <a href="/docs/quickstart" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Next Section</span>
-      Quick Start <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+      Quickstart <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
   </a>
 
 

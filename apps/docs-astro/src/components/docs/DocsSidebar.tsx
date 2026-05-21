@@ -114,10 +114,10 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                 </SidebarItem>
                 {expandedSections.started && (
                     <div className="mt-1 space-y-1">
-                        <SubItem to="/docs/intro" currentPath={currentPath}>Introduction</SubItem>
+                        <SubItem to="/docs/intro" currentPath={currentPath}>Welcome</SubItem>
                         <SubItem to="/docs/comparison" currentPath={currentPath}>Comparison</SubItem>
                         <SubItem to="/docs/installation" currentPath={currentPath}>Installation</SubItem>
-                        <SubItem to="/docs/quick-start" currentPath={currentPath}>Quick Start</SubItem>
+                        <SubItem to="/docs/quickstart" currentPath={currentPath}>Quickstart</SubItem>
                         <SubItem to="/docs/faq" currentPath={currentPath}>FAQ</SubItem>
                         <SubItem to="/docs/roadmap" currentPath={currentPath}>Roadmap</SubItem>
                     </div>
