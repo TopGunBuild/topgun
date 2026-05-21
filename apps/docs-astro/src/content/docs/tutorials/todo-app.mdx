@@ -285,12 +285,12 @@ Create `src/TodoList.tsx`:
 
 ```tsx
 import { useQuery } from '@topgunbuild/react';
-import { TodoItem } from './TodoItem';
-import type { TodoItem as TodoItemType } from './types';
+import { TodoItem as TodoItemCard } from './TodoItem';
+import type { TodoItem } from './types';
 
 export function TodoList() {
   // Subscribe to the 'todos' map — re-renders automatically on changes
-  const { data: todos = [] } = useQuery<TodoItemType>('todos');
+  const { data: todos = [] } = useQuery<TodoItem>('todos');
 
   if (todos.length === 0) {
     return (
@@ -303,14 +303,14 @@ export function TodoList() {
   return (
     <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
       {todos.map((item) => (
-        <TodoItem key={item._key} item={item} />
+        <TodoItemCard key={item._key} item={item} />
       ))}
     </ul>
   );
 }
 ```
 
-`useQuery<TodoItemType>('todos')` returns a flat array that re-renders whenever:
+`useQuery<TodoItem>('todos')` returns a flat array that re-renders whenever:
 - You add, edit, or delete a todo locally
 - Another browser tab modifies a todo (when sync is enabled)
 - The server sends updates from other clients (when connected)
