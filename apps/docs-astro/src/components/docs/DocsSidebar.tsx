@@ -154,8 +154,8 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                     <div className="mt-1 space-y-1">
                         <SubItem to="/docs/concepts" currentPath={currentPath}>Overview</SubItem>
                         <SubItem to="/docs/concepts/local-first" currentPath={currentPath}>Local-First</SubItem>
-                        <SubItem to="/docs/concepts/crdt-hlc" currentPath={currentPath}>CRDTs & Time</SubItem>
-                        <SubItem to="/docs/concepts/sync-protocol" currentPath={currentPath}>Sync Protocol</SubItem>
+                        <SubItem to="/docs/concepts/crdt-hlc" currentPath={currentPath}>CRDTs in TopGun</SubItem>
+                        <SubItem to="/docs/concepts/sync-protocol" currentPath={currentPath}>Sync, conflicts, HLC</SubItem>
                         <SubItem to="/docs/concepts/data-structures" currentPath={currentPath}>Data Structures</SubItem>
                     </div>
                 )}
