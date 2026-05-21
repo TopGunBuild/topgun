@@ -1,6 +1,6 @@
 {
   "name": "create-topgun-app",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "description": "Scaffold a new TopGun offline-first app in seconds.",
   "type": "module",
   "private": false,
