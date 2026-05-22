@@ -17,6 +17,9 @@ export default defineConfig({
     '/docs/reference/adapter': '/docs/reference/adapters',
     '/docs/reference/cli': '/docs/reference/server',
     '/docs/guides/mcp-server': '/docs/reference/mcp',
+    '/docs/guides/deployment': '/docs/deploy/self-host',
+    '/docs/guides/postgresql': '/docs/deploy/storage-backends',
+    '/docs/guides/performance': '/docs/deploy/performance',
   },
   build: {
     format: 'file',

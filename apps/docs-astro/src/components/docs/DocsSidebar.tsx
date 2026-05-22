@@ -8,6 +8,7 @@ import {
     Database,
     BookOpen,
     LifeBuoy,
+    Cloud,
 } from 'lucide-react';
 
 const SidebarItem = ({
@@ -55,7 +56,7 @@ const SubItem = ({ to, children, currentPath }: { to: string; children: React.Re
     );
 };
 
-type SectionKey = 'started' | 'tutorials' | 'concepts' | 'guides' | 'reference' | 'resources';
+type SectionKey = 'started' | 'tutorials' | 'concepts' | 'guides' | 'deploy' | 'reference' | 'resources';
 
 // Helper to determine initial expanded section from path
 const getInitialExpandedSection = (pathname: string): Record<SectionKey, boolean> => {
@@ -64,6 +65,7 @@ const getInitialExpandedSection = (pathname: string): Record<SectionKey, boolean
         tutorials: false,
         concepts: false,
         guides: false,
+        deploy: false,
         reference: false,
         resources: false,
     };
@@ -74,6 +76,8 @@ const getInitialExpandedSection = (pathname: string): Record<SectionKey, boolean
         sections.concepts = true;
     } else if (pathname.startsWith('/docs/guides/') || pathname === '/docs/guides') {
         sections.guides = true;
+    } else if (pathname.startsWith('/docs/deploy/') || pathname === '/docs/deploy') {
+        sections.deploy = true;
     } else if (pathname.startsWith('/docs/reference/') || pathname === '/docs/reference') {
         sections.reference = true;
     } else if (pathname === '/docs/faq') {
@@ -197,12 +201,30 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                         <SubItem to="/docs/guides/interceptors" currentPath={currentPath}>Interceptors</SubItem>
                         <SubItem to="/docs/guides/distributed-locks" currentPath={currentPath}>Distributed Locks</SubItem>
                         <SubItem to="/docs/guides/adoption-path" currentPath={currentPath}>Adoption Path</SubItem>
-                        <SubItem to="/docs/guides/deployment" currentPath={currentPath}>Deployment</SubItem>
                         <SubItem to="/docs/guides/cluster-client" currentPath={currentPath}>Cluster Client</SubItem>
                         <SubItem to="/docs/guides/cluster-replication" currentPath={currentPath}>Cluster Replication</SubItem>
                         <SubItem to="/docs/guides/observability" currentPath={currentPath}>Observability</SubItem>
-                        <SubItem to="/docs/guides/performance" currentPath={currentPath}>Performance</SubItem>
                         <SubItem to="/docs/guides/troubleshooting" currentPath={currentPath}>Troubleshooting</SubItem>
+                    </div>
+                )}
+            </div>
+
+            <div className="mb-4">
+                <SidebarItem
+                    icon={Cloud}
+                    hasSub
+                    expanded={expandedSections.deploy}
+                    onClick={() => toggleSection('deploy')}
+                >
+                    Deploy
+                </SidebarItem>
+                {expandedSections.deploy && (
+                    <div className="mt-1 space-y-1">
+                        <SubItem to="/docs/deploy" currentPath={currentPath}>Overview</SubItem>
+                        <SubItem to="/docs/deploy/self-host" currentPath={currentPath}>Self-host</SubItem>
+                        <SubItem to="/docs/deploy/storage-backends" currentPath={currentPath}>Storage backends</SubItem>
+                        <SubItem to="/docs/deploy/performance" currentPath={currentPath}>Performance</SubItem>
+                        <SubItem to="/docs/deploy/configuration" currentPath={currentPath}>Configuration</SubItem>
                     </div>
                 )}
             </div>

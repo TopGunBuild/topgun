@@ -13,7 +13,7 @@ import { Server } from 'lucide-react';
 
 The TopGun server is a Rust binary built on [axum](https://docs.rs/axum) and [tokio](https://tokio.rs). It manages client WebSocket connections, CRDT synchronization, Merkle delta sync, full-text and vector search, clustering, and durable storage (embedded redb by default, optional PostgreSQL for production).
 
-This page documents the user-facing surface: how to run it, what flags and environment variables it reads, the HTTP and WebSocket endpoints, and the Rust embed API for callers that want to host the server in-process.
+This page documents the user-facing surface: how to run it, what flags and environment variables it reads, the HTTP and WebSocket endpoints, and the Rust embed API for callers that want to host the server in-process. For operator-oriented setup with Docker Compose, Kubernetes, and tuning advice, see [Deploy](/docs/deploy).
 
 ## Running the server
 

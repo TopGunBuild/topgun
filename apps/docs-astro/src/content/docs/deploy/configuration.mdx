@@ -1,0 +1,125 @@
+---
+title: Configuration
+description: Operator-oriented configuration cheatsheet — env file examples, defaults rationale, tuning checklist.
+order: 54
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight } from 'lucide-react';
+
+export const devEnvCode = `# Minimal .env for local development (redb default, no auth required)
+RUST_LOG=topgun_server=info
+# STORAGE_BACKEND defaults to redb — omit for zero-config local dev
+# TOPGUN_REDB_PATH defaults to ./topgun.redb — omit to use cwd`;
+
+export const productionEnvCode = `# Production .env — PostgreSQL, auth enabled, memory tuned for 4 GB instance
+RUST_LOG=topgun_server=info
+TOPGUN_LOG_FORMAT=json
+
+# Storage
+STORAGE_BACKEND=postgres
+DATABASE_URL=postgres://topgun_user:secret@db-host:5432/topgun
+
+# Auth (required in production — never disable)
+JWT_SECRET=your-production-secret-min-32-chars
+
+# Admin UI credentials
+TOPGUN_ADMIN_USERNAME=admin
+TOPGUN_ADMIN_PASSWORD=your-secure-admin-password
+
+# Memory ceiling — set to 80% of instance RAM
+# Example: 4 GB instance → 3200 MB
+TOPGUN_MAX_RAM_MB=3200
+TOPGUN_EVICTION_HIGH_PCT=85
+TOPGUN_EVICTION_LOW_PCT=70
+TOPGUN_EVICTION_INTERVAL_MS=1000
+
+# Write-behind buffer
+TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS=1000
+TOPGUN_WRITEBEHIND_BATCH_SIZE=100
+TOPGUN_WRITEBEHIND_CAPACITY=10000
+
+# Bind address (explicit for containers)
+TOPGUN_BIND_ADDR=0.0.0.0`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/deploy" className="hover:text-foreground transition-colors">Deploy</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Configuration</span>
+</div>
+
+# Configuration
+
+Operator-oriented configuration cheatsheet. For the complete variable list with source-file references and consumer paths, see [Server & CLI reference](/docs/reference/server) — that page is the canonical source of truth. This page provides `.env` examples, defaults rationale, and a pre-production checklist.
+
+## Where to look up every variable
+
+[Server & CLI reference → Environment variables](/docs/reference/server) lists all 22 variables the binary reads, with source-file line numbers and consumer paths. Every variable documented on the Deploy pages traces back to that table. Do not rely on memory — check the reference page.
+
+## Minimal `.env` (development)
+
+<div className="not-prose">
+  <CodeBlock title=".env (development)" language="bash" code={devEnvCode} />
+</div>
+
+Zero configuration needed for local development: `pnpm start:server` uses redb by default, binds to `0.0.0.0:8080`, and does not require `JWT_SECRET` (auth is skipped when the variable is absent). Add `TOPGUN_NO_AUTH=true` if you want to disable auth checks explicitly (test and demo use only — do not enable in production).
+
+## Production `.env`
+
+<div className="not-prose">
+  <CodeBlock title=".env (production)" language="bash" code={productionEnvCode} />
+</div>
+
+Copy this file, fill in your secrets, and mount it into your container or pass it via your deployment system's secret management.
+
+## Defaults rationale {#defaults-rationale}
+
+The server emits its effective configuration at startup (`tracing::info!`) so operators can confirm the active values without reading source.
+
+**Why 1024 MB `TOPGUN_MAX_RAM_MB`?**
+Conservative ceiling for a fresh demo server. At 1 GB, the cache holds tens of millions of CRDT records before eviction engages. For a production instance, set this to ~80% of available RAM.
+
+**Why 85 / 70 water marks?**
+The 15-percentage-point gap between `TOPGUN_EVICTION_HIGH_PCT` (85) and `TOPGUN_EVICTION_LOW_PCT` (70) prevents eviction churn: after the high-water mark triggers a flush, the eviction loop does meaningful work (removing 15% of capacity) before stopping. Narrower gaps (e.g., 85/83) cause the eviction loop to wake, do trivial work, and wake again immediately under continuous write pressure.
+
+**Why 1s write-behind interval (`TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS`)?**
+1 second matches the common "eventual consistency window" expectation: a crash within 1s of a write could lose that write. For mission-critical data, reduce to 100–250ms at the cost of increased I/O. For demo servers, 1s is the right trade-off.
+
+**Why 271 partitions?**
+Fixed in the binary as `PARTITION_COUNT = 271` (a prime) in `packages/topgun-core`. Prime partition counts reduce hash collisions in consistent-hashing cluster layouts. Not user-configurable via env var; changing it requires a rebuild.
+
+## Pre-production checklist
+
+Before going live, verify:
+
+- [ ] **Auth is enabled.** `JWT_SECRET` is set to a random string of at least 32 characters. `TOPGUN_NO_AUTH` is **not** set (or is `false`). `INSECURE_FORWARD_AUTH_ERRORS` is **not** set (or is `false`).
+- [ ] **Storage backend is set.** `STORAGE_BACKEND=postgres` with a valid `DATABASE_URL` for shared/durable deployments. Or `STORAGE_BACKEND=redb` with `TOPGUN_REDB_PATH` pointing to a persistent volume.
+- [ ] **TLS is terminated externally.** The binary does not read `TOPGUN_TLS_*` env vars today. Use a reverse proxy (nginx, Caddy, AWS ALB) to terminate TLS in front of the server.
+- [ ] **Memory ceiling is set.** `TOPGUN_MAX_RAM_MB` is set to ~80% of your instance RAM. Default 1024 MB is tuned for demo; most production instances have more.
+- [ ] **Log format is set.** For log aggregators (Datadog, CloudWatch, Splunk), set `TOPGUN_LOG_FORMAT=json`. Default is human-readable text.
+- [ ] **Admin credentials are changed.** `TOPGUN_ADMIN_USERNAME` defaults to `admin`; `TOPGUN_ADMIN_PASSWORD` has no default and causes a startup error if the admin UI is served — set it explicitly.
+- [ ] **Bind address is explicit.** `TOPGUN_BIND_ADDR=0.0.0.0` in containers ensures the server listens on all interfaces, not just loopback.
+
+## Cross-links
+
+- [Self-host guide](/docs/deploy/self-host) — Docker, Docker Compose, Kubernetes recipes
+- [Storage backends](/docs/deploy/storage-backends) — redb vs PostgreSQL vs null decision table
+- [Performance tuning](/docs/deploy/performance) — memory/eviction/write-behind env vars + programmatic config
+- [Server & CLI reference](/docs/reference/server) — canonical env-var table with source-file line numbers
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/deploy/performance" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Performance tuning
+    </div>
+  </a>
+  <a href="/docs/reference" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Reference <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>
