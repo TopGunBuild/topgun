@@ -176,7 +176,7 @@ query<K extends keyof TSchema & string>(mapName: K, filter: QueryFilter): QueryH
 query<T = any>(mapName: string, filter: QueryFilter): QueryHandle<T>;
 ```
 
-Returns a live query subscription. The handle emits an initial result and delta updates.
+Returns a live query subscription. The handle emits an initial result and delta updates. See [Search & live queries](/docs/guides/search-and-live-queries) for the canonical use-case-driven example.
 
 ```typescript
 const handle = client.query<Todo>('todos', {
@@ -209,7 +209,7 @@ if (hasMore && nextCursor) {
 public topic(name: string): TopicHandle
 ```
 
-Returns a pub/sub topic for ephemeral fan-out messaging (not CRDT-persisted).
+Returns a pub/sub topic for ephemeral fan-out messaging (not CRDT-persisted). See [Live notifications](/docs/guides/live-notifications) for the canonical hook-first pattern.
 
 ```typescript
 const chat = client.topic('chat-room');
@@ -225,7 +225,7 @@ const unsubscribe = chat.subscribe((msg) => {
 public getLock(name: string): DistributedLock
 ```
 
-Returns a distributed lock handle.
+Returns a distributed lock handle. See [Counters & locks](/docs/guides/counters-and-locks) for fencing-token semantics and single-node-vs-cluster caveats.
 
 ```typescript
 const lock = client.getLock('resource-A');
@@ -243,7 +243,7 @@ if (await lock.lock(10000)) {
 public getPNCounter(name: string): PNCounterHandle
 ```
 
-Returns a PN-Counter (positive-negative) for offline-capable increment/decrement.
+Returns a PN-Counter (positive-negative) for offline-capable increment/decrement. See [Counters & locks](/docs/guides/counters-and-locks) for a canonical example.
 
 ```typescript
 const likes = client.getPNCounter('likes:post-123');

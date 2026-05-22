@@ -58,7 +58,7 @@ Throws if used outside `<TopGunProvider>`.
 
 ### `useQuery<T>`
 
-Live query subscription. Returns `data`, `loading`, `error`, change-tracking fields, pagination info, and per-record sync state.
+Live query subscription. Returns `data`, `loading`, `error`, change-tracking fields, pagination info, and per-record sync state. See [Search & live queries](/docs/guides/search-and-live-queries) for canonical examples.
 
 ```tsx
 import { useQuery } from '@topgunbuild/react';
@@ -185,7 +185,7 @@ Companion: `useORMapWithSyncState`.
 
 ### `useSyncState`
 
-Returns the current `RecordSyncState` for a `(mapName, key)` pair. The state is one of `synced`, `pending`, `conflict`, or `offline`. Re-renders only when *that* key's state changes.
+Returns the current `RecordSyncState` for a `(mapName, key)` pair. The state is one of `synced`, `pending`, `conflict`, or `offline`. Re-renders only when *that* key's state changes. See [Offline-first apps](/docs/guides/offline-first) for the canonical reconnect-and-merge pattern.
 
 ```tsx
 import { useSyncState } from '@topgunbuild/react';
@@ -204,7 +204,7 @@ function useSyncState(mapName: string, key: string): RecordSyncState
 
 ### `useTopic`
 
-Subscribe to (and publish on) an ephemeral pub/sub topic.
+Subscribe to (and publish on) an ephemeral pub/sub topic. See [Live notifications](/docs/guides/live-notifications) for canonical examples.
 
 ```tsx
 import { useTopic } from '@topgunbuild/react';

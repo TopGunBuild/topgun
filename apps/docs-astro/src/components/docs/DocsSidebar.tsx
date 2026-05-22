@@ -177,6 +177,12 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                 {expandedSections.guides && (
                     <div className="mt-1 space-y-1">
                         <SubItem to="/docs/guides" currentPath={currentPath}>All Guides</SubItem>
+                        <SubItem to="/docs/guides/realtime-collaboration" currentPath={currentPath}>Real-time collaboration</SubItem>
+                        <SubItem to="/docs/guides/offline-first" currentPath={currentPath}>Offline-first apps</SubItem>
+                        <SubItem to="/docs/guides/live-notifications" currentPath={currentPath}>Live notifications</SubItem>
+                        <SubItem to="/docs/guides/schema-typed-data" currentPath={currentPath}>Schema-typed data</SubItem>
+                        <SubItem to="/docs/guides/search-and-live-queries" currentPath={currentPath}>Search & live queries</SubItem>
+                        <SubItem to="/docs/guides/counters-and-locks" currentPath={currentPath}>Counters & locks</SubItem>
                         <SubItem to="/docs/guides/authentication" currentPath={currentPath}>Authentication</SubItem>
                         <SubItem to="/docs/guides/migrating-from-firebase" currentPath={currentPath}>Migrating from Firebase</SubItem>
                         <SubItem to="/docs/guides/migrating-from-replicache" currentPath={currentPath}>Migrating from Replicache</SubItem>
@@ -184,22 +190,16 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                         <SubItem to="/docs/guides/migrating-from-yjs" currentPath={currentPath}>Migrating from Y.js</SubItem>
                         <SubItem to="/docs/guides/security" currentPath={currentPath}>Security (TLS)</SubItem>
                         <SubItem to="/docs/guides/rbac" currentPath={currentPath}>RBAC</SubItem>
-                        <SubItem to="/docs/guides/live-queries" currentPath={currentPath}>Live Queries</SubItem>
                         <SubItem to="/docs/guides/sync-state" currentPath={currentPath}>Sync State</SubItem>
                         <SubItem to="/docs/guides/sql-queries" currentPath={currentPath}>SQL Queries</SubItem>
-                        <SubItem to="/docs/guides/schema" currentPath={currentPath}>Schema & Type Safety</SubItem>
                         <SubItem to="/docs/guides/indexing" currentPath={currentPath}>Indexing</SubItem>
-                        <SubItem to="/docs/guides/full-text-search" currentPath={currentPath}>Full-Text Search</SubItem>
                         <SubItem to="/docs/guides/adaptive-indexing" currentPath={currentPath}>Adaptive Indexing</SubItem>
-                        <SubItem to="/docs/guides/pub-sub" currentPath={currentPath}>Pub/Sub (Topics)</SubItem>
                         <SubItem to="/docs/guides/ttl" currentPath={currentPath}>Time-To-Live (TTL)</SubItem>
                         <SubItem to="/docs/guides/write-concern" currentPath={currentPath}>Write Concern</SubItem>
                         <SubItem to="/docs/guides/entry-processor" currentPath={currentPath}>Entry Processor</SubItem>
-                        <SubItem to="/docs/guides/pn-counter" currentPath={currentPath}>PN-Counter</SubItem>
                         <SubItem to="/docs/guides/event-journal" currentPath={currentPath}>Event Journal</SubItem>
                         <SubItem to="/docs/guides/conflict-resolvers" currentPath={currentPath}>Conflict Resolvers</SubItem>
                         <SubItem to="/docs/guides/interceptors" currentPath={currentPath}>Interceptors</SubItem>
-                        <SubItem to="/docs/guides/distributed-locks" currentPath={currentPath}>Distributed Locks</SubItem>
                         <SubItem to="/docs/guides/adoption-path" currentPath={currentPath}>Adoption Path</SubItem>
                         <SubItem to="/docs/guides/cluster-client" currentPath={currentPath}>Cluster Client</SubItem>
                         <SubItem to="/docs/guides/cluster-replication" currentPath={currentPath}>Cluster Replication</SubItem>
