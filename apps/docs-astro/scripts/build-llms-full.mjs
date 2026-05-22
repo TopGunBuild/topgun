@@ -51,7 +51,8 @@ const ALLOWLIST = [
   'concepts/crdt-hlc.mdx',
   'concepts/sync-protocol.mdx',
   'concepts/data-structures.mdx',
-  'guides/schema.mdx',
+  'guides/schema-typed-data.mdx',     // Renamed from guides/schema.mdx — teaches TopGunClient<TSchema> paradigm
+  'guides/offline-first.mdx',        // Net-new — teaches the canonical local-first story agents cannot reconstruct from other pages
   'guides/building-with-ai.mdx',     // Linked from llms.txt — agents should find it via their RAG
   'guides/authentication.mdx',
   'reference/client.mdx',

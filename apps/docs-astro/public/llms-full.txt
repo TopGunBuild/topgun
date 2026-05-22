@@ -765,140 +765,181 @@ When you delete data in TopGun, the record isn't immediately removed from storag
 
 ---
 
-# Schema & Type Safety
+# Schema-typed data
 
-> Add TypeScript type safety to TopGun maps using the TopGunClient<T> generic class
+> Add compile-time type safety to TopGun maps using the TopGunClient<TSchema> generic.
 
 
 
-# Schema & Type Safety
+  <span className="text-foreground font-medium">Docs</span>
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <span className="text-foreground font-medium">Schema-typed data</span>
 
-<AlertBox variant="info" title="Hook-first API for React UI code" text="For most React UI code, the canonical hook-first API (useQuery<Todo>('todos') + useMutation<Todo>('todos') with type Todo = z.infer<typeof TodoSchema>) provides type safety via the Zod schema flow shown at /docs/quick-start. This page documents the lower-level imperative TopGunClient<T>.getMap() path used in non-React contexts (Node.js scripts, service workers, testing) or for advanced typed-map access patterns." />
+# Schema-typed data
 
-TopGun provides compile-time type safety for your data through the `TopGunClient<TSchema>` generic class. This guide shows you how to define typed schemas and get full TypeScript autocomplete and error checking for your map operations.
+Schema-typed data: define your data shapes as TypeScript types (optionally derived from Zod schemas); pass them to `TopGunClient<MySchema>`; get autocomplete and compile-time errors on map operations. Type enforcement is compile-time only — there is no runtime validation or server-side schema enforcement in the current version.
 
-> **Important:** Type enforcement is compile-time only. There is no runtime validation or server-side schema enforcement in the current version. The types help catch mistakes during development but do not prevent invalid data from being written at runtime.
-
----
-
-## What `TopGunClient<TSchema>` Provides
-
-The `TopGunClient<TSchema>` generic gives you:
-
-- **Compile-time type checking** for map names and value types
-- **Typed map access** via `client.getMap(name)` that narrows the return type to `LWWMap<string, TSchema[name]>`
-- **Autocomplete** in your editor for map names and field names
-
-The `TSchema` type parameter is defined as `Record<string, any>`. Your schema interface must satisfy this constraint.
+<AlertBox
+  variant="info"
+  title="Hook-first API for React UI code"
+  text="For React UI code, the canonical pattern is useQuery<Todo>('todos') + useMutation<Todo>('todos') with type Todo = z.infer<typeof TodoSchema> — see /docs/quickstart. This page documents the lower-level TopGunClient<TSchema>.getMap() path used in non-React contexts (Node.js scripts, service workers, testing) or for advanced typed-map access patterns."
+/>
 
 ---
 
-## Defining Your Schema
+## Defining a schema
 
-Create a TypeScript interface that describes your data maps:
+The recommended approach is to define your types via Zod schemas, then derive TypeScript types from them using `z.infer`. This gives you a single source of truth: Zod schemas for runtime validation in your business logic, TypeScript types for the compiler.
 
-```typescript
-// Define the shape of each map's values
-interface Todo {
-  text: string;
-  completed: boolean;
-  createdAt: number;
-}
 
-interface UserProfile {
-  name: string;
-  email: string;
-  avatar?: string;
-}
 
-// Define your schema mapping map names to value types
-interface MyAppSchema {
-  todos: Todo;
-  profiles: UserProfile;
-}
-```
-
-The schema interface maps map names (as keys) to the value types stored in each map.
+If you prefer plain TypeScript without Zod, you can define the interface directly without the Zod step — just omit the `z.object(...)` declarations and write the interfaces by hand. Zod is not a dependency of TopGun; it is optional.
 
 ---
 
-## Typed Entry Point: `TopGunClient<TSchema>`
+## Typed map access
 
-Instantiate with your schema type parameter:
+Pass your schema type as the generic parameter to `TopGunClient`. The client narrows the return types of `getMap`, `getORMap`, and `query` to your application types.
 
-```typescript
 
-// Create a typed TopGunClient instance
-const client = new TopGunClient<MyAppSchema>({
-  serverUrl: 'ws://localhost:8080',
-  storage: new IDBAdapter()
-});
 
-await client.start();
-```
-
-Now you can access maps with full type safety:
-
-```typescript
-// getMap('todos') returns LWWMap<string, Todo>
-const todos = client.getMap('todos');
-
-// get() returns Todo | undefined -- correctly typed
-const todo = todos.get('todo-1');
-if (todo) {
-  console.log(todo.text);       // OK: 'text' exists on Todo
-  console.log(todo.completed);  // OK: 'completed' exists on Todo
-  // console.log(todo.foo);     // ERROR: Property 'foo' does not exist on type 'Todo'
-}
-
-// set() accepts Todo -- correctly typed
-todos.set('todo-2', {
-  text: 'Learn TopGun',
-  completed: false,
-  createdAt: Date.now()
-});
-
-// getMap('profiles') returns LWWMap<string, UserProfile>
-const profiles = client.getMap('profiles');
-const profile = profiles.get('user-1');
-if (profile) {
-  console.log(profile.name);    // OK: 'name' exists on UserProfile
-}
-```
-
-TypeScript will flag errors at compile time if you:
-- Access a map name that is not in your schema
-- Pass the wrong value type to `set()`
-- Access a field that does not exist on the value type
+Omitting `<MyAppSchema>` falls back to the untyped overload — `getMap<K, V>(name: string): LWWMap<K, V>` — which preserves backward compatibility for callers that supply explicit type parameters manually.
 
 ---
 
-## How Type Narrowing Works
+## Typed hooks (React)
 
-The typed narrowing works through the `TopGunClient<TSchema>.getMap(name)` path:
+The React hooks inherit the schema types when you pass a typed client to `TopGunProvider`. You can also specify the generic directly on the hook.
 
-1. `TopGunClient<TSchema>` captures your schema type (e.g., `MyAppSchema`)
-2. When you call `client.getMap('todos')`, TypeScript looks up `TSchema['todos']` to get the value type (`Todo`)
-3. The returned `LWWMap<string, Todo>` has `get` and `set` typed to `Todo`
 
-Omitting `<TSchema>` falls back to the untyped overload — `getMap<K, V>(name: string): LWWMap<K, V>` — which preserves back-compat for advanced callers that supply explicit type parameters manually.
 
 ---
 
-## Limitations
+## Compile-time-only honesty caveat
 
-- **Compile-time only.** Types are erased at runtime. If external code or another client writes data that does not match your interface, TypeScript will not catch it. Consider adding runtime checks for untrusted data
-- **No server-side enforcement.** The server does not validate data against your TypeScript schema. Any valid CRDT operation is accepted regardless of the value shape
-- **Schema evolution.** If you add or rename fields in your interface, existing data in storage will not be migrated. Use optional fields (`field?: type`) for new fields to handle records written before the schema change
-- **No cross-language schemas.** The TypeScript schema is only available in TypeScript. If you have non-TypeScript clients, they must independently maintain compatible type definitions
+> **Important:** Type enforcement is compile-time only. Types are erased at runtime. If external code or another client writes data that does not match your interface, TypeScript will not catch it. Consider adding runtime validation (e.g. via Zod's `TodoSchema.parse(value)`) for untrusted data.
 
-  <a href="/docs/guides/sql-queries" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+Other limitations:
+
+| Limitation | Details |
+|-----------|---------|
+| **No server-side enforcement** | The server does not validate data against your TypeScript schema. Any valid CRDT operation is accepted regardless of the value shape. |
+| **Schema evolution** | If you add or rename fields in your interface, existing data in storage is not migrated. Use optional fields (`field?: type`) for new fields to handle records written before the schema change. |
+| **No cross-language schemas** | The TypeScript schema is only available in TypeScript clients. Other language clients must independently maintain compatible type definitions. |
+
+---
+
+**Next steps**
+
+- [Search & live queries](/docs/guides/search-and-live-queries) — apply typed predicate queries to your typed maps
+- [Quickstart](/docs/quickstart) — canonical hook-first snippet with the Zod schema flow end-to-end
+- [Client API reference](/docs/reference/client) — full `getMap`, `getORMap`, `query` signatures
+
+  <a href="/docs/guides/live-notifications" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Previous</span>
-      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> SQL Queries
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Live notifications
   </a>
-  <a href="/docs/guides/indexing" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+  <a href="/docs/guides/search-and-live-queries" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Next</span>
-      Indexing <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+      Search & live queries <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+  </a>
+
+
+---
+
+# Offline-first apps
+
+> Build apps that work without a network and recover state automatically on reconnect.
+
+
+
+  <span className="text-foreground font-medium">Docs</span>
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <span className="text-foreground font-medium">Offline-first apps</span>
+
+# Offline-first apps
+
+Offline-first apps: TopGun reads and writes go to local IndexedDB first; the sync engine ships pending writes when the server reconnects; HLC timestamps make merges automatic. The result is an app that feels instant whether or not the network is present.
+
+---
+
+## Why offline-first
+
+Most apps treat the network as a requirement: reads block on a fetch, writes fail loudly when the server is unreachable. TopGun inverts this:
+
+- **Reads are local.** `useQuery` pulls from the in-memory CRDT map, which is backed by IndexedDB. No network round-trip required.
+- **Writes are local first.** `useMutation` writes immediately to the local map. The sync engine queues the write and ships it to the server when connected.
+- **Merges are automatic.** When two offline clients reconnect, TopGun reconciles their writes using HLC (Hybrid Logical Clock) timestamps. The most recent write per key wins (LWW semantics). No manual conflict handling.
+
+---
+
+## Setting up IDBAdapter
+
+Pass a `new IDBAdapter()` to the client constructor. The adapter persists the CRDT state to IndexedDB in the browser. No configuration needed — the database name is derived from the client's `nodeId`.
+
+
+
+Once the client has started, writes survive a page reload. On the next load, the in-memory state is rebuilt from IndexedDB before the server connection is attempted — so your app renders instantly from local state.
+
+---
+
+## Detecting connection state
+
+Use the `useSyncState` hook to get per-record sync status, or listen to the client's connection events directly for a global indicator.
+
+### Per-record sync status (React)
+
+
+
+### Global connection state (imperative)
+
+
+
+---
+
+## Reconnect and merge
+
+When the client reconnects after a period offline, TopGun uses a Merkle tree to compute the exact delta between the local state and the server state. Only the records that changed on either side are exchanged — not the full dataset.
+
+From the application's perspective, this is invisible: `useQuery` subscribers receive the merged results automatically. You do not need to trigger a manual refresh.
+
+
+
+<AlertBox
+  variant="info"
+  title="Write-behind buffer"
+  text="The server batches writes through a write-behind buffer (default flush interval: 1 s). An unclean server shutdown can lose buffered writes not yet flushed to the durable backend. WAL-recovery support is tracked on the roadmap (TODO-339)."
+/>
+
+---
+
+## Local-only mode
+
+TopGun works without a server at all. Omit `serverUrl` for a fully local app — reads and writes go to IndexedDB only, with no sync.
+
+
+
+Local-only mode is useful for:
+
+- **Progressive disclosure** — ship a working local app first; add sync later
+- **Private data** — user preferences, drafts, or cached data that should never leave the device
+- **Testing** — write deterministic unit tests without mocking a server
+
+---
+
+**Next steps**
+
+- [Real-time collaboration](/docs/guides/realtime-collaboration) — build multi-user shared maps on top of the same local-first foundation
+- [Live notifications](/docs/guides/live-notifications) — ephemeral topic messages that complement offline-capable maps
+- [Schema-typed data](/docs/guides/schema-typed-data) — add compile-time type safety to your offline map operations
+
+  <a href="/docs/guides/realtime-collaboration" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Real-time collaboration
+  </a>
+  <a href="/docs/guides/live-notifications" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+      Live notifications <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
   </a>
 
 
@@ -1095,21 +1136,7 @@ The agent moves `await client.start()` to module scope (before the component fun
 
 # Authentication & Security
 
-> Secure your local-first application by integrating authentication providers and managing access control.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+> Secure your TopGun app by integrating Clerk, BetterAuth, Firebase, or a custom JWT provider.
 
 
 
@@ -1119,172 +1146,153 @@ The agent moves `await client.start()` to module scope (before the component fun
 
 # Authentication & Security
 
-Secure your local-first application by integrating authentication providers and managing access control.
+Authentication and security: connect any JWT-issuing provider (Clerk, BetterAuth, Firebase, or custom) to your `TopGunClient` instance; the client sends the token to the server on every WebSocket handshake; the server validates it and enforces per-collection RBAC access control. Local-first writes happen before the network authenticates, so offline clients can write immediately and reconcile permissions on reconnect.
 
   <FeatureCard
     icon={Shield}
     iconColor="text-brand-subtle"
-    title="Token-Based"
+    title="Token-based"
     description="Standard JWT authentication integrated directly into the sync protocol."
   />
   <FeatureCard
     icon={Lock}
     iconColor="text-green-500"
-    title="Provider Agnostic"
-    description="Works with Clerk, Better Auth, Auth0, Firebase, or any JWT-based provider."
+    title="Provider agnostic"
+    description="Works with Clerk, BetterAuth, Firebase, Auth0, or any JWT-based provider."
   />
   <FeatureCard
     icon={Key}
     iconColor="text-orange-500"
-    title="Access Control"
+    title="Access control"
     description="Fine-grained RBAC permissions per collection with pattern matching."
   />
 
-## How it Works
+## Setup
 
-In a local-first architecture, authentication serves two main purposes:
+Create the client once and export it. The `storage` field accepts `new IDBAdapter()` (zero-arg) for IndexedDB persistence in the browser.
 
-- **Gatekeeping Sync:** Only authenticated users can connect to the synchronization server (WebSocket).
-- **Authorization:** Ensuring users can only read or write data they are permitted to access.
 
-TopGun decouples the authentication provider from the sync engine. You can use any provider to generate a JWT token. This token is passed to the TopGun client, which sends it to the server during the WebSocket handshake.
 
-## Integration Flow
+Register a token provider after the client is created. The provider is called on every `AUTH_REQUIRED` message — which the server sends on initial connection and after any reconnect.
+
+
+
+## How it works
 
     <Step
       number={1}
-      title="Authenticate User"
-      description="Use your preferred provider SDK to log the user in and retrieve a session token (JWT)."
+      title="Authenticate user"
+      description="Use your preferred provider SDK to log the user in and retrieve a JWT."
     />
     <Step
       number={2}
-      title="Set Token in Client"
-      description="Pass the token to the TopGun client. The client will automatically authenticate the WebSocket connection."
+      title="Register token provider"
+      description="Call tgClient.setAuthTokenProvider(async () => token). The client calls this on every AUTH_REQUIRED message."
     />
     <Step
       number={3}
-      title="Server Validation"
-      description="The TopGun server validates the JWT using the configured secret. If valid, the connection is established with the user's principal attached."
+      title="Server validates JWT"
+      description="The TopGun server verifies the JWT using the configured JWT_SECRET. If valid, the sync connection is established with the user's principal attached."
     />
 
-## Clerk Integration
+## Clerk integration
 
-  <span className="text-neutral-600 dark:text-neutral-300">Clerk is a popular authentication provider with excellent React support. Here's how to integrate it with TopGun.</span>
-
-### 1. Setup TopGun Client
-
-
-### 2. Create Auth Sync Component
-
-Use `setAuthTokenProvider` to automatically refresh tokens when they expire.
-
-
-### 3. Wire Up in App
-
-
-### 4. User-Scoped Data
-
-Use the user ID from Clerk to scope data per user:
-
-
-## Better Auth Integration
-
-  <span className="text-neutral-600 dark:text-neutral-300">Better Auth is a framework-agnostic authentication library. TopGun provides a dedicated adapter that uses TopGun as the database backend for Better Auth.</span>
-
-  <p className="text-amber-800 dark:text-amber-200 text-sm">
-    <strong>Note:</strong> This approach stores auth data (users, sessions) in TopGun itself, allowing authentication data to be distributed and synced like any other application data.
-  </p>
-
-### 1. Install the Adapter
-
-
-### 2. Configure Better Auth
-
-
-### 3. Use in Your App
-
-
-### 4. Connect BetterAuth Session to TopGun
-
-  <p className="text-brand text-sm">
-    <strong>Important:</strong> BetterAuth manages sessions using cookies or opaque session tokens by default — it does not issue JWTs. TopGun requires a JWT for sync authentication. To connect BetterAuth sessions to TopGun, you must create a custom server endpoint that verifies the BetterAuth session and mints a signed JWT for TopGun consumption.
-  </p>
-
-**Two-step bridge pattern: BetterAuth session → custom endpoint → JWT → TopGun**
+  <span className="text-neutral-600 dark:text-neutral-300">Clerk is a popular React-first auth provider. Its JWTs use RS256 — configure <code>JWT_SECRET</code> with the Clerk RSA public key.</span>
 
 
 
-## Server Configuration
-
-The TopGun server validates JWT tokens using a shared secret. Configure the secret to match your auth provider.
 
 
-### JWT Token Structure
+### Clerk JWT_SECRET (production)
 
-TopGun expects the following claims in the JWT payload:
-
-
-## Custom JWT Provider
-
-If you're using a custom authentication system, you can generate JWT tokens manually.
-
-
-### Client-Side Usage
-
-
-## Token Lifecycle
-
-Understanding how token expiry interacts with active connections helps you build robust auth flows.
-
-- **Active connections are not terminated when a token expires.** Once a WebSocket connection is established and authenticated, token expiry does not disconnect the client. The existing session continues until the connection is dropped.
-- **Token expiry only matters on reconnect.** If the network drops, the page is reloaded, or the WebSocket is otherwise closed, the client must re-authenticate. At that point, the server sends an `AUTH_REQUIRED` message.
-- **`setAuthTokenProvider()` is called on every `AUTH_REQUIRED` message.** This happens on initial connection and on every reconnect. The provider must return a valid, non-expired token for the connection to be established.
-- **Returning `null` from the provider leaves the connection unauthenticated.** The client will be connected but no data operations will be permitted.
-- **Recommendation:** your token provider should call your app's token or session refresh endpoint rather than relying on a cached token that may be stale after a long offline period.
-
-## Production Deployment with Clerk
-
-  <p className="text-brand text-sm">
-    <strong>Important:</strong> Clerk uses RS256 (asymmetric RSA) algorithm for JWT signing, not HS256. This means you need to use Clerk's <strong>public key</strong> for token verification on the server.
-  </p>
-
-### Getting the Clerk Public Key
-
-Clerk publishes its public keys via the JWKS (JSON Web Key Set) endpoint. You can find your instance's public key at:
+Clerk uses RSA asymmetric signing. Set `JWT_SECRET` to the RSA public key from Clerk's JWKS endpoint:
 
 ```
 https://YOUR_CLERK_DOMAIN.clerk.accounts.dev/.well-known/jwks.json
 ```
 
 
-### Configuring JWT_SECRET for Docker/Dokploy
 
-When deploying to Docker-based platforms (Dokploy, Railway, etc.), you need to handle the PEM key format carefully:
+The server automatically detects RSA public keys (by checking for `-----BEGIN`) and uses the RS256 algorithm.
 
+---
 
-  <p className="text-amber-800 dark:text-amber-200 text-sm">
-    <strong>Note:</strong> The TopGun server automatically detects RSA public keys (by checking for <code>-----BEGIN</code>) and uses the RS256 algorithm. It also handles escaped newlines (<code>\n</code>) from Docker environment variables.
-  </p>
+## BetterAuth integration
 
-### Algorithm Support
+  <span className="text-neutral-600 dark:text-neutral-300">BetterAuth is a framework-agnostic auth library. The <code>@topgunbuild/adapter-better-auth</code> package lets TopGun serve as the BetterAuth database backend.</span>
 
-TopGun server supports both symmetric and asymmetric JWT algorithms:
-
-| Provider | Algorithm | JWT_SECRET Value |
-|----------|-----------|------------------|
-| Custom/Self-hosted | HS256 | Shared secret string |
-| Clerk | RS256 | RSA Public Key (PEM) |
-| Auth0 | RS256 | RSA Public Key (PEM) |
-| Firebase | RS256 | RSA Public Key (PEM) |
-
-## Authentication Protocol
-
-Here's how the authentication handshake works at the WebSocket level:
+<AlertBox
+  variant="info"
+  title="BetterAuth sessions are not JWTs"
+  text="BetterAuth uses opaque session cookies by default. TopGun requires a JWT for sync authentication. You must create a server-side bridge endpoint that exchanges a BetterAuth session for a signed JWT."
+/>
 
 
-  <a href="/docs/guides" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Back</span>
-      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> All Guides
+
+### Bridge endpoint: BetterAuth session → TopGun JWT
+
+
+
+
+
+---
+
+## Custom auth provider
+
+If you manage your own JWT issuance (e.g. a custom login endpoint), call `setAuthTokenProvider` with an async function that returns the token from your session store.
+
+
+
+
+
+---
+
+## Firebase integration
+
+Firebase uses RS256 for JWT signing. Obtain the Firebase public key from the Google JWKS endpoint and set it as `JWT_SECRET`.
+
+| Provider | Algorithm | JWT_SECRET value |
+|----------|-----------|-----------------|
+| Custom / self-hosted | HS256 | Shared secret string |
+| Clerk | RS256 | RSA public key (PEM) |
+| Firebase | RS256 | RSA public key (PEM) |
+| Auth0 | RS256 | RSA public key (PEM) |
+
+The TopGun server detects RSA keys automatically (by checking for `-----BEGIN`) and switches to RS256 validation.
+
+---
+
+## JWT token structure
+
+TopGun reads only the `sub` and `roles` claims from the JWT payload:
+
+
+
+---
+
+## Token lifecycle and refresh
+
+- **Active connections are not terminated when a token expires.** Once a WebSocket connection is established, token expiry does not disconnect the client. The session continues until the connection drops.
+- **Token expiry only matters on reconnect.** When the WebSocket closes (page reload, network drop), the server sends `AUTH_REQUIRED`. `setAuthTokenProvider` is called at that point to obtain a fresh token.
+- **Returning `null` from the provider leaves the connection unauthenticated.** No data operations are permitted in that state.
+- **Recommendation:** your token provider should call your app's token or session refresh endpoint rather than relying on a cached token that may be stale after a long offline period.
+
+---
+
+## Authentication protocol
+
+
+---
+
+**Next steps**
+
+- [RBAC](/docs/guides/rbac) — configure per-collection read/write access control on the server
+- [Security (TLS)](/docs/guides/security) — enable TLS for the WebSocket connection in production
+- [Offline-first apps](/docs/guides/offline-first) — understand how authentication interacts with offline writes
+
+  <a href="/docs/guides/counters-and-locks" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Counters & locks
   </a>
   <a href="/docs/guides/security" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Next</span>
@@ -1461,7 +1469,7 @@ query<K extends keyof TSchema & string>(mapName: K, filter: QueryFilter): QueryH
 query<T = any>(mapName: string, filter: QueryFilter): QueryHandle<T>;
 ```
 
-Returns a live query subscription. The handle emits an initial result and delta updates.
+Returns a live query subscription. The handle emits an initial result and delta updates. See [Search & live queries](/docs/guides/search-and-live-queries) for the canonical use-case-driven example.
 
 ```typescript
 const handle = client.query<Todo>('todos', {
@@ -1494,7 +1502,7 @@ if (hasMore && nextCursor) {
 public topic(name: string): TopicHandle
 ```
 
-Returns a pub/sub topic for ephemeral fan-out messaging (not CRDT-persisted).
+Returns a pub/sub topic for ephemeral fan-out messaging (not CRDT-persisted). See [Live notifications](/docs/guides/live-notifications) for the canonical hook-first pattern.
 
 ```typescript
 const chat = client.topic('chat-room');
@@ -1510,7 +1518,7 @@ const unsubscribe = chat.subscribe((msg) => {
 public getLock(name: string): DistributedLock
 ```
 
-Returns a distributed lock handle.
+Returns a distributed lock handle. See [Counters & locks](/docs/guides/counters-and-locks) for fencing-token semantics and single-node-vs-cluster caveats.
 
 ```typescript
 const lock = client.getLock('resource-A');
@@ -1528,7 +1536,7 @@ if (await lock.lock(10000)) {
 public getPNCounter(name: string): PNCounterHandle
 ```
 
-Returns a PN-Counter (positive-negative) for offline-capable increment/decrement.
+Returns a PN-Counter (positive-negative) for offline-capable increment/decrement. See [Counters & locks](/docs/guides/counters-and-locks) for a canonical example.
 
 ```typescript
 const likes = client.getPNCounter('likes:post-123');
@@ -2009,7 +2017,7 @@ Throws if used outside `<TopGunProvider>`.
 
 ### `useQuery<T>`
 
-Live query subscription. Returns `data`, `loading`, `error`, change-tracking fields, pagination info, and per-record sync state.
+Live query subscription. Returns `data`, `loading`, `error`, change-tracking fields, pagination info, and per-record sync state. See [Search & live queries](/docs/guides/search-and-live-queries) for canonical examples.
 
 ```tsx
 
@@ -2134,7 +2142,7 @@ Companion: `useORMapWithSyncState`.
 
 ### `useSyncState`
 
-Returns the current `RecordSyncState` for a `(mapName, key)` pair. The state is one of `synced`, `pending`, `conflict`, or `offline`. Re-renders only when *that* key's state changes.
+Returns the current `RecordSyncState` for a `(mapName, key)` pair. The state is one of `synced`, `pending`, `conflict`, or `offline`. Re-renders only when *that* key's state changes. See [Offline-first apps](/docs/guides/offline-first) for the canonical reconnect-and-merge pattern.
 
 ```tsx
 
@@ -2152,7 +2160,7 @@ function useSyncState(mapName: string, key: string): RecordSyncState
 
 ### `useTopic`
 
-Subscribe to (and publish on) an ephemeral pub/sub topic.
+Subscribe to (and publish on) an ephemeral pub/sub topic. See [Live notifications](/docs/guides/live-notifications) for canonical examples.
 
 ```tsx
 
