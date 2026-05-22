@@ -1,0 +1,258 @@
+---
+title: Real-time collaboration
+description: Build shared cursors, live edits, and presence indicators using TopGun's shared maps and topics.
+order: 10
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight } from 'lucide-react';
+import { AlertBox } from '../../../components/docs/AlertBox';
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Real-time collaboration</span>
+</div>
+
+# Real-time collaboration
+
+Real-time collaboration: each user writes to their own key in a shared map; conflicts resolve automatically via HLC timestamps; transient events (cursor positions, typing indicators) go through topics for ephemeral broadcast. The result is Google Docs-style multi-user editing without a backend conflict-resolution layer.
+
+---
+
+## Live cursors
+
+Cursor positions are ephemeral — you don't need to store them. Use `useTopic` to broadcast and receive cursor positions in real time.
+
+export const liveCursorCode = `import { useTopic } from '@topgunbuild/react';
+import { useState, useCallback } from 'react';
+
+interface CursorPosition {
+  userId: string;
+  x: number;
+  y: number;
+}
+
+export function CollaborativeCanvas() {
+  const [cursors, setCursors] = useState<Record<string, CursorPosition>>({});
+
+  // Receive cursor updates from other users
+  const cursorTopic = useTopic('cursors:doc-1', (msg) => {
+    const position = msg as CursorPosition;
+    setCursors(prev => ({ ...prev, [position.userId]: position }));
+  });
+
+  const handleMouseMove = useCallback((e: React.MouseEvent) => {
+    cursorTopic.publish({
+      userId: 'user-alice',
+      x: e.clientX,
+      y: e.clientY,
+    });
+  }, [cursorTopic]);
+
+  return (
+    <div onMouseMove={handleMouseMove} style={{ position: 'relative', width: '100%', height: '400px' }}>
+      {Object.values(cursors).map(cursor => (
+        <div
+          key={cursor.userId}
+          style={{ position: 'absolute', left: cursor.x, top: cursor.y }}
+          className="cursor-indicator"
+        >
+          {cursor.userId}
+        </div>
+      ))}
+    </div>
+  );
+}`;
+
+<div className="not-prose">
+  <CodeBlock title="components/CollaborativeCanvas.tsx" language="tsx" code={liveCursorCode} />
+</div>
+
+Topics are ephemeral — if a user is offline when a cursor event fires, they miss it. That's the right tradeoff for cursor positions: you always want the latest value, not a backlog of stale positions.
+
+---
+
+## Live edits
+
+For persistent shared state (document text, shared notes, task lists), use a shared map. Each user writes to their own key or a shared key. Concurrent writes to the same key resolve automatically: the write with the highest HLC timestamp wins (Last-Write-Wins semantics).
+
+export const liveEditsCode = `import { useQuery, useMutation } from '@topgunbuild/react';
+
+interface DocumentBlock {
+  author: string;
+  content: string;
+  updatedAt: number;
+}
+
+export function CollaborativeDocument({ docId }: { docId: string }) {
+  const mapName = \`doc:\${docId}\`;
+
+  // Subscribe to all blocks in the document — updates push in real time
+  const { data: blocks, loading } = useQuery<DocumentBlock>(mapName, {
+    sort: { updatedAt: 'asc' },
+  });
+
+  // Mutations apply locally first, sync to server in the background
+  const { update } = useMutation<DocumentBlock>(mapName);
+
+  const handleEdit = (blockKey: string, content: string) => {
+    update(blockKey, { content, updatedAt: Date.now() });
+  };
+
+  if (loading) return <p>Loading document...</p>;
+
+  return (
+    <div>
+      {blocks.map(block => (
+        <textarea
+          key={block._key}
+          defaultValue={block.content}
+          onBlur={(e) => handleEdit(block._key, e.target.value)}
+        />
+      ))}
+    </div>
+  );
+}`;
+
+<div className="not-prose">
+  <CodeBlock title="components/CollaborativeDocument.tsx" language="tsx" code={liveEditsCode} />
+</div>
+
+Writes apply locally before hitting the network, so edits feel instant. When two users edit the same block at the same time, the server merges them using HLC timestamps — no manual conflict handling required.
+
+---
+
+## Presence indicators
+
+Presence (who is online, who is typing) is ephemeral. Use `useTopic` with a heartbeat pattern: each client publishes its presence on an interval; subscribers expire entries after a timeout.
+
+export const presenceCode = `import { useTopic } from '@topgunbuild/react';
+import { useState, useEffect } from 'react';
+
+interface PresencePayload {
+  userId: string;
+  status: 'online' | 'typing';
+  timestamp: number;
+}
+
+const PRESENCE_TTL_MS = 5000; // expire after 5 s without heartbeat
+
+export function PresenceIndicators({ roomId, currentUserId }: {
+  roomId: string;
+  currentUserId: string;
+}) {
+  const [online, setOnline] = useState<Record<string, PresencePayload>>({});
+
+  const presenceTopic = useTopic(\`presence:\${roomId}\`, (msg) => {
+    const payload = msg as PresencePayload;
+    setOnline(prev => ({ ...prev, [payload.userId]: payload }));
+  });
+
+  // Broadcast own presence every 3 s
+  useEffect(() => {
+    const interval = setInterval(() => {
+      presenceTopic.publish({ userId: currentUserId, status: 'online', timestamp: Date.now() });
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [presenceTopic, currentUserId]);
+
+  // Expire stale entries every second
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const cutoff = Date.now() - PRESENCE_TTL_MS;
+      setOnline(prev => {
+        const next: Record<string, PresencePayload> = {};
+        for (const [id, p] of Object.entries(prev)) {
+          if (p.timestamp > cutoff) next[id] = p;
+        }
+        return next;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const others = Object.values(online).filter(p => p.userId !== currentUserId);
+
+  return (
+    <div className="presence-bar">
+      {others.map(p => (
+        <span key={p.userId} className="avatar" title={p.userId}>
+          {p.userId[0].toUpperCase()}
+        </span>
+      ))}
+    </div>
+  );
+}`;
+
+<div className="not-prose">
+  <CodeBlock title="components/PresenceIndicators.tsx" language="tsx" code={presenceCode} />
+</div>
+
+<AlertBox
+  variant="info"
+  title="Topics are at-most-once"
+  text="Topics deliver messages to currently-connected subscribers only. If a client is offline when a presence heartbeat fires, they miss it — and the TTL expiry logic above handles the cleanup on reconnect."
+/>
+
+---
+
+## Non-React contexts
+
+Outside React (Node.js scripts, service workers, integration tests), use the imperative client API directly.
+
+export const imperativeCode = `import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080',
+  storage: new IDBAdapter(),
+});
+
+await client.start();
+
+// Shared map — persistent, CRDT-merged
+const docMap = client.getMap('doc:room-1');
+
+docMap.set('block-1', {
+  author: 'alice',
+  content: 'Hello world',
+  updatedAt: Date.now(),
+});
+
+// Topic — ephemeral broadcast
+const cursorTopic = client.topic('cursors:room-1');
+cursorTopic.publish({ userId: 'alice', x: 120, y: 340 });
+
+const unsubscribe = cursorTopic.subscribe((msg, ctx) => {
+  console.log('Cursor from', ctx.publisherId, msg);
+});`;
+
+<div className="not-prose">
+  <CodeBlock title="src/worker.ts" language="typescript" code={imperativeCode} />
+</div>
+
+---
+
+**Next steps**
+
+- [Live notifications](/docs/guides/live-notifications) — hook-first `useTopic` patterns for notifications and signaling
+- [Offline-first apps](/docs/guides/offline-first) — what happens to collaborative edits when a user goes offline
+- [Search & live queries](/docs/guides/search-and-live-queries) — filter and sort the shared map with reactive predicate queries
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Back</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> All Guides
+    </div>
+  </a>
+  <a href="/docs/guides/offline-first" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Offline-first apps <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

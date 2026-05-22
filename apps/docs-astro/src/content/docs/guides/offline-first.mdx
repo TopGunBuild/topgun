@@ -1,0 +1,198 @@
+---
+title: Offline-first apps
+description: Build apps that work without a network and seamlessly recover state on reconnect.
+order: 11
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight } from 'lucide-react';
+import { AlertBox } from '../../../components/docs/AlertBox';
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Offline-first apps</span>
+</div>
+
+# Offline-first apps
+
+Offline-first apps: TopGun reads and writes go to local IndexedDB first; the sync engine ships pending writes when the server reconnects; HLC timestamps make merges automatic. The result is an app that feels instant whether or not the network is present.
+
+---
+
+## Why offline-first
+
+Most apps treat the network as a requirement: reads block on a fetch, writes fail loudly when the server is unreachable. TopGun inverts this:
+
+- **Reads are local.** `useQuery` pulls from the in-memory CRDT map, which is backed by IndexedDB. No network round-trip required.
+- **Writes are local first.** `useMutation` writes immediately to the local map. The sync engine queues the write and ships it to the server when connected.
+- **Merges are automatic.** When two offline clients reconnect, TopGun reconciles their writes using HLC (Hybrid Logical Clock) timestamps. The most recent write per key wins (LWW semantics). No manual conflict handling.
+
+---
+
+## Setting up IDBAdapter
+
+Pass a `new IDBAdapter()` to the client constructor. The adapter persists the CRDT state to IndexedDB in the browser. No configuration needed — the database name is derived from the client's `nodeId`.
+
+export const setupCode = `import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+export const client = new TopGunClient({
+  serverUrl: 'ws://your-server.example.com',
+  storage: new IDBAdapter(),   // zero-arg: persists to IndexedDB automatically
+});
+
+await client.start();`;
+
+<div className="not-prose">
+  <CodeBlock title="src/lib/topgun.ts" language="typescript" code={setupCode} />
+</div>
+
+Once the client has started, writes survive a page reload. On the next load, the in-memory state is rebuilt from IndexedDB before the server connection is attempted — so your app renders instantly from local state.
+
+---
+
+## Detecting connection state
+
+Use the `useSyncState` hook to get per-record sync status, or listen to the client's connection events directly for a global indicator.
+
+### Per-record sync status (React)
+
+export const syncStateCode = `import { useSyncState } from '@topgunbuild/react';
+
+// 'synced' | 'pending' | 'conflict' | 'offline'
+function SyncBadge({ mapName, itemKey }: { mapName: string; itemKey: string }) {
+  const state = useSyncState(mapName, itemKey);
+
+  const labels = {
+    synced: 'Saved',
+    pending: 'Saving...',
+    conflict: 'Conflict',
+    offline: 'Offline',
+  };
+
+  return (
+    <span className={\`badge badge-\${state}\`}>
+      {labels[state]}
+    </span>
+  );
+}`;
+
+<div className="not-prose">
+  <CodeBlock title="components/SyncBadge.tsx" language="tsx" code={syncStateCode} />
+</div>
+
+### Global connection state (imperative)
+
+export const connectionEventCode = `// Listen for connection state changes from the client directly.
+// Events: 'connected' | 'disconnected' | 'reconnecting'
+client.on('connection-state', (state) => {
+  if (state === 'disconnected') {
+    showToast('You are offline. Changes will sync when you reconnect.');
+  }
+  if (state === 'connected') {
+    hideToast();
+  }
+});`;
+
+<div className="not-prose">
+  <CodeBlock title="src/lib/connection.ts" language="typescript" code={connectionEventCode} />
+</div>
+
+---
+
+## Reconnect and merge
+
+When the client reconnects after a period offline, TopGun uses a Merkle tree to compute the exact delta between the local state and the server state. Only the records that changed on either side are exchanged — not the full dataset.
+
+From the application's perspective, this is invisible: `useQuery` subscribers receive the merged results automatically. You do not need to trigger a manual refresh.
+
+export const reconnectUiCode = `import { useSyncState } from '@topgunbuild/react';
+import { useQuery, useMutation } from '@topgunbuild/react';
+
+function TodoItem({ id }: { id: string }) {
+  const { data: todos } = useQuery('todos', { where: { id } });
+  const { update } = useMutation('todos');
+  const syncState = useSyncState('todos', id);
+
+  const todo = todos[0];
+  if (!todo) return null;
+
+  return (
+    <div className="todo-item">
+      <input
+        type="checkbox"
+        checked={todo.completed}
+        onChange={(e) => update(id, { completed: e.target.checked })}
+      />
+      <span>{todo.text}</span>
+      {syncState === 'pending' && <span className="badge">Saving...</span>}
+      {syncState === 'synced'  && <span className="badge badge-ok">Saved</span>}
+    </div>
+  );
+}`;
+
+<div className="not-prose">
+  <CodeBlock title="components/TodoItem.tsx" language="tsx" code={reconnectUiCode} />
+</div>
+
+<AlertBox
+  variant="info"
+  title="Write-behind buffer"
+  text="The server batches writes through a write-behind buffer (default flush interval: 1 s). An unclean server shutdown can lose buffered writes not yet flushed to the durable backend. WAL-recovery support is tracked on the roadmap (TODO-339)."
+/>
+
+---
+
+## Local-only mode
+
+TopGun works without a server at all. Omit `serverUrl` for a fully local app — reads and writes go to IndexedDB only, with no sync.
+
+export const localOnlyCode = `import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+// No serverUrl → pure local mode. Perfect for dev, tests, or privacy-first apps.
+const client = new TopGunClient({
+  storage: new IDBAdapter(),
+});
+
+await client.start();
+
+// All reads and writes go to local IndexedDB only
+const prefs = client.getMap('user-preferences');
+prefs.set('theme', { value: 'dark' });`;
+
+<div className="not-prose">
+  <CodeBlock title="src/lib/local-only.ts" language="typescript" code={localOnlyCode} />
+</div>
+
+Local-only mode is useful for:
+
+- **Progressive disclosure** — ship a working local app first; add sync later
+- **Private data** — user preferences, drafts, or cached data that should never leave the device
+- **Testing** — write deterministic unit tests without mocking a server
+
+---
+
+**Next steps**
+
+- [Real-time collaboration](/docs/guides/realtime-collaboration) — build multi-user shared maps on top of the same local-first foundation
+- [Live notifications](/docs/guides/live-notifications) — ephemeral topic messages that complement offline-capable maps
+- [Schema-typed data](/docs/guides/schema-typed-data) — add compile-time type safety to your offline map operations
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/realtime-collaboration" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Real-time collaboration
+    </div>
+  </a>
+  <a href="/docs/guides/live-notifications" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Live notifications <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>
