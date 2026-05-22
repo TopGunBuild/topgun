@@ -6,13 +6,12 @@ const links = [
     { href: '#how', label: 'How it works' },
   ]},
   { heading: 'Open source', items: [
-    { href: 'https://github.com/TopGunBuild/topgun', label: 'GitHub' },
-    { href: '/docs/license', label: 'Apache 2.0' },
-    { href: '/changelog', label: 'Changelog' },
+    { href: 'https://github.com/TopGunBuild/topgun', label: 'GitHub', external: true },
+    { href: 'https://github.com/TopGunBuild/topgun/blob/main/LICENSE', label: 'Apache 2.0', external: true },
+    { href: '/docs/changelog', label: 'Changelog' },
   ]},
   { heading: 'Community', items: [
     { href: '/blog', label: 'Blog' },
-    { href: 'https://x.com/topgunbuild', label: 'X' },
   ]},
 ];
 ---
@@ -47,7 +46,11 @@ const links = [
             <ul class="mt-4 space-y-2.5 text-sm" style="color: var(--color-fg-muted)">
               {group.items.map((item) => (
                 <li>
-                  <a href={item.href} class="transition-colors hover:text-[var(--color-fg)]">
+                  <a
+                    href={item.href}
+                    class="transition-colors hover:text-[var(--color-fg)]"
+                    {...(item.external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
+                  >
                     {item.label}
                   </a>
                 </li>

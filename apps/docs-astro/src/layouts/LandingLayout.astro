@@ -1,5 +1,7 @@
 ---
 import '../styles/global.css';
+import SEO from '../components/SEO.astro';
+import PostHog from '../components/PostHog.astro';
 
 interface Props {
   title?: string;
@@ -13,20 +15,21 @@ const {
 ---
 
 <!doctype html>
-<html lang="en">
+<html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="generator" content={Astro.generator} />
-    <meta name="description" content={description} />
-    <meta property="og:title" content={title} />
-    <meta property="og:description" content={description} />
-    <meta property="og:type" content="website" />
+    <SEO title={title} description={description} type="website" />
     <meta name="theme-color" content="#0a0e14" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>{title}</title>
+    <PostHog />
   </head>
-  <body class="font-sans">
+  <body
+    class="font-sans"
+    style="background-color: var(--color-bg); color: var(--color-fg); min-height: 100vh;"
+  >
     <slot />
   </body>
 </html>
