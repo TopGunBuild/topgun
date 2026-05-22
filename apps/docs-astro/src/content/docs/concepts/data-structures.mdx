@@ -118,7 +118,7 @@ When you delete data in TopGun, the record isn't immediately removed from storag
 <div className="bg-purple-50 dark:bg-purple-900/20 border-l-4 border-purple-500 p-4 my-6 not-prose">
   <p className="text-sm text-purple-800 dark:text-purple-200">
     <strong>Garbage Collection:</strong> Tombstones are eligible for cleanup once all replicas
-    have acknowledged the deletion. The <code>LWWMap.pruneTombstones()</code> method removes tombstones
+    have acknowledged the deletion. The <code>LWWMap.prune()</code> method removes tombstones
     older than a given threshold, preventing "resurrection" of deleted data.
   </p>
 </div>
