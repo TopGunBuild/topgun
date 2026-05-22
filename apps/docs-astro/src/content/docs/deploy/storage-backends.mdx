@@ -1,0 +1,185 @@
+---
+title: Storage backends
+description: Choose between redb (embedded, default), PostgreSQL (production), or null (test only) as the TopGun server's durability backend.
+order: 52
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, HardDrive, Database, AlertTriangle, CheckCircle } from 'lucide-react';
+
+export const redbStartCode = `# Default — no configuration needed
+pnpm start:server
+
+# Or with explicit path
+TOPGUN_REDB_PATH=/var/lib/topgun/data.redb pnpm start:server`;
+
+export const postgresStartCode = `# Switch to PostgreSQL
+STORAGE_BACKEND=postgres \\
+DATABASE_URL=postgres://user:pass@localhost/myapp \\
+pnpm start:server`;
+
+export const tablesCode = `-- TopGun automatically creates this table on startup
+-- Your existing tables are NOT modified
+
+CREATE TABLE IF NOT EXISTS topgun_maps (
+  map_name        TEXT    NOT NULL,
+  key             TEXT    NOT NULL,
+  value           BYTEA   NOT NULL,  -- MsgPack-encoded CRDT data
+  expiration_time BIGINT  NOT NULL DEFAULT 0,
+  is_backup       BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at      BIGINT  NOT NULL,
+  updated_at      BIGINT  NOT NULL,
+  PRIMARY KEY (map_name, key, is_backup)
+);
+
+-- Index for efficient map-level queries
+CREATE INDEX IF NOT EXISTS idx_topgun_maps_map
+  ON topgun_maps (map_name);`;
+
+export const nullStartCode = `# In-memory ephemeral backend — data lost on restart
+# Use in unit tests / CI only
+STORAGE_BACKEND=null pnpm start:server`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/deploy" className="hover:text-foreground transition-colors">Deploy</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Storage backends</span>
+</div>
+
+# Storage backends
+
+Choose how the TopGun server persists data. The backend is selected at startup via `STORAGE_BACKEND` (source: `packages/server-rust/src/bin/test_server.rs:109`). Three choices are available: `redb` (embedded, default), `postgres` (PostgreSQL, production), and `null` (ephemeral, tests only).
+
+## Choosing a backend
+
+| Scenario | Recommended backend | Reason |
+|----------|--------------------|-|
+| Local development / demo | `redb` (default) | Zero-config, no Docker, instant start |
+| Production — single node | `redb` or `postgres` | redb for lowest ops overhead; postgres for shared access |
+| Production — multi-node / cluster | `postgres` | Shared persistence across nodes; redb is per-process |
+| Integration tests / CI | `null` | Ephemeral; deterministic between runs |
+
+## redb (embedded default)
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <HardDrive className="w-6 h-6 text-brand" />
+  <span className="text-neutral-600 dark:text-neutral-300">A fast embedded key-value store — no external process required.</span>
+</div>
+
+[redb](https://github.com/cberner/redb) is the default backend added in SPEC-241. The server opens a single file (`./topgun.redb` by default) directly in-process. No Postgres, no Docker, no connection pool.
+
+### Starting with redb
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code={redbStartCode} />
+</div>
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STORAGE_BACKEND` | `"redb"` | Set to `redb` or omit entirely |
+| `TOPGUN_REDB_PATH` | `./topgun.redb` | File path for the redb database file |
+
+Source: `STORAGE_BACKEND` at `bin/test_server.rs:109`; `TOPGUN_REDB_PATH` at `bin/test_server.rs:115`.
+
+### Notes
+
+- Data persists across server restarts as long as the file exists.
+- Single-process: not shared between multiple server instances.
+- For Docker deployments, mount the path as a volume so data survives container recreation.
+
+## PostgreSQL
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Database className="w-6 h-6 text-brand" />
+  <span className="text-neutral-600 dark:text-neutral-300">Shared, durable persistence for multi-node and production deployments.</span>
+</div>
+
+### Starting with PostgreSQL
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code={postgresStartCode} />
+</div>
+
+TopGun works alongside your existing PostgreSQL database. It creates its own `topgun_maps` table and never touches your application tables.
+
+### What TopGun creates
+
+<div className="not-prose">
+  <CodeBlock title="topgun table schema (auto-created on startup)" language="sql" code={tablesCode} />
+</div>
+
+<div className="bg-green-50 dark:bg-green-900/20 border border-green-100 dark:border-green-800 rounded-xl p-6 my-6 not-prose">
+  <div className="flex items-center gap-2 mb-2">
+    <CheckCircle className="w-5 h-5 text-green-600 dark:text-green-400" />
+    <h3 className="text-lg font-semibold text-green-800 dark:text-green-300">Safe coexistence</h3>
+  </div>
+  <span className="text-green-700 dark:text-green-400">TopGun uses the <code className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-800/50 text-sm">topgun_</code> prefix for all its tables. It never creates, modifies, or drops tables outside this namespace. Your existing data is safe.</span>
+</div>
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STORAGE_BACKEND` | `"redb"` | Must be set to `postgres` to use PostgreSQL |
+| `DATABASE_URL` | — | PostgreSQL connection URL (required when `STORAGE_BACKEND=postgres`) |
+
+Source: `STORAGE_BACKEND` at `bin/test_server.rs:109`; `DATABASE_URL` at `bin/test_server.rs:126`.
+
+### When to use a separate database
+
+For production, you may want TopGun to use a **separate** PostgreSQL database to isolate resource usage:
+
+```bash
+DATABASE_URL=postgres://user:pass@localhost/topgun_data \
+STORAGE_BACKEND=postgres \
+pnpm start:server
+```
+
+Consider isolation when:
+- TopGun write volume is high and you want to isolate I/O
+- You want independent backup/restore for TopGun data
+- Your existing database is already under heavy load
+
+## null (ephemeral, test only)
+
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800 rounded-xl p-6 my-6 not-prose">
+  <div className="flex items-center gap-2 mb-2">
+    <AlertTriangle className="w-5 h-5 text-yellow-600 dark:text-yellow-400" />
+    <h3 className="text-lg font-semibold text-yellow-800 dark:text-yellow-300">Test use only</h3>
+  </div>
+  <span className="text-yellow-700 dark:text-yellow-400">The <code>null</code> backend stores nothing to disk. All data is lost when the server stops. Do not use in production.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code={nullStartCode} />
+</div>
+
+The `null` backend is used in the TopGun integration test suite for deterministic, stateless test runs. Source: `bin/test_server.rs:109` — `"null"` is one of the three accepted values.
+
+## Switching between backends
+
+Data does **not** auto-migrate between backends. If you switch from `redb` to `postgres` (or vice versa), the server starts with an empty store on the new backend. Clients re-sync their local state on reconnect via MerkleTree delta sync.
+
+**Operational notes:**
+- **redb → postgres:** Export is not built-in today. For production migrations, re-ingest data from clients (they hold authoritative local state). Standard path: start fresh postgres instance, let clients reconnect and push their local maps.
+- **postgres → redb:** `pg_dump` the `topgun_maps` table if you need a snapshot, then restore using standard SQL tools. TopGun does not provide a migration utility (out of scope; follow standard SQL dump/file-copy procedures).
+- **Backup:** For redb, copy the `.redb` file. For postgres, use `pg_dump`. For cluster deployments, back up the primary postgres instance.
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/deploy/self-host" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Self-host
+    </div>
+  </a>
+  <a href="/docs/deploy/performance" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Performance tuning <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>
