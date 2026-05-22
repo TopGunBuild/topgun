@@ -1,6 +1,6 @@
 ---
 import '../styles/global.css';
-import { NavbarWrapper } from '../components/NavbarWrapper';
+import Header from '../components/landing/Header.astro';
 import { DocsSidebar } from '../components/docs/DocsSidebar';
 import { TableOfContents } from '../components/docs/TableOfContents';
 import SEO from '../components/SEO.astro';
@@ -48,9 +48,9 @@ const currentPath = Astro.url.pathname;
         </div>
 
         <div class="relative z-10 flex flex-col min-h-screen">
-            <NavbarWrapper client:load />
+            <Header />
 
-            <div class="flex w-full pt-16 min-h-screen">
+            <div class="flex w-full pt-14 min-h-screen">
                 <!-- Mobile Menu Toggle -->
                 <button
                     id="mobile-menu-toggle"
@@ -65,19 +65,19 @@ const currentPath = Astro.url.pathname;
                 <div id="mobile-sidebar-overlay" class="fixed inset-0 z-40 lg:hidden hidden">
                     <div class="absolute inset-0 bg-black/50 backdrop-blur-sm" id="mobile-sidebar-backdrop"></div>
                     <aside
-                        class="absolute left-0 top-16 bottom-0 w-64 bg-background border-r border-card-border overflow-y-auto"
+                        class="absolute left-0 top-14 bottom-0 w-64 bg-background border-r border-card-border overflow-y-auto"
                     >
                         <DocsSidebar client:load currentPath={currentPath} />
                     </aside>
                 </div>
 
                 <!-- Left Sidebar - Desktop -->
-                <aside class="fixed left-0 top-16 w-64 h-[calc(100vh-4rem)] border-r border-card-border bg-background overflow-y-auto hidden lg:block custom-scrollbar">
+                <aside class="fixed left-0 top-14 w-64 h-[calc(100vh-3.5rem)] border-r border-card-border bg-background overflow-y-auto hidden lg:block custom-scrollbar">
                     <DocsSidebar client:load currentPath={currentPath} />
                 </aside>
 
                 <!-- Right Sidebar - Table of Contents (fixed) -->
-                <aside class="fixed right-0 top-16 w-64 h-[calc(100vh-4rem)] bg-background overflow-y-auto hidden xl:block custom-scrollbar">
+                <aside class="fixed right-0 top-14 w-64 h-[calc(100vh-3.5rem)] bg-background overflow-y-auto hidden xl:block custom-scrollbar">
                     <TableOfContents client:idle />
                 </aside>
 

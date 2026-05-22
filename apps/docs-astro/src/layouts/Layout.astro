@@ -1,6 +1,6 @@
 ---
 import '../styles/global.css';
-import { NavbarWrapper } from '../components/NavbarWrapper';
+import Header from '../components/landing/Header.astro';
 import { Footer } from '../components/Footer';
 import SEO from '../components/SEO.astro';
 import PostHog from '../components/PostHog.astro';
@@ -55,7 +55,7 @@ const {
         </div>
 
         <div class="relative z-10">
-            <NavbarWrapper client:load />
+            <Header />
             <slot />
             <Footer />
         </div>
