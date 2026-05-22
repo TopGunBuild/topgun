@@ -1,0 +1,239 @@
+---
+title: Counters & locks
+description: Distributed PN-Counter with automatic conflict resolution and single-node distributed locks with fencing tokens.
+order: 15
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Plus, Minus, Lock, ShieldCheck } from 'lucide-react';
+import { AlertBox } from '../../../components/docs/AlertBox';
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Counters & locks</span>
+</div>
+
+# Counters & locks
+
+Counters and locks: TopGun ships a PN-Counter (increment/decrement with automatic conflict resolution) and named distributed locks (single-node, fencing-token-based — cluster-safe locks are on the Raft roadmap). Both are available from the same `TopGunClient` instance and work offline.
+
+---
+
+## Section 1 — PN-Counter
+
+A **PN-Counter** (Positive-Negative Counter) is a CRDT that supports both increment and decrement operations. It works correctly when multiple clients update it concurrently or offline: writes queue locally, sync on reconnect, and converge automatically.
+
+### Basic usage
+
+export const counterBasicCode = `import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080',
+  storage: new IDBAdapter(),
+});
+
+await client.start();
+
+// Get a counter instance — namespaced by entity type and ID
+const likes = client.getPNCounter('likes:post-123');
+
+// Increment (+1)
+likes.increment();
+
+// Decrement (-1)
+likes.decrement();
+
+// Add arbitrary amount (positive or negative)
+likes.addAndGet(10);   // +10
+likes.addAndGet(-5);   // -5
+
+// Get current value (reads from local state — no network round-trip)
+console.log('Likes:', likes.get());`;
+
+<div className="not-prose">
+  <CodeBlock title="src/lib/counters.ts" language="typescript" code={counterBasicCode} />
+</div>
+
+### Subscribing to changes
+
+export const counterSubscribeCode = `const likes = client.getPNCounter('likes:post-123');
+
+// Callback fires on local operations AND on remote updates
+const unsubscribe = likes.subscribe((value) => {
+  console.log('Current likes:', value);
+  updateUI(value);
+});
+
+// Stop listening when done
+unsubscribe();`;
+
+<div className="not-prose">
+  <CodeBlock title="src/lib/counters.ts" language="typescript" code={counterSubscribeCode} />
+</div>
+
+### React hook
+
+export const counterReactCode = `import { usePNCounter } from '@topgunbuild/react';
+
+function LikeButton({ postId }: { postId: string }) {
+  const { value, increment, decrement, loading } = usePNCounter(\`likes:\${postId}\`);
+
+  return (
+    <div>
+      <button onClick={decrement} disabled={loading}>-</button>
+      <span>{value}</span>
+      <button onClick={increment} disabled={loading}>+</button>
+    </div>
+  );
+}`;
+
+<div className="not-prose">
+  <CodeBlock title="components/LikeButton.tsx" language="tsx" code={counterReactCode} />
+</div>
+
+### PNCounterHandle API
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `get()` | `number` | Current counter value (local read) |
+| `increment()` | `number` | Increment by 1, returns new value |
+| `decrement()` | `number` | Decrement by 1, returns new value |
+| `addAndGet(delta)` | `number` | Add delta, returns new value |
+| `subscribe(fn)` | `() => void` | Subscribe to changes, returns unsubscribe |
+
+### Use cases
+
+```typescript
+// Like / upvote counter
+const likes = client.getPNCounter('likes:post-123');
+likes.increment(); // user liked
+likes.decrement(); // user unliked
+
+// Inventory tracking across locations
+const stock = client.getPNCounter('inventory:sku-abc');
+stock.addAndGet(100);  // warehouse receives shipment
+stock.addAndGet(-5);   // warehouse ships items
+
+// Game score
+const score = client.getPNCounter('score:player-abc');
+score.addAndGet(100);  // points earned
+score.addAndGet(-20);  // penalty applied
+```
+
+PN-Counter operations work offline — changes persist to IndexedDB and sync when the connection is restored.
+
+---
+
+## Section 2 — Distributed locks (single-node)
+
+<AlertBox
+  variant="warning"
+  title="Deployment Mode Semantics"
+  text="Single-node: stable (fencing tokens, TTL-based expiry, disconnect-release). Cluster — current: partition-routing (safe when a single node owns the relevant partition; weaker guarantees under split-brain). Cluster — planned: Raft-replicated consensus via openraft, tracked on the roadmap."
+/>
+
+| Deployment | Status | Notes |
+|-----------|--------|-------|
+| Single-node | Stable | Fencing tokens, TTL-based expiry, disconnect-release semantics in place |
+| Cluster (current) | Partition-routing | Safe when a single node owns the relevant partition; weaker guarantees under split-brain |
+| Cluster (planned) | Raft-replicated | Via openraft — Raft-backed cluster locks are on the roadmap |
+
+Distributed locks in cluster mode currently use partition-routing without Raft consensus. They are safe for single-node deployments and for cluster deployments where a single node owns the relevant partition, but provide weaker guarantees under split-brain. Raft-backed cluster locks are in development.
+
+### Basic usage
+
+export const lockBasicCode = `import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080',
+  storage: new IDBAdapter(),
+});
+
+await client.start();
+
+async function processJob() {
+  const lock = client.getLock('process-queue-1');
+
+  // Acquire lock with 5 s TTL (auto-released if client crashes)
+  const acquired = await lock.lock(5000);
+
+  if (acquired) {
+    try {
+      console.log('Lock acquired, processing job...');
+      await doHeavyWork();
+    } finally {
+      // Always release in a finally block
+      await lock.unlock();
+      console.log('Lock released');
+    }
+  } else {
+    console.log('Could not acquire lock — another worker holds it.');
+  }
+}`;
+
+<div className="not-prose">
+  <CodeBlock title="src/workers/job-processor.ts" language="typescript" code={lockBasicCode} />
+</div>
+
+### DistributedLock API
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `lock(ttlMs?)` | `Promise<boolean>` | Attempt to acquire. Returns `true` if granted, `false` if held by another client. `ttlMs` is the auto-release timeout if the client crashes. |
+| `unlock()` | `Promise<void>` | Release the lock. No-op if not held. |
+| `isLocked()` | `boolean` | Returns `true` if this handle currently holds the lock. |
+
+### Fencing tokens
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <ShieldCheck className="w-6 h-6 text-green-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">When a lock is granted, the server returns a monotonically increasing fencing token. Successive acquire → release → acquire sequences always yield a strictly increasing token (invariant I2 in <code>coordination_lock.rs</code>).</span>
+</div>
+
+<AlertBox
+  variant="info"
+  title="Why fencing tokens matter"
+  text="If a client pauses (e.g., a long GC pause) and its lock TTL expires, another client may acquire the lock. When the first client wakes up, it still thinks it holds the lock. Fencing tokens allow downstream storage systems to reject writes from the old client (its token is lower than the current holder's) — preventing silent data corruption. The high-level lock() / unlock() API handles this internally for TopGun operations."
+/>
+
+### Lock naming
+
+Use descriptive, namespaced names:
+
+```typescript
+// Good: entity type + ID makes collisions unlikely
+client.getLock('job-queue:partition-0');
+client.getLock('resource:payment-processor');
+client.getLock('cron:daily-report');
+
+// Avoid: ambiguous names that risk accidental sharing
+client.getLock('lock1');
+```
+
+---
+
+**Next steps**
+
+- [Authentication](/docs/guides/authentication) — secure lock operations with per-user RBAC
+- [Offline-first apps](/docs/guides/offline-first) — understand how counter writes queue during disconnects
+- [Client API reference](/docs/reference/client) — full `getPNCounter` and `getLock` method signatures
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/search-and-live-queries" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Search & live queries
+    </div>
+  </a>
+  <a href="/docs/guides/authentication" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Authentication <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

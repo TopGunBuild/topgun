@@ -1,0 +1,354 @@
+---
+title: Search & live queries
+description: Subscribe to reactive predicate queries and add BM25 full-text search to your maps.
+order: 14
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight } from 'lucide-react';
+import { AlertBox } from '../../../components/docs/AlertBox';
+import { FeatureCard } from '../../../components/docs/FeatureCard';
+import { Activity, Filter, Search, Zap } from 'lucide-react';
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Search & live queries</span>
+</div>
+
+# Search & live queries
+
+Search and live queries: subscribe to filtered subsets of a map with `useQuery`; the subscription updates automatically when matching records change. For text-heavy data, layer an `InvertedIndex` on top for BM25-ranked full-text search. Both patterns work offline — the subscription runs against local data when the server is unreachable.
+
+<div className="grid md:grid-cols-3 gap-6 mb-12 not-prose">
+  <FeatureCard
+    icon={Activity}
+    iconColor="text-brand-subtle"
+    title="Live subscriptions"
+    description="Changes push to subscribers immediately — no polling required."
+  />
+  <FeatureCard
+    icon={Filter}
+    iconColor="text-green-500"
+    title="Predicate filters"
+    description="Simple equality, range, regex, and logical operators."
+  />
+  <FeatureCard
+    icon={Search}
+    iconColor="text-orange-500"
+    title="Full-text search"
+    description="InvertedIndex for token matching; BM25 for relevance-ranked results."
+  />
+</div>
+
+---
+
+## Reactive queries (React)
+
+Use `useQuery` with a `where` clause or `predicate` to subscribe to a filtered view of a map. The subscription updates automatically whenever matching records change — locally or via sync.
+
+export const reactQueryCode = `import { useQuery, useMutation } from '@topgunbuild/react';
+
+interface Todo {
+  text: string;
+  completed: boolean;
+  createdAt: number;
+}
+
+export function ActiveTodos() {
+  // Subscribe to incomplete todos, sorted newest first
+  const { data: todos, loading, error } = useQuery<Todo>('todos', {
+    where: { completed: false },
+    sort: { createdAt: 'desc' },
+    limit: 50,
+  });
+
+  const { update } = useMutation<Todo>('todos');
+
+  if (loading) return <p>Loading...</p>;
+  if (error) return <p>Error: {error.message}</p>;
+
+  return (
+    <ul>
+      {todos.map(todo => (
+        <li key={todo._key}>
+          <input
+            type="checkbox"
+            checked={todo.completed}
+            onChange={() => update(todo._key, { completed: true })}
+          />
+          {todo.text}
+        </li>
+      ))}
+    </ul>
+  );
+}`;
+
+<div className="not-prose">
+  <CodeBlock title="components/ActiveTodos.tsx" language="tsx" code={reactQueryCode} />
+</div>
+
+---
+
+## Reactive queries (imperative)
+
+Outside React, use `client.query(mapName, filter)` to get a `QueryHandle`. Subscribe to the handle and call `unsubscribe()` when done.
+
+See [Client API reference](/docs/reference/client) for the full `QueryFilter` and `QueryHandle` surfaces.
+
+export const imperativeQueryCode = `import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080',
+  storage: new IDBAdapter(),
+});
+
+await client.start();
+
+const handle = client.query('orders', {
+  where: { status: 'pending' },
+  sort: { createdAt: 'desc' },
+  limit: 20,
+});
+
+const unsubscribe = handle.subscribe((results) => {
+  console.log('Pending orders:', results.length);
+  // results is QueryResultItem<T>[] — each item carries _key
+});
+
+// Stop receiving updates when done
+unsubscribe();`;
+
+<div className="not-prose">
+  <CodeBlock title="src/workers/order-watcher.ts" language="typescript" code={imperativeQueryCode} />
+</div>
+
+---
+
+## Predicates
+
+For complex filtering — range comparisons, logical operators, regex — use the `Predicates` builder from `@topgunbuild/client`. The result is passed to the `predicate` field of the query filter.
+
+export const predicatesCode = `import { Predicates } from '@topgunbuild/client';
+import { useQuery } from '@topgunbuild/react';
+
+interface Product {
+  name: string;
+  price: number;
+  category: string;
+  inStock: boolean;
+}
+
+export function AffordableElectronics() {
+  const { data: products } = useQuery<Product>('products', {
+    predicate: Predicates.and(
+      Predicates.greaterThan('price', 10),
+      Predicates.lessThanOrEqual('price', 200),
+      Predicates.equal('category', 'electronics'),
+      Predicates.equal('inStock', true),
+    ),
+    sort: { price: 'asc' },
+  });
+
+  return (
+    <ul>
+      {products.map(p => (
+        <li key={p._key}>{p.name} — \${p.price}</li>
+      ))}
+    </ul>
+  );
+}`;
+
+<div className="not-prose">
+  <CodeBlock title="components/AffordableElectronics.tsx" language="tsx" code={predicatesCode} />
+</div>
+
+### Available predicate methods
+
+| Method | Description | Example |
+|--------|-------------|---------|
+| `equal(attr, value)` | Exact match | `Predicates.equal('status', 'active')` |
+| `notEqual(attr, value)` | Not equal | `Predicates.notEqual('type', 'draft')` |
+| `greaterThan(attr, value)` | Greater than | `Predicates.greaterThan('price', 100)` |
+| `greaterThanOrEqual(attr, value)` | Greater or equal | `Predicates.greaterThanOrEqual('stock', 0)` |
+| `lessThan(attr, value)` | Less than | `Predicates.lessThan('age', 18)` |
+| `lessThanOrEqual(attr, value)` | Less or equal | `Predicates.lessThanOrEqual('priority', 5)` |
+| `like(attr, pattern)` | SQL-like pattern (`%` = any, `_` = single char) | `Predicates.like('name', '%john%')` |
+| `regex(attr, pattern)` | Regular expression | `Predicates.regex('email', '^.*@gmail\\.com$')` |
+| `between(attr, from, to)` | Range (inclusive) | `Predicates.between('price', 10, 100)` |
+| `isIn(attr, values)` | Match any value in list | `Predicates.isIn('status', ['active', 'pending'])` |
+| `isNull(attr)` | Field is null or missing | `Predicates.isNull('deletedAt')` |
+| `isNotNull(attr)` | Field exists and is not null | `Predicates.isNotNull('email')` |
+| `and(...predicates)` | Logical AND | `Predicates.and(p1, p2, p3)` |
+| `or(...predicates)` | Logical OR | `Predicates.or(p1, p2)` |
+| `not(predicate)` | Logical NOT | `Predicates.not(p1)` |
+
+<AlertBox
+  variant="info"
+  title="isIn not in"
+  text="The list-membership predicate is Predicates.isIn() (not Predicates.in()) because `in` is a reserved JavaScript keyword."
+/>
+
+---
+
+## Full-text search with InvertedIndex
+
+For text-heavy data, add an `InvertedIndex` to an `IndexedLWWMap`. The index maps tokens to document keys, enabling O(K) search (where K is the number of matching tokens) instead of a full scan.
+
+export const invertedIndexCode = `import {
+  IndexedLWWMap,
+  simpleAttribute,
+  HLC,
+} from '@topgunbuild/core';
+
+interface Article {
+  title: string;
+  body: string;
+  author: string;
+}
+
+const hlc = new HLC('node-1');
+const articles = new IndexedLWWMap<string, Article>(hlc);
+
+// Add an inverted index on the 'title' field
+const titleAttr = simpleAttribute<Article, string>('title', a => a.title);
+articles.addInvertedIndex(titleAttr);
+
+// Index a document
+articles.set('a1', {
+  title: 'Introduction to Machine Learning',
+  body: 'Machine learning is a subset of artificial intelligence.',
+  author: 'Alice',
+});
+
+articles.set('a2', {
+  title: 'Deep Learning Tutorial',
+  body: 'Deep learning uses many-layer neural networks.',
+  author: 'Bob',
+});
+
+// Token search — O(K) lookup
+const results = articles.queryValues({
+  type: 'contains',
+  attribute: 'title',
+  value: 'learning',
+});
+// Returns both articles ('learning' appears in both titles)
+
+// AND semantics: all tokens must match
+const narrowed = articles.queryValues({
+  type: 'contains',
+  attribute: 'title',
+  value: 'machine learning',  // "machine" AND "learning"
+});
+// Returns only a1`;
+
+<div className="not-prose">
+  <CodeBlock title="src/lib/search.ts" language="typescript" code={invertedIndexCode} />
+</div>
+
+### Query types
+
+| Query type | Semantics | Use case |
+|-----------|-----------|----------|
+| `contains` | All tokens must match (AND) | Search box with multiple words |
+| `containsAll` | All specified values present | Filter by required tags |
+| `containsAny` | Any token matches (OR) | Search with alternatives |
+
+---
+
+## Combining queries and search
+
+Use predicate queries for structured filtering (equality, range) and `InvertedIndex` for text search. Combine them by chaining `queryValues` on an `IndexedLWWMap` or by applying predicate queries to the results of a text search.
+
+export const combinedCode = `import {
+  IndexedLWWMap,
+  simpleAttribute,
+  HLC,
+} from '@topgunbuild/core';
+import { Predicates } from '@topgunbuild/client';
+import { useQuery } from '@topgunbuild/react';
+
+interface Product {
+  name: string;
+  category: string;
+  price: number;
+  inStock: boolean;
+}
+
+// Use IndexedLWWMap for text search + getMap for reactive queries
+// Approach: predicate query first (from useQuery), then apply text filter client-side
+// OR: use IndexedLWWMap directly for in-memory search without server round-trip
+
+const hlc = new HLC('node-search');
+const productIndex = new IndexedLWWMap<string, Product>(hlc);
+
+const nameAttr = simpleAttribute<Product, string>('name', p => p.name);
+productIndex.addInvertedIndex(nameAttr);
+
+function searchProducts(query: string, maxPrice: number) {
+  // Step 1: text search — returns products whose name contains the query tokens
+  const textMatches = productIndex.queryValues({
+    type: 'contains',
+    attribute: 'name',
+    value: query,
+  });
+
+  // Step 2: filter by price client-side (or use a predicate query on the server map)
+  return textMatches.filter(p => p.price <= maxPrice && p.inStock);
+}
+
+// In React: use useQuery for the reactive layer + run text search on the result set
+export function ProductSearch() {
+  const [searchTerm, setSearchTerm] = React.useState('');
+
+  const { data: products } = useQuery<Product>('products', {
+    predicate: Predicates.and(
+      Predicates.equal('inStock', true),
+      Predicates.lessThanOrEqual('price', 500),
+    ),
+  });
+
+  const filtered = React.useMemo(() => {
+    if (!searchTerm) return products;
+    const lower = searchTerm.toLowerCase();
+    return products.filter(p => p.name.toLowerCase().includes(lower));
+  }, [products, searchTerm]);
+
+  return (
+    <div>
+      <input value={searchTerm} onChange={e => setSearchTerm(e.target.value)} placeholder="Search..." />
+      <ul>{filtered.map(p => <li key={p._key}>{p.name} — \${p.price}</li>)}</ul>
+    </div>
+  );
+}`;
+
+<div className="not-prose">
+  <CodeBlock title="components/ProductSearch.tsx" language="tsx" code={combinedCode} />
+</div>
+
+---
+
+**Next steps**
+
+- [Schema-typed data](/docs/guides/schema-typed-data) — add compile-time types to query results
+- [Real-time collaboration](/docs/guides/realtime-collaboration) — apply live queries to shared maps
+- [Client API reference](/docs/reference/client) — full `query()` and `QueryHandle` surface
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/schema-typed-data" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Schema-typed data
+    </div>
+  </a>
+  <a href="/docs/guides/counters-and-locks" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Counters & locks <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>
