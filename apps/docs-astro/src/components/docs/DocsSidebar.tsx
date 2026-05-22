@@ -82,7 +82,7 @@ const getInitialExpandedSection = (pathname: string): Record<SectionKey, boolean
         sections.reference = true;
     } else if (pathname === '/docs/faq') {
         sections.started = true;
-    } else if (pathname === '/docs/community' || pathname === '/docs/changelog' || pathname === '/docs/benchmarks') {
+    } else if (pathname === '/docs/community' || pathname === '/docs/changelog' || pathname === '/docs/benchmarks' || pathname === '/docs/for-coding-agents' || pathname === '/docs/guides/troubleshooting') {
         sections.resources = true;
     } else if (pathname === '/docs/roadmap') {
         sections.started = true;
@@ -204,7 +204,6 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                         <SubItem to="/docs/guides/cluster-client" currentPath={currentPath}>Cluster Client</SubItem>
                         <SubItem to="/docs/guides/cluster-replication" currentPath={currentPath}>Cluster Replication</SubItem>
                         <SubItem to="/docs/guides/observability" currentPath={currentPath}>Observability</SubItem>
-                        <SubItem to="/docs/guides/troubleshooting" currentPath={currentPath}>Troubleshooting</SubItem>
                     </div>
                 )}
             </div>
@@ -266,6 +265,8 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                         <SubItem to="/docs/community" currentPath={currentPath}>Community & Support</SubItem>
                         <SubItem to="/docs/changelog" currentPath={currentPath}>Changelog</SubItem>
                         <SubItem to="/docs/benchmarks" currentPath={currentPath}>Benchmarks</SubItem>
+                        <SubItem to="/docs/guides/troubleshooting" currentPath={currentPath}>Troubleshooting</SubItem>
+                        <SubItem to="/docs/for-coding-agents" currentPath={currentPath}>For coding agents</SubItem>
                     </div>
                 )}
             </div>

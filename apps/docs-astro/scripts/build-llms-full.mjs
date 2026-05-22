@@ -59,6 +59,7 @@ const ALLOWLIST = [
   'reference/react.mdx',
   'reference/core.mdx',
   'comparison.mdx',
+  'for-coding-agents.mdx',  // Curated cheatsheet for LLM coding agents — canonical patterns not reconstructable from other allowlisted pages
 ];
 
 // 200 KB budget — typical limit LLM agents reserve for project context.

@@ -7,8 +7,8 @@ TopGun is a hybrid offline-first in-memory data grid — zero-latency reads/writ
 - [Introduction](https://topgun.build/intro/): What TopGun is, how it bridges in-memory data grids and offline-first client databases, and when to use it.
 - [Quickstart](https://topgun.build/quickstart/): Build a local-first React app in under 5 minutes — works offline by default, add real-time sync optionally.
 - [Core Concepts](https://topgun.build/concepts/): Understand the distributed systems theory behind TopGun: local-first architecture, CRDTs, Hybrid Logical Clocks, and the sync protocol.
-- [Schema & Type Safety](https://topgun.build/guides/schema/): Add TypeScript type safety to TopGun maps using the TopGun<T> generic class.
-- [MCP Server](https://topgun.build/guides/mcp-server/): Connect AI assistants like Claude Desktop and Cursor to your TopGun database using the Model Context Protocol.
+- [Schema-Typed Data](https://topgun.build/guides/schema-typed-data/): Add TypeScript type safety to TopGun maps using the TopGunClient<TSchema> generic class.
+- [MCP](https://topgun.build/reference/mcp/): Connect AI assistants like Claude Desktop and Cursor to your TopGun database using the Model Context Protocol.
 - [AI Builder Guide](https://topgun.build/guides/building-with-ai/): Build a TopGun app using Claude Code, Cursor, or Codex — prompt templates, common pitfalls, and live database access via MCP.
 - [API Reference](https://topgun.build/reference/): Full reference for TopGunClient, React hooks, data structures, server API, and the wire protocol.
 - [Comparison](https://topgun.build/comparison/): How TopGun compares to Firebase, Supabase Realtime, Replicache, and Yjs — trade-offs, migration paths, and positioning.
@@ -16,7 +16,8 @@ TopGun is a hybrid offline-first in-memory data grid — zero-latency reads/writ
 ## Optional
 
 - [FAQ](https://topgun.build/faq/): Frequently asked questions about TopGun's architecture, hosting, and use cases.
-- [Benchmarks](https://topgun.build/benchmarks/): Measured throughput and latency numbers — 560 K ops/sec fire-and-forget, 37 K ops/sec fire-and-wait at 1.5 ms p50 on M1 Max.
+- [Benchmarks](https://topgun.build/benchmarks/): Measured throughput and latency numbers — 480 K+ ops/sec fire-and-forget, 37 K ops/sec fire-and-wait at 1.5 ms p50 on M1 Max.
 - [Roadmap](https://topgun.build/roadmap/): Upcoming features and the post-launch engineering plan.
+- [For coding agents](https://topgun.build/for-coding-agents/): Concise schema-typed cheatsheet optimized for LLM ingestion.
 
 For full docs concatenated into one file, see [/llms-full.txt](https://topgun.build/llms-full.txt).
