@@ -1,0 +1,264 @@
+---
+title: Performance tuning
+description: Tune memory, eviction, write-behind, and connection limits. Programmatic ServerConfig + supported env vars only.
+order: 53
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Zap, Gauge, Timer, Server, Activity, Terminal } from 'lucide-react';
+import { AlertBox } from '../../../components/docs/AlertBox';
+
+export const memoryEnvCode = `# Memory ceiling and eviction thresholds (all real env vars)
+TOPGUN_MAX_RAM_MB=2048             # default 1024 MB
+TOPGUN_EVICTION_HIGH_PCT=85        # default 85 — eviction starts at this % of ceiling
+TOPGUN_EVICTION_LOW_PCT=70         # default 70 — eviction stops at this % of ceiling
+TOPGUN_EVICTION_INTERVAL_MS=1000   # default 1000 ms — orchestrator tick`;
+
+export const writeBehindEnvCode = `# Write-behind buffer (all real env vars)
+TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS=1000   # default 1000 ms — flush cadence
+TOPGUN_WRITEBEHIND_BATCH_SIZE=100           # default 100 — max entries per flush
+TOPGUN_WRITEBEHIND_CAPACITY=10000           # default 10000 — bounded buffer size`;
+
+export const serverConfigNote = `// packages/server-rust/src/service/config.rs
+pub struct ServerConfig {
+    pub max_concurrent_operations: u32,   // default 1000
+    pub default_operation_timeout_ms: u64, // default 30000
+    pub max_query_records: u32,           // default 10000
+    pub gc_interval_ms: u64,              // default 60000
+    // ...
+}
+
+// packages/server-rust/src/network/config.rs
+pub struct ConnectionConfig {
+    pub outbound_channel_capacity: usize,  // default 256
+    pub send_timeout: Duration,            // default 5s
+    pub idle_timeout: Duration,            // default 60s
+    pub ws_write_buffer_size: usize,       // default 128 KB
+    pub ws_max_write_buffer_size: usize,   // default 512 KB
+}
+
+pub struct NetworkConfig {
+    pub request_timeout: Duration,         // default 30s
+    pub max_body_size: usize,             // default 2 MB
+    pub cors_max_age: Duration,           // default 86400s
+    pub rate_limit_per_ip: u32,           // default 100
+    pub rate_limit_burst: u32,            // default 50
+    // ...
+}`;
+
+export const osLinuxTuning = `# Increase socket backlog
+sudo sysctl -w net.core.somaxconn=65535
+sudo sysctl -w net.ipv4.tcp_max_syn_backlog=65535
+
+# Increase file descriptor limits
+ulimit -n 65535
+
+# Enable TCP keepalive tuning
+sudo sysctl -w net.ipv4.tcp_keepalive_time=60
+sudo sysctl -w net.ipv4.tcp_keepalive_intvl=10
+sudo sysctl -w net.ipv4.tcp_keepalive_probes=6
+
+# Persist settings in /etc/sysctl.conf
+cat >> /etc/sysctl.conf << EOF
+net.core.somaxconn=65535
+net.ipv4.tcp_max_syn_backlog=65535
+net.ipv4.tcp_keepalive_time=60
+net.ipv4.tcp_keepalive_intvl=10
+net.ipv4.tcp_keepalive_probes=6
+EOF`;
+
+export const osLimitConf = `# /etc/security/limits.conf
+topgun soft nofile 65535
+topgun hard nofile 65535
+topgun soft nproc 65535
+topgun hard nproc 65535`;
+
+export const grafanaQueries = `# Operation throughput
+rate(topgun_operations_total[5m])
+
+# p99 latency
+histogram_quantile(0.99, rate(topgun_operation_duration_seconds_bucket[5m]))
+
+# Error rate
+rate(topgun_operation_errors_total[5m])
+
+# Active connections
+topgun_active_connections`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/deploy" className="hover:text-foreground transition-colors">Deploy</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Performance tuning</span>
+</div>
+
+# Performance tuning
+
+Tune the TopGun server for your workload: memory ceiling, eviction thresholds, write-behind buffer, and connection limits. Env-var-configurable knobs are documented below. Deeper configuration (concurrency, timeouts, connection buffers) requires programmatic `ServerConfig` / `ConnectionConfig` struct fields.
+
+## Measured benchmarks
+
+<div className="bg-neutral-50 dark:bg-neutral-900/50 border border-card-border rounded-xl p-6 my-6 not-prose">
+  <h3 className="text-lg font-semibold text-foreground mb-4">Measured performance (single node, M1 Max)</h3>
+  <div className="grid md:grid-cols-3 gap-6">
+    <div>
+      <div className="text-3xl font-bold text-brand">37,000+</div>
+      <div className="text-sm text-neutral-600 dark:text-neutral-400">ops/sec fire-and-wait (ACK-verified)</div>
+    </div>
+    <div>
+      <div className="text-3xl font-bold text-green-600 dark:text-green-400">560,000+</div>
+      <div className="text-sm text-neutral-600 dark:text-neutral-400">ops/sec fire-and-forget</div>
+    </div>
+    <div>
+      <div className="text-3xl font-bold text-purple-600 dark:text-purple-400">1.5ms</div>
+      <div className="text-sm text-neutral-600 dark:text-neutral-400">p50 write latency</div>
+    </div>
+  </div>
+  <p className="text-xs text-neutral-500 mt-4">
+    Benchmarks measured 2026-03-27 on M1 Max using the in-process load harness (<code>cargo bench --bench load_harness</code>, 200 connections, 30s). Fire-and-wait measures round-trip to ACK; fire-and-forget measures raw push throughput. Run <code>cargo bench --bench load_harness</code> to reproduce on your hardware.
+  </p>
+</div>
+
+## Memory and eviction
+
+The server uses an in-memory record cache with LRU eviction. When memory usage rises above the high-water mark, the eviction orchestrator removes least-recently-used records until it drops to the low-water mark.
+
+All four env vars below are real — sourced from `packages/server-rust/src/storage/eviction_config.rs`:
+
+<div className="not-prose">
+  <CodeBlock title=".env" language="bash" code={memoryEnvCode} />
+</div>
+
+| Variable | Default | Source | Notes |
+|----------|---------|--------|-------|
+| `TOPGUN_MAX_RAM_MB` | `1024` | `eviction_config.rs:85` | RAM ceiling in MB; eviction engages above high-water mark |
+| `TOPGUN_EVICTION_HIGH_PCT` | `85` | `eviction_config.rs:105` | Percent of ceiling at which eviction starts (0–100) |
+| `TOPGUN_EVICTION_LOW_PCT` | `70` | `eviction_config.rs:125` | Percent of ceiling at which eviction stops; must be &lt; high |
+| `TOPGUN_EVICTION_INTERVAL_MS` | `1000` | `eviction_config.rs:145` | Orchestrator tick interval in ms |
+
+**Why 1024 MB / 85 / 70 defaults?** Conservative ceiling tuned for a single-node HN-demo server. 85/70 water marks follow the Hazelcast LRU eviction reference pattern — wide enough gap (15 pp) to avoid eviction churn under bursty write loads. See [Configuration defaults rationale](/docs/deploy/configuration#defaults-rationale).
+
+## Write-behind buffer
+
+The write-behind layer decouples mutation latency from persistence latency by buffering writes in per-partition coalesced queues and flushing on a configurable schedule.
+
+All three env vars below are real — sourced from `packages/server-rust/src/storage/datastores/write_behind.rs`:
+
+<div className="not-prose">
+  <CodeBlock title=".env" language="bash" code={writeBehindEnvCode} />
+</div>
+
+| Variable | Default | Source | Notes |
+|----------|---------|--------|-------|
+| `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` | `1000` | `write_behind.rs:79` | How often the background flush task runs |
+| `TOPGUN_WRITEBEHIND_BATCH_SIZE` | `100` | `write_behind.rs:99` | Max records flushed per tick |
+| `TOPGUN_WRITEBEHIND_CAPACITY` | `10000` | `write_behind.rs:119` | Bounded buffer size; once full, writes apply back-pressure |
+
+**Durability note:** Write-behind buffers acked writes for ~1s before persisting to disk. Acceptable for demo-tier. Crash-safe shutdown drain + WAL recovery are tracked separately (out of scope for this release). Until that lands, an unclean shutdown can lose buffered writes not yet flushed.
+
+## Programmatic tuning
+
+Deeper configuration is controlled via Rust struct fields, not env vars. To change these values, modify the config structs and rebuild the binary.
+
+<div className="not-prose">
+  <CodeBlock title="packages/server-rust/src/service/config.rs + network/config.rs" language="rust" code={serverConfigNote} />
+</div>
+
+<AlertBox variant="info" title="Not env-var configurable today" text="These fields are Rust struct defaults. Env-var overrides for concurrency, timeout, and connection-buffer settings are tracked at TODO-400. Until then, modify the config structs and rebuild." />
+
+### ServerConfig fields
+
+| Field | Default | When to adjust |
+|-------|---------|----------------|
+| `max_concurrent_operations` | 1000 | Increase when load-shed errors appear under high load |
+| `default_operation_timeout_ms` | 30000 ms | Decrease for faster failure detection; increase for complex queries |
+| `max_query_records` | 10000 | Increase for large dataset queries; decrease if memory constrained |
+| `gc_interval_ms` | 60000 ms | Decrease if stale data accumulating; increase if GC overhead visible |
+
+### ConnectionConfig fields
+
+| Field | Default | When to adjust |
+|-------|---------|----------------|
+| `outbound_channel_capacity` | 256 | Increase for slow consumers; decrease if per-connection memory is high |
+| `send_timeout` | 5s | Increase for high-latency clients; decrease to drop slow clients faster |
+| `idle_timeout` | 60s | Decrease to reclaim idle connections; increase if frequent reconnects |
+| `ws_write_buffer_size` | 128 KB | Increase if large messages are being fragmented |
+| `ws_max_write_buffer_size` | 512 KB | Increase for very large payloads |
+
+### NetworkConfig fields
+
+| Field | Default | When to adjust |
+|-------|---------|----------------|
+| `request_timeout` | 30s | Decrease to fail hung requests faster |
+| `max_body_size` | 2 MB | Increase for large batch writes |
+| `rate_limit_per_ip` | 100 req/s | Decrease to throttle aggressive clients |
+| `rate_limit_burst` | 50 | Decrease to tighten burst tolerance |
+
+## OS-level tuning
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Terminal className="w-6 h-6 text-green-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Linux kernel parameters for high-connection workloads.</span>
+</div>
+
+For production servers handling thousands of connections, tune the operating system:
+
+### Linux sysctl settings
+
+<div className="not-prose">
+  <CodeBlock title="Linux kernel tuning" language="bash" code={osLinuxTuning} />
+</div>
+
+### File descriptor limits
+
+<div className="not-prose">
+  <CodeBlock title="/etc/security/limits.conf" language="text" code={osLimitConf} />
+</div>
+
+<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-6 my-6 not-prose">
+  <h3 className="text-lg font-semibold text-brand mb-2">Docker / Kubernetes note</h3>
+  <span className="text-brand">When running in containers, ensure the host has these settings applied. You may also need to set <code className="bg-brand-subtle/10 px-1.5 py-0.5 rounded">ulimits</code> in your Docker Compose or Kubernetes pod spec.</span>
+</div>
+
+## Observability
+
+Prometheus metrics are exposed at `GET /metrics`. All four metric names below are real — verified against `packages/server-rust/src/service/middleware/metrics.rs` and `network/handlers/metrics_endpoint.rs`:
+
+### Grafana dashboard queries
+
+<div className="not-prose">
+  <CodeBlock title="PromQL queries" language="text" code={grafanaQueries} />
+</div>
+
+### Critical metrics
+
+| Metric | Type | Labels | Healthy range | Action if exceeded |
+|--------|------|--------|---------------|-------------------|
+| `topgun_active_connections` | Gauge | — | Depends on capacity | Add nodes or increase file descriptors |
+| `topgun_operations_total` | Counter | service, outcome | Steady rate | Investigate spikes by service label |
+| `topgun_operation_duration_seconds` | Histogram | service | p99 &lt; 500ms | Profile slow service, check DB |
+| `topgun_operation_errors_total` | Counter | service, error | Near 0 | Investigate by error label |
+
+### Recommended alerts
+
+| Alert name | Condition | Severity |
+|-----------|-----------|----------|
+| HighErrorRate | `rate(topgun_operation_errors_total[5m]) > 10` | Critical |
+| HighLatency | `histogram_quantile(0.99, rate(topgun_operation_duration_seconds_bucket[5m])) > 0.5` | Warning |
+| ConnectionSpike | `topgun_active_connections > 1000` | Warning |
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/deploy/storage-backends" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Storage backends
+    </div>
+  </a>
+  <a href="/docs/deploy/configuration" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Configuration <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>
