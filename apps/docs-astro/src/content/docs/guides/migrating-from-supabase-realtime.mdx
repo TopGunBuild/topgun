@@ -7,7 +7,7 @@ order: 8
 import { ChevronRight } from 'lucide-react';
 import { AlertBox } from '../../../components/docs/AlertBox';
 
-<AlertBox variant="danger" title="Read this first — what's shipped vs. planned" text="TopGun does NOT replace Supabase's full BaaS. TopGun is a sync layer in front of YOUR Postgres — it does not replace Supabase Auth, Edge Functions, Storage buckets, or row-level security policies. TopGun ships per-map ACL booleans (read/write) plus JWT roles claim extraction; first-class RBAC and Postgres RLS-style policies are on the roadmap (see /docs/guides/rbac). Supabase postgres_changes (CDC from the Postgres write-ahead log) maps loosely to TopGun's CRDT-write notifications, but TopGun owns the write path — clients write through the TopGun client, not directly to Postgres. Reference: /docs/roadmap." />
+<AlertBox variant="danger" title="Read this first — what's shipped vs. planned" text="TopGun does NOT replace Supabase's full BaaS. TopGun is a sync layer in front of YOUR Postgres — it does not replace Supabase Auth, Edge Functions, Storage buckets, or row-level security policies. TopGun ships per-map ACL booleans (read/write) plus JWT roles claim extraction; first-class RBAC and Postgres RLS-style policies are on the roadmap (see /docs/roadmap). Supabase postgres_changes (CDC from the Postgres write-ahead log) maps loosely to TopGun's CRDT-write notifications, but TopGun owns the write path — clients write through the TopGun client, not directly to Postgres. Reference: /docs/roadmap." />
 
 <div className="flex items-center gap-2 text-sm text-neutral-500 mt-8 mb-8 overflow-hidden whitespace-nowrap">
   <span className="text-foreground font-medium">Docs</span>
