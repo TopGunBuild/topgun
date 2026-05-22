@@ -1,0 +1,122 @@
+---
+title: For Coding Agents
+description: TopGun cheatsheet for LLM coding assistants — schema-typed minimal code, structured headings, optimized for context-window ingestion.
+order: 99
+---
+
+## What TopGun is
+
+Local-first reactive data layer; CRDT-merged writes; WebSocket sync to a Rust server (single-node stable).
+
+## Install
+
+```bash
+pnpm add @topgunbuild/client @topgunbuild/react @topgunbuild/adapters
+```
+
+## Canonical app shape (React)
+
+```tsx
+// main.tsx
+import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+import { TopGunProvider } from '@topgunbuild/react';
+
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080',
+  storage: new IDBAdapter(),
+});
+client.start(); // non-await: lazy init, do NOT await
+
+function App() {
+  return (
+    <TopGunProvider client={client}>
+      <TodoApp />
+    </TopGunProvider>
+  );
+}
+```
+
+## Canonical writes
+
+```tsx
+import { useMutation } from '@topgunbuild/react';
+import { type Todo } from './schema';
+
+// useMutation<T>('mapName') returns { create, update, remove }
+// record._key is the unique identifier on every record
+const { create, update, remove } = useMutation<Todo>('todos');
+
+create(crypto.randomUUID(), { title: 'Buy milk', done: false });
+update(existingKey, { done: true });
+remove(existingKey);
+```
+
+## Canonical queries
+
+```tsx
+import { useQuery } from '@topgunbuild/react';
+import { Predicates } from '@topgunbuild/client';
+import { type Todo } from './schema';
+
+// useQuery<T>('mapName') returns { data: T[] }
+const { data: todos } = useQuery<Todo>('todos');
+
+// With predicates:
+const { data: open } = useQuery<Todo>('todos', {
+  predicate: Predicates.equal('done', false),
+});
+// Also: Predicates.isIn(), Predicates.greaterThan()
+```
+
+## Local-only mode
+
+```tsx
+// Omit serverUrl to run fully local — no server needed
+const client = new TopGunClient({
+  storage: new IDBAdapter(),
+});
+```
+
+## Add real-time sync
+
+```bash
+pnpm start:server   # embedded redb backend, zero-config
+```
+
+```tsx
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080',
+  storage: new IDBAdapter(),
+});
+```
+
+## Topic-based pub/sub
+
+```tsx
+import { useTopic } from '@topgunbuild/react';
+
+// useTopic<Payload>('channelName') returns { publish, messages }
+const { publish, messages } = useTopic<{ text: string }>('chat');
+publish({ text: 'hello' });
+```
+
+## Auth
+
+```tsx
+// client.setAuthToken(jwt) after sign-in
+// TopGun does NOT issue JWTs — use your own auth provider
+const jwt = await myAuthServer.signIn(email, password);
+client.setAuthToken(jwt);
+```
+
+## Common pitfalls
+
+- Do NOT `await client.start()` — lazy init; calling `await` is incorrect
+- Use `record._key` (not `record.id`) to identify records in mutation callbacks
+- `useMutation` requires the generic param `<T>` for type-safety: `useMutation<Todo>('todos')`
+- IndexedDB only persists when `IDBAdapter` is wired in `new TopGunClient({ storage: new IDBAdapter() })`
+
+## Cross-reference
+
+Full bundle: `/llms-full.txt`. Source: `https://github.com/TopGunBuild/topgun`.

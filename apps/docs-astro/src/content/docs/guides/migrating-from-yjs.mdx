@@ -262,7 +262,7 @@ function TodoList() {
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Cluster (current)</td>
         <td className="py-3 px-4 text-yellow-600 dark:text-yellow-400">Partition-routing, no Raft</td>
-        <td className="py-3 px-4 text-neutral-500">Safe when one node owns the partition; weaker guarantees under node failure — see <a href="/docs/guides/cluster-replication">Cluster Replication</a></td>
+        <td className="py-3 px-4 text-neutral-500">Safe when one node owns the partition; weaker guarantees under node failure — see <a href="/docs/roadmap">/docs/roadmap</a></td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Cluster (planned)</td>
@@ -273,7 +273,7 @@ function TodoList() {
   </table>
 </div>
 
-For a first migration, start on single-node. The partition-routed cluster mode works but does not yet have Raft-backed consensus; consult the [Cluster Replication guide](/docs/guides/cluster-replication) before running cluster in production.
+For a first migration, start on single-node. The partition-routed cluster mode works but does not yet have Raft-backed consensus; see the [roadmap](/docs/roadmap) for cluster-safety status.
 
 ## Why migrate?
 
@@ -283,6 +283,7 @@ For a first migration, start on single-node. The partition-routed cluster mode w
 - **Plain Postgres durable store:** Migrate data off TopGun via `pg_dump`. Y.js typically pairs with a custom server (y-websocket, y-redis, y-leveldb) — TopGun ships with the durable store.
 - **Offline persistence via `IDBAdapter`:** Always-on parity with `IndexeddbPersistence`.
 - **CRDT conflict resolution by HLC:** Deterministic across clients (parity with Y.js's CRDT semantics, but at whole-document granularity, not character-level).
+- **Performance:** 483K ops/sec fire-and-forget, ~37K ops/sec fire-and-wait at 1.5ms p50 on M1 Max (200 connections). See [benchmarks](/docs/benchmarks) for methodology.
 
 ## Migration checklist
 

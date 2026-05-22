@@ -56,7 +56,7 @@ Supabase Realtime is a Postgres-native real-time library: clients open WebSocket
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Row Level Security (RLS) policies</td>
         <td className="py-3 px-4 text-foreground">Per-map ACL booleans (<code>read</code>/<code>write</code>)</td>
-        <td className="py-3 px-4 text-neutral-500">Full RLS-style policies on roadmap — see <a href="/docs/guides/rbac">/docs/guides/rbac</a></td>
+        <td className="py-3 px-4 text-neutral-500">Full RLS-style policies on roadmap — see <a href="/docs/roadmap">/docs/roadmap</a></td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Supabase Auth (<code>signInWithPassword</code>, etc.)</td>
@@ -309,7 +309,7 @@ function UserList() {
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Cluster (current)</td>
         <td className="py-3 px-4 text-yellow-600 dark:text-yellow-400">Partition-routing, no Raft</td>
-        <td className="py-3 px-4 text-neutral-500">Safe when one node owns the partition; weaker guarantees under node failure — see <a href="/docs/guides/cluster-replication">Cluster Replication</a></td>
+        <td className="py-3 px-4 text-neutral-500">Safe when one node owns the partition; weaker guarantees under node failure — see <a href="/docs/roadmap">/docs/roadmap</a></td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Cluster (planned)</td>
@@ -320,7 +320,7 @@ function UserList() {
   </table>
 </div>
 
-For a first migration, start on single-node. The partition-routed cluster mode works but does not yet have Raft-backed consensus; consult the [Cluster Replication guide](/docs/guides/cluster-replication) before running cluster in production.
+For a first migration, start on single-node. The partition-routed cluster mode works but does not yet have Raft-backed consensus; see the [roadmap](/docs/roadmap) for cluster-safety status.
 
 ## Why migrate?
 
@@ -346,10 +346,10 @@ For a first migration, start on single-node. The partition-routed cluster mode w
       <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Migrating from Replicache
     </div>
   </a>
-  <a href="/docs/guides/security" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Next Guide</span>
+  <a href="/docs/roadmap" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">See also</span>
     <div className="flex items-center gap-2 text-foreground font-semibold">
-      Security (TLS) <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+      Roadmap &amp; Maturity <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
     </div>
   </a>
 </div>
