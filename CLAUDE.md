@@ -70,21 +70,30 @@ pnpm start:docs
     ↓
 @topgunbuild/client (depends on core)
     ↓
-@topgunbuild/adapters, @topgunbuild/react (depend on client)
+@topgunbuild/adapters, @topgunbuild/react, @topgunbuild/adapter-better-auth,
+@topgunbuild/mcp-server (depend on client)
+
+core-rust (no internal deps)
+    ↓
+server-rust (depends on core-rust)
 ```
 
-Note: The server is implemented in Rust (`packages/server-rust/`). See `packages/server-rust/` for the Rust server codebase.
+Note: The server is implemented in Rust (`packages/server-rust/`). The TS-side `@topgunbuild/server` package is gone — the only consumers of `core-rust` are Rust crates.
 
 ### Packages
 
 | Package | Purpose |
 |---------|---------|
 | `core` | CRDTs (LWWMap, ORMap), Hybrid Logical Clock, MerkleTree, message schemas (Zod), serialization (msgpackr) |
-| `client` | Browser/Node SDK: TopGunClient, SyncEngine, QueryHandle, storage adapters interface |
-| `server-rust` | Rust server: axum WebSocket server, clustering, PostgreSQL adapter (tokio runtime) |
-| `react` | React bindings: TopGunProvider, useQuery, useMap, useORMap, useMutation, useTopic hooks |
-| `adapters` | Storage implementations: IDBAdapter (IndexedDB for browsers) |
+| `core-rust` | Rust port of CRDT primitives (`MerkleTree`, `HLC`, `Timestamp`); depended on by `server-rust`. Internal — not published to crates.io |
+| `client` | Browser/Node SDK: `TopGunClient`, `SyncEngine`, `QueryHandle`, storage adapter interface |
+| `server-rust` | Rust server: axum WebSocket, clustering, redb (default) + Postgres (optional) backends, tokio runtime |
+| `react` | React bindings: `TopGunProvider`, `useQuery`, `useMap`, `useORMap`, `useMutation`, `useTopic`, `useSyncState`, `useMergeRejections` |
+| `adapters` | Storage implementations: `IDBAdapter` (IndexedDB for browsers) |
 | `adapter-better-auth` | BetterAuth integration |
+| `mcp-server` | `@topgunbuild/mcp-server` — MCP server (Claude Desktop, Cursor); eight tools over stdio |
+| `schema` | `@topgunbuild/schema` — Zod schemas + `topgun codegen` source-of-truth |
+| `create-topgun-app` | `npx create-topgun-app` scaffold CLI — publishes as bare `create-topgun-app` on npm |
 
 ### Key Abstractions
 
@@ -110,7 +119,7 @@ Note: The server is implemented in Rust (`packages/server-rust/`). See `packages
 1. Client writes locally to LWWMap + OpLog (IndexedDB)
 2. UI updates immediately
 3. SyncEngine batches and sends to server when online
-4. Server merges using HLC timestamps, broadcasts to subscribers
+4. Server merges using HLC timestamps, persists to embedded **redb** (default; `STORAGE_BACKEND=redb`) or Postgres (`STORAGE_BACKEND=postgres` + `DATABASE_URL`), broadcasts to subscribers
 5. Clients reconnecting use MerkleTree for efficient delta sync
 
 ## Build System

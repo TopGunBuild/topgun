@@ -57,7 +57,10 @@ topgun/
 │   ├── core-rust/     # Rust CRDTs, HLC, MerkleTree
 │   ├── adapters/      # @topgunbuild/adapters - Storage adapters
 │   ├── react/         # @topgunbuild/react - React bindings
-│   └── adapter-better-auth/  # @topgunbuild/adapter-better-auth
+│   ├── adapter-better-auth/  # @topgunbuild/adapter-better-auth
+│   ├── mcp-server/    # @topgunbuild/mcp-server - MCP for Claude Desktop / Cursor
+│   ├── schema/        # @topgunbuild/schema - shared Zod schemas + codegen
+│   └── create-topgun-app/    # `npx create-topgun-app` scaffold CLI
 │
 ├── apps/              # Applications
 │   ├── docs-astro/    # Documentation site
@@ -124,11 +127,18 @@ pnpm --filter @topgunbuild/core test:coverage
 pnpm test:integration-rust
 ```
 
-### Load Tests
+### Load Tests (k6)
 
 ```bash
-pnpm test:load
+pnpm test:k6:smoke         # quick sanity-check
+pnpm test:k6:throughput    # write-read mixed load
+pnpm test:k6:write         # write-heavy
+pnpm test:k6:connections   # connection-storm
 ```
+
+The k6 binary is custom-built with msgpack support — run `pnpm test:k6:build` once to install it under `bin/k6`. For dockerized k6, see `tests/k6/Dockerfile.k6`.
+
+For the in-process Rust load harness (no network), see [`packages/server-rust/benches/load_harness/`](packages/server-rust/benches/load_harness/) and run `cargo bench --bench load_harness`.
 
 ## Development Workflow
 

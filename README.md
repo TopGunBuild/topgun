@@ -37,7 +37,7 @@ This boots a Vite app with a working LWW-Map todo demo. For the backend, in a se
 pnpm start:server
 ```
 
-The server runs on `ws://localhost:8080` with embedded storage at `./topgun.redb` — writes survive restart, no Postgres, no Docker required. Stop with `Ctrl-C`, restart, and your data is still there. Backup is a single-file copy.
+The server runs on `ws://localhost:8080` with embedded storage at `./topgun.redb` — writes survive restart, no Postgres required. You do need a Rust toolchain installed; `pnpm start:server` wraps `cargo run --bin topgun-server --release` and compiles on first run. Pre-built binaries are on the roadmap. Stop with `Ctrl-C`, restart, and your data is still there. Backup is a single-file copy.
 
 For users who prefer containers, `docker compose up server` works too — it spins up Postgres alongside the server in one command.
 
@@ -163,9 +163,13 @@ Full docs: [topgun.build/docs](https://topgun.build/docs)
 | `@topgunbuild/core` | CRDTs, Hybrid Logical Clock, Merkle trees, message schemas |
 | `@topgunbuild/client` | Browser/Node.js SDK with IndexedDB persistence |
 | `server-rust` | Rust WebSocket server (axum), clustering, PostgreSQL |
+| `core-rust` | Rust port of CRDT primitives, depended on by `server-rust` (internal) |
 | `@topgunbuild/react` | React hooks: `useQuery`, `useMap`, `useMutation`, `useTopic` |
 | `@topgunbuild/adapters` | Storage adapters: IndexedDB |
 | `@topgunbuild/adapter-better-auth` | Better Auth integration |
+| `@topgunbuild/mcp-server` | MCP server for AI agents (Claude Desktop, Cursor) |
+| `@topgunbuild/schema` | Shared Zod schemas + types |
+| `create-topgun-app` | Scaffold a TopGun app in one command (`npx create-topgun-app my-app`) |
 
 ## Running locally
 
@@ -222,7 +226,7 @@ pnpm test:k6:throughput
 pnpm --filter @topgunbuild/core bench
 ```
 
-See [tests/benchmark/README.md](tests/benchmark/README.md) for details.
+See [packages/server-rust/benches/load_harness/](packages/server-rust/benches/load_harness/) and the [Performance tuning guide](https://topgun.build/docs/deploy/performance) for details.
 
 ## AI Agents
 
