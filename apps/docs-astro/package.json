@@ -2,6 +2,8 @@
   "name": "apps-docs-astro",
   "type": "module",
   "version": "0.10.1",
+  "private": true,
+  "license": "Apache-2.0",
   "scripts": {
     "dev": "astro dev",
     "prebuild": "node scripts/build-llms-full.mjs",
