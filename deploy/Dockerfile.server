@@ -23,9 +23,20 @@ RUN apt-get update && \
 # Copy the compiled binary, renaming for a cleaner container image
 COPY --from=builder /app/target/release/topgun-server /usr/local/bin/topgun-server
 
-# Run as non-root user for security
-RUN useradd --create-home --shell /bin/bash topgun
+# Run as non-root user for security. Create a /data directory owned by the
+# topgun user so the embedded redb backend has a writable path; the
+# previous image left redb to create ./topgun.redb in WORKDIR, which is
+# owned by root and panics with "Permission denied" on first write.
+RUN useradd --create-home --shell /bin/bash topgun && \
+    mkdir -p /data && \
+    chown topgun:topgun /data
 USER topgun
+WORKDIR /data
+
+# Persist the embedded redb database across container restarts. Mount with
+# `docker run -v topgun-data:/data ...` (or a host path) to retain writes.
+VOLUME ["/data"]
+ENV TOPGUN_REDB_PATH=/data/topgun.redb
 
 # Health check on default port 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
