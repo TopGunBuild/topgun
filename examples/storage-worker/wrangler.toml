@@ -1,7 +1,7 @@
 name = "notes-storage-worker"
 main = "src/index.ts"
 compatibility_date = "2023-10-25"
-account_id = "c08d344baa31d37b404e0b4b724d929c"
+# account_id = "<your-cloudflare-account-id>"  # required for `wrangler deploy`; find via `wrangler whoami`
 
 # Replace these with your values or use `wrangler secret put`
 [vars]

@@ -104,7 +104,12 @@ export function NoteEditor({ mapName, note, darkMode, isMobile = false }: NoteEd
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
-    const WORKER_URL = import.meta.env.VITE_STORAGE_WORKER_URL || 'https://notes-storage-worker.easysolpro.workers.dev';
+    const WORKER_URL = import.meta.env.VITE_STORAGE_WORKER_URL;
+    if (!WORKER_URL) {
+      throw new Error(
+        'VITE_STORAGE_WORKER_URL is not configured. Deploy examples/storage-worker and set the URL in your .env.'
+      );
+    }
     const newAttachments: Attachment[] = [];
 
     for (const file of Array.from(files)) {
