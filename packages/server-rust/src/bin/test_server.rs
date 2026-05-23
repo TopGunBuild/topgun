@@ -475,6 +475,15 @@ async fn main() -> anyhow::Result<()> {
         .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"))
         .unwrap_or(false);
 
+    // Comma-separated list of allowed CORS origins. Empty (the default) rejects
+    // all cross-origin browser requests, which is the safe default but means
+    // browser SDKs hosted on a different origin than the server cannot connect
+    // until this is set. Operators set TOPGUN_CORS_ORIGINS to enable.
+    let cors_origins = std::env::var("TOPGUN_CORS_ORIGINS")
+        .ok()
+        .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect::<Vec<_>>())
+        .unwrap_or_default();
+
     // When set to 1 or true, omit the JWT secret so templates and QA harness
     // can connect without auth tokens.
     let no_auth = std::env::var("TOPGUN_NO_AUTH")
@@ -509,6 +518,7 @@ async fn main() -> anyhow::Result<()> {
         shutdown: Arc::clone(&shutdown),
         config: Arc::new(NetworkConfig {
             insecure_forward_auth_errors,
+            cors_origins,
             ..NetworkConfig::default()
         }),
         start_time: Instant::now(),

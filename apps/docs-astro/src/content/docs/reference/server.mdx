@@ -154,7 +154,7 @@ struct NetworkConfig {
     port: u16,                       // default 0 (OS-assigned)
     tls: Option<TlsConfig>,          // optional TLS (cert_path, key_path, ca_cert_path)
     connection: ConnectionConfig,    // per-connection settings
-    cors_origins: Vec<String>,       // default ["*"]
+    cors_origins: Vec<String>,       // default []  (deny all cross-origin); set TOPGUN_CORS_ORIGINS env to a comma-separated list
     request_timeout: Duration,       // default 30s
 }
 ```
