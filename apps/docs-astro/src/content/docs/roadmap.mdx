@@ -104,9 +104,9 @@ The features below are **not implemented** in the current Rust server. The guide
         <td className="py-3 px-4">Cluster traffic is plaintext TCP today; planned v3.0</td>
       </tr>
       <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-medium text-foreground">Conflict Resolvers</td>
-        <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned</td>
-        <td className="py-3 px-4"><a href="/docs/guides/conflict-resolvers" className="text-brand hover:underline">/docs/guides/conflict-resolvers</a> — TODO-179</td>
+        <td className="py-3 px-4 font-medium text-foreground">Custom Conflict Resolvers</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned (v2.x)</td>
+        <td className="py-3 px-4">User-defined merge functions; requires server-side WASM sandbox. SDK surface (<code>client.getConflictResolvers().register/unregister/list</code>) throws with a roadmap pointer pre-launch. Built-in CRDT merge logic + <code>MergeRejection</code> observability are unchanged.</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Crash-safe shutdown drain + WAL recovery</td>
@@ -115,8 +115,8 @@ The features below are **not implemented** in the current Rust server. The guide
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Entry Processor</td>
-        <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned</td>
-        <td className="py-3 px-4"><a href="/docs/guides/entry-processor" className="text-brand hover:underline">/docs/guides/entry-processor</a> — TODO-176</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned (v2.x)</td>
+        <td className="py-3 px-4">Server-side atomic read-modify-write via user-defined functions; requires WASM sandbox. SDK surface (<code>client.executeOnKey/executeOnKeys</code>) throws with a roadmap pointer pre-launch.</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Hash/Navigable indexes</td>

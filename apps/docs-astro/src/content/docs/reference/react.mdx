@@ -41,7 +41,7 @@ export function App() {
 
 ### `useClient`
 
-Escape hatch returning the underlying `TopGunClient`. Use this for imperative operations (calling `client.executeOnKey`, `client.getEventJournal`, etc.) inside event handlers and effects.
+Escape hatch returning the underlying `TopGunClient`. Use this for imperative operations (calling `client.getEventJournal`, `client.topic`, etc.) inside event handlers and effects.
 
 ```tsx
 import { useClient } from '@topgunbuild/react';
@@ -252,35 +252,6 @@ function usePNCounter(name: string): UsePNCounterResult
 
 ## Server-Side Logic
 
-### `useEntryProcessor`
-
-Atomic read-modify-write via a server-side entry processor.
-
-```tsx
-import { useEntryProcessor } from '@topgunbuild/react';
-import { BuiltInProcessors } from '@topgunbuild/core';
-
-function IncrementButton() {
-  const { execute, pending } = useEntryProcessor('stats', 'pageViews');
-
-  return (
-    <button
-      disabled={pending}
-      onClick={() => execute(BuiltInProcessors.INCREMENT(1))}
-    >
-      Increment
-    </button>
-  );
-}
-```
-
-```typescript
-function useEntryProcessor<V = unknown, R = V>(
-  mapName: string,
-  key: string,
-): { execute: (def: EntryProcessorDef<V, R>) => Promise<EntryProcessorResult<R>>; pending: boolean; lastResult?: EntryProcessorResult<R> }
-```
-
 ### `useEventJournal`
 
 Subscribe to the journal of map-change events. Useful for audit trails, activity feeds, undo stacks.
@@ -295,7 +266,7 @@ function useEventJournal(
 
 ### `useMergeRejections`
 
-Surface merge rejections (the server's conflict resolver rejected a remote change). Useful for telling the user "your edit conflicted".
+Surface merge rejections (the built-in CRDT merge logic rejected a remote change). Useful for telling the user "your edit conflicted".
 
 ```typescript
 function useMergeRejections(
@@ -303,16 +274,7 @@ function useMergeRejections(
 ): MergeRejection[]
 ```
 
-### `useConflictResolver`
-
-Register a custom conflict resolver scoped to a component lifecycle. Unregisters on unmount.
-
-```typescript
-function useConflictResolver(
-  mapName: string,
-  def: ConflictResolverDef,
-): { registered: boolean; error: Error | null }
-```
+> Custom user-defined resolvers (`useConflictResolver`, `client.executeOnKey`, server-side entry processors) require a WASM sandbox on the v2.x roadmap. See [/docs/roadmap](/docs/roadmap). The SDK surface for those features was removed pre-launch to avoid runtime errors.
 
 ## Search
 

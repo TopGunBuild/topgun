@@ -255,50 +255,9 @@ likes.subscribe((value) => {
 });
 ```
 
-### `executeOnKey(mapName, key, processor)`
+### Entry processors — planned (v2.x)
 
-```typescript
-public async executeOnKey<V, R = V>(
-  mapName: string,
-  key: string,
-  processor: EntryProcessorDef<V, R>,
-): Promise<EntryProcessorResult<R>>
-```
-
-Atomic read-modify-write on the server. Eliminates client-side races.
-
-```typescript
-import { BuiltInProcessors } from '@topgunbuild/core';
-
-const result = await client.executeOnKey(
-  'stats',
-  'pageViews',
-  BuiltInProcessors.INCREMENT(1)
-);
-```
-
-### `executeOnKeys(mapName, keys, processor)`
-
-```typescript
-public async executeOnKeys<V, R = V>(
-  mapName: string,
-  keys: string[],
-  processor: EntryProcessorDef<V, R>,
-): Promise<Map<string, EntryProcessorResult<R>>>
-```
-
-Apply a processor across many keys atomically per key.
-
-```typescript
-const results = await client.executeOnKeys(
-  'stats',
-  ['pageViews', 'uniqueVisitors', 'bounceRate'],
-  {
-    name: 'reset',
-    code: `return { value: 0, result: value };`,
-  }
-);
-```
+Server-side atomic read-modify-write via user-defined functions (`client.executeOnKey`, `client.executeOnKeys`, `BuiltInProcessors`) requires a WASM sandbox on the v2.x roadmap. The SDK surface throws an explanatory error pre-launch — see [/docs/roadmap](/docs/roadmap).
 
 ### `close()`
 
@@ -548,28 +507,14 @@ const events = await journal.readFrom(0n, 100);
 public getConflictResolvers(): ConflictResolverClient
 ```
 
-Register custom merge resolvers (first-write-wins, numeric constraints, owner-only edits) and observe merge rejections.
+Observe merge rejections (the built-in CRDT merge logic rejected a remote change). The returned client's `register` / `unregister` / `list` methods throw — registering custom server-side resolvers requires a WASM sandbox on the v2.x roadmap, see [/docs/roadmap](/docs/roadmap).
 
 ```typescript
 const resolvers = client.getConflictResolvers();
 
-await resolvers.register('bookings', {
-  name: 'first-write-wins',
-  code: `
-    if (context.localValue !== undefined) {
-      return { action: 'reject', reason: 'Slot already booked' };
-    }
-    return { action: 'accept', value: context.remoteValue };
-  `,
-  priority: 100,
-});
-
 resolvers.onRejection((rejection) => {
   console.log(`Merge rejected: ${rejection.reason}`);
 });
-
-const registered = await resolvers.list('bookings');
-await resolvers.unregister('bookings', 'first-write-wins');
 ```
 
 ## Per-Record Sync State

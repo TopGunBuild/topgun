@@ -1548,49 +1548,9 @@ likes.subscribe((value) => {
 });
 ```
 
-### `executeOnKey(mapName, key, processor)`
+### Entry processors — planned (v2.x)
 
-```typescript
-public async executeOnKey<V, R = V>(
-  mapName: string,
-  key: string,
-  processor: EntryProcessorDef<V, R>,
-): Promise<EntryProcessorResult<R>>
-```
-
-Atomic read-modify-write on the server. Eliminates client-side races.
-
-```typescript
-
-const result = await client.executeOnKey(
-  'stats',
-  'pageViews',
-  BuiltInProcessors.INCREMENT(1)
-);
-```
-
-### `executeOnKeys(mapName, keys, processor)`
-
-```typescript
-public async executeOnKeys<V, R = V>(
-  mapName: string,
-  keys: string[],
-  processor: EntryProcessorDef<V, R>,
-): Promise<Map<string, EntryProcessorResult<R>>>
-```
-
-Apply a processor across many keys atomically per key.
-
-```typescript
-const results = await client.executeOnKeys(
-  'stats',
-  ['pageViews', 'uniqueVisitors', 'bounceRate'],
-  {
-    name: 'reset',
-    code: `return { value: 0, result: value };`,
-  }
-);
-```
+Server-side atomic read-modify-write via user-defined functions (`client.executeOnKey`, `client.executeOnKeys`, `BuiltInProcessors`) requires a WASM sandbox on the v2.x roadmap. The SDK surface throws an explanatory error pre-launch — see [/docs/roadmap](/docs/roadmap).
 
 ### `close()`
 
@@ -1839,28 +1799,14 @@ const events = await journal.readFrom(0n, 100);
 public getConflictResolvers(): ConflictResolverClient
 ```
 
-Register custom merge resolvers (first-write-wins, numeric constraints, owner-only edits) and observe merge rejections.
+Observe merge rejections (the built-in CRDT merge logic rejected a remote change). The returned client's `register` / `unregister` / `list` methods throw — registering custom server-side resolvers requires a WASM sandbox on the v2.x roadmap, see [/docs/roadmap](/docs/roadmap).
 
 ```typescript
 const resolvers = client.getConflictResolvers();
 
-await resolvers.register('bookings', {
-  name: 'first-write-wins',
-  code: `
-    if (context.localValue !== undefined) {
-      return { action: 'reject', reason: 'Slot already booked' };
-    }
-    return { action: 'accept', value: context.remoteValue };
-  `,
-  priority: 100,
-});
-
 resolvers.onRejection((rejection) => {
   console.log(`Merge rejected: ${rejection.reason}`);
 });
-
-const registered = await resolvers.list('bookings');
-await resolvers.unregister('bookings', 'first-write-wins');
 ```
 
 ## Per-Record Sync State
@@ -2001,7 +1947,7 @@ export function App() {
 
 ### `useClient`
 
-Escape hatch returning the underlying `TopGunClient`. Use this for imperative operations (calling `client.executeOnKey`, `client.getEventJournal`, etc.) inside event handlers and effects.
+Escape hatch returning the underlying `TopGunClient`. Use this for imperative operations (calling `client.getEventJournal`, `client.topic`, etc.) inside event handlers and effects.
 
 ```tsx
 
@@ -2206,33 +2152,6 @@ function usePNCounter(name: string): UsePNCounterResult
 
 ## Server-Side Logic
 
-### `useEntryProcessor`
-
-Atomic read-modify-write via a server-side entry processor.
-
-```tsx
-
-function IncrementButton() {
-  const { execute, pending } = useEntryProcessor('stats', 'pageViews');
-
-  return (
-    <button
-      disabled={pending}
-      onClick={() => execute(BuiltInProcessors.INCREMENT(1))}
-    >
-      Increment
-    </button>
-  );
-}
-```
-
-```typescript
-function useEntryProcessor<V = unknown, R = V>(
-  mapName: string,
-  key: string,
-): { execute: (def: EntryProcessorDef<V, R>) => Promise<EntryProcessorResult<R>>; pending: boolean; lastResult?: EntryProcessorResult<R> }
-```
-
 ### `useEventJournal`
 
 Subscribe to the journal of map-change events. Useful for audit trails, activity feeds, undo stacks.
@@ -2247,7 +2166,7 @@ function useEventJournal(
 
 ### `useMergeRejections`
 
-Surface merge rejections (the server's conflict resolver rejected a remote change). Useful for telling the user "your edit conflicted".
+Surface merge rejections (the built-in CRDT merge logic rejected a remote change). Useful for telling the user "your edit conflicted".
 
 ```typescript
 function useMergeRejections(
@@ -2255,16 +2174,7 @@ function useMergeRejections(
 ): MergeRejection[]
 ```
 
-### `useConflictResolver`
-
-Register a custom conflict resolver scoped to a component lifecycle. Unregisters on unmount.
-
-```typescript
-function useConflictResolver(
-  mapName: string,
-  def: ConflictResolverDef,
-): { registered: boolean; error: Error | null }
-```
+> Custom user-defined resolvers (`useConflictResolver`, `client.executeOnKey`, server-side entry processors) require a WASM sandbox on the v2.x roadmap. See [/docs/roadmap](/docs/roadmap). The SDK surface for those features was removed pre-launch to avoid runtime errors.
 
 ## Search
 
@@ -2700,10 +2610,8 @@ Leaf keys grouped under the given path.
 `@topgunbuild/core` also re-exports types and helpers consumed across the stack. Highlights:
 
 - **`Predicates`** — composable filter builders (`equal`, `gt`, `lt`, `contains`, `and`, `or`, `not`, `match`, `matchPhrase`, `matchPrefix`). Used by `client.query`, `client.hybridQuery`, and the React hooks.
-- **`BuiltInProcessors`** — ready-made entry processors (`INCREMENT`, `DECREMENT`, `RESET`). Consumed by `client.executeOnKey`/`executeOnKeys` — see [Client Reference → Entry Processors](/docs/reference/client).
 - **`SearchOptions`** — shared FTS options shape used by `client.search`/`searchSubscribe` and `useSearch`.
-- **EntryProcessor types** — `EntryProcessorDef`, `EntryProcessorResult`, `EntryProcessorFn`, `ProcessorRateLimitConfig`.
-- **Conflict resolver types** — `MergeContext`, `MergeResult`, `ConflictResolverDef`, `MergeRejection`, `BuiltInResolvers`.
+- **`MergeRejection`** — event shape emitted when the built-in CRDT merge logic rejects a remote change. Observed via `useMergeRejections` (React) or `client.getConflictResolvers().onRejection()`.
 - **`WriteConcern`** / **`ConsistencyLevel`** — durability and consistency knobs for cluster writes.
 - **`IndexedLWWMap`** / **`IndexedORMap`** — indexed variants used by the server's query engine.
 - **Full-Text Search** — `Tokenizer`, `InvertedIndex`, `BM25Scorer`, `FullTextIndex` for embedding FTS directly.

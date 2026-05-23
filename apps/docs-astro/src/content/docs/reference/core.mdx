@@ -339,10 +339,8 @@ Leaf keys grouped under the given path.
 `@topgunbuild/core` also re-exports types and helpers consumed across the stack. Highlights:
 
 - **`Predicates`** — composable filter builders (`equal`, `gt`, `lt`, `contains`, `and`, `or`, `not`, `match`, `matchPhrase`, `matchPrefix`). Used by `client.query`, `client.hybridQuery`, and the React hooks.
-- **`BuiltInProcessors`** — ready-made entry processors (`INCREMENT`, `DECREMENT`, `RESET`). Consumed by `client.executeOnKey`/`executeOnKeys` — see [Client Reference → Entry Processors](/docs/reference/client).
 - **`SearchOptions`** — shared FTS options shape used by `client.search`/`searchSubscribe` and `useSearch`.
-- **EntryProcessor types** — `EntryProcessorDef`, `EntryProcessorResult`, `EntryProcessorFn`, `ProcessorRateLimitConfig`.
-- **Conflict resolver types** — `MergeContext`, `MergeResult`, `ConflictResolverDef`, `MergeRejection`, `BuiltInResolvers`.
+- **`MergeRejection`** — event shape emitted when the built-in CRDT merge logic rejects a remote change. Observed via `useMergeRejections` (React) or `client.getConflictResolvers().onRejection()`.
 - **`WriteConcern`** / **`ConsistencyLevel`** — durability and consistency knobs for cluster writes.
 - **`IndexedLWWMap`** / **`IndexedORMap`** — indexed variants used by the server's query engine.
 - **Full-Text Search** — `Tokenizer`, `InvertedIndex`, `BM25Scorer`, `FullTextIndex` for embedding FTS directly.
