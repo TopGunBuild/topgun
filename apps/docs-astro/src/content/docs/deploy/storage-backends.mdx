@@ -50,7 +50,7 @@ STORAGE_BACKEND=null pnpm start:server`;
 
 # Storage backends
 
-Choose how the TopGun server persists data. The backend is selected at startup via `STORAGE_BACKEND` (source: `packages/server-rust/src/bin/test_server.rs:109`). Three choices are available: `redb` (embedded, default), `postgres` (PostgreSQL, production), and `null` (ephemeral, tests only).
+Choose how the TopGun server persists data. The backend is selected at startup via `STORAGE_BACKEND` (source: `packages/server-rust/src/bin/topgun_server.rs:109`). Three choices are available: `redb` (embedded, default), `postgres` (PostgreSQL, production), and `null` (ephemeral, tests only).
 
 ## Choosing a backend
 
@@ -83,7 +83,7 @@ Choose how the TopGun server persists data. The backend is selected at startup v
 | `STORAGE_BACKEND` | `"redb"` | Set to `redb` or omit entirely |
 | `TOPGUN_REDB_PATH` | `./topgun.redb` | File path for the redb database file |
 
-Source: `STORAGE_BACKEND` at `bin/test_server.rs:109`; `TOPGUN_REDB_PATH` at `bin/test_server.rs:115`.
+Source: `STORAGE_BACKEND` at `bin/topgun_server.rs:109`; `TOPGUN_REDB_PATH` at `bin/topgun_server.rs:115`.
 
 ### Notes
 
@@ -127,7 +127,7 @@ TopGun works alongside your existing PostgreSQL database. It creates its own `to
 | `STORAGE_BACKEND` | `"redb"` | Must be set to `postgres` to use PostgreSQL |
 | `DATABASE_URL` | — | PostgreSQL connection URL (required when `STORAGE_BACKEND=postgres`) |
 
-Source: `STORAGE_BACKEND` at `bin/test_server.rs:109`; `DATABASE_URL` at `bin/test_server.rs:126`.
+Source: `STORAGE_BACKEND` at `bin/topgun_server.rs:109`; `DATABASE_URL` at `bin/topgun_server.rs:126`.
 
 ### When to use a separate database
 
@@ -158,7 +158,7 @@ Consider isolation when:
   <CodeBlock title="terminal" language="bash" code={nullStartCode} />
 </div>
 
-The `null` backend is used in the TopGun integration test suite for deterministic, stateless test runs. Source: `bin/test_server.rs:109` — `"null"` is one of the three accepted values.
+The `null` backend is used in the TopGun integration test suite for deterministic, stateless test runs. Source: `bin/topgun_server.rs:109` — `"null"` is one of the three accepted values.
 
 ## Switching between backends
 

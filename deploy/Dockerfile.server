@@ -10,7 +10,7 @@ COPY packages/core-rust/ ./packages/core-rust/
 COPY packages/server-rust/ ./packages/server-rust/
 
 # Build the server binary in release mode
-RUN cargo build --release --bin test-server
+RUN cargo build --release --bin topgun-server
 
 # Runtime image
 FROM debian:bookworm-slim
@@ -21,7 +21,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy the compiled binary, renaming for a cleaner container image
-COPY --from=builder /app/target/release/test-server /usr/local/bin/topgun-server
+COPY --from=builder /app/target/release/topgun-server /usr/local/bin/topgun-server
 
 # Run as non-root user for security
 RUN useradd --create-home --shell /bin/bash topgun

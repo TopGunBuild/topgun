@@ -155,10 +155,10 @@ async fn select_datastore() -> anyhow::Result<(Arc<dyn MapDataStore>, StorageBac
 /// `--seed-nodes` lists peer addresses, the server participates in cluster
 /// formation, heartbeat failure detection, and partition rebalancing.
 #[derive(Parser, Debug)]
-#[command(name = "test-server")]
+#[command(name = "topgun-server")]
 struct Args {
     /// Unique identifier for this node in the cluster.
-    #[arg(long, default_value = "test-server-node")]
+    #[arg(long, default_value = "topgun-server-node")]
     node_id: String,
 
     /// Host name or IP that peers use to reach this node's cluster port.
@@ -540,7 +540,7 @@ async fn main() -> anyhow::Result<()> {
         counter_registry: Some(counter_registry),
     };
 
-    // Mirror NetworkModule::serve()'s scalar index rebuild for the test_server
+    // Mirror NetworkModule::serve()'s scalar index rebuild for the topgun_server
     // path, which builds its router directly without going through NetworkModule.
     // Runs BEFORE set_ready() so queries arriving immediately after readiness see
     // populated indexes instead of empty-state false negatives. Reuses the
@@ -601,7 +601,7 @@ async fn main() -> anyhow::Result<()> {
         )
         // Auth login + scalar index admin endpoints. Mounting here mirrors the
         // route set NetworkModule::serve registers in production. Without this,
-        // `pnpm start:server` hits the test_server binary's hand-built router
+        // `pnpm start:server` hits the topgun_server binary's hand-built router
         // which previously omitted login + /api/admin/indexes/*, leaving the
         // persistence path unreachable end-to-end.
         .route(

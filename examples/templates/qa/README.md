@@ -108,7 +108,7 @@ The script exits 0 if all selected scenarios pass, non-zero otherwise. Per-scena
 
 ### TOPGUN_NO_AUTH env-flag
 
-The Rust test server (`packages/server-rust/src/bin/test_server.rs`) now reads `TOPGUN_NO_AUTH`:
+The Rust test server (`packages/server-rust/src/bin/topgun_server.rs`) now reads `TOPGUN_NO_AUTH`:
 
 ```bash
 TOPGUN_NO_AUTH=1 pnpm start:server

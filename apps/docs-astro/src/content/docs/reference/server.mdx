@@ -17,31 +17,31 @@ This page documents the user-facing surface: how to run it, what flags and envir
 
 ## Running the server
 
-The repository entrypoint is `pnpm start:server`, which wraps `cargo run --bin test-server --release`. The binary is named `test-server` because the build was originally produced for the integration test suite; it is the same binary used in production-style demos like `demo.topgun.build`.
+The repository entrypoint is `pnpm start:server`, which wraps `cargo run --bin topgun-server --release`. The binary is named `topgun-server` because the build was originally produced for the integration test suite; it is the same binary used in production-style demos like `demo.topgun.build`.
 
 ```bash
 # From the repo root
 pnpm start:server
 
 # Or directly with cargo
-cargo run --bin test-server --release
+cargo run --bin topgun-server --release
 
 # Pick a port
-PORT=8080 cargo run --bin test-server --release
+PORT=8080 cargo run --bin topgun-server --release
 
 # Increase log verbosity
-RUST_LOG=topgun_server=debug cargo run --bin test-server --release
+RUST_LOG=topgun_server=debug cargo run --bin topgun-server --release
 ```
 
 By default the server uses the embedded redb backend (no Postgres, no Docker required). It binds to `0.0.0.0:8080` and opens `./topgun.redb` in the working directory. Set `STORAGE_BACKEND=postgres` and `DATABASE_URL=...` to use Postgres instead.
 
 ## CLI flags
 
-The `test-server` binary exposes five `clap`-derived flags (defined in `packages/server-rust/src/bin/test_server.rs`):
+The `topgun-server` binary exposes five `clap`-derived flags (defined in `packages/server-rust/src/bin/topgun_server.rs`):
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--node-id <ID>` | string | `"test-server-node"` | Unique identifier for this node in a cluster. |
+| `--node-id <ID>` | string | `"topgun-server-node"` | Unique identifier for this node in a cluster. |
 | `--host <ADDR>` | string | `"127.0.0.1"` | Host name or IP that peers use to reach this node's cluster port. Also used as `MemberInfo.host` in join handshakes. |
 | `--port <PORT>` | u16 | `8080` (or env `PORT`) | Client WebSocket port. `0` means OS-assigned. Also reads the `PORT` environment variable. |
 | `--cluster-port <PORT>` | u16 | `0` (OS-assigned) | Inter-node cluster TCP port. |
@@ -57,24 +57,24 @@ All variables below correspond to direct `std::env::var(...)` reads or `tracing-
 
 | Variable | Type | Default | Consumer | Notes |
 |---|---|---|---|---|
-| `STORAGE_BACKEND` | string | `"redb"` | `bin/test_server.rs:109` | One of `redb`, `postgres`, `null`. `null` is in-memory ephemeral (test only). |
-| `TOPGUN_REDB_PATH` | path | `./topgun.redb` | `bin/test_server.rs:115` | File path for the embedded redb database (used when `STORAGE_BACKEND=redb`). |
-| `DATABASE_URL` | string | none | `bin/test_server.rs:126`, `storage/datastores/postgres.rs:693` | Postgres connection string (required when `STORAGE_BACKEND=postgres`). |
+| `STORAGE_BACKEND` | string | `"redb"` | `bin/topgun_server.rs:109` | One of `redb`, `postgres`, `null`. `null` is in-memory ephemeral (test only). |
+| `TOPGUN_REDB_PATH` | path | `./topgun.redb` | `bin/topgun_server.rs:115` | File path for the embedded redb database (used when `STORAGE_BACKEND=redb`). |
+| `DATABASE_URL` | string | none | `bin/topgun_server.rs:126`, `storage/datastores/postgres.rs:693` | Postgres connection string (required when `STORAGE_BACKEND=postgres`). |
 
 ### Networking
 
 | Variable | Type | Default | Consumer | Notes |
 |---|---|---|---|---|
-| `PORT` | u16 | `8080` | `bin/test_server.rs:168` (via `#[arg(env = "PORT")]`) | Client WebSocket port. Equivalent to `--port`. |
-| `TOPGUN_BIND_ADDR` | string | `"0.0.0.0"` | `bin/test_server.rs:203` | Bind address for the client WebSocket listener. Override to `127.0.0.1` for loopback-only deployments. |
+| `PORT` | u16 | `8080` | `bin/topgun_server.rs:168` (via `#[arg(env = "PORT")]`) | Client WebSocket port. Equivalent to `--port`. |
+| `TOPGUN_BIND_ADDR` | string | `"0.0.0.0"` | `bin/topgun_server.rs:203` | Bind address for the client WebSocket listener. Override to `127.0.0.1` for loopback-only deployments. |
 
 ### Authentication
 
 | Variable | Type | Default | Consumer | Notes |
 |---|---|---|---|---|
 | `JWT_SECRET` | string | none | `network/module.rs:454` | HMAC secret for signing/verifying JWTs. Required for production auth. |
-| `TOPGUN_NO_AUTH` | truthy | unset | `bin/test_server.rs:477` | If set (`"true"`, `"1"`), disables auth. Test and demo use only. |
-| `INSECURE_FORWARD_AUTH_ERRORS` | truthy | unset | `bin/test_server.rs:470` | If set, forwards upstream auth errors verbatim in responses. Insecure; do not enable in production. |
+| `TOPGUN_NO_AUTH` | truthy | unset | `bin/topgun_server.rs:477` | If set (`"true"`, `"1"`), disables auth. Test and demo use only. |
+| `INSECURE_FORWARD_AUTH_ERRORS` | truthy | unset | `bin/topgun_server.rs:470` | If set, forwards upstream auth errors verbatim in responses. Insecure; do not enable in production. |
 | `TOPGUN_ADMIN_USERNAME` | string | `"admin"` | `network/handlers/admin.rs:111` | Username for the admin dashboard login. |
 | `TOPGUN_ADMIN_PASSWORD` | string | required if admin enabled | `network/handlers/admin.rs:112` | Password for the admin dashboard login. |
 | `TOPGUN_ADMIN_DIR` | path | `./admin-dashboard/dist` | `network/module.rs:582` | Static-file directory served at `/admin/*`. |
@@ -83,14 +83,14 @@ All variables below correspond to direct `std::env::var(...)` reads or `tracing-
 
 | Variable | Type | Default | Consumer | Notes |
 |---|---|---|---|---|
-| `TOPGUN_INDEX_PATH` | path | none | `bin/test_server.rs:516`, `network/module.rs:316`, `network/handlers/admin.rs:1078` | Directory holding the BM25 full-text-search index. |
+| `TOPGUN_INDEX_PATH` | path | none | `bin/topgun_server.rs:516`, `network/module.rs:316`, `network/handlers/admin.rs:1078` | Directory holding the BM25 full-text-search index. |
 | `TOPGUN_VECTOR_INDEX_PATH` | path | none | `network/module.rs:286`, `network/handlers/admin.rs:1139` | Directory holding the HNSW vector index. |
 
 ### Observability
 
 | Variable | Type | Default | Consumer | Notes |
 |---|---|---|---|---|
-| `RUST_LOG` | filter expression | `"info"` | `bin/test_server.rs:191` (via `tracing_subscriber::EnvFilter::try_from_default_env()`) | Standard tracing filter (e.g., `topgun_server=debug,info`). Not read via `std::env::var` directly. |
+| `RUST_LOG` | filter expression | `"info"` | `bin/topgun_server.rs:191` (via `tracing_subscriber::EnvFilter::try_from_default_env()`) | Standard tracing filter (e.g., `topgun_server=debug,info`). Not read via `std::env::var` directly. |
 | `TOPGUN_LOG_FORMAT` | string | text | `service/middleware/observability.rs:130` | Set to `"json"` for structured JSON logs. Anything else uses the text formatter. |
 
 ### Memory and eviction

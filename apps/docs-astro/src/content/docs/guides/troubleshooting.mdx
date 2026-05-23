@@ -141,7 +141,7 @@ This guide covers common issues you may encounter when using TopGun, organized b
   ```
 - Kill the existing process or choose a different port:
   ```bash
-  PORT=8081 cargo run --bin test-server --release
+  PORT=8081 cargo run --bin topgun-server --release
   ```
 - If running in development, ensure previous server processes are terminated before restarting
 
@@ -154,7 +154,7 @@ This guide covers common issues you may encounter when using TopGun, organized b
 **Solutions:**
 - To use PostgreSQL, set `STORAGE_BACKEND=postgres` and provide `DATABASE_URL`:
   ```bash
-  STORAGE_BACKEND=postgres DATABASE_URL=postgresql://user:password@host:5432/database cargo run --bin test-server --release
+  STORAGE_BACKEND=postgres DATABASE_URL=postgresql://user:password@host:5432/database cargo run --bin topgun-server --release
   ```
 - See [Storage Backends](/docs/deploy/storage-backends) for all backend options and decision guidance
 - If using the default redb backend and you see connection failures, check that the redb file path is writable (defaults to `./topgun.redb`; override with `TOPGUN_REDB_PATH`)

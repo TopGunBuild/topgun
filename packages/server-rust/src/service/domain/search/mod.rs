@@ -1220,7 +1220,7 @@ impl SearchService {
     /// subscriptions for that map and sends ENTER/UPDATE/LEAVE deltas.
     ///
     /// The spawned task holds an `Arc<SearchService>` (cloned from `self`).
-    /// Because `test_server` lifetimes are process-bounded the task is dropped
+    /// Because `topgun_server` lifetimes are process-bounded the task is dropped
     /// when the process exits, so this is not a reference-cycle concern in practice.
     pub fn spawn_hybrid_notifier(self: &Arc<Self>, mut hybrid_rx: mpsc::UnboundedReceiver<String>) {
         let svc = Arc::clone(self);

@@ -4,12 +4,12 @@
  * Increases the Jest timeout and suppresses console output during tests
  * unless the DEBUG environment variable is set.
  *
- * The Rust test-server binary is built lazily on first invocation of
- * spawnRustServer() via `cargo run --bin test-server --release`.
+ * The Rust topgun-server binary is built lazily on first invocation of
+ * spawnRustServer() via `cargo run --bin topgun-server --release`.
  * To skip the cargo overhead in CI, build the binary once upfront:
  *
- *   cargo build --bin test-server --release
- *   export RUST_SERVER_BINARY=./target/release/test-server
+ *   cargo build --bin topgun-server --release
+ *   export RUST_SERVER_BINARY=./target/release/topgun-server
  *
  * Then spawnRustServer() will use the pre-built binary directly.
  */

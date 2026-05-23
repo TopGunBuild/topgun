@@ -156,7 +156,7 @@ impl RedbDataStore {
     /// # Errors
     ///
     /// Reserved for future schema migrations; never errors today.
-    // Async signature is intentional: `select_datastore()` in `test_server.rs` calls
+    // Async signature is intentional: `select_datastore()` in `topgun_server.rs` calls
     // `store.initialize().await` uniformly across backends. `PostgresDataStore::initialize`
     // is genuinely async (runs DDL migrations); keeping the same signature here lets the
     // bootstrap code branch on the backend without conditional `.await`.

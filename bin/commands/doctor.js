@@ -124,14 +124,14 @@ const checks = [
   {
     name: 'Rust Server Binary',
     check: () => {
-      const binaryPath = path.join(process.cwd(), 'target/release/test-server');
+      const binaryPath = path.join(process.cwd(), 'target/release/topgun-server');
       if (fs.existsSync(binaryPath)) {
         return { pass: true, message: 'Built' };
       }
       return {
         pass: false,
         message: 'Not built',
-        fix: 'cargo build --release -p topgun-server --bin test-server',
+        fix: 'cargo build --release -p topgun-server --bin topgun-server',
       };
     },
   },

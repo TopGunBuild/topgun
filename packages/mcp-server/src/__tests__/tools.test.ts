@@ -122,7 +122,7 @@ function createTestContext(config?: Partial<ResolvedMCPServerConfig>): ToolConte
   return {
     client: new MockTopGunClient() as unknown as ToolContext['client'],
     config: {
-      name: 'test-server',
+      name: 'topgun-server',
       version: '1.0.0',
       topgunUrl: 'ws://localhost:8080',
       enableMutations: true,

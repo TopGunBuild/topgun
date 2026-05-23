@@ -81,7 +81,7 @@ Single-node is fully consistent and production-ready for workloads that fit one 
 ```bash
 docker compose up --build
 # Or run the Rust server directly
-cargo run --bin test-server --release
+cargo run --bin topgun-server --release
 ```
 
 **4. Multi-node cluster** *(on roadmap — Raft consensus)*
@@ -174,7 +174,7 @@ Full docs: [topgun.build/docs](https://topgun.build/docs)
 docker compose up --build
 
 # Or run the Rust server directly
-cargo run --bin test-server --release
+cargo run --bin topgun-server --release
 
 # Or run the example app
 cd examples/notes-app

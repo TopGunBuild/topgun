@@ -497,7 +497,7 @@ fn is_leap_year(year: u64) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Observer factories (duplicated from test_server.rs — keep in sync)
+// Observer factories (duplicated from topgun_server.rs — keep in sync)
 // ---------------------------------------------------------------------------
 
 struct SearchObserverFactory {
@@ -538,7 +538,7 @@ impl ObserverFactory for SearchObserverFactory {
         map_name: &str,
         _partition_id: u32,
     ) -> Option<Arc<dyn MutationObserver>> {
-        // Use fast batch parameters for bench harness (keep in sync with test_server.rs).
+        // Use fast batch parameters for bench harness (keep in sync with topgun_server.rs).
         let config = SearchConfig {
             batch_interval_ms: 16,
             batch_flush_threshold: 100,
@@ -561,7 +561,7 @@ impl ObserverFactory for SearchObserverFactory {
 
 /// Wires all 7 domain services and builds the partition dispatcher.
 ///
-/// Duplicated from `test_server.rs` — keep in sync.
+/// Duplicated from `topgun_server.rs` — keep in sync.
 #[allow(clippy::too_many_lines)]
 fn build_services() -> (
     Arc<OperationService>,

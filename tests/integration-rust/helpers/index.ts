@@ -36,14 +36,14 @@ export interface RustTestContext {
  * to stdout.
  *
  * Passes `--port 0` explicitly so the OS assigns an ephemeral port, allowing
- * parallel test runs without conflicts. The `test_server` CLI default is 8080
+ * parallel test runs without conflicts. The `topgun_server` CLI default is 8080
  * (matches the documented quick-start); ephemeral allocation is opt-in here
  * for test isolation.
  *
  * Sets `STORAGE_BACKEND=null` in the spawn env so each child uses the in-memory
  * `NullDataStore`. This is required because `redb` (the documented
  * `pnpm start:server` default) is single-writer and file-locked at
- * `./topgun.redb`; Jest spawns multiple `test-server` instances in parallel
+ * `./topgun.redb`; Jest spawns multiple `topgun-server` instances in parallel
  * from the same CWD, and the second-and-later opens would otherwise fail with
  * `Error: Database already open. Cannot acquire lock.` The null backend has no
  * file lock and is correct for stateless WebSocket-protocol integration tests.
@@ -51,7 +51,7 @@ export interface RustTestContext {
  * needs persistence behavior; the default does NOT change the documented
  * `pnpm start:server` redb default.
  *
- * By default this runs `cargo run --bin test-server --release` from the
+ * By default this runs `cargo run --bin topgun-server --release` from the
  * repository root, which will trigger a cargo build on the first invocation.
  * In CI, set the `RUST_SERVER_BINARY` environment variable to the path of a
  * pre-built binary to skip the cargo overhead and get a single-process launch
@@ -99,7 +99,7 @@ export async function spawnRustServer(
     // since the binary's CLI default is 8080 (matches the documented quick-start).
     proc = child_process.spawn(
       'cargo',
-      ['run', '--bin', 'test-server', '--release', '--', '--port', '0'],
+      ['run', '--bin', 'topgun-server', '--release', '--', '--port', '0'],
       {
         cwd: REPO_ROOT,
         detached: true,
