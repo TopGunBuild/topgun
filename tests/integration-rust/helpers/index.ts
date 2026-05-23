@@ -91,7 +91,7 @@ export async function spawnRustServer(
       cwd: REPO_ROOT,
       detached: true,
       stdio: ['ignore', 'pipe', 'inherit'],
-      env: { ...process.env, STORAGE_BACKEND: 'null', ...options.env },
+      env: { ...process.env, STORAGE_BACKEND: 'null', JWT_SECRET: 'test-e2e-secret', ...options.env },
     });
   } else {
     // Development: let cargo build and run the binary.
@@ -104,7 +104,7 @@ export async function spawnRustServer(
         cwd: REPO_ROOT,
         detached: true,
         stdio: ['ignore', 'pipe', 'inherit'],
-        env: { ...process.env, STORAGE_BACKEND: 'null', ...options.env },
+        env: { ...process.env, STORAGE_BACKEND: 'null', JWT_SECRET: 'test-e2e-secret', ...options.env },
       }
     );
   }

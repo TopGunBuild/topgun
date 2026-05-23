@@ -4,8 +4,12 @@
 //! and prints `PORT=<number>` to stdout. The TS test harness passes `--port 0`
 //! to opt into an ephemeral port and reads it from stdout to connect.
 //!
-//! Uses `NullDataStore` (no `PostgreSQL` dependency) and JWT secret `test-e2e-secret`
-//! to match the TS test helpers.
+//! Uses `NullDataStore` (no `PostgreSQL` dependency). The JWT signing secret is
+//! read from the `JWT_SECRET` env var; the process fails fast if it is unset and
+//! `TOPGUN_NO_AUTH` is not `1` / `true`. Integration tests, benches, and the
+//! sync-lab demo expect `JWT_SECRET=test-e2e-secret` (matched against the
+//! pre-signed tokens in `tests/integration-rust/helpers/test-client.ts` and the
+//! demo token in `examples/sync-lab/src/lib/device-manager.ts`).
 //!
 //! Optional cluster mode: when `--seed-nodes` is provided, the server participates
 //! in cluster formation, heartbeat-based failure detection, and partition rebalancing.
@@ -472,11 +476,32 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(false);
 
     // When set to 1 or true, omit the JWT secret so templates and QA harness
-    // can connect without auth tokens. Default preserves existing behaviour so
-    // all integration tests that rely on jwt_secret remain unaffected.
+    // can connect without auth tokens.
     let no_auth = std::env::var("TOPGUN_NO_AUTH")
         .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"))
         .unwrap_or(false);
+
+    // Read the JWT signing secret from env. We refuse to start with a baked-in
+    // secret because earlier revisions of this binary defaulted to a publicly-
+    // known value, which silently turned any deployment of the prod Docker
+    // image into a forge-anybody's-tokens vulnerability whenever the operator
+    // forgot to override.
+    let jwt_secret = if no_auth {
+        None
+    } else {
+        match std::env::var("JWT_SECRET") {
+            Ok(s) if !s.is_empty() => Some(s),
+            _ => {
+                eprintln!(
+                    "ERROR: JWT_SECRET environment variable must be set when auth is enabled.\n  \
+                     For production:   JWT_SECRET=$(openssl rand -base64 32) <command>\n  \
+                     For local dev:    TOPGUN_NO_AUTH=1 <command>\n  \
+                     For integration tests + sync-lab demo: JWT_SECRET=test-e2e-secret <command>"
+                );
+                std::process::exit(1);
+            }
+        }
+    };
 
     let shutdown = Arc::new(ShutdownController::new());
     let state = AppState {
@@ -490,7 +515,7 @@ async fn main() -> anyhow::Result<()> {
         observability: None,
         operation_service: Some(classify_svc),
         dispatcher: Some(Arc::new(dispatcher)),
-        jwt_secret: if no_auth { None } else { Some("test-e2e-secret".to_string()) },
+        jwt_secret,
         cluster_state: cluster_state_for_app,
         store_factory: None,
         server_config: None,
