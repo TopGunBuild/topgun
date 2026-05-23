@@ -156,12 +156,6 @@ function TodoList() {
 
 Full docs: [topgun.build/docs](https://topgun.build/docs)
 
-Specifications in this repo:
-- [Master Architecture](specifications/00_MASTER_ARCHITECTURE.md)
-- [System Architecture](specifications/01_SYSTEM_ARCHITECTURE.md)
-- [CRDT & Data Structures](specifications/02_DATA_STRUCTURES_CRDT.md)
-- [Synchronization Protocol](specifications/03_SYNCHRONIZATION_PROTOCOL.md)
-
 ## Packages
 
 | Package | Description |

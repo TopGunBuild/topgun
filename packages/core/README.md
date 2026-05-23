@@ -78,7 +78,7 @@ const ts2 = hlc.now();
 ## Documentation
 
 - Full docs: [topgun.build/docs](https://topgun.build/docs)
-- Architecture: [specifications/02_DATA_STRUCTURES_CRDT.md](https://github.com/TopGunBuild/topgun/blob/main/specifications/02_DATA_STRUCTURES_CRDT.md)
+- Reference: [topgun.build/docs/reference/core](https://topgun.build/docs/reference/core)
 - GitHub: [TopGunBuild/topgun](https://github.com/TopGunBuild/topgun)
 
 ## License

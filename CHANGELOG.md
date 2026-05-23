@@ -54,8 +54,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking Changes
 
-> See [MIGRATION.md](./MIGRATION.md) for upgrade instructions.
-
 - **client**: Remove deprecated `ClusterClient.sendMessage()` - use `send(data, key)` instead
 - **core**: Remove legacy constructor from `QueryOptimizer` - use options object
 - **core**: Remove legacy array format from `CRDTDebugger.importHistory()` - use v1.0 format
