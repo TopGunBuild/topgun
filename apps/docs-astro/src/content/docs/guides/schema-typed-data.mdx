@@ -146,7 +146,7 @@ function TodoList() {
   const { create, update } = useMutation<Todo>('todos');
 
   const addTodo = () => {
-    create({ text: 'New task', completed: false, createdAt: Date.now() });
+    create(crypto.randomUUID(), { text: 'New task', completed: false, createdAt: Date.now() });
     // TS ERROR if you omit a required field or pass the wrong type
   };
 

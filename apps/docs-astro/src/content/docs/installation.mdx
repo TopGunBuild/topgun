@@ -66,7 +66,7 @@ export default client;`;
 <div className="mb-10 not-prose">
   <h3 className="text-lg font-semibold text-foreground mb-2">Server Development</h3>
   <p className="text-neutral-600 dark:text-neutral-300 mb-4">
-    To run the TopGun server locally for development, build and run the Rust test server binary. It uses in-memory storage with no external dependencies.
+    Boot the server from the repository root. The default backend is embedded redb (durable, on-disk, no Postgres required); the only prerequisite is a Rust toolchain to compile the binary.
   </p>
   <CodeBlock
     title="terminal"
@@ -74,17 +74,20 @@ export default client;`;
 git clone https://github.com/topgunbuild/topgun.git
 cd topgun
 
-# Build and run the test server (requires Rust toolchain)
+# Boot the server (auto-compiles topgun-server on first run)
+pnpm start:server
+
+# Or directly with cargo
 cargo run --bin topgun-server --release
 
-# Or with a custom port
-PORT=8080 cargo run --bin topgun-server --release`}
+# Set an explicit port (default is 8080)
+PORT=9000 pnpm start:server`}
   />
   <div className="p-4 mt-4 rounded-lg bg-green-500/10 border border-green-500/20 flex gap-3">
     <div className="mt-1">
       <div className="w-4 h-4 rounded-full bg-green-500 flex items-center justify-center text-white text-[10px] font-bold">i</div>
     </div>
-    <span className="text-sm text-neutral-700 dark:text-neutral-300"><span className="font-semibold text-green-600 dark:text-green-400">No database required for development!</span> The test server uses in-memory storage. See the <a href="/docs/reference/cli" className="underline">CLI Reference</a> for details.</span>
+    <span className="text-sm text-neutral-700 dark:text-neutral-300"><span className="font-semibold text-green-600 dark:text-green-400">No external database required.</span> The server writes to <code>./topgun.redb</code> by default; data survives restarts. Set <code>TOPGUN_NO_AUTH=1</code> for auth-free local exploration. See the <a href="/docs/reference/server" className="underline">Server &amp; CLI reference</a> for flags and env vars.</span>
   </div>
 </div>
 

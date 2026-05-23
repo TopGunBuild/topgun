@@ -35,7 +35,7 @@ Supabase Realtime is a Postgres-native real-time library: clients open WebSocket
     <tbody>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Channel (<code>supabase.channel('room-1')</code>)</td>
-        <td className="py-3 px-4 text-foreground"><code>client.getTopic('room-1')</code></td>
+        <td className="py-3 px-4 text-foreground"><code>client.topic('room-1')</code></td>
         <td className="py-3 px-4 text-neutral-500">Named pub/sub topic; HLC-ordered delivery</td>
       </tr>
       <tr className="border-b border-card-border">
@@ -192,7 +192,7 @@ todosChannel
 
 ```typescript
 // Pub/sub topic — fan-out messages
-const topic = client.getTopic('room-1');
+const topic = client.topic('room-1');
 
 const unsub = topic.subscribe((payload) => {
   console.log('topic', payload);
@@ -336,7 +336,7 @@ For a first migration, start on single-node. The partition-routed cluster mode w
 2. Cross-reference each against the Concept Mapping table above; mark mappings vs gaps.
 3. Audit which Supabase services you use beyond Realtime (Auth, Storage, Edge Functions, RLS) — TopGun replaces only the Realtime + sync surface; the others stay on Supabase or move to alternative providers. Make explicit decisions per service.
 4. Port the client layer: replace `createClient(url, anonKey)` + the auth flow with `new TopGunClient({ serverUrl, storage })` + `setAuthToken` (BYO JWT). See [Authentication](/docs/guides/authentication).
-5. Port channels/queries one resource at a time: replace `channel.on('broadcast', ...)` with `client.getTopic().subscribe()`, replace `channel.on('postgres_changes', ...)` with `client.query().subscribe()`, and replace direct `supabase.from().insert()` with `client.getMap().set()` (the write path moves through TopGun, not directly to Postgres).
+5. Port channels/queries one resource at a time: replace `channel.on('broadcast', ...)` with `client.topic(name).subscribe(cb)`, replace `channel.on('postgres_changes', ...)` with `client.query().subscribe()`, and replace direct `supabase.from().insert()` with `client.getMap().set()` (the write path moves through TopGun, not directly to Postgres).
 6. Backfill data via a one-time migration script that reads from Postgres (or via `supabase-js`) and writes to TopGun via the client SDK or direct Postgres insert (TopGun owns the write path going forward).
 
 <div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">

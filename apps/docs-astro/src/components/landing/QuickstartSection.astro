@@ -17,7 +17,7 @@ const code = `<span style="${warn}">import</span> &#123; <span style="${accent}"
 
 <span style="${dim}">// 1. connect — local-first by default, no server required</span>
 <span style="${warn}">const</span> client = <span style="${warn}">new</span> <span style="${accent}">TopGunClient</span>(&#123;
-  storage: <span style="${warn}">new</span> <span style="${accent}">IDBAdapter</span>(<span style="${accent}">'my-app'</span>),
+  storage: <span style="${warn}">new</span> <span style="${accent}">IDBAdapter</span>(),
 &#125;);
 client.<span style="${accent}">start</span>();
 

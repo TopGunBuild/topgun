@@ -94,11 +94,16 @@ const client = new TopGunClient({
 ## Topic-based pub/sub
 
 ```tsx
+import { useState } from 'react';
 import { useTopic } from '@topgunbuild/react';
 
-// useTopic<Payload>('channelName') returns { publish, messages }
-const { publish, messages } = useTopic<{ text: string }>('chat');
-publish({ text: 'hello' });
+// useTopic returns a TopicHandle. Pass a callback to receive messages;
+// publish via the returned handle.
+const [messages, setMessages] = useState<Array<{ text: string }>>([]);
+const topic = useTopic<{ text: string }>('chat', (msg) =>
+  setMessages((prev) => [...prev, msg]),
+);
+topic.publish({ text: 'hello' });
 ```
 
 ## Auth

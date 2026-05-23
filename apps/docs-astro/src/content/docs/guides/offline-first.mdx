@@ -86,13 +86,13 @@ function SyncBadge({ mapName, itemKey }: { mapName: string; itemKey: string }) {
 
 ### Global connection state (imperative)
 
-export const connectionEventCode = `// Listen for connection state changes from the client directly.
-// Events: 'connected' | 'disconnected' | 'reconnecting'
-client.on('connection-state', (state) => {
-  if (state === 'disconnected') {
+export const connectionEventCode = `// Subscribe to connection state transitions.
+// event.to is a SyncState: CONNECTING | AUTHENTICATING | CONNECTED | OFFLINE | ERROR | DISPOSED
+const unsubscribe = client.onConnectionStateChange((event) => {
+  if (event.to === 'OFFLINE') {
     showToast('You are offline. Changes will sync when you reconnect.');
   }
-  if (state === 'connected') {
+  if (event.to === 'CONNECTED') {
     hideToast();
   }
 });`;
