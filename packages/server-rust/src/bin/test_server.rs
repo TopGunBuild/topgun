@@ -603,7 +603,7 @@ async fn main() -> anyhow::Result<()> {
         // route set NetworkModule::serve registers in production. Without this,
         // `pnpm start:server` hits the test_server binary's hand-built router
         // which previously omitted login + /api/admin/indexes/*, leaving the
-        // SPEC-244 persistence path unreachable end-to-end.
+        // persistence path unreachable end-to-end.
         .route(
             "/api/auth/login",
             post(topgun_server::network::handlers::admin::login),

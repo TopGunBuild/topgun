@@ -1859,7 +1859,7 @@ mod tests {
         assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
-    // ---- auth-namespace null check tests (AC11, AC12 from SPEC-174) ----
+    // ---- auth-namespace null check tests (AC11, AC12) ----
 
     fn is_null_pred(attribute: &str) -> PredicateNode {
         PredicateNode {

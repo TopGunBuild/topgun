@@ -2860,7 +2860,7 @@ mod tests {
 
         // RecordValue::Lww requires topgun_core::Value, not rmpv::Value.
         // Build a Value::Map containing the embedding as a MsgPack-encoded binary blob,
-        // matching the wire contract established by SPEC-196.
+        // matching the wire contract.
         let embedding_bytes = rmp_serde::to_vec_named(&Vector::F32(vec![1.0, 0.0])).unwrap();
         let stored_value = Value::Map(BTreeMap::from([(
             "embedding".to_string(),
