@@ -16,6 +16,13 @@ on:
         default: 'false'
         type: boolean
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   micro-benchmarks:
     name: Vitest Micro-Benchmarks
@@ -35,7 +42,7 @@ jobs:
           corepack enable
           corepack prepare pnpm@10 --activate
 
-      - run: pnpm install
+      - run: pnpm install --frozen-lockfile
       - run: pnpm build
 
       - name: Run quick micro-benchmarks (up to 10K records)
@@ -62,27 +69,18 @@ jobs:
           corepack enable
           corepack prepare pnpm@10 --activate
 
-      - run: pnpm install
+      - run: pnpm install --frozen-lockfile
       - run: pnpm build
 
       - name: Run full micro-benchmarks
         run: pnpm bench
         working-directory: packages/core
 
-  # NOTE: k6 tests are disabled in CI because they require a custom k6 build
-  # with xk6-msgpack extension for MessagePack support.
-  #
-  # To run k6 tests locally:
-  #   1. Build custom k6: pnpm test:k6:build
-  #   2. Start server: pnpm start:server
-  #   3. Run tests: pnpm test:k6:smoke (or other k6 test scripts)
-  #
-  # k6-smoke-test:
-  #   name: k6 Smoke Test
-  #   runs-on: ubuntu-latest
-  #   ...
-  #
-  # k6-throughput-benchmark:
-  #   name: k6 Throughput Benchmark
-  #   runs-on: ubuntu-latest
-  #   ...
+  # k6 tests are not run in CI because they require a custom k6 build with
+  # xk6-msgpack for MessagePack support. Run locally:
+  #   1. Build the custom k6 binary: pnpm test:k6:build
+  #   2. Start the server: pnpm start:server
+  #   3. Execute the scenarios: pnpm test:k6:smoke (and the rest).
+  # See packages/server-rust/benches/load_harness/ for the in-process
+  # Rust load harness that already runs as part of .github/workflows/rust.yml
+  # (perf-gate / vector-perf-gate).
