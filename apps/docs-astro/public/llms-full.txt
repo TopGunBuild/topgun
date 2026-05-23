@@ -249,10 +249,10 @@ git clone https://github.com/topgunbuild/topgun.git
 cd topgun
 
 # Build and run the test server (requires Rust toolchain)
-cargo run --bin test-server --release
+cargo run --bin topgun-server --release
 
 # Or with a custom port
-PORT=8080 cargo run --bin test-server --release`}
+PORT=8080 cargo run --bin topgun-server --release`}
   />
     <span className="text-sm text-neutral-700 dark:text-neutral-300"><span className="font-semibold text-green-600 dark:text-green-400">No database required for development!</span> The test server uses in-memory storage. See the <a href="/docs/reference/cli" className="underline">CLI Reference</a> for details.</span>
 

@@ -81,6 +81,9 @@
   "author": "",
   "license": "Apache-2.0",
   "pnpm": {
-    "onlyBuiltDependencies": []
+    "onlyBuiltDependencies": [],
+    "overrides": {
+      "fast-xml-parser": "^5.3.5"
+    }
   }
 }
