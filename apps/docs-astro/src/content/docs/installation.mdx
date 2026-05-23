@@ -10,20 +10,15 @@ import { ChevronRight } from 'lucide-react';
 export const coreInitCode = `import { TopGunClient } from '@topgunbuild/client';
 import { IDBAdapter } from '@topgunbuild/adapters';
 
-// 1. Initialize the storage adapter (e.g., IndexedDB)
-const adapter = new IDBAdapter();
-
-// 2. Create the client
+// 1. Create the client — local-first by default, no server required.
+//    Add \`serverUrl\` later when you want background sync.
 const client = new TopGunClient({
-  // Optional: URL of the sync server
-  serverUrl: 'ws://localhost:3000',
-  // Required: Storage adapter instance
-  storage: adapter
+  storage: new IDBAdapter(),
 });
 
-// 3. Start the client (async operation)
-// You typically do this in your app's entry point
-await client.start();
+// 2. Start the client so IndexedDB initializes and queued writes can persist.
+//    Non-blocking — UI renders immediately, persistence drains in the background.
+client.start();
 
 export default client;`;
 

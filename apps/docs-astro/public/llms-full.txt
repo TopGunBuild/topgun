@@ -2732,7 +2732,7 @@ The complete re-export list lives in `packages/core/src/index.ts`.
 
 How TopGun compares to other solutions in the ecosystem.
 
-  <table className="w-full text-left border-collapse">
+  <table className="w-full text-left border-collapse min-w-[860px]">
     <thead>
       <tr className="border-b border-card-border">
         <th className="py-4 px-4 text-sm font-mono text-neutral-500 uppercase tracking-wider">Feature</th>

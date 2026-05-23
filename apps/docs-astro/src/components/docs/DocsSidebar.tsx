@@ -70,10 +70,16 @@ const getInitialExpandedSection = (pathname: string): Record<SectionKey, boolean
         resources: false,
     };
 
+    // Resource pages that live under /docs/guides/ but belong to the Resources section.
+    // Must be checked BEFORE the /docs/guides/ startsWith so the Resources section opens.
+    const resourceGuidePaths = ['/docs/guides/troubleshooting', '/docs/guides/building-with-ai'];
+
     if (pathname.startsWith('/docs/tutorials/') || pathname === '/docs/tutorials') {
         sections.tutorials = true;
     } else if (pathname.startsWith('/docs/concepts/') || pathname === '/docs/concepts') {
         sections.concepts = true;
+    } else if (resourceGuidePaths.includes(pathname)) {
+        sections.resources = true;
     } else if (pathname.startsWith('/docs/guides/') || pathname === '/docs/guides') {
         sections.guides = true;
     } else if (pathname.startsWith('/docs/deploy/') || pathname === '/docs/deploy') {
@@ -82,7 +88,7 @@ const getInitialExpandedSection = (pathname: string): Record<SectionKey, boolean
         sections.reference = true;
     } else if (pathname === '/docs/faq') {
         sections.started = true;
-    } else if (pathname === '/docs/community' || pathname === '/docs/changelog' || pathname === '/docs/benchmarks' || pathname === '/docs/for-coding-agents' || pathname === '/docs/guides/troubleshooting') {
+    } else if (pathname === '/docs/community' || pathname === '/docs/changelog' || pathname === '/docs/benchmarks' || pathname === '/docs/for-coding-agents') {
         sections.resources = true;
     } else if (pathname === '/docs/roadmap') {
         sections.started = true;
@@ -188,22 +194,6 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                         <SubItem to="/docs/guides/migrating-from-replicache" currentPath={currentPath}>Migrating from Replicache</SubItem>
                         <SubItem to="/docs/guides/migrating-from-supabase-realtime" currentPath={currentPath}>Migrating from Supabase Realtime</SubItem>
                         <SubItem to="/docs/guides/migrating-from-yjs" currentPath={currentPath}>Migrating from Y.js</SubItem>
-                        <SubItem to="/docs/guides/security" currentPath={currentPath}>Security (TLS)</SubItem>
-                        <SubItem to="/docs/guides/rbac" currentPath={currentPath}>RBAC</SubItem>
-                        <SubItem to="/docs/guides/sync-state" currentPath={currentPath}>Sync State</SubItem>
-                        <SubItem to="/docs/guides/sql-queries" currentPath={currentPath}>SQL Queries</SubItem>
-                        <SubItem to="/docs/guides/indexing" currentPath={currentPath}>Indexing</SubItem>
-                        <SubItem to="/docs/guides/adaptive-indexing" currentPath={currentPath}>Adaptive Indexing</SubItem>
-                        <SubItem to="/docs/guides/ttl" currentPath={currentPath}>Time-To-Live (TTL)</SubItem>
-                        <SubItem to="/docs/guides/write-concern" currentPath={currentPath}>Write Concern</SubItem>
-                        <SubItem to="/docs/guides/entry-processor" currentPath={currentPath}>Entry Processor</SubItem>
-                        <SubItem to="/docs/guides/event-journal" currentPath={currentPath}>Event Journal</SubItem>
-                        <SubItem to="/docs/guides/conflict-resolvers" currentPath={currentPath}>Conflict Resolvers</SubItem>
-                        <SubItem to="/docs/guides/interceptors" currentPath={currentPath}>Interceptors</SubItem>
-                        <SubItem to="/docs/guides/adoption-path" currentPath={currentPath}>Adoption Path</SubItem>
-                        <SubItem to="/docs/guides/cluster-client" currentPath={currentPath}>Cluster Client</SubItem>
-                        <SubItem to="/docs/guides/cluster-replication" currentPath={currentPath}>Cluster Replication</SubItem>
-                        <SubItem to="/docs/guides/observability" currentPath={currentPath}>Observability</SubItem>
                     </div>
                 )}
             </div>
@@ -267,6 +257,7 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                         <SubItem to="/docs/benchmarks" currentPath={currentPath}>Benchmarks</SubItem>
                         <SubItem to="/docs/guides/troubleshooting" currentPath={currentPath}>Troubleshooting</SubItem>
                         <SubItem to="/docs/for-coding-agents" currentPath={currentPath}>For coding agents</SubItem>
+                        <SubItem to="/docs/guides/building-with-ai" currentPath={currentPath}>Building with AI</SubItem>
                     </div>
                 )}
             </div>
