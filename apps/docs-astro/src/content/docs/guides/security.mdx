@@ -1,0 +1,105 @@
+---
+title: Security
+description: TLS at the proxy, client-side encrypted storage, and credential hygiene for TopGun deployments.
+order: 12
+---
+
+import { ChevronRight, KeyRound } from 'lucide-react';
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Guides</span>
+  <ChevronRight className="w-4 h-4" />
+  <span>Security</span>
+</div>
+
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <KeyRound className="w-10 h-10 text-brand" />
+  <h1 className="text-4xl font-bold text-foreground">Security</h1>
+</div>
+
+A short reference covering the security knobs you need to know about for a TopGun deployment: TLS termination, secret-at-rest encryption on the client, and credential hygiene. For role-based access control (RBAC) status and the full security roadmap, see [/docs/roadmap](/docs/roadmap).
+
+## TLS / wss\:// — terminate at the reverse proxy
+
+The TopGun Rust server speaks plain WebSocket (`ws://`) on port 8080 by default. **Do not expose this port to the internet.** Terminate TLS at your edge — nginx, Caddy, Cloudflare, an AWS ALB, Fly.io's built-in TLS, etc. — and forward to the server over loopback or a private network.
+
+A minimal nginx snippet:
+
+```nginx
+server {
+  listen 443 ssl http2;
+  server_name api.example.com;
+
+  ssl_certificate     /etc/letsencrypt/live/api.example.com/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/api.example.com/privkey.pem;
+
+  location /ws {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "Upgrade";
+    proxy_set_header Host $host;
+    proxy_read_timeout 86400s;
+  }
+}
+```
+
+Then connect clients to `wss://api.example.com/ws`.
+
+The cluster transport is plain TCP today (cluster mTLS is on the [roadmap](/docs/roadmap)); restrict the cluster network with a VPC / private subnet until that lands.
+
+## Authentication — `JWT_SECRET` must be set
+
+The server refuses to start when `JWT_SECRET` is unset and `TOPGUN_NO_AUTH` is not `1`. For production:
+
+```bash
+export JWT_SECRET="$(openssl rand -base64 32)"
+pnpm start:server
+```
+
+For dev / demo with no auth:
+
+```bash
+export TOPGUN_NO_AUTH=1
+pnpm start:server
+```
+
+Token-validation details — Clerk, Better Auth, Firebase, custom JWTs — live in the [Authentication guide](/docs/guides/authentication).
+
+## Encrypting data at rest on the client
+
+By default `IDBAdapter` stores records in IndexedDB unencrypted. For laptops where the OS does not encrypt the disk (or for shared devices), wrap your adapter in `EncryptedStorageAdapter`:
+
+```ts
+import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+import { EncryptedStorageAdapter } from '@topgunbuild/client';
+
+const key = await crypto.subtle.importKey(
+  'raw',
+  await deriveKeyMaterial(userPassword),
+  { name: 'AES-GCM' },
+  false,
+  ['encrypt', 'decrypt'],
+);
+
+const client = new TopGunClient({
+  serverUrl: 'wss://api.example.com/ws',
+  storage: new EncryptedStorageAdapter(new IDBAdapter(), key),
+});
+```
+
+Key management is the integrator's responsibility — derive from a password, fetch from a vault, or pin to an OS keychain depending on your threat model.
+
+## Credential hygiene
+
+- **Never** commit `.env` files. The repo's `.gitignore` excludes `.env`, `.env.local`, and `.env.*.local`. Use `.env.example` placeholders.
+- Rotate `JWT_SECRET` if it ever leaks. Active sessions become invalid; clients reconnect and re-authenticate.
+- Cluster admin credentials (`TOPGUN_ADMIN_USERNAME`, `TOPGUN_ADMIN_PASSWORD`) ship with `changeme`-style defaults in `.env.example`; override them before any non-localhost deployment.
+- Report suspected vulnerabilities via the disclosure channel in [`SECURITY.md`](https://github.com/TopGunBuild/topgun/blob/main/SECURITY.md).
+
+## Planned
+
+Per-map / per-op RBAC, cluster mTLS, mutual auth for the cluster transport, and field-level redaction are on the [roadmap](/docs/roadmap). Until they ship, enforce authorization at the application layer (token-claim checks before `client.getMap(...)`.set(...)) and rely on edge TLS for transport security.

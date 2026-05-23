@@ -1,0 +1,111 @@
+---
+title: MCP Server
+description: Connect Claude Desktop, Cursor, or any MCP-compatible agent to a running TopGun server.
+order: 22
+---
+
+import { ChevronRight, Bot } from 'lucide-react';
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Guides</span>
+  <ChevronRight className="w-4 h-4" />
+  <span>MCP Server</span>
+</div>
+
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <Bot className="w-10 h-10 text-brand" />
+  <h1 className="text-4xl font-bold text-foreground">MCP Server</h1>
+</div>
+
+`@topgunbuild/mcp-server` implements the [Model Context Protocol](https://modelcontextprotocol.io/) and exposes your live TopGun data to AI assistants. Claude Desktop, Cursor, Continue, or any MCP-compatible client can read, mutate, search, and subscribe to your maps over `stdio`. For the API surface, see the [MCP reference](/docs/reference/mcp).
+
+## Quick start
+
+Have a TopGun server running:
+
+```bash
+pnpm start:server
+```
+
+Then point an MCP client at the bundled CLI. There is nothing to install — `npx` fetches `@topgunbuild/mcp-server@latest` on demand.
+
+## Claude Desktop
+
+Open `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows) and add:
+
+```json
+{
+  "mcpServers": {
+    "topgun": {
+      "command": "npx",
+      "args": ["-y", "@topgunbuild/mcp-server"],
+      "env": {
+        "TOPGUN_URL": "ws://localhost:8080",
+        "TOPGUN_TOKEN": ""
+      }
+    }
+  }
+}
+```
+
+Restart Claude Desktop. The tools appear under the 🔧 icon. Leave `TOPGUN_TOKEN` empty when the server is running with `TOPGUN_NO_AUTH=1`; otherwise set a JWT signed with the server's `JWT_SECRET`.
+
+## Cursor
+
+Cursor's MCP config lives at `~/.cursor/mcp.json` (project-scoped: `.cursor/mcp.json` in the project root). Use the same shape:
+
+```json
+{
+  "mcpServers": {
+    "topgun": {
+      "command": "npx",
+      "args": ["-y", "@topgunbuild/mcp-server"],
+      "env": {
+        "TOPGUN_URL": "ws://localhost:8080"
+      }
+    }
+  }
+}
+```
+
+## The eight tools
+
+| Tool | Purpose |
+|---|---|
+| `topgun_list_maps` | Discover map names and their schemas. |
+| `topgun_query` | Run a query (filter + sort + limit) over a map. |
+| `topgun_mutate` | Set or delete records. |
+| `topgun_search` | BM25 full-text search across indexed maps. |
+| `topgun_subscribe` | Streaming subscription to map changes. |
+| `topgun_schema` | Read the Zod-derived schema for a map. |
+| `topgun_stats` | Map size, record count, last-modified. |
+| `topgun_explain` | Show the query plan for a given filter. |
+
+For exact tool signatures and return shapes, see the [MCP reference](/docs/reference/mcp).
+
+## Scoping which maps an agent can touch
+
+By default the MCP server exposes every map the connected client can read. Restrict the surface with the `TOPGUN_ALLOWED_MAPS` env var (comma-separated):
+
+```json
+{
+  "env": {
+    "TOPGUN_URL": "ws://localhost:8080",
+    "TOPGUN_ALLOWED_MAPS": "todos,notes,public_settings"
+  }
+}
+```
+
+Combined with a JWT whose claims limit the underlying TopGun ACL, this gives you defense in depth: the agent literally cannot mention or mutate maps outside the allowlist.
+
+## Troubleshooting
+
+- **Claude Desktop logs:** `~/Library/Logs/Claude/mcp*.log` (macOS).
+- **"Tool not loaded" / connection error:** double-check the config JSON parses, the server is actually reachable at `TOPGUN_URL`, and `npx` is on PATH for the user that runs Claude Desktop.
+- **`AUTH_REQUIRED` errors:** the server expects a token. Either disable auth on the server (`TOPGUN_NO_AUTH=1`) for local exploration, or supply `TOPGUN_TOKEN`.
+
+## What's next
+
+For end-to-end "Claude builds a TopGun app from a prompt" workflows including AGENTS.md / CLAUDE.md guidance, see the [Building with AI Coding Agents guide](/docs/guides/building-with-ai).
