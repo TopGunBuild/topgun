@@ -592,7 +592,7 @@ pub struct SearchMutationObserver {
     map_name: String,
     /// Sender for the background batch processor.
     /// `UnboundedSender::send()` is synchronous, safe to call from sync trait methods.
-    event_tx: mpsc::UnboundedSender<MutationEvent>,
+    event_tx: mpsc::Sender<MutationEvent>,
     /// Shutdown signal for the background task.
     shutdown_tx: Arc<tokio::sync::watch::Sender<bool>>,
     /// Retained for per-enqueue subscription check — avoids indexing cost when
@@ -623,7 +623,12 @@ impl SearchMutationObserver {
         config: SearchConfig,
         needs_population: Arc<DashMap<String, AtomicBool>>,
     ) -> (Self, mpsc::UnboundedReceiver<String>) {
-        let (event_tx, event_rx) = mpsc::unbounded_channel::<MutationEvent>();
+        // Bounded so a stalled batch processor applies backpressure instead of
+        // growing memory without limit. Capacity 10_000 is large enough that
+        // healthy sustained write throughput never reaches it; if it does,
+        // try_send returns Err(Full) and the call site logs a warn so the
+        // condition becomes observable rather than a silent OOM.
+        let (event_tx, event_rx) = mpsc::channel::<MutationEvent>(10_000);
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let shutdown_tx = Arc::new(shutdown_tx);
 
@@ -696,14 +701,20 @@ impl SearchMutationObserver {
                 .store(true, Ordering::Release);
             return;
         }
-        let _ = self.event_tx.send(MutationEvent {
+        if let Err(err) = self.event_tx.try_send(MutationEvent {
             map_name: self.map_name.clone(),
             op: IndexOp::Index {
                 key: key.to_owned(),
                 value,
                 change_type,
             },
-        });
+        }) {
+            tracing::warn!(
+                map = %self.map_name,
+                key,
+                "search index queue saturated (10k capacity); event dropped — investigate stalled batch processor: {err}"
+            );
+        }
     }
 
     /// Enqueues a remove operation for the batch processor (no synchronous indexing).
@@ -726,12 +737,18 @@ impl SearchMutationObserver {
                 .store(true, Ordering::Release);
             return;
         }
-        let _ = self.event_tx.send(MutationEvent {
+        if let Err(err) = self.event_tx.try_send(MutationEvent {
             map_name: self.map_name.clone(),
             op: IndexOp::Remove {
                 key: key.to_owned(),
             },
-        });
+        }) {
+            tracing::warn!(
+                map = %self.map_name,
+                key,
+                "search index queue saturated (10k capacity); remove dropped — investigate stalled batch processor: {err}"
+            );
+        }
     }
 }
 
@@ -773,10 +790,15 @@ impl MutationObserver for SearchMutationObserver {
     }
 
     fn on_clear(&self) {
-        let _ = self.event_tx.send(MutationEvent {
+        if let Err(err) = self.event_tx.try_send(MutationEvent {
             map_name: self.map_name.clone(),
             op: IndexOp::Clear,
-        });
+        }) {
+            tracing::warn!(
+                map = %self.map_name,
+                "search index queue saturated (10k capacity); clear dropped — investigate stalled batch processor: {err}"
+            );
+        }
     }
 
     fn on_reset(&self) {
@@ -814,7 +836,7 @@ fn record_to_rmpv(record_value: &RecordValue) -> rmpv::Value {
 /// remaining events before exiting.
 #[allow(clippy::too_many_arguments)]
 async fn run_batch_processor(
-    mut event_rx: mpsc::UnboundedReceiver<MutationEvent>,
+    mut event_rx: mpsc::Receiver<MutationEvent>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     registry: Arc<SearchRegistry>,
     indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>>,

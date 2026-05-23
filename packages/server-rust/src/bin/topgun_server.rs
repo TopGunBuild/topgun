@@ -633,14 +633,47 @@ async fn main() -> anyhow::Result<()> {
     // Mark the server as ready
     shutdown.set_ready();
 
-    // Serve until SIGTERM or SIGINT; signal cluster services to shut down.
+    // Hand the controller a second handle so the graceful-shutdown closure
+    // can flip /health to draining the moment SIGTERM lands, while the
+    // outer scope keeps the original Arc for wait_for_drain below.
+    let shutdown_for_drain = Arc::clone(&shutdown);
+
+    // Serve until SIGTERM or SIGINT.
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
-            // Signal cluster services (e.g. HeartbeatService) to exit their loops.
+            // Flip /health to 503 before the HTTP server starts closing so
+            // any load balancer in front of us drains traffic away first.
+            // Without this, /health stays "ready" until the process dies
+            // and the LB happily forwards new requests into a dying server.
+            shutdown_for_drain.trigger_shutdown();
+            // Signal cluster services (HeartbeatService, EvictionOrchestrator,
+            // WriteBehindDataStore flush loop, etc.) to exit their loops.
             let _ = shutdown_tx.send(true);
         })
         .await?;
+
+    // After Hyper graceful shutdown returns, wait for any still-running
+    // request handlers (tracked via ShutdownController::in_flight_guard) to
+    // finish, with a bounded deadline so a stuck handler can't block exit
+    // indefinitely. 30s matches typical k8s terminationGracePeriodSeconds.
+    let drained = shutdown
+        .wait_for_drain(std::time::Duration::from_secs(30))
+        .await;
+    if !drained {
+        tracing::warn!(
+            "shutdown drain timed out after 30s — exiting with in-flight \
+             requests still running. Investigate stuck handlers if persistent."
+        );
+    } else {
+        tracing::info!("graceful shutdown complete");
+    }
+
+    // KNOWN GAP (TODO-339): WriteBehindDataStore does not yet flush its
+    // bounded buffer on shutdown. Up to TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS
+    // (1s default) of acked-but-unpersisted writes can be lost on clean
+    // SIGTERM. Tracked at https://topgun.build/docs/roadmap; landing in v2.x
+    // alongside WAL recovery.
 
     Ok(())
 }
