@@ -44,60 +44,40 @@ To enable file uploads, you need to deploy the Storage Worker and configure Clou
 
 For local development, the TopGun server needs to be configured with your Clerk instance's public key so it can validate tokens.
 
-#### Quick Start
+#### Step 1 — Get your Clerk Public Key (PEM)
+
+The TopGun server validates Clerk-issued JWTs using your instance's public key. Fetch and convert it from your JWKS URL (Clerk Dashboard → API Keys → Show JWT Public Key → JWKS URL, typically `https://<your-domain>.clerk.accounts.dev/.well-known/jwks.json`):
 
 ```bash
-# In the repository root
-chmod +x start-clerk-server.sh
-./start-clerk-server.sh
+# Run from repository root
+node scripts/get-clerk-key.js <YOUR_JWKS_URL>
 ```
 
-> **Note:** The script uses placeholder values by default. Set environment variables for your own Clerk instance.
+The script prints a PEM block:
 
-#### Custom Configuration (Your Clerk Instance)
+```
+-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...
+-----END PUBLIC KEY-----
+```
 
-If you are using your own Clerk instance, you need to provide your Public Key to the server.
+#### Step 2 — Start the server
 
-1. **Obtain your Clerk Public Key (PEM):**
-   
-   You can use our helper script to fetch and convert your JWKS key to PEM format. You need your **JWKS URL** (found in Clerk Dashboard > API Keys > Show JWT Public Key > JWKS URL, or typically `https://<your-domain>.clerk.accounts.dev/.well-known/jwks.json`).
+From the repository root, pass the PEM to `pnpm start:server` via `JWT_SECRET`:
 
-   ```bash
-   # Run from repository root
-   node scripts/get-clerk-key.js <YOUR_JWKS_URL>
-   ```
-   
-   *Example output:*
-   ```
-   -----BEGIN PUBLIC KEY-----
-   MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...
-   ...
-   -----END PUBLIC KEY-----
-   ```
+```bash
+JWT_SECRET="-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...
+-----END PUBLIC KEY-----" pnpm start:server
+```
 
-2. **Run the Server with Environment Variables:**
+Or export it once for the session:
 
-   You can create a `.env` file in the root directory or pass variables inline:
+```bash
+export JWT_SECRET="$(cat /path/to/clerk-public-key.pem)"
+pnpm start:server
+```
 
-   **Option A: Using .env file (Recommended)**
-   Create a `.env` file in the project root:
-   ```env
-   JWT_SECRET="-----BEGIN PUBLIC KEY-----
-   ...your key content...
-   -----END PUBLIC KEY-----"
-   # Optional: Custom DB
-   # DATABASE_URL="postgresql://user:pass@host/db"
-   ```
-   Then run:
-   ```bash
-   ./start-clerk-server.sh
-   ```
+The server defaults to embedded redb storage on disk — no Postgres needed. The notes app expects the server on `ws://localhost:8080`; set `VITE_TOPGUN_SERVER_URL` if you bind elsewhere.
 
-   **Option B: Inline Variables**
-   ```bash
-   export JWT_SECRET="-----BEGIN PUBLIC KEY-----
-   ...your key content...
-   -----END PUBLIC KEY-----"
-   
-   ./start-clerk-server.sh
-   ```
+> **Tip:** for quick, auth-free experimentation (no Clerk integration), run `TOPGUN_NO_AUTH=1 pnpm start:server` and skip Clerk wiring entirely.
