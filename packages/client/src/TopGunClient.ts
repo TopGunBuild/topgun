@@ -93,6 +93,14 @@ export interface TopGunClientConfig {
 
   /** Auth provider for automatic token management */
   auth?: AuthProvider;
+
+  /**
+   * Called when the server demands authentication (sends AUTH_REQUIRED) but no
+   * token / token provider / auth provider is configured. Without this hook the
+   * client parks silently in AUTHENTICATING. Wire it to prompt for login, call
+   * setAuthToken(), redirect, etc.
+   */
+  onAuthRequired?: (error: import('./errors/AuthRequiredError').AuthRequiredError) => void;
 }
 
 export class TopGunClient<TSchema extends Record<string, any> = any> {
@@ -154,6 +162,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
         storageAdapter: this.storageAdapter,
         backoff: config.backoff,
         backpressure: config.backpressure,
+        onAuthRequired: config.onAuthRequired,
       });
 
       logger.info({ seeds: this.clusterConfig.seeds }, 'TopGunClient initialized in cluster mode');
@@ -174,6 +183,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
         storageAdapter: this.storageAdapter,
         backoff: config.backoff,
         backpressure: config.backpressure,
+        onAuthRequired: config.onAuthRequired,
       });
 
       logger.info({ serverUrl: config.serverUrl }, 'TopGunClient initialized in single-server mode');
@@ -187,6 +197,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
         storageAdapter: this.storageAdapter,
         backoff: config.backoff,
         backpressure: config.backpressure,
+        onAuthRequired: config.onAuthRequired,
       });
       logger.info({}, 'TopGunClient initialized in local-only mode (no sync target)');
     }
