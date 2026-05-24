@@ -18,12 +18,17 @@ const html = await codeToHtml(code, {
 <div class="code-block not-prose rounded-lg border border-card-border bg-[#0d0d0d] overflow-hidden my-6">
     <div class="flex items-center justify-between px-4 py-2 border-b border-white/10 bg-white/5">
         <span class="text-xs font-mono text-neutral-400">{title}</span>
-        <button class="copy-btn text-neutral-500 hover:text-white transition-colors" data-code={code}>
-            <svg class="w-3 h-3 copy-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <button
+            type="button"
+            class="copy-btn text-neutral-500 hover:text-white transition-colors"
+            data-code={code}
+            aria-label={`Copy code: ${title}`}
+        >
+            <svg class="w-3 h-3 copy-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
                 <rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect>
                 <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path>
             </svg>
-            <svg class="w-3 h-3 check-icon hidden" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <svg class="w-3 h-3 check-icon hidden" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
                 <polyline points="20 6 9 17 4 12"></polyline>
             </svg>
         </button>
@@ -34,26 +39,63 @@ const html = await codeToHtml(code, {
 </div>
 
 <script>
-    document.querySelectorAll('.code-block .copy-btn').forEach((btn) => {
+    // Fallback for non-secure contexts and old browsers: write to a hidden
+    // textarea + execCommand('copy'). navigator.clipboard.writeText only works
+    // on HTTPS or localhost; this catches everything else (e.g. http://staging
+    // mirrors, embedded preview iframes).
+    function legacyCopy(text: string): boolean {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+            return document.execCommand('copy');
+        } finally {
+            document.body.removeChild(ta);
+        }
+    }
+
+    async function copyToClipboard(text: string): Promise<boolean> {
+        if (navigator.clipboard?.writeText) {
+            try {
+                await navigator.clipboard.writeText(text);
+                return true;
+            } catch {
+                // fall through to legacy
+            }
+        }
+        return legacyCopy(text);
+    }
+
+    document.querySelectorAll<HTMLButtonElement>('.code-block .copy-btn').forEach((btn) => {
         btn.addEventListener('click', async () => {
             const code = btn.getAttribute('data-code');
             if (!code) return;
 
-            try {
-                await navigator.clipboard.writeText(code);
-                const copyIcon = btn.querySelector('.copy-icon');
-                const checkIcon = btn.querySelector('.check-icon');
+            const copyIcon = btn.querySelector('.copy-icon');
+            const checkIcon = btn.querySelector('.check-icon');
 
-                copyIcon?.classList.add('hidden');
-                checkIcon?.classList.remove('hidden');
+            const ok = await copyToClipboard(code);
 
-                setTimeout(() => {
-                    copyIcon?.classList.remove('hidden');
-                    checkIcon?.classList.add('hidden');
-                }, 2000);
-            } catch {
-                console.error('Failed to copy to clipboard');
+            // Swap icon regardless of clipboard success — confirms the click
+            // registered. If the copy actually failed we tint the check icon
+            // red instead so the user notices.
+            copyIcon?.classList.add('hidden');
+            checkIcon?.classList.remove('hidden');
+            if (!ok) {
+                checkIcon?.classList.add('text-red-400');
+                btn.setAttribute('title', 'Copy failed — select the code and press ⌘C / Ctrl+C');
             }
+
+            setTimeout(() => {
+                copyIcon?.classList.remove('hidden');
+                checkIcon?.classList.add('hidden');
+                checkIcon?.classList.remove('text-red-400');
+                btn.removeAttribute('title');
+            }, 2000);
         });
     });
 </script>

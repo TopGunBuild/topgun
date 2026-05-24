@@ -192,11 +192,11 @@ The server boots in seconds with embedded storage (`./topgun.redb`) — no Postg
 In production, always use `wss://` instead of `ws://` to encrypt data in transit. See the [Security Guide](/docs/guides/security) for TLS configuration.
 
   <a href="/docs/intro" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Previous</span>
+    <span className="text-xs text-neutral-400 dark:text-neutral-400">Previous</span>
       <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Welcome
   </a>
   <a href="/docs/tutorials/todo-app" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Next Section</span>
+    <span className="text-xs text-neutral-400 dark:text-neutral-400">Next Section</span>
       Tutorial: Real-time Todo <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
   </a>
 
@@ -260,11 +260,11 @@ PORT=9000 pnpm start:server`}
     <span className="text-sm text-neutral-700 dark:text-neutral-300"><span className="font-semibold text-green-600 dark:text-green-400">No external database required.</span> The server writes to <code>./topgun.redb</code> by default; data survives restarts. Set <code>TOPGUN_NO_AUTH=1</code> for auth-free local exploration. See the <a href="/docs/reference/server" className="underline">Server &amp; CLI reference</a> for flags and env vars.</span>
 
   <a href="/docs/comparison" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Previous</span>
+    <span className="text-xs text-neutral-400 dark:text-neutral-400">Previous</span>
       <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Comparison
   </a>
   <a href="/docs/quickstart" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Next Section</span>
+    <span className="text-xs text-neutral-400 dark:text-neutral-400">Next Section</span>
       Quickstart <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
   </a>
 
@@ -757,11 +757,11 @@ When you delete data in TopGun, the record isn't immediately removed from storag
   </table>
 
   <a href="/docs/concepts/sync-protocol" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Previous</span>
+    <span className="text-xs text-neutral-400 dark:text-neutral-400">Previous</span>
       <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Sync Protocol
   </a>
   <a href="/docs/guides" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Next Section</span>
+    <span className="text-xs text-neutral-400 dark:text-neutral-400">Next Section</span>
       Guides <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
   </a>
 
@@ -2784,11 +2784,11 @@ How TopGun compares to other solutions in the ecosystem.
 </ul>
 
   <a href="/docs/intro" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Previous</span>
+    <span className="text-xs text-neutral-400 dark:text-neutral-400">Previous</span>
       <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Introduction
   </a>
   <a href="/docs/installation" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Next Section</span>
+    <span className="text-xs text-neutral-400 dark:text-neutral-400">Next Section</span>
       Installation <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
   </a>
 

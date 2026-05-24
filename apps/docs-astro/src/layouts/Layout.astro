@@ -1,7 +1,7 @@
 ---
 import '../styles/global.css';
 import Header from '../components/landing/Header.astro';
-import { Footer } from '../components/Footer';
+import Footer from '../components/landing/Footer.astro';
 import SEO from '../components/SEO.astro';
 import PostHog from '../components/PostHog.astro';
 
@@ -15,8 +15,8 @@ interface Props {
 }
 
 const {
-	title = "TopGun - Offline-First In-Memory Data Grid",
-	description = "TopGun is a high-performance, offline-first, real-time database. Zero-latency reads/writes, CRDTs, and Merkle Tree sync.",
+	title = "TopGun — Real-time apps that survive offline.",
+	description = "Local writes are instant. Reconnect and everything syncs. CRDT conflict handling is built in. Self-hostable, Apache 2.0.",
 	image,
 	type = 'website',
 	publishedTime,
@@ -29,23 +29,10 @@ const {
 	<head>
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width" />
-		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 		<meta name="generator" content={Astro.generator} />
 		<SEO title={title} description={description} image={image} type={type} publishedTime={publishedTime} author={author} />
 		<title>{title}</title>
 		<PostHog />
-        <script is:inline>
-            // Theme toggle logic - default to dark if no preference saved
-            const getThemePreference = () => {
-                if (typeof localStorage !== 'undefined' && localStorage.getItem('theme')) {
-                    return localStorage.getItem('theme');
-                }
-                // Default to dark theme when no preference is saved
-                return 'dark';
-            };
-            const isDark = getThemePreference() === 'dark';
-            document.documentElement.classList[isDark ? 'add' : 'remove']('dark');
-        </script>
 	</head>
 	<body class="min-h-screen bg-background text-foreground overflow-x-hidden selection:bg-brand-subtle/30">
         <!-- Background Grid Effect -->

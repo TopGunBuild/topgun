@@ -9,19 +9,28 @@ interface Props {
 }
 
 const {
-  title = 'TopGun - Offline-First In-Memory Data Grid',
-  description = 'TopGun is a high-performance, offline-first, real-time database. Zero-latency reads/writes, CRDTs, and Merkle Tree sync.',
+  title = 'TopGun — Real-time apps that survive offline.',
+  description = 'Local writes are instant. Reconnect and everything syncs. CRDT conflict handling is built in. Self-hostable, Apache 2.0.',
   image,
   type = 'website',
   publishedTime,
   author,
 } = Astro.props;
 
-// Normalize pathname: remove trailing slash (except for root)
-const pathname = Astro.url.pathname === '/' ? '/' : Astro.url.pathname.replace(/\/$/, '');
+// Normalize pathname: at build time Astro.url.pathname carries the literal
+// emitted file path (e.g. `/docs/intro.html` because build.format === 'file'),
+// but the deployed URLs are clean (no .html, no trailing slash). Strip both so
+// canonical, og:url, twitter:url, and the derived og:image path stay aligned
+// with what Cloudflare actually serves.
+const rawPathname = Astro.url.pathname;
+const pathname = rawPathname === '/'
+  ? '/'
+  : rawPathname.replace(/\.html$/, '').replace(/\/$/, '');
 const canonicalURL = new URL(pathname, Astro.site);
 
-// Generate dynamic OG image URL based on current path
+// Generate dynamic OG image URL based on current path. The root path resolves
+// to /og.png (served by src/pages/og.png.ts); every other page resolves to the
+// matching pre-rendered image under /og/<path>.png.
 const ogImagePath = pathname === '/' ? '/og.png' : `/og${pathname}.png`;
 const imageURL = new URL(image || ogImagePath, Astro.site);
 ---
@@ -31,6 +40,14 @@ const imageURL = new URL(image || ogImagePath, Astro.site);
 <meta name="description" content={description} />
 <link rel="canonical" href={canonicalURL} />
 <link rel="alternate" type="application/rss+xml" title="TopGun Blog RSS Feed" href={new URL('/rss.xml', Astro.site)} />
+
+<!-- Favicons + PWA -->
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+<link rel="manifest" href="/site.webmanifest" />
+<meta name="theme-color" content="#0a0e14" />
 
 <!-- Open Graph / Facebook -->
 <meta property="og:type" content={type} />
