@@ -151,6 +151,21 @@ Examples:
   // GOOD: // Merge defaults to prevent race condition when topics subscribe before connection
   ```
 
+## Pre-Existing Errors Are Owned, Not Deferred
+
+When the user asks "подготовь / проверь проект" (or any audit / release / cleanup task), every failing check in the repository is in scope — regardless of whether the cause predates the session.
+
+**Prohibited phrasings:** "это было до меня", "не моё изменение, не трогаю", "pre-existing, обхожу через --filter", "stale, but not introduced by my changes". These reframe ownership and cause CI breakage to surface at merge time instead of fix time.
+
+**Required behaviour:** any failure surfaced by `pnpm -r build`, `pnpm test`, `pnpm lint`, `pnpm format:check`, `cargo build --release`, `cargo test`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo fmt --check`, `pnpm --filter apps-docs-astro build`, or any equivalent must be either:
+
+1. Fixed in the same session (commit + verify), OR
+2. Explicitly recorded as a deferred blocker with: (a) WHY deferral is acceptable, (b) where the follow-up is tracked (TODO marker, issue, roadmap row, audit finding), (c) who owns the fix.
+
+Working around a failure by narrowing scope (`pnpm --filter "./packages/*"` instead of `pnpm -r`) is **never** an acceptable mitigation — it's a bandaid that pushes the problem to CI or the next contributor.
+
+**Pre-merge sanity gate:** before opening a PR / merging / publishing, run the full `MERGE-TO-MAIN-CHECKLIST.md §A` matrix end-to-end. If that file does not exist for the task, run at minimum: `pnpm install --frozen-lockfile && pnpm -r build && pnpm lint && pnpm format:check && cargo build --release && cargo test --release -p topgun-server --lib`.
+
 ## Test Notes
 
 - Rust server tests: `SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) cargo test --release -p topgun-server`
