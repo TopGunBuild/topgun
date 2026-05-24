@@ -1,0 +1,353 @@
+---
+title: Core
+description: Reference for @topgunbuild/core — LWWMap, ORMap, HLC, and MerkleTree.
+order: 21.5
+---
+
+import { Database } from 'lucide-react';
+
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <Database className="w-10 h-10 text-brand" />
+  <h1 className="text-4xl font-bold text-foreground">Core</h1>
+</div>
+
+`@topgunbuild/core` ships the CRDT primitives, Hybrid Logical Clock, and Merkle tree that the client and server share. This page documents the public surface (the "what / how"). For background on why TopGun picks these primitives over alternatives, see [Concepts → Data Structures](/docs/concepts/data-structures).
+
+The two primary data structures are `LWWMap` (last-write-wins) and `ORMap` (observed-remove). Both are exposed on `TopGunClient` via `getMap()` and `getORMap()` — most application code never instantiates them directly.
+
+## LWWMap
+
+```typescript
+import { LWWMap, HLC } from '@topgunbuild/core';
+
+const hlc = new HLC('node-1');
+const map = new LWWMap<string, User>(hlc);
+```
+
+Last-write-wins semantics: each key holds exactly one value. Concurrent writes from different nodes are resolved by HLC timestamp (highest wins, ties broken by `nodeId`).
+
+### Constructor
+
+```typescript
+new LWWMap<K, V>(hlc: HLC)
+```
+
+### Methods
+
+**`set(key, value, ttlMs?)`** — `LWWRecord<V>`
+
+Write a value. Stamps the record with `hlc.now()`. Optional `ttlMs` for time-bounded entries.
+
+```typescript
+const record = map.set('u1', { name: 'Alice', email: 'alice@example.com' });
+// { value: {...}, timestamp: { millis, counter, nodeId } }
+
+// With 1-hour TTL
+map.set('session-123', sessionData, 3600000);
+```
+
+**`get(key)`** — `V | undefined`
+
+Read a value. Returns `undefined` for deleted or expired keys.
+
+**`getRecord(key)`** — `LWWRecord<V> | undefined`
+
+Read the full record (value, timestamp, optional TTL).
+
+**`remove(key)`** — `LWWRecord<V>`
+
+Delete a key by writing a tombstone (`value: null`). Returns the tombstone record.
+
+**`merge(key, remoteRecord)`** — `boolean`
+
+Merge a remote record. Returns `true` if local state was updated (i.e., the remote record's timestamp dominated).
+
+```typescript
+const remote: LWWRecord<User> = {
+  value: { name: 'Bob' },
+  timestamp: { millis: Date.now(), counter: 0, nodeId: 'node-2' },
+};
+const updated = map.merge('u1', remote);
+```
+
+**`subscribe(callback)`** — `() => void`
+
+Subscribe to map-change notifications. The callback receives `entries: Array<[K, V]>`. Returns an unsubscribe function.
+
+```typescript
+const unsubscribe = map.subscribe((entries) => {
+  console.log('Map changed,', entries.length, 'live entries');
+});
+```
+
+**`entries()`** — `IterableIterator<[K, V]>`
+
+Iterate non-tombstoned entries (drops deleted and expired).
+
+**`allKeys()`** — `IterableIterator<K>`
+
+Iterate every key including tombstones.
+
+**`size`** (getter) — `number`
+
+Count of entries including tombstones.
+
+**`prune(olderThan)`** — `K[]`
+
+Drop tombstones older than the given `Timestamp`. Returns the removed keys.
+
+**`clear()`** — `void`
+
+Reset to empty state.
+
+**`getMerkleTree()`** — `MerkleTree`
+
+Access the underlying Merkle tree for delta-sync diffing.
+
+### LWWRecord shape
+
+```typescript
+interface LWWRecord<V> {
+  value: V | null;          // null indicates tombstone
+  timestamp: Timestamp;     // HLC stamp
+  ttlMs?: number;           // optional TTL
+}
+```
+
+## ORMap
+
+```typescript
+import { ORMap, HLC } from '@topgunbuild/core';
+
+const hlc = new HLC('node-1');
+const map = new ORMap<string, string>(hlc);
+```
+
+Observed-remove semantics: each key holds a *set* of values. Concurrent adds preserve every value (tagged with unique IDs). A remove operation tombstones only the tags it observed locally, so concurrent add-vs-remove resolves correctly (no spurious deletes).
+
+Use this for tag clouds, comment threads, multi-select fields, presence rosters — anywhere two clients can legitimately contribute different values to the same key.
+
+### Constructor
+
+```typescript
+new ORMap<K, V>(hlc: HLC)
+```
+
+### Methods
+
+**`add(key, value, ttlMs?)`** — `ORMapRecord<V>`
+
+Add a value under a key. Generates a unique tag. Returns the record.
+
+```typescript
+const tags = new ORMap<string, string>(hlc);
+tags.add('post:123', 'javascript');
+tags.add('post:123', 'typescript');
+// post:123 -> ['javascript', 'typescript']
+```
+
+**`remove(key, value)`** — `string[]`
+
+Remove a specific value under a key. Returns the tombstone tags created.
+
+**`get(key)`** — `V[]`
+
+Read all live values for a key.
+
+```typescript
+const postTags = tags.get('post:123');
+// ['javascript', 'typescript']
+```
+
+**`getRecords(key)`** — `ORMapRecord<V>[]`
+
+Read full records (value + tag + timestamp) for a key.
+
+**`getTombstones()`** — `string[]`
+
+Read all current tombstone tags.
+
+**`apply(key, record)`** — `boolean`
+
+Apply a remote `ORMapRecord` to local state. Returns `true` if state changed.
+
+**`applyTombstone(tag)`** — `void`
+
+Apply a remote tombstone tag.
+
+**`merge(other)`** — `void`
+
+Merge another `ORMap` of the same key/value types in bulk.
+
+**`subscribe(callback)`** — `() => void`
+
+Subscribe to change events. The callback receives `entries: Array<[K, V[]]>`.
+
+**`allKeys()`** — `K[]`
+
+All keys with at least one live or tombstoned value.
+
+**`size`** / **`totalRecords`** (getters) — `number`
+
+`size` counts distinct keys; `totalRecords` counts every tagged record (including duplicates per key).
+
+**`prune(olderThan)`** — `string[]`
+
+Drop tombstones older than the timestamp. Returns dropped tags.
+
+**`clear()`** — `void`
+
+Reset to empty.
+
+**`getMerkleTree()`** — `ORMapMerkleTree`
+
+Underlying Merkle tree (a different shape than LWWMap's tree because ORMap stores multi-value-per-key).
+
+**`getSnapshot()`** — `ORMapSnapshot<K, V>`
+
+Serializable snapshot for persistence.
+
+**`isTombstoned(tag)`** — `boolean`
+
+Check whether a tag is in the tombstone set.
+
+### ORMapRecord shape
+
+```typescript
+interface ORMapRecord<V> {
+  value: V;
+  tag: string;            // unique add ID
+  timestamp: Timestamp;   // HLC stamp
+  ttlMs?: number;
+}
+```
+
+## HLC (Hybrid Logical Clock)
+
+```typescript
+import { HLC } from '@topgunbuild/core';
+
+const hlc = new HLC('node-1');
+const ts = hlc.now();
+// { millis: 1748025600000, counter: 0, nodeId: 'node-1' }
+```
+
+The HLC combines physical wall-clock time (`millis`) with a logical counter (`counter`) so total ordering is preserved across nodes even when clocks drift.
+
+### Constructor
+
+```typescript
+new HLC(nodeId: string, options?: HLCOptions)
+```
+
+`HLCOptions` fields:
+
+| Field | Default | Description |
+|---|---|---|
+| `strictMode` | `false` | Throw on clock drift exceeding `maxDriftMs`. |
+| `maxDriftMs` | `60000` | Permitted drift threshold (ms). |
+| `clockSource` | wall clock | Custom `ClockSource` for deterministic tests. |
+
+### Methods
+
+**`now()`** — `Timestamp`
+
+Issue a fresh timestamp. Monotonic per node.
+
+**`update(remote)`** — `void`
+
+Update the local clock against a received remote timestamp. Bumps `lastMillis`/`lastCounter` as needed to maintain causal ordering.
+
+**`getClockSource()`** — `ClockSource`
+
+Returns the configured clock source.
+
+**`getNodeId`** / **`getStrictMode`** / **`getMaxDriftMs`** (getters)
+
+Inspect configured fields.
+
+### Static helpers
+
+**`HLC.compare(a, b)`** — `number`
+
+Total-order comparator. Returns negative if `a < b`, zero if equal, positive if `a > b`. Ordered by `millis`, then `counter`, then `nodeId`.
+
+**`HLC.toString(ts)`** — `string`
+
+Canonical string encoding for serialization or sort keys.
+
+**`HLC.parse(str)`** — `Timestamp`
+
+Inverse of `toString`.
+
+### Timestamp shape
+
+```typescript
+interface Timestamp {
+  millis: number;
+  counter: number;
+  nodeId: string;
+}
+```
+
+## MerkleTree
+
+```typescript
+import { MerkleTree } from '@topgunbuild/core';
+
+const tree = new MerkleTree();
+```
+
+The Merkle tree powers delta sync: clients and servers compare hash trees and exchange only differing buckets instead of full state. `LWWMap` and `ORMap` maintain their own trees internally — use this directly only when implementing custom sync providers or diagnostics.
+
+### Constructor
+
+```typescript
+new MerkleTree(records?: Map<string, LWWRecord<any>>, depth = 3)
+```
+
+`depth` controls fan-out (default 3 levels deep).
+
+### Methods
+
+**`update(key, record)`** — `void`
+
+Insert or replace the leaf for `key` and rehash the path to the root.
+
+**`remove(key)`** — `void`
+
+Drop the leaf and rehash.
+
+**`getRootHash()`** — `number`
+
+Top-level hash. Two trees with identical content produce the same root.
+
+**`getNode(path)`** — `MerkleNode | undefined`
+
+Return the node at a given path string (used during diff walks).
+
+**`getBuckets(path)`** — `Record<string, number>`
+
+Per-bucket hashes for the children of the node at `path`.
+
+**`getKeysInBucket(path)`** — `string[]`
+
+Leaf keys grouped under the given path.
+
+## Re-exports
+
+`@topgunbuild/core` also re-exports types and helpers consumed across the stack. Highlights:
+
+- **`Predicates`** — composable filter builders (`equal`, `gt`, `lt`, `contains`, `and`, `or`, `not`, `match`, `matchPhrase`, `matchPrefix`). Used by `client.query`, `client.hybridQuery`, and the React hooks.
+- **`SearchOptions`** — shared FTS options shape used by `client.search`/`searchSubscribe` and `useSearch`.
+- **`MergeRejection`** — event shape emitted when the built-in CRDT merge logic rejects a remote change. Observed via `useMergeRejections` (React) or `client.getConflictResolvers().onRejection()`.
+- **`WriteConcern`** / **`ConsistencyLevel`** — durability and consistency knobs for cluster writes.
+- **`IndexedLWWMap`** / **`IndexedORMap`** — indexed variants used by the server's query engine.
+- **Full-Text Search** — `Tokenizer`, `InvertedIndex`, `BM25Scorer`, `FullTextIndex` for embedding FTS directly.
+- **Deterministic Simulation Testing** — `VirtualClock`, `SeededRNG`, `VirtualNetwork`, `InvariantChecker`, `ScenarioRunner` for property-based distributed tests.
+
+The complete re-export list lives in `packages/core/src/index.ts`.
+
+---
+
+[← Client](/docs/reference/client) · [React →](/docs/reference/react)

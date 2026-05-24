@@ -27,6 +27,12 @@ services:
       - topgun
 
   server:
+    # Default `docker compose up server` boots TopGun with the embedded redb
+    # backend on a named volume — no Postgres required, no auth required.
+    # For a Postgres-backed deployment, set STORAGE_BACKEND=postgres and
+    # DATABASE_URL via .env (the `postgres` service above is left running so
+    # the connection string resolves) OR use the `server-postgres` profile
+    # below for an explicit production-shaped wiring.
     build:
       context: .
       dockerfile: deploy/Dockerfile.server
@@ -37,10 +43,16 @@ services:
       RUST_LOG: topgun_server=info
       TOPGUN_PORT: 8080
       TOPGUN_CLUSTER_PORT: 9080
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-redb}
+      TOPGUN_REDB_PATH: /data/topgun.redb
+      # Dev default: skip auth so `docker compose up server` works without
+      # generating a key. Override with JWT_SECRET=... for any real deploy.
+      TOPGUN_NO_AUTH: ${TOPGUN_NO_AUTH:-1}
+      JWT_SECRET: ${JWT_SECRET:-}
+      # Only consumed when STORAGE_BACKEND=postgres — harmless otherwise.
       DATABASE_URL: postgres://${DB_USER:-topgun}:${DB_PASSWORD:-topgun_dev}@postgres:5432/${DB_NAME:-topgun}
-    depends_on:
-      postgres:
-        condition: service_healthy
+    volumes:
+      - topgun-data:/data
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
       interval: 10s
@@ -276,6 +288,7 @@ volumes:
   postgres-data:
   prometheus-data:
   grafana-data:
+  topgun-data:
 
 networks:
   topgun:

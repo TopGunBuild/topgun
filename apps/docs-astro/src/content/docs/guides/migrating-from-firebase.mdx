@@ -91,7 +91,7 @@ This guide is for Firestore users, Firebase Realtime Database users, and anyone 
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Cloud Functions onWrite trigger</td>
-        <td className="py-3 px-4 text-foreground">Not yet shipped — Entry Processor is design-only (see <a href="/docs/guides/entry-processor">/docs/guides/entry-processor</a>)</td>
+        <td className="py-3 px-4 text-foreground">Not yet shipped — Entry Processor is design-only (see <a href="/docs/roadmap">/docs/roadmap</a>)</td>
         <td className="py-3 px-4 text-neutral-500">No current server-side equivalent; see <a href="/docs/roadmap">/docs/roadmap</a> for planned delivery</td>
       </tr>
       <tr className="border-b border-card-border">
@@ -312,7 +312,7 @@ The same auto-batching applies to multiple `useMutation` `.create()` / `.update(
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Cluster (current)</td>
         <td className="py-3 px-4 text-yellow-600 dark:text-yellow-400">Partition-routing, no Raft</td>
-        <td className="py-3 px-4 text-neutral-500">Safe when one node owns the partition; weaker guarantees under node failure — see <a href="/docs/guides/cluster-replication">Cluster Replication</a></td>
+        <td className="py-3 px-4 text-neutral-500">Safe when one node owns the partition; weaker guarantees under node failure — see <a href="/docs/roadmap">/docs/roadmap</a></td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Cluster (planned)</td>
@@ -323,7 +323,7 @@ The same auto-batching applies to multiple `useMutation` `.create()` / `.update(
   </table>
 </div>
 
-For a first migration, start on single-node. The partition-routed cluster mode works but does not yet have Raft-backed consensus; consult the [Cluster Replication guide](/docs/guides/cluster-replication) before running cluster in production.
+For a first migration, start on single-node. The partition-routed cluster mode works but does not yet have Raft-backed consensus; see the [roadmap](/docs/roadmap) for cluster-safety status.
 
 ## Why migrate?
 

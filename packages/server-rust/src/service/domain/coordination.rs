@@ -39,7 +39,7 @@ impl CoordinationService {
     /// Creates a new `CoordinationService` with its required dependencies.
     ///
     /// The `LockRegistry` is constructed internally so callsites in `lib.rs`,
-    /// `sim/cluster.rs`, and `bin/test_server.rs` do not need changes.
+    /// `sim/cluster.rs`, and `bin/topgun_server.rs` do not need changes.
     #[must_use]
     pub fn new(
         cluster_state: Arc<ClusterState>,

@@ -1721,7 +1721,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // AuthValidator integration tests (SPEC-189 AC2, AC4)
+    // AuthValidator integration tests
     // -----------------------------------------------------------------------
 
     /// Helper: build a minimal AppState with a jwt_secret and optional validator.
@@ -1740,7 +1740,7 @@ mod tests {
         }
     }
 
-    /// AC2 (SPEC-189): A rejecting AuthValidator causes ClientClaims extractor to return None.
+    /// AC2: A rejecting AuthValidator causes ClientClaims extractor to return None.
     #[tokio::test]
     async fn client_claims_rejecting_validator_returns_none() {
         use axum::http::{header, Request};
@@ -1765,7 +1765,7 @@ mod tests {
         );
     }
 
-    /// AC4 (SPEC-189): When auth_validator is None, valid token is accepted (no regression).
+    /// AC4: When auth_validator is None, valid token is accepted (no regression).
     #[tokio::test]
     async fn client_claims_no_validator_accepts_valid_token() {
         use axum::http::{header, Request};

@@ -118,7 +118,7 @@ export async function spawnCluster(
     } else {
       proc = child_process.spawn(
         'cargo',
-        ['run', '--bin', 'test-server', '--release', '--', ...args],
+        ['run', '--bin', 'topgun-server', '--release', '--', ...args],
         {
           cwd: REPO_ROOT,
           detached: true,

@@ -30,6 +30,7 @@ import type {
 import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
 import type { IConnectionProvider } from './types';
 import { ConflictResolverClient } from './ConflictResolverClient';
+import { AuthRequiredError } from './errors/AuthRequiredError';
 import { RecordSyncStateTracker } from './RecordSyncState';
 import { WebSocketManager, BackpressureController, QueryManager, TopicManager, LockManager, WriteConcernManager, CounterManager, EntryProcessorClient, SearchClient, SqlClient, VectorSearchClient, HybridSearchClient, MerkleSyncHandler, ORMapSyncHandler, MessageRouter, registerClientMessageHandlers } from './sync';
 import type { SearchResult, SqlQueryResult, VectorSearchClientOptions, VectorSearchClientResult, HybridSearchClientOptions, HybridSearchClientResult, IMessageRouter } from './sync';
@@ -91,6 +92,13 @@ export interface SyncEngineConfig {
   backpressure?: Partial<BackpressureConfig>;
   /** Configuration for offline topic message queue */
   topicQueue?: Partial<TopicQueueConfig>;
+  /**
+   * Invoked when the server sends AUTH_REQUIRED but no token / token provider
+   * is configured. Without this hook the client parks in AUTHENTICATING forever
+   * with only an info-level log line; the callback lets integrators detect and
+   * react (prompt for login, call setAuthToken, etc.).
+   */
+  onAuthRequired?: (error: AuthRequiredError) => void;
 }
 
 const DEFAULT_BACKOFF_CONFIG: BackoffConfig = {
@@ -156,6 +164,7 @@ export class SyncEngine {
   private lastSyncTimestamp: number = 0;
   private authToken: string | null = null;
   private tokenProvider: (() => Promise<string | null>) | null = null;
+  private onAuthRequired: ((error: AuthRequiredError) => void) | null = null;
 
   // Grace timer: gives the server a bounded window to send AUTH_REQUIRED after WS open.
   // If AUTH_REQUIRED arrives, the timer is cancelled and existing auth behaviour runs.
@@ -182,6 +191,7 @@ export class SyncEngine {
 
     this.nodeId = config.nodeId;
     this.storageAdapter = config.storageAdapter;
+    this.onAuthRequired = config.onAuthRequired ?? null;
     this.hlc = new HLC(this.nodeId);
 
     // Initialize state machine
@@ -485,7 +495,22 @@ export class SyncEngine {
     if (this.authToken || this.tokenProvider) {
       this.sendAuth();
     } else {
-      logger.info('AUTH_REQUIRED received but no token configured. Waiting for setAuthToken().');
+      // Without a token the SyncEngine parks in AUTHENTICATING. Surface the
+      // condition loudly: warn-level log + typed callback so integrators can
+      // react (prompt for login, call setAuthToken, redirect, etc.) instead
+      // of debugging a silent connection.
+      const error = new AuthRequiredError();
+      logger.warn(
+        { code: error.code },
+        'AUTH_REQUIRED received but no token configured. Call client.setAuthToken(token) or configure config.auth/config.onAuthRequired.'
+      );
+      if (this.onAuthRequired) {
+        try {
+          this.onAuthRequired(error);
+        } catch (callbackErr) {
+          logger.error({ err: callbackErr }, 'onAuthRequired callback threw');
+        }
+      }
     }
   }
 

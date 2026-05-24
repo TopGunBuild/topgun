@@ -18,9 +18,9 @@ import { ChevronRight } from 'lucide-react';
 
 # Roadmap
 
-Last updated: 2026-04-22
+Last updated: 2026-05-22
 
-This page tracks the maturity level of distributed primitives across deployment modes. It exists alongside the feature documentation so that the deployment-mode constraints are visible next to the feature status.
+This page tracks the maturity level of distributed primitives across deployment modes and consolidates every Planned / not-yet-implemented feature into one auditable status table. It is the canonical single source of truth for "what works today vs what is planned."
 
 ## Distributed Primitives Maturity
 
@@ -94,29 +94,74 @@ The features below are **not implemented** in the current Rust server. The guide
     </thead>
     <tbody>
       <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-medium text-foreground">Indexing</td>
-        <td className="py-3 px-4 text-red-600 dark:text-red-400">Not implemented</td>
-        <td className="py-3 px-4"><a href="/docs/guides/indexing" className="text-brand hover:underline">/docs/guides/indexing</a></td>
+        <td className="py-3 px-4 font-medium text-foreground">Adaptive Indexing</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned</td>
+        <td className="py-3 px-4"><a href="/docs/guides/adaptive-indexing" className="text-brand hover:underline">/docs/guides/adaptive-indexing</a> — TODO-174</td>
       </tr>
       <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-medium text-foreground">Adaptive Indexing</td>
-        <td className="py-3 px-4 text-red-600 dark:text-red-400">Not implemented</td>
-        <td className="py-3 px-4"><a href="/docs/guides/adaptive-indexing" className="text-brand hover:underline">/docs/guides/adaptive-indexing</a></td>
+        <td className="py-3 px-4 font-medium text-foreground">Cluster mTLS</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned</td>
+        <td className="py-3 px-4">Cluster traffic is plaintext TCP today; planned v3.0</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Custom Conflict Resolvers</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned (v2.x)</td>
+        <td className="py-3 px-4">User-defined merge functions; requires server-side WASM sandbox. SDK surface (<code>client.getConflictResolvers().register/unregister/list</code>) throws with a roadmap pointer pre-launch. Built-in CRDT merge logic + <code>MergeRejection</code> observability are unchanged.</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Crash-safe shutdown drain + WAL recovery</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned</td>
+        <td className="py-3 px-4">TODO-339; write-behind can lose ~1s of buffered writes on unclean shutdown</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Entry Processor</td>
-        <td className="py-3 px-4 text-red-600 dark:text-red-400">Not implemented</td>
-        <td className="py-3 px-4"><a href="/docs/guides/entry-processor" className="text-brand hover:underline">/docs/guides/entry-processor</a></td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned (v2.x)</td>
+        <td className="py-3 px-4">Server-side atomic read-modify-write via user-defined functions; requires WASM sandbox. SDK surface (<code>client.executeOnKey/executeOnKeys</code>) throws with a roadmap pointer pre-launch.</td>
       </tr>
       <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-medium text-foreground">Conflict Resolvers</td>
-        <td className="py-3 px-4 text-red-600 dark:text-red-400">Not implemented</td>
-        <td className="py-3 px-4"><a href="/docs/guides/conflict-resolvers" className="text-brand hover:underline">/docs/guides/conflict-resolvers</a></td>
+        <td className="py-3 px-4 font-medium text-foreground">Hash/Navigable indexes</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned</td>
+        <td className="py-3 px-4">Distinct from tantivy full-text search (shipped); post-HN backlog</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Indexing</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned</td>
+        <td className="py-3 px-4"><a href="/docs/guides/indexing" className="text-brand hover:underline">/docs/guides/indexing</a> — umbrella: Hash/Navigable + Adaptive Indexing</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Interceptors</td>
-        <td className="py-3 px-4 text-red-600 dark:text-red-400">Not implemented</td>
-        <td className="py-3 px-4"><a href="/docs/guides/interceptors" className="text-brand hover:underline">/docs/guides/interceptors</a></td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned</td>
+        <td className="py-3 px-4"><a href="/docs/guides/interceptors" className="text-brand hover:underline">/docs/guides/interceptors</a> — TODO-178</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">RBAC role policies</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned</td>
+        <td className="py-3 px-4">Design sketch at <a href="/docs/guides/rbac" className="text-brand hover:underline">/docs/guides/rbac</a>; post-HN backlog</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Scheduler — data-driven actions</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned</td>
+        <td className="py-3 px-4">TODO-317</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Scheduler — system cron</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned</td>
+        <td className="py-3 px-4">TODO-316</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">TLS env-var config</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned</td>
+        <td className="py-3 px-4">Programmatic <code>TlsConfig</code> works today; env-var config is post-HN backlog</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Webhooks</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned</td>
+        <td className="py-3 px-4">TODO-140</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Write Concern achievement reporting</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned</td>
+        <td className="py-3 px-4"><code>achieved_level</code> field always returns <code>None</code> today; post-HN backlog</td>
       </tr>
     </tbody>
   </table>
@@ -139,10 +184,10 @@ This work is tracked internally. The current partition-routing implementation is
       <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> FAQ
     </div>
   </a>
-  <a href="/docs/guides/distributed-locks" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+  <a href="/docs/guides/counters-and-locks" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Related</span>
     <div className="flex items-center gap-2 text-foreground font-semibold">
-      Distributed Locks Guide <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+      Counters &amp; Locks Guide <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
     </div>
   </a>
 </div>

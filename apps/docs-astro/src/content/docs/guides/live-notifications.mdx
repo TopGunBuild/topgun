@@ -1,0 +1,199 @@
+---
+title: Live notifications
+description: Send real-time messages between clients using topics and the useTopic hook.
+order: 12
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight } from 'lucide-react';
+import { AlertBox } from '../../../components/docs/AlertBox';
+import { FeatureCard } from '../../../components/docs/FeatureCard';
+import { Bell, Radio, Zap } from 'lucide-react';
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Live notifications</span>
+</div>
+
+# Live notifications
+
+Live notifications: subscribe to a named topic and receive messages in real time from any other connected client; publish a message and every subscriber gets it immediately. Topics are ephemeral — messages are not stored and are delivered only to currently connected subscribers.
+
+<div className="grid md:grid-cols-3 gap-6 mb-12 not-prose">
+  <FeatureCard
+    icon={Bell}
+    iconColor="text-brand-subtle"
+    title="Push notifications"
+    description={`"User X is typing", "New alert!", live score updates.`}
+  />
+  <FeatureCard
+    icon={Radio}
+    iconColor="text-green-500"
+    title="Signaling"
+    description="WebRTC offer/answer exchange, presence heartbeats, coordination."
+  />
+  <FeatureCard
+    icon={Zap}
+    iconColor="text-orange-500"
+    title="Ephemeral events"
+    description="Cursor positions, typing indicators, game state bursts."
+  />
+</div>
+
+---
+
+## Subscribe to a topic (React)
+
+Use the `useTopic` hook. It manages the subscription lifecycle — subscribes on mount, unsubscribes on unmount. The hook returns a `TopicHandle` so you can publish from the same component.
+
+export const subscribeCode = `import { useTopic } from '@topgunbuild/react';
+import { useState } from 'react';
+
+interface ChatMessage {
+  userId: string;
+  text: string;
+}
+
+export function ChatLog({ roomId }: { roomId: string }) {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+
+  // Subscribe: callback fires on every incoming message
+  useTopic(\`chat:\${roomId}\`, (msg) => {
+    setMessages(prev => [...prev, msg as ChatMessage]);
+  });
+
+  return (
+    <ul>
+      {messages.map((m, i) => (
+        <li key={i}><strong>{m.userId}:</strong> {m.text}</li>
+      ))}
+    </ul>
+  );
+}`;
+
+<div className="not-prose">
+  <CodeBlock title="components/ChatLog.tsx" language="tsx" code={subscribeCode} />
+</div>
+
+---
+
+## Publish to a topic (React)
+
+`useTopic` returns a `TopicHandle`. Call `.publish(payload)` to send a message to all subscribers of that topic.
+
+export const publishCode = `import { useTopic } from '@topgunbuild/react';
+import { useState } from 'react';
+
+interface ChatMessage {
+  userId: string;
+  text: string;
+}
+
+export function ChatInput({ roomId, userId }: { roomId: string; userId: string }) {
+  const [text, setText] = useState('');
+
+  // Subscribe and get a handle for publishing
+  const topic = useTopic(\`chat:\${roomId}\`);
+
+  const send = () => {
+    if (!text.trim()) return;
+    topic.publish({ userId, text } satisfies ChatMessage);
+    setText('');
+  };
+
+  return (
+    <div>
+      <input
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => e.key === 'Enter' && send()}
+        placeholder="Type a message..."
+      />
+      <button onClick={send}>Send</button>
+    </div>
+  );
+}`;
+
+<div className="not-prose">
+  <CodeBlock title="components/ChatInput.tsx" language="tsx" code={publishCode} />
+</div>
+
+---
+
+## Non-React contexts
+
+In Node.js services, service workers, or integration tests, use the imperative `client.topic(name)` API directly. The `TopicHandle` returned by `client.topic()` is the same object `useTopic` wraps.
+
+export const imperativeCode = `import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080',
+  storage: new IDBAdapter(),
+});
+
+await client.start();
+
+const chatTopic = client.topic('chat:room-general');
+
+// Subscribe
+const unsubscribe = chatTopic.subscribe((data, context) => {
+  console.log('Received:', data);
+  // context.publisherId — sender's nodeId (undefined if sent from server)
+  // context.timestamp — HLC timestamp of the message
+  console.log('From:', context.publisherId, 'At:', new Date(context.timestamp));
+});
+
+// Publish
+chatTopic.publish({ userId: 'alice', text: 'Hello from Node.js!' });
+
+// Stop listening when done
+unsubscribe();`;
+
+<div className="not-prose">
+  <CodeBlock title="src/server/notifications.ts" language="typescript" code={imperativeCode} />
+</div>
+
+---
+
+## Topic ordering and delivery
+
+| Property | Behaviour |
+|----------|-----------|
+| **Delivery guarantee** | At-most-once. Messages are not ACKed or persisted. |
+| **Offline behaviour** | If a subscriber is offline when a message is published, they do not receive it on reconnect. Use `getMap()` or `getORMap()` for durable history. |
+| **Re-subscription** | The client automatically re-subscribes to all active topics on reconnect to the server. |
+| **Ordering** | Messages from a single publisher arrive in send order. Cross-publisher ordering is not guaranteed. |
+| **Payload type** | Any JSON-serialisable value: string, number, object, array. |
+
+<AlertBox
+  variant="info"
+  title="When to use topics vs maps"
+  text="Use topics for transient events where delivery to currently-offline users is not required (typing indicators, cursor positions, live scores). Use maps (via useQuery / getMap) for durable data that must survive disconnects and page reloads."
+/>
+
+---
+
+**Next steps**
+
+- [Real-time collaboration](/docs/guides/realtime-collaboration) — combine topics with shared maps for cursors + document edits
+- [Offline-first apps](/docs/guides/offline-first) — understand how map-backed data survives disconnects
+- [Client API reference](/docs/reference/client) — full `topic(name)` and `TopicHandle` method signatures
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/offline-first" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Offline-first apps
+    </div>
+  </a>
+  <a href="/docs/guides/schema-typed-data" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Schema-typed data <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

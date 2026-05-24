@@ -48,6 +48,11 @@ examples/**/*.d.ts
 !examples/**/tailwind.config.js
 !examples/**/vite.config.ts
 
+# Keep app config files (source only, not compiled)
+!apps/**/jest.config.js
+!apps/**/postcss.config.js
+!apps/**/tailwind.config.js
+
 # Keep example app source files (JSX/TSX/JS are source, not compiled)
 !examples/**/src/**/*.jsx
 !examples/**/src/**/*.tsx
@@ -106,3 +111,9 @@ topgun.runtime.json
 
 # Vector index descriptor (generated at runtime; path configurable via TOPGUN_VECTOR_INDEX_PATH)
 vector_indexes.json
+
+# Embedded redb backend file (generated at runtime by `pnpm start:server`)
+topgun.redb
+
+# Local scratch directories (not part of the release)
+my-test-review/

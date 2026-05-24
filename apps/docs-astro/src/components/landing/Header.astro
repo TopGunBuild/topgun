@@ -1,0 +1,62 @@
+---
+const nav = [
+  { href: '/#how', label: 'How it works' },
+  { href: '/#quickstart', label: 'Quickstart' },
+  { href: '/docs', label: 'Docs' },
+  { href: '/blog', label: 'Blog' },
+];
+---
+
+<header
+  class="sticky top-0 z-50 backdrop-blur-md"
+  style="background-color: color-mix(in oklab, var(--color-bg) 75%, transparent); border-bottom: 1px solid var(--color-border);"
+>
+  <div class="mx-auto flex h-14 max-w-6xl items-center justify-between px-6">
+    <a
+      href="/"
+      class="flex items-center gap-2.5 text-[15px] font-semibold tracking-tight"
+      style="color: var(--color-fg)"
+      aria-label="TopGun — home"
+    >
+      <svg width="22" height="22" viewBox="0 0 32 32" aria-hidden="true">
+        <circle cx="16" cy="16" r="13" fill="none" stroke="var(--color-accent)" stroke-width="1.5" stroke-opacity="0.4" />
+        <circle cx="16" cy="16" r="8"  fill="none" stroke="var(--color-accent)" stroke-width="1.5" stroke-opacity="0.7" />
+        <line x1="16" y1="16" x2="27" y2="11" stroke="var(--color-accent)" stroke-width="1.5" stroke-linecap="round" />
+        <circle cx="16" cy="16" r="2" fill="var(--color-accent)" />
+      </svg>
+      TopGun
+    </a>
+
+    <nav class="hidden items-center gap-7 text-sm md:flex" style="color: var(--color-fg-muted)">
+      {
+        nav.map((item) => (
+          <a
+            href={item.href}
+            class="transition-colors hover:text-[var(--color-fg)]"
+          >
+            {item.label}
+          </a>
+        ))
+      }
+    </nav>
+
+    <div class="flex items-center gap-3">
+      <a
+        href="https://github.com/TopGunBuild/topgun"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="hidden text-sm transition-colors hover:text-[var(--color-fg)] md:inline-block"
+        style="color: var(--color-fg-muted)"
+      >
+        GitHub
+      </a>
+      <a
+        href="/#get-started"
+        class="rounded-md px-3 py-1.5 text-sm font-medium transition-colors"
+        style="background-color: var(--color-accent); color: var(--color-bg);"
+      >
+        Get started
+      </a>
+    </div>
+  </div>
+</header>

@@ -100,7 +100,7 @@ function buildClient(
           dataListener = null;
         };
       },
-      onChanges: (_cb: any) => () => {},
+      onDelta: (_cb: any) => () => {},
       onPaginationChange: (cb: any) => {
         cb({ hasMore: false, cursorStatus: 'none' });
         return () => {};

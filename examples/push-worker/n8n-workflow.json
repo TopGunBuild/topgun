@@ -115,7 +115,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://push-worker.easysolpro.workers.dev/api/push/send",
+        "url": "https://<your-push-worker-subdomain>.workers.dev/api/push/send",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [

@@ -26,7 +26,13 @@ const getServerUrl = (): string => {
   return 'ws://localhost:8080';
 };
 
-// Pre-signed JWT for the demo test server (secret: "test-e2e-secret", expires 2036).
+// Pre-signed JWT for the demo (signed with the literal secret "test-e2e-secret",
+// expires 2036). To run sync-lab against `pnpm start:server`, start the server
+// with one of:
+//   JWT_SECRET=test-e2e-secret pnpm start:server   # validates the demo token
+//   TOPGUN_NO_AUTH=1 pnpm start:server             # disables auth entirely
+// The server refuses to boot with a baked-in default and will exit with a
+// clear error otherwise.
 const getDemoToken = (): string =>
   (import.meta as any).env?.VITE_AUTH_TOKEN ||
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJkZW1vLXVzZXIiLCJyb2xlcyI6WyJVU0VSIl0sImlhdCI6MTc3MjgxNTUyNywiZXhwIjoyMDg4MzkxNTI3fQ.sxBWldBhyeq--0LNYaThMXa1q4bJjzAIvBiZn-aPWgY';

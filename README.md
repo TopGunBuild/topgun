@@ -37,7 +37,7 @@ This boots a Vite app with a working LWW-Map todo demo. For the backend, in a se
 pnpm start:server
 ```
 
-The server runs on `ws://localhost:8080` with embedded storage at `./topgun.redb` — writes survive restart, no Postgres, no Docker required. Stop with `Ctrl-C`, restart, and your data is still there. Backup is a single-file copy.
+The server runs on `ws://localhost:8080` with embedded storage at `./topgun.redb` — writes survive restart, no Postgres required. You do need a Rust toolchain installed; `pnpm start:server` wraps `cargo run --bin topgun-server --release` and compiles on first run. Pre-built binaries are on the roadmap. Stop with `Ctrl-C`, restart, and your data is still there. Backup is a single-file copy.
 
 For users who prefer containers, `docker compose up server` works too — it spins up Postgres alongside the server in one command.
 
@@ -81,7 +81,7 @@ Single-node is fully consistent and production-ready for workloads that fit one 
 ```bash
 docker compose up --build
 # Or run the Rust server directly
-cargo run --bin test-server --release
+cargo run --bin topgun-server --release
 ```
 
 **4. Multi-node cluster** *(on roadmap — Raft consensus)*
@@ -102,27 +102,18 @@ Prometheus metrics endpoint and structured-log hooks are planned.
 import { TopGunClient } from '@topgunbuild/client';
 import { IDBAdapter } from '@topgunbuild/adapters';
 
-const adapter = new IDBAdapter();
 const client = new TopGunClient({
-  serverUrl: 'ws://localhost:8080',
-  storage: adapter,
+  serverUrl: 'ws://localhost:8080',  // optional — omit for local-only
+  storage: new IDBAdapter('my-app'),
 });
-
 client.start();
 
-// Write data (instant, works offline)
+// Reactive read — fires immediately and on every change
 const todos = client.getMap('todos');
-todos.set('todo-1', {
-  id: 'todo-1',
-  text: 'Buy milk',
-  done: false,
-});
+todos.subscribe((entries) => render(entries));
 
-// Read data
-const todo = todos.get('todo-1');
-
-// Subscribe to changes via live queries
-// See useQuery hook for React integration
+// Optimistic write — applies locally, syncs in background
+todos.set('todo-1', { text: 'Buy milk', done: false });
 ```
 
 With React:
@@ -165,12 +156,6 @@ function TodoList() {
 
 Full docs: [topgun.build/docs](https://topgun.build/docs)
 
-Specifications in this repo:
-- [Master Architecture](specifications/00_MASTER_ARCHITECTURE.md)
-- [System Architecture](specifications/01_SYSTEM_ARCHITECTURE.md)
-- [CRDT & Data Structures](specifications/02_DATA_STRUCTURES_CRDT.md)
-- [Synchronization Protocol](specifications/03_SYNCHRONIZATION_PROTOCOL.md)
-
 ## Packages
 
 | Package | Description |
@@ -178,9 +163,13 @@ Specifications in this repo:
 | `@topgunbuild/core` | CRDTs, Hybrid Logical Clock, Merkle trees, message schemas |
 | `@topgunbuild/client` | Browser/Node.js SDK with IndexedDB persistence |
 | `server-rust` | Rust WebSocket server (axum), clustering, PostgreSQL |
+| `core-rust` | Rust port of CRDT primitives, depended on by `server-rust` (internal) |
 | `@topgunbuild/react` | React hooks: `useQuery`, `useMap`, `useMutation`, `useTopic` |
 | `@topgunbuild/adapters` | Storage adapters: IndexedDB |
 | `@topgunbuild/adapter-better-auth` | Better Auth integration |
+| `@topgunbuild/mcp-server` | MCP server for AI agents (Claude Desktop, Cursor) |
+| `@topgunbuild/schema` | Shared Zod schemas + types |
+| `create-topgun-app` | Scaffold a TopGun app in one command (`npx create-topgun-app my-app`) |
 
 ## Running locally
 
@@ -189,7 +178,7 @@ Specifications in this repo:
 docker compose up --build
 
 # Or run the Rust server directly
-cargo run --bin test-server --release
+cargo run --bin topgun-server --release
 
 # Or run the example app
 cd examples/notes-app
@@ -237,7 +226,7 @@ pnpm test:k6:throughput
 pnpm --filter @topgunbuild/core bench
 ```
 
-See [tests/benchmark/README.md](tests/benchmark/README.md) for details.
+See [packages/server-rust/benches/load_harness/](packages/server-rust/benches/load_harness/) and the [Performance tuning guide](https://topgun.build/docs/deploy/performance) for details.
 
 ## AI Agents
 

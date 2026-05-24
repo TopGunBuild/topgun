@@ -27,6 +27,13 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check:
     name: Check & Lint
@@ -304,7 +311,9 @@ jobs:
     needs: [check]
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    continue-on-error: true
+    # No longer informational: distributed-correctness verification should
+    # block merges. If a test flakes, fix it; don't paper over with
+    # continue-on-error. (P11 H1)
     steps:
       - uses: actions/checkout@v4
 
@@ -325,3 +334,18 @@ jobs:
 
       - name: Run simulation tests
         run: cargo test --profile ci-sim --features simulation -p topgun-server -- sim
+
+  audit:
+    name: Cargo Audit (RustSec advisories)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run cargo audit
+        # Fails on any known advisory. RUSTSEC-2020-0071 etc. should be
+        # acknowledged via deny.toml or fixed via dep bump.
+        run: cargo audit

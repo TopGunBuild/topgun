@@ -1,0 +1,121 @@
+---
+/**
+ * Sync visual — two device clusters with pulses traveling between them.
+ * CSS-only animation. Respects prefers-reduced-motion via global stylesheet.
+ *
+ * Used in: hero, sync-visualization section.
+ */
+---
+
+<div
+  class="relative aspect-[5/4] w-full max-w-[520px]"
+  role="img"
+  aria-label="Animated visualization: two devices syncing in real time"
+>
+  <svg
+    viewBox="0 0 500 400"
+    class="absolute inset-0 h-full w-full"
+    aria-hidden="true"
+  >
+    <!-- Connection line -->
+    <line
+      x1="120"
+      y1="200"
+      x2="380"
+      y2="200"
+      stroke="var(--color-border-strong)"
+      stroke-width="1"
+      stroke-dasharray="4 6"
+    />
+
+    <!-- Device A (left) -->
+    <g transform="translate(40, 140)">
+      <rect
+        width="120"
+        height="120"
+        rx="14"
+        fill="var(--color-bg-elevated)"
+        stroke="var(--color-border-strong)"
+        stroke-width="1"
+      />
+      <text
+        x="14"
+        y="26"
+        font-family="var(--font-mono)"
+        font-size="10"
+        fill="var(--color-fg-dim)"
+      >
+        device.a
+      </text>
+
+      <!-- Synced state — 3 data dots, blinking -->
+      <circle cx="22" cy="55" r="4" fill="var(--color-accent)" class="node-blink" style="animation-delay: 0s" />
+      <circle cx="22" cy="78" r="4" fill="var(--color-accent)" class="node-blink" style="animation-delay: 0.4s" />
+      <circle cx="22" cy="101" r="4" fill="var(--color-accent)" class="node-blink" style="animation-delay: 0.8s" />
+
+      <line x1="34" y1="55" x2="100" y2="55" stroke="var(--color-border)" stroke-width="1" />
+      <line x1="34" y1="78" x2="86" y2="78" stroke="var(--color-border)" stroke-width="1" />
+      <line x1="34" y1="101" x2="94" y2="101" stroke="var(--color-border)" stroke-width="1" />
+    </g>
+
+    <!-- Device B (right) -->
+    <g transform="translate(340, 140)">
+      <rect
+        width="120"
+        height="120"
+        rx="14"
+        fill="var(--color-bg-elevated)"
+        stroke="var(--color-border-strong)"
+        stroke-width="1"
+      />
+      <text
+        x="14"
+        y="26"
+        font-family="var(--font-mono)"
+        font-size="10"
+        fill="var(--color-fg-dim)"
+      >
+        device.b
+      </text>
+
+      <circle cx="22" cy="55" r="4" fill="var(--color-accent)" class="node-blink" style="animation-delay: 0.2s" />
+      <circle cx="22" cy="78" r="4" fill="var(--color-accent)" class="node-blink" style="animation-delay: 0.6s" />
+      <circle cx="22" cy="101" r="4" fill="var(--color-accent)" class="node-blink" style="animation-delay: 1.0s" />
+
+      <line x1="34" y1="55" x2="100" y2="55" stroke="var(--color-border)" stroke-width="1" />
+      <line x1="34" y1="78" x2="92" y2="78" stroke="var(--color-border)" stroke-width="1" />
+      <line x1="34" y1="101" x2="80" y2="101" stroke="var(--color-border)" stroke-width="1" />
+    </g>
+  </svg>
+
+  <!-- Traveling pulses, layered above SVG.
+       Two pulses on opposite phases, so signal looks bidirectional. -->
+  <div
+    class="absolute"
+    style="top: 49%; left: 120px;"
+    aria-hidden="true"
+  >
+    <span
+      class="sync-pulse block h-2.5 w-2.5 rounded-full"
+      style="background-color: var(--color-accent); box-shadow: 0 0 12px var(--color-accent); animation-delay: 0s;"
+    ></span>
+  </div>
+  <div
+    class="absolute"
+    style="top: 49%; left: 120px;"
+    aria-hidden="true"
+  >
+    <span
+      class="sync-pulse block h-2.5 w-2.5 rounded-full"
+      style="background-color: var(--color-accent); box-shadow: 0 0 12px var(--color-accent); animation-delay: 1.6s;"
+    ></span>
+  </div>
+
+  <!-- Caption strip -->
+  <div
+    class="absolute bottom-0 left-1/2 -translate-x-1/2 whitespace-nowrap font-mono text-[11px]"
+    style="color: var(--color-fg-dim)"
+  >
+    ~ realtime · last sync 0 ms
+  </div>
+</div>

@@ -93,6 +93,14 @@ export interface TopGunClientConfig {
 
   /** Auth provider for automatic token management */
   auth?: AuthProvider;
+
+  /**
+   * Called when the server demands authentication (sends AUTH_REQUIRED) but no
+   * token / token provider / auth provider is configured. Without this hook the
+   * client parks silently in AUTHENTICATING. Wire it to prompt for login, call
+   * setAuthToken(), redirect, etc.
+   */
+  onAuthRequired?: (error: import('./errors/AuthRequiredError').AuthRequiredError) => void;
 }
 
 export class TopGunClient<TSchema extends Record<string, any> = any> {
@@ -154,6 +162,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
         storageAdapter: this.storageAdapter,
         backoff: config.backoff,
         backpressure: config.backpressure,
+        onAuthRequired: config.onAuthRequired,
       });
 
       logger.info({ seeds: this.clusterConfig.seeds }, 'TopGunClient initialized in cluster mode');
@@ -174,6 +183,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
         storageAdapter: this.storageAdapter,
         backoff: config.backoff,
         backpressure: config.backpressure,
+        onAuthRequired: config.onAuthRequired,
       });
 
       logger.info({ serverUrl: config.serverUrl }, 'TopGunClient initialized in single-server mode');
@@ -187,6 +197,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
         storageAdapter: this.storageAdapter,
         backoff: config.backoff,
         backpressure: config.backpressure,
+        onAuthRequired: config.onAuthRequired,
       });
       logger.info({}, 'TopGunClient initialized in local-only mode (no sync target)');
     }
@@ -902,24 +913,20 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
    * );
    * ```
    */
+  /**
+   * @deprecated Entry processors require a server-side WASM sandbox that is on
+   * the v2.x roadmap. Calling this method throws immediately. See
+   * https://topgun.build/docs/roadmap for status.
+   */
   public async executeOnKey<V, R = V>(
-    mapName: string,
-    key: string,
-    processor: EntryProcessorDef<V, R>,
+    _mapName: string,
+    _key: string,
+    _processor: EntryProcessorDef<V, R>,
   ): Promise<EntryProcessorResult<R>> {
-    const result = await this.syncEngine.executeOnKey(mapName, key, processor);
-
-    // Update local map cache if successful and we have the map
-    if (result.success && result.newValue !== undefined) {
-      const map = this.maps.get(mapName);
-      if (map instanceof LWWMap) {
-        // Update local cache - set() generates its own timestamp
-        // The server will broadcast the full update to all subscribers
-        (map as LWWMap<any, any>).set(key, result.newValue);
-      }
-    }
-
-    return result;
+    throw new Error(
+      'Entry processors require server-side WASM sandbox execution, which is on the v2.x roadmap. ' +
+        'See https://topgun.build/docs/roadmap. The SDK surface will return when the sandbox lands.'
+    );
   }
 
   /**
@@ -950,24 +957,20 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
    * }
    * ```
    */
+  /**
+   * @deprecated Entry processors require a server-side WASM sandbox that is on
+   * the v2.x roadmap. Calling this method throws immediately. See
+   * https://topgun.build/docs/roadmap for status.
+   */
   public async executeOnKeys<V, R = V>(
-    mapName: string,
-    keys: string[],
-    processor: EntryProcessorDef<V, R>,
+    _mapName: string,
+    _keys: string[],
+    _processor: EntryProcessorDef<V, R>,
   ): Promise<Map<string, EntryProcessorResult<R>>> {
-    const results = await this.syncEngine.executeOnKeys(mapName, keys, processor);
-
-    // Update local map cache for successful operations
-    const map = this.maps.get(mapName);
-    if (map instanceof LWWMap) {
-      for (const [key, result] of results) {
-        if (result.success && result.newValue !== undefined) {
-          (map as LWWMap<any, any>).set(key, result.newValue);
-        }
-      }
-    }
-
-    return results;
+    throw new Error(
+      'Entry processors require server-side WASM sandbox execution, which is on the v2.x roadmap. ' +
+        'See https://topgun.build/docs/roadmap. The SDK surface will return when the sandbox lands.'
+    );
   }
 
   // ============================================

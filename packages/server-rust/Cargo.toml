@@ -66,8 +66,8 @@ hex = "0.4"
 quick_cache = "0.6"
 
 [[bin]]
-name = "test-server"
-path = "src/bin/test_server.rs"
+name = "topgun-server"
+path = "src/bin/topgun_server.rs"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util", "time"] }

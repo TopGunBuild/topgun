@@ -1,0 +1,212 @@
+---
+title: Schema-typed data
+description: Add compile-time type safety to TopGun maps using the TopGunClient<TSchema> generic.
+order: 13
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight } from 'lucide-react';
+import { AlertBox } from '../../../components/docs/AlertBox';
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Schema-typed data</span>
+</div>
+
+# Schema-typed data
+
+Schema-typed data: define your data shapes as TypeScript types (optionally derived from Zod schemas); pass them to `TopGunClient<MySchema>`; get autocomplete and compile-time errors on map operations. Type enforcement is compile-time only — there is no runtime validation or server-side schema enforcement in the current version.
+
+<AlertBox
+  variant="info"
+  title="Hook-first API for React UI code"
+  text="For React UI code, the canonical pattern is useQuery<Todo>('todos') + useMutation<Todo>('todos') with type Todo = z.infer<typeof TodoSchema> — see /docs/quickstart. This page documents the lower-level TopGunClient<TSchema>.getMap() path used in non-React contexts (Node.js scripts, service workers, testing) or for advanced typed-map access patterns."
+/>
+
+---
+
+## Defining a schema
+
+The recommended approach is to define your types via Zod schemas, then derive TypeScript types from them using `z.infer`. This gives you a single source of truth: Zod schemas for runtime validation in your business logic, TypeScript types for the compiler.
+
+export const zodSchemaCode = `import { z } from 'zod';
+
+// Define the data shape for each map
+export const TodoSchema = z.object({
+  text: z.string(),
+  completed: z.boolean(),
+  createdAt: z.number(),
+});
+
+export const UserProfileSchema = z.object({
+  name: z.string(),
+  email: z.string().email(),
+  avatar: z.string().optional(),
+});
+
+// Derive TypeScript types from the Zod schemas (no duplication)
+export type Todo = z.infer<typeof TodoSchema>;
+export type UserProfile = z.infer<typeof UserProfileSchema>;
+
+// Define the app schema: map names → value types
+export interface MyAppSchema {
+  todos: Todo;
+  profiles: UserProfile;
+}`;
+
+<div className="not-prose">
+  <CodeBlock title="src/lib/schema.ts" language="typescript" code={zodSchemaCode} />
+</div>
+
+If you prefer plain TypeScript without Zod, you can define the interface directly without the Zod step — just omit the `z.object(...)` declarations and write the interfaces by hand. Zod is not a dependency of TopGun; it is optional.
+
+---
+
+## Typed map access
+
+Pass your schema type as the generic parameter to `TopGunClient`. The client narrows the return types of `getMap`, `getORMap`, and `query` to your application types.
+
+export const typedClientCode = `import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+import { MyAppSchema } from './schema';
+
+const client = new TopGunClient<MyAppSchema>({
+  serverUrl: 'ws://localhost:8080',
+  storage: new IDBAdapter(),
+});
+
+await client.start();
+
+// getMap('todos') returns LWWMap<string, Todo>
+const todos = client.getMap('todos');
+
+// get() returns Todo | undefined — correctly typed
+const todo = todos.get('todo-1');
+if (todo) {
+  console.log(todo.text);       // OK: 'text' exists on Todo
+  console.log(todo.completed);  // OK: 'completed' exists on Todo
+  // console.log(todo.foo);     // TS ERROR: Property 'foo' does not exist on type 'Todo'
+}
+
+// set() accepts Todo — correctly typed
+todos.set('todo-2', {
+  text: 'Learn TopGun',
+  completed: false,
+  createdAt: Date.now(),
+});
+
+// getMap('profiles') returns LWWMap<string, UserProfile>
+const profiles = client.getMap('profiles');
+const profile = profiles.get('user-1');
+if (profile) {
+  console.log(profile.name);  // OK: 'name' exists on UserProfile
+}
+
+// TypeScript flags these at compile time:
+// - Map name not in schema: client.getMap('typo')
+// - Wrong value type: todos.set('k', { wrong: true })
+// - Missing required field: todos.set('k', { text: 'hi' })  // missing completed + createdAt`;
+
+<div className="not-prose">
+  <CodeBlock title="src/lib/db.ts" language="typescript" code={typedClientCode} />
+</div>
+
+Omitting `<MyAppSchema>` falls back to the untyped overload — `getMap<K, V>(name: string): LWWMap<K, V>` — which preserves backward compatibility for callers that supply explicit type parameters manually.
+
+---
+
+## Typed hooks (React)
+
+The React hooks inherit the schema types when you pass a typed client to `TopGunProvider`. You can also specify the generic directly on the hook.
+
+export const typedHooksCode = `import { TopGunProvider } from '@topgunbuild/react';
+import { useQuery, useMutation } from '@topgunbuild/react';
+import { client } from './db';
+import { Todo } from './schema';
+
+// Wire the typed client once at the root
+function App() {
+  return (
+    <TopGunProvider client={client}>
+      <TodoList />
+    </TopGunProvider>
+  );
+}
+
+function TodoList() {
+  // data is QueryResultItem<Todo>[] — each item carries _key
+  const { data: todos, loading } = useQuery<Todo>('todos', {
+    where: { completed: false },
+    sort: { createdAt: 'desc' },
+  });
+
+  const { create, update } = useMutation<Todo>('todos');
+
+  const addTodo = () => {
+    create(crypto.randomUUID(), { text: 'New task', completed: false, createdAt: Date.now() });
+    // TS ERROR if you omit a required field or pass the wrong type
+  };
+
+  const toggle = (key: string, current: boolean) => {
+    update(key, { completed: !current });
+  };
+
+  if (loading) return <p>Loading...</p>;
+
+  return (
+    <>
+      <button onClick={addTodo}>Add</button>
+      <ul>
+        {todos.map(item => (
+          <li key={item._key} onClick={() => toggle(item._key, item.completed)}>
+            {item.text}
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}`;
+
+<div className="not-prose">
+  <CodeBlock title="src/components/TodoList.tsx" language="tsx" code={typedHooksCode} />
+</div>
+
+---
+
+## Compile-time-only honesty caveat
+
+> **Important:** Type enforcement is compile-time only. Types are erased at runtime. If external code or another client writes data that does not match your interface, TypeScript will not catch it. Consider adding runtime validation (e.g. via Zod's `TodoSchema.parse(value)`) for untrusted data.
+
+Other limitations:
+
+| Limitation | Details |
+|-----------|---------|
+| **No server-side enforcement** | The server does not validate data against your TypeScript schema. Any valid CRDT operation is accepted regardless of the value shape. |
+| **Schema evolution** | If you add or rename fields in your interface, existing data in storage is not migrated. Use optional fields (`field?: type`) for new fields to handle records written before the schema change. |
+| **No cross-language schemas** | The TypeScript schema is only available in TypeScript clients. Other language clients must independently maintain compatible type definitions. |
+
+---
+
+**Next steps**
+
+- [Search & live queries](/docs/guides/search-and-live-queries) — apply typed predicate queries to your typed maps
+- [Quickstart](/docs/quickstart) — canonical hook-first snippet with the Zod schema flow end-to-end
+- [Client API reference](/docs/reference/client) — full `getMap`, `getORMap`, `query` signatures
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/live-notifications" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Live notifications
+    </div>
+  </a>
+  <a href="/docs/guides/search-and-live-queries" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Search & live queries <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

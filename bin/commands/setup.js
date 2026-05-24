@@ -64,10 +64,10 @@ module.exports = async function setup(options) {
 
   // Step 3: Build server binary if missing
   console.log(chalk.cyan('\n[3/4] Building server binary...'));
-  const rustBinaryPath = path.join(process.cwd(), 'target/release/test-server');
+  const rustBinaryPath = path.join(process.cwd(), 'target/release/topgun-server');
   if (!fs.existsSync(rustBinaryPath)) {
     try {
-      execSync('cargo build --release -p topgun-server --bin test-server', { stdio: 'inherit' });
+      execSync('cargo build --release -p topgun-server --bin topgun-server', { stdio: 'inherit' });
       console.log(chalk.green('  ✓ Server binary built'));
     } catch (error) {
       console.error(chalk.red('  ✗ Failed to build server binary'));

@@ -1,18 +1,24 @@
 ---
-import Layout from '../layouts/Layout.astro';
-import Hero from '../components/Hero.astro';
-import { Features } from '../components/Features';
-import { SyncLabDemo } from '../components/SyncLabDemo';
-import { Architecture } from '../components/Architecture';
-import { ComingFromTable } from '../components/ComingFromTable';
-import { Performance } from '../components/Performance';
+import LandingLayout from '../layouts/LandingLayout.astro';
+import Header from '../components/landing/Header.astro';
+import Hero from '../components/landing/Hero.astro';
+import AntiPatternSection from '../components/landing/AntiPatternSection.astro';
+import SyncSection from '../components/landing/SyncSection.astro';
+import PersonaSection from '../components/landing/PersonaSection.astro';
+import QuickstartSection from '../components/landing/QuickstartSection.astro';
+import ProductionSection from '../components/landing/ProductionSection.astro';
+import Footer from '../components/landing/Footer.astro';
 ---
 
-<Layout>
-	<Hero />
-	<SyncLabDemo client:visible />
-	<Features client:visible />
-	<ComingFromTable client:visible />
-	<Architecture client:visible />
-	<Performance client:visible />
-</Layout>
+<LandingLayout>
+  <Header />
+  <main>
+    <Hero />
+    <AntiPatternSection />
+    <SyncSection />
+    <PersonaSection />
+    <QuickstartSection />
+    <ProductionSection />
+  </main>
+  <Footer />
+</LandingLayout>

@@ -155,7 +155,7 @@ The key step: give your agent the `llms-full.txt` bundle so it has the full API 
 This gives your agent three things:
 
 1. The complete API reference loaded from [`https://topgun.build/llms-full.txt`](https://topgun.build/llms-full.txt)
-2. The canonical hook-first snippet (the same shape as the [Quick Start canonical app](/docs/quick-start#the-canonical-app))
+2. The canonical hook-first snippet (the same shape as the [Quick Start canonical app](/docs/quickstart#the-canonical-app))
 3. A one-line mental model: **hooks for reads (`useQuery`), `useMutation` for writes, schema in Zod, `pnpm start:server` for the local backend**
 
 Without this block, agents reliably hallucinate methods like `client.subscribe()` or reach for raw map getters for reads, which won't re-render on data changes.
@@ -186,7 +186,7 @@ Replace the brackets with your actual requirements. The `Use the hook-first API`
 
 *Why it happens:* `client.getMap('todos')` returns a raw map object — it doesn't subscribe to React state. The agent reaches for it because it looks like a standard getter.
 
-*Fix:* Swap every read to `useQuery<T>('mapName')`. Cross-reference: [Quick Start canonical app](/docs/quick-start#the-canonical-app).
+*Fix:* Swap every read to `useQuery<T>('mapName')`. Cross-reference: [Quick Start canonical app](/docs/quickstart#the-canonical-app).
 
 ```tsx
 // Wrong — no re-renders when data changes
@@ -210,7 +210,7 @@ const { data: todos = [] } = useQuery<Todo>('todos');
 
 *Why it happens:* The agent generates correct client code but doesn't know a server needs to be running locally.
 
-*Fix:* Run `pnpm start:server` in a second terminal before opening the app. See [Quick Start — Start the Server](/docs/quick-start#2-start-the-server).
+*Fix:* Run `pnpm start:server` in a second terminal before opening the app. See [Quick Start — Start the Server](/docs/quickstart#2-start-the-server).
 
 ```bash
 # In a second terminal — keep this running while you develop
@@ -221,7 +221,7 @@ pnpm start:server
 
 Connect your agent to a running TopGun server so it can query your real data, introspect the schema, and avoid hallucination entirely.
 
-TopGun ships `@topgunbuild/mcp-server`, which implements the [Model Context Protocol](https://modelcontextprotocol.io/) and exposes `topgun_query`, `topgun_get`, `topgun_set`, `topgun_schema`, and `topgun_list_maps` tools to any MCP-compatible agent.
+TopGun ships `@topgunbuild/mcp-server`, which implements the [Model Context Protocol](https://modelcontextprotocol.io/) and exposes eight tools to any MCP-compatible agent: `topgun_query`, `topgun_mutate`, `topgun_search`, `topgun_subscribe`, `topgun_schema`, `topgun_stats`, `topgun_explain`, `topgun_list_maps`.
 
 **Step 1:** Make sure `pnpm start:server` is running.
 

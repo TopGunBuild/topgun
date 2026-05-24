@@ -43,7 +43,7 @@ This guide covers common issues you may encounter when using TopGun, organized b
 **Solutions:**
 - Wait for the sync cycle to fully complete. Check the `SyncEngine` connection state -- it should transition to `connected` and then `synced`
 - For large datasets, sync happens in batches. Initial sync after a long offline period may take several seconds
-- If the issue persists, the client's local MerkleTree may be corrupted. Clearing IndexedDB storage and re-syncing will rebuild it from the server
+- If the issue persists, the client's local MerkleTree may be corrupted. Clearing IndexedDB storage and re-syncing will rebuild it from the server. Note: call `LWWMap.prune()` to remove tombstones if the map has accumulated many deleted entries before clearing
 
 ---
 
@@ -80,18 +80,23 @@ This guide covers common issues you may encounter when using TopGun, organized b
 
 **Symptom:** Connection is rejected with an authentication error, or the server returns a 401/403 status.
 
-**Cause:** TopGun uses JWT tokens for authentication. The token must contain a `sub` (subject) claim per RFC 7519.
+**Cause:** TopGun uses JWT tokens for authentication. The token must contain a `sub` (subject) claim per RFC 7519. The server validates the `sub` claim is present and non-empty; no custom `userId` field is required or supported.
 
 **Solutions:**
 - Verify your JWT token has not expired. Check the `exp` claim
-- Ensure the token contains a `sub` claim with the user ID. TopGun uses only the standard `sub` claim -- there is no custom `userId` field
-- Verify the token is signed with the same secret or key pair configured on the server
-- Check that the token is passed correctly in the connection configuration:
+- Ensure the token contains a `sub` claim with the user ID. TopGun uses only the standard `sub` claim — there is no custom `userId` field
+- Verify the token is signed with the same secret or key pair configured on the server (`JWT_SECRET` env var)
+- Check that the token is supplied via `setAuthToken` or `setAuthTokenProvider` after construction:
   ```typescript
+  import { IDBAdapter } from '@topgunbuild/adapters';
+
   const client = new TopGunClient({
     serverUrl: 'wss://your-server.com',
-    auth: { token: 'your-jwt-token' }
+    storage: new IDBAdapter(),
   });
+  client.setAuthToken('your-jwt-token');
+  // Or for refreshing tokens:
+  // client.setAuthTokenProvider(async () => fetchFreshToken());
   ```
 
 ---
@@ -141,15 +146,27 @@ This guide covers common issues you may encounter when using TopGun, organized b
   ```
 - Kill the existing process or choose a different port:
   ```bash
-  PORT=8081 cargo run --bin test-server --release
+  PORT=8081 cargo run --bin topgun-server --release
   ```
 - If running in development, ensure previous server processes are terminated before restarting
 
-### PostgreSQL connection failed
+### Storage backend mismatch
 
-**Symptom:** The server starts but fails to connect to PostgreSQL, logging connection errors.
+**Symptom:** The server logs `using redb backend` but you expected Postgres, or the server fails to connect to PostgreSQL.
+
+**Cause:** As of SPEC-241, the default storage backend is an embedded redb database (zero-config). If you need PostgreSQL, you must explicitly set the `STORAGE_BACKEND` environment variable.
 
 **Solutions:**
+- To use PostgreSQL, set `STORAGE_BACKEND=postgres` and provide `DATABASE_URL`:
+  ```bash
+  STORAGE_BACKEND=postgres DATABASE_URL=postgresql://user:password@host:5432/database cargo run --bin topgun-server --release
+  ```
+- See [Storage Backends](/docs/deploy/storage-backends) for all backend options and decision guidance
+- If using the default redb backend and you see connection failures, check that the redb file path is writable (defaults to `./topgun.redb`; override with `TOPGUN_REDB_PATH`)
+
+#### PostgreSQL-specific issues
+
+If you have switched to the Postgres backend:
 - Verify the connection string format: `postgresql://user:password@host:port/database`
 - Check that PostgreSQL is running and accepting connections on the configured host and port
 - If using SSL, ensure the `sslmode` parameter matches your PostgreSQL configuration (e.g., `sslmode=require` or `sslmode=prefer`)
@@ -158,9 +175,14 @@ This guide covers common issues you may encounter when using TopGun, organized b
 
 ### Cluster nodes not discovering each other
 
+import { AlertBox } from '../../../components/docs/AlertBox';
+
+<AlertBox variant="warning" title="Cluster mode is on the roadmap" text="Multi-node cluster discovery is on the roadmap. Single-node deployment is recommended pre-1.0. See /docs/roadmap for the cluster-safety status." />
+
 **Symptom:** Multiple server nodes are running but not forming a cluster. Each node operates independently.
 
-**Solutions:**
+The following steps are forward-compatible troubleshooting guidance for when full cluster discovery ships:
+
 - Verify that all nodes are configured with the same cluster name/identifier
 - Ensure the cluster port (separate from the client-facing WebSocket port) is accessible between nodes. Check firewall rules
 - Verify that nodes can resolve each other's hostnames or IP addresses

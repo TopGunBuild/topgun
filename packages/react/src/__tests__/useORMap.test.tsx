@@ -46,7 +46,7 @@ const createMockORMap = () => {
       return items && items.size > 0;
     }),
     keys: jest.fn(() => Array.from(data.keys()).filter(k => data.get(k)!.size > 0)),
-    onChange: jest.fn((callback: () => void) => {
+    subscribe: jest.fn((callback: () => void) => {
       listeners.add(callback);
       return () => {
         listeners.delete(callback);
@@ -145,14 +145,14 @@ describe('useORMap', () => {
     expect(result.current.get('non-existent')).toEqual([]);
   });
 
-  it('should subscribe to onChange on mount', () => {
+  it('should subscribe on mount', () => {
     renderHook(() => useORMap('test-ormap'), { wrapper });
 
-    expect(mockORMap.onChange).toHaveBeenCalled();
+    expect(mockORMap.subscribe).toHaveBeenCalled();
     expect(mockORMap._getListenerCount()).toBe(1);
   });
 
-  it('should unsubscribe from onChange on unmount', () => {
+  it('should unsubscribe on unmount', () => {
     const { unmount } = renderHook(() => useORMap('test-ormap'), { wrapper });
 
     expect(mockORMap._getListenerCount()).toBe(1);

@@ -1,0 +1,187 @@
+---
+title: Quickstart
+description: Build a local-first React app in under 5 minutes — works offline by default.
+order: 4
+---
+
+import CodeBlock from '../../components/docs/CodeBlock.astro';
+import { ChevronRight, Server } from 'lucide-react';
+
+export const canonicalAppCode = `import { useQuery, useMutation, TopGunProvider } from '@topgunbuild/react';
+import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+import { type Todo } from './schema';
+
+export const client = new TopGunClient({
+  storage: new IDBAdapter(),
+  // Uncomment to connect to a server:
+  // serverUrl: 'ws://localhost:8080',
+});
+
+function TodoApp() {
+  const { data: todos = [] } = useQuery<Todo>('todos');
+  const { create } = useMutation<Todo>('todos');
+  const add = () => create(\`todo-\${Date.now()}\`, { text: 'Ship v2', done: false });
+  return (
+    <>
+      <button onClick={add}>Add</button>
+      <ul>{todos.map(t => <li key={t._key}>{t.text}</li>)}</ul>
+    </>
+  );
+}
+
+export default () => <TopGunProvider client={client}><TodoApp /></TopGunProvider>;`;
+
+export const canonicalSchemaCode = `import { z } from 'zod';
+export const TodoSchema = z.object({ text: z.string(), done: z.boolean() });
+export type Todo = z.infer<typeof TodoSchema>;`;
+
+export const imperativeCode = `const todos = client.getMap('todos');
+todos.set(\`todo-\${Date.now()}\`, { text: 'Ship v2', done: false });`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <span>Get Started</span>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Quickstart</span>
+</div>
+
+# Quickstart
+
+Build your first local-first application with TopGun in under 5 minutes. No server required to start — the app works offline by default and syncs when you add one.
+Want to see it running first? Try the [live demo](https://demo.topgun.build/).
+
+## 1. Installation
+
+<div className="not-prose">
+  <p className="text-neutral-600 dark:text-neutral-300 mb-4">
+    Install the core client, adapters, the React hooks package, and Zod for schema definitions.
+  </p>
+  <CodeBlock
+    title="terminal"
+    code="npm install @topgunbuild/client @topgunbuild/adapters @topgunbuild/react zod"
+  />
+</div>
+
+## 2. The Canonical App
+
+Hook-first is the simple way to read and write data with React. One read hook (`useQuery`) gives you the list and re-renders when data changes. One write hook (`useMutation`) adds new items. One type-safe `Todo` shape ties them together. The whole loop fits in 24 lines, and your list shows up instantly then keeps itself in sync as data changes.
+
+<div className="not-prose">
+  <CodeBlock
+    title="src/app.tsx"
+    language="tsx"
+    code={canonicalAppCode}
+  />
+</div>
+
+<div className="not-prose mt-4">
+  <CodeBlock
+    title="src/schema.ts"
+    language="ts"
+    code={canonicalSchemaCode}
+  />
+</div>
+
+## 3. How It Works
+
+Here is a step-by-step breakdown of the canonical snippet above:
+
+**Lines 1–4: Imports.** Three packages installed in step 1 (`@topgunbuild/react`, `@topgunbuild/client`, `@topgunbuild/adapters`) plus the `Todo` type derived from your schema.
+
+**Lines 6–9: Client init.** `TopGunClient` takes a `storage` adapter for local persistence. `IDBAdapter` writes to IndexedDB so your data survives page reloads. No explicit `start()` call is needed in module-level code — the adapter initializes lazily in the background. Uncomment `serverUrl` to connect to a sync server.
+
+**Line 12: Read hook.** `useQuery<Todo>('todos')` subscribes to the `todos` map. The component re-renders automatically whenever data changes locally or arrives from the server.
+
+**Line 13: Write hook.** `useMutation<Todo>('todos')` returns `{ create, update, remove }`. Call `create(key, value)` to add a new item. The write lands in memory immediately (zero-latency) and syncs to the server in the background when a server is configured.
+
+**Line 14: Add function.** A plain function that calls `create` with a timestamp-based key and the new todo shape. No loading state, no async/await in the component — the write is always instant.
+
+**Lines 15–20: Render.** Standard React JSX. `todos.map(t => ...)` iterates the live list. Use `t._key` as the React key — this is the string key you passed to `create`, exposed on every query result item.
+
+**Line 23: Provider.** `TopGunProvider` makes the client available to all hooks in the tree via React context.
+
+## 4. End-to-End Types
+
+No manual `interface` needed — the type flows from the Zod schema through the hook generic:
+
+```ts
+// schema.ts
+export const TodoSchema = z.object({ text: z.string(), done: z.boolean() });
+export type Todo = z.infer<typeof TodoSchema>;
+```
+
+```tsx
+// app.tsx
+import { type Todo } from './schema';
+const { data: todos = [] } = useQuery<Todo>('todos');
+```
+
+`z.infer<typeof TodoSchema>` produces `{ text: string; done: boolean }`. Pass that as the generic to `useQuery<Todo>` and TypeScript knows the shape of every item in `todos` — autocomplete works, typos are caught at compile time, and you never have to keep a manual interface in sync with your schema.
+
+## 5. Imperative API (advanced)
+
+Use when outside React — service workers, Node scripts, non-component utilities, or when you need direct map access without hooks.
+
+<div className="not-prose">
+  <CodeBlock
+    title="example.ts"
+    language="ts"
+    code={imperativeCode}
+  />
+</div>
+
+`client.getMap('todos')` returns the map directly. `.set(key, value)` writes to local memory immediately and queues the change for sync. This is not the recommended path for UI code — prefer `useQuery` and `useMutation` in React components.
+
+<div className="bg-green-50 dark:bg-green-900/20 border border-green-100 dark:border-green-800 rounded-xl p-6 mb-6 not-prose">
+  <h3 className="text-lg font-semibold text-green-800 dark:text-green-300 mb-2 !mt-0">Non-Blocking Initialization</h3>
+  <span className="text-green-700 dark:text-green-400">IndexedDB can take 50-500ms to initialize. TopGun's <code className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-800/50 text-sm">IDBAdapter</code> initializes lazily in the background and queues reads and writes until the store is ready — your UI renders instantly with zero blocking time and no <code className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-800/50 text-sm">await</code> ceremony. If you need a hard signal that persistence is ready (e.g., before a critical migration step), keep a reference to the adapter and call <code className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-800/50 text-sm">await adapter.waitForReady()</code>.</span>
+</div>
+
+<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-6 mb-6 not-prose">
+  <h3 className="text-lg font-semibold text-brand mb-2 !mt-0">Persistence</h3>
+  <span className="text-brand">By using <code className="px-1.5 py-0.5 rounded bg-brand-subtle/10 text-sm">IDBAdapter</code>, your data is automatically saved to IndexedDB. Even if the user refreshes the page or closes the browser, the state is preserved locally.</span>
+</div>
+
+<div className="bg-purple-50 dark:bg-purple-900/20 border border-purple-100 dark:border-purple-800 rounded-xl p-6 mb-6 not-prose">
+  <h3 className="text-lg font-semibold text-purple-800 dark:text-purple-300 mb-2 !mt-0">Optional: Encrypt Local Storage</h3>
+  <span className="text-purple-700 dark:text-purple-400">For sensitive data, wrap your adapter with <code className="px-1.5 py-0.5 rounded bg-purple-100 dark:bg-purple-800/50 text-sm">EncryptedStorageAdapter</code> to encrypt data at rest. See the <a href="/docs/guides/security#client-side-encryption-data-at-rest" className="underline">Client-Side Encryption section</a> in the Security Guide.</span>
+</div>
+
+<div className="bg-purple-50 dark:bg-purple-900/20 border border-purple-100 dark:border-purple-800 rounded-xl p-6 mb-6 not-prose">
+  <h3 className="text-lg font-semibold text-purple-800 dark:text-purple-300 mb-2 !mt-0">Building with an AI Agent?</h3>
+  <span className="text-purple-700 dark:text-purple-400">See the <a href="/docs/guides/building-with-ai" className="underline">AI Builder guide</a> for prompt templates, agent setup, and live database access via MCP.</span>
+</div>
+
+## 6. Add real-time sync (optional)
+
+By default the app runs in local-only mode — data persists in IndexedDB and works offline without a server. To add real-time sync across browsers and devices:
+
+1. Uncomment the `serverUrl` line in the client init above.
+2. Start the TopGun server in a second terminal:
+
+```bash
+pnpm start:server
+```
+
+The server boots in seconds with embedded storage (`./topgun.redb`) — no Postgres, no Docker required.
+
+3. Open your app in two browser tabs and watch changes sync in real time.
+
+In production, always use `wss://` instead of `ws://` to encrypt data in transit. See the [Security Guide](/docs/guides/security) for TLS configuration.
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/intro" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Welcome
+    </div>
+  </a>
+  <a href="/docs/tutorials/todo-app" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next Section</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Tutorial: Real-time Todo <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

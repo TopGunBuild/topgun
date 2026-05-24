@@ -204,12 +204,12 @@ export class QueryHandle<T> {
   }
 
   /**
-   * Subscribe to change events.
-   * Returns an unsubscribe function.
+   * Subscribe to delta change events (add / update / remove per record).
+   * For the full result set, use subscribe(). Returns an unsubscribe function.
    *
    * @example
    * ```typescript
-   * const unsubscribe = handle.onChanges((changes) => {
+   * const unsubscribe = handle.onDelta((changes) => {
    *   for (const change of changes) {
    *     if (change.type === 'add') {
    *       console.log('Added:', change.key, change.value);
@@ -218,7 +218,7 @@ export class QueryHandle<T> {
    * });
    * ```
    */
-  public onChanges(listener: (changes: ChangeEvent<T>[]) => void): () => void {
+  public onDelta(listener: (changes: ChangeEvent<T>[]) => void): () => void {
     this.changeListeners.add(listener);
     return () => this.changeListeners.delete(listener);
   }
@@ -407,7 +407,7 @@ export class QueryHandle<T> {
     this.syncStateListeners.add(cb);
     this.ensureSyncStateSubscription();
     // Immediate emission with current snapshot — matches the existing
-    // onPaginationChange / onChanges idioms.
+    // onPaginationChange / onDelta idioms.
     try {
       cb(this.syncState);
     } catch (e) {

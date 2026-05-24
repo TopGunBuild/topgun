@@ -1,0 +1,148 @@
+---
+import RadarScope from './ambient/RadarScope.astro';
+---
+
+<section class="relative overflow-hidden">
+  <!-- Ambient dot-grid background -->
+  <div
+    class="bg-dotgrid bg-dotgrid-mask pointer-events-none absolute inset-0"
+    aria-hidden="true"
+  ></div>
+
+  <div class="relative mx-auto max-w-6xl px-6 pt-24 pb-32 md:pt-32 md:pb-40">
+    <div class="grid grid-cols-1 items-center gap-12 lg:grid-cols-[1.1fr_1fr]">
+      <!-- Copy column -->
+      <div>
+        <div
+          class="inline-flex items-center gap-2 rounded-full px-3 py-1 font-mono text-xs"
+          style="background-color: var(--color-bg-elevated); border: 1px solid var(--color-border); color: var(--color-fg-muted);"
+        >
+          <span
+            class="h-1.5 w-1.5 rounded-full sync-glow"
+            style="background-color: var(--color-accent)"
+          ></span>
+          open-source · self-hostable · apache 2.0
+        </div>
+
+        <h1
+          class="mt-7 text-5xl font-bold tracking-tight md:text-6xl"
+          style="color: var(--color-fg); line-height: 1.05;"
+        >
+          Real-time apps that<br />
+          <span style="color: var(--color-accent)">survive offline.</span>
+        </h1>
+
+        <p
+          class="mt-6 max-w-xl text-lg leading-relaxed"
+          style="color: var(--color-fg-muted)"
+        >
+          Local writes are instant. Reconnect and everything syncs. Conflict
+          handling is built in. One npm package on the client, <code>pnpm start:server</code>
+          boots the embedded backend.
+        </p>
+
+        <div class="mt-9 flex flex-wrap items-center gap-3">
+          <a
+            id="get-started"
+            href="/docs/quickstart"
+            class="rounded-md px-5 py-3 text-sm font-semibold transition-transform hover:scale-[1.02]"
+            style="background-color: var(--color-accent); color: var(--color-bg); box-shadow: 0 0 0 1px var(--color-accent-strong), 0 8px 24px -8px var(--color-accent-soft);"
+          >
+            Start in 60 seconds &rarr;
+          </a>
+          <a
+            href="/docs"
+            class="rounded-md px-5 py-3 text-sm font-medium transition-colors hover:bg-[var(--color-bg-elevated)]"
+            style="border: 1px solid var(--color-border-strong); color: var(--color-fg)"
+          >
+            Read the docs
+          </a>
+        </div>
+
+        <!-- Install snippet -->
+        <div
+          class="mt-8 flex max-w-md items-center justify-between gap-3 rounded-md px-4 py-3 font-mono text-sm"
+          style="background-color: var(--color-bg-elevated); border: 1px solid var(--color-border); color: var(--color-fg);"
+        >
+          <span style="color: var(--color-fg-dim)">$</span>
+          <span class="flex-1 select-all">npx create-topgun-app</span>
+          <button
+            type="button"
+            class="copy-btn text-xs uppercase tracking-wider transition-colors hover:text-[var(--color-fg)]"
+            style="color: var(--color-fg-dim)"
+            data-copy="npx create-topgun-app"
+            data-copy-label="copy"
+            data-copied-label="copied"
+            aria-label="Copy install command"
+          >
+            copy
+          </button>
+        </div>
+
+        <!-- Quiet version + proof bullets -->
+        <div
+          class="mt-3 font-mono text-[11px]"
+          style="color: var(--color-fg-dim)"
+        >
+          v2.0 · single-node stable · cluster mode in progress
+        </div>
+        <ul
+          class="mt-7 grid grid-cols-1 gap-x-8 gap-y-2 font-mono text-xs sm:grid-cols-3"
+          style="color: var(--color-fg-dim)"
+        >
+          <li>~ 0 ms local reads</li>
+          <li>~ works offline first</li>
+          <li>~ zero config to start</li>
+        </ul>
+      </div>
+
+      <!-- Visual column -->
+      <div class="flex justify-center lg:justify-end">
+        <RadarScope />
+      </div>
+    </div>
+  </div>
+
+  <!-- Soft divider into next section -->
+  <div
+    class="pointer-events-none absolute bottom-0 left-0 right-0 h-32"
+    style="background: linear-gradient(to bottom, transparent, var(--color-bg-sunken));"
+    aria-hidden="true"
+  ></div>
+</section>
+
+<script>
+  /* Copy-to-clipboard for any [data-copy] element.
+     Falls back silently if the Clipboard API is unavailable (older browsers,
+     non-HTTPS contexts) — the snippet stays select-all so the user can still
+     copy manually. */
+  type CopyButton = HTMLButtonElement & {
+    dataset: { copy: string; copyLabel?: string; copiedLabel?: string };
+  };
+
+  const buttons = document.querySelectorAll<CopyButton>('[data-copy]');
+  buttons.forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const text = btn.dataset.copy;
+      if (!text || !navigator.clipboard) return;
+
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        return;
+      }
+
+      const originalLabel = btn.dataset.copyLabel ?? btn.textContent ?? 'copy';
+      const copiedLabel = btn.dataset.copiedLabel ?? 'copied';
+      const originalColor = btn.style.color;
+
+      btn.textContent = copiedLabel;
+      btn.style.color = 'var(--color-accent)';
+
+      window.setTimeout(() => {
+        btn.textContent = originalLabel;
+        btn.style.color = originalColor;
+      }, 1400);
+    });
+  });
+</script>

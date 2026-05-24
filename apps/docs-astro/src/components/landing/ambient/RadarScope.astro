@@ -1,0 +1,131 @@
+---
+/**
+ * Radar scope — circular polar grid + rotating sweep arm + two blips.
+ *
+ * Coordinate system: viewBox -250 -250 500 500 (origin at scope centre).
+ * The sweep <g> rotates around (0, 0) via CSS transform-origin: 0 0.
+ *
+ * Blip timing: at 6 s per revolution (60 deg/s clockwise), the arm reaches
+ *   - device.a at angle ≈ -30° (NE blip, pos +190, -110)  →  330° clockwise → t ≈ 5.5 s
+ *   - device.b at angle ≈ 143° (SW blip, pos -160, +120)  →  143° clockwise → t ≈ 2.4 s
+ * We delay each blip's flash animation to align with sweep crossover.
+ *
+ * Respects prefers-reduced-motion via global stylesheet.
+ */
+---
+
+<div
+  class="relative w-full max-w-[520px]"
+  role="img"
+  aria-label="Radar scope visualization: two devices being tracked in real time"
+>
+  <svg viewBox="-250 -250 500 500" class="block h-auto w-full" aria-hidden="true">
+    <defs>
+      <!-- Soft cyan halo behind the scope -->
+      <radialGradient id="scope-glow" cx="0" cy="0" r="240" gradientUnits="userSpaceOnUse">
+        <stop offset="0%"  stop-color="var(--color-accent)" stop-opacity="0.07" />
+        <stop offset="65%" stop-color="var(--color-accent)" stop-opacity="0.02" />
+        <stop offset="100%" stop-color="var(--color-accent)" stop-opacity="0" />
+      </radialGradient>
+
+      <!-- Sweep wedge gradient — fades from arm direction backwards along the trail -->
+      <linearGradient id="sweep-trail" x1="240" y1="0" x2="-100" y2="-120" gradientUnits="userSpaceOnUse">
+        <stop offset="0%"   stop-color="var(--color-accent)" stop-opacity="0.55" />
+        <stop offset="55%"  stop-color="var(--color-accent)" stop-opacity="0.10" />
+        <stop offset="100%" stop-color="var(--color-accent)" stop-opacity="0" />
+      </linearGradient>
+    </defs>
+
+    <!-- 1. Background glow disk -->
+    <circle r="240" fill="url(#scope-glow)" />
+
+    <!-- 2. Concentric rings — outer is the scope boundary; inner are range guides -->
+    <g fill="none">
+      <circle r="240" stroke="var(--color-border-strong)" stroke-width="1" />
+      <circle r="180" stroke="var(--color-border)" stroke-width="0.7" />
+      <circle r="120" stroke="var(--color-border)" stroke-width="0.7" />
+      <circle r="60"  stroke="var(--color-border)" stroke-width="0.7" stroke-dasharray="2 3" />
+    </g>
+
+    <!-- 3. Outer tick marks at the 4 cardinal points -->
+    <g stroke="var(--color-border-strong)" stroke-width="0.9">
+      <line x1="225" y1="0"   x2="245" y2="0" />
+      <line x1="-225" y1="0"  x2="-245" y2="0" />
+      <line x1="0" y1="225"   x2="0" y2="245" />
+      <line x1="0" y1="-225"  x2="0" y2="-245" />
+    </g>
+
+    <!-- 4. Sweep wedge (rotates).  Arm at angle 0° = pointing right (+x).
+         Trail is an 80° wedge BEHIND the arm (going CCW in screen coords,
+         which visually means "above" the arm at t=0). -->
+    <g class="radar-sweep">
+      <path
+        d="M 0 0 L 240 0 A 240 240 0 0 0 41.7 -236.4 Z"
+        fill="url(#sweep-trail)"
+      />
+      <line
+        x1="0" y1="0" x2="240" y2="0"
+        stroke="var(--color-accent)"
+        stroke-width="1.5"
+        stroke-linecap="round"
+      />
+    </g>
+
+    <!-- 5. Centre crosshair + dot -->
+    <g stroke="var(--color-fg-dim)" stroke-width="1">
+      <line x1="-9" y1="0" x2="9" y2="0" />
+      <line x1="0" y1="-9" x2="0" y2="9" />
+    </g>
+    <circle r="3" fill="var(--color-accent)" />
+
+    <!-- 6. Blip A — device.a, NE quadrant.  Label sits to the LEFT of the blip
+         to keep within the 500-wide viewBox at all sizes. -->
+    <g transform="translate(175, -120)">
+      <circle r="10" fill="var(--color-accent)" class="blip-glow" />
+      <circle
+        r="5"
+        fill="var(--color-accent)"
+        class="blip-pulse"
+        style="animation-delay: 5.5s; transform-box: fill-box; transform-origin: center;"
+      />
+      <text
+        x="-14"
+        y="5"
+        text-anchor="end"
+        font-family="var(--font-mono)"
+        font-size="11"
+        fill="var(--color-fg-muted)"
+      >
+        device.a
+      </text>
+    </g>
+
+    <!-- 7. Blip B — device.b, SW quadrant.  Label to the right of the blip. -->
+    <g transform="translate(-160, 120)">
+      <circle r="10" fill="var(--color-accent)" class="blip-glow" style="animation-delay: 1.2s" />
+      <circle
+        r="5"
+        fill="var(--color-accent)"
+        class="blip-pulse"
+        style="animation-delay: 2.4s; transform-box: fill-box; transform-origin: center;"
+      />
+      <text
+        x="14"
+        y="5"
+        font-family="var(--font-mono)"
+        font-size="11"
+        fill="var(--color-fg-muted)"
+      >
+        device.b
+      </text>
+    </g>
+  </svg>
+
+  <!-- Caption strip under the scope -->
+  <div
+    class="absolute left-1/2 -translate-x-1/2 whitespace-nowrap font-mono text-[11px]"
+    style="bottom: -8px; color: var(--color-fg-dim);"
+  >
+    ~ tracking 2 devices · last sync 0 ms
+  </div>
+</div>

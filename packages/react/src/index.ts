@@ -10,12 +10,11 @@ export * from './hooks/useTopic';
 // Per-record sync-state type re-export from @topgunbuild/client
 export type { RecordSyncState } from '@topgunbuild/client';
 export * from './hooks/usePNCounter';
-export * from './hooks/useEntryProcessor';
 export * from './hooks/useEventJournal';
 
-// Conflict Resolver hooks
+// Merge rejection observer (built-in CRDT merge collisions, NOT custom
+// resolvers — that surface is on the v2.x WASM-sandbox roadmap).
 export * from './hooks/useMergeRejections';
-export * from './hooks/useConflictResolver';
 
 // Full-Text Search hooks
 export * from './hooks/useSearch';

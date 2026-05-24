@@ -1,9 +1,12 @@
 replicaCount: 3
 
 image:
-  repository: topgun-server
+  # Override per environment if you're hosting the image elsewhere.
+  repository: ghcr.io/topgunbuild/topgun-server
   pullPolicy: IfNotPresent
-  tag: "latest"
+  # Pin to a concrete tag (e.g. "2.0.0") for reproducible deploys; "latest"
+  # is convenient for dev but follows whatever main pushes.
+  tag: "2.0.0"
 
 service:
   type: ClusterIP

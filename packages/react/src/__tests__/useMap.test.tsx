@@ -25,7 +25,7 @@ const createMockLWWMap = () => {
     keys: jest.fn(() => Array.from(data.keys())),
     values: jest.fn(() => Array.from(data.values())),
     entries: jest.fn(() => Array.from(data.entries())),
-    onChange: jest.fn((callback: () => void) => {
+    subscribe: jest.fn((callback: () => void) => {
       listeners.add(callback);
       return () => {
         listeners.delete(callback);
@@ -118,14 +118,14 @@ describe('useMap', () => {
     expect(result.current.get('non-existent')).toBeUndefined();
   });
 
-  it('should subscribe to onChange on mount', () => {
+  it('should subscribe on mount', () => {
     renderHook(() => useMap('test-map'), { wrapper });
 
-    expect(mockMap.onChange).toHaveBeenCalled();
+    expect(mockMap.subscribe).toHaveBeenCalled();
     expect(mockMap._getListenerCount()).toBe(1);
   });
 
-  it('should unsubscribe from onChange on unmount', () => {
+  it('should unsubscribe on unmount', () => {
     const { unmount } = renderHook(() => useMap('test-map'), { wrapper });
 
     expect(mockMap._getListenerCount()).toBe(1);

@@ -66,45 +66,21 @@ export class ConflictResolverClient {
    * });
    * ```
    */
+  /**
+   * @deprecated Server-side custom conflict resolvers require a WASM sandbox
+   * on the v2.x roadmap. Calling this method throws immediately. See
+   * https://topgun.build/docs/roadmap for status. The `onRejection` observer
+   * below is unaffected — merge rejections from built-in CRDT logic continue
+   * to surface through it.
+   */
   async register<V>(
-    mapName: string,
-    resolver: Omit<ConflictResolverDef<V>, 'fn'>,
+    _mapName: string,
+    _resolver: Omit<ConflictResolverDef<V>, 'fn'>,
   ): Promise<RegisterResult> {
-    const requestId = crypto.randomUUID();
-
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pendingRequests.delete(requestId);
-        reject(new Error('Register resolver request timed out'));
-      }, ConflictResolverClient.REQUEST_TIMEOUT);
-
-      this.pendingRequests.set(requestId, {
-        resolve: (result: RegisterResult) => {
-          clearTimeout(timeout);
-          resolve(result);
-        },
-        reject,
-        timeout,
-      });
-
-      try {
-        this.syncEngine.send({
-          type: 'REGISTER_RESOLVER',
-          requestId,
-          mapName,
-          resolver: {
-            name: resolver.name,
-            code: resolver.code || '',
-            priority: resolver.priority,
-            keyPattern: resolver.keyPattern,
-          },
-        });
-      } catch {
-        this.pendingRequests.delete(requestId);
-        clearTimeout(timeout);
-        resolve({ success: false, error: 'Not connected to server' });
-      }
-    });
+    throw new Error(
+      'Custom conflict resolvers require server-side WASM sandbox execution, which is on the v2.x roadmap. ' +
+        'See https://topgun.build/docs/roadmap. Use onRejection(cb) to observe built-in merge rejections.'
+    );
   }
 
   /**
@@ -114,75 +90,26 @@ export class ConflictResolverClient {
    * @param resolverName The name of the resolver to unregister
    * @returns Promise resolving to unregistration result
    */
-  async unregister(mapName: string, resolverName: string): Promise<RegisterResult> {
-    const requestId = crypto.randomUUID();
-
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pendingRequests.delete(requestId);
-        reject(new Error('Unregister resolver request timed out'));
-      }, ConflictResolverClient.REQUEST_TIMEOUT);
-
-      this.pendingRequests.set(requestId, {
-        resolve: (result: RegisterResult) => {
-          clearTimeout(timeout);
-          resolve(result);
-        },
-        reject,
-        timeout,
-      });
-
-      try {
-        this.syncEngine.send({
-          type: 'UNREGISTER_RESOLVER',
-          requestId,
-          mapName,
-          resolverName,
-        });
-      } catch {
-        this.pendingRequests.delete(requestId);
-        clearTimeout(timeout);
-        resolve({ success: false, error: 'Not connected to server' });
-      }
-    });
+  /**
+   * @deprecated See {@link register} — WASM sandbox not yet implemented.
+   */
+  async unregister(_mapName: string, _resolverName: string): Promise<RegisterResult> {
+    throw new Error(
+      'Custom conflict resolvers require server-side WASM sandbox execution, which is on the v2.x roadmap. ' +
+        'See https://topgun.build/docs/roadmap.'
+    );
   }
 
   /**
-   * List registered conflict resolvers on the server.
-   *
-   * @param mapName Optional - filter by map name
-   * @returns Promise resolving to list of resolver info
+   * @deprecated See {@link register} — WASM sandbox not yet implemented; this
+   * method previously returned an empty list silently. It now throws so
+   * integrators learn at call time, not at "why isn't my resolver listed?".
    */
-  async list(mapName?: string): Promise<ResolverInfo[]> {
-    const requestId = crypto.randomUUID();
-
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pendingRequests.delete(requestId);
-        reject(new Error('List resolvers request timed out'));
-      }, ConflictResolverClient.REQUEST_TIMEOUT);
-
-      this.pendingRequests.set(requestId, {
-        resolve: (result: { resolvers: ResolverInfo[] }) => {
-          clearTimeout(timeout);
-          resolve(result.resolvers);
-        },
-        reject,
-        timeout,
-      });
-
-      try {
-        this.syncEngine.send({
-          type: 'LIST_RESOLVERS',
-          requestId,
-          mapName,
-        });
-      } catch {
-        this.pendingRequests.delete(requestId);
-        clearTimeout(timeout);
-        resolve([]);
-      }
-    });
+  async list(_mapName?: string): Promise<ResolverInfo[]> {
+    throw new Error(
+      'Custom conflict resolvers require server-side WASM sandbox execution, which is on the v2.x roadmap. ' +
+        'See https://topgun.build/docs/roadmap.'
+    );
   }
 
   /**

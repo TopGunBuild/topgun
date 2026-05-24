@@ -7,7 +7,7 @@ order: 8
 import { ChevronRight } from 'lucide-react';
 import { AlertBox } from '../../../components/docs/AlertBox';
 
-<AlertBox variant="danger" title="Read this first — what's shipped vs. planned" text="TopGun does NOT replace Supabase's full BaaS. TopGun is a sync layer in front of YOUR Postgres — it does not replace Supabase Auth, Edge Functions, Storage buckets, or row-level security policies. TopGun ships per-map ACL booleans (read/write) plus JWT roles claim extraction; first-class RBAC and Postgres RLS-style policies are on the roadmap (see /docs/guides/rbac). Supabase postgres_changes (CDC from the Postgres write-ahead log) maps loosely to TopGun's CRDT-write notifications, but TopGun owns the write path — clients write through the TopGun client, not directly to Postgres. Reference: /docs/roadmap." />
+<AlertBox variant="danger" title="Read this first — what's shipped vs. planned" text="TopGun does NOT replace Supabase's full BaaS. TopGun is a sync layer in front of YOUR Postgres — it does not replace Supabase Auth, Edge Functions, Storage buckets, or row-level security policies. TopGun ships per-map ACL booleans (read/write) plus JWT roles claim extraction; first-class RBAC and Postgres RLS-style policies are on the roadmap (see /docs/roadmap). Supabase postgres_changes (CDC from the Postgres write-ahead log) maps loosely to TopGun's CRDT-write notifications, but TopGun owns the write path — clients write through the TopGun client, not directly to Postgres. Reference: /docs/roadmap." />
 
 <div className="flex items-center gap-2 text-sm text-neutral-500 mt-8 mb-8 overflow-hidden whitespace-nowrap">
   <span className="text-foreground font-medium">Docs</span>
@@ -35,7 +35,7 @@ Supabase Realtime is a Postgres-native real-time library: clients open WebSocket
     <tbody>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Channel (<code>supabase.channel('room-1')</code>)</td>
-        <td className="py-3 px-4 text-foreground"><code>client.getTopic('room-1')</code></td>
+        <td className="py-3 px-4 text-foreground"><code>client.topic('room-1')</code></td>
         <td className="py-3 px-4 text-neutral-500">Named pub/sub topic; HLC-ordered delivery</td>
       </tr>
       <tr className="border-b border-card-border">
@@ -56,7 +56,7 @@ Supabase Realtime is a Postgres-native real-time library: clients open WebSocket
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Row Level Security (RLS) policies</td>
         <td className="py-3 px-4 text-foreground">Per-map ACL booleans (<code>read</code>/<code>write</code>)</td>
-        <td className="py-3 px-4 text-neutral-500">Full RLS-style policies on roadmap — see <a href="/docs/guides/rbac">/docs/guides/rbac</a></td>
+        <td className="py-3 px-4 text-neutral-500">Full RLS-style policies on roadmap — see <a href="/docs/roadmap">/docs/roadmap</a></td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Supabase Auth (<code>signInWithPassword</code>, etc.)</td>
@@ -192,7 +192,7 @@ todosChannel
 
 ```typescript
 // Pub/sub topic — fan-out messages
-const topic = client.getTopic('room-1');
+const topic = client.topic('room-1');
 
 const unsub = topic.subscribe((payload) => {
   console.log('topic', payload);
@@ -309,7 +309,7 @@ function UserList() {
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Cluster (current)</td>
         <td className="py-3 px-4 text-yellow-600 dark:text-yellow-400">Partition-routing, no Raft</td>
-        <td className="py-3 px-4 text-neutral-500">Safe when one node owns the partition; weaker guarantees under node failure — see <a href="/docs/guides/cluster-replication">Cluster Replication</a></td>
+        <td className="py-3 px-4 text-neutral-500">Safe when one node owns the partition; weaker guarantees under node failure — see <a href="/docs/roadmap">/docs/roadmap</a></td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Cluster (planned)</td>
@@ -320,7 +320,7 @@ function UserList() {
   </table>
 </div>
 
-For a first migration, start on single-node. The partition-routed cluster mode works but does not yet have Raft-backed consensus; consult the [Cluster Replication guide](/docs/guides/cluster-replication) before running cluster in production.
+For a first migration, start on single-node. The partition-routed cluster mode works but does not yet have Raft-backed consensus; see the [roadmap](/docs/roadmap) for cluster-safety status.
 
 ## Why migrate?
 
@@ -336,7 +336,7 @@ For a first migration, start on single-node. The partition-routed cluster mode w
 2. Cross-reference each against the Concept Mapping table above; mark mappings vs gaps.
 3. Audit which Supabase services you use beyond Realtime (Auth, Storage, Edge Functions, RLS) — TopGun replaces only the Realtime + sync surface; the others stay on Supabase or move to alternative providers. Make explicit decisions per service.
 4. Port the client layer: replace `createClient(url, anonKey)` + the auth flow with `new TopGunClient({ serverUrl, storage })` + `setAuthToken` (BYO JWT). See [Authentication](/docs/guides/authentication).
-5. Port channels/queries one resource at a time: replace `channel.on('broadcast', ...)` with `client.getTopic().subscribe()`, replace `channel.on('postgres_changes', ...)` with `client.query().subscribe()`, and replace direct `supabase.from().insert()` with `client.getMap().set()` (the write path moves through TopGun, not directly to Postgres).
+5. Port channels/queries one resource at a time: replace `channel.on('broadcast', ...)` with `client.topic(name).subscribe(cb)`, replace `channel.on('postgres_changes', ...)` with `client.query().subscribe()`, and replace direct `supabase.from().insert()` with `client.getMap().set()` (the write path moves through TopGun, not directly to Postgres).
 6. Backfill data via a one-time migration script that reads from Postgres (or via `supabase-js`) and writes to TopGun via the client SDK or direct Postgres insert (TopGun owns the write path going forward).
 
 <div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
@@ -346,10 +346,10 @@ For a first migration, start on single-node. The partition-routed cluster mode w
       <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Migrating from Replicache
     </div>
   </a>
-  <a href="/docs/guides/security" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Next Guide</span>
+  <a href="/docs/roadmap" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">See also</span>
     <div className="flex items-center gap-2 text-foreground font-semibold">
-      Security (TLS) <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+      Roadmap &amp; Maturity <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
     </div>
   </a>
 </div>

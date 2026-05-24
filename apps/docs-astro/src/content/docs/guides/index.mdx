@@ -1,10 +1,10 @@
 ---
 title: Guides
-description: Practical, step-by-step guides to help you implement common patterns and features with TopGun.
+description: Practical, step-by-step guides for the patterns and features that ship with TopGun today.
 order: 10
 ---
 
-import { ChevronRight, Shield, Server, Radio, Timer, Activity, Lock, KeyRound, Zap, CheckCircle, Network, Cpu, Plus, ScrollText, GitMerge, Plug, Database, Search, Lightbulb, Copy, Bot } from 'lucide-react';
+import { ChevronRight, Shield, Radio, Activity, Lock, KeyRound, Search, Database, ScrollText, Bot, Lightbulb, GitMerge, Plane, Server, Plug } from 'lucide-react';
 import { GuideCard } from '../../../components/docs/GuideCard';
 
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
@@ -15,145 +15,126 @@ import { GuideCard } from '../../../components/docs/GuideCard';
 
 # Guides
 
-Practical, step-by-step guides to help you implement common patterns and features with TopGun.
+These pages cover what works in TopGun today. The [roadmap](/docs/roadmap) is the canonical source for what's planned (custom conflict resolvers, entry processors, RBAC, cluster mTLS).
 
-<div className="grid gap-6 not-prose mt-12">
+## Building with TopGun
+
+<div className="grid gap-6 not-prose mt-6 mb-12">
+  <GuideCard
+    href="/docs/guides/offline-first"
+    icon={Plane}
+    title="Offline-first apps"
+    description="Make reads instant and writes survive a flight without network — the default behaviour, made explicit."
+  />
+  <GuideCard
+    href="/docs/guides/realtime-collaboration"
+    icon={Activity}
+    title="Real-time collaboration"
+    description="Two users editing the same record at the same time, conflict-free, with the React hooks."
+  />
+  <GuideCard
+    href="/docs/guides/live-notifications"
+    icon={Radio}
+    title="Live notifications (pub/sub topics)"
+    description="Fire-and-forget topic messages for chat, presence, and ephemeral signals."
+  />
+  <GuideCard
+    href="/docs/guides/schema-typed-data"
+    icon={Database}
+    title="Schema-typed data"
+    description="Define maps with Zod, get end-to-end TypeScript inference on reads, writes, and queries."
+  />
+  <GuideCard
+    href="/docs/guides/search-and-live-queries"
+    icon={Search}
+    title="Search & live queries"
+    description="BM25 full-text search, filtered + sorted queries, and how live subscriptions keep results fresh."
+  />
+  <GuideCard
+    href="/docs/guides/counters-and-locks"
+    icon={Lock}
+    title="Counters & locks"
+    description="PN-Counter for distributed counts and single-node distributed locks with TTL-based expiry."
+  />
+</div>
+
+## Auth, security, AI
+
+<div className="grid gap-6 not-prose mt-6 mb-12">
   <GuideCard
     href="/docs/guides/authentication"
     icon={Shield}
-    title="Authentication"
-    description="How to integrate authentication providers (Clerk, Better Auth) and secure your sync channels."
+    title="Authentication & security"
+    description="Clerk, Better Auth, Firebase, or custom JWT — wiring auth providers and validating tokens server-side."
   />
   <GuideCard
     href="/docs/guides/security"
     icon={KeyRound}
-    title="Security (TLS/mTLS)"
-    description="Secure your deployment with TLS encryption, mTLS for cluster, and certificate management."
-  />
-  <GuideCard
-    href="/docs/guides/live-queries"
-    icon={Activity}
-    title="Live Queries"
-    description="Building reactive applications with real-time query subscriptions."
-  />
-  <GuideCard
-    href="/docs/guides/indexing"
-    icon={Database}
-    title="Indexing"
-    description="Accelerate queries with HashIndex, NavigableIndex, and InvertedIndex for O(1) to O(log N) lookups."
-  />
-  <GuideCard
-    href="/docs/guides/full-text-search"
-    icon={Search}
-    title="Full-Text Search"
-    description="Add fast text search with InvertedIndex and configurable tokenization pipelines."
-  />
-  <GuideCard
-    href="/docs/guides/adaptive-indexing"
-    icon={Lightbulb}
-    title="Adaptive Indexing"
-    description="Auto-suggest or auto-create indexes based on query patterns with the Index Advisor."
-  />
-  <GuideCard
-    href="/docs/guides/pub-sub"
-    icon={Radio}
-    title="Pub/Sub (Topics)"
-    description="Using ephemeral topics for real-time messaging and notifications."
-  />
-  <GuideCard
-    href="/docs/guides/ttl"
-    icon={Timer}
-    title="Time-To-Live (TTL)"
-    description="Managing data expiration and garbage collection."
-  />
-  <GuideCard
-    href="/docs/guides/deployment"
-    icon={Server}
-    title="Deployment"
-    description="How to deploy and scale the TopGun server cluster using Docker and Kubernetes."
-  />
-  <GuideCard
-    href="/docs/guides/cluster-client"
-    icon={Network}
-    title="Client Cluster Mode"
-    description="Connect to a multi-node cluster with automatic failover and partition-aware routing."
-  />
-  <GuideCard
-    href="/docs/guides/cluster-replication"
-    icon={Copy}
-    title="Cluster Replication"
-    description="Server-side replication with consistency levels, anti-entropy repair, and automatic failover."
-  />
-  <GuideCard
-    href="/docs/guides/observability"
-    icon={Activity}
-    title="Observability"
-    description="Monitoring, metrics (Prometheus), and structured logging."
-  />
-  <GuideCard
-    href="/docs/guides/performance"
-    icon={Zap}
-    title="Performance Tuning"
-    description="Optimize for high throughput, low latency, or balanced production workloads."
-  />
-  <GuideCard
-    href="/docs/guides/distributed-locks"
-    icon={Lock}
-    title="Distributed Locks"
-    description="Coordinating processes with locks and fencing tokens."
-  />
-  <GuideCard
-    href="/docs/guides/rbac"
-    icon={Shield}
-    title="Role-Based Access Control"
-    description="Fine-grained permission policies to control read, write, and delete access per role and map pattern."
-  />
-  <GuideCard
-    href="/docs/guides/write-concern"
-    icon={CheckCircle}
-    title="Write Concern"
-    description="Configure acknowledgment levels for write operations to balance performance vs durability."
-  />
-  <GuideCard
-    href="/docs/guides/entry-processor"
-    icon={Cpu}
-    title="Entry Processor"
-    description="Execute atomic read-modify-write operations on the server to solve race conditions."
-  />
-  <GuideCard
-    href="/docs/guides/pn-counter"
-    icon={Plus}
-    title="PN-Counter"
-    description="Distributed counter supporting increment/decrement with automatic conflict resolution."
-  />
-  <GuideCard
-    href="/docs/guides/event-journal"
-    icon={ScrollText}
-    title="Event Journal"
-    description="Capture all map changes for CDC, audit trails, event replay, and real-time activity feeds."
-  />
-  <GuideCard
-    href="/docs/guides/conflict-resolvers"
-    icon={GitMerge}
-    title="Conflict Resolvers"
-    description="Custom server-side conflict resolution beyond LWW for booking systems, inventory, and business rules."
-  />
-  <GuideCard
-    href="/docs/guides/interceptors"
-    icon={Plug}
-    title="Interceptors"
-    description="Extend TopGun with custom server-side logic for ML inference, webhooks, and external service integration."
+    title="Security"
+    description="TLS termination at the proxy, client-side encrypted storage, and credential hygiene."
   />
   <GuideCard
     href="/docs/guides/mcp-server"
     icon={Bot}
-    title="MCP Server"
-    description="Connect AI assistants like Claude Desktop and Cursor to your TopGun database."
+    title="MCP server"
+    description="Connect Claude Desktop, Cursor, or any MCP client to a running TopGun database."
   />
   <GuideCard
     href="/docs/guides/building-with-ai"
-    icon={Bot}
-    title="Building with AI Coding Agents"
-    description="How to use Claude Code, Cursor, or Codex to build a TopGun app — prompt templates, common pitfalls, and live database access via MCP."
+    icon={Lightbulb}
+    title="Building with AI coding agents"
+    description="Prompt patterns, AGENTS.md / CLAUDE.md guidance, and the hook-first canonical app shape."
+  />
+</div>
+
+## Migration
+
+<div className="grid gap-6 not-prose mt-6 mb-12">
+  <GuideCard
+    href="/docs/guides/migrating-from-firebase"
+    icon={GitMerge}
+    title="Migrating from Firebase"
+    description="Realtime Database / Firestore → TopGun. Maps, queries, presence, offline."
+  />
+  <GuideCard
+    href="/docs/guides/migrating-from-supabase-realtime"
+    icon={GitMerge}
+    title="Migrating from Supabase Realtime"
+    description="Channels → topics, postgres_changes → queries, RLS context."
+  />
+  <GuideCard
+    href="/docs/guides/migrating-from-replicache"
+    icon={GitMerge}
+    title="Migrating from Replicache"
+    description="Mutators → CRDT writes, pull/push → built-in delta sync."
+  />
+  <GuideCard
+    href="/docs/guides/migrating-from-yjs"
+    icon={GitMerge}
+    title="Migrating from Y.js"
+    description="Document-level merges via HLC LWW, with a note on where character-level OT differs."
+  />
+</div>
+
+## Operations
+
+<div className="grid gap-6 not-prose mt-6 mb-12">
+  <GuideCard
+    href="/docs/deploy"
+    icon={Server}
+    title="Deploy"
+    description="Self-host with Docker, Kubernetes, or a bare binary. Backends (redb default, Postgres optional)."
+  />
+  <GuideCard
+    href="/docs/deploy/performance"
+    icon={Activity}
+    title="Performance tuning"
+    description="RAM ceilings, eviction water marks, write-behind cadence, and how to read the perf-gate output."
+  />
+  <GuideCard
+    href="/docs/guides/troubleshooting"
+    icon={Plug}
+    title="Troubleshooting"
+    description="Common errors — auth, IndexedDB, WebSocket, sync state — and how to diagnose them."
   />
 </div>

@@ -379,7 +379,7 @@ CQIDAQAB
     }
 
     // -----------------------------------------------------------------------
-    // AuthValidator integration tests (SPEC-189 AC3, AC4)
+    // AuthValidator integration tests
     // -----------------------------------------------------------------------
 
     /// Build a minimal `AppState` for testing with an optional validator.
@@ -398,7 +398,7 @@ CQIDAQAB
         }
     }
 
-    /// AC3 (SPEC-189): A rejecting `AuthValidator` causes `AdminClaims` extractor to return `Err(InvalidToken)`.
+    /// AC3: A rejecting `AuthValidator` causes `AdminClaims` extractor to return `Err(InvalidToken)`.
     #[tokio::test]
     async fn rejecting_validator_returns_invalid_token() {
         let validator = Arc::new(
@@ -422,7 +422,7 @@ CQIDAQAB
         }
     }
 
-    /// AC4 (SPEC-189): When `auth_validator` is `None`, valid admin token is accepted (no regression).
+    /// AC4: When `auth_validator` is `None`, valid admin token is accepted (no regression).
     #[tokio::test]
     async fn no_validator_accepts_valid_admin_token() {
         let state = test_state_with_validator(None);

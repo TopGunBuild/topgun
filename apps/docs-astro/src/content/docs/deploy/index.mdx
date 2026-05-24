@@ -1,0 +1,49 @@
+---
+title: Deploy
+description: Self-host the TopGun server with Docker, Kubernetes, storage backends, performance tuning, and configuration reference.
+order: 50
+---
+
+import { ChevronRight, Server, HardDrive, Zap, Settings } from 'lucide-react';
+import { ReferenceCard } from '../../../components/docs/ReferenceCard';
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Deploy</span>
+</div>
+
+# Deploy
+
+Set up and run the TopGun server on your own infrastructure. Choose a storage backend, tune memory and connection limits, and configure the server for production. Every variable documented here traces to a real `std::env::var()` call in the binary — no planned-but-not-yet-supported knobs.
+
+<div className="grid md:grid-cols-2 gap-6 not-prose mt-8">
+  <ReferenceCard
+    href="/docs/deploy/self-host"
+    icon={Server}
+    title="Self-host"
+    description="Run the server with Docker, Docker Compose, or Kubernetes. Real env vars only — no TOPGUN_TLS_* or TOPGUN_CLUSTER_* that the binary doesn't read."
+    linkText="Self-host guide"
+  />
+  <ReferenceCard
+    href="/docs/deploy/storage-backends"
+    icon={HardDrive}
+    title="Storage backends"
+    description="Choose between redb (embedded, default), PostgreSQL (production), or null (tests only). Includes the topgun_maps table schema and migration notes."
+    linkText="Storage backends"
+  />
+  <ReferenceCard
+    href="/docs/deploy/performance"
+    icon={Zap}
+    title="Performance tuning"
+    description="Tune memory eviction, write-behind buffer, and connection limits via env vars. Programmatic ServerConfig / ConnectionConfig fields for deeper control."
+    linkText="Performance tuning"
+  />
+  <ReferenceCard
+    href="/docs/deploy/configuration"
+    icon={Settings}
+    title="Configuration"
+    description="Operator-oriented cheatsheet: .env file examples, defaults rationale, and pre-production checklist. Links to the canonical env-var table in Reference."
+    linkText="Configuration"
+  />
+</div>

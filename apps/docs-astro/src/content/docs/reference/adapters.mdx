@@ -1,0 +1,213 @@
+---
+title: Adapters
+description: Reference for @topgunbuild/adapters — IDBAdapter, IStorageAdapter contract, and EncryptedStorageAdapter.
+order: 23
+---
+
+import { Database } from 'lucide-react';
+import { AlertBox } from '../../../components/docs/AlertBox';
+
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <Database className="w-10 h-10 text-brand" />
+  <h1 className="text-4xl font-bold text-foreground">Adapters</h1>
+</div>
+
+`@topgunbuild/adapters` ships the IndexedDB storage adapter. The `IStorageAdapter` interface is exported from `@topgunbuild/client` and is what custom adapters implement.
+
+The adapter is what gives TopGun its memory-first feel: writes never wait for IndexedDB to initialize, and reads use the in-memory CRDT cache. The adapter only flushes to durable storage in the background.
+
+## IStorageAdapter
+
+The contract every storage adapter implements. Defined in `packages/client/src/IStorageAdapter.ts`.
+
+```typescript
+interface IStorageAdapter {
+  // Lifecycle
+  initialize(dbName: string): Promise<void>;
+  close(): Promise<void>;
+  waitForReady?(): Promise<void>; // optional
+
+  // Key/Value
+  get<V>(key: string): Promise<LWWRecord<V> | ORMapRecord<V>[] | any | undefined>;
+  put(key: string, value: any): Promise<void>;
+  remove(key: string): Promise<void>;
+  batchPut(entries: Map<string, any>): Promise<void>;
+
+  // Metadata (internal system state)
+  getMeta(key: string): Promise<any>;
+  setMeta(key: string, value: any): Promise<void>;
+
+  // Operation log (for sync)
+  appendOpLog(entry: Omit<OpLogEntry, 'id'>): Promise<number>;
+  getPendingOps(): Promise<OpLogEntry[]>;
+  markOpsSynced(lastId: number): Promise<void>;
+
+  // Iteration
+  getAllKeys(): Promise<string[]>;
+}
+```
+
+`OpLogEntry` shape:
+
+```typescript
+interface OpLogEntry {
+  id?: number;             // auto-increment
+  key: string;
+  op: 'PUT' | 'REMOVE' | 'OR_ADD' | 'OR_REMOVE';
+  value?: any;
+  record?: LWWRecord<any>;
+  orRecord?: ORMapRecord<any>;
+  orTag?: string;
+  hlc?: string;
+  timestamp?: any;
+  synced: number;          // 0 = pending, 1 = acknowledged
+  mapName: string;
+}
+```
+
+## IDBAdapter
+
+The default browser adapter. Persists to IndexedDB via the `idb` library.
+
+```typescript
+import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+const client = new TopGunClient({
+  storage: new IDBAdapter(),
+});
+```
+
+`IDBAdapter` takes **no constructor arguments**. The database name is set when `client.start()` (or any client operation that eagerly initializes storage) calls `adapter.initialize('topgun_offline_db')`.
+
+### Non-blocking initialization
+
+`initialize()` returns immediately without waiting for IndexedDB to open. Writes that arrive before IndexedDB is ready are **queued in memory** and replayed once the database is open. This is what lets the UI render and accept input within a single tick of mount, even when IndexedDB takes 50–500 ms to initialize.
+
+```typescript
+const adapter = new IDBAdapter();
+const client = new TopGunClient({ storage: adapter });
+
+// Writes work immediately — queued, then flushed
+client.getMap('todos').set('task-1', { text: 'Hello' });
+
+// If you need to ensure persistence before continuing:
+await adapter.waitForReady();
+```
+
+Read operations (`get`, `getMeta`, `getPendingOps`, `getAllKeys`) await `waitForReady()` internally — they always see the latest state including queued writes.
+
+### Methods
+
+The `IDBAdapter` implements the full `IStorageAdapter` interface (see above). All methods are async. Write methods (`put`, `remove`, `setMeta`, `batchPut`, `appendOpLog`, `markOpsSynced`) queue before initialization completes. Reads (`get`, `getMeta`, `getPendingOps`, `getAllKeys`) await readiness internally.
+
+### Object stores
+
+`IDBAdapter` opens an IndexedDB database with three object stores:
+
+| Store | Purpose |
+|---|---|
+| `kv_store` | Key/value records (keyed by `key`) |
+| `op_log` | Append-only operation log (auto-incrementing `id`) |
+| `meta_store` | Internal metadata (tombstones, last-synced HLC, etc.) |
+
+The database name is `topgun_offline_db` by default — pass a different name to `initialize()` to scope multiple apps in the same origin.
+
+## EncryptedStorageAdapter
+
+An at-rest-encryption wrapper around any `IStorageAdapter`. Exported from `@topgunbuild/client` (not from `@topgunbuild/adapters`).
+
+```typescript
+import { TopGunClient, EncryptedStorageAdapter } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+const encrypted = new EncryptedStorageAdapter(
+  new IDBAdapter(),
+  { passphrase: 'user-provided-secret' }
+);
+
+const client = new TopGunClient({
+  storage: encrypted,
+});
+```
+
+Values are AES-GCM-encrypted before they hit the underlying adapter. Keys and metadata stay plaintext so the sync engine and Merkle tree can still iterate without unsealing every record.
+
+Use this for sensitive client-side caches (PII, draft messages, auth state) where IndexedDB on a shared device is a threat model.
+
+## PostgreSQL — server-side only
+
+PostgreSQL is **not** a client adapter. The Rust server uses PostgreSQL as one of its durable backends; clients talk to that server over WebSocket. See the [Server reference](/docs/reference/server) for the `DATABASE_URL` configuration and the `PostgresDataStore` Rust embed API.
+
+<AlertBox variant="info" title="No client-side PostgresAdapter" text="If you find references to a `PostgresAdapter` in older docs, code, or LLM-generated snippets, they are stale. PostgreSQL lives behind the server; the client only talks WebSocket." />
+
+## Writing a custom adapter
+
+Implement `IStorageAdapter` against any durable store (SQLite, file system, S3, Redis, etc.) and pass an instance to `new TopGunClient({ storage: yourAdapter })`.
+
+```typescript
+import type { IStorageAdapter, OpLogEntry } from '@topgunbuild/client';
+import type { LWWRecord, ORMapRecord } from '@topgunbuild/core';
+
+class MyAdapter implements IStorageAdapter {
+  async initialize(dbName: string) {
+    // Open backing store
+  }
+
+  async close() {
+    // Tear down
+  }
+
+  async get<V>(key: string) {
+    // Return stored value, or undefined
+    return undefined;
+  }
+
+  async put(key: string, value: any) {
+    // Persist atomically
+  }
+
+  async remove(key: string) {
+    // Delete
+  }
+
+  async batchPut(entries: Map<string, any>) {
+    // Atomic batch
+  }
+
+  async getMeta(key: string) {
+    return undefined;
+  }
+
+  async setMeta(key: string, value: any) {}
+
+  async appendOpLog(entry: Omit<OpLogEntry, 'id'>): Promise<number> {
+    // Append, return auto-increment id
+    return 0;
+  }
+
+  async getPendingOps(): Promise<OpLogEntry[]> {
+    return [];
+  }
+
+  async markOpsSynced(lastId: number) {}
+
+  async getAllKeys(): Promise<string[]> {
+    return [];
+  }
+}
+```
+
+### Implementation contract
+
+Custom adapters must honor three invariants the sync engine depends on:
+
+1. **Atomic single-key writes.** `put` and `remove` should commit fully or not at all. A half-written record corrupts the Merkle tree and the next delta sync will diverge.
+2. **Ordered op-log.** `appendOpLog` must assign monotonically increasing IDs. `markOpsSynced(lastId)` marks every entry with `id <= lastId` as `synced: 1`. Out-of-order acks corrupt replay on reconnect.
+3. **Persistence across restarts.** `getAllKeys` and `get` must return what was written before the last `close()` — otherwise the client cannot rehydrate maps after reload.
+
+The IndexedDB adapter satisfies these via transactions on `kv_store` and `op_log`. Implementations on other stores should use the equivalent primitive (SQL transactions, append-only files with fsync, conditional writes, etc.).
+
+---
+
+[← React](/docs/reference/react) · [Server →](/docs/reference/server)

@@ -177,7 +177,7 @@ Each request carries full client context -- `clientId`, `clientHlc`, and `syncMa
 
 ## Server Architecture
 
-While clients are "Local-First", TopGun is backed by a robust server cluster for persistence and scalability.
+While clients are "Local-First", TopGun is backed by a Rust server (single-node stable today; cluster mode in development).
 
 <div className="space-y-4 not-prose">
   <div className="p-4 rounded-lg border border-card-border">
@@ -190,7 +190,7 @@ While clients are "Local-First", TopGun is backed by a robust server cluster for
   </div>
   <div className="p-4 rounded-lg border border-card-border">
     <h4 className="font-bold text-foreground">3. Persistence Layer</h4>
-    <p className="text-sm text-neutral-600 dark:text-neutral-300 mt-1">Async write-behind to PostgreSQL (or in-memory for development).</p>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300 mt-1">Async write-behind to the configured backend (redb embedded default, PostgreSQL optional for production).</p>
   </div>
   <div className="p-4 rounded-lg border border-card-border">
     <h4 className="font-bold text-foreground">4. Pub/Sub Bus</h4>

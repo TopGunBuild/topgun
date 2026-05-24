@@ -1,23 +1,183 @@
 ---
-title: Server API
-description: The Rust-based TopGun server — configuration, endpoints, storage, and deployment.
+title: Server & CLI
+description: Reference for the Rust TopGun server — CLI flags, environment variables, endpoints, embed API, and HTTP /sync wire format.
 order: 22
 ---
 
-import CodeBlock from '../../../components/docs/CodeBlock.astro';
-import { ChevronRight, Server, Settings, Shield, Network, Lock, Gauge, Database, Terminal } from 'lucide-react';
-import { ApiParam, ApiConstructor } from '../../../components/docs/ApiMethod';
+import { Server } from 'lucide-react';
 
-export const startServerCode = `# Run the test server (integration testing)
-cargo run --bin test-server --release
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <Server className="w-10 h-10 text-brand" />
+  <h1 className="text-4xl font-bold text-foreground">Server & CLI</h1>
+</div>
 
-# With a custom port
-PORT=8080 cargo run --bin test-server --release
+The TopGun server is a Rust binary built on [axum](https://docs.rs/axum) and [tokio](https://tokio.rs). It manages client WebSocket connections, CRDT synchronization, Merkle delta sync, full-text and vector search, clustering, and durable storage (embedded redb by default, optional PostgreSQL for production).
 
-# With debug logging
-RUST_LOG=topgun_server=debug cargo run --bin test-server --release`;
+This page documents the user-facing surface: how to run it, what flags and environment variables it reads, the HTTP and WebSocket endpoints, and the Rust embed API for callers that want to host the server in-process. For operator-oriented setup with Docker Compose, Kubernetes, and tuning advice, see [Deploy](/docs/deploy).
 
-export const embedServerCode = `use topgun_server::network::config::NetworkConfig;
+## Running the server
+
+The repository entrypoint is `pnpm start:server`, which wraps `cargo run --bin topgun-server --release`. The binary is named `topgun-server` because the build was originally produced for the integration test suite; it is the same binary used in production-style demos like `demo.topgun.build`.
+
+```bash
+# From the repo root
+pnpm start:server
+
+# Or directly with cargo
+cargo run --bin topgun-server --release
+
+# Pick a port
+PORT=8080 cargo run --bin topgun-server --release
+
+# Increase log verbosity
+RUST_LOG=topgun_server=debug cargo run --bin topgun-server --release
+```
+
+By default the server uses the embedded redb backend (no Postgres, no Docker required). It binds to `0.0.0.0:8080` and opens `./topgun.redb` in the working directory. Set `STORAGE_BACKEND=postgres` and `DATABASE_URL=...` to use Postgres instead.
+
+## CLI flags
+
+The `topgun-server` binary exposes five `clap`-derived flags (defined in `packages/server-rust/src/bin/topgun_server.rs`):
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--node-id <ID>` | string | `"topgun-server-node"` | Unique identifier for this node in a cluster. |
+| `--host <ADDR>` | string | `"127.0.0.1"` | Host name or IP that peers use to reach this node's cluster port. Also used as `MemberInfo.host` in join handshakes. |
+| `--port <PORT>` | u16 | `8080` (or env `PORT`) | Client WebSocket port. `0` means OS-assigned. Also reads the `PORT` environment variable. |
+| `--cluster-port <PORT>` | u16 | `0` (OS-assigned) | Inter-node cluster TCP port. |
+| `--seed-nodes <LIST>` | string | `""` (single-node) | Comma-separated seed node addresses (e.g., `"127.0.0.1:11001,127.0.0.1:11002"`). Empty string means single-node mode. |
+
+Every other knob (storage backend, auth, search indexes, admin UI, memory limits) is configured via environment variables, listed in the next section.
+
+## Environment variables
+
+All variables below correspond to direct `std::env::var(...)` reads or `tracing-subscriber::EnvFilter::try_from_default_env()` consumers in `packages/server-rust/src/`. Variables not in this table are not read by the binary.
+
+### Storage backend
+
+| Variable | Type | Default | Consumer | Notes |
+|---|---|---|---|---|
+| `STORAGE_BACKEND` | string | `"redb"` | `bin/topgun_server.rs:109` | One of `redb`, `postgres`, `null`. `null` is in-memory ephemeral (test only). |
+| `TOPGUN_REDB_PATH` | path | `./topgun.redb` | `bin/topgun_server.rs:115` | File path for the embedded redb database (used when `STORAGE_BACKEND=redb`). |
+| `DATABASE_URL` | string | none | `bin/topgun_server.rs:126`, `storage/datastores/postgres.rs:693` | Postgres connection string (required when `STORAGE_BACKEND=postgres`). |
+
+### Networking
+
+| Variable | Type | Default | Consumer | Notes |
+|---|---|---|---|---|
+| `PORT` | u16 | `8080` | `bin/topgun_server.rs:168` (via `#[arg(env = "PORT")]`) | Client WebSocket port. Equivalent to `--port`. |
+| `TOPGUN_BIND_ADDR` | string | `"0.0.0.0"` | `bin/topgun_server.rs:203` | Bind address for the client WebSocket listener. Override to `127.0.0.1` for loopback-only deployments. |
+
+### Authentication
+
+| Variable | Type | Default | Consumer | Notes |
+|---|---|---|---|---|
+| `JWT_SECRET` | string | none | `network/module.rs:454` | HMAC secret for signing/verifying JWTs. Required for production auth. |
+| `TOPGUN_NO_AUTH` | truthy | unset | `bin/topgun_server.rs:477` | If set (`"true"`, `"1"`), disables auth. Test and demo use only. |
+| `INSECURE_FORWARD_AUTH_ERRORS` | truthy | unset | `bin/topgun_server.rs:470` | If set, forwards upstream auth errors verbatim in responses. Insecure; do not enable in production. |
+| `TOPGUN_ADMIN_USERNAME` | string | `"admin"` | `network/handlers/admin.rs:111` | Username for the admin dashboard login. |
+| `TOPGUN_ADMIN_PASSWORD` | string | required if admin enabled | `network/handlers/admin.rs:112` | Password for the admin dashboard login. |
+| `TOPGUN_ADMIN_DIR` | path | `./admin-dashboard/dist` | `network/module.rs:582` | Static-file directory served at `/admin/*`. |
+
+### Search indexes
+
+| Variable | Type | Default | Consumer | Notes |
+|---|---|---|---|---|
+| `TOPGUN_INDEX_PATH` | path | none | `bin/topgun_server.rs:516`, `network/module.rs:316`, `network/handlers/admin.rs:1078` | Directory holding the BM25 full-text-search index. |
+| `TOPGUN_VECTOR_INDEX_PATH` | path | none | `network/module.rs:286`, `network/handlers/admin.rs:1139` | Directory holding the HNSW vector index. |
+
+### Observability
+
+| Variable | Type | Default | Consumer | Notes |
+|---|---|---|---|---|
+| `RUST_LOG` | filter expression | `"info"` | `bin/topgun_server.rs:191` (via `tracing_subscriber::EnvFilter::try_from_default_env()`) | Standard tracing filter (e.g., `topgun_server=debug,info`). Not read via `std::env::var` directly. |
+| `TOPGUN_LOG_FORMAT` | string | text | `service/middleware/observability.rs:130` | Set to `"json"` for structured JSON logs. Anything else uses the text formatter. |
+
+### Memory and eviction
+
+| Variable | Type | Default | Consumer | Notes |
+|---|---|---|---|---|
+| `TOPGUN_MAX_RAM_MB` | u64 | `1024` | `storage/eviction_config.rs:85` | RAM ceiling for the in-memory record cache. |
+| `TOPGUN_EVICTION_HIGH_PCT` | u8 | `85` | `storage/eviction_config.rs:105` | High water mark (% of `TOPGUN_MAX_RAM_MB`). Eviction engages above this threshold. |
+| `TOPGUN_EVICTION_LOW_PCT` | u8 | `70` | `storage/eviction_config.rs:125` | Low water mark. Eviction stops once usage falls below this. |
+| `TOPGUN_EVICTION_INTERVAL_MS` | u64 | `1000` | `storage/eviction_config.rs:145` | Eviction orchestrator tick interval. |
+
+### Write-behind buffer
+
+| Variable | Type | Default | Consumer | Notes |
+|---|---|---|---|---|
+| `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` | u64 | `1000` | `storage/datastores/write_behind.rs:79` | How often the write-behind buffer flushes to the durable backend. |
+| `TOPGUN_WRITEBEHIND_BATCH_SIZE` | usize | `100` | `storage/datastores/write_behind.rs:99` | Maximum records flushed per write-behind tick. |
+| `TOPGUN_WRITEBEHIND_CAPACITY` | usize | `10000` | `storage/datastores/write_behind.rs:119` | Bounded buffer size. Producers apply backpressure when full. |
+
+At startup the server emits a single `tracing::info!` line containing the effective `max_ram_mb`, water marks, eviction interval, and `write_behind_enabled` so operators can confirm the active configuration without reading source.
+
+## Endpoints
+
+### Health and observability
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/health` | GET | Detailed health JSON (server state, uptime, connection count). |
+| `/health/live` | GET | Kubernetes liveness probe. Returns 200 if the process is alive. |
+| `/health/ready` | GET | Kubernetes readiness probe. Returns 200 once the server accepts connections. |
+| `/metrics` | GET | Prometheus metrics endpoint (`text/plain`). |
+
+### Client communication
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/ws` | GET (Upgrade) | WebSocket upgrade. Primary real-time channel for CRDT sync, queries, and pub/sub. Sends `AUTH_REQUIRED` on connect when auth is enabled. |
+| `/sync` | POST | Stateless HTTP sync endpoint. Accepts MsgPack-encoded batched operations and returns deltas. |
+
+### Admin API
+
+| Endpoint | Method | Auth | Description |
+|---|---|---|---|
+| `/api/status` | GET | none | Server status (version, uptime, node info). |
+| `/api/auth/login` | POST | none | Admin login. Returns JWT for admin API access. |
+| `/api/admin/cluster/status` | GET | admin JWT | Cluster membership and partition status. |
+| `/api/admin/maps` | GET | admin JWT | List maps with record counts and partition info. |
+| `/api/admin/settings` | GET, PUT | admin JWT | Read or update server configuration at runtime. |
+| `/api/docs` | GET | none | Swagger UI for the admin API (OpenAPI spec at `/api/openapi.json`). |
+| `/admin/*` | GET | none | SPA admin dashboard. Serves static files from `TOPGUN_ADMIN_DIR`. |
+
+## Rust embed API
+
+For callers that want to host the server in-process (custom binaries, integration tests, embedded scenarios), the building blocks live in `topgun_server::network`.
+
+### NetworkConfig
+
+```rust
+struct NetworkConfig {
+    host: String,                    // default "0.0.0.0"
+    port: u16,                       // default 0 (OS-assigned)
+    tls: Option<TlsConfig>,          // optional TLS (cert_path, key_path, ca_cert_path)
+    connection: ConnectionConfig,    // per-connection settings
+    cors_origins: Vec<String>,       // default []  (deny all cross-origin); set TOPGUN_CORS_ORIGINS env to a comma-separated list
+    request_timeout: Duration,       // default 30s
+}
+```
+
+`ConnectionConfig` fields: `outbound_channel_capacity` (256), `send_timeout` (5s), `idle_timeout` (60s), `ws_write_buffer_size` (128 KB), `ws_max_write_buffer_size` (512 KB).
+
+### ServerConfig
+
+```rust
+struct ServerConfig {
+    node_id: String,
+    default_operation_timeout_ms: u64,    // default 30000
+    max_concurrent_operations: u32,       // default 1000
+    gc_interval_ms: u64,                  // default 60000
+    partition_count: u32,                 // default 271
+    security: SecurityConfig,
+}
+```
+
+### Embedding the server
+
+```rust
+use topgun_server::network::config::NetworkConfig;
 use topgun_server::network::module::NetworkModule;
 
 let config = NetworkConfig {
@@ -30,70 +190,89 @@ let config = NetworkConfig {
 let mut module = NetworkModule::new(config);
 let port = module.start().await?;
 println!("Server listening on port {port}");
-module.serve(shutdown_signal()).await?;`;
+module.serve(shutdown_signal()).await?;
+```
 
-export const postgresCode = `use sqlx::PgPool;
+### PostgresDataStore
+
+```rust
+use sqlx::PgPool;
 use topgun_server::storage::datastores::PostgresDataStore;
 
 let pool = PgPool::connect("postgres://user:pass@localhost/topgun").await?;
-let store = PostgresDataStore::new(pool, None)?; // table: "topgun_maps"
-store.initialize().await?; // CREATE TABLE IF NOT EXISTS`;
+let store = PostgresDataStore::new(pool, None)?;  // default table: "topgun_maps"
+store.initialize().await?;                         // CREATE TABLE IF NOT EXISTS
+```
 
-export const httpSyncRequestExample = `// POST /sync
-// Content-Type: application/x-msgpack
-// (shown as JSON for readability)
+`PostgresDataStore::new(pool, table_name)` takes an optional custom table name; if supplied, it is validated against `^[a-zA-Z_][a-zA-Z0-9_]*$`. Call `initialize()` after construction to run the schema migration.
 
+## POST /sync wire format
+
+The `/sync` endpoint is the stateless HTTP fallback for environments without WebSocket support (Cloudflare Workers, restrictive proxies, serverless). It accepts a batch of operations and returns deltas in a single request/response cycle.
+
+- **URL:** `POST /sync`
+- **Content-Type:** `application/x-msgpack` (binary MsgPack)
+- **Response Content-Type:** `application/msgpack`
+
+### HttpSyncRequest
+
+```typescript
+interface HttpSyncRequest {
+  clientId: string;
+  clientHlc: Timestamp;                   // { millis, counter, nodeId }
+  operations?: ClientOp[];                // mapName, key, record { value, timestamp }
+  syncMaps?: SyncMapEntry[];              // { mapName, lastSyncTimestamp }
+  queries?: HttpQueryRequest[];           // { queryId, mapName, filter, limit?, offset? }
+  searches?: HttpSearchRequest[];
+}
+```
+
+### HttpSyncResponse
+
+```typescript
+interface HttpSyncResponse {
+  serverHlc: Timestamp;
+  ack?: { lastId: string; results?: AckResult[] };
+  deltas?: MapDelta[];                    // { mapName, records: DeltaRecord[], serverSyncTimestamp }
+  queryResults?: HttpQueryResult[];
+  searchResults?: HttpSearchResult[];
+  errors?: HttpSyncError[];               // { code, message, context? }
+}
+```
+
+### Example request (shown as JSON for readability)
+
+```json
 {
   "clientId": "client-1",
-  "clientHlc": {
-    "millis": 1706000000000,
-    "counter": 0,
-    "nodeId": "client-1"
-  },
+  "clientHlc": { "millis": 1706000000000, "counter": 0, "nodeId": "client-1" },
   "operations": [
     {
       "mapName": "todos",
       "key": "t1",
       "record": {
         "value": { "text": "Buy milk" },
-        "timestamp": {
-          "millis": 1706000000000,
-          "counter": 1,
-          "nodeId": "client-1"
-        }
+        "timestamp": { "millis": 1706000000000, "counter": 1, "nodeId": "client-1" }
       }
     }
   ],
   "syncMaps": [
     {
       "mapName": "todos",
-      "lastSyncTimestamp": {
-        "millis": 1705999000000,
-        "counter": 0,
-        "nodeId": ""
-      }
+      "lastSyncTimestamp": { "millis": 1705999000000, "counter": 0, "nodeId": "" }
     }
   ]
-}`;
+}
+```
 
-export const httpSyncResponseExample = `// 200 OK
-// Content-Type: application/msgpack
+### Example response
 
+```json
 {
-  "serverHlc": {
-    "millis": 1706000001000,
-    "counter": 1,
-    "nodeId": "server-1"
-  },
+  "serverHlc": { "millis": 1706000001000, "counter": 1, "nodeId": "server-1" },
   "ack": {
     "lastId": "http-op-0",
-    "results": [
-      {
-        "opId": "http-op-0",
-        "success": true,
-        "achievedLevel": "MEMORY"
-      }
-    ]
+    "results": [{ "opId": "http-op-0", "success": true, "achievedLevel": "MEMORY" }]
   },
   "deltas": [
     {
@@ -103,425 +282,31 @@ export const httpSyncResponseExample = `// 200 OK
           "key": "t2",
           "record": {
             "value": { "text": "Walk the dog" },
-            "timestamp": {
-              "millis": 1706000000500,
-              "counter": 0,
-              "nodeId": "client-2"
-            }
+            "timestamp": { "millis": 1706000000500, "counter": 0, "nodeId": "client-2" }
           },
           "eventType": "PUT"
         }
       ],
-      "serverSyncTimestamp": {
-        "millis": 1706000001000,
-        "counter": 2,
-        "nodeId": "server-1"
-      }
+      "serverSyncTimestamp": { "millis": 1706000001000, "counter": 2, "nodeId": "server-1" }
     }
   ],
   "queryResults": [],
   "searchResults": [],
   "errors": []
-}`;
+}
+```
 
-<div className="flex items-center gap-3 mb-6 not-prose">
-  <Server className="w-10 h-10 text-brand" />
-  <h1 className="text-4xl font-bold text-foreground">Server API</h1>
-</div>
+## Graceful shutdown
 
-The TopGun server is a Rust binary built on [axum](https://docs.rs/axum) and [tokio](https://tokio.rs). It manages client WebSocket connections, CRDT synchronization, Merkle tree delta sync, full-text search, clustering, and durable PostgreSQL storage.
+On SIGTERM or SIGINT the server:
 
-## Getting Started
+1. Transitions health state to **Draining**.
+2. Sends a Close frame to every active WebSocket connection.
+3. Gives in-flight requests up to 30 seconds to complete.
+4. Transitions health state to **Stopped**.
 
-<div className="not-prose">
-  <CodeBlock title="terminal" language="bash" code={startServerCode} />
-</div>
+The write-behind buffer flushes pending writes during the drain window; crash-safe shutdown drain plus WAL recovery is tracked as a follow-up item (see [Concepts → Reliability](/docs/concepts) for the current durability model).
 
-<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-4 mb-6 not-prose">
-  <span className="text-sm text-brand">The <code>test-server</code> binary is designed for integration testing. It uses in-memory storage (<code>NullDataStore</code>) and a hardcoded JWT secret. See the <a href="/docs/reference/cli">CLI Reference</a> for details on the test binary and future production builds.</span>
-</div>
+---
 
-## Configuration
-
-The Rust server is configured via two primary mechanisms: **environment variables** for runtime settings, and **Rust structs** for programmatic embedding.
-
-### Environment Variables
-
-The server reads three environment variables at startup: `PORT`, `TOPGUN_ADMIN_DIR`, and `RUST_LOG`. See the <a href="/docs/reference/cli#environment-variables">CLI Reference</a> for the full table with descriptions and defaults.
-
-### NetworkConfig (Programmatic)
-
-<div className="flex items-center gap-2 mb-3 not-prose">
-  <Settings className="w-5 h-5 text-neutral-500" />
-  <span className="text-neutral-600 dark:text-neutral-300">Network-level configuration for embedding the server in a Rust application.</span>
-</div>
-
-<div className="not-prose">
-  <ApiConstructor signature="struct NetworkConfig">
-    <ApiParam
-      name="host"
-      type="String"
-      description="Bind address for the server. Default: &quot;0.0.0.0&quot;"
-    />
-    <ApiParam
-      name="port"
-      type="u16"
-      description="Port to listen on. 0 means OS-assigned. Default: 0"
-    />
-    <ApiParam
-      name="tls"
-      type="Option<TlsConfig>"
-      description="Optional TLS configuration with cert_path, key_path, and optional ca_cert_path. Default: None"
-    />
-    <ApiParam
-      name="connection"
-      type="ConnectionConfig"
-      description="Per-connection settings: outbound_channel_capacity (256), send_timeout (5s), idle_timeout (60s), ws_write_buffer_size (128KB), ws_max_write_buffer_size (512KB)."
-    />
-    <ApiParam
-      name="cors_origins"
-      type="Vec<String>"
-      description="Allowed CORS origins. Default: [&quot;*&quot;]"
-    />
-    <ApiParam
-      name="request_timeout"
-      type="Duration"
-      description="Maximum time to wait for a request to complete. Default: 30s"
-    />
-  </ApiConstructor>
-</div>
-
-### ServerConfig (Programmatic)
-
-<div className="not-prose">
-  <ApiConstructor signature="struct ServerConfig">
-    <ApiParam
-      name="node_id"
-      type="String"
-      description="Unique identifier for this server node."
-    />
-    <ApiParam
-      name="default_operation_timeout_ms"
-      type="u64"
-      description="Default timeout for operations in milliseconds. Default: 30000"
-    />
-    <ApiParam
-      name="max_concurrent_operations"
-      type="u32"
-      description="Maximum concurrent operations before load shedding. Default: 1000"
-    />
-    <ApiParam
-      name="gc_interval_ms"
-      type="u64"
-      description="Interval between garbage collection runs in milliseconds. Default: 60000"
-    />
-    <ApiParam
-      name="partition_count"
-      type="u32"
-      description="Number of partitions. Default: 271 (PARTITION_COUNT)"
-    />
-    <ApiParam
-      name="security"
-      type="SecurityConfig"
-      description="Security configuration for write validation. Default: SecurityConfig::default()"
-    />
-  </ApiConstructor>
-</div>
-
-### Embedding the Server
-
-<div className="not-prose">
-  <CodeBlock title="main.rs" language="rust" code={embedServerCode} />
-</div>
-
-## Endpoints
-
-The server exposes the following HTTP and WebSocket endpoints:
-
-### Health and Observability
-
-<div className="overflow-x-auto mb-6 not-prose">
-  <table className="w-full text-sm border-collapse">
-    <thead>
-      <tr className="border-b border-card-border">
-        <th className="text-left py-3 px-4 font-semibold text-foreground">Endpoint</th>
-        <th className="text-left py-3 px-4 font-semibold text-foreground">Method</th>
-        <th className="text-left py-3 px-4 font-semibold text-foreground">Description</th>
-      </tr>
-    </thead>
-    <tbody className="text-neutral-600 dark:text-neutral-300">
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-mono">/health</td>
-        <td className="py-3 px-4">GET</td>
-        <td className="py-3 px-4">Detailed health JSON including server state, uptime, and connection count.</td>
-      </tr>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-mono">/health/live</td>
-        <td className="py-3 px-4">GET</td>
-        <td className="py-3 px-4">Kubernetes liveness probe. Returns 200 if the process is alive.</td>
-      </tr>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-mono">/health/ready</td>
-        <td className="py-3 px-4">GET</td>
-        <td className="py-3 px-4">Kubernetes readiness probe. Returns 200 when the server is accepting connections.</td>
-      </tr>
-      <tr>
-        <td className="py-3 px-4 font-mono">/metrics</td>
-        <td className="py-3 px-4">GET</td>
-        <td className="py-3 px-4">Prometheus metrics endpoint. Returns text/plain with counter, histogram, and gauge data.</td>
-      </tr>
-    </tbody>
-  </table>
-</div>
-
-### Client Communication
-
-<div className="overflow-x-auto mb-6 not-prose">
-  <table className="w-full text-sm border-collapse">
-    <thead>
-      <tr className="border-b border-card-border">
-        <th className="text-left py-3 px-4 font-semibold text-foreground">Endpoint</th>
-        <th className="text-left py-3 px-4 font-semibold text-foreground">Method</th>
-        <th className="text-left py-3 px-4 font-semibold text-foreground">Description</th>
-      </tr>
-    </thead>
-    <tbody className="text-neutral-600 dark:text-neutral-300">
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-mono">/ws</td>
-        <td className="py-3 px-4">GET</td>
-        <td className="py-3 px-4">WebSocket upgrade. Primary real-time connection for CRDT sync, queries, and pub/sub. Sends AUTH_REQUIRED on connect.</td>
-      </tr>
-      <tr>
-        <td className="py-3 px-4 font-mono">/sync</td>
-        <td className="py-3 px-4">POST</td>
-        <td className="py-3 px-4">Stateless HTTP sync endpoint. Accepts MsgPack-encoded batched operations, returns deltas and query results.</td>
-      </tr>
-    </tbody>
-  </table>
-</div>
-
-### Admin API
-
-<div className="overflow-x-auto mb-6 not-prose">
-  <table className="w-full text-sm border-collapse">
-    <thead>
-      <tr className="border-b border-card-border">
-        <th className="text-left py-3 px-4 font-semibold text-foreground">Endpoint</th>
-        <th className="text-left py-3 px-4 font-semibold text-foreground">Method</th>
-        <th className="text-left py-3 px-4 font-semibold text-foreground">Auth</th>
-        <th className="text-left py-3 px-4 font-semibold text-foreground">Description</th>
-      </tr>
-    </thead>
-    <tbody className="text-neutral-600 dark:text-neutral-300">
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-mono">/api/status</td>
-        <td className="py-3 px-4">GET</td>
-        <td className="py-3 px-4">No</td>
-        <td className="py-3 px-4">Server status (version, uptime, node info).</td>
-      </tr>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-mono">/api/auth/login</td>
-        <td className="py-3 px-4">POST</td>
-        <td className="py-3 px-4">No</td>
-        <td className="py-3 px-4">Admin login endpoint. Returns JWT for admin API access.</td>
-      </tr>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-mono">/api/admin/cluster/status</td>
-        <td className="py-3 px-4">GET</td>
-        <td className="py-3 px-4">Admin JWT</td>
-        <td className="py-3 px-4">Cluster membership and partition status.</td>
-      </tr>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-mono">/api/admin/maps</td>
-        <td className="py-3 px-4">GET</td>
-        <td className="py-3 px-4">Admin JWT</td>
-        <td className="py-3 px-4">List all maps with record counts and partition info.</td>
-      </tr>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-mono">/api/admin/settings</td>
-        <td className="py-3 px-4">GET, PUT</td>
-        <td className="py-3 px-4">Admin JWT</td>
-        <td className="py-3 px-4">Read or update server configuration at runtime.</td>
-      </tr>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-mono">/api/docs</td>
-        <td className="py-3 px-4">GET</td>
-        <td className="py-3 px-4">No</td>
-        <td className="py-3 px-4">Swagger UI for the admin API (OpenAPI spec at <code>/api/openapi.json</code>).</td>
-      </tr>
-      <tr>
-        <td className="py-3 px-4 font-mono">/admin/*</td>
-        <td className="py-3 px-4">GET</td>
-        <td className="py-3 px-4">No</td>
-        <td className="py-3 px-4">SPA admin dashboard. Serves static files from <code>TOPGUN_ADMIN_DIR</code>.</td>
-      </tr>
-    </tbody>
-  </table>
-</div>
-
-## Docker
-
-See the <a href="/docs/reference/cli#docker">CLI Reference</a> for Docker run examples with environment variable configuration.
-
-## PostgreSQL Storage
-
-The `PostgresDataStore` provides durable write-through persistence via `sqlx::PgPool`. Every mutation is committed to PostgreSQL before the async method returns.
-
-<div className="not-prose">
-  <CodeBlock title="storage.rs" language="rust" code={postgresCode} />
-</div>
-
-<div className="not-prose">
-  <ApiConstructor signature="PostgresDataStore::new(pool, table_name)">
-    <ApiParam
-      name="pool"
-      type="PgPool"
-      description="A sqlx connection pool. Create with PgPool::connect(&quot;postgres://...&quot;)."
-    />
-    <ApiParam
-      name="table_name"
-      type="Option<String>"
-      description="Custom table name. Default: &quot;topgun_maps&quot;. Validated against ^[a-zA-Z_][a-zA-Z0-9_]*$."
-    />
-  </ApiConstructor>
-</div>
-
-Call `store.initialize().await?` after construction to run the schema migration (`CREATE TABLE IF NOT EXISTS`).
-
-## POST /sync Endpoint
-
-<div className="flex items-center gap-2 mb-4 not-prose">
-  <Network className="w-6 h-6 text-brand" />
-  <span className="text-neutral-600 dark:text-neutral-300">Stateless HTTP sync endpoint for serverless environments. Accepts batched operations, returns deltas and query results in a single request-response cycle.</span>
-</div>
-
-<div className="p-4 bg-neutral-100 dark:bg-neutral-900 rounded-lg mb-6 not-prose">
-  <div className="space-y-2 text-sm">
-    <div className="flex gap-2">
-      <span className="font-semibold text-foreground">URL:</span>
-      <code>POST /sync</code>
-    </div>
-    <div className="flex gap-2">
-      <span className="font-semibold text-foreground">Content Type:</span>
-      <code>application/x-msgpack</code> (binary MsgPack)
-    </div>
-    <div className="flex gap-2">
-      <span className="font-semibold text-foreground">Response Format:</span>
-      <code>application/msgpack</code>
-    </div>
-  </div>
-</div>
-
-### Request Schema (HttpSyncRequest)
-
-<div className="not-prose">
-  <ApiConstructor signature="interface HttpSyncRequest">
-    <ApiParam
-      name="clientId"
-      type="string"
-      description="Client identifier. Required."
-    />
-    <ApiParam
-      name="clientHlc"
-      type="Timestamp"
-      description="Client's current Hybrid Logical Clock as an object: { millis: number, counter: number, nodeId: string }. Required."
-    />
-    <ApiParam
-      name="operations?"
-      type="ClientOp[]"
-      description="Batch of operations to push to the server. Each operation contains mapName, key, and record with value and timestamp."
-    />
-    <ApiParam
-      name="syncMaps?"
-      type="SyncMapEntry[]"
-      description="Maps to pull deltas for. Each entry contains mapName (string) and lastSyncTimestamp (Timestamp) indicating the last known server state for that map."
-    />
-    <ApiParam
-      name="queries?"
-      type="HttpQueryRequest[]"
-      description="One-shot queries to execute. Each query contains queryId (string), mapName (string), filter (object), and optional limit (number) and offset (number)."
-    />
-    <ApiParam
-      name="searches?"
-      type="HttpSearchRequest[]"
-      description="One-shot search requests to execute."
-    />
-  </ApiConstructor>
-</div>
-
-### Response Schema (HttpSyncResponse)
-
-<div className="not-prose">
-  <ApiConstructor signature="interface HttpSyncResponse">
-    <ApiParam
-      name="serverHlc"
-      type="Timestamp"
-      description="Server's current HLC timestamp as an object: { millis: number, counter: number, nodeId: string }."
-    />
-    <ApiParam
-      name="ack?"
-      type="{ lastId: string, results?: AckResult[] }"
-      description="Acknowledgment of processed operations. lastId is the ID of the last processed operation. results contains per-operation success/failure details with achievedLevel."
-    />
-    <ApiParam
-      name="deltas?"
-      type="MapDelta[]"
-      description="Delta records for requested maps. Each MapDelta contains mapName (string), records (DeltaRecord[] with key, record: LWWRecord, eventType: 'PUT' | 'REMOVE'), and serverSyncTimestamp (Timestamp)."
-    />
-    <ApiParam
-      name="queryResults?"
-      type="HttpQueryResult[]"
-      description="Results for one-shot queries, matching the queryId from the request."
-    />
-    <ApiParam
-      name="searchResults?"
-      type="HttpSearchResult[]"
-      description="Results for one-shot search requests."
-    />
-    <ApiParam
-      name="errors?"
-      type="HttpSyncError[]"
-      description="Errors for individual operations. Each error contains code (number), message (string), and context (string, optional) identifying the failed operation."
-    />
-  </ApiConstructor>
-</div>
-
-### Example Request
-
-<div className="not-prose mb-4">
-  <CodeBlock language="json" code={httpSyncRequestExample} />
-</div>
-
-<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-4 mb-6 not-prose">
-  <span className="text-sm text-brand">The wire format is <code>application/x-msgpack</code> (binary). The examples above use JSON for readability.</span>
-</div>
-
-### Example Response
-
-<div className="not-prose">
-  <CodeBlock language="json" code={httpSyncResponseExample} />
-</div>
-
-## Graceful Shutdown
-
-The server supports graceful shutdown via SIGTERM or SIGINT:
-
-1. Health state transitions to **Draining**
-2. All active WebSocket connections receive a Close frame
-3. In-flight requests are given up to 30 seconds to complete
-4. Health state transitions to **Stopped**
-
-<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
-  <a href="/docs/reference/data-structures" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Previous</span>
-    <div className="flex items-center gap-2 text-foreground font-semibold">
-      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Data Structures API
-    </div>
-  </a>
-  <a href="/docs/reference/cli" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Next</span>
-    <div className="flex items-center gap-2 text-foreground font-semibold">
-      CLI Reference <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-    </div>
-  </a>
-</div>
+[← Adapters](/docs/reference/adapters) · [MCP →](/docs/reference/mcp)

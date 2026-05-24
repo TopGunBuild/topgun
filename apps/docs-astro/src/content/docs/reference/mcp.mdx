@@ -1,0 +1,217 @@
+---
+title: MCP
+description: Reference for @topgunbuild/mcp-server — Model Context Protocol tools that let AI assistants query and mutate TopGun data.
+order: 50
+---
+
+import { Bot } from 'lucide-react';
+
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <Bot className="w-10 h-10 text-brand" />
+  <h1 className="text-4xl font-bold text-foreground">MCP</h1>
+</div>
+
+`@topgunbuild/mcp-server` lets AI assistants read and mutate your TopGun data through the Model Context Protocol. Drop it into Claude Desktop, Cursor, or any MCP-compatible client and the assistant gains eight tools for querying, mutating, searching, and inspecting your maps.
+
+For the broader story (how to design schemas the model can use, prompting patterns), see the [Building with AI](/docs/guides/building-with-ai) guide.
+
+## Installation and transport
+
+The server ships as `@topgunbuild/mcp-server` on npm and runs over either stdio (default) or HTTP.
+
+### Stdio (Claude Desktop, Cursor)
+
+The server starts when the host AI client spawns it. No long-running process required.
+
+**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+
+```json
+{
+  "mcpServers": {
+    "topgun": {
+      "command": "npx",
+      "args": ["@topgunbuild/mcp-server"],
+      "env": {
+        "TOPGUN_URL": "ws://localhost:8080"
+      }
+    }
+  }
+}
+```
+
+**Cursor** (`~/.cursor/mcp.json`):
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "topgun": {
+        "command": "npx",
+        "args": ["@topgunbuild/mcp-server"],
+        "env": {
+          "TOPGUN_URL": "ws://localhost:8080"
+        }
+      }
+    }
+  }
+}
+```
+
+### HTTP
+
+For remote MCP clients or shared deployments, run the server as a long-lived HTTP service.
+
+```bash
+# Default port 3000
+npx @topgunbuild/mcp-server --http --port 3000
+
+# With auth, restricted maps, mutations disabled
+npx @topgunbuild/mcp-server --http --port 3000 \
+  --url ws://production.example.com:8080 \
+  --token $TOPGUN_TOKEN \
+  --maps tasks,users \
+  --no-mutations
+```
+
+## Programmatic API
+
+For embedding the MCP server inside an existing Node process, use the `TopGunMCPServer` class.
+
+```typescript
+import { TopGunMCPServer } from '@topgunbuild/mcp-server';
+
+const server = new TopGunMCPServer({
+  topgunUrl: 'ws://localhost:8080',
+  authToken: process.env.TOPGUN_TOKEN,
+  allowedMaps: ['tasks', 'users', 'projects'],
+  enableMutations: true,
+  enableSubscriptions: true,
+  defaultLimit: 10,
+  maxLimit: 100,
+  debug: false,
+});
+
+await server.start();
+```
+
+`MCPServerConfig` fields (all optional):
+
+| Field | Default | Description |
+|---|---|---|
+| `name` | `"topgun-mcp-server"` | Server name advertised over MCP. |
+| `version` | `"1.0.0"` | Server version. |
+| `topgunUrl` | `"ws://localhost:8080"` | TopGun WebSocket URL. |
+| `authToken` | none | JWT passed to `client.setAuthToken()`. |
+| `allowedMaps` | unrestricted | Whitelist of map names the assistant may touch. |
+| `enableMutations` | `true` | If `false`, `topgun_mutate` returns an error. |
+| `enableSubscriptions` | `true` | If `false`, `topgun_subscribe` is unavailable. |
+| `defaultLimit` | `10` | Default page size for `topgun_query`. |
+| `maxLimit` | `100` | Hard cap on requested page size. |
+| `subscriptionTimeoutSeconds` | `60` | Maximum lifetime of a `topgun_subscribe` call. |
+| `debug` | `false` | Verbose logging. |
+| `client` | none | Pre-built `TopGunClient` instance (overrides `topgunUrl` + `authToken`). |
+
+`server.start()` spawns the transport (stdio or HTTP) and registers tool handlers.
+
+## Tools
+
+The server exposes eight tools, all prefixed with `topgun_`. The assistant chooses which to invoke based on the natural-language prompt.
+
+### topgun_list_maps
+
+List every map the server knows about.
+
+- **Parameters:** none
+- **Response:** array of `{ name, recordCount, hasFTS, hasVectorIndex }`
+- **Security:** filtered by `allowedMaps` when set
+
+```text
+> What maps are available?
+[lists tasks, users, projects]
+```
+
+### topgun_query
+
+Read records from a map with filters, sorting, and cursor pagination.
+
+- **Parameters:** `{ map, filter?, sort?, limit?, cursor?, fields? }`
+- **Response:** `[{ _key, ...fields }]` plus optional `nextCursor` for pagination
+- **Security:** rejects maps outside `allowedMaps`; clamps `limit` to `maxLimit`
+
+```text
+> Show me unfinished tasks created this week
+[runs topgun_query with where: { done: false, createdAt: { gt: ... } }]
+```
+
+### topgun_mutate
+
+Create, update, or remove a record.
+
+- **Parameters:** `{ map, op: "create" | "update" | "remove", key, value? }`
+- **Response:** `{ success, key }` or an error object
+- **Security:** requires `enableMutations: true`; rejects maps outside `allowedMaps`
+
+```text
+> Add a task: "Write the spec response"
+[runs topgun_mutate with op: 'create', value: { text: '...', done: false }]
+```
+
+### topgun_search
+
+BM25 full-text search across a map.
+
+- **Parameters:** `{ map, query, limit?, minScore?, boost? }`
+- **Response:** `[{ _key, value, score, matchedTerms }]`
+- **Security:** requires FTS enabled for the map on the server
+
+```text
+> Find tasks mentioning "deployment"
+[runs topgun_search with query: 'deployment']
+```
+
+### topgun_subscribe
+
+Subscribe to live updates on a map for a bounded time window. Useful for the assistant to watch for changes during a conversation.
+
+- **Parameters:** `{ map, filter?, durationSeconds? }`
+- **Response:** stream of `{ type: 'add' | 'update' | 'remove', key, value }` until timeout
+- **Security:** requires `enableSubscriptions: true`; capped by `subscriptionTimeoutSeconds`
+
+### topgun_schema
+
+Inspect a map's schema (registered field types, indexes, FTS configuration).
+
+- **Parameters:** `{ map }`
+- **Response:** `{ name, fields, indexes, fts?, vectorIndex? }`
+
+### topgun_stats
+
+Operational stats for a map.
+
+- **Parameters:** `{ map }`
+- **Response:** `{ recordCount, sizeBytes, tombstoneCount, ftsIndexSize?, vectorIndexSize? }`
+
+### topgun_explain
+
+Show the query plan and estimated cost for a query without executing it.
+
+- **Parameters:** `{ map, filter?, sort?, limit? }`
+- **Response:** `{ plan: PlanStep[], estimatedCost, indexesUsed }`
+
+Use this to debug why a query is slow or to confirm the planner is picking the index you expect.
+
+## Security model
+
+Three tunables shape what the assistant can do:
+
+| Tunable | Behavior |
+|---|---|
+| `allowedMaps` | Hard whitelist. Tools refuse to operate on maps outside the list. |
+| `enableMutations` | When `false`, `topgun_mutate` returns an error before touching the database. |
+| `enableSubscriptions` | When `false`, `topgun_subscribe` is unavailable. |
+
+For production deployments, run the MCP server with a service-scoped JWT (via `authToken`) so the underlying TopGun server's authorization policies are also enforced. The MCP layer is defense-in-depth, not a substitute for proper server-side auth.
+
+---
+
+[← Server & CLI](/docs/reference/server) · [Protocol →](/docs/reference/protocol)

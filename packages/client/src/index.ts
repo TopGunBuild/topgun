@@ -8,6 +8,7 @@ import { TopicHandle } from './TopicHandle';
 import { SyncState, VALID_TRANSITIONS, isValidTransition } from './SyncState';
 import { SyncStateMachine } from './SyncStateMachine';
 import { BackpressureError } from './errors/BackpressureError';
+import { AuthRequiredError } from './errors/AuthRequiredError';
 import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
 
 // Cluster imports
@@ -34,7 +35,7 @@ import type {
 // Value exports
 export { SyncEngine, TopGunClient, QueryHandle, LWWMap, Predicates, TopicHandle };
 export { SyncState, VALID_TRANSITIONS, isValidTransition, SyncStateMachine };
-export { BackpressureError, DEFAULT_BACKPRESSURE_CONFIG, DEFAULT_CLUSTER_CONFIG };
+export { BackpressureError, AuthRequiredError, DEFAULT_BACKPRESSURE_CONFIG, DEFAULT_CLUSTER_CONFIG };
 export { logger } from './utils/logger';
 
 // Change tracking exports

@@ -27,11 +27,11 @@ The harness source code is at [`packages/server-rust/benches/load_harness/`](htt
 
 In fire-and-wait mode, each connection sends an `OpBatch`, waits for the server's `OP_ACK`, and records the round-trip latency before sending the next batch. This measures end-to-end request latency including server processing and acknowledgement.
 
-| Metric | Value |
-|--------|-------|
-| **Throughput** | 1,000+ ops/sec |
-| **p50 latency** | < 1,000 ms |
-| **Acked ratio** | >= 80% |
+| Metric | Measured | Baseline floor |
+|--------|----------|----------------|
+| **Throughput** | 37,000+ ops/sec | 30,000 ops/sec |
+| **p50 latency** | 1.5ms | 5ms max |
+| **Acked ratio** | >= 80% | >= 80% |
 
 ### What this means
 
@@ -45,32 +45,42 @@ Fire-and-wait latency represents the worst case for a client that needs confirma
 
 In fire-and-forget mode, connections send batches as fast as possible without waiting for acknowledgement. This measures the server's maximum ingestion rate.
 
-| Metric | Value |
-|--------|-------|
-| **Throughput** | 100,000+ ops/sec |
-| **p50 latency** | < 1,000 ms |
+| Metric | Measured | Baseline floor |
+|--------|----------|----------------|
+| **Throughput** | 480,000+ ops/sec | 380,000 ops/sec |
+| **p50 latency** | < 1,000 ms | < 1,000 ms |
 
 ### What this means
 
-100,000+ ops/sec throughput means the server can handle thousands of concurrent active users, each writing multiple times per second, on a single node. For context:
+480,000+ ops/sec throughput means the server can handle large numbers of concurrent active users, each writing multiple times per second, on a single node. For context (these are aspirational ceilings for a single Rust server node with default settings; production capacity depends on payload size, query complexity, network egress, and hardware):
 
-- A collaborative document editor generating 10 ops/sec per user can support 10,000+ concurrent editors
-- A real-time dashboard ingesting sensor data at 100 ops/sec per source can handle 1,000+ data sources
-- A chat application sending 1 message/sec per user can support 100,000+ active chatters
+- A collaborative document editor generating 10 ops/sec per user can support 48,000+ concurrent editors
+- A real-time dashboard ingesting sensor data at 100 ops/sec per source can handle 4,800+ data sources
+- A chat application sending 1 message/sec per user can support 480,000+ active chatters
+
+See [performance tuning](/docs/deploy/performance) for production capacity planning guidance.
+
+---
+
+## Measurement provenance
+
+The numbers above were measured on 2026-04-18 (two consecutive runs: 483K, 487K ops/sec fire-and-forget) on an M1 Max MacBook Pro with the `load_harness` driving 200 concurrent WebSocket connections against an in-process server. The harness retries on `ENOBUFS` with exponential backoff (introduced by SPEC-214) to avoid macOS kernel-buffer exhaustion artifacts.
+
+An earlier 2026-03-27 measurement reported 560K ops/sec fire-and-forget; that figure was retired after SPEC-214's break-on-ENOBUFS fix surfaced that the prior harness was over-counting kernel-buffered drops. The current 480K+ figure is the post-fix steady-state measurement.
 
 ---
 
 ## Baseline Thresholds
 
-The load harness enforces pass/fail thresholds defined in [`baseline.json`](https://github.com/topgunbuild/topgun/tree/main/packages/server-rust/benches/load_harness/baseline.json):
+The load harness enforces pass/fail thresholds defined in [`baseline.json`](https://github.com/topgunbuild/topgun/tree/main/packages/server-rust/benches/load_harness/baseline.json). These are FLOORS (minimum acceptable), not the measured numbers above:
 
-| Mode | Metric | Threshold |
-|------|--------|-----------|
-| Fire-and-wait | Min ops/sec | 1,000 |
-| Fire-and-wait | Max p50 latency | 1,000 ms |
-| Fire-and-forget | Min ops/sec | 100,000 |
-| Fire-and-forget | Max p50 latency | 1,000 ms |
-| Both | Regression tolerance | 20% |
+| Mode | Metric | Floor (baseline.json) | Measured (2026-04-18) |
+|------|--------|-----------------------|-----------------------|
+| Fire-and-wait | Min ops/sec | 30,000 | 37,000+ |
+| Fire-and-wait | Max p50 latency | 5ms | 1.5ms |
+| Fire-and-forget | Min ops/sec | 380,000 | 480,000+ |
+| Fire-and-forget | Max p50 latency | 1,000ms | < 1,000ms |
+| Both | Regression tolerance | 20% | — |
 
 These thresholds are checked in CI. A regression greater than 20% from baseline triggers a warning.
 
@@ -89,6 +99,9 @@ cargo bench --bench load_harness
 
 # Fire-and-forget throughput test
 cargo bench --bench load_harness -- --fire-and-forget --interval 0
+
+# Write results as JSON for automated comparison
+cargo bench --bench load_harness -- --json-output
 ```
 
 Results are printed as ASCII tables in the terminal. Add `--json-output` to write results as JSON for automated comparison.
@@ -97,10 +110,10 @@ Results are printed as ASCII tables in the terminal. Add `--json-output` to writ
 
 ## Hardware Considerations
 
-Benchmark results vary with hardware. The numbers above were measured on a development machine. Key factors:
+Benchmark results vary with hardware. The numbers above were measured on an M1 Max MacBook Pro (2026-04-18). Key factors:
 
 - **CPU cores:** More cores improve throughput (tokio uses a multi-threaded runtime)
 - **Memory:** The in-process harness runs server and clients in the same process, requiring more RAM than a standalone server
 - **OS:** Linux generally provides better networking performance than macOS for high-connection-count scenarios
 
-For production capacity planning, run the load harness on hardware similar to your deployment target.
+For production capacity planning, run the load harness on hardware similar to your deployment target. See [performance tuning](/docs/deploy/performance) for production configuration guidance.

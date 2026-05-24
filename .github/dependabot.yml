@@ -1,0 +1,55 @@
+version: 2
+updates:
+  # GitHub Actions versions — keeps actions/* and docker/* pinned to the
+  # latest stable major, opens PRs for new minors.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: UTC
+    open-pull-requests-limit: 5
+
+  # npm (root workspace) — covers every package.json under packages/, apps/,
+  # examples/, and the root. pnpm's workspace protocol is preserved.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: UTC
+    open-pull-requests-limit: 10
+    groups:
+      # Cluster security-relevant ecosystem deps into one PR to keep noise low.
+      auth:
+        patterns:
+          - 'better-auth'
+          - '@clerk/*'
+          - 'jsonwebtoken'
+          - '@types/jsonwebtoken'
+      react:
+        patterns:
+          - 'react'
+          - 'react-dom'
+          - '@types/react'
+          - '@types/react-dom'
+      build:
+        patterns:
+          - 'tsup'
+          - 'typescript'
+          - 'eslint*'
+          - 'prettier'
+          - 'vite'
+          - '@vitejs/*'
+
+  # Cargo workspace.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: UTC
+    open-pull-requests-limit: 10

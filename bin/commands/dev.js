@@ -22,12 +22,12 @@ module.exports = async function dev(options) {
   console.log('');
 
   // Determine Rust server binary path
-  const rustBinaryPath = path.join(process.cwd(), 'target/release/test-server');
+  const rustBinaryPath = path.join(process.cwd(), 'target/release/topgun-server');
 
   if (!fs.existsSync(rustBinaryPath)) {
     console.error(chalk.red('  Error: Rust server binary not found.'));
     console.log(chalk.yellow(`  Expected: ${rustBinaryPath}`));
-    console.log(chalk.yellow('  Run: cargo build --release -p topgun-server --bin test-server'));
+    console.log(chalk.yellow('  Run: cargo build --release -p topgun-server --bin topgun-server'));
     process.exit(1);
   }
 

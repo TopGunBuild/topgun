@@ -168,10 +168,10 @@ describe('QueryHandle', () => {
       handle.subscribe(() => {}); // Activate handle
     });
 
-    describe('onChanges', () => {
+    describe('onDelta', () => {
       test('should subscribe to change events', () => {
         const changeListener = jest.fn();
-        const unsubscribe = handle.onChanges(changeListener);
+        const unsubscribe = handle.onDelta(changeListener);
 
         handle.onResult([
           { key: 'a', value: { name: 'Alice' } },
@@ -189,7 +189,7 @@ describe('QueryHandle', () => {
 
       test('should unsubscribe from change events', () => {
         const changeListener = jest.fn();
-        const unsubscribe = handle.onChanges(changeListener);
+        const unsubscribe = handle.onDelta(changeListener);
 
         // First update - should trigger listener
         handle.onResult([{ key: 'a', value: { name: 'Alice' } }], 'server');
@@ -207,8 +207,8 @@ describe('QueryHandle', () => {
         const listener1 = jest.fn();
         const listener2 = jest.fn();
 
-        handle.onChanges(listener1);
-        handle.onChanges(listener2);
+        handle.onDelta(listener1);
+        handle.onDelta(listener2);
 
         handle.onResult([{ key: 'a', value: { name: 'Alice' } }], 'server');
 
@@ -220,8 +220,8 @@ describe('QueryHandle', () => {
         const errorListener = jest.fn(() => { throw new Error('Test error'); });
         const normalListener = jest.fn();
 
-        handle.onChanges(errorListener);
-        handle.onChanges(normalListener);
+        handle.onDelta(errorListener);
+        handle.onDelta(normalListener);
 
         handle.onResult([{ key: 'a', value: { name: 'Alice' } }], 'server');
 
@@ -253,7 +253,7 @@ describe('QueryHandle', () => {
 
       test('should not affect change listeners', () => {
         const listener = jest.fn();
-        handle.onChanges(listener);
+        handle.onDelta(listener);
 
         handle.onResult([{ key: 'a', value: { name: 'Alice' } }], 'server');
         handle.consumeChanges();

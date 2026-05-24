@@ -1,73 +1,46 @@
-# React + TypeScript + Vite
+# admin-dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+The TopGun admin dashboard — a Vite + React 19 SPA that connects to a running TopGun server for operator workflows: browsing maps, inspecting cluster health, viewing recent operations, and reading metrics.
 
-Currently, two official plugins are available:
+Private package — not published to npm. Shipped as a Docker image bundled with the server's `docker compose --profile admin` deploy.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## Quick start
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+# From the repo root
+pnpm install
+pnpm --filter admin-dashboard dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Vite serves the SPA at `http://localhost:5173`. It expects a TopGun server reachable at `ws://localhost:8080` by default; override via `VITE_TOPGUN_SERVER_URL` for a remote server, and `VITE_TOPGUN_METRICS_URL` for the Prometheus endpoint.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Build
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+pnpm --filter admin-dashboard build      # static bundle into dist/
+pnpm --filter admin-dashboard preview    # serve the built bundle locally
+pnpm --filter admin-dashboard typecheck
 ```
+
+## Deploy via Docker Compose
+
+```bash
+# Boots admin-ui (port 3001) + server (8080) + postgres
+docker compose --profile admin up
+```
+
+The `Dockerfile` does a two-stage build (Node → nginx) and serves the bundle at port 3000 in the container, mapped to host 3001 in `docker-compose.yml`. Set `VITE_TOPGUN_SERVER_URL` as a build-time arg if the server URL differs from the in-container default.
+
+## Layout
+
+```
+src/
+├── App.tsx                # Top-level shell + Server-Unavailable overlay
+├── features/              # Feature folders (maps, cluster, metrics, setup wizard)
+├── components/            # Reusable UI
+└── lib/                   # Client wiring + helpers
+```
+
+## Contributing
+
+See the repo-root [`CONTRIBUTING.md`](../../CONTRIBUTING.md).

@@ -343,7 +343,7 @@ impl NetworkModule {
         // Emit the boot-log line UNCONDITIONALLY — even if either factory is None,
         // operators grepping `topgun_server::bootstrap` for the boot fingerprint must
         // see the line with `count=0` rather than a silent no-emit. Symmetric with the
-        // test-server path's unconditional emission.
+        // topgun-server path's unconditional emission.
         tracing::info!(
             target: "topgun_server::bootstrap",
             count = scalar_count,
@@ -416,7 +416,7 @@ struct AppServices {
         >,
     >,
     /// `Arc<LockRegistry>` for disconnect cleanup. `None` when the coordination
-    /// service has not been wired into this router (e.g. `test_server` without locks).
+    /// service has not been wired into this router (e.g. `topgun_server` without locks).
     lock_registry: Option<Arc<crate::service::domain::LockRegistry>>,
     /// `Arc<TopicRegistry>` for disconnect cleanup.
     topic_registry: Option<Arc<crate::service::domain::messaging::TopicRegistry>>,

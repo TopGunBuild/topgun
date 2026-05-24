@@ -8,6 +8,7 @@ import {
     Database,
     BookOpen,
     LifeBuoy,
+    Cloud,
 } from 'lucide-react';
 
 const SidebarItem = ({
@@ -55,7 +56,7 @@ const SubItem = ({ to, children, currentPath }: { to: string; children: React.Re
     );
 };
 
-type SectionKey = 'started' | 'tutorials' | 'concepts' | 'guides' | 'reference' | 'resources';
+type SectionKey = 'started' | 'tutorials' | 'concepts' | 'guides' | 'deploy' | 'reference' | 'resources';
 
 // Helper to determine initial expanded section from path
 const getInitialExpandedSection = (pathname: string): Record<SectionKey, boolean> => {
@@ -64,21 +65,30 @@ const getInitialExpandedSection = (pathname: string): Record<SectionKey, boolean
         tutorials: false,
         concepts: false,
         guides: false,
+        deploy: false,
         reference: false,
         resources: false,
     };
+
+    // Resource pages that live under /docs/guides/ but belong to the Resources section.
+    // Must be checked BEFORE the /docs/guides/ startsWith so the Resources section opens.
+    const resourceGuidePaths = ['/docs/guides/troubleshooting', '/docs/guides/building-with-ai'];
 
     if (pathname.startsWith('/docs/tutorials/') || pathname === '/docs/tutorials') {
         sections.tutorials = true;
     } else if (pathname.startsWith('/docs/concepts/') || pathname === '/docs/concepts') {
         sections.concepts = true;
+    } else if (resourceGuidePaths.includes(pathname)) {
+        sections.resources = true;
     } else if (pathname.startsWith('/docs/guides/') || pathname === '/docs/guides') {
         sections.guides = true;
+    } else if (pathname.startsWith('/docs/deploy/') || pathname === '/docs/deploy') {
+        sections.deploy = true;
     } else if (pathname.startsWith('/docs/reference/') || pathname === '/docs/reference') {
         sections.reference = true;
     } else if (pathname === '/docs/faq') {
         sections.started = true;
-    } else if (pathname === '/docs/community' || pathname === '/docs/changelog' || pathname === '/docs/benchmarks') {
+    } else if (pathname === '/docs/community' || pathname === '/docs/changelog' || pathname === '/docs/benchmarks' || pathname === '/docs/for-coding-agents') {
         sections.resources = true;
     } else if (pathname === '/docs/roadmap') {
         sections.started = true;
@@ -114,10 +124,10 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                 </SidebarItem>
                 {expandedSections.started && (
                     <div className="mt-1 space-y-1">
-                        <SubItem to="/docs/intro" currentPath={currentPath}>Introduction</SubItem>
+                        <SubItem to="/docs/intro" currentPath={currentPath}>Welcome</SubItem>
                         <SubItem to="/docs/comparison" currentPath={currentPath}>Comparison</SubItem>
                         <SubItem to="/docs/installation" currentPath={currentPath}>Installation</SubItem>
-                        <SubItem to="/docs/quick-start" currentPath={currentPath}>Quick Start</SubItem>
+                        <SubItem to="/docs/quickstart" currentPath={currentPath}>Quickstart</SubItem>
                         <SubItem to="/docs/faq" currentPath={currentPath}>FAQ</SubItem>
                         <SubItem to="/docs/roadmap" currentPath={currentPath}>Roadmap</SubItem>
                     </div>
@@ -154,8 +164,8 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                     <div className="mt-1 space-y-1">
                         <SubItem to="/docs/concepts" currentPath={currentPath}>Overview</SubItem>
                         <SubItem to="/docs/concepts/local-first" currentPath={currentPath}>Local-First</SubItem>
-                        <SubItem to="/docs/concepts/crdt-hlc" currentPath={currentPath}>CRDTs & Time</SubItem>
-                        <SubItem to="/docs/concepts/sync-protocol" currentPath={currentPath}>Sync Protocol</SubItem>
+                        <SubItem to="/docs/concepts/crdt-hlc" currentPath={currentPath}>CRDTs in TopGun</SubItem>
+                        <SubItem to="/docs/concepts/sync-protocol" currentPath={currentPath}>Sync, conflicts, HLC</SubItem>
                         <SubItem to="/docs/concepts/data-structures" currentPath={currentPath}>Data Structures</SubItem>
                     </div>
                 )}
@@ -173,37 +183,37 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                 {expandedSections.guides && (
                     <div className="mt-1 space-y-1">
                         <SubItem to="/docs/guides" currentPath={currentPath}>All Guides</SubItem>
+                        <SubItem to="/docs/guides/realtime-collaboration" currentPath={currentPath}>Real-time collaboration</SubItem>
+                        <SubItem to="/docs/guides/offline-first" currentPath={currentPath}>Offline-first apps</SubItem>
+                        <SubItem to="/docs/guides/live-notifications" currentPath={currentPath}>Live notifications</SubItem>
+                        <SubItem to="/docs/guides/schema-typed-data" currentPath={currentPath}>Schema-typed data</SubItem>
+                        <SubItem to="/docs/guides/search-and-live-queries" currentPath={currentPath}>Search & live queries</SubItem>
+                        <SubItem to="/docs/guides/counters-and-locks" currentPath={currentPath}>Counters & locks</SubItem>
                         <SubItem to="/docs/guides/authentication" currentPath={currentPath}>Authentication</SubItem>
                         <SubItem to="/docs/guides/migrating-from-firebase" currentPath={currentPath}>Migrating from Firebase</SubItem>
                         <SubItem to="/docs/guides/migrating-from-replicache" currentPath={currentPath}>Migrating from Replicache</SubItem>
                         <SubItem to="/docs/guides/migrating-from-supabase-realtime" currentPath={currentPath}>Migrating from Supabase Realtime</SubItem>
                         <SubItem to="/docs/guides/migrating-from-yjs" currentPath={currentPath}>Migrating from Y.js</SubItem>
-                        <SubItem to="/docs/guides/security" currentPath={currentPath}>Security (TLS)</SubItem>
-                        <SubItem to="/docs/guides/rbac" currentPath={currentPath}>RBAC</SubItem>
-                        <SubItem to="/docs/guides/live-queries" currentPath={currentPath}>Live Queries</SubItem>
-                        <SubItem to="/docs/guides/sync-state" currentPath={currentPath}>Sync State</SubItem>
-                        <SubItem to="/docs/guides/sql-queries" currentPath={currentPath}>SQL Queries</SubItem>
-                        <SubItem to="/docs/guides/schema" currentPath={currentPath}>Schema & Type Safety</SubItem>
-                        <SubItem to="/docs/guides/indexing" currentPath={currentPath}>Indexing</SubItem>
-                        <SubItem to="/docs/guides/full-text-search" currentPath={currentPath}>Full-Text Search</SubItem>
-                        <SubItem to="/docs/guides/adaptive-indexing" currentPath={currentPath}>Adaptive Indexing</SubItem>
-                        <SubItem to="/docs/guides/pub-sub" currentPath={currentPath}>Pub/Sub (Topics)</SubItem>
-                        <SubItem to="/docs/guides/ttl" currentPath={currentPath}>Time-To-Live (TTL)</SubItem>
-                        <SubItem to="/docs/guides/write-concern" currentPath={currentPath}>Write Concern</SubItem>
-                        <SubItem to="/docs/guides/entry-processor" currentPath={currentPath}>Entry Processor</SubItem>
-                        <SubItem to="/docs/guides/pn-counter" currentPath={currentPath}>PN-Counter</SubItem>
-                        <SubItem to="/docs/guides/event-journal" currentPath={currentPath}>Event Journal</SubItem>
-                        <SubItem to="/docs/guides/conflict-resolvers" currentPath={currentPath}>Conflict Resolvers</SubItem>
-                        <SubItem to="/docs/guides/interceptors" currentPath={currentPath}>Interceptors</SubItem>
-                        <SubItem to="/docs/guides/distributed-locks" currentPath={currentPath}>Distributed Locks</SubItem>
-                        <SubItem to="/docs/guides/adoption-path" currentPath={currentPath}>Adoption Path</SubItem>
-                        <SubItem to="/docs/guides/deployment" currentPath={currentPath}>Deployment</SubItem>
-                        <SubItem to="/docs/guides/cluster-client" currentPath={currentPath}>Cluster Client</SubItem>
-                        <SubItem to="/docs/guides/cluster-replication" currentPath={currentPath}>Cluster Replication</SubItem>
-                        <SubItem to="/docs/guides/observability" currentPath={currentPath}>Observability</SubItem>
-                        <SubItem to="/docs/guides/performance" currentPath={currentPath}>Performance</SubItem>
-                        <SubItem to="/docs/guides/mcp-server" currentPath={currentPath}>MCP Server</SubItem>
-                        <SubItem to="/docs/guides/troubleshooting" currentPath={currentPath}>Troubleshooting</SubItem>
+                    </div>
+                )}
+            </div>
+
+            <div className="mb-4">
+                <SidebarItem
+                    icon={Cloud}
+                    hasSub
+                    expanded={expandedSections.deploy}
+                    onClick={() => toggleSection('deploy')}
+                >
+                    Deploy
+                </SidebarItem>
+                {expandedSections.deploy && (
+                    <div className="mt-1 space-y-1">
+                        <SubItem to="/docs/deploy" currentPath={currentPath}>Overview</SubItem>
+                        <SubItem to="/docs/deploy/self-host" currentPath={currentPath}>Self-host</SubItem>
+                        <SubItem to="/docs/deploy/storage-backends" currentPath={currentPath}>Storage backends</SubItem>
+                        <SubItem to="/docs/deploy/performance" currentPath={currentPath}>Performance</SubItem>
+                        <SubItem to="/docs/deploy/configuration" currentPath={currentPath}>Configuration</SubItem>
                     </div>
                 )}
             </div>
@@ -220,12 +230,12 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                 {expandedSections.reference && (
                     <div className="mt-1 space-y-1">
                         <SubItem to="/docs/reference" currentPath={currentPath}>Overview</SubItem>
-                        <SubItem to="/docs/reference/client" currentPath={currentPath}>Client API</SubItem>
-                        <SubItem to="/docs/reference/data-structures" currentPath={currentPath}>Data Structures API</SubItem>
-                        <SubItem to="/docs/reference/server" currentPath={currentPath}>Server API</SubItem>
-                        <SubItem to="/docs/reference/cli" currentPath={currentPath}>CLI Reference</SubItem>
-                        <SubItem to="/docs/reference/adapter" currentPath={currentPath}>Adapter API</SubItem>
-                        <SubItem to="/docs/reference/react-hooks" currentPath={currentPath}>React Hooks</SubItem>
+                        <SubItem to="/docs/reference/client" currentPath={currentPath}>Client</SubItem>
+                        <SubItem to="/docs/reference/core" currentPath={currentPath}>Core</SubItem>
+                        <SubItem to="/docs/reference/react" currentPath={currentPath}>React</SubItem>
+                        <SubItem to="/docs/reference/adapters" currentPath={currentPath}>Adapters</SubItem>
+                        <SubItem to="/docs/reference/server" currentPath={currentPath}>Server & CLI</SubItem>
+                        <SubItem to="/docs/reference/mcp" currentPath={currentPath}>MCP</SubItem>
                         <SubItem to="/docs/reference/protocol" currentPath={currentPath}>Protocol</SubItem>
                     </div>
                 )}
@@ -245,6 +255,9 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                         <SubItem to="/docs/community" currentPath={currentPath}>Community & Support</SubItem>
                         <SubItem to="/docs/changelog" currentPath={currentPath}>Changelog</SubItem>
                         <SubItem to="/docs/benchmarks" currentPath={currentPath}>Benchmarks</SubItem>
+                        <SubItem to="/docs/guides/troubleshooting" currentPath={currentPath}>Troubleshooting</SubItem>
+                        <SubItem to="/docs/for-coding-agents" currentPath={currentPath}>For coding agents</SubItem>
+                        <SubItem to="/docs/guides/building-with-ai" currentPath={currentPath}>Building with AI</SubItem>
                     </div>
                 )}
             </div>

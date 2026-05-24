@@ -322,11 +322,11 @@ describe('HybridQueryHandle', () => {
   });
 
   describe('change tracking', () => {
-    it('should track changes via onChanges', () => {
+    it('should track changes via onDelta', () => {
       const handle = new HybridQueryHandle<{ title: string }>(mockSyncEngine, 'articles');
       const changeCallback = jest.fn();
 
-      handle.onChanges(changeCallback);
+      handle.onDelta(changeCallback);
 
       // Add a document
       handle.onUpdate('doc1', { title: 'Test' }, 2.0, []);

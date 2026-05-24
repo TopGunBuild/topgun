@@ -17,7 +17,7 @@ const createMockQueryHandle = () => {
         if (idx >= 0) dataListeners.splice(idx, 1);
       };
     }),
-    onChanges: jest.fn((cb) => {
+    onDelta: jest.fn((cb) => {
       changeListeners.push(cb);
       return () => {
         const idx = changeListeners.indexOf(cb);

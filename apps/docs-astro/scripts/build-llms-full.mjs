@@ -44,21 +44,22 @@ const OUTPUT_PATH = join(DOCS_ROOT, 'public', 'llms-full.txt');
 // (deployment/observability/performance — irrelevant to "build a todo app").
 const ALLOWLIST = [
   'intro.mdx',
-  'quick-start.mdx',
+  'quickstart.mdx',
   'installation.mdx',
   'concepts/index.mdx',
   'concepts/local-first.mdx',
   'concepts/crdt-hlc.mdx',
   'concepts/sync-protocol.mdx',
   'concepts/data-structures.mdx',
-  'guides/schema.mdx',
-  'guides/mcp-server.mdx',
+  'guides/schema-typed-data.mdx',     // Renamed from guides/schema.mdx — teaches TopGunClient<TSchema> paradigm
+  'guides/offline-first.mdx',        // Net-new — teaches the canonical local-first story agents cannot reconstruct from other pages
   'guides/building-with-ai.mdx',     // Linked from llms.txt — agents should find it via their RAG
   'guides/authentication.mdx',
   'reference/client.mdx',
-  'reference/react-hooks.mdx',
-  'reference/data-structures.mdx',
+  'reference/react.mdx',
+  'reference/core.mdx',
   'comparison.mdx',
+  'for-coding-agents.mdx',  // Curated cheatsheet for LLM coding agents — canonical patterns not reconstructable from other allowlisted pages
 ];
 
 // 200 KB budget — typical limit LLM agents reserve for project context.

@@ -8,7 +8,7 @@ import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight } from 'lucide-react';
 import { AlertBox } from '../../../components/docs/AlertBox';
 
-<AlertBox variant="danger" title="Read this first — what's shipped vs. planned" text="TopGun does NOT replicate Replicache's server-mutator + client-side optimistic-mutation model. CRDT-merge semantics (LWW-Map / OR-Map by HLC) remove the need for explicit mutator functions, but they also mean there is no server-authoritative custom mutation logic. Replicache's Pull/Push protocol and per-mutator validation logic must be re-architected, not ported: validation in TopGun runs as per-map ACL booleans plus (planned) Entry Processor — not as per-mutation server functions. Replicache useSubscribe with query.scan and pluggable indexes maps to client.query() with predicates, but pluggable secondary indexes are still on the roadmap (see /docs/guides/indexing). Reference: /docs/roadmap." />
+<AlertBox variant="danger" title="Read this first — what's shipped vs. planned" text="TopGun does NOT replicate Replicache's server-mutator + client-side optimistic-mutation model. CRDT-merge semantics (LWW-Map / OR-Map by HLC) remove the need for explicit mutator functions, but they also mean there is no server-authoritative custom mutation logic. Replicache's Pull/Push protocol and per-mutator validation logic must be re-architected, not ported: validation in TopGun runs as per-map ACL booleans plus (planned) Entry Processor — not as per-mutation server functions. Replicache useSubscribe with query.scan and pluggable indexes maps to client.query() with predicates, but pluggable secondary indexes are still on the roadmap. Reference: /docs/roadmap." />
 
 <div className="flex items-center gap-2 text-sm text-neutral-500 mt-8 mb-8 overflow-hidden whitespace-nowrap">
   <span className="text-foreground font-medium">Docs</span>
@@ -67,7 +67,7 @@ This guide is for Replicache users (including those on the deprecated upstream) 
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Pluggable indexes</td>
         <td className="py-3 px-4 text-foreground">Planned</td>
-        <td className="py-3 px-4 text-neutral-500">Pluggable secondary indexes are on the roadmap — see <a href="/docs/guides/indexing">/docs/guides/indexing</a></td>
+        <td className="py-3 px-4 text-neutral-500">Pluggable secondary indexes are on the roadmap — see <a href="/docs/roadmap">/docs/roadmap</a></td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Replicache license fee</td>
@@ -284,7 +284,7 @@ Replicache groups multi-key writes inside a single mutator function so they appl
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Cluster (current)</td>
         <td className="py-3 px-4 text-yellow-600 dark:text-yellow-400">Partition-routing, no Raft</td>
-        <td className="py-3 px-4 text-neutral-500">Safe when one node owns the partition; weaker guarantees under node failure — see <a href="/docs/guides/cluster-replication">Cluster Replication</a></td>
+        <td className="py-3 px-4 text-neutral-500">Safe when one node owns the partition; weaker guarantees under node failure — see <a href="/docs/roadmap">/docs/roadmap</a></td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Cluster (planned)</td>
@@ -295,7 +295,7 @@ Replicache groups multi-key writes inside a single mutator function so they appl
   </table>
 </div>
 
-For a first migration, start on single-node. The partition-routed cluster mode works but does not yet have Raft-backed consensus; consult the [Cluster Replication guide](/docs/guides/cluster-replication) before running cluster in production.
+For a first migration, start on single-node. The partition-routed cluster mode works but does not yet have Raft-backed consensus; see the [roadmap](/docs/roadmap) for cluster-safety status.
 
 ## Why migrate?
 

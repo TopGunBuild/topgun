@@ -5,6 +5,161 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+> Versions below 0.12 are pre-release internal milestones — TopGun's public
+> history begins at v2.0.0.
+
+## [2.0.0] - 2026-05-23
+
+> First general-availability release of TopGun v2. Complete rewrite from the v1
+> gun.js port. New Rust server, new client API, embedded backend by default,
+> single-node production-ready.
+
+### Breaking Changes
+
+- **SDK API unified on `.subscribe` / `.onDelta`** — removed the old per-handle
+  observe/onChange variants. `client.getMap(name).subscribe(fn)` returns an
+  unsubscribe handle on both LWW and OR maps.
+- **`TopGunClient` is now generic** — `new TopGunClient<TSchema>({...})`. Map
+  and query accessors narrow types from the schema. Untyped (no generic) still
+  works.
+- **`TopGun` facade removed** — import and instantiate `TopGunClient` directly.
+- **`@topgunbuild/client` IDBAdapter export removed** — use
+  `@topgunbuild/adapters/IDBAdapter` (memory-first queueing implementation).
+- **Server binary renamed `test-server` → `topgun-server`** — `cargo run --bin
+  topgun-server --release` everywhere. The Docker image artifact path was
+  already `/usr/local/bin/topgun-server`.
+- **`JWT_SECRET` is required** — the server refuses to boot with the previous
+  baked-in default and exits with a clear error if neither `JWT_SECRET` nor
+  `TOPGUN_NO_AUTH=1` is set.
+- **`@topgunbuild/client` `client.executeOnKey` / `executeOnKeys` and
+  `ConflictResolverClient.register` / `unregister` / `list` now throw** —
+  server-side custom entry processors and conflict resolvers require a WASM
+  sandbox that is on the v2.x roadmap. Built-in CRDT merge logic and
+  `useMergeRejections` / `ConflictResolverClient.onRejection` are unchanged.
+- **`useEntryProcessor` and `useConflictResolver` React hooks removed.**
+- **Default storage backend is embedded redb** (`STORAGE_BACKEND=redb`).
+  Postgres still works via `STORAGE_BACKEND=postgres` + `DATABASE_URL`.
+  The legacy SQLite server adapter was removed.
+
+### Added
+
+#### Embedded Storage (redb)
+- **redb default** — server writes survive restart with no external
+  dependency. File location configurable via `TOPGUN_REDB_PATH`
+  (default `./topgun.redb`).
+- **Production defaults for in-memory cache + write-behind buffer** —
+  `TOPGUN_MAX_RAM_MB`, `TOPGUN_EVICTION_HIGH_PCT`, `TOPGUN_EVICTION_LOW_PCT`,
+  `TOPGUN_EVICTION_INTERVAL_MS`, `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS`,
+  `TOPGUN_WRITEBEHIND_BATCH_SIZE`, `TOPGUN_WRITEBEHIND_CAPACITY`. See
+  `CLAUDE.md` for ranges.
+- **`TOPGUN_CORS_ORIGINS`** — comma-separated env var to enable browser
+  cross-origin access (default deny-all).
+- **Scalar index startup rebuild** with durability-before-ack contract.
+
+#### Client SDK
+- **`NullConnectionProvider`** — `TopGunClient` boots without a `serverUrl`
+  for pure local-only apps.
+- **`AuthRequiredError`** + `TopGunClientConfig.onAuthRequired` callback —
+  when the server sends `AUTH_REQUIRED` with no token configured, the
+  client now logs warn + invokes the callback instead of parking silently.
+- **`useSyncState`** + `useMapWithSyncState` + `useORMapWithSyncState`
+  React hooks for surface-level write-concern UX.
+- **`RecordSyncStateTracker`** in `SyncEngine`.
+
+#### Tooling
+- **`create-topgun-app`** — `npx create-topgun-app my-app` scaffolds a
+  working Vite + React + TopGun app with a hook-first todo demo.
+- **Docker images on GHCR** — `ghcr.io/topgunbuild/topgun-server:latest`
+  (multi-arch linux/amd64 + linux/arm64).
+- **`@topgunbuild/mcp-server`** — MCP server for Claude Desktop and Cursor.
+  Exposes eight tools (`topgun_query`, `topgun_mutate`, `topgun_search`,
+  `topgun_subscribe`, `topgun_schema`, `topgun_stats`, `topgun_explain`,
+  `topgun_list_maps`).
+
+#### Cluster (single-node stable; cluster-mode partition-routing in progress)
+- **Quorum-election state machine** replacing the discover-then-join protocol.
+- **Cluster member lifecycle fixes** — `MemberAdded` events, disconnect on
+  `MemberRemoved`, rejoin deduplication, no-auth bypass for dev clusters.
+
+#### Docs
+- New migration guides: Firebase, Y.js, Replicache, Supabase Realtime.
+- New `/docs/guides/security` and `/docs/guides/mcp-server` guides.
+- Roadmap, FAQ, troubleshooting, benchmarks rebuilt.
+- `building-with-ai.mdx` AI Builder Guide with hook-first canon + MCP snippets.
+- `llms.txt` + `llms-full.txt` for AI assistants.
+- "Coming from X" comparison landing component.
+- `SECURITY.md` responsible-disclosure policy.
+
+### Changed
+
+- Hero / landing positioning to outcome-first: "Build real-time apps that work
+  offline."
+- Landing fork (`landing-astro-next`) merged into the unified `docs-astro` app.
+- Performance benchmarks: fire-and-forget reported as 483K ops/sec
+  (corrected from a retired 560K figure).
+- `TopGunClient.close()` is now async; all callers updated.
+
+### Fixed
+
+- 3 critical npm advisories in the prod dep tree resolved by bumping
+  `better-auth >= 1.4.17` (2FA bypass), `@clerk/clerk-react >= 5.61.6`
+  (middleware bypass), and forcing `fast-xml-parser >= 5.3.5` via pnpm
+  override (RSS DOCTYPE bypass via `@astrojs/rss`).
+- `ClusterState::update_view` made monotonic to prevent stale-view clobber.
+- `topgun-server --port` default normalized to 8080; `--port 0` honored for
+  ephemeral allocation in tests.
+- `STORAGE_BACKEND=null` propagated through cluster spawn env (cluster test
+  stability).
+- Numerous cluster-routing teardown fixes (await `pool.close()`,
+  `verifier.close()`, `removeNode` promises).
+- `@topgunbuild/client` `pino-pretty` redirected to stderr.
+- `apps/admin-dashboard` Server-Unavailable overlay no longer displays a
+  non-existent `cargo run --bin topgun-server` command (the name now
+  matches the actual binary).
+- `apps/docs-astro/src/content/docs/guides/index.mdx` rewritten to list only
+  guides that actually exist (was 22 cards, 9+ pointed at 404).
+- 13 stale code samples in docs-astro corrected (`map.getAll()`, `auth: {token}`,
+  `useTopic` destructuring, `create({...})`, `client.getTopic`, `cargo run --bin
+  test-server`, landing "one binary" claim, `IDBAdapter('my-app')`, port 8090,
+  `topgun_get/set`, quick-start slug).
+- 14 SPEC-NNN references removed from `packages/server-rust/src/` to honor
+  the CLAUDE.md code-comments convention.
+
+### Removed
+
+- **`TopGun` facade** and `TopGun.test.ts`.
+- **`@topgunbuild/client` `IDBAdapter` re-export** (use `@topgunbuild/adapters`).
+- **Legacy SQLite server adapter** (`BetterSqlite3Adapter`) — superseded by redb.
+- **`WHITEPAPER.md`, `MIGRATION.md`, `TESTING.md`, `TODO_NEXT.md`** — outcome-
+  level positioning conflicted with `CLAUDE.md`; superseded by docs-astro.
+- **`specifications/` directory** (15 monolithic spec files) and `docs/`
+  directory (4 legacy markdown pages) — content fully ported to
+  `apps/docs-astro/`.
+- **`start-clerk-server.sh`** — TS-server-era leftover; the notes-app README
+  was rewritten to use `pnpm start:server` directly.
+- **`scripts/analyze-bottlenecks.md`** — referenced a non-existent
+  `profile-server.sh` and cited stale benchmark numbers.
+- **`apps/docs-astro/src/content/blog/conflict-resolution-beyond-lww.mdx`** —
+  blog promoted a feature whose backend (WASM sandbox) is on the roadmap.
+- **Personal Cloudflare account_id and `easysolpro.workers.dev` URLs** stripped
+  from `examples/push-worker`, `examples/storage-worker`, `examples/notes-app`.
+- Dead `Hero.tsx` from landing (zero imports).
+- 488 phase/spec/bug references from code comments (CLAUDE.md convention).
+
+### Legal
+
+- Apache ICLA at `.github/CLA.md`; cla-assistant.io bot enforcement.
+- Grandfathered committers snapshot at `legal/GRANDFATHERED_COMMITTERS.md`.
+
+### Tests
+
+- Parallel 3-node cluster bootstrap integration tests with `serial_test`
+  annotation for shared-port suites.
+- Cluster failover, partition-routing, rebalance k6 scenarios.
+- 4 Jest scaffold tests for `create-topgun-app`.
+
+---
+
 ## [0.11.0] - 2026-02-07
 
 ### Added
@@ -53,8 +208,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.10.0] - 2026-02-04
 
 ### Breaking Changes
-
-> See [MIGRATION.md](./MIGRATION.md) for upgrade instructions.
 
 - **client**: Remove deprecated `ClusterClient.sendMessage()` - use `send(data, key)` instead
 - **core**: Remove legacy constructor from `QueryOptimizer` - use options object

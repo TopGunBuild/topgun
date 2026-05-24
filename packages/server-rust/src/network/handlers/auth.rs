@@ -639,7 +639,7 @@ RQIDAQAB
         );
     }
 
-    // AC1 (SPEC-189): A rejecting AuthValidator causes handle_auth to return Err
+    // AC1: A rejecting AuthValidator causes handle_auth to return Err
     // and send AUTH_FAIL on the channel.
     #[tokio::test]
     async fn rejecting_validator_causes_auth_fail() {
@@ -667,7 +667,7 @@ RQIDAQAB
         );
     }
 
-    // AC4 (SPEC-189): When auth_validator is None, valid token is accepted (no regression).
+    // AC4: When auth_validator is None, valid token is accepted (no regression).
     #[tokio::test]
     async fn no_validator_accepts_valid_token() {
         let handler = AuthHandler::new(TEST_SECRET.to_owned(), None);
@@ -685,7 +685,7 @@ RQIDAQAB
         assert_eq!(result.unwrap().id, "user-99");
     }
 
-    // AC7 (SPEC-189): Rejecting validator with insecure_forward_auth_errors=false
+    // AC7: Rejecting validator with insecure_forward_auth_errors=false
     // sends generic "Authentication failed" message to client.
     #[tokio::test]
     async fn rejecting_validator_opaque_error_mode() {
@@ -719,7 +719,7 @@ RQIDAQAB
         }
     }
 
-    // AC7 (SPEC-189): Rejecting validator with insecure_forward_auth_errors=true
+    // AC7: Rejecting validator with insecure_forward_auth_errors=true
     // sends detailed reason to client.
     #[tokio::test]
     async fn rejecting_validator_insecure_error_mode() {

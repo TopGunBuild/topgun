@@ -1981,7 +1981,7 @@ mod tests {
         updates
     }
 
-    /// AC3 (SPEC-143): QUERY_UPDATE is NOT sent to the connection that originated the write.
+    /// AC3: QUERY_UPDATE is NOT sent to the connection that originated the write.
     /// This tests broadcast_query_updates() writer exclusion + field projection.
     #[tokio::test]
     async fn broadcast_query_updates_writer_exclusion_and_projection() {

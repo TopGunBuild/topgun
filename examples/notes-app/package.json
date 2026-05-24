@@ -10,7 +10,7 @@
     "test": "echo \"No tests for example app\" && exit 0"
   },
   "dependencies": {
-    "@clerk/clerk-react": "^5.57.0",
+    "@clerk/clerk-react": "^5.61.6",
     "@topgunbuild/adapters": "workspace:*",
     "@topgunbuild/client": "workspace:*",
     "@topgunbuild/core": "workspace:*",

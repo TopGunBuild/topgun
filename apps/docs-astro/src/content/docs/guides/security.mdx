@@ -1,809 +1,105 @@
 ---
-title: Security Guide
-description: Secure your TopGun deployment with TLS encryption, mTLS for cluster communication, client-side data encryption, and best practices for production environments.
-order: 19
+title: Security
+description: TLS at the proxy, client-side encrypted storage, and credential hygiene for TopGun deployments.
+order: 12
 ---
 
-import CodeBlock from '../../../components/docs/CodeBlock.astro';
-import { ChevronRight, Shield, Lock, Key, Server, AlertTriangle, CheckCircle, Database, HardDrive } from 'lucide-react';
-import { ApiParam, ApiConstructor } from '../../../components/docs/ApiMethod';
-import { AlertBox } from '../../../components/docs/AlertBox';
-
-export const serverTlsCode = `# PLANNED — these TLS environment variables do not exist yet.
-# A standalone topgun-server production binary with env-var TLS config is planned.
-# For TLS today, configure it programmatically via TlsConfig when embedding the server.
-#
-# PORT=443 \\
-# DATABASE_URL=postgres://user:pass@localhost/topgun \\
-# TOPGUN_TLS_ENABLED=true \\
-# TOPGUN_TLS_CERT_PATH=/etc/topgun/tls/server.crt \\
-# TOPGUN_TLS_KEY_PATH=/etc/topgun/tls/server.key \\
-# TOPGUN_TLS_MIN_VERSION=TLSv1.3 \\
-# TOPGUN_CLUSTER_TLS_ENABLED=true \\       # Planned — v3.0
-# TOPGUN_CLUSTER_TLS_CERT_PATH=/etc/topgun/tls/cluster.crt \\
-# TOPGUN_CLUSTER_TLS_KEY_PATH=/etc/topgun/tls/cluster.key \\
-# TOPGUN_CLUSTER_TLS_CA_PATH=/etc/topgun/tls/ca.crt \\
-# TOPGUN_CLUSTER_MTLS=true \\
-# topgun-server    # <-- planned binary, not yet available`;
-
-export const clientWssCode = `import { TopGunClient } from '@topgunbuild/client';
-import { IDBAdapter } from '@topgunbuild/adapters';
-
-// Production: Use wss:// (WebSocket Secure)
-const client = new TopGunClient({
-  serverUrl: 'wss://topgun.example.com',
-  storage: new IDBAdapter()
-});
-// Set the JWT after construction — the constructor has no token field
-client.setAuthToken('your-jwt-token');
-
-// Development only: ws:// (unencrypted)
-const devClient = new TopGunClient({
-  serverUrl: 'ws://localhost:8080',
-  storage: new IDBAdapter()
-});`;
-
-export const generateCertsCode = `#!/bin/bash
-# Generate self-signed certificates for testing
-# For production, use Let's Encrypt or your organization's CA
-
-# Create output directory
-mkdir -p certs && cd certs
-
-# 1. Generate CA (Certificate Authority)
-openssl genrsa -out ca.key 4096
-openssl req -new -x509 -days 365 -key ca.key \\
-  -out ca.crt -subj "/CN=TopGun CA"
-
-# 2. Generate Server Certificate
-openssl genrsa -out server.key 2048
-openssl req -new -key server.key \\
-  -out server.csr -subj "/CN=topgun.example.com"
-
-# Create SAN (Subject Alternative Name) config
-cat > san.cnf << EOF
-[req]
-distinguished_name = req_distinguished_name
-req_extensions = v3_req
-[req_distinguished_name]
-[v3_req]
-subjectAltName = @alt_names
-[alt_names]
-DNS.1 = topgun.example.com
-DNS.2 = *.topgun.example.com
-DNS.3 = localhost
-IP.1 = 127.0.0.1
-EOF
-
-# Sign with CA
-openssl x509 -req -days 365 -in server.csr \\
-  -CA ca.crt -CAkey ca.key -CAcreateserial \\
-  -out server.crt -extfile san.cnf -extensions v3_req
-
-# 3. Generate Cluster Node Certificates (for mTLS)
-for i in 1 2 3; do
-  openssl genrsa -out node\${i}.key 2048
-  openssl req -new -key node\${i}.key \\
-    -out node\${i}.csr -subj "/CN=topgun-node-\${i}"
-  openssl x509 -req -days 365 -in node\${i}.csr \\
-    -CA ca.crt -CAkey ca.key -CAcreateserial \\
-    -out node\${i}.crt
-done
-
-echo "Certificates generated in ./certs/"`;
-
-export const envVarsTable = `| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| \`TOPGUN_TLS_ENABLED\` | boolean | \`false\` | Enable TLS for client connections |
-| \`TOPGUN_TLS_CERT_PATH\` | string | - | Path to certificate (PEM) |
-| \`TOPGUN_TLS_KEY_PATH\` | string | - | Path to private key (PEM) |
-| \`TOPGUN_TLS_CA_PATH\` | string | - | Path to CA certificate |
-| \`TOPGUN_TLS_MIN_VERSION\` | enum | \`TLSv1.2\` | Minimum TLS version |
-| \`TOPGUN_TLS_PASSPHRASE\` | string | - | Key passphrase (if encrypted) |
-| \`TOPGUN_CLUSTER_TLS_ENABLED\` | boolean | \`false\` | Enable TLS for cluster |
-| \`TOPGUN_CLUSTER_TLS_CERT_PATH\` | string | - | Cluster certificate path |
-| \`TOPGUN_CLUSTER_TLS_KEY_PATH\` | string | - | Cluster key path |
-| \`TOPGUN_CLUSTER_TLS_CA_PATH\` | string | - | CA for peer verification |
-| \`TOPGUN_CLUSTER_MTLS\` | boolean | \`false\` | Require client certificate |
-| \`TOPGUN_CLUSTER_TLS_REJECT_UNAUTHORIZED\` | boolean | \`true\` | Verify peer certificates |`;
-
-export const certManagerCode = `apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
-metadata:
-  name: letsencrypt-prod
-spec:
-  acme:
-    server: https://acme-v02.api.letsencrypt.org/directory
-    email: admin@example.com
-    privateKeySecretRef:
-      name: letsencrypt-prod-account-key
-    solvers:
-    - http01:
-        ingress:
-          class: nginx
----
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: topgun-tls
-  namespace: topgun
-spec:
-  secretName: topgun-tls
-  issuerRef:
-    name: letsencrypt-prod
-    kind: ClusterIssuer
-  dnsNames:
-  - topgun.example.com
-  - "*.topgun-cluster.svc.cluster.local"`;
-
-export const encryptedStorageCode = `import { TopGunClient, EncryptedStorageAdapter } from '@topgunbuild/client';
-import { IDBAdapter } from '@topgunbuild/adapters';
-
-// Get encryption key (see key management strategies below)
-const encryptionKey = await getEncryptionKey(); // or getDeviceKey()
-
-// Create base adapter and wrap with encryption
-const baseAdapter = new IDBAdapter();
-const encryptedAdapter = new EncryptedStorageAdapter(baseAdapter, encryptionKey);
-
-const client = new TopGunClient({
-  serverUrl: 'wss://topgun.example.com',
-  storage: encryptedAdapter
-});`;
-
-export const passwordDerivedKeyCode = `async function getEncryptionKey(password: string): Promise<CryptoKey> {
-  const encoder = new TextEncoder();
-
-  // Get or create salt
-  let saltString = localStorage.getItem('encryption_salt');
-  let salt: Uint8Array;
-
-  if (saltString) {
-    salt = Uint8Array.from(atob(saltString), c => c.charCodeAt(0));
-  } else {
-    salt = crypto.getRandomValues(new Uint8Array(16));
-    localStorage.setItem('encryption_salt', btoa(String.fromCharCode(...salt)));
-  }
-
-  // Derive key from password
-  const keyMaterial = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(password),
-    'PBKDF2',
-    false,
-    ['deriveKey']
-  );
-
-  return crypto.subtle.deriveKey(
-    {
-      name: 'PBKDF2',
-      salt: salt,
-      iterations: 100000,
-      hash: 'SHA-256'
-    },
-    keyMaterial,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt', 'decrypt']
-  );
-}`;
-
-export const deviceBoundKeyCode = `async function getDeviceKey(): Promise<CryptoKey> {
-  const storedKey = localStorage.getItem('topgun_device_key');
-
-  if (storedKey) {
-    // Import existing key
-    const keyData = Uint8Array.from(atob(storedKey), c => c.charCodeAt(0));
-    return crypto.subtle.importKey(
-      'raw',
-      keyData,
-      { name: 'AES-GCM', length: 256 },
-      false,
-      ['encrypt', 'decrypt']
-    );
-  }
-
-  // Generate new key
-  const key = await crypto.subtle.generateKey(
-    { name: 'AES-GCM', length: 256 },
-    true, // extractable
-    ['encrypt', 'decrypt']
-  );
-
-  // Store for future use
-  const exported = await crypto.subtle.exportKey('raw', key);
-  localStorage.setItem(
-    'topgun_device_key',
-    btoa(String.fromCharCode(...new Uint8Array(exported)))
-  );
-
-  return key;
-}`;
-
-export const troubleshootingCode = `# Verify certificate
-openssl x509 -in server.crt -text -noout
-
-# Check expiry date
-openssl x509 -enddate -noout -in server.crt
-
-# Verify key matches certificate
-openssl x509 -noout -modulus -in server.crt | openssl md5
-openssl rsa -noout -modulus -in server.key | openssl md5
-# Both should output the same hash
-
-# Test TLS connection
-openssl s_client -connect localhost:443 -tls1_3
-
-# View full certificate chain
-openssl s_client -showcerts -connect topgun.example.com:443`;
-
-<AlertBox variant="danger" title="Production Deployment — Read This First" text="TopGun's security model is partially shipped. JWT authentication, map-level ACLs, HLC sanitization, trusted-origin pipeline, and client-side EncryptedStorageAdapter are stable and enforced today. The standalone topgun-server CLI binary with env-var TLS configuration, mTLS for cluster communication, and a first-class RBAC role abstraction are not yet implemented. For production today: embed topgun-server programmatically with TlsConfig, or terminate TLS at a reverse proxy. See /docs/roadmap for maturity status." />
+import { ChevronRight, KeyRound } from 'lucide-react';
 
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
   <span className="text-foreground font-medium">Docs</span>
   <ChevronRight className="w-4 h-4" />
-  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <span className="text-foreground font-medium">Guides</span>
   <ChevronRight className="w-4 h-4" />
-  <span className="text-foreground font-medium">Security</span>
+  <span>Security</span>
 </div>
-
-# Security Guide
 
 <div className="flex items-center gap-3 mb-6 not-prose">
-  <Shield className="w-10 h-10 text-green-600 dark:text-green-400" />
-  <p className="text-lg text-neutral-600 dark:text-neutral-300">
-    TopGun ships JWT authentication, map-level ACL enforcement, HLC sanitization, trusted-origin pipeline, and client-side <code>EncryptedStorageAdapter</code> today. The standalone CLI binary with env-var TLS config, mTLS for cluster communication, and a first-class RBAC role abstraction are not yet available — see the Production Deployment banner above and the Deployment Mode Semantics section below, or visit <a href="/docs/roadmap">/docs/roadmap</a> for maturity status.
-  </p>
+  <KeyRound className="w-10 h-10 text-brand" />
+  <h1 className="text-4xl font-bold text-foreground">Security</h1>
 </div>
 
-This guide covers:
-- Security model and threat boundary
-- TLS/WSS configuration for client connections
-- mTLS (mutual TLS) for cluster communication
-- Environment variables reference
-- Certificate generation and management
-- Client-side encryption for data at rest
+A short reference covering the security knobs you need to know about for a TopGun deployment: TLS termination, secret-at-rest encryption on the client, and credential hygiene. For role-based access control (RBAC) status and the full security roadmap, see [/docs/roadmap](/docs/roadmap).
 
-## Server Deployment Model
+## TLS / wss\:// — terminate at the reverse proxy
 
-`topgun-server` is a **library crate**. There is no standalone production binary today. The only binary included in the repository is `test-server` — intended for development and integration testing only.
+The TopGun Rust server speaks plain WebSocket (`ws://`) on port 8080 by default. **Do not expose this port to the internet.** Terminate TLS at your edge — nginx, Caddy, Cloudflare, an AWS ALB, Fly.io's built-in TLS, etc. — and forward to the server over loopback or a private network.
 
-For production, embed the server programmatically in your Rust application:
+A minimal nginx snippet:
 
-```rust
-use topgun_server::{ServerBuilder, NetworkConfig};
+```nginx
+server {
+  listen 443 ssl http2;
+  server_name api.example.com;
 
-let server = ServerBuilder::new()
-    .network(NetworkConfig { port: 8090, ..Default::default() })
-    .build()
-    .await?;
-server.start().await?;
+  ssl_certificate     /etc/letsencrypt/live/api.example.com/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/api.example.com/privkey.pem;
+
+  location /ws {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "Upgrade";
+    proxy_set_header Host $host;
+    proxy_read_timeout 86400s;
+  }
+}
 ```
 
-A standalone `topgun-server` production binary with full env-var configuration (including TLS) is **planned** but does not yet exist.
+Then connect clients to `wss://api.example.com/ws`.
 
-## Deployment Mode Semantics
+The cluster transport is plain TCP today (cluster mTLS is on the [roadmap](/docs/roadmap)); restrict the cluster network with a VPC / private subnet until that lands.
 
-<div className="overflow-x-auto mb-8 not-prose">
-  <table className="w-full text-left border-collapse text-sm">
-    <thead>
-      <tr className="border-b border-card-border">
-        <th className="py-3 px-4 font-medium text-neutral-500">Capability</th>
-        <th className="py-3 px-4 font-medium text-neutral-500">Status</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-medium text-foreground">JWT Authentication</td>
-        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable — HMAC + RSA, <code>JWT_SECRET</code> env var works today</td>
-      </tr>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-medium text-foreground">Map-level ACL</td>
-        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable — per-connection, per-map read/write permissions via <code>WriteValidator</code></td>
-      </tr>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-medium text-foreground">HLC Sanitization</td>
-        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable — server-generated timestamps replace client-provided ones</td>
-      </tr>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-medium text-foreground">Value Size Limits</td>
-        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable — enforced via <code>SecurityConfig</code></td>
-      </tr>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-medium text-foreground">Trusted-Origin Bypass</td>
-        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable — <code>CallerOrigin::Forwarded</code>/<code>Backup</code>/<code>Wan</code>/<code>System</code> skip <code>WriteValidator</code></td>
-      </tr>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-medium text-foreground">TLS for Client Connections</td>
-        <td className="py-3 px-4 text-yellow-600 dark:text-yellow-400">Partial — programmatic via <code>TlsConfig</code> stable; standalone binary with env-var config planned</td>
-      </tr>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-medium text-foreground">mTLS for Cluster Communication</td>
-        <td className="py-3 px-4 text-red-600 dark:text-red-400">Not implemented — planned v3.0; cluster traffic is plaintext TCP today</td>
-      </tr>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-medium text-foreground">First-Class RBAC Roles</td>
-        <td className="py-3 px-4 text-red-600 dark:text-red-400">Not implemented as a dedicated surface — ACL + auth-backed principals cover most use cases</td>
-      </tr>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-medium text-foreground">Encrypted Storage Adapter (client-side)</td>
-        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable — <code>EncryptedStorageAdapter</code> exported from <code>@topgunbuild/client</code></td>
-      </tr>
-    </tbody>
-  </table>
-</div>
+## Authentication — `JWT_SECRET` must be set
 
-For full maturity tracking across deployment modes, see [/docs/roadmap](/docs/roadmap).
+The server refuses to start when `JWT_SECRET` is unset and `TOPGUN_NO_AUTH` is not `1`. For production:
 
-## Security Model
-
-<div className="flex items-center gap-2 mb-4 not-prose">
-  <Shield className="w-6 h-6 text-green-600" />
-  <span className="text-neutral-600 dark:text-neutral-300">Understanding TopGun's trust boundaries and security pipeline.</span>
-</div>
-
-### Trust Boundary
-
-Clients are **untrusted**. The server is **authoritative**. While TopGun's "Client as Replica" architecture gives clients local CRDT replicas for zero-latency reads and writes, this does not mean clients have unrestricted access. The server enforces all security policies.
-
-### Security Pipeline
-
-Every write passes through the security pipeline before reaching CRDT merge:
-
-```
-Client write --> Auth check --> Map ACL check --> HLC sanitization --> CRDT merge --> Persist
+```bash
+export JWT_SECRET="$(openssl rand -base64 32)"
+pnpm start:server
 ```
 
-<div className="overflow-x-auto not-prose">
+For dev / demo with no auth:
 
-| Layer | What it does |
-|-------|-------------|
-| **JWT Authentication** | Clients must authenticate with a JWT containing a standard `sub` claim. No operations are permitted before authentication. |
-| **Map-level ACL** | Per-connection, per-map read/write permissions. Simple allow/deny rules control which maps a client can access. |
-| **HLC Sanitization** | The server replaces client-provided HLC timestamps with server-generated ones, preventing future-timestamp attacks that would "win" all LWW conflicts. |
-| **Value Size Limits** | The server enforces maximum value size per write to prevent abuse. |
-| **RBAC** | The server enforces per-connection, per-map permissions via `WriteValidator`. Principals are identified via JWT `sub` claims; ACLs are checked per operation. A dedicated role abstraction (role definitions and role-to-ACL bindings) is not a separate surface — see `/docs/roadmap`. |
-
-</div>
-
-### Trusted-Origin Bypass
-
-Operations arriving from trusted internal origins skip the `WriteValidator` security checks entirely. This is by design for internal server-to-server operations (replication, backup restore, cluster forwarding) that must be applied without re-validation.
-
-| Caller Origin | Passes Through Security Pipeline? |
-|--------------|-----------------------------------|
-| `Client` | Yes — all checks apply |
-| `Forwarded` | No — cluster-forwarded writes, bypass `WriteValidator` |
-| `Backup` | No — backup restore operations, bypass `WriteValidator` |
-| `Wan` | No — WAN replication, bypass `WriteValidator` |
-| `System` | No — internal system operations, bypass `WriteValidator` |
-
-External client connections always carry `CallerOrigin::Client` and pass through all security checks. Trusted origins are only set by the server itself for internal operations.
-
-### Transport Security
-
-- **TLS** encrypts all client-to-server traffic (HTTPS + WSS)
-- **mTLS** (mutual TLS) for cluster communication is planned for v3.0; cluster traffic is currently plaintext TCP
-- See sections below for configuration details
-
-<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-6 my-6 not-prose">
-  <h3 className="text-lg font-semibold text-brand mb-2">Server API Reference</h3>
-  <span className="text-brand">For the full Rust server embed API including <code className="px-1.5 py-0.5 rounded bg-brand-subtle/10 text-sm">NetworkConfig</code> and <code className="px-1.5 py-0.5 rounded bg-brand-subtle/10 text-sm">TlsConfig</code>, see the <a href="/docs/reference/server" className="underline">Server API reference</a>.</span>
-</div>
-
-<div className="bg-red-50 dark:bg-red-900/20 border border-red-100 dark:border-red-800 rounded-xl p-6 my-6 not-prose">
-  <div className="flex items-center gap-2 mb-2">
-    <AlertTriangle className="w-5 h-5 text-red-600 dark:text-red-400" />
-    <h3 className="text-lg font-semibold text-red-800 dark:text-red-300">Production Requirement</h3>
-  </div>
-  <span className="text-red-700 dark:text-red-400">Always enable TLS in production environments. Without TLS, all data including authentication tokens is transmitted in plaintext and can be intercepted by attackers.</span>
-</div>
-
-## TLS/WSS Configuration
-
-<div className="flex items-center gap-2 mb-4 not-prose">
-  <Lock className="w-6 h-6 text-brand" />
-  <span className="text-neutral-600 dark:text-neutral-300">Enable HTTPS and secure WebSocket (WSS) for client connections.</span>
-</div>
-
-When TLS is enabled, TopGun automatically:
-- Creates an HTTPS server instead of HTTP
-- Upgrades WebSocket connections to WSS
-- Logs a warning if TLS is disabled in production
-
-<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800 rounded-xl p-4 mb-4 not-prose">
-  <span className="text-sm text-yellow-700 dark:text-yellow-400">The <code>topgun-server</code> production binary and TLS environment variables shown below are planned for a future release. Currently, use <code>cargo run --bin test-server</code> for testing, or embed the server programmatically with <code>TlsConfig</code>.</span>
-</div>
-
-<div className="not-prose">
-  <CodeBlock title="Server Configuration (planned)" language="bash" code={serverTlsCode} />
-</div>
-
-### Client Connection
-
-Clients automatically use secure connections when connecting to a `wss://` URL:
-
-<div className="not-prose">
-  <CodeBlock title="Client" language="typescript" code={clientWssCode} />
-</div>
-
-### TLS via Reverse Proxy (Recommended)
-
-<div className="bg-green-50 dark:bg-green-900/20 border border-green-100 dark:border-green-800 rounded-xl p-6 my-6 not-prose">
-  <div className="flex items-center gap-2 mb-2">
-    <CheckCircle className="w-5 h-5 text-green-600 dark:text-green-400" />
-    <h3 className="text-lg font-semibold text-green-800 dark:text-green-300">Often Already Configured</h3>
-  </div>
-  <span className="text-green-700 dark:text-green-400">If you're using a deployment platform or reverse proxy, TLS is likely already handled for you. In this case, you don't need to configure certificates in TopGun server.</span>
-</div>
-
-Many deployment platforms and reverse proxies automatically provide TLS termination:
-
-| Platform / Proxy | TLS Handling | TopGun Server Config |
-|------------------|--------------|----------------------|
-| **Dokploy** | Traefik terminates TLS | Use `ws://` internally, clients connect via `wss://` |
-| **Vercel / Netlify** | Automatic HTTPS | Not applicable (edge functions) |
-| **Railway / Render** | Automatic TLS | Use `ws://` on server port |
-| **Kubernetes Ingress** | TLS at ingress | Configure TLS on Ingress, not TopGun |
-| **Cloudflare** | Edge TLS | Use `ws://` to origin |
-| **Traefik / nginx / Caddy** | Proxy terminates TLS | Use `ws://` backend |
-
-**How it works:**
-
-```
-Client (wss://) → Reverse Proxy (TLS termination) → TopGun Server (ws://)
+```bash
+export TOPGUN_NO_AUTH=1
+pnpm start:server
 ```
 
-1. Client connects to `wss://your-domain.com`
-2. Reverse proxy handles TLS/SSL certificates
-3. Proxy forwards to TopGun via unencrypted `ws://localhost:8080`
-4. All external traffic is encrypted; internal traffic stays on localhost
+Token-validation details — Clerk, Better Auth, Firebase, custom JWTs — live in the [Authentication guide](/docs/guides/authentication).
 
-**When to configure TLS directly in TopGun:**
-- Direct server exposure without reverse proxy
-- End-to-end encryption requirements
-- mTLS for cluster communication
+## Encrypting data at rest on the client
 
-## mTLS for Cluster Communication
+By default `IDBAdapter` stores records in IndexedDB unencrypted. For laptops where the OS does not encrypt the disk (or for shared devices), wrap your adapter in `EncryptedStorageAdapter`:
 
-<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-xl p-4 mb-6 not-prose">
-  <div className="flex items-center gap-2 mb-1">
-    <AlertTriangle className="w-5 h-5 text-yellow-600 dark:text-yellow-400" />
-    <span className="font-semibold text-yellow-800 dark:text-yellow-200">Planned for v3.0</span>
-  </div>
-  <p className="text-sm text-yellow-700 dark:text-yellow-300">Cluster communication currently uses plaintext TCP. <code>ClusterConfig</code> has no TLS fields. mTLS for cluster nodes is on the roadmap for v3.0. See TODO-164 for progress.</p>
-</div>
+```ts
+import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+import { EncryptedStorageAdapter } from '@topgunbuild/client';
 
-<div className="flex items-center gap-2 mb-4 not-prose">
-  <Server className="w-6 h-6 text-purple-600" />
-  <span className="text-neutral-600 dark:text-neutral-300">Mutual TLS (mTLS) ensures that only authorized nodes can join the cluster.</span>
-</div>
+const key = await crypto.subtle.importKey(
+  'raw',
+  await deriveKeyMaterial(userPassword),
+  { name: 'AES-GCM' },
+  false,
+  ['encrypt', 'decrypt'],
+);
 
-With mTLS enabled:
-- Each node presents its certificate when connecting to peers
-- Nodes verify peer certificates against the CA
-- Unauthorized nodes are rejected
+const client = new TopGunClient({
+  serverUrl: 'wss://api.example.com/ws',
+  storage: new EncryptedStorageAdapter(new IDBAdapter(), key),
+});
+```
 
-<div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
-  <div className="p-4 border border-card-border rounded-lg">
-    <div className="flex items-center gap-2 mb-2">
-      <CheckCircle className="w-5 h-5 text-green-600" />
-      <span className="font-semibold text-foreground">With mTLS</span>
-    </div>
-    <ul className="text-sm text-neutral-600 dark:text-neutral-300 space-y-1">
-      <li>Encrypted inter-node traffic</li>
-      <li>Verified node identity</li>
-      <li>Protection against rogue nodes</li>
-      <li>Zero-trust network security</li>
-    </ul>
-  </div>
-  <div className="p-4 border border-card-border rounded-lg">
-    <div className="flex items-center gap-2 mb-2">
-      <AlertTriangle className="w-5 h-5 text-yellow-600" />
-      <span className="font-semibold text-foreground">Without mTLS</span>
-    </div>
-    <ul className="text-sm text-neutral-600 dark:text-neutral-300 space-y-1">
-      <li>Plaintext inter-node traffic</li>
-      <li>Any node can join cluster</li>
-      <li>Vulnerable to MITM attacks</li>
-      <li>Not suitable for production</li>
-    </ul>
-  </div>
-</div>
+Key management is the integrator's responsibility — derive from a password, fetch from a vault, or pin to an OS keychain depending on your threat model.
 
-## Server Environment Variables
+## Credential hygiene
 
-<div className="flex items-center gap-2 mb-4 not-prose">
-  <Key className="w-6 h-6 text-orange-600" />
-  <span className="text-neutral-600 dark:text-neutral-300">Environment variables that are implemented and work today in the <code>test-server</code> binary and programmatic embedding.</span>
-</div>
+- **Never** commit `.env` files. The repo's `.gitignore` excludes `.env`, `.env.local`, and `.env.*.local`. Use `.env.example` placeholders.
+- Rotate `JWT_SECRET` if it ever leaks. Active sessions become invalid; clients reconnect and re-authenticate.
+- Cluster admin credentials (`TOPGUN_ADMIN_USERNAME`, `TOPGUN_ADMIN_PASSWORD`) ship with `changeme`-style defaults in `.env.example`; override them before any non-localhost deployment.
+- Report suspected vulnerabilities via the disclosure channel in [`SECURITY.md`](https://github.com/TopGunBuild/topgun/blob/main/SECURITY.md).
 
-<div className="overflow-x-auto not-prose">
+## Planned
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `PORT` | No | `8090` | HTTP/WebSocket listen port |
-| `DATABASE_URL` | Yes | — | PostgreSQL connection string |
-| `JWT_SECRET` | Yes | — | HMAC secret or RSA public key (PEM) for JWT verification |
-| `TOPGUN_ADMIN_PASSWORD` | Yes (for admin) | — | Password for admin API login |
-| `TOPGUN_ADMIN_USERNAME` | No | `admin` | Username for admin API login |
-| `TOPGUN_ADMIN_DIR` | No | — | Path to admin SPA static files |
-| `TOPGUN_LOG_FORMAT` | No | human-readable | Set to `json` for structured JSON logging |
-
-</div>
-
-## TLS Environment Variables (Planned)
-
-<div className="flex items-center gap-2 mb-4 not-prose">
-  <Key className="w-6 h-6 text-orange-600" />
-  <span className="text-neutral-600 dark:text-neutral-300">Planned TLS configuration via environment variables for a future production binary.</span>
-</div>
-
-<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-xl p-4 mb-6 not-prose">
-  <div className="flex items-center gap-2 mb-1">
-    <AlertTriangle className="w-5 h-5 text-yellow-600 dark:text-yellow-400" />
-    <span className="font-semibold text-yellow-800 dark:text-yellow-200">Planned — not yet implemented</span>
-  </div>
-  <p className="text-sm text-yellow-700 dark:text-yellow-300">The TLS environment variables below are planned for a future production binary. They do not exist in the current server. Currently, TLS is configured programmatically via the <code>TlsConfig</code> struct when embedding the server in a Rust application. See the <a href="/docs/reference/server" className="underline">Server API reference</a> for the programmatic API.</p>
-</div>
-
-<div className="overflow-x-auto not-prose">
-
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `TOPGUN_TLS_ENABLED` | boolean | `false` | **Planned** — Enable TLS for client connections |
-| `TOPGUN_TLS_CERT_PATH` | string | — | **Planned** — Path to certificate (PEM) |
-| `TOPGUN_TLS_KEY_PATH` | string | — | **Planned** — Path to private key (PEM) |
-| `TOPGUN_TLS_CA_PATH` | string | — | **Planned** — Path to CA certificate |
-| `TOPGUN_TLS_MIN_VERSION` | enum | `TLSv1.2` | **Planned** — Minimum TLS version |
-| `TOPGUN_TLS_PASSPHRASE` | string | — | **Planned** — Key passphrase (if encrypted) |
-| `TOPGUN_CLUSTER_TLS_ENABLED` | boolean | `false` | **Planned** — Enable TLS for cluster |
-| `TOPGUN_CLUSTER_TLS_CERT_PATH` | string | — | **Planned** — Cluster certificate path |
-| `TOPGUN_CLUSTER_TLS_KEY_PATH` | string | — | **Planned** — Cluster key path |
-| `TOPGUN_CLUSTER_TLS_CA_PATH` | string | — | **Planned** — CA for peer verification |
-| `TOPGUN_CLUSTER_MTLS` | boolean | `false` | **Planned** — Require client certificate (mTLS) |
-| `TOPGUN_CLUSTER_TLS_REJECT_UNAUTHORIZED` | boolean | `true` | **Planned** — Verify peer certificates |
-
-</div>
-
-### Example: Planned Production Environment (TLS vars not yet implemented)
-
-<div className="not-prose">
-  <CodeBlock title=".env.production (planned — TLS vars not yet implemented)" language="bash" code={`# Working today:
-PORT=8090
-DATABASE_URL=postgres://user:pass@localhost/topgun
-JWT_SECRET=your-secret-key
-TOPGUN_ADMIN_PASSWORD=your-admin-password
-
-# Planned (not yet implemented — use TlsConfig struct for programmatic TLS):
-# TOPGUN_PORT=443
-# TOPGUN_TLS_ENABLED=true
-# TOPGUN_TLS_CERT_PATH=/etc/topgun/tls/server.crt
-# TOPGUN_TLS_KEY_PATH=/etc/topgun/tls/server.key
-# TOPGUN_TLS_MIN_VERSION=TLSv1.3
-
-# Planned — cluster mTLS (v3.0):
-# TOPGUN_CLUSTER_PORT=9443
-# TOPGUN_CLUSTER_TLS_ENABLED=true
-# TOPGUN_CLUSTER_TLS_CERT_PATH=/etc/topgun/tls/cluster.crt
-# TOPGUN_CLUSTER_TLS_KEY_PATH=/etc/topgun/tls/cluster.key
-# TOPGUN_CLUSTER_TLS_CA_PATH=/etc/topgun/tls/ca.crt
-# TOPGUN_CLUSTER_MTLS=true`} />
-</div>
-
-## Certificate Generation
-
-<div className="flex items-center gap-2 mb-4 not-prose">
-  <Key className="w-6 h-6 text-green-600" />
-  <span className="text-neutral-600 dark:text-neutral-300">Generate certificates for development and testing.</span>
-</div>
-
-<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800 rounded-xl p-6 my-6 not-prose">
-  <h3 className="text-lg font-semibold text-yellow-800 dark:text-yellow-300 mb-2">Production Certificates</h3>
-  <span className="text-yellow-700 dark:text-yellow-400">For production, use certificates from a trusted CA like <a href="https://letsencrypt.org/" className="underline">Let's Encrypt</a> or your organization's internal CA. Self-signed certificates are suitable only for development and testing.</span>
-</div>
-
-### Development Certificates Script
-
-<div className="not-prose">
-  <CodeBlock title="scripts/generate-certs.sh" language="bash" code={generateCertsCode} />
-</div>
-
-Run the script:
-
-<div className="not-prose">
-  <CodeBlock title="terminal" language="bash" code={`chmod +x scripts/generate-certs.sh
-./scripts/generate-certs.sh`} />
-</div>
-
-## Kubernetes cert-manager Integration
-
-<div className="flex items-center gap-2 mb-4 not-prose">
-  <Server className="w-6 h-6 text-brand" />
-  <span className="text-neutral-600 dark:text-neutral-300">Automate certificate management with cert-manager.</span>
-</div>
-
-For Kubernetes deployments, use [cert-manager](https://cert-manager.io/) to automatically provision and renew certificates:
-
-<div className="not-prose">
-  <CodeBlock title="k8s/cert-manager.yaml" language="yaml" code={certManagerCode} />
-</div>
-
-### Installation
-
-<div className="not-prose">
-  <CodeBlock title="terminal" language="bash" code={`# Install cert-manager
-kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.0/cert-manager.yaml
-
-# Apply configuration
-kubectl apply -f k8s/cert-manager.yaml`} />
-</div>
-
-## Troubleshooting
-
-<div className="flex items-center gap-2 mb-4 not-prose">
-  <AlertTriangle className="w-6 h-6 text-yellow-600" />
-  <span className="text-neutral-600 dark:text-neutral-300">Common TLS issues and solutions.</span>
-</div>
-
-### Useful OpenSSL Commands
-
-<div className="not-prose">
-  <CodeBlock title="terminal" language="bash" code={troubleshootingCode} />
-</div>
-
-### Common Errors
-
-<div className="overflow-x-auto not-prose">
-
-| Error | Cause | Solution |
-|-------|-------|----------|
-| `UNABLE_TO_VERIFY_LEAF_SIGNATURE` | Missing CA certificate | Add `caCertPath` configuration |
-| `CERT_HAS_EXPIRED` | Certificate expired | Renew the certificate |
-| `DEPTH_ZERO_SELF_SIGNED_CERT` | Self-signed cert in production | Use CA-signed certificate |
-| `ERR_TLS_CERT_ALTNAME_INVALID` | Hostname mismatch | Add correct SAN to certificate |
-| `ENOENT` on cert path | File not found | Check path and file permissions |
-
-</div>
-
-## Security Best Practices
-
-<div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
-  <div className="p-4 border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-900/20 rounded-lg">
-    <h4 className="font-semibold text-green-800 dark:text-green-300 mb-2">Do</h4>
-    <ul className="text-sm text-green-700 dark:text-green-400 space-y-1">
-      <li>Use TLS 1.3 when possible</li>
-      <li>Enable mTLS for cluster</li>
-      <li>Rotate certificates regularly</li>
-      <li>Store keys in secrets/vault</li>
-      <li>Monitor certificate expiry</li>
-    </ul>
-  </div>
-  <div className="p-4 border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20 rounded-lg">
-    <h4 className="font-semibold text-red-800 dark:text-red-300 mb-2">Don't</h4>
-    <ul className="text-sm text-red-700 dark:text-red-400 space-y-1">
-      <li>Disable TLS in production</li>
-      <li>Use self-signed certs in prod</li>
-      <li>Commit certificates to git</li>
-      <li>Use weak cipher suites</li>
-      <li>Ignore certificate warnings</li>
-    </ul>
-  </div>
-</div>
-
-## Recommended Cipher Suites
-
-For maximum security, TopGun recommends using modern cipher suites:
-
-<div className="not-prose">
-  <CodeBlock title="Recommended TLS 1.3 Ciphers" language="text" code={`TLS_AES_256_GCM_SHA384
-TLS_CHACHA20_POLY1305_SHA256
-TLS_AES_128_GCM_SHA256`} />
-</div>
-
-For TLS 1.2 compatibility:
-
-<div className="not-prose">
-  <CodeBlock title="Recommended TLS 1.2 Ciphers" language="text" code={`ECDHE-ECDSA-AES256-GCM-SHA384
-ECDHE-RSA-AES256-GCM-SHA384
-ECDHE-ECDSA-CHACHA20-POLY1305
-ECDHE-RSA-CHACHA20-POLY1305`} />
-</div>
-
-## Client-Side Encryption (Data at Rest)
-
-<div className="flex items-center gap-2 mb-4 not-prose">
-  <HardDrive className="w-6 h-6 text-purple-600" />
-  <span className="text-neutral-600 dark:text-neutral-300">Encrypt local data stored in IndexedDB or other client-side storage.</span>
-</div>
-
-While TLS protects data in transit, client-side encryption protects data at rest on user devices. The `EncryptedStorageAdapter` wraps any storage adapter (like IndexedDB) with AES-256-GCM encryption using the Web Crypto API.
-
-### What It Protects
-
-<div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
-  <div className="p-4 border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-900/20 rounded-lg">
-    <h4 className="font-semibold text-green-800 dark:text-green-300 mb-2">Protected Against</h4>
-    <ul className="text-sm text-green-700 dark:text-green-400 space-y-1">
-      <li>Browser DevTools inspection</li>
-      <li>Malicious browser extensions</li>
-      <li>Physical device access (disk dumps)</li>
-      <li>IndexedDB data export</li>
-    </ul>
-  </div>
-  <div className="p-4 border border-yellow-200 dark:border-yellow-800 bg-yellow-50 dark:bg-yellow-900/20 rounded-lg">
-    <h4 className="font-semibold text-yellow-800 dark:text-yellow-300 mb-2">Not Protected Against</h4>
-    <ul className="text-sm text-yellow-700 dark:text-yellow-400 space-y-1">
-      <li>XSS attacks (if attacker has JS execution)</li>
-      <li>Compromised application code</li>
-      <li>Key theft from memory</li>
-    </ul>
-  </div>
-</div>
-
-### Basic Usage
-
-<div className="not-prose">
-  <CodeBlock title="Encrypted Storage" language="typescript" code={encryptedStorageCode} />
-</div>
-
-### Key Management Strategies
-
-Choose a key management strategy based on your security requirements:
-
-#### Password-Derived Key (PBKDF2)
-
-Best for user-authenticated encryption where the key is derived from a user's password:
-
-<div className="not-prose">
-  <CodeBlock title="Password-Derived Key" language="typescript" code={passwordDerivedKeyCode} />
-</div>
-
-#### Device-Bound Random Key
-
-Best for protecting data from disk dumps without requiring a user password. Data is tied to the device:
-
-<div className="not-prose">
-  <CodeBlock title="Device-Bound Key" language="typescript" code={deviceBoundKeyCode} />
-</div>
-
-<div className="bg-red-50 dark:bg-red-900/20 border border-red-100 dark:border-red-800 rounded-xl p-6 my-6 not-prose">
-  <div className="flex items-center gap-2 mb-2">
-    <AlertTriangle className="w-5 h-5 text-red-600 dark:text-red-400" />
-    <h3 className="text-lg font-semibold text-red-800 dark:text-red-300">Key Management Warning</h3>
-  </div>
-  <span className="text-red-700 dark:text-red-400">If the encryption key is lost, <strong>all encrypted data becomes irrecoverable</strong>. Consider implementing key backup strategies for password-derived keys, or accept data loss on device change for device-bound keys.</span>
-</div>
-
-### When to Use Client-Side Encryption
-
-<div className="overflow-x-auto not-prose">
-
-| Use Case | Recommendation |
-|----------|----------------|
-| Medical or financial data | Required - regulatory compliance |
-| Personal user data | Recommended - privacy protection |
-| Multi-tenant applications | Recommended - tenant isolation |
-| Gaming or non-sensitive apps | Optional - based on threat model |
-
-</div>
-
-<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-6 my-6 not-prose">
-  <h3 className="text-lg font-semibold text-brand mb-2">API Reference</h3>
-  <span className="text-brand">For detailed API documentation, see the <a href="/docs/reference/adapter#encryptedstorageadapter" className="underline">EncryptedStorageAdapter section</a> in the Adapter API reference.</span>
-</div>
-
-<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
-  <a href="/docs/guides/authentication" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Previous</span>
-    <div className="flex items-center gap-2 text-foreground font-semibold">
-      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Authentication
-    </div>
-  </a>
-  <a href="/docs/guides/live-queries" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Next Guide</span>
-    <div className="flex items-center gap-2 text-foreground font-semibold">
-      Live Queries <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-    </div>
-  </a>
-</div>
+Per-map / per-op RBAC, cluster mTLS, mutual auth for the cluster transport, and field-level redaction are on the [roadmap](/docs/roadmap). Until they ship, enforce authorization at the application layer (token-claim checks before `client.getMap(...)`.set(...)) and rely on edge TLS for transport security.

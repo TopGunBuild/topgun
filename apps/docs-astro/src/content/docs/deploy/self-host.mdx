@@ -1,0 +1,321 @@
+---
+title: Self-host the server
+description: Run the TopGun server with Docker, Docker Compose, or Kubernetes using only the environment variables the binary actually reads.
+order: 51
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Container, Layers, Server, Lock, Cloud } from 'lucide-react';
+
+export const dockerBuildCode = `# From the root of the repository
+docker build -t topgun-server -f deploy/Dockerfile.server .`;
+
+export const dockerRunRedbCode = `# Run with embedded redb backend (default — no Postgres required)
+docker run -d \\
+  --name topgun-server \\
+  -p 8080:8080 \\
+  -e RUST_LOG=topgun_server=info \\
+  -v topgun-data:/data \\
+  -e TOPGUN_REDB_PATH=/data/topgun.redb \\
+  topgun-server`;
+
+export const dockerRunPostgresCode = `# Run with PostgreSQL backend (opt-in)
+docker run -d \\
+  --name topgun-server \\
+  -p 8080:8080 \\
+  -e RUST_LOG=topgun_server=info \\
+  -e STORAGE_BACKEND=postgres \\
+  -e DATABASE_URL=postgres://user:pass@db-host:5432/myapp \\
+  -e JWT_SECRET=your-production-secret \\
+  topgun-server`;
+
+export const dockerComposeRedbCode = `version: '3.8'
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.server
+    container_name: topgun-server
+    ports:
+      - "8080:8080"
+    environment:
+      RUST_LOG: topgun_server=info
+      # redb is the default; TOPGUN_REDB_PATH sets the file location
+      TOPGUN_REDB_PATH: /data/topgun.redb
+      # Optional: enable auth
+      JWT_SECRET: your-dev-secret
+    volumes:
+      - topgun-data:/data
+    restart: unless-stopped
+
+volumes:
+  topgun-data:`;
+
+export const dockerComposePostgresCode = `version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: topgun-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_password
+      POSTGRES_DB: topgun
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.server
+    container_name: topgun-server
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      RUST_LOG: topgun_server=info
+      STORAGE_BACKEND: postgres
+      DATABASE_URL: postgres://postgres:postgres_password@postgres:5432/topgun
+      JWT_SECRET: your-production-secret
+      TOPGUN_BIND_ADDR: "0.0.0.0"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:`;
+
+export const k8sStatefulSetCode = `apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: topgun-server
+  namespace: topgun
+spec:
+  serviceName: topgun-server
+  replicas: 1
+  selector:
+    matchLabels:
+      app: topgun-server
+  template:
+    metadata:
+      labels:
+        app: topgun-server
+    spec:
+      containers:
+        - name: topgun-server
+          image: topgun-server:latest
+          ports:
+            - containerPort: 8080
+              name: ws
+          env:
+            - name: RUST_LOG
+              value: "topgun_server=info"
+            - name: TOPGUN_BIND_ADDR
+              value: "0.0.0.0"
+            - name: STORAGE_BACKEND
+              value: "postgres"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: topgun-secrets
+                  key: database-url
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: topgun-secrets
+                  key: jwt-secret
+            - name: TOPGUN_ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: topgun-secrets
+                  key: admin-username
+            - name: TOPGUN_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: topgun-secrets
+                  key: admin-password
+            - name: TOPGUN_MAX_RAM_MB
+              value: "1024"
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "2"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: topgun-server
+  namespace: topgun
+spec:
+  selector:
+    app: topgun-server
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: ws
+  type: ClusterIP`;
+
+export const k8sSecretsCode = `apiVersion: v1
+kind: Secret
+metadata:
+  name: topgun-secrets
+  namespace: topgun
+type: Opaque
+stringData:
+  database-url: "postgres://user:pass@postgres-host:5432/topgun"
+  jwt-secret: "your-production-secret-min-32-chars"
+  admin-username: "admin"
+  admin-password: "your-admin-password"`;
+
+export const serverlessClientHttpCode = `import { HttpSyncProvider, SyncEngine } from '@topgunbuild/client';
+import { HLC } from '@topgunbuild/core';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+const hlc = new HLC('client-1');
+const provider = new HttpSyncProvider({
+  url: 'https://your-topgun-server.example.com',
+  clientId: 'client-1',
+  hlc,
+  authToken: 'your-jwt-token',
+  syncMaps: ['todos'],
+});
+
+const engine = new SyncEngine({
+  nodeId: 'client-1',
+  connectionProvider: provider,
+  storageAdapter: new IDBAdapter(),
+});`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/deploy" className="hover:text-foreground transition-colors">Deploy</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Self-host</span>
+</div>
+
+# Self-host the server
+
+Run the TopGun server on your own infrastructure using Docker, Docker Compose, or Kubernetes. By default the server uses an embedded [redb](https://github.com/cberner/redb) database — no Postgres or external dependency required. Switch to PostgreSQL when you need a shared production backend.
+
+## Building the image
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code={dockerBuildCode} />
+</div>
+
+The Dockerfile uses a multi-stage Rust build (`rust:1.85-bookworm`) and produces a minimal `debian:bookworm-slim` runtime image. The binary is named `topgun-server` and is the same binary used in production-style demos.
+
+## Docker
+
+### Run with redb (default — no Postgres required)
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code={dockerRunRedbCode} />
+</div>
+
+### Run with PostgreSQL (opt-in)
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code={dockerRunPostgresCode} />
+</div>
+
+## Docker Compose
+
+### redb default (recommended for single-node)
+
+<div className="not-prose">
+  <CodeBlock title="docker-compose.yml" language="yaml" code={dockerComposeRedbCode} />
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code="docker-compose up -d" />
+</div>
+
+### With PostgreSQL (opt-in)
+
+<div className="not-prose">
+  <CodeBlock title="docker-compose.postgres.yml" language="yaml" code={dockerComposePostgresCode} />
+</div>
+
+## Kubernetes
+
+For production Kubernetes deployments, use a `StatefulSet` so pods get stable network identities. Store `DATABASE_URL`, `JWT_SECRET`, and admin credentials in a Kubernetes `Secret`.
+
+### Secrets
+
+<div className="not-prose">
+  <CodeBlock title="k8s/secrets.yaml" language="yaml" code={k8sSecretsCode} />
+</div>
+
+### StatefulSet + Service
+
+<div className="not-prose">
+  <CodeBlock title="k8s/statefulset.yaml" language="yaml" code={k8sStatefulSetCode} />
+</div>
+
+All `env` entries above correspond to environment variables the binary actually reads (`std::env::var(...)` or `clap` `#[arg(env)]`). For the complete variable list and source-file references, see [Server & CLI reference](/docs/reference/server).
+
+## TLS
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Lock className="w-6 h-6 text-green-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">The server binary does not read any <code>TOPGUN_TLS_*</code> environment variables today.</span>
+</div>
+
+The binary reads zero `TOPGUN_TLS_*` env vars (verified: 22 `std::env::var()` call sites, none matching `TOPGUN_TLS`). TLS is configured programmatically via `TlsConfig` when embedding the server in a Rust host process. See [Server & CLI reference — embed API](/docs/reference/server) for the programmatic approach.
+
+**For standard production deployments,** terminate TLS at a reverse proxy in front of the server:
+
+- **nginx** — `proxy_pass http://topgun-server:8080` with `ssl on` on the nginx listener
+- **Caddy** — `reverse_proxy topgun-server:8080` under a `tls` directive
+- **AWS ALB** — HTTPS listener with target group pointing at port 8080; ALB handles TLS offload
+
+WebSocket connections (`ws://`) are proxied as-is; the proxy upgrades `wss://` externally.
+
+## Serverless
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Cloud className="w-6 h-6 text-indigo-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Serverless edge deployment is not supported for the TopGun server.</span>
+</div>
+
+The Rust server is a long-running process that maintains in-memory CRDT state, WebSocket connections, and cluster membership. It does not support Vercel Edge Functions, AWS Lambda, or Cloudflare Workers.
+
+Deploy TopGun as a persistent service (Docker, Kubernetes, or any platform supporting long-running processes) and connect from your edge functions using the TopGun client SDK:
+
+<div className="not-prose">
+  <CodeBlock title="Edge function connecting to TopGun server" language="typescript" code={serverlessClientHttpCode} />
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/deploy" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Deploy overview
+    </div>
+  </a>
+  <a href="/docs/deploy/storage-backends" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Storage backends <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

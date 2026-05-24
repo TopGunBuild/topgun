@@ -8,61 +8,40 @@
 
 ---
 
-# Introduction
+# Welcome
 
-> TopGun is a next-generation data platform designed for the modern "Local-First" web.
+> Build real-time apps that work offline — instant local reads/writes, automatic sync when online, no conflict handling required.
 
 
 
   <span className="text-foreground font-medium">Docs</span>
   <span>Get Started</span>
-  <span className="text-foreground font-medium">Introduction</span>
+  <span className="text-foreground font-medium">Welcome</span>
 
-# Introduction
+# Welcome
 
-TopGun is a next-generation data platform designed for the modern "Local-First" web. 
-It bridges the gap between scalable <strong className="text-foreground">In-Memory Data Grids (IMDG)</strong> like Hazelcast 
-and <strong className="text-foreground">Offline-First Client Databases</strong> like RxDB.
-It allows you to build applications that are instant, reliable, and collaborative by default.
-Try the [live demo](https://demo.topgun.build/) to see real-time CRDT sync in action.
+Build real-time apps that work offline. Local writes are instant and survive disconnects — reconnecting clients sync automatically without you writing conflict-handling code. Try the [live demo](https://demo.topgun.build/) to see it in action, or jump straight to the [Quickstart](/docs/quickstart) to scaffold a working app in under 5 minutes.
 
-## Quick start
+## What you can build
 
-### Drop-in (5 minutes)
+TopGun is well-suited for collaborative tools, offline-first mobile and desktop web apps, local-first developer tools, and any app where users expect data to survive a flaky connection. You scaffold a React project, drop in a few hooks, and get instant local reads/writes with background sync — no custom sync logic, no conflict resolution ceremony.
 
-Scaffold a working app:
+## When to use TopGun
 
-```bash
-npx create-topgun-app my-app
-cd my-app && pnpm install && pnpm dev
-```
+- **Real-time collaboration** — shared docs, whiteboards, live editing
+- **Offline-first web and mobile apps** — todos, notes, forms that keep working without a signal
+- **Local-first developer tools** — IDEs, CLI tools, dashboards that feel instant
+- **Multi-tab / multi-device sync** — changes in one tab appear in another automatically
+- **AI-assisted apps** — agents can read and mutate live data via the built-in MCP server
 
-In a separate terminal, boot the single-node backend:
+## When not to use TopGun
 
-```bash
-pnpm start:server
-```
-
-The server runs on `ws://localhost:8080` with embedded storage at `./topgun.redb` — writes survive restart. No Postgres, no Docker required. Run a second `pnpm start:server` only after stopping the first; redb's lockfile prevents two processes from opening the same file at once.
-
-For users who prefer containers, `docker compose up server` works too — it brings up Postgres alongside the server in one command.
-
-### Production
-
-Production deployments need Postgres and explicit auth. TopGun v2 is **single-node stable**; multi-node Raft consensus is on the [roadmap](/docs/roadmap).
-
-| Step | Status | Notes |
-|------|--------|-------|
-| Postgres DSN | Required | Set `DATABASE_URL`; schema applied on first boot |
-| Server env vars | Required | `JWT_SECRET`, `TOPGUN_NO_AUTH=0`; ACL via `/docs/security` |
-| Single-node deploy | Stable | `docker compose up --build` or `cargo run --bin test-server --release` |
-| Multi-node cluster | Roadmap | Raft consensus pending — see [/docs/roadmap](/docs/roadmap) |
-| Backup/restore | Planned | Use `pg_dump` today; operational tooling tracked in TODO-139 |
-| Monitoring hooks | Planned | Prometheus + structured-log hooks pending |
+- Pure server-side analytical or reporting workloads where all reads/writes happen server-side
+- Single-writer admin tools where local-first overhead and offline persistence add no value
+- Scenarios requiring strong cross-document ACID transactions across many maps
+- Apps where all clients are always online and eventual consistency is an unacceptable trade-off
 
 ## Features
-
-TopGun aims to be the standard for local-first state management. It provides a robust sync engine out of the box.
 
   <FeatureGridCard 
     title="Framework Agnostic" 
@@ -73,38 +52,29 @@ TopGun aims to be the standard for local-first state management. It provides a r
     desc="The client is the replica. Reads/Writes are instant against local memory." 
   />
   <FeatureGridCard 
-    title="Conflict Resolution" 
-    desc="Automatic convergence using Hybrid Logical Clocks (HLC) and CRDTs." 
-  />
-  <FeatureGridCard 
     title="Offline Capable" 
-    desc="Persists to IndexedDB or SQLite. Queues operations and syncs when online." 
-  />
-  <FeatureGridCard 
-    title="Real-Time Sync" 
-    desc="Push-based architecture via WebSockets. Merkle Trees ensure bandwidth efficiency." 
+    desc="Persists to IndexedDB. Queues operations and syncs when online." 
   />
   <FeatureGridCard 
     title="Scalable Backend" 
-    desc="Server cluster handles partitioning, authority, and durable storage on PostgreSQL." 
+    desc="Server cluster handles partitioning, authority, and durable storage." 
   />
   <FeatureGridCard 
     title="Agent-Operable Backend" 
     desc="Built-in MCP server lets Claude, Cursor, and other AI agents query and mutate your live data. See the [AI Builder guide](/docs/guides/building-with-ai) to get started." 
   />
 
-    <a href="/docs/comparison" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <a href="/docs/quickstart" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Next Page</span>
-        Comparison <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+        Quickstart <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
     </a>
 
 
 ---
 
-# Quick Start
+# Quickstart
 
-> Build your first Local-First application with TopGun in less than 5 minutes.
-
+> Build a local-first React app in under 5 minutes — works offline by default.
 
 
 
@@ -113,11 +83,11 @@ TopGun aims to be the standard for local-first state management. It provides a r
 
   <span className="text-foreground font-medium">Docs</span>
   <span>Get Started</span>
-  <span className="text-foreground font-medium">Quick Start</span>
+  <span className="text-foreground font-medium">Quickstart</span>
 
-# Quick Start Guide
+# Quickstart
 
-Build your first Local-First application with TopGun in less than 5 minutes.
+Build your first local-first application with TopGun in under 5 minutes. No server required to start — the app works offline by default and syncs when you add one.
 Want to see it running first? Try the [live demo](https://demo.topgun.build/).
 
 ## 1. Installation
@@ -130,23 +100,7 @@ Want to see it running first? Try the [live demo](https://demo.topgun.build/).
     code="npm install @topgunbuild/client @topgunbuild/adapters @topgunbuild/react zod"
   />
 
-## 2. Start the Server
-
-  <p className="text-neutral-600 dark:text-neutral-300 mb-4">
-    Start the TopGun server locally. This boots a zero-config server with embedded storage.
-  </p>
-  <CodeBlock
-    title="terminal"
-    language="bash"
-    code={serverStartCode}
-  />
-
-> **Note:** Today `pnpm start:server` compiles the server from source and requires the Rust toolchain. A zero-install `npx @topgunbuild/server` binary distribution is on the roadmap (see TODO-365) and will replace this step.
-
-  <h3 className="text-lg font-semibold text-brand mb-2 !mt-0">Server Configuration</h3>
-  <span className="text-brand">The TopGun server is configured via environment variables. For the full configuration reference including TLS, clustering, and the Rust embed API, see the <a href="/docs/reference/server" className="underline">Server API reference</a>. For a gradual adoption approach, see the <a href="/docs/guides/adoption-path" className="underline">Adoption Path guide</a>.</span>
-
-## 3. The Canonical App
+## 2. The Canonical App
 
 Hook-first is the simple way to read and write data with React. One read hook (`useQuery`) gives you the list and re-renders when data changes. One write hook (`useMutation`) adds new items. One type-safe `Todo` shape ties them together. The whole loop fits in 24 lines, and your list shows up instantly then keeps itself in sync as data changes.
 
@@ -162,27 +116,25 @@ Hook-first is the simple way to read and write data with React. One read hook (`
     code={canonicalSchemaCode}
   />
 
-## 4. How It Works
+## 3. How It Works
 
 Here is a step-by-step breakdown of the canonical snippet above:
 
 **Lines 1–4: Imports.** Three packages installed in step 1 (`@topgunbuild/react`, `@topgunbuild/client`, `@topgunbuild/adapters`) plus the `Todo` type derived from your schema.
 
-**Lines 6–9: Client init.** `TopGunClient` takes a `serverUrl` for the WebSocket connection and a `storage` adapter for local persistence. `IDBAdapter` writes to IndexedDB so your data survives page reloads.
+**Lines 6–9: Client init.** `TopGunClient` takes a `storage` adapter for local persistence. `IDBAdapter` writes to IndexedDB so your data survives page reloads. No explicit `start()` call is needed in module-level code — the adapter initializes lazily in the background. Uncomment `serverUrl` to connect to a sync server.
 
-**Line 10: Start.** `await client.start()` initializes IndexedDB asynchronously. Top-level await is supported by Vite, esbuild, and Next.js 14+.
+**Line 12: Read hook.** `useQuery<Todo>('todos')` subscribes to the `todos` map. The component re-renders automatically whenever data changes locally or arrives from the server.
 
-**Line 13: Read hook.** `useQuery<Todo>('todos')` subscribes to the `todos` map. The component re-renders automatically whenever data changes locally or arrives from the server.
+**Line 13: Write hook.** `useMutation<Todo>('todos')` returns `{ create, update, remove }`. Call `create(key, value)` to add a new item. The write lands in memory immediately (zero-latency) and syncs to the server in the background when a server is configured.
 
-**Line 14: Write hook.** `useMutation<Todo>('todos')` returns `{ create, update, remove }`. Call `create(key, value)` to add a new item. The write lands in memory immediately (zero-latency) and syncs to the server in the background.
+**Line 14: Add function.** A plain function that calls `create` with a timestamp-based key and the new todo shape. No loading state, no async/await in the component — the write is always instant.
 
-**Line 15: Add function.** A plain function that calls `create` with a random UUID key and the new todo shape. No loading state, no async/await in the component — the write is always instant.
+**Lines 15–20: Render.** Standard React JSX. `todos.map(t => ...)` iterates the live list. Use `t._key` as the React key — this is the string key you passed to `create`, exposed on every query result item.
 
-**Lines 16–21: Render.** Standard React JSX. `todos.map(t => ...)` iterates the live list. Use `t._key` as the React key — this is the string key you passed to `create`, exposed on every query result item.
+**Line 23: Provider.** `TopGunProvider` makes the client available to all hooks in the tree via React context.
 
-**Line 24: Provider.** `TopGunProvider` makes the client available to all hooks in the tree via React context.
-
-## End-to-End Types
+## 4. End-to-End Types
 
 No manual `interface` needed — the type flows from the Zod schema through the hook generic:
 
@@ -198,7 +150,7 @@ const { data: todos = [] } = useQuery<Todo>('todos');
 
 `z.infer<typeof TodoSchema>` produces `{ text: string; done: boolean }`. Pass that as the generic to `useQuery<Todo>` and TypeScript knows the shape of every item in `todos` — autocomplete works, typos are caught at compile time, and you never have to keep a manual interface in sync with your schema.
 
-## Imperative API (advanced)
+## 5. Imperative API (advanced)
 
 Use when outside React — service workers, Node scripts, non-component utilities, or when you need direct map access without hooks.
 
@@ -211,13 +163,10 @@ Use when outside React — service workers, Node scripts, non-component utilitie
 `client.getMap('todos')` returns the map directly. `.set(key, value)` writes to local memory immediately and queues the change for sync. This is not the recommended path for UI code — prefer `useQuery` and `useMutation` in React components.
 
   <h3 className="text-lg font-semibold text-green-800 dark:text-green-300 mb-2 !mt-0">Non-Blocking Initialization</h3>
-  <span className="text-green-700 dark:text-green-400">IndexedDB can take 50-500ms to initialize. TopGun queues write operations in memory and persists them once ready — your UI renders instantly with zero blocking time. Call <code className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-800/50 text-sm">await client.start()</code> at module scope before mounting your app to ensure the storage layer is ready before the first hook fires.</span>
+  <span className="text-green-700 dark:text-green-400">IndexedDB can take 50-500ms to initialize. TopGun's <code className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-800/50 text-sm">IDBAdapter</code> initializes lazily in the background and queues reads and writes until the store is ready — your UI renders instantly with zero blocking time and no <code className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-800/50 text-sm">await</code> ceremony. If you need a hard signal that persistence is ready (e.g., before a critical migration step), keep a reference to the adapter and call <code className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-800/50 text-sm">await adapter.waitForReady()</code>.</span>
 
   <h3 className="text-lg font-semibold text-brand mb-2 !mt-0">Persistence</h3>
   <span className="text-brand">By using <code className="px-1.5 py-0.5 rounded bg-brand-subtle/10 text-sm">IDBAdapter</code>, your data is automatically saved to IndexedDB. Even if the user refreshes the page or closes the browser, the state is preserved locally.</span>
-
-  <h3 className="text-lg font-semibold text-yellow-800 dark:text-yellow-300 mb-2 !mt-0">Production: Use Secure WebSocket (WSS)</h3>
-  <span className="text-yellow-700 dark:text-yellow-400">In production, always use <code className="px-1.5 py-0.5 rounded bg-yellow-100 dark:bg-yellow-800/50 text-sm">wss://</code> instead of <code className="px-1.5 py-0.5 rounded bg-yellow-100 dark:bg-yellow-800/50 text-sm">ws://</code> to encrypt data in transit. See the <a href="/docs/guides/security" className="underline">Security Guide</a> for TLS configuration.</span>
 
   <h3 className="text-lg font-semibold text-purple-800 dark:text-purple-300 mb-2 !mt-0">Optional: Encrypt Local Storage</h3>
   <span className="text-purple-700 dark:text-purple-400">For sensitive data, wrap your adapter with <code className="px-1.5 py-0.5 rounded bg-purple-100 dark:bg-purple-800/50 text-sm">EncryptedStorageAdapter</code> to encrypt data at rest. See the <a href="/docs/guides/security#client-side-encryption-data-at-rest" className="underline">Client-Side Encryption section</a> in the Security Guide.</span>
@@ -225,28 +174,30 @@ Use when outside React — service workers, Node scripts, non-component utilitie
   <h3 className="text-lg font-semibold text-purple-800 dark:text-purple-300 mb-2 !mt-0">Building with an AI Agent?</h3>
   <span className="text-purple-700 dark:text-purple-400">See the <a href="/docs/guides/building-with-ai" className="underline">AI Builder guide</a> for prompt templates, agent setup, and live database access via MCP.</span>
 
-## Next Steps
+## 6. Add real-time sync (optional)
 
-  <a href="/docs/concepts" className="block p-6 border border-card-border rounded-lg hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <h3 className="font-semibold text-foreground mb-2">Core Concepts</h3>
-    <p className="text-sm text-neutral-600 dark:text-neutral-300">
-      Learn about Local-First, CRDTs, and how TopGun achieves eventual consistency.
-    </p>
-  </a>
-  <a href="/docs/guides" className="block p-6 border border-card-border rounded-lg hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <h3 className="font-semibold text-foreground mb-2">Guides</h3>
-    <p className="text-sm text-neutral-600 dark:text-neutral-300">
-      Deep dive into specific topics like Authentication, Encryption, and patterns.
-    </p>
-  </a>
+By default the app runs in local-only mode — data persists in IndexedDB and works offline without a server. To add real-time sync across browsers and devices:
 
-  <a href="/docs/installation" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+1. Uncomment the `serverUrl` line in the client init above.
+2. Start the TopGun server in a second terminal:
+
+```bash
+pnpm start:server
+```
+
+The server boots in seconds with embedded storage (`./topgun.redb`) — no Postgres, no Docker required.
+
+3. Open your app in two browser tabs and watch changes sync in real time.
+
+In production, always use `wss://` instead of `ws://` to encrypt data in transit. See the [Security Guide](/docs/guides/security) for TLS configuration.
+
+  <a href="/docs/intro" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Previous</span>
-      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Installation
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Welcome
   </a>
-  <a href="/docs/concepts" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+  <a href="/docs/tutorials/todo-app" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Next Section</span>
-      Concepts <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+      Tutorial: Real-time Todo <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
   </a>
 
 
@@ -289,7 +240,7 @@ Use when outside React — service workers, Node scripts, non-component utilitie
 
   <h3 className="text-lg font-semibold text-foreground mb-2">Server Development</h3>
   <p className="text-neutral-600 dark:text-neutral-300 mb-4">
-    To run the TopGun server locally for development, build and run the Rust test server binary. It uses in-memory storage with no external dependencies.
+    Boot the server from the repository root. The default backend is embedded redb (durable, on-disk, no Postgres required); the only prerequisite is a Rust toolchain to compile the binary.
   </p>
   <CodeBlock
     title="terminal"
@@ -297,21 +248,24 @@ Use when outside React — service workers, Node scripts, non-component utilitie
 git clone https://github.com/topgunbuild/topgun.git
 cd topgun
 
-# Build and run the test server (requires Rust toolchain)
-cargo run --bin test-server --release
+# Boot the server (auto-compiles topgun-server on first run)
+pnpm start:server
 
-# Or with a custom port
-PORT=8080 cargo run --bin test-server --release`}
+# Or directly with cargo
+cargo run --bin topgun-server --release
+
+# Set an explicit port (default is 8080)
+PORT=9000 pnpm start:server`}
   />
-    <span className="text-sm text-neutral-700 dark:text-neutral-300"><span className="font-semibold text-green-600 dark:text-green-400">No database required for development!</span> The test server uses in-memory storage. See the <a href="/docs/reference/cli" className="underline">CLI Reference</a> for details.</span>
+    <span className="text-sm text-neutral-700 dark:text-neutral-300"><span className="font-semibold text-green-600 dark:text-green-400">No external database required.</span> The server writes to <code>./topgun.redb</code> by default; data survives restarts. Set <code>TOPGUN_NO_AUTH=1</code> for auth-free local exploration. See the <a href="/docs/reference/server" className="underline">Server &amp; CLI reference</a> for flags and env vars.</span>
 
   <a href="/docs/comparison" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Previous</span>
       <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Comparison
   </a>
-  <a href="/docs/quick-start" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+  <a href="/docs/quickstart" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Next Section</span>
-      Quick Start <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+      Quickstart <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
   </a>
 
 
@@ -396,7 +350,7 @@ TopGun ensures your app feels native and responsive, regardless of network condi
     <FeatureItem
       emoji="💾"
       title="Offline Capability"
-      description="Data is persisted to IndexedDB (Browser) or SQLite (Mobile/Desktop). Your app works without internet."
+      description="Data is persisted to IndexedDB in the browser. Your app works without internet."
       color="purple"
     />
     <FeatureItem
@@ -668,14 +622,14 @@ Each request carries full client context -- `clientId`, `clientHlc`, and `syncMa
 
 ## Server Architecture
 
-While clients are "Local-First", TopGun is backed by a robust server cluster for persistence and scalability.
+While clients are "Local-First", TopGun is backed by a Rust server (single-node stable today; cluster mode in development).
 
     <h4 className="font-bold text-foreground">1. Gateway Node</h4>
     <p className="text-sm text-neutral-600 dark:text-neutral-300 mt-1">Handles WebSocket connections and routes traffic.</p>
     <h4 className="font-bold text-foreground">2. Partition Engine</h4>
     <p className="text-sm text-neutral-600 dark:text-neutral-300 mt-1">In-memory sharding logic that distributes data across the cluster.</p>
     <h4 className="font-bold text-foreground">3. Persistence Layer</h4>
-    <p className="text-sm text-neutral-600 dark:text-neutral-300 mt-1">Async write-behind to PostgreSQL (or in-memory for development).</p>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300 mt-1">Async write-behind to the configured backend (redb embedded default, PostgreSQL optional for production).</p>
     <h4 className="font-bold text-foreground">4. Pub/Sub Bus</h4>
     <p className="text-sm text-neutral-600 dark:text-neutral-300 mt-1">Broadcasts updates to other connected clients in real-time.</p>
 
@@ -763,9 +717,9 @@ When you delete data in TopGun, the record isn't immediately removed from storag
     </pre>
 
   <p className="text-sm text-purple-800 dark:text-purple-200">
-    <strong>Garbage Collection:</strong> Tombstones are periodically cleaned up via GC.
-    The server coordinates this process to ensure all replicas have seen the deletion
-    before permanently removing the tombstone. This prevents "resurrection" of deleted data.
+    <strong>Garbage Collection:</strong> Tombstones are eligible for cleanup once all replicas
+    have acknowledged the deletion. The <code>LWWMap.prune()</code> method removes tombstones
+    older than a given threshold, preventing "resurrection" of deleted data.
   </p>
 
 ## Summary
@@ -814,332 +768,181 @@ When you delete data in TopGun, the record isn't immediately removed from storag
 
 ---
 
-# Schema & Type Safety
+# Schema-typed data
 
-> Add TypeScript type safety to TopGun maps using the TopGunClient<T> generic class
-
-
-
-# Schema & Type Safety
-
-<AlertBox variant="info" title="Hook-first API for React UI code" text="For most React UI code, the canonical hook-first API (useQuery<Todo>('todos') + useMutation<Todo>('todos') with type Todo = z.infer<typeof TodoSchema>) provides type safety via the Zod schema flow shown at /docs/quick-start. This page documents the lower-level imperative TopGunClient<T>.getMap() path used in non-React contexts (Node.js scripts, service workers, testing) or for advanced typed-map access patterns." />
-
-TopGun provides compile-time type safety for your data through the `TopGunClient<TSchema>` generic class. This guide shows you how to define typed schemas and get full TypeScript autocomplete and error checking for your map operations.
-
-> **Important:** Type enforcement is compile-time only. There is no runtime validation or server-side schema enforcement in the current version. The types help catch mistakes during development but do not prevent invalid data from being written at runtime.
-
----
-
-## What `TopGunClient<TSchema>` Provides
-
-The `TopGunClient<TSchema>` generic gives you:
-
-- **Compile-time type checking** for map names and value types
-- **Typed map access** via `client.getMap(name)` that narrows the return type to `LWWMap<string, TSchema[name]>`
-- **Autocomplete** in your editor for map names and field names
-
-The `TSchema` type parameter is defined as `Record<string, any>`. Your schema interface must satisfy this constraint.
-
----
-
-## Defining Your Schema
-
-Create a TypeScript interface that describes your data maps:
-
-```typescript
-// Define the shape of each map's values
-interface Todo {
-  text: string;
-  completed: boolean;
-  createdAt: number;
-}
-
-interface UserProfile {
-  name: string;
-  email: string;
-  avatar?: string;
-}
-
-// Define your schema mapping map names to value types
-interface MyAppSchema {
-  todos: Todo;
-  profiles: UserProfile;
-}
-```
-
-The schema interface maps map names (as keys) to the value types stored in each map.
-
----
-
-## Typed Entry Point: `TopGunClient<TSchema>`
-
-Instantiate with your schema type parameter:
-
-```typescript
-
-// Create a typed TopGunClient instance
-const client = new TopGunClient<MyAppSchema>({
-  serverUrl: 'ws://localhost:8080',
-  storage: new IDBAdapter()
-});
-
-await client.start();
-```
-
-Now you can access maps with full type safety:
-
-```typescript
-// getMap('todos') returns LWWMap<string, Todo>
-const todos = client.getMap('todos');
-
-// get() returns Todo | undefined -- correctly typed
-const todo = todos.get('todo-1');
-if (todo) {
-  console.log(todo.text);       // OK: 'text' exists on Todo
-  console.log(todo.completed);  // OK: 'completed' exists on Todo
-  // console.log(todo.foo);     // ERROR: Property 'foo' does not exist on type 'Todo'
-}
-
-// set() accepts Todo -- correctly typed
-todos.set('todo-2', {
-  text: 'Learn TopGun',
-  completed: false,
-  createdAt: Date.now()
-});
-
-// getMap('profiles') returns LWWMap<string, UserProfile>
-const profiles = client.getMap('profiles');
-const profile = profiles.get('user-1');
-if (profile) {
-  console.log(profile.name);    // OK: 'name' exists on UserProfile
-}
-```
-
-TypeScript will flag errors at compile time if you:
-- Access a map name that is not in your schema
-- Pass the wrong value type to `set()`
-- Access a field that does not exist on the value type
-
----
-
-## How Type Narrowing Works
-
-The typed narrowing works through the `TopGunClient<TSchema>.getMap(name)` path:
-
-1. `TopGunClient<TSchema>` captures your schema type (e.g., `MyAppSchema`)
-2. When you call `client.getMap('todos')`, TypeScript looks up `TSchema['todos']` to get the value type (`Todo`)
-3. The returned `LWWMap<string, Todo>` has `get` and `set` typed to `Todo`
-
-Omitting `<TSchema>` falls back to the untyped overload — `getMap<K, V>(name: string): LWWMap<K, V>` — which preserves back-compat for advanced callers that supply explicit type parameters manually.
-
----
-
-## Limitations
-
-- **Compile-time only.** Types are erased at runtime. If external code or another client writes data that does not match your interface, TypeScript will not catch it. Consider adding runtime checks for untrusted data
-- **No server-side enforcement.** The server does not validate data against your TypeScript schema. Any valid CRDT operation is accepted regardless of the value shape
-- **Schema evolution.** If you add or rename fields in your interface, existing data in storage will not be migrated. Use optional fields (`field?: type`) for new fields to handle records written before the schema change
-- **No cross-language schemas.** The TypeScript schema is only available in TypeScript. If you have non-TypeScript clients, they must independently maintain compatible type definitions
-
-  <a href="/docs/guides/sql-queries" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Previous</span>
-      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> SQL Queries
-  </a>
-  <a href="/docs/guides/indexing" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Next</span>
-      Indexing <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-  </a>
-
-
----
-
-# MCP Server
-
-> Connect AI assistants like Claude Desktop and Cursor to your TopGun database using the Model Context Protocol.
-
-
-
-
+> Add compile-time type safety to TopGun maps using the TopGunClient<TSchema> generic.
 
 
 
   <span className="text-foreground font-medium">Docs</span>
   <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
-  <span className="text-foreground font-medium">MCP Server</span>
+  <span className="text-foreground font-medium">Schema-typed data</span>
 
-# MCP Server
+# Schema-typed data
 
-The MCP (Model Context Protocol) Server enables AI assistants like **Claude Desktop** and **Cursor** to interact with your TopGun database through natural language. Query, mutate, and search your data without writing code.
+Schema-typed data: define your data shapes as TypeScript types (optionally derived from Zod schemas); pass them to `TopGunClient<MySchema>`; get autocomplete and compile-time errors on map operations. Type enforcement is compile-time only — there is no runtime validation or server-side schema enforcement in the current version.
 
-  <FeatureCard
-    icon={Bot}
-    iconColor="text-purple-500"
-    title="AI Integration"
-    description="Connect Claude, Cursor, and other MCP-compatible AI tools to your data."
-  />
-  <FeatureCard
-    icon={MessageSquare}
-    iconColor="text-brand-subtle"
-    title="Natural Language"
-    description="Query and modify data using plain English instead of writing code."
-  />
-  <FeatureCard
-    icon={Shield}
-    iconColor="text-green-500"
-    title="Secure by Default"
-    description="Restrict maps, disable mutations, and use auth tokens for production."
-  />
+<AlertBox
+  variant="info"
+  title="Hook-first API for React UI code"
+  text="For React UI code, the canonical pattern is useQuery<Todo>('todos') + useMutation<Todo>('todos') with type Todo = z.infer<typeof TodoSchema> — see /docs/quickstart. This page documents the lower-level TopGunClient<TSchema>.getMap() path used in non-React contexts (Node.js scripts, service workers, testing) or for advanced typed-map access patterns."
+/>
 
-## What is MCP?
+---
 
-[MCP (Model Context Protocol)](https://modelcontextprotocol.io/) is Anthropic's open protocol for connecting AI assistants to external data sources. It provides a standardized way for AI tools to:
+## Defining a schema
 
-- **Query** data from your TopGun maps
-- **Mutate** data (create, update, delete)
-- **Search** using hybrid BM25 + exact matching
-- **Subscribe** to real-time changes
-- **Inspect** schema and statistics
-
-## Installation
-
-```bash
-npm install @topgunbuild/mcp-server
-# or
-pnpm add @topgunbuild/mcp-server
-```
-
-## Claude Desktop Setup
-
-1. Install the MCP server globally:
-
-```bash
-npm install -g @topgunbuild/mcp-server
-```
-
-2. Configure Claude Desktop by editing `~/Library/Application Support/Claude/claude_desktop_config.json`:
+The recommended approach is to define your types via Zod schemas, then derive TypeScript types from them using `z.infer`. This gives you a single source of truth: Zod schemas for runtime validation in your business logic, TypeScript types for the compiler.
 
 
-3. Restart Claude Desktop
 
-4. Try asking: *"Show me all tasks in my TopGun database"*
+If you prefer plain TypeScript without Zod, you can define the interface directly without the Zod step — just omit the `z.object(...)` declarations and write the interfaces by hand. Zod is not a dependency of TopGun; it is optional.
 
-## Cursor Setup
+---
 
-Add the following to `.cursor/config.json` in your workspace:
+## Typed map access
 
-
-## Available Tools
-
-The MCP server exposes these tools to AI assistants:
-
-| Tool | Description |
-|------|-------------|
-| `topgun_list_maps` | List all available maps |
-| `topgun_query` | Query data with filters and sorting |
-| `topgun_mutate` | Create, update, or delete records |
-| `topgun_search` | Hybrid search (BM25 full-text + exact) |
-| `topgun_subscribe` | Watch for real-time changes |
-| `topgun_schema` | Get schema information about a map |
-| `topgun_stats` | Connection and map statistics |
-| `topgun_explain` | Explain query execution plan |
-
-### Example Prompts
-
-Once configured, you can use natural language:
-
-- *"Show me all tasks with status 'done'"*
-- *"Create a new task called 'Review PR #123' with high priority"*
-- *"Find tasks mentioning authentication"*
-- *"What fields does the users map have?"*
-- *"Watch for new high-priority tasks"*
-
-## Programmatic Usage
-
-For custom integrations, you can use the server programmatically:
+Pass your schema type as the generic parameter to `TopGunClient`. The client narrows the return types of `getMap`, `getORMap`, and `query` to your application types.
 
 
-## CLI Options
 
-```bash
-topgun-mcp [options]
+Omitting `<MyAppSchema>` falls back to the untyped overload — `getMap<K, V>(name: string): LWWMap<K, V>` — which preserves backward compatibility for callers that supply explicit type parameters manually.
 
-Options:
-  --url, -u <url>         TopGun server URL (default: ws://localhost:8080)
-  --token, -t <token>     Authentication token
-  --maps, -m <maps>       Comma-separated list of allowed maps
-  --no-mutations          Disable mutation operations
-  --no-subscriptions      Disable subscription operations
-  --http                  Start HTTP transport instead of stdio
-  --port, -p <port>       HTTP port (default: 3000)
-  --debug, -d             Enable debug logging
-  --help, -h              Show help
-  --version, -v           Show version
-```
+---
 
-## HTTP Transport
+## Typed hooks (React)
 
-For web-based MCP clients or custom integrations, start the server with HTTP transport:
+The React hooks inherit the schema types when you pass a typed client to `TopGunProvider`. You can also specify the generic directly on the hook.
 
 
-### HTTP Endpoints
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health check |
-| `/mcp` | GET | Server info |
-| `/mcp/events` | GET | SSE connection for streaming |
-| `/mcp` | POST | Stateless tool calls |
+---
 
-## Configuration Reference
+## Compile-time-only honesty caveat
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `topgunUrl` | string | `ws://localhost:8080` | TopGun server WebSocket URL |
-| `authToken` | string | - | Authentication token |
-| `allowedMaps` | string[] | all | Restrict access to specific maps |
-| `enableMutations` | boolean | `true` | Allow write operations |
-| `enableSubscriptions` | boolean | `true` | Allow real-time subscriptions |
-| `defaultLimit` | number | `10` | Default query result limit |
-| `maxLimit` | number | `100` | Maximum query result limit |
-| `subscriptionTimeoutSeconds` | number | `60` | Subscription timeout |
-| `debug` | boolean | `false` | Enable debug logging |
+> **Important:** Type enforcement is compile-time only. Types are erased at runtime. If external code or another client writes data that does not match your interface, TypeScript will not catch it. Consider adding runtime validation (e.g. via Zod's `TodoSchema.parse(value)`) for untrusted data.
 
-## Environment Variables
+Other limitations:
 
-| Variable | Description |
-|----------|-------------|
-| `TOPGUN_URL` | TopGun server URL |
-| `TOPGUN_TOKEN` | Authentication token |
-| `TOPGUN_MAPS` | Comma-separated allowed maps |
-| `TOPGUN_MCP_PORT` | HTTP port (with --http) |
-| `TOPGUN_DEBUG` | Enable debug (true/false) |
+| Limitation | Details |
+|-----------|---------|
+| **No server-side enforcement** | The server does not validate data against your TypeScript schema. Any valid CRDT operation is accepted regardless of the value shape. |
+| **Schema evolution** | If you add or rename fields in your interface, existing data in storage is not migrated. Use optional fields (`field?: type`) for new fields to handle records written before the schema change. |
+| **No cross-language schemas** | The TypeScript schema is only available in TypeScript clients. Other language clients must independently maintain compatible type definitions. |
 
-## Security Best Practices
+---
 
-1. **Restrict Maps**: Use `allowedMaps` to limit which data the AI can access
-2. **Read-Only Mode**: Set `enableMutations: false` for read-only access
-3. **Authentication**: Always use auth tokens in production
-4. **Local Execution**: The MCP server runs locally—data never leaves your machine
+**Next steps**
 
-```typescript
-// Production-safe configuration
-const server = new TopGunMCPServer({
-  topgunUrl: 'wss://production.example.com',
-  authToken: process.env.TOPGUN_TOKEN,
-  allowedMaps: ['public-tasks', 'public-users'], // Restrict access
-  enableMutations: false, // Read-only
-  enableSubscriptions: false,
-  maxLimit: 50,
-});
-```
+- [Search & live queries](/docs/guides/search-and-live-queries) — apply typed predicate queries to your typed maps
+- [Quickstart](/docs/quickstart) — canonical hook-first snippet with the Zod schema flow end-to-end
+- [Client API reference](/docs/reference/client) — full `getMap`, `getORMap`, `query` signatures
 
-  <a href="/docs/guides/performance" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+  <a href="/docs/guides/live-notifications" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Previous</span>
-      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Performance Tuning
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Live notifications
   </a>
-  <a href="/docs/reference" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+  <a href="/docs/guides/search-and-live-queries" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Next</span>
-      API Reference <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+      Search & live queries <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+  </a>
+
+
+---
+
+# Offline-first apps
+
+> Build apps that work without a network and recover state automatically on reconnect.
+
+
+
+  <span className="text-foreground font-medium">Docs</span>
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <span className="text-foreground font-medium">Offline-first apps</span>
+
+# Offline-first apps
+
+Offline-first apps: TopGun reads and writes go to local IndexedDB first; the sync engine ships pending writes when the server reconnects; HLC timestamps make merges automatic. The result is an app that feels instant whether or not the network is present.
+
+---
+
+## Why offline-first
+
+Most apps treat the network as a requirement: reads block on a fetch, writes fail loudly when the server is unreachable. TopGun inverts this:
+
+- **Reads are local.** `useQuery` pulls from the in-memory CRDT map, which is backed by IndexedDB. No network round-trip required.
+- **Writes are local first.** `useMutation` writes immediately to the local map. The sync engine queues the write and ships it to the server when connected.
+- **Merges are automatic.** When two offline clients reconnect, TopGun reconciles their writes using HLC (Hybrid Logical Clock) timestamps. The most recent write per key wins (LWW semantics). No manual conflict handling.
+
+---
+
+## Setting up IDBAdapter
+
+Pass a `new IDBAdapter()` to the client constructor. The adapter persists the CRDT state to IndexedDB in the browser. No configuration needed — the database name is derived from the client's `nodeId`.
+
+
+
+Once the client has started, writes survive a page reload. On the next load, the in-memory state is rebuilt from IndexedDB before the server connection is attempted — so your app renders instantly from local state.
+
+---
+
+## Detecting connection state
+
+Use the `useSyncState` hook to get per-record sync status, or listen to the client's connection events directly for a global indicator.
+
+### Per-record sync status (React)
+
+
+
+### Global connection state (imperative)
+
+
+
+---
+
+## Reconnect and merge
+
+When the client reconnects after a period offline, TopGun uses a Merkle tree to compute the exact delta between the local state and the server state. Only the records that changed on either side are exchanged — not the full dataset.
+
+From the application's perspective, this is invisible: `useQuery` subscribers receive the merged results automatically. You do not need to trigger a manual refresh.
+
+
+
+<AlertBox
+  variant="info"
+  title="Write-behind buffer"
+  text="The server batches writes through a write-behind buffer (default flush interval: 1 s). An unclean server shutdown can lose buffered writes not yet flushed to the durable backend. WAL-recovery support is tracked on the roadmap (TODO-339)."
+/>
+
+---
+
+## Local-only mode
+
+TopGun works without a server at all. Omit `serverUrl` for a fully local app — reads and writes go to IndexedDB only, with no sync.
+
+
+
+Local-only mode is useful for:
+
+- **Progressive disclosure** — ship a working local app first; add sync later
+- **Private data** — user preferences, drafts, or cached data that should never leave the device
+- **Testing** — write deterministic unit tests without mocking a server
+
+---
+
+**Next steps**
+
+- [Real-time collaboration](/docs/guides/realtime-collaboration) — build multi-user shared maps on top of the same local-first foundation
+- [Live notifications](/docs/guides/live-notifications) — ephemeral topic messages that complement offline-capable maps
+- [Schema-typed data](/docs/guides/schema-typed-data) — add compile-time type safety to your offline map operations
+
+  <a href="/docs/guides/realtime-collaboration" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Real-time collaboration
+  </a>
+  <a href="/docs/guides/live-notifications" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+      Live notifications <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
   </a>
 
 
@@ -1191,7 +994,7 @@ The key step: give your agent the `llms-full.txt` bundle so it has the full API 
 This gives your agent three things:
 
 1. The complete API reference loaded from [`https://topgun.build/llms-full.txt`](https://topgun.build/llms-full.txt)
-2. The canonical hook-first snippet (the same shape as the [Quick Start canonical app](/docs/quick-start#the-canonical-app))
+2. The canonical hook-first snippet (the same shape as the [Quick Start canonical app](/docs/quickstart#the-canonical-app))
 3. A one-line mental model: **hooks for reads (`useQuery`), `useMutation` for writes, schema in Zod, `pnpm start:server` for the local backend**
 
 Without this block, agents reliably hallucinate methods like `client.subscribe()` or reach for raw map getters for reads, which won't re-render on data changes.
@@ -1222,7 +1025,7 @@ Replace the brackets with your actual requirements. The `Use the hook-first API`
 
 *Why it happens:* `client.getMap('todos')` returns a raw map object — it doesn't subscribe to React state. The agent reaches for it because it looks like a standard getter.
 
-*Fix:* Swap every read to `useQuery<T>('mapName')`. Cross-reference: [Quick Start canonical app](/docs/quick-start#the-canonical-app).
+*Fix:* Swap every read to `useQuery<T>('mapName')`. Cross-reference: [Quick Start canonical app](/docs/quickstart#the-canonical-app).
 
 ```tsx
 // Wrong — no re-renders when data changes
@@ -1246,7 +1049,7 @@ const { data: todos = [] } = useQuery<Todo>('todos');
 
 *Why it happens:* The agent generates correct client code but doesn't know a server needs to be running locally.
 
-*Fix:* Run `pnpm start:server` in a second terminal before opening the app. See [Quick Start — Start the Server](/docs/quick-start#2-start-the-server).
+*Fix:* Run `pnpm start:server` in a second terminal before opening the app. See [Quick Start — Start the Server](/docs/quickstart#2-start-the-server).
 
 ```bash
 # In a second terminal — keep this running while you develop
@@ -1257,7 +1060,7 @@ pnpm start:server
 
 Connect your agent to a running TopGun server so it can query your real data, introspect the schema, and avoid hallucination entirely.
 
-TopGun ships `@topgunbuild/mcp-server`, which implements the [Model Context Protocol](https://modelcontextprotocol.io/) and exposes `topgun_query`, `topgun_get`, `topgun_set`, `topgun_schema`, and `topgun_list_maps` tools to any MCP-compatible agent.
+TopGun ships `@topgunbuild/mcp-server`, which implements the [Model Context Protocol](https://modelcontextprotocol.io/) and exposes eight tools to any MCP-compatible agent: `topgun_query`, `topgun_mutate`, `topgun_search`, `topgun_subscribe`, `topgun_schema`, `topgun_stats`, `topgun_explain`, `topgun_list_maps`.
 
 **Step 1:** Make sure `pnpm start:server` is running.
 
@@ -1336,21 +1139,7 @@ The agent moves `await client.start()` to module scope (before the component fun
 
 # Authentication & Security
 
-> Secure your local-first application by integrating authentication providers and managing access control.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+> Secure your TopGun app by integrating Clerk, BetterAuth, Firebase, or a custom JWT provider.
 
 
 
@@ -1360,172 +1149,153 @@ The agent moves `await client.start()` to module scope (before the component fun
 
 # Authentication & Security
 
-Secure your local-first application by integrating authentication providers and managing access control.
+Authentication and security: connect any JWT-issuing provider (Clerk, BetterAuth, Firebase, or custom) to your `TopGunClient` instance; the client sends the token to the server on every WebSocket handshake; the server validates it and enforces per-collection RBAC access control. Local-first writes happen before the network authenticates, so offline clients can write immediately and reconcile permissions on reconnect.
 
   <FeatureCard
     icon={Shield}
     iconColor="text-brand-subtle"
-    title="Token-Based"
+    title="Token-based"
     description="Standard JWT authentication integrated directly into the sync protocol."
   />
   <FeatureCard
     icon={Lock}
     iconColor="text-green-500"
-    title="Provider Agnostic"
-    description="Works with Clerk, Better Auth, Auth0, Firebase, or any JWT-based provider."
+    title="Provider agnostic"
+    description="Works with Clerk, BetterAuth, Firebase, Auth0, or any JWT-based provider."
   />
   <FeatureCard
     icon={Key}
     iconColor="text-orange-500"
-    title="Access Control"
+    title="Access control"
     description="Fine-grained RBAC permissions per collection with pattern matching."
   />
 
-## How it Works
+## Setup
 
-In a local-first architecture, authentication serves two main purposes:
+Create the client once and export it. The `storage` field accepts `new IDBAdapter()` (zero-arg) for IndexedDB persistence in the browser.
 
-- **Gatekeeping Sync:** Only authenticated users can connect to the synchronization server (WebSocket).
-- **Authorization:** Ensuring users can only read or write data they are permitted to access.
 
-TopGun decouples the authentication provider from the sync engine. You can use any provider to generate a JWT token. This token is passed to the TopGun client, which sends it to the server during the WebSocket handshake.
 
-## Integration Flow
+Register a token provider after the client is created. The provider is called on every `AUTH_REQUIRED` message — which the server sends on initial connection and after any reconnect.
+
+
+
+## How it works
 
     <Step
       number={1}
-      title="Authenticate User"
-      description="Use your preferred provider SDK to log the user in and retrieve a session token (JWT)."
+      title="Authenticate user"
+      description="Use your preferred provider SDK to log the user in and retrieve a JWT."
     />
     <Step
       number={2}
-      title="Set Token in Client"
-      description="Pass the token to the TopGun client. The client will automatically authenticate the WebSocket connection."
+      title="Register token provider"
+      description="Call tgClient.setAuthTokenProvider(async () => token). The client calls this on every AUTH_REQUIRED message."
     />
     <Step
       number={3}
-      title="Server Validation"
-      description="The TopGun server validates the JWT using the configured secret. If valid, the connection is established with the user's principal attached."
+      title="Server validates JWT"
+      description="The TopGun server verifies the JWT using the configured JWT_SECRET. If valid, the sync connection is established with the user's principal attached."
     />
 
-## Clerk Integration
+## Clerk integration
 
-  <span className="text-neutral-600 dark:text-neutral-300">Clerk is a popular authentication provider with excellent React support. Here's how to integrate it with TopGun.</span>
-
-### 1. Setup TopGun Client
-
-
-### 2. Create Auth Sync Component
-
-Use `setAuthTokenProvider` to automatically refresh tokens when they expire.
-
-
-### 3. Wire Up in App
-
-
-### 4. User-Scoped Data
-
-Use the user ID from Clerk to scope data per user:
-
-
-## Better Auth Integration
-
-  <span className="text-neutral-600 dark:text-neutral-300">Better Auth is a framework-agnostic authentication library. TopGun provides a dedicated adapter that uses TopGun as the database backend for Better Auth.</span>
-
-  <p className="text-amber-800 dark:text-amber-200 text-sm">
-    <strong>Note:</strong> This approach stores auth data (users, sessions) in TopGun itself, allowing authentication data to be distributed and synced like any other application data.
-  </p>
-
-### 1. Install the Adapter
-
-
-### 2. Configure Better Auth
-
-
-### 3. Use in Your App
-
-
-### 4. Connect BetterAuth Session to TopGun
-
-  <p className="text-brand text-sm">
-    <strong>Important:</strong> BetterAuth manages sessions using cookies or opaque session tokens by default — it does not issue JWTs. TopGun requires a JWT for sync authentication. To connect BetterAuth sessions to TopGun, you must create a custom server endpoint that verifies the BetterAuth session and mints a signed JWT for TopGun consumption.
-  </p>
-
-**Two-step bridge pattern: BetterAuth session → custom endpoint → JWT → TopGun**
+  <span className="text-neutral-600 dark:text-neutral-300">Clerk is a popular React-first auth provider. Its JWTs use RS256 — configure <code>JWT_SECRET</code> with the Clerk RSA public key.</span>
 
 
 
-## Server Configuration
-
-The TopGun server validates JWT tokens using a shared secret. Configure the secret to match your auth provider.
 
 
-### JWT Token Structure
+### Clerk JWT_SECRET (production)
 
-TopGun expects the following claims in the JWT payload:
-
-
-## Custom JWT Provider
-
-If you're using a custom authentication system, you can generate JWT tokens manually.
-
-
-### Client-Side Usage
-
-
-## Token Lifecycle
-
-Understanding how token expiry interacts with active connections helps you build robust auth flows.
-
-- **Active connections are not terminated when a token expires.** Once a WebSocket connection is established and authenticated, token expiry does not disconnect the client. The existing session continues until the connection is dropped.
-- **Token expiry only matters on reconnect.** If the network drops, the page is reloaded, or the WebSocket is otherwise closed, the client must re-authenticate. At that point, the server sends an `AUTH_REQUIRED` message.
-- **`setAuthTokenProvider()` is called on every `AUTH_REQUIRED` message.** This happens on initial connection and on every reconnect. The provider must return a valid, non-expired token for the connection to be established.
-- **Returning `null` from the provider leaves the connection unauthenticated.** The client will be connected but no data operations will be permitted.
-- **Recommendation:** your token provider should call your app's token or session refresh endpoint rather than relying on a cached token that may be stale after a long offline period.
-
-## Production Deployment with Clerk
-
-  <p className="text-brand text-sm">
-    <strong>Important:</strong> Clerk uses RS256 (asymmetric RSA) algorithm for JWT signing, not HS256. This means you need to use Clerk's <strong>public key</strong> for token verification on the server.
-  </p>
-
-### Getting the Clerk Public Key
-
-Clerk publishes its public keys via the JWKS (JSON Web Key Set) endpoint. You can find your instance's public key at:
+Clerk uses RSA asymmetric signing. Set `JWT_SECRET` to the RSA public key from Clerk's JWKS endpoint:
 
 ```
 https://YOUR_CLERK_DOMAIN.clerk.accounts.dev/.well-known/jwks.json
 ```
 
 
-### Configuring JWT_SECRET for Docker/Dokploy
 
-When deploying to Docker-based platforms (Dokploy, Railway, etc.), you need to handle the PEM key format carefully:
+The server automatically detects RSA public keys (by checking for `-----BEGIN`) and uses the RS256 algorithm.
 
+---
 
-  <p className="text-amber-800 dark:text-amber-200 text-sm">
-    <strong>Note:</strong> The TopGun server automatically detects RSA public keys (by checking for <code>-----BEGIN</code>) and uses the RS256 algorithm. It also handles escaped newlines (<code>\n</code>) from Docker environment variables.
-  </p>
+## BetterAuth integration
 
-### Algorithm Support
+  <span className="text-neutral-600 dark:text-neutral-300">BetterAuth is a framework-agnostic auth library. The <code>@topgunbuild/adapter-better-auth</code> package lets TopGun serve as the BetterAuth database backend.</span>
 
-TopGun server supports both symmetric and asymmetric JWT algorithms:
-
-| Provider | Algorithm | JWT_SECRET Value |
-|----------|-----------|------------------|
-| Custom/Self-hosted | HS256 | Shared secret string |
-| Clerk | RS256 | RSA Public Key (PEM) |
-| Auth0 | RS256 | RSA Public Key (PEM) |
-| Firebase | RS256 | RSA Public Key (PEM) |
-
-## Authentication Protocol
-
-Here's how the authentication handshake works at the WebSocket level:
+<AlertBox
+  variant="info"
+  title="BetterAuth sessions are not JWTs"
+  text="BetterAuth uses opaque session cookies by default. TopGun requires a JWT for sync authentication. You must create a server-side bridge endpoint that exchanges a BetterAuth session for a signed JWT."
+/>
 
 
-  <a href="/docs/guides" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Back</span>
-      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> All Guides
+
+### Bridge endpoint: BetterAuth session → TopGun JWT
+
+
+
+
+
+---
+
+## Custom auth provider
+
+If you manage your own JWT issuance (e.g. a custom login endpoint), call `setAuthTokenProvider` with an async function that returns the token from your session store.
+
+
+
+
+
+---
+
+## Firebase integration
+
+Firebase uses RS256 for JWT signing. Obtain the Firebase public key from the Google JWKS endpoint and set it as `JWT_SECRET`.
+
+| Provider | Algorithm | JWT_SECRET value |
+|----------|-----------|-----------------|
+| Custom / self-hosted | HS256 | Shared secret string |
+| Clerk | RS256 | RSA public key (PEM) |
+| Firebase | RS256 | RSA public key (PEM) |
+| Auth0 | RS256 | RSA public key (PEM) |
+
+The TopGun server detects RSA keys automatically (by checking for `-----BEGIN`) and switches to RS256 validation.
+
+---
+
+## JWT token structure
+
+TopGun reads only the `sub` and `roles` claims from the JWT payload:
+
+
+
+---
+
+## Token lifecycle and refresh
+
+- **Active connections are not terminated when a token expires.** Once a WebSocket connection is established, token expiry does not disconnect the client. The session continues until the connection drops.
+- **Token expiry only matters on reconnect.** When the WebSocket closes (page reload, network drop), the server sends `AUTH_REQUIRED`. `setAuthTokenProvider` is called at that point to obtain a fresh token.
+- **Returning `null` from the provider leaves the connection unauthenticated.** No data operations are permitted in that state.
+- **Recommendation:** your token provider should call your app's token or session refresh endpoint rather than relying on a cached token that may be stale after a long offline period.
+
+---
+
+## Authentication protocol
+
+
+---
+
+**Next steps**
+
+- [RBAC](/docs/guides/rbac) — configure per-collection read/write access control on the server
+- [Security (TLS)](/docs/guides/security) — enable TLS for the WebSocket connection in production
+- [Offline-first apps](/docs/guides/offline-first) — understand how authentication interacts with offline writes
+
+  <a href="/docs/guides/counters-and-locks" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Counters & locks
   </a>
   <a href="/docs/guides/security" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Next</span>
@@ -1537,1245 +1307,1324 @@ Here's how the authentication handshake works at the WebSocket level:
 
 # Client API
 
-> The TopGunClient is the main entry point for interacting with the TopGun cluster.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+> TopGunClient — the imperative SDK surface that React hooks call under the hood.
 
 
 
   <h1 className="text-4xl font-bold text-foreground">Client API</h1>
 
-<AlertBox variant="info" title="Hook-first API for React UI code" text="For React UI code, prefer the hook-first API: useQuery<Todo>('todos') for reads, useMutation<Todo>('todos') for writes (see /docs/quick-start for the canonical pattern). This reference page documents the lower-level TopGunClient API surface used inside hooks and in non-React contexts (Node.js, service workers, testing)." />
+<AlertBox variant="info" title="Hook-first API for React UI code" text="For React UI code, prefer the hook-first API: useQuery<Todo>('todos') for reads, useMutation<Todo>('todos') for writes (see /docs/quickstart for the canonical pattern). This reference page documents the lower-level TopGunClient<TSchema> API surface used inside hooks and in non-React contexts (Node.js, service workers, testing)." />
 
-The `TopGunClient` is the main entry point for interacting with the TopGun cluster.
-It handles connection management, offline synchronization, and provides access to distributed data structures.
+`TopGunClient<TSchema>` is the imperative SDK entry point. It manages local CRDT maps, the sync engine, and the connection lifecycle. The class is generic over an optional schema type that narrows `getMap`, `getORMap`, and `query` to your application types.
+
+```typescript
+interface AppSchema {
+  todos: { text: string; done: boolean };
+  users: { name: string; email: string };
+}
+
+const client = new TopGunClient<AppSchema>({
+  storage: new IDBAdapter(),
+});
+
+// Narrowed: LWWMap<string, { text: string; done: boolean }>
+const todos = client.getMap('todos');
+```
+
+The untyped fallback overloads remain for callers that pass explicit type parameters.
 
 ## Constructor
 
-    <ApiParam
-      name="serverUrl"
-      type="string"
-      description="WebSocket URL of the TopGun server (e.g., ws://localhost:8765). Required for single-server mode."
-    />
-    <ApiParam
-      name="cluster?"
-      type="ClusterConfig"
-      description="Cluster configuration for multi-node deployments. When provided, serverUrl is ignored."
-    />
-    <ApiParam
-      name="storage"
-      type="IStorageAdapter"
-      description="Persistence adapter (e.g., IDBAdapter)."
-    />
-    <ApiParam
-      name="nodeId?"
-      type="string"
-      description="Optional unique ID for this client. Auto-generated if omitted."
-    />
+```typescript
+new TopGunClient<TSchema>(config: TopGunClientConfig)
+```
 
-### Single-Server Mode
+`TopGunClientConfig` accepts:
 
-For simple deployments with a single TopGun server:
+| Field | Type | Description |
+|---|---|---|
+| `storage` | `IStorageAdapter` | Required. Local persistence (typically `new IDBAdapter()`). |
+| `serverUrl` | `string` | Optional. WebSocket URL for single-server mode. Mutually exclusive with `cluster`. |
+| `cluster` | `TopGunClusterConfig` | Optional. Cluster configuration. Mutually exclusive with `serverUrl`. |
+| `nodeId` | `string` | Optional. Auto-generated UUID if omitted. |
+| `backoff` | `Partial<BackoffConfig>` | Optional. Reconnect backoff tuning. |
+| `backpressure` | `Partial<BackpressureConfig>` | Optional. Backpressure thresholds and strategy. |
+| `auth` | `AuthProvider` | Optional. Pluggable auth provider (Clerk, Firebase, BetterAuth, Custom). |
 
+The constructor branches on three mutually exclusive modes:
 
-### Cluster Mode
+### Local-only mode (default)
 
-For production deployments with multiple nodes, use the `cluster` configuration:
+When neither `serverUrl` nor `cluster` is supplied, the client uses `NullConnectionProvider`. Operations stay in memory and IndexedDB; no socket is opened. This is the default for offline demos, tests, and prototype apps.
 
+```typescript
 
-    <h4 className="font-semibold text-brand">Smart Routing</h4>
-  <span className="text-brand">
-    When <code className="px-1.5 py-0.5 rounded bg-brand-subtle/10 text-sm">smartRouting</code> is enabled,
-    the client automatically routes operations to the correct partition owner node. This reduces network hops and improves latency.
-    The client maintains a partition map and updates it automatically when the cluster topology changes.
-  </span>
+const client = new TopGunClient({
+  storage: new IDBAdapter(),
+});
+```
 
-#### ClusterConfig Options
+### Single-server mode
 
-    <ApiParam
-      name="seeds"
-      type="string[]"
-      description="List of seed node WebSocket URLs. The client connects to these nodes to discover the cluster."
-    />
-    <ApiParam
-      name="smartRouting?"
-      type="boolean"
-      description="Enable partition-aware routing. Operations are sent directly to partition owners. Default: true."
-    />
-    <ApiParam
-      name="connectionsPerNode?"
-      type="number"
-      description="Number of connections to maintain per node. Default: 1."
-    />
-    <ApiParam
-      name="partitionMapRefreshMs?"
-      type="number"
-      description="Interval for refreshing the partition map. Default: 30000 (30 seconds)."
-    />
-    <ApiParam
-      name="connectionTimeoutMs?"
-      type="number"
-      description="Connection timeout in milliseconds. Default: 10000."
-    />
-    <ApiParam
-      name="retryAttempts?"
-      type="number"
-      description="Number of retry attempts on connection failure. Default: 3."
-    />
+Supply `serverUrl` to connect to one TopGun server over WebSocket.
 
-### HTTP Sync Mode
+```typescript
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080',
+  storage: new IDBAdapter(),
+});
+```
 
-For serverless environments where WebSocket connections are unavailable, use `HttpSyncProvider` to sync via HTTP polling. `HttpSyncProvider` implements the `IConnectionProvider` interface and is used with `SyncEngine` directly -- it is not compatible with the `TopGunClient` constructor, which only accepts `serverUrl` and `cluster` options.
+### Cluster mode
 
+Supply `cluster.seeds` (one or more seed URLs) for partition-aware routing across multiple nodes.
 
-#### HttpSyncProviderConfig
+```typescript
+const client = new TopGunClient({
+  cluster: {
+    seeds: [
+      'ws://node1.example.com:8080',
+      'ws://node2.example.com:8080',
+      'ws://node3.example.com:8080',
+    ],
+    smartRouting: true,
+    connectionsPerNode: 2,
+    connectionTimeoutMs: 5000,
+  },
+  storage: new IDBAdapter(),
+});
+```
 
-    <ApiParam
-      name="url"
-      type="string"
-      description="HTTP URL of the TopGun server (e.g., 'https://api.example.com')."
-    />
-    <ApiParam
-      name="clientId"
-      type="string"
-      description="Client identifier for request construction."
-    />
-    <ApiParam
-      name="hlc"
-      type="HLC"
-      description="Hybrid Logical Clock instance for causality tracking."
-    />
-    <ApiParam
-      name="authToken?"
-      type="string"
-      description="JWT auth token for the Authorization header."
-    />
-    <ApiParam
-      name="pollIntervalMs?"
-      type="number"
-      description="Polling interval in milliseconds. Default: 5000"
-    />
-    <ApiParam
-      name="requestTimeoutMs?"
-      type="number"
-      description="HTTP request timeout in milliseconds. Default: 30000"
-    />
-    <ApiParam
-      name="syncMaps?"
-      type="string[]"
-      description="Map names to sync deltas for on each poll."
-    />
-    <ApiParam
-      name="fetchImpl?"
-      type="typeof fetch"
-      description="Custom fetch implementation for testing or platform compatibility."
-    />
+`TopGunClusterConfig` fields: `seeds` (required), `connectionsPerNode` (default 1), `smartRouting` (default true), `partitionMapRefreshMs` (default 30000), `connectionTimeoutMs` (default 5000), `retryAttempts` (default 3).
 
-### Auto Connection Mode
+Supplying both `serverUrl` and `cluster` throws at construction.
 
-`AutoConnectionProvider` automatically tries WebSocket first and falls back to HTTP sync when WebSocket connections fail. Like `HttpSyncProvider`, it implements the `IConnectionProvider` interface and is used with `SyncEngine` directly -- not with `TopGunClient`.
+### Advanced: HTTP-sync and auto-connection providers
 
+For environments without WebSockets (Cloudflare Workers, serverless, restrictive proxies), build a custom `SyncEngine` with `HttpSyncProvider` or `AutoConnectionProvider`. These are advanced and bypass the `TopGunClient` wrapper.
 
-#### AutoConnectionProviderConfig
+```typescript
 
-    <ApiParam
-      name="url"
-      type="string"
-      description="Server URL (ws:// or http://)."
-    />
-    <ApiParam
-      name="clientId"
-      type="string"
-      description="Client identifier."
-    />
-    <ApiParam
-      name="hlc"
-      type="HLC"
-      description="Hybrid Logical Clock instance."
-    />
-    <ApiParam
-      name="maxWsAttempts?"
-      type="number"
-      description="Maximum WebSocket connection attempts before falling back to HTTP. Default: 3"
-    />
-    <ApiParam
-      name="authToken?"
-      type="string"
-      description="JWT auth token."
-    />
-    <ApiParam
-      name="httpOnly?"
-      type="boolean"
-      description="Skip WebSocket and use HTTP-only mode. Default: false"
-    />
-    <ApiParam
-      name="httpPollIntervalMs?"
-      type="number"
-      description="HTTP polling interval in milliseconds. Default: 5000"
-    />
-    <ApiParam
-      name="syncMaps?"
-      type="string[]"
-      description="Map names to sync via HTTP."
-    />
-    <ApiParam
-      name="fetchImpl?"
-      type="typeof fetch"
-      description="Custom fetch implementation for HTTP mode."
-    />
+const hlc = new HLC('client-1');
+const provider = new HttpSyncProvider({
+  url: 'https://your-api.example.com',
+  clientId: 'client-1',
+  hlc,
+  authToken: 'your-jwt-token',
+  syncMaps: ['todos'],
+  pollIntervalMs: 5000,
+});
 
-    <h4 className="font-semibold text-brand">HTTP Mode Limitations</h4>
-  <span className="text-brand">
-    HTTP sync mode supports batch operations and one-shot queries only. It does not support live query subscriptions,
-    Merkle tree synchronization, or real-time topic messages. For real-time features, use WebSocket mode or
-    <code className="px-1.5 py-0.5 rounded bg-brand-subtle/10 text-sm">AutoConnectionProvider</code>
-    which will use WebSocket when available.
-  </span>
+const engine = new SyncEngine({
+  nodeId: 'client-1',
+  connectionProvider: provider,
+  storageAdapter: new IDBAdapter(),
+});
+```
+
+`AutoConnectionProvider` attempts WebSocket first, then falls back to HTTP polling. Same setup pattern.
 
 ## Core Methods
 
-### start()
+### `start()`
 
-  <span className="text-neutral-600 dark:text-neutral-300">Initializes the storage adapter and starts the synchronization engine.</span>
+```typescript
+public async start(): Promise<void>
+```
 
+Initializes the storage adapter (calls `storage.initialize('topgun_offline_db')`). For local-only mode this is optional — `IDBAdapter` initializes lazily on first read/write. Calling `start()` eagerly is useful when you want to surface storage errors before the UI renders.
 
-  <h4 className="font-semibold text-green-800 dark:text-green-300 mb-2">Non-Blocking Initialization</h4>
-  <span className="text-green-700 dark:text-green-400">
-    The <code className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-800/50 text-sm">IDBAdapter</code> initializes IndexedDB in the background.
-    You can start using the client immediately—write operations are queued in memory and persisted once IndexedDB is ready.
-    This provides true "memory-first" behavior with zero blocking time.
-  </span>
+### `getMap(name)`
 
-### getMap\<K, V\>(name)
+```typescript
+getMap<K extends keyof TSchema & string>(name: K): LWWMap<string, TSchema[K]>;
+getMap<K = string, V = any>(name: string): LWWMap<K, V>;
+```
 
-  <span className="text-neutral-600 dark:text-neutral-300">Returns an <strong className="text-foreground">LWWMap</strong> (Last-Writer-Wins Map). Best for simple key-value data where the latest update wins.</span>
+Returns an `LWWMap` (last-write-wins CRDT) for the given name. Creates the map on first call and restores its state from storage asynchronously.
 
+```typescript
+const users = client.getMap<string, User>('users');
+users.set('u1', { name: 'Alice' });
+const user = users.get('u1');
+```
 
-### getORMap\<K, V\>(name)
+### `getORMap(name)`
 
-  <span className="text-neutral-600 dark:text-neutral-300">Returns an <strong className="text-foreground">ORMap</strong> (Observed-Remove Map). Best for sets or lists where concurrent additions should be preserved.</span>
+```typescript
+getORMap<K extends keyof TSchema & string>(name: K): ORMap<string, TSchema[K]>;
+getORMap<K = string, V = any>(name: string): ORMap<K, V>;
+```
 
+Returns an `ORMap` (observed-remove CRDT) for multi-value-per-key data.
 
-### topic(name)
+```typescript
+const tags = client.getORMap<string, string>('tags');
+tags.add('post:123', 'javascript');
+tags.add('post:123', 'typescript');
+const postTags = tags.get('post:123'); // ['javascript', 'typescript']
+```
 
-  <span className="text-neutral-600 dark:text-neutral-300">Returns a <strong className="text-foreground">TopicHandle</strong> for real-time Pub/Sub messaging. Messages are ephemeral and not stored.</span>
+### `query(mapName, filter)`
 
+```typescript
+query<K extends keyof TSchema & string>(mapName: K, filter: QueryFilter): QueryHandle<TSchema[K]>;
+query<T = any>(mapName: string, filter: QueryFilter): QueryHandle<T>;
+```
 
-### getLock(name)
+Returns a live query subscription. The handle emits an initial result and delta updates. See [Search & live queries](/docs/guides/search-and-live-queries) for the canonical use-case-driven example.
 
-  <span className="text-neutral-600 dark:text-neutral-300">Returns a <strong className="text-foreground">DistributedLock</strong> handle. Useful for coordinating tasks across multiple clients.</span>
+```typescript
+const handle = client.query<Todo>('todos', {
+  where: { completed: false },
+  sort: { createdAt: 'desc' },
+  limit: 10,
+});
 
+const unsubscribe = handle.subscribe((results) => {
+  console.log('Results:', results);
+});
 
-### query\<T\>(mapName, filter)
+// Cursor pagination
+const { nextCursor, hasMore } = handle.getPaginationInfo();
+if (hasMore && nextCursor) {
+  const nextPage = client.query<Todo>('todos', {
+    where: { completed: false },
+    sort: { createdAt: 'desc' },
+    limit: 10,
+    cursor: nextCursor,
+  });
+}
+```
 
-  <span className="text-neutral-600 dark:text-neutral-300">Creates a live query subscription for a map. Returns a <strong className="text-foreground">QueryHandle</strong> that can be subscribed to for real-time updates.</span>
+`QueryHandle<T>` methods: `subscribe(cb)`, `onDelta(listener)`, `consumeChanges()`, `getLastChange()`, `getPendingChanges()`, `clearChanges()`, `resetChangeTracker()`, `getFilter()`, `getMapName()`, `getPaginationInfo()`, `onPaginationChange(listener)`, `updatePaginationInfo(info)`, `syncState` (getter), `onSyncStateChange(listener)`.
 
+### `topic(name)`
 
-### executeOnKey\<V, R\>(mapName, key, processor)
+```typescript
+public topic(name: string): TopicHandle
+```
 
-  <span className="text-neutral-600 dark:text-neutral-300">Executes an <strong className="text-foreground">Entry Processor</strong> atomically on a single key. Solves read-modify-write race conditions.</span>
+Returns a pub/sub topic for ephemeral fan-out messaging (not CRDT-persisted). See [Live notifications](/docs/guides/live-notifications) for the canonical hook-first pattern.
 
-  <CodeBlock language="typescript" code={`import { BuiltInProcessors } from '@topgunbuild/core';
+```typescript
+const chat = client.topic('chat-room');
+chat.publish({ text: 'Hello!' });
+const unsubscribe = chat.subscribe((msg) => {
+  console.log(msg);
+});
+```
 
-// Atomic increment
-const result = await client.executeOnKey(
-  'stats',     // map name
-  'pageViews', // key
-  BuiltInProcessors.INCREMENT(1)
+### `getLock(name)`
+
+```typescript
+public getLock(name: string): DistributedLock
+```
+
+Returns a distributed lock handle. See [Counters & locks](/docs/guides/counters-and-locks) for fencing-token semantics and single-node-vs-cluster caveats.
+
+```typescript
+const lock = client.getLock('resource-A');
+if (await lock.lock(10000)) {
+  // Critical section
+  await lock.unlock();
+}
+```
+
+`DistributedLock` methods: `lock(ttl?: number)`, `unlock()`, `isLocked()`.
+
+### `getPNCounter(name)`
+
+```typescript
+public getPNCounter(name: string): PNCounterHandle
+```
+
+Returns a PN-Counter (positive-negative) for offline-capable increment/decrement. See [Counters & locks](/docs/guides/counters-and-locks) for a canonical example.
+
+```typescript
+const likes = client.getPNCounter('likes:post-123');
+likes.increment();
+likes.decrement();
+likes.addAndGet(10);
+likes.subscribe((value) => {
+  console.log('Current likes:', value);
+});
+```
+
+### Entry processors — planned (v2.x)
+
+Server-side atomic read-modify-write via user-defined functions (`client.executeOnKey`, `client.executeOnKeys`, `BuiltInProcessors`) requires a WASM sandbox on the v2.x roadmap. The SDK surface throws an explanatory error pre-launch — see [/docs/roadmap](/docs/roadmap).
+
+### `close()`
+
+```typescript
+public async close(): Promise<void>
+```
+
+Tears down the client. Awaits cluster reconnect-timer cleanup so the host process does not leak `setTimeout` handles.
+
+## Search and SQL
+
+### `search(mapName, query, options?)`
+
+```typescript
+public async search<T>(
+  mapName: string,
+  query: string,
+  options?: { limit?: number; minScore?: number; boost?: Record<string, number> }
+): Promise<Array<{ key: string; value: T; score: number; matchedTerms: string[] }>>
+```
+
+One-shot BM25 full-text search. Requires FTS enabled for the map on the server.
+
+```typescript
+const results = await client.search<Article>('articles', 'machine learning', {
+  limit: 20,
+  minScore: 0.5,
+  boost: { title: 2.0, body: 1.0 },
+});
+```
+
+### `searchSubscribe(mapName, query, options?)`
+
+```typescript
+public searchSubscribe<T>(
+  mapName: string,
+  query: string,
+  options?: SearchOptions
+): SearchHandle<T>
+```
+
+Live BM25 subscription. The handle receives ENTER/UPDATE/LEAVE deltas as documents change.
+
+```typescript
+const handle = client.searchSubscribe<Article>('articles', 'machine learning', {
+  limit: 20,
+  minScore: 0.5,
+});
+const unsubscribe = handle.subscribe((results) => setResults(results));
+handle.dispose();
+```
+
+### `sql(query)`
+
+```typescript
+public async sql(query: string): Promise<SqlQueryResult>
+```
+
+Execute a SQL query server-side via DataFusion. Map names are table names. Requires the server's DataFusion feature and registered schemas.
+
+```typescript
+const result = await client.sql('SELECT name, age FROM users WHERE age > 21 ORDER BY age');
+// result.columns: ['name', 'age']
+// result.rows: [[...], [...]]
+```
+
+### `vectorSearch(mapName, queryVector, options?)`
+
+```typescript
+public async vectorSearch(
+  mapName: string,
+  queryVector: Float32Array | number[],
+  options?: VectorSearchClientOptions
+): Promise<VectorSearchClientResult[]>
+```
+
+ANN search against the HNSW vector index. Query vector serializes as little-endian f32 bytes.
+
+```typescript
+const results = await client.vectorSearch('notes', new Float32Array([0.1, 0.2, 0.3]), { k: 5 });
+```
+
+### `hybridSearch(mapName, queryText, options?)`
+
+```typescript
+public async hybridSearch(
+  mapName: string,
+  queryText: string,
+  options?: HybridSearchClientOptions
+): Promise<HybridSearchClientResult[]>
+```
+
+Tri-hybrid search combining exact match, full-text, and semantic vector results via Reciprocal Rank Fusion.
+
+### `hybridSearchSubscribe(mapName, queryText, options?)`
+
+```typescript
+public hybridSearchSubscribe<T = unknown>(
+  mapName: string,
+  queryText: string,
+  options?: HybridSearchSubscribeOptions
+): HybridSearchHandle<T>
+```
+
+Live tri-hybrid search subscription.
+
+### `hybridQuery(mapName, filter?)`
+
+```typescript
+public hybridQuery<T>(mapName: string, filter: HybridQueryFilter = {}): HybridQueryHandle<T>
+```
+
+Combine FTS predicates with traditional filter predicates in a single query. Results include `_score` for FTS ranking.
+
+```typescript
+
+const handle = client.hybridQuery<Article>('articles', {
+  predicate: Predicates.and(
+    Predicates.match('body', 'machine learning'),
+    Predicates.equal('category', 'tech')
+  ),
+  sort: { _score: 'desc' },
+  limit: 20,
+});
+```
+
+## Connection State
+
+### `getConnectionState()`
+
+```typescript
+public getConnectionState(): SyncState
+```
+
+Returns the current state from the connection state machine (e.g., `OFFLINE`, `CONNECTING`, `AUTHENTICATING`, `READY`).
+
+### `onConnectionStateChange(listener)`
+
+```typescript
+public onConnectionStateChange(listener: (event: StateChangeEvent) => void): () => void
+```
+
+Subscribe to state transitions. Returns an unsubscribe function.
+
+```typescript
+const unsubscribe = client.onConnectionStateChange((event) => {
+  console.log(`State: ${event.from} -> ${event.to}`);
+});
+```
+
+### `getStateHistory(limit?)`
+
+```typescript
+public getStateHistory(limit?: number): StateChangeEvent[]
+```
+
+Returns the ring-buffered state-change history (useful for debugging reconnect storms).
+
+### `resetConnection()`
+
+```typescript
+public resetConnection(): void
+```
+
+Reset the connection and state machine. Use after fatal errors to start fresh.
+
+## Backpressure
+
+### `getPendingOpsCount()`
+
+```typescript
+public getPendingOpsCount(): number
+```
+
+Number of unacknowledged operations waiting for server ack.
+
+### `getBackpressureStatus()`
+
+```typescript
+public getBackpressureStatus(): BackpressureStatus
+```
+
+Snapshot: `{ pending, maxPending, strategy, paused, droppedCount }`.
+
+### `isBackpressurePaused()`
+
+```typescript
+public isBackpressurePaused(): boolean
+```
+
+True when the writer is currently paused under the pause strategy.
+
+### `onBackpressure(event, listener)`
+
+```typescript
+public onBackpressure(
+  event: 'backpressure:high' | 'backpressure:low' | 'backpressure:paused' | 'backpressure:resumed' | 'operation:dropped',
+  listener: (data?: BackpressureThresholdEvent | OperationDroppedEvent) => void
+): () => void
+```
+
+Subscribe to backpressure transitions.
+
+```typescript
+client.onBackpressure('backpressure:high', ({ pending, max }) => {
+  console.warn(`Warning: ${pending}/${max} pending ops`);
+});
+client.onBackpressure('backpressure:paused', () => showLoadingSpinner());
+client.onBackpressure('backpressure:resumed', () => hideLoadingSpinner());
+```
+
+## Event Journal
+
+### `getEventJournal()`
+
+```typescript
+public getEventJournal(): EventJournalReader
+```
+
+Returns the journal reader for subscribing to and replaying map-change events (audit trail, undo history, change-feed consumers).
+
+```typescript
+const journal = client.getEventJournal();
+
+const unsubscribe = journal.subscribe((event) => {
+  console.log(`${event.type} on ${event.mapName}:${event.key}`);
+});
+
+// Filtered subscription
+journal.subscribe(
+  (event) => console.log('User changed:', event.key),
+  { mapName: 'users' }
 );
 
-console.log(result.newValue); // New value after increment
-console.log(result.success);  // true`} />
+// Historical replay
+const events = await journal.readFrom(0n, 100);
+```
 
-### executeOnKeys\<V, R\>(mapName, keys, processor)
+`EventJournalReader` methods: `readFrom(sequence, limit)`, `readMapEvents(...)`, `getLatestSequence()`, `subscribe(listener, options?)`.
 
-  <span className="text-neutral-600 dark:text-neutral-300">Executes an <strong className="text-foreground">Entry Processor</strong> on multiple keys. Returns a Map of results.</span>
+## Conflict Resolvers
 
-  <CodeBlock language="typescript" code={`import { BuiltInProcessors } from '@topgunbuild/core';
+### `getConflictResolvers()`
 
-// Increment multiple counters
-const results = await client.executeOnKeys(
-  'counters',
-  ['views', 'clicks', 'shares'],
-  BuiltInProcessors.INCREMENT(1)
-);
+```typescript
+public getConflictResolvers(): ConflictResolverClient
+```
 
-for (const [key, result] of results) {
-  console.log(\`\${key}: \${result.newValue}\`);
-}`} />
+Observe merge rejections (the built-in CRDT merge logic rejected a remote change). The returned client's `register` / `unregister` / `list` methods throw — registering custom server-side resolvers requires a WASM sandbox on the v2.x roadmap, see [/docs/roadmap](/docs/roadmap).
 
-    <h4 className="font-semibold text-brand">Entry Processor</h4>
-  <span className="text-brand">
-    Entry processors execute user-defined logic atomically on the server. This solves race conditions where multiple clients
-    might read, modify, and write the same data concurrently. See the <a href="/docs/guides/entry-processor" className="underline">Entry Processor Guide</a> for detailed usage.
-  </span>
+```typescript
+const resolvers = client.getConflictResolvers();
 
-### close()
+resolvers.onRejection((rejection) => {
+  console.log(`Merge rejected: ${rejection.reason}`);
+});
+```
 
-  <span className="text-neutral-600 dark:text-neutral-300">Closes the client, disconnecting from the server and cleaning up resources.</span>
+## Per-Record Sync State
 
+### `getRecordSyncStateTracker()`
+
+```typescript
+public getRecordSyncStateTracker(): RecordSyncStateTracker
+```
+
+The tracker projects op-log mutations, connection state, and merge rejections into a four-state tag per `(mapName, key)`. Used by React hooks (`useSyncState`, the `*WithSyncState` companions) and by advanced consumers reading sync state outside a query context.
+
+## Cluster Mode API
+
+### `isCluster()`
+
+```typescript
+public isCluster(): boolean
+```
+
+True when the client was constructed with `cluster` config.
+
+### `getConnectedNodes()`
+
+```typescript
+public getConnectedNodes(): string[]
+```
+
+List of currently connected node IDs (cluster mode); empty array otherwise.
+
+### `getPartitionMapVersion()`
+
+```typescript
+public getPartitionMapVersion(): number
+```
+
+Current partition-map version; 0 in single-server mode.
+
+### `isRoutingActive()`
+
+```typescript
+public isRoutingActive(): boolean
+```
+
+True when direct routing to partition owners is active.
+
+### `getClusterHealth()`
+
+```typescript
+public getClusterHealth(): Map<string, NodeHealth>
+```
+
+Per-node health map.
+
+### `refreshPartitionMap()`
+
+```typescript
+public async refreshPartitionMap(): Promise<void>
+```
+
+Force a partition-map refresh. Useful after detecting routing errors.
+
+### `getClusterStats()`
+
+```typescript
+public getClusterStats(): { mapVersion: number; partitionCount: number; nodeCount: number; lastRefresh: number; isStale: boolean } | null
+```
+
+Router statistics snapshot.
 
 ## Authentication
 
-Use `setAuthToken` to authenticate the client. The token is sent to the server on connection and reconnection.
+### `setAuthToken(token)`
 
+```typescript
+public setAuthToken(token: string): void
+```
 
-For dynamic token refresh (e.g., when tokens expire), use `setAuthTokenProvider`:
+Set a static JWT for the next sync handshake.
 
+```typescript
+client.setAuthToken('jwt-token-here');
+```
 
-## Unsubscribing from Changes
+### `setAuthTokenProvider(provider)`
 
-All subscription methods return an unsubscribe function. Call it to stop receiving updates:
+```typescript
+public setAuthTokenProvider(provider: () => Promise<string | null>): void
+```
 
+Provider is called on each reconnection — refresh tokens land here.
 
-  <p className="text-sm text-yellow-800 dark:text-yellow-200">
-    <strong>Important:</strong> The <code className="bg-yellow-100 dark:bg-yellow-800/50 px-1 rounded">onChange()</code> callback receives no arguments—it only signals that something changed.
-    To see what changed, re-read the data inside the callback. For filtered results with automatic updates, use <code className="bg-yellow-100 dark:bg-yellow-800/50 px-1 rounded">client.query()</code> instead.
-  </p>
+```typescript
+client.setAuthTokenProvider(async () => {
+  const token = await refreshToken();
+  return token;
+});
+```
 
-## Cluster Failover
+For Clerk/Firebase/BetterAuth/Custom, prefer the `auth` constructor option with a pluggable `AuthProvider` instead of calling these methods directly.
 
-  <span className="text-neutral-600 dark:text-neutral-300">In cluster mode, the client automatically handles node failures with built-in circuit breaker logic.</span>
+---
 
-When a node becomes unavailable:
-
-1. **Circuit breaker opens** after consecutive failures (default: 5)
-2. **Traffic reroutes** to healthy nodes automatically
-3. **Circuit resets** after a timeout period (default: 30 seconds)
-4. **Partition map updates** when cluster topology changes
-
-
-  <h4 className="font-semibold text-green-800 dark:text-green-300 mb-2">Automatic Recovery</h4>
-  <span className="text-green-700 dark:text-green-400">
-    The client maintains connections to multiple cluster nodes. If one node fails,
-    operations are automatically rerouted to other available nodes. When the failed node
-    recovers, the client will start using it again after the circuit breaker resets.
-  </span>
-
-  <a href="/docs/reference" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Previous</span>
-      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Overview
-  </a>
-  <a href="/docs/reference/data-structures" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Next</span>
-      Data Structures API <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-  </a>
+[← Reference Overview](/docs/reference) · [Core →](/docs/reference/core)
 
 
 ---
 
-# React Hooks
+# React
 
-> The @topgunbuild/react package provides hooks for building reactive applications with TopGun.
-
-
+> Reference for @topgunbuild/react — hooks for building reactive TopGun apps.
 
 
 
+  <h1 className="text-4xl font-bold text-foreground">React</h1>
 
+`@topgunbuild/react` ships hooks that wrap the imperative `TopGunClient` API. Every hook below resolves the client through `<TopGunProvider client={client}>` — that provider is the one required ancestor.
 
-
-
-
-
-
-
-
-
-
-
-
-  <span className="text-foreground font-medium">Docs</span>
-  <a href="/docs/reference" className="hover:text-foreground transition-colors">Reference</a>
-  <span className="text-foreground font-medium">React Hooks</span>
-
-  <h1 className="text-4xl font-bold text-foreground">React Hooks</h1>
-
-The `@topgunbuild/react` package provides a set of hooks to make it easy to build
-reactive applications with TopGun.
+For the imperative surface these hooks call into, see the [Client Reference](/docs/reference/client).
 
 ## Setup
 
-  <span className="text-neutral-600 dark:text-neutral-300">Wrap your application in the <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded">TopGunProvider</code>:</span>
+### `TopGunProvider`
 
+Required React context provider. Wrap your app once at the root.
 
-## useQuery
+```tsx
 
-  <span className="text-neutral-600 dark:text-neutral-300">Subscribes to a live query and returns the results. The component will automatically re-render when the data changes.</span>
+const client = new TopGunClient({
+  storage: new IDBAdapter(),
+});
 
-
-### Change Tracking
-
-The `useQuery` hook provides built-in change tracking to help you understand **what** changed, not just the new state. This enables:
-
-- Efficient React re-renders (only changed items)
-- Add/remove animations (framer-motion, react-spring)
-- Optimistic UI rollback on specific keys
-- "New item added" notifications
-
-#### Return Values
-
-| Property | Type | Description |
-|----------|------|-------------|
-| `data` | `T[]` | Current query results |
-| `loading` | `boolean` | Loading state |
-| `error` | `Error \| null` | Error state |
-| `lastChange` | `ChangeEvent<T> \| null` | Most recent change |
-| `changes` | `ChangeEvent<T>[]` | All changes since last `clearChanges()` |
-| `clearChanges` | `() => void` | Clear accumulated changes |
-| `nextCursor` | `string \| undefined` | Cursor for fetching the next page |
-| `hasMore` | `boolean` | Whether more results are available |
-| `cursorStatus` | `'valid' \| 'expired' \| 'invalid' \| 'none'` | Status of cursor processing (for debugging) |
-
-#### ChangeEvent Structure
-
-```typescript
-interface ChangeEvent<T> {
-  type: 'add' | 'update' | 'remove';
-  key: string;
-  value?: T;           // New value (for add/update)
-  previousValue?: T;   // Previous value (for update/remove)
-  timestamp: number;   // When the change occurred
-}
-```
-
-#### Using lastChange and changes
-
-
-#### Callback Options
-
-For a more declarative approach, use the callback options:
-
-
-#### Animation Integration
-
-The change tracking works seamlessly with animation libraries like framer-motion:
-
-
-## useMap / useORMap
-
-  <span className="text-neutral-600 dark:text-neutral-300">Get direct access to a Map CRDT instance. The component will re-render whenever the map changes.</span>
-
-Use `useMap` for Last-Write-Wins maps (simple key-value) and `useORMap` for Observed-Remove maps (multi-value/sets).
-
-
-## useMutation
-
-  <span className="text-neutral-600 dark:text-neutral-300">A helper hook for performing mutations on a map without subscribing to changes.</span>
-
-
-## usePNCounter
-
-  <span className="text-neutral-600 dark:text-neutral-300">Subscribe to a distributed counter that supports increment/decrement with offline support.</span>
-
-  <CodeBlock title="components/LikeButton.tsx" language="typescript" code={`import { usePNCounter } from '@topgunbuild/react';
-
-function LikeButton({ postId }) {
-  const { value, increment, decrement, add, loading } = usePNCounter(\`likes:\${postId}\`);
-
+export function App() {
   return (
-      <button onClick={decrement} disabled={loading}>-</button>
-      <span>{value}</span>
-      <button onClick={increment} disabled={loading}>+</button>
   );
-}`} />
-
-### Return Values
-
-| Property | Type | Description |
-|----------|------|-------------|
-| `value` | `number` | Current counter value |
-| `loading` | `boolean` | True while initial state is loading |
-| `increment` | `() => void` | Increment by 1 |
-| `decrement` | `() => void` | Decrement by 1 |
-| `add` | `(delta: number) => void` | Add arbitrary amount (positive or negative) |
-
-  <p className="text-sm text-brand">
-    <strong>Offline Support:</strong> Counter operations work offline and are persisted to IndexedDB.
-    Changes sync automatically when the connection is restored.
-    See the <a href="/docs/guides/pn-counter" className="underline">PN-Counter Guide</a> for more details.
-  </p>
-
-## useEntryProcessor
-
-  <span className="text-neutral-600 dark:text-neutral-300">Execute atomic read-modify-write operations on the server with loading and error states.</span>
-
-  <CodeBlock title="components/LikeButton.tsx" language="typescript" code={`import { useEntryProcessor } from '@topgunbuild/react';
-
-function LikeButton({ postId }) {
-  const processor = useMemo(() => BuiltInProcessors.INCREMENT(1), []);
-  const { execute, executing, lastResult, error } = useEntryProcessor('likes', processor);
-
-  const handleLike = async () => {
-    const result = await execute(postId);
-    if (result.success) {
-      console.log('New count:', result.newValue);
-    }
-  };
-
-  return (
-    <button onClick={handleLike} disabled={executing}>
-      {executing ? '...' : 'Like'}
-    </button>
-  );
-}`} />
-
-### Return Values
-
-| Property | Type | Description |
-|----------|------|-------------|
-| `execute` | `(key: string, args?: unknown) => Promise<EntryProcessorResult>` | Execute processor on a key |
-| `executeMany` | `(keys: string[], args?: unknown) => Promise<Map<string, EntryProcessorResult>>` | Execute on multiple keys |
-| `executing` | `boolean` | True while operation is in progress |
-| `lastResult` | `EntryProcessorResult \| null` | Most recent execution result |
-| `error` | `Error \| null` | Last error encountered |
-| `reset` | `() => void` | Clear lastResult and error |
-
-  <p className="text-sm text-brand">
-    <strong>Atomic Operations:</strong> Entry processors run on the server, solving race conditions in read-modify-write scenarios.
-    See the <a href="/docs/guides/entry-processor" className="underline">Entry Processor Guide</a> for more details.
-  </p>
-
-## useEventJournal
-
-  <span className="text-neutral-600 dark:text-neutral-300">Subscribe to the Event Journal to receive real-time notifications of all map changes (PUT, UPDATE, DELETE).</span>
-
-
-### Return Values
-
-| Property | Type | Description |
-|----------|------|-------------|
-| `events` | `JournalEvent[]` | Array of recent events (newest last) |
-| `lastEvent` | `JournalEvent \| null` | Most recently received event |
-| `isSubscribed` | `boolean` | Whether subscription is active |
-| `clearEvents` | `() => void` | Clear accumulated events |
-| `readFrom` | `(sequence: bigint, limit?: number) => Promise<JournalEvent[]>` | Read historical events |
-| `getLatestSequence` | `() => Promise<bigint>` | Get the latest sequence number |
-
-### JournalEvent Structure
-
-```typescript
-interface JournalEvent {
-  sequence: bigint;           // Monotonically increasing ID
-  type: 'PUT' | 'UPDATE' | 'DELETE';
-  mapName: string;            // Name of the map that changed
-  key: string;                // Key that was modified
-  value?: unknown;            // New value (undefined for DELETE)
-  previousValue?: unknown;    // Previous value (for UPDATE/DELETE)
-  timestamp: Timestamp;       // HLC timestamp
-  nodeId: string;             // Node that made the change
-  metadata?: Record<string, unknown>;
 }
 ```
 
-### Options
+### `useClient`
 
-| Option | Type | Description |
-|--------|------|-------------|
-| `mapName` | `string` | Filter events by map name |
-| `types` | `('PUT' \| 'UPDATE' \| 'DELETE')[]` | Filter by event types |
-| `fromSequence` | `bigint` | Start receiving from this sequence |
-| `maxEvents` | `number` | Max events to keep in state (default: 100) |
-| `onEvent` | `(event: JournalEvent) => void` | Callback for each new event |
-| `paused` | `boolean` | Pause subscription |
+Escape hatch returning the underlying `TopGunClient`. Use this for imperative operations (calling `client.getEventJournal`, `client.topic`, etc.) inside event handlers and effects.
 
-### With Event Callback
+```tsx
 
-
-### Reading Historical Events
-
-
-  <p className="text-sm text-brand">
-    <strong>Server-side Feature:</strong> The Event Journal must be enabled on the server with <code className="bg-brand-subtle/10 px-1 rounded">eventJournalEnabled: true</code>.
-    Events are persisted to PostgreSQL for durability. See the <a href="/docs/guides/event-journal" className="underline">Event Journal Guide</a> for server configuration.
-  </p>
-
-## useSearch
-
-  <span className="text-neutral-600 dark:text-neutral-300">Subscribe to live full-text search results with BM25 relevance ranking. Results update automatically when matching documents change.</span>
-
-
-### Return Values
-
-| Property | Type | Description |
-|----------|------|-------------|
-| `results` | `SearchResult<T>[]` | Current search results sorted by relevance score |
-| `loading` | `boolean` | True while waiting for initial results |
-| `error` | `Error \| null` | Error if search subscription failed |
-
-### SearchResult Structure
-
-```typescript
-interface SearchResult<T> {
-  key: string;        // Document key
-  value: T;           // Full document value
-  score: number;      // BM25 relevance score
-  matchedTerms: string[];  // Stemmed terms that matched
-}
-```
-
-### Options
-
-| Option | Type | Description |
-|--------|------|-------------|
-| `limit` | `number` | Maximum results to return |
-| `minScore` | `number` | Minimum BM25 score threshold |
-| `boost` | `Record<string, number>` | Field boost weights (e.g., `{ title: 2.0 }`) |
-| `debounceMs` | `number` | Debounce delay for query changes |
-
-### With Debounce
-
-For search-as-you-type interfaces, use `debounceMs` to avoid excessive server requests:
-
-
-  <p className="text-sm text-brand">
-    <strong>Server-side Feature:</strong> Full-text search must be enabled on the server for the target map with <code className="bg-brand-subtle/10 px-1 rounded">fullTextSearch</code> configuration.
-    See the <a href="/docs/guides/full-text-search" className="underline">Full-Text Search Guide</a> for server setup.
-  </p>
-
-## useHybridQuery
-
-  <span className="text-neutral-600 dark:text-neutral-300">Combine full-text search with traditional filter predicates in a single query. Ideal for faceted search UIs.</span>
-
-
-### Return Values
-
-| Property | Type | Description |
-|----------|------|-------------|
-| `results` | `HybridResultItem<T>[]` | Current query results with scores |
-| `loading` | `boolean` | True while waiting for initial results |
-| `error` | `Error \| null` | Error if query failed |
-
-### HybridResultItem Structure
-
-```typescript
-interface HybridResultItem<T> {
-  value: T;                     // Document value
-  _key: string;                 // Document key
-  _score?: number;              // BM25 relevance score (for FTS queries)
-  _matchedTerms?: string[];     // Stemmed terms that matched
-}
-```
-
-### Filter Options
-
-| Option | Type | Description |
-|--------|------|-------------|
-| `predicate` | `PredicateNode` | Predicate tree (FTS + filters) |
-| `where` | `Record<string, any>` | Simple equality filters |
-| `sort` | `Record<string, 'asc' \| 'desc'>` | Sort fields (use `_score` for relevance) |
-| `limit` | `number` | Maximum results per page |
-| `cursor` | `string` | Opaque cursor for pagination (from `nextCursor`) |
-
-### Hook Options
-
-| Option | Type | Description |
-|--------|------|-------------|
-| `skip` | `boolean` | Skip query execution (for conditional queries) |
-
-### Dynamic Filters
-
-Build complex faceted search UIs with dynamic predicates:
-
-
-  <p className="text-sm text-purple-800 dark:text-purple-200">
-    <strong>When to use Hybrid vs Search:</strong> Use <code>useSearch</code> for pure text search (search box). Use <code>useHybridQuery</code> when you need to combine text search with filters (faceted search, filtered listings).
-    See the <a href="/docs/guides/full-text-search#hybrid-queries" className="underline">Hybrid Queries Guide</a> for more examples.
-  </p>
-
-## useTopic
-
-  <span className="text-neutral-600 dark:text-neutral-300">Subscribe to a Pub/Sub topic for ephemeral messaging. Messages are not persisted.</span>
-
-
-## useClient
-
-  <span className="text-neutral-600 dark:text-neutral-300">Get direct access to the TopGunClient instance from context.</span>
-
-  <CodeBlock title="components/CustomComponent.tsx" language="typescript" code={`import { useClient } from '@topgunbuild/react';
-
-function CustomComponent() {
+function ResetButton() {
   const client = useClient();
+  return <button onClick={() => client.resetConnection()}>Reset</button>;
+}
+```
 
-  // Direct access to client methods
-  const lock = client.getLock('my-resource');
+Throws if used outside `<TopGunProvider>`.
 
-  return <div>...</div>;
-}`} />
+## Reactive Data Hooks
 
-## useConflictResolver
+### `useQuery<T>`
 
-  <span className="text-neutral-600 dark:text-neutral-300">Manage conflict resolvers for a specific map. Auto-unregisters on unmount.</span>
+Live query subscription. Returns `data`, `loading`, `error`, change-tracking fields, pagination info, and per-record sync state. See [Search & live queries](/docs/guides/search-and-live-queries) for canonical examples.
 
-  <CodeBlock title="components/BookingManager.tsx" language="typescript" code={`import { useConflictResolver } from '@topgunbuild/react';
+```tsx
 
-function BookingManager() {
-  const { register, unregister, list, loading, error, registered } =
-    useConflictResolver('bookings');
+interface Todo { text: string; done: boolean }
 
-  useEffect(() => {
-    // Register first-write-wins resolver on mount
-    register({
-      name: 'first-write-wins',
-      code: \`
-        if (context.localValue !== undefined) {
-          return { action: 'reject', reason: 'Slot already booked' };
-        }
-        return { action: 'accept', value: context.remoteValue };
-      \`,
-      priority: 100,
-    });
-  }, []);
-
-  return (
-    <div>
-      {loading && <span>Registering...</span>}
-      {error && <span>Error: {error.message}</span>}
-      <p>Registered resolvers: {registered.join(', ')}</p>
-  );
-}`} />
-
-### Options
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `autoUnregister` | `boolean` | `true` | Unregister resolvers on unmount |
-
-### Return Value
-
-| Property | Type | Description |
-|----------|------|-------------|
-| `register` | `(resolver) => Promise<RegisterResult>` | Register a resolver |
-| `unregister` | `(name) => Promise<RegisterResult>` | Unregister by name |
-| `list` | `() => Promise<ResolverInfo[]>` | List registered resolvers |
-| `loading` | `boolean` | Operation in progress |
-| `error` | `Error \| null` | Last error |
-| `registered` | `string[]` | Names of resolvers registered by this hook |
-
-## useMergeRejections
-
-  <span className="text-neutral-600 dark:text-neutral-300">Subscribe to merge rejection events from conflict resolvers.</span>
-
-  <CodeBlock title="components/BookingForm.tsx" language="typescript" code={`import { useMergeRejections } from '@topgunbuild/react';
-
-function BookingForm() {
-  const { rejections, lastRejection, clear } = useMergeRejections({
-    mapName: 'bookings',
-    maxHistory: 50,
+function TodoList() {
+  const { data, loading, error } = useQuery<Todo>('todos', {
+    where: { done: false },
+    sort: { createdAt: 'desc' },
+    limit: 10,
   });
 
-  // Show toast for rejections
-  useEffect(() => {
-    if (lastRejection) {
-      toast.error(\`Booking failed: \${lastRejection.reason}\`);
-      clear();
-    }
-  }, [lastRejection]);
+  if (loading) return <p>Loading…</p>;
+  if (error) return <p>Error: {error.message}</p>;
 
   return (
-    <div>
-      {/* Form UI */}
-      {rejections.length > 0 && (
-          {rejections.map((r, i) => (
-            <p key={i}>{r.key}: {r.reason}</p>
-          ))}
-      )}
+    <ul>
+      {data.map(item => <li key={item._key}>{item.text}</li>)}
+    </ul>
   );
-}`} />
+}
+```
 
-### Options
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `mapName` | `string` | - | Filter rejections by map name |
-| `maxHistory` | `number` | `100` | Max rejections to keep in history |
-
-### Return Value
-
-| Property | Type | Description |
-|----------|------|-------------|
-| `rejections` | `MergeRejection[]` | List of recent rejections |
-| `lastRejection` | `MergeRejection \| null` | Most recent rejection |
-| `clear` | `() => void` | Clear rejection history |
-
-### MergeRejection Type
+Signature:
 
 ```typescript
-interface MergeRejection {
-  mapName: string;
-  key: string;
-  attemptedValue: unknown;  // null for deletions
-  reason: string;
-  timestamp: Timestamp;
+function useQuery<T = any>(
+  mapName: string,
+  query?: QueryFilter,
+  options?: UseQueryOptions<T>
+): UseQueryResult<T>
+```
+
+`UseQueryOptions<T>` (all optional):
+
+| Field | Description |
+|---|---|
+| `onChange` | Called for any change event with the `ChangeEvent<T>`. |
+| `onAdd` | Called when an item is added: `(key, value)`. |
+| `onUpdate` | Called when an item is updated: `(key, value, previous)`. |
+| `onRemove` | Called when an item is removed: `(key, previous)`. |
+| `maxChanges` | Cap on accumulated `changes[]`. Default 1000. |
+
+`UseQueryResult<T>` fields:
+
+| Field | Description |
+|---|---|
+| `data` | `QueryResultItem<T>[]` — current rows; each item carries `_key`. |
+| `loading` | True until first result arrives. |
+| `error` | `Error \| null`. |
+| `lastChange` | Most recent `ChangeEvent<T>` (or `null`). |
+| `changes` | All `ChangeEvent<T>` since the last `clearChanges()`. |
+| `clearChanges` | Resets `changes` and `lastChange`. |
+| `nextCursor` / `hasMore` / `cursorStatus` | Pagination state. |
+| `syncState` | `ReadonlyMap<string, RecordSyncState>` keyed by `_key`. |
+
+Pagination example:
+
+```tsx
+const [cursor, setCursor] = useState<string | undefined>();
+const { data, nextCursor, hasMore } = useQuery<Todo>('todos', {
+  sort: { createdAt: 'desc' },
+  limit: 20,
+  cursor,
+});
+// {hasMore && <button onClick={() => setCursor(nextCursor)}>Load more</button>}
+```
+
+### `useMutation<T, K>`
+
+Imperative write helper. Returns `{ create, update, remove, map }`.
+
+```tsx
+
+function AddTodo() {
+  const { create } = useMutation<Todo>('todos');
+
+  return (
+    <button onClick={() => create(crypto.randomUUID(), { text: 'New', done: false })}>
+      Add
+    </button>
+  );
+}
+```
+
+Signature:
+
+```typescript
+function useMutation<T = any, K = string>(mapName: string): UseMutationResult<T, K>
+```
+
+`UseMutationResult<T, K>`:
+
+| Field | Type | Description |
+|---|---|---|
+| `create` | `(key: K, value: T) => void` | Write a new entry. |
+| `update` | `(key: K, value: T) => void` | Overwrite an entry. (Same semantics as `create` under LWW.) |
+| `remove` | `(key: K) => void` | Delete (tombstone) an entry. |
+| `map` | `LWWMap<K, T>` | Underlying map instance for advanced consumers. |
+
+### `useMap<K, V>`
+
+Lower-level escape hatch returning the raw `LWWMap` instance for the named map. Useful when you need direct access to `merge`, `prune`, or `subscribe` — but for most UI code, `useQuery`/`useMutation` is the right choice.
+
+```typescript
+function useMap<K = string, V = any>(mapName: string): LWWMap<K, V>
+```
+
+A companion `useMapWithSyncState` variant exposes per-record sync state alongside the map.
+
+### `useORMap<K, V>`
+
+Same shape as `useMap` but returns the `ORMap` for multi-value-per-key data.
+
+```typescript
+function useORMap<K = string, V = any>(mapName: string): ORMap<K, V>
+```
+
+Companion: `useORMapWithSyncState`.
+
+## Sync State
+
+### `useSyncState`
+
+Returns the current `RecordSyncState` for a `(mapName, key)` pair. The state is one of `synced`, `pending`, `conflict`, or `offline`. Re-renders only when *that* key's state changes. See [Offline-first apps](/docs/guides/offline-first) for the canonical reconnect-and-merge pattern.
+
+```tsx
+
+function SyncBadge({ id }: { id: string }) {
+  const state = useSyncState('todos', id);
+  return <span className={`badge badge-${state}`}>{state}</span>;
+}
+```
+
+```typescript
+function useSyncState(mapName: string, key: string): RecordSyncState
+```
+
+## Pub/Sub
+
+### `useTopic`
+
+Subscribe to (and publish on) an ephemeral pub/sub topic. See [Live notifications](/docs/guides/live-notifications) for canonical examples.
+
+```tsx
+
+function ChatLog() {
+  const [messages, setMessages] = useState<string[]>([]);
+
+  const topic = useTopic('chat-room', (msg) => {
+    setMessages(prev => [...prev, msg as string]);
+  });
+
+  return (
+    <>
+      <ul>{messages.map((m, i) => <li key={i}>{m}</li>)}</ul>
+      <button onClick={() => topic.publish('hi')}>Send</button>
+    </>
+  );
+}
+```
+
+```typescript
+function useTopic(topicName: string, callback?: TopicCallback): TopicHandle
+```
+
+## Counters
+
+### `usePNCounter`
+
+PN-Counter handle with reactive value.
+
+```tsx
+
+function LikeButton() {
+  const { value, increment } = usePNCounter('likes:post-123');
+  return <button onClick={increment}>👍 {value}</button>;
+}
+```
+
+```typescript
+function usePNCounter(name: string): UsePNCounterResult
+```
+
+`UsePNCounterResult` exposes `value` plus `increment`, `decrement`, and `addAndGet` callbacks.
+
+## Server-Side Logic
+
+### `useEventJournal`
+
+Subscribe to the journal of map-change events. Useful for audit trails, activity feeds, undo stacks.
+
+```typescript
+function useEventJournal(
+  options?: { mapName?: string; types?: JournalEventType[]; limit?: number }
+): { events: JournalEvent[]; loading: boolean; error: Error | null }
+```
+
+## Conflict Resolvers
+
+### `useMergeRejections`
+
+Surface merge rejections (the built-in CRDT merge logic rejected a remote change). Useful for telling the user "your edit conflicted".
+
+```typescript
+function useMergeRejections(
+  options?: { mapName?: string; key?: string }
+): MergeRejection[]
+```
+
+> Custom user-defined resolvers (`useConflictResolver`, `client.executeOnKey`, server-side entry processors) require a WASM sandbox on the v2.x roadmap. See [/docs/roadmap](/docs/roadmap). The SDK surface for those features was removed pre-launch to avoid runtime errors.
+
+## Search
+
+### `useSearch<T>`
+
+Live BM25 full-text search. Re-runs when `query` changes.
+
+```tsx
+
+function ArticleSearch() {
+  const [q, setQ] = useState('');
+  const { results, loading } = useSearch<Article>('articles', q, {
+    limit: 20,
+    minScore: 0.5,
+  });
+
+  return (
+    <>
+      <input value={q} onChange={(e) => setQ(e.target.value)} />
+      {loading ? <p>…</p> : results.map(r => (
+        <li key={r.key}>{r.value.title} <small>({r.score.toFixed(2)})</small></li>
+      ))}
+    </>
+  );
+}
+```
+
+```typescript
+function useSearch<T = unknown>(
+  mapName: string,
+  query: string,
+  options?: SearchOptions,
+): { results: SearchResult<T>[]; loading: boolean; error: Error | null }
+```
+
+### `useHybridQuery<T>`
+
+Combine FTS predicates with traditional filter predicates (`where`/`sort`/`limit`/`cursor`) in one query. Results include `_score` for FTS ranking.
+
+```tsx
+
+const { data } = useHybridQuery<Article>('articles', {
+  predicate: Predicates.and(
+    Predicates.match('body', 'machine learning'),
+    Predicates.equal('category', 'tech')
+  ),
+  sort: { _score: 'desc' },
+  limit: 20,
+});
+```
+
+```typescript
+function useHybridQuery<T = unknown>(
+  mapName: string,
+  filter?: HybridQueryFilter,
+): { data: HybridResultItem<T>[]; loading: boolean; error: Error | null; nextCursor?: string; hasMore: boolean }
+```
+
+### `useVectorSearch`
+
+ANN vector search via the HNSW index.
+
+```typescript
+function useVectorSearch(
+  mapName: string,
+  queryVector: Float32Array | number[] | null,
+  options?: VectorSearchClientOptions,
+): { results: VectorSearchClientResult[]; loading: boolean; error: Error | null }
+```
+
+Passing `null` as the vector pauses the search (useful while the user is still typing).
+
+### `useHybridSearch`
+
+Tri-hybrid search (exact + full-text + semantic, fused via Reciprocal Rank Fusion).
+
+```typescript
+function useHybridSearch(
+  mapName: string,
+  queryText: string,
+  options?: HybridSearchClientOptions,
+): { results: HybridSearchClientResult[]; loading: boolean; error: Error | null }
+```
+
+### `useHybridSearchSubscribe<T>`
+
+Live tri-hybrid search subscription with ENTER/UPDATE/LEAVE deltas. Pair with optimistic UI for animated results.
+
+```typescript
+function useHybridSearchSubscribe<T = unknown>(
+  mapName: string,
+  queryText: string,
+  options?: HybridSearchSubscribeOptions,
+): { results: HybridSearchHandleResult<T>[]; loading: boolean; error: Error | null }
+```
+
+---
+
+[← Core](/docs/reference/core) · [Adapters →](/docs/reference/adapters)
+
+
+---
+
+# Core
+
+> Reference for @topgunbuild/core — LWWMap, ORMap, HLC, and MerkleTree.
+
+
+
+  <h1 className="text-4xl font-bold text-foreground">Core</h1>
+
+`@topgunbuild/core` ships the CRDT primitives, Hybrid Logical Clock, and Merkle tree that the client and server share. This page documents the public surface (the "what / how"). For background on why TopGun picks these primitives over alternatives, see [Concepts → Data Structures](/docs/concepts/data-structures).
+
+The two primary data structures are `LWWMap` (last-write-wins) and `ORMap` (observed-remove). Both are exposed on `TopGunClient` via `getMap()` and `getORMap()` — most application code never instantiates them directly.
+
+## LWWMap
+
+```typescript
+
+const hlc = new HLC('node-1');
+const map = new LWWMap<string, User>(hlc);
+```
+
+Last-write-wins semantics: each key holds exactly one value. Concurrent writes from different nodes are resolved by HLC timestamp (highest wins, ties broken by `nodeId`).
+
+### Constructor
+
+```typescript
+new LWWMap<K, V>(hlc: HLC)
+```
+
+### Methods
+
+**`set(key, value, ttlMs?)`** — `LWWRecord<V>`
+
+Write a value. Stamps the record with `hlc.now()`. Optional `ttlMs` for time-bounded entries.
+
+```typescript
+const record = map.set('u1', { name: 'Alice', email: 'alice@example.com' });
+// { value: {...}, timestamp: { millis, counter, nodeId } }
+
+// With 1-hour TTL
+map.set('session-123', sessionData, 3600000);
+```
+
+**`get(key)`** — `V | undefined`
+
+Read a value. Returns `undefined` for deleted or expired keys.
+
+**`getRecord(key)`** — `LWWRecord<V> | undefined`
+
+Read the full record (value, timestamp, optional TTL).
+
+**`remove(key)`** — `LWWRecord<V>`
+
+Delete a key by writing a tombstone (`value: null`). Returns the tombstone record.
+
+**`merge(key, remoteRecord)`** — `boolean`
+
+Merge a remote record. Returns `true` if local state was updated (i.e., the remote record's timestamp dominated).
+
+```typescript
+const remote: LWWRecord<User> = {
+  value: { name: 'Bob' },
+  timestamp: { millis: Date.now(), counter: 0, nodeId: 'node-2' },
+};
+const updated = map.merge('u1', remote);
+```
+
+**`subscribe(callback)`** — `() => void`
+
+Subscribe to map-change notifications. The callback receives `entries: Array<[K, V]>`. Returns an unsubscribe function.
+
+```typescript
+const unsubscribe = map.subscribe((entries) => {
+  console.log('Map changed,', entries.length, 'live entries');
+});
+```
+
+**`entries()`** — `IterableIterator<[K, V]>`
+
+Iterate non-tombstoned entries (drops deleted and expired).
+
+**`allKeys()`** — `IterableIterator<K>`
+
+Iterate every key including tombstones.
+
+**`size`** (getter) — `number`
+
+Count of entries including tombstones.
+
+**`prune(olderThan)`** — `K[]`
+
+Drop tombstones older than the given `Timestamp`. Returns the removed keys.
+
+**`clear()`** — `void`
+
+Reset to empty state.
+
+**`getMerkleTree()`** — `MerkleTree`
+
+Access the underlying Merkle tree for delta-sync diffing.
+
+### LWWRecord shape
+
+```typescript
+interface LWWRecord<V> {
+  value: V | null;          // null indicates tombstone
+  timestamp: Timestamp;     // HLC stamp
+  ttlMs?: number;           // optional TTL
+}
+```
+
+## ORMap
+
+```typescript
+
+const hlc = new HLC('node-1');
+const map = new ORMap<string, string>(hlc);
+```
+
+Observed-remove semantics: each key holds a *set* of values. Concurrent adds preserve every value (tagged with unique IDs). A remove operation tombstones only the tags it observed locally, so concurrent add-vs-remove resolves correctly (no spurious deletes).
+
+Use this for tag clouds, comment threads, multi-select fields, presence rosters — anywhere two clients can legitimately contribute different values to the same key.
+
+### Constructor
+
+```typescript
+new ORMap<K, V>(hlc: HLC)
+```
+
+### Methods
+
+**`add(key, value, ttlMs?)`** — `ORMapRecord<V>`
+
+Add a value under a key. Generates a unique tag. Returns the record.
+
+```typescript
+const tags = new ORMap<string, string>(hlc);
+tags.add('post:123', 'javascript');
+tags.add('post:123', 'typescript');
+// post:123 -> ['javascript', 'typescript']
+```
+
+**`remove(key, value)`** — `string[]`
+
+Remove a specific value under a key. Returns the tombstone tags created.
+
+**`get(key)`** — `V[]`
+
+Read all live values for a key.
+
+```typescript
+const postTags = tags.get('post:123');
+// ['javascript', 'typescript']
+```
+
+**`getRecords(key)`** — `ORMapRecord<V>[]`
+
+Read full records (value + tag + timestamp) for a key.
+
+**`getTombstones()`** — `string[]`
+
+Read all current tombstone tags.
+
+**`apply(key, record)`** — `boolean`
+
+Apply a remote `ORMapRecord` to local state. Returns `true` if state changed.
+
+**`applyTombstone(tag)`** — `void`
+
+Apply a remote tombstone tag.
+
+**`merge(other)`** — `void`
+
+Merge another `ORMap` of the same key/value types in bulk.
+
+**`subscribe(callback)`** — `() => void`
+
+Subscribe to change events. The callback receives `entries: Array<[K, V[]]>`.
+
+**`allKeys()`** — `K[]`
+
+All keys with at least one live or tombstoned value.
+
+**`size`** / **`totalRecords`** (getters) — `number`
+
+`size` counts distinct keys; `totalRecords` counts every tagged record (including duplicates per key).
+
+**`prune(olderThan)`** — `string[]`
+
+Drop tombstones older than the timestamp. Returns dropped tags.
+
+**`clear()`** — `void`
+
+Reset to empty.
+
+**`getMerkleTree()`** — `ORMapMerkleTree`
+
+Underlying Merkle tree (a different shape than LWWMap's tree because ORMap stores multi-value-per-key).
+
+**`getSnapshot()`** — `ORMapSnapshot<K, V>`
+
+Serializable snapshot for persistence.
+
+**`isTombstoned(tag)`** — `boolean`
+
+Check whether a tag is in the tombstone set.
+
+### ORMapRecord shape
+
+```typescript
+interface ORMapRecord<V> {
+  value: V;
+  tag: string;            // unique add ID
+  timestamp: Timestamp;   // HLC stamp
+  ttlMs?: number;
+}
+```
+
+## HLC (Hybrid Logical Clock)
+
+```typescript
+
+const hlc = new HLC('node-1');
+const ts = hlc.now();
+// { millis: 1748025600000, counter: 0, nodeId: 'node-1' }
+```
+
+The HLC combines physical wall-clock time (`millis`) with a logical counter (`counter`) so total ordering is preserved across nodes even when clocks drift.
+
+### Constructor
+
+```typescript
+new HLC(nodeId: string, options?: HLCOptions)
+```
+
+`HLCOptions` fields:
+
+| Field | Default | Description |
+|---|---|---|
+| `strictMode` | `false` | Throw on clock drift exceeding `maxDriftMs`. |
+| `maxDriftMs` | `60000` | Permitted drift threshold (ms). |
+| `clockSource` | wall clock | Custom `ClockSource` for deterministic tests. |
+
+### Methods
+
+**`now()`** — `Timestamp`
+
+Issue a fresh timestamp. Monotonic per node.
+
+**`update(remote)`** — `void`
+
+Update the local clock against a received remote timestamp. Bumps `lastMillis`/`lastCounter` as needed to maintain causal ordering.
+
+**`getClockSource()`** — `ClockSource`
+
+Returns the configured clock source.
+
+**`getNodeId`** / **`getStrictMode`** / **`getMaxDriftMs`** (getters)
+
+Inspect configured fields.
+
+### Static helpers
+
+**`HLC.compare(a, b)`** — `number`
+
+Total-order comparator. Returns negative if `a < b`, zero if equal, positive if `a > b`. Ordered by `millis`, then `counter`, then `nodeId`.
+
+**`HLC.toString(ts)`** — `string`
+
+Canonical string encoding for serialization or sort keys.
+
+**`HLC.parse(str)`** — `Timestamp`
+
+Inverse of `toString`.
+
+### Timestamp shape
+
+```typescript
+interface Timestamp {
+  millis: number;
+  counter: number;
   nodeId: string;
 }
 ```
 
-  <p className="text-sm text-brand">
-    <strong>See Also:</strong> The <a href="/docs/guides/conflict-resolvers" className="underline">Conflict Resolvers Guide</a> for detailed examples and use cases.
-  </p>
+## MerkleTree
 
-  <a href="/docs/reference/adapter" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Previous</span>
-      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Adapter API
-  </a>
-  <a href="/docs/reference/protocol" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Next</span>
-      Protocol <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-  </a>
+```typescript
 
+const tree = new MerkleTree();
+```
 
----
+The Merkle tree powers delta sync: clients and servers compare hash trees and exchange only differing buckets instead of full state. `LWWMap` and `ORMap` maintain their own trees internally — use this directly only when implementing custom sync providers or diagnostics.
 
-# Data Structures API
+### Constructor
 
-> Complete API reference for LWWMap and ORMap - the two primary CRDT-based data structures in TopGun.
+```typescript
+new MerkleTree(records?: Map<string, LWWRecord<any>>, depth = 3)
+```
 
+`depth` controls fan-out (default 3 levels deep).
 
+### Methods
 
+**`update(key, record)`** — `void`
 
+Insert or replace the leaf for `key` and rehash the path to the root.
 
+**`remove(key)`** — `void`
 
+Drop the leaf and rehash.
 
+**`getRootHash()`** — `number`
 
+Top-level hash. Two trees with identical content produce the same root.
 
+**`getNode(path)`** — `MerkleNode | undefined`
 
+Return the node at a given path string (used during diff walks).
 
+**`getBuckets(path)`** — `Record<string, number>`
 
+Per-bucket hashes for the children of the node at `path`.
 
+**`getKeysInBucket(path)`** — `string[]`
 
+Leaf keys grouped under the given path.
 
+## Re-exports
 
+`@topgunbuild/core` also re-exports types and helpers consumed across the stack. Highlights:
 
-  <span className="text-foreground font-medium">Docs</span>
-  <a href="/docs/reference" className="hover:text-foreground transition-colors">Reference</a>
-  <span className="text-foreground font-medium">Data Structures API</span>
+- **`Predicates`** — composable filter builders (`equal`, `gt`, `lt`, `contains`, `and`, `or`, `not`, `match`, `matchPhrase`, `matchPrefix`). Used by `client.query`, `client.hybridQuery`, and the React hooks.
+- **`SearchOptions`** — shared FTS options shape used by `client.search`/`searchSubscribe` and `useSearch`.
+- **`MergeRejection`** — event shape emitted when the built-in CRDT merge logic rejects a remote change. Observed via `useMergeRejections` (React) or `client.getConflictResolvers().onRejection()`.
+- **`WriteConcern`** / **`ConsistencyLevel`** — durability and consistency knobs for cluster writes.
+- **`IndexedLWWMap`** / **`IndexedORMap`** — indexed variants used by the server's query engine.
+- **Full-Text Search** — `Tokenizer`, `InvertedIndex`, `BM25Scorer`, `FullTextIndex` for embedding FTS directly.
+- **Deterministic Simulation Testing** — `VirtualClock`, `SeededRNG`, `VirtualNetwork`, `InvariantChecker`, `ScenarioRunner` for property-based distributed tests.
 
-  <h1 className="text-4xl font-bold text-foreground">Data Structures API</h1>
-
-TopGun provides two CRDT-based data structures for storing and syncing data.
-This page documents all available methods for performing CRUD operations.
-
-  <p className="text-sm text-brand">
-    <strong>Which one to use?</strong> Use <code className="bg-brand-subtle/10 px-1 rounded">LWWMap</code> for key-value data where each key has one value (profiles, settings).
-    Use <code className="bg-brand-subtle/10 px-1 rounded">ORMap</code> for collections where a key can have multiple values (todo lists, tags, comments).
-    See <a href="/docs/concepts/data-structures" className="underline">Concepts: Data Structures</a> for detailed comparison.
-  </p>
-
----
-
-## Timestamp Structure
-
-All records include a Hybrid Logical Clock (HLC) timestamp for ordering and conflict resolution.
-
-
----
-
-## LWWMap (Last-Write-Wins Map)
-
-The `LWWMap` is a key-value store where conflicts are resolved by accepting the update with the latest timestamp.
-Access it via `client.getMap<K, V>(name)`.
-
-### Reading Data
-
-  <span className="text-neutral-600 dark:text-neutral-300">Retrieve values by key or iterate over entries.</span>
-
-  <ApiConstructor signature="LWWMap<K, V>">
-    <ApiParam
-      name="get(key: K)"
-      type="V | undefined"
-      description="Returns the value for the given key, or undefined if not found, deleted, or expired."
-    />
-    <ApiParam
-      name="getRecord(key: K)"
-      type="LWWRecord<V> | undefined"
-      description="Returns the full record including timestamp and TTL. Useful for sync operations."
-    />
-    <ApiParam
-      name="entries()"
-      type="IterableIterator<[K, V]>"
-      description="Returns an iterator over all non-deleted, non-expired entries as [key, value] pairs."
-    />
-    <ApiParam
-      name="allKeys()"
-      type="IterableIterator<K>"
-      description="Returns an iterator over all keys including tombstones. Use getRecord() to check if deleted."
-    />
-    <ApiParam
-      name="size"
-      type="number"
-      description="The total number of entries in the map (including tombstones)."
-    />
-
-
-### Creating & Updating Data
-
-  <span className="text-neutral-600 dark:text-neutral-300">Use <code className="bg-neutral-100 dark:bg-neutral-800 px-1 rounded">set()</code> for both create and update operations.</span>
-
-  <ApiConstructor signature="LWWMap<K, V>">
-    <ApiParam
-      name="set(key: K, value: V, ttlMs?: number)"
-      type="LWWRecord<V>"
-      description="Sets the value for the given key. Returns the created record with timestamp. Optional TTL in milliseconds for auto-expiration."
-    />
-
-
-  <p className="text-sm text-yellow-800 dark:text-yellow-200">
-    <strong>Note:</strong> LWWMap performs full replacement on <code className="bg-yellow-100 dark:bg-yellow-800/50 px-1 rounded">set()</code>.
-    To update a single field, read the current value first, merge your changes, then set the entire object.
-  </p>
-
-### Deleting Data
-
-  <span className="text-neutral-600 dark:text-neutral-300">Remove entries by key. Creates a tombstone for sync.</span>
-
-  <ApiConstructor signature="LWWMap<K, V>">
-    <ApiParam
-      name="remove(key: K)"
-      type="LWWRecord<V>"
-      description="Removes the entry for the given key. Returns a tombstone record (value: null) for sync."
-    />
-    <ApiParam
-      name="clear()"
-      type="void"
-      description="Clears all data and tombstones. Resets the internal Merkle tree."
-    />
-
-
-### Iterating Over Data
-
-  <span className="text-neutral-600 dark:text-neutral-300">Access entries using iterators.</span>
-
-
-### Observing Changes
-
-  <span className="text-neutral-600 dark:text-neutral-300">React to changes in real-time.</span>
-
-  <ApiConstructor signature="LWWMap<K, V>">
-    <ApiParam
-      name="onChange(callback: () => void)"
-      type="() => void"
-      description="Registers a callback that fires whenever the map changes. Returns an unsubscribe function."
-    />
-
-
-### Synchronization Methods
-
-  <span className="text-neutral-600 dark:text-neutral-300">Low-level methods for CRDT synchronization.</span>
-
-  <ApiConstructor signature="LWWMap<K, V> - Sync Methods">
-    <ApiParam
-      name="merge(key: K, remoteRecord: LWWRecord<V>)"
-      type="boolean"
-      description="Merges a record from a remote source. Returns true if local state was updated (remote wins)."
-    />
-    <ApiParam
-      name="prune(olderThan: Timestamp)"
-      type="K[]"
-      description="Garbage collection: removes tombstones older than the specified timestamp. Returns array of pruned keys."
-    />
-    <ApiParam
-      name="getMerkleTree()"
-      type="MerkleTree"
-      description="Returns the internal Merkle tree for efficient sync protocol."
-    />
-
+The complete re-export list lives in `packages/core/src/index.ts`.
 
 ---
 
-## ORMap (Observed-Remove Map)
-
-The `ORMap` is designed for collections where a key can have multiple values.
-Concurrent additions are preserved, and removals only affect observed items.
-Access it via `client.getORMap<K, V>(name)`.
-
-### Adding Data
-
-  <span className="text-neutral-600 dark:text-neutral-300">Add items to a collection. Multiple items can share the same key.</span>
-
-  <ApiConstructor signature="ORMap<K, V>">
-    <ApiParam
-      name="add(key: K, value: V, ttlMs?: number)"
-      type="ORMapRecord<V>"
-      description="Adds a value under the given key. Returns an ORMapRecord with unique tag and timestamp. Multiple adds with same key create separate entries."
-    />
-
-
-### Reading Data
-
-  <span className="text-neutral-600 dark:text-neutral-300">Retrieve all values for a key.</span>
-
-  <ApiConstructor signature="ORMap<K, V>">
-    <ApiParam
-      name="get(key: K)"
-      type="V[]"
-      description="Returns an array of all active (non-tombstoned, non-expired) values for the key."
-    />
-    <ApiParam
-      name="getRecords(key: K)"
-      type="ORMapRecord<V>[]"
-      description="Returns full records with metadata for the key. Useful for sync operations."
-    />
-    <ApiParam
-      name="size"
-      type="number"
-      description="The number of unique keys that have at least one value."
-    />
-    <ApiParam
-      name="totalRecords"
-      type="number"
-      description="The total count of all active records across all keys."
-    />
-
-
-### Removing Data
-
-  <span className="text-neutral-600 dark:text-neutral-300">Remove specific values from a key.</span>
-
-  <ApiConstructor signature="ORMap<K, V>">
-    <ApiParam
-      name="remove(key: K, value: V)"
-      type="string[]"
-      description="Removes a specific value from the key using strict equality (===). Returns array of removed tags for sync."
-    />
-    <ApiParam
-      name="clear()"
-      type="void"
-      description="Clears all data and tombstones."
-    />
-
-
-  <p className="text-sm text-yellow-800 dark:text-yellow-200">
-    <strong>Note:</strong> <code className="bg-yellow-100 dark:bg-yellow-800/50 px-1 rounded">remove()</code> uses strict equality (<code>===</code>).
-    For objects, you need the exact same reference that was added. Consider storing a unique ID in your values for easier removal.
-  </p>
-
-### Observing Changes
-
-  <span className="text-neutral-600 dark:text-neutral-300">React to additions and removals in real-time.</span>
-
-  <ApiConstructor signature="ORMap<K, V>">
-    <ApiParam
-      name="onChange(callback: () => void)"
-      type="() => void"
-      description="Registers a callback that fires whenever the map changes. Returns an unsubscribe function."
-    />
-
-
-### Synchronization Methods
-
-  <span className="text-neutral-600 dark:text-neutral-300">Low-level methods for CRDT synchronization.</span>
-
-  <ApiConstructor signature="ORMap<K, V> - Sync Methods">
-    <ApiParam
-      name="apply(key: K, record: ORMapRecord<V>)"
-      type="void"
-      description="Applies a record from a remote source. Ignored if the tag is already tombstoned."
-    />
-    <ApiParam
-      name="applyTombstone(tag: string)"
-      type="void"
-      description="Applies a tombstone (deletion) from a remote source. Removes the record with matching tag."
-    />
-    <ApiParam
-      name="getTombstones()"
-      type="string[]"
-      description="Returns all tombstone tags. Used for sync protocol."
-    />
-    <ApiParam
-      name="merge(other: ORMap<K, V>)"
-      type="void"
-      description="Merges state from another ORMap instance. Unions items and tombstones."
-    />
-    <ApiParam
-      name="prune(olderThan: Timestamp)"
-      type="string[]"
-      description="Garbage collection: removes tombstones older than the timestamp. Returns pruned tags."
-    />
-
-
----
-
-## Querying Data
-
-For more advanced data retrieval with filtering, sorting, and live updates, use `client.query()`.
-
-  <ApiConstructor signature="client.query<T>(mapName, options?)">
-    <ApiParam
-      name="mapName"
-      type="string"
-      description="The name of the map to query."
-    />
-    <ApiParam
-      name="options.where?"
-      type="Partial<T>"
-      description="Simple equality filter. Returns entries where all specified fields match."
-    />
-    <ApiParam
-      name="options.predicate?"
-      type="Predicate"
-      description="Complex filter using Predicates (and, or, gt, lt, contains, etc.)."
-    />
-    <ApiParam
-      name="options.sort?"
-      type="{ [field]: 'asc' | 'desc' }"
-      description="Sort order for results."
-    />
-
-### Basic Query
-
-
-### Complex Predicates
-
-
-### Available Predicates
-
-  <table className="min-w-full text-left text-sm">
-    <thead className="bg-neutral-100 dark:bg-neutral-800 text-foreground">
-      <tr>
-        <th className="p-4 font-semibold">Predicate</th>
-        <th className="p-4 font-semibold">Description</th>
-        <th className="p-4 font-semibold">Example</th>
-      </tr>
-    </thead>
-    <tbody className="divide-y divide-neutral-200 dark:divide-neutral-800">
-      <tr>
-        <td className="p-4 font-mono text-sm">eq(field, value)</td>
-        <td className="p-4 text-neutral-600 dark:text-neutral-300">Equal to</td>
-        <td className="p-4 font-mono text-xs">Predicates.eq('status', 'active')</td>
-      </tr>
-      <tr>
-        <td className="p-4 font-mono text-sm">neq(field, value)</td>
-        <td className="p-4 text-neutral-600 dark:text-neutral-300">Not equal to</td>
-        <td className="p-4 font-mono text-xs">Predicates.neq('status', 'deleted')</td>
-      </tr>
-      <tr>
-        <td className="p-4 font-mono text-sm">gt(field, value)</td>
-        <td className="p-4 text-neutral-600 dark:text-neutral-300">Greater than</td>
-        <td className="p-4 font-mono text-xs">Predicates.gt('price', 100)</td>
-      </tr>
-      <tr>
-        <td className="p-4 font-mono text-sm">gte(field, value)</td>
-        <td className="p-4 text-neutral-600 dark:text-neutral-300">Greater than or equal</td>
-        <td className="p-4 font-mono text-xs">Predicates.gte('age', 18)</td>
-      </tr>
-      <tr>
-        <td className="p-4 font-mono text-sm">lt(field, value)</td>
-        <td className="p-4 text-neutral-600 dark:text-neutral-300">Less than</td>
-        <td className="p-4 font-mono text-xs">Predicates.lt('stock', 10)</td>
-      </tr>
-      <tr>
-        <td className="p-4 font-mono text-sm">lte(field, value)</td>
-        <td className="p-4 text-neutral-600 dark:text-neutral-300">Less than or equal</td>
-        <td className="p-4 font-mono text-xs">Predicates.lte('priority', 5)</td>
-      </tr>
-      <tr>
-        <td className="p-4 font-mono text-sm">contains(field, value)</td>
-        <td className="p-4 text-neutral-600 dark:text-neutral-300">Array contains value</td>
-        <td className="p-4 font-mono text-xs">Predicates.contains('tags', 'featured')</td>
-      </tr>
-      <tr>
-        <td className="p-4 font-mono text-sm">and(...predicates)</td>
-        <td className="p-4 text-neutral-600 dark:text-neutral-300">All conditions must match</td>
-        <td className="p-4 font-mono text-xs">Predicates.and(p1, p2, p3)</td>
-      </tr>
-      <tr>
-        <td className="p-4 font-mono text-sm">or(...predicates)</td>
-        <td className="p-4 text-neutral-600 dark:text-neutral-300">Any condition must match</td>
-        <td className="p-4 font-mono text-xs">Predicates.or(p1, p2)</td>
-      </tr>
-      <tr>
-        <td className="p-4 font-mono text-sm">not(predicate)</td>
-        <td className="p-4 text-neutral-600 dark:text-neutral-300">Negates a condition</td>
-        <td className="p-4 font-mono text-xs">Predicates.not(Predicates.eq('hidden', true))</td>
-      </tr>
-    </tbody>
-  </table>
-
----
-
-## CRUD Summary
-
-  <table className="min-w-full text-left text-sm">
-    <thead className="bg-neutral-100 dark:bg-neutral-800 text-foreground">
-      <tr>
-        <th className="p-4 font-semibold">Operation</th>
-        <th className="p-4 font-semibold">LWWMap</th>
-        <th className="p-4 font-semibold">ORMap</th>
-      </tr>
-    </thead>
-    <tbody className="divide-y divide-neutral-200 dark:divide-neutral-800">
-      <tr>
-        <td className="p-4 font-medium text-foreground">Create</td>
-        <td className="p-4 font-mono text-sm">map.set(key, value)</td>
-        <td className="p-4 font-mono text-sm">map.add(key, value)</td>
-      </tr>
-      <tr>
-        <td className="p-4 font-medium text-foreground">Read (single)</td>
-        <td className="p-4 font-mono text-sm">map.get(key)</td>
-        <td className="p-4 font-mono text-sm">map.get(key)</td>
-      </tr>
-      <tr>
-        <td className="p-4 font-medium text-foreground">Read (with metadata)</td>
-        <td className="p-4 font-mono text-sm">map.getRecord(key)</td>
-        <td className="p-4 font-mono text-sm">map.getRecords(key)</td>
-      </tr>
-      <tr>
-        <td className="p-4 font-medium text-foreground">Read (all)</td>
-        <td className="p-4 font-mono text-sm">map.entries()</td>
-        <td className="p-4 font-mono text-sm">—</td>
-      </tr>
-      <tr>
-        <td className="p-4 font-medium text-foreground">Read (filtered)</td>
-        <td className="p-4 font-mono text-sm" colSpan="2">client.query(name, {'{ where, predicate }'})</td>
-      </tr>
-      <tr>
-        <td className="p-4 font-medium text-foreground">Update</td>
-        <td className="p-4 font-mono text-sm">map.set(key, newValue)</td>
-        <td className="p-4 font-mono text-sm">map.remove() + map.add()</td>
-      </tr>
-      <tr>
-        <td className="p-4 font-medium text-foreground">Delete</td>
-        <td className="p-4 font-mono text-sm">map.remove(key)</td>
-        <td className="p-4 font-mono text-sm">map.remove(key, value)</td>
-      </tr>
-      <tr>
-        <td className="p-4 font-medium text-foreground">Subscribe</td>
-        <td className="p-4 font-mono text-sm" colSpan="2">map.onChange(callback)</td>
-      </tr>
-      <tr>
-        <td className="p-4 font-medium text-foreground">Sync (merge)</td>
-        <td className="p-4 font-mono text-sm">map.merge(key, record)</td>
-        <td className="p-4 font-mono text-sm">map.apply() / map.merge()</td>
-      </tr>
-      <tr>
-        <td className="p-4 font-medium text-foreground">Garbage collect</td>
-        <td className="p-4 font-mono text-sm" colSpan="2">map.prune(olderThan)</td>
-      </tr>
-    </tbody>
-  </table>
-
-  <a href="/docs/reference/client" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Previous</span>
-      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Client API
-  </a>
-  <a href="/docs/reference/server" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
-    <span className="text-xs text-neutral-500">Next</span>
-      Server API <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-  </a>
+[← Client](/docs/reference/client) · [React →](/docs/reference/react)
 
 
 ---
@@ -2794,65 +2643,78 @@ For more advanced data retrieval with filtering, sorting, and live updates, use 
 
 How TopGun compares to other solutions in the ecosystem.
 
-  <table className="w-full text-left border-collapse">
+  <table className="w-full text-left border-collapse min-w-[860px]">
     <thead>
       <tr className="border-b border-card-border">
         <th className="py-4 px-4 text-sm font-mono text-neutral-500 uppercase tracking-wider">Feature</th>
         <th className="py-4 px-4 text-center bg-brand-subtle/5 border-t border-x border-brand-subtle/10 rounded-t-lg">
           <span className="text-foreground font-bold text-lg">TopGun</span>
         </th>
-        <th className="py-4 px-4 text-center text-neutral-500 font-medium">ElectricSQL</th>
         <th className="py-4 px-4 text-center text-neutral-500 font-medium">Firebase</th>
+        <th className="py-4 px-4 text-center text-neutral-500 font-medium">Supabase Realtime</th>
+        <th className="py-4 px-4 text-center text-neutral-500 font-medium">Yjs</th>
         <th className="py-4 px-4 text-center text-neutral-500 font-medium">RxDB</th>
-        <th className="py-4 px-4 text-center text-neutral-500 font-medium">Replicache/Zero</th>
-        <th className="py-4 px-4 text-center text-neutral-500 font-medium">Durable Objects</th>
+        <th className="py-4 px-4 text-center text-neutral-500 font-medium">Replicache</th>
+        <th className="py-4 px-4 text-center text-neutral-500 font-medium">InstantDB</th>
       </tr>
     </thead>
     <tbody>
+      {/* TopGun claims sourced from packages/core/src/, packages/client/src/, packages/server-rust/src/ — verified 2026-05-21 */}
+      {/* Firebase claims sourced from https://firebase.google.com/docs/firestore — verified 2026-05-21 */}
+      {/* Supabase Realtime claims sourced from https://supabase.com/docs/guides/realtime — verified 2026-05-21 */}
+      {/* Yjs claims sourced from https://github.com/yjs/yjs — verified 2026-05-21 */}
+      {/* RxDB claims sourced from https://rxdb.info/replication.html — verified 2026-05-21 */}
+      {/* Replicache claims sourced from https://doc.replicache.dev/ — verified 2026-05-21 */}
+      {/* InstantDB claims sourced from https://www.instantdb.com/docs and https://github.com/instantdb/instant — verified 2026-05-21 */}
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Primary Model</td>
-        <td className="py-3 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10">Local-First IMDG</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Postgres Sync</td>
+        <td className="py-3 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10">Local-First CRDT grid</td>
         <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Cloud Doc DB</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Postgres pub/sub</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Collaborative CRDT framework</td>
         <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Local-First DB</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Client Auth Sync</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Edge Stateful</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Client-auth sync</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Local-first graph DB</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Offline Support</td>
         <td className="py-3 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10 text-green-600 dark:text-green-400">First-Class</td>
-        <td className="py-3 px-4 text-center text-green-600 dark:text-green-400">Good</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Good</td>
-        <td className="py-3 px-4 text-center text-green-600 dark:text-green-400">Excellent</td>
         <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Good</td>
         <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Limited</td>
+        <td className="py-3 px-4 text-center text-green-600 dark:text-green-400">Excellent</td>
+        <td className="py-3 px-4 text-center text-green-600 dark:text-green-400">Excellent</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Good</td>
+        <td className="py-3 px-4 text-center text-green-600 dark:text-green-400">First-Class</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Latency</td>
-        <td className="py-3 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10">~0ms (In-Memory)</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">~5-10ms (SQLite)</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Network Dependent</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">~5-10ms (IndexedDB)</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">~5-10ms</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Edge-fast</td>
+        <td className="py-3 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10">~0ms (in-memory)</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Network-dependent</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Network-dependent</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">~0ms (in-memory)</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">~5–10ms (IndexedDB)</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">~0ms local / server-validated</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">~0ms (in-memory)</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Backend Control</td>
-        <td className="py-3 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10">Self-Hosted Cluster</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Sync Service</td>
+        <td className="py-3 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10">Self-host (Apache-2.0)</td>
         <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Proprietary</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Self-host or Supabase Cloud</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">BYO transport / provider</td>
         <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">CouchDB / Custom</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Self-Host or Cloud</td>
-        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Cloudflare Only</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Self-host or Replicache Cloud</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">InstantDB Cloud (self-host community)</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Consistency</td>
         <td className="py-3 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10">HLC + CRDT</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Server-authoritative LWW</td>
         <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Server Authority</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">LWW (Server)</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">CRDT (Y-types)</td>
         <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Revision Trees</td>
         <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Server Authority</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Single-Object</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Server-authoritative with optimistic UI</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Distributed Locks</td>
@@ -2861,16 +2723,18 @@ How TopGun compares to other solutions in the ecosystem.
         <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Not Supported</td>
         <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Not Supported</td>
         <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Not Supported</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Per-Object</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Not Supported</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Not Supported</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">License</td>
-        <td className="py-3 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10">Open Source</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Open Source</td>
+        <td className="py-3 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10">Apache-2.0</td>
         <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Proprietary</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Open Source</td>
-        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Open Source</td>
-        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Proprietary</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Apache-2.0</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">MIT</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Apache-2.0 / Proprietary (Premium)</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Apache-2.0</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">MIT (client) + proprietary cloud</td>
       </tr>
     </tbody>
   </table>
@@ -2882,33 +2746,39 @@ How TopGun compares to other solutions in the ecosystem.
 
 <ul className="space-y-4 text-neutral-600 dark:text-neutral-300 not-prose">
   <li className="flex gap-3">
-    <span className="mt-1 text-brand">vs ElectricSQL:</span>
+    <span className="mt-1 text-brand">vs Firebase:</span>
     <p>
-      TopGun operates entirely in-memory for zero-latency reads/writes, whereas ElectricSQL relies on SQLite access (5-10ms).
+      TopGun gives you ownership of your data. Run it on your own cloud, use your own backend, and never get locked into a proprietary platform.
     </p>
   </li>
   <li className="flex gap-3">
-    <span className="mt-1 text-brand">vs Firebase:</span>
+    <span className="mt-1 text-brand">vs Supabase Realtime:</span>
     <p>
-      TopGun gives you ownership of your data. Run it on your own cloud, use your own Postgres DB, and never get locked into a proprietary platform.
+      Supabase Realtime is Postgres pub/sub — great for server-driven events, but not designed for offline-first local writes. TopGun persists data locally in IndexedDB and syncs seamlessly when the network returns.
+    </p>
+  </li>
+  <li className="flex gap-3">
+    <span className="mt-1 text-brand">vs Yjs:</span>
+    <p>
+      Yjs is an excellent CRDT framework for collaborative text editing but requires you to bring your own transport, persistence, and server. TopGun ships with a full server, IndexedDB persistence, and a React SDK out of the box.
     </p>
   </li>
   <li className="flex gap-3">
     <span className="mt-1 text-brand">vs RxDB:</span>
     <p>
-      TopGun includes a powerful, sharded server cluster for handling massive datasets and complex server-side logic, rather than just replication.
+      RxDB is a mature local-first database with good offline support, but its writes go through IndexedDB (5–10ms). TopGun operates entirely in-memory for zero-latency reads/writes, with async write-behind to the configured backend.
     </p>
   </li>
   <li className="flex gap-3">
-    <span className="mt-1 text-brand">vs Replicache/Zero:</span>
+    <span className="mt-1 text-brand">vs Replicache:</span>
     <p>
-      TopGun uses CRDTs for automatic conflict resolution; mutations apply locally first and merge deterministically. Replicache/Zero is server-authoritative — mutations queue and the server validates them. Both projects are Apache-2.0 open source. Zero additionally offers a managed cloud (Cloud Zero); TopGun is self-host today, with managed on the roadmap.
+      TopGun uses CRDTs for automatic conflict resolution — mutations apply locally first and merge deterministically. Replicache is server-authoritative: mutations queue and the server validates them. Related: Zero (also from Rocicorp) offers a similar server-authoritative model with a managed cloud option. Both Replicache and TopGun are Apache-2.0 open source.
     </p>
   </li>
   <li className="flex gap-3">
-    <span className="mt-1 text-brand">vs Durable Objects:</span>
+    <span className="mt-1 text-brand">vs InstantDB:</span>
     <p>
-      TopGun runs on your own infrastructure with full control over data and deployment. Durable Objects are locked to the Cloudflare platform with per-object pricing. TopGun provides a complete data grid (clustering, partitioning, search), not just edge state.
+      InstantDB is a local-first graph database with an excellent developer experience. It currently runs on InstantDB Cloud (community-led self-hosting available via the open-source repo). TopGun is fully self-hostable under Apache-2.0 with no cloud dependency.
     </p>
   </li>
 </ul>
@@ -2921,3 +2791,120 @@ How TopGun compares to other solutions in the ecosystem.
     <span className="text-xs text-neutral-500">Next Section</span>
       Installation <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
   </a>
+
+
+---
+
+# For Coding Agents
+
+> TopGun cheatsheet for LLM coding assistants — schema-typed minimal code, structured headings, optimized for context-window ingestion.
+
+
+## What TopGun is
+
+Local-first reactive data layer; CRDT-merged writes; WebSocket sync to a Rust server (single-node stable).
+
+## Install
+
+```bash
+pnpm add @topgunbuild/client @topgunbuild/react @topgunbuild/adapters
+```
+
+## Canonical app shape (React)
+
+```tsx
+// main.tsx
+
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080',
+  storage: new IDBAdapter(),
+});
+client.start(); // non-await: lazy init, do NOT await
+
+function App() {
+  return (
+  );
+}
+```
+
+## Canonical writes
+
+```tsx
+
+// useMutation<T>('mapName') returns { create, update, remove }
+// record._key is the unique identifier on every record
+const { create, update, remove } = useMutation<Todo>('todos');
+
+create(crypto.randomUUID(), { title: 'Buy milk', done: false });
+update(existingKey, { done: true });
+remove(existingKey);
+```
+
+## Canonical queries
+
+```tsx
+
+// useQuery<T>('mapName') returns { data: T[] }
+const { data: todos } = useQuery<Todo>('todos');
+
+// With predicates:
+const { data: open } = useQuery<Todo>('todos', {
+  predicate: Predicates.equal('done', false),
+});
+// Also: Predicates.isIn(), Predicates.greaterThan()
+```
+
+## Local-only mode
+
+```tsx
+// Omit serverUrl to run fully local — no server needed
+const client = new TopGunClient({
+  storage: new IDBAdapter(),
+});
+```
+
+## Add real-time sync
+
+```bash
+pnpm start:server   # embedded redb backend, zero-config
+```
+
+```tsx
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080',
+  storage: new IDBAdapter(),
+});
+```
+
+## Topic-based pub/sub
+
+```tsx
+
+// useTopic returns a TopicHandle. Pass a callback to receive messages;
+// publish via the returned handle.
+const [messages, setMessages] = useState<Array<{ text: string }>>([]);
+const topic = useTopic<{ text: string }>('chat', (msg) =>
+  setMessages((prev) => [...prev, msg]),
+);
+topic.publish({ text: 'hello' });
+```
+
+## Auth
+
+```tsx
+// client.setAuthToken(jwt) after sign-in
+// TopGun does NOT issue JWTs — use your own auth provider
+const jwt = await myAuthServer.signIn(email, password);
+client.setAuthToken(jwt);
+```
+
+## Common pitfalls
+
+- Do NOT `await client.start()` — lazy init; calling `await` is incorrect
+- Use `record._key` (not `record.id`) to identify records in mutation callbacks
+- `useMutation` requires the generic param `<T>` for type-safety: `useMutation<Todo>('todos')`
+- IndexedDB only persists when `IDBAdapter` is wired in `new TopGunClient({ storage: new IDBAdapter() })`
+
+## Cross-reference
+
+Full bundle: `/llms-full.txt`. Source: `https://github.com/TopGunBuild/topgun`.

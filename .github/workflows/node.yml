@@ -1,0 +1,108 @@
+name: Node
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'packages/core/**'
+      - 'packages/client/**'
+      - 'packages/react/**'
+      - 'packages/adapters/**'
+      - 'packages/adapter-better-auth/**'
+      - 'packages/mcp-server/**'
+      - 'packages/schema/**'
+      - 'packages/create-topgun-app/**'
+      - 'apps/docs-astro/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'tsconfig.json'
+      - 'eslint.config.mjs'
+      - '.github/workflows/node.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'packages/core/**'
+      - 'packages/client/**'
+      - 'packages/react/**'
+      - 'packages/adapters/**'
+      - 'packages/adapter-better-auth/**'
+      - 'packages/mcp-server/**'
+      - 'packages/schema/**'
+      - 'packages/create-topgun-app/**'
+      - 'apps/docs-astro/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'tsconfig.json'
+      - 'eslint.config.mjs'
+      - '.github/workflows/node.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-test-lint:
+    name: Build · Test · Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build all packages
+        run: pnpm -r build
+
+      - name: Unit tests
+        # --runInBand keeps Jest sequential so per-package fixtures don't
+        # contend on ports/files. Matches CLAUDE.md guidance.
+        run: pnpm -r exec jest --runInBand --passWithNoTests
+
+      - name: Lint (eslint)
+        run: pnpm lint
+
+      - name: Format check (prettier)
+        run: pnpm format:check
+
+  docs-build:
+    name: docs-astro build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build docs-astro
+        # Pre-merge gate: catches broken MDX, missing imports, dead
+        # internal links before Cloudflare Pages reports them post-merge.
+        run: pnpm --filter apps-docs-astro build

@@ -1,0 +1,379 @@
+---
+title: React
+description: Reference for @topgunbuild/react — hooks for building reactive TopGun apps.
+order: 24
+---
+
+import { Zap } from 'lucide-react';
+
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <Zap className="w-10 h-10 text-brand" />
+  <h1 className="text-4xl font-bold text-foreground">React</h1>
+</div>
+
+`@topgunbuild/react` ships hooks that wrap the imperative `TopGunClient` API. Every hook below resolves the client through `<TopGunProvider client={client}>` — that provider is the one required ancestor.
+
+For the imperative surface these hooks call into, see the [Client Reference](/docs/reference/client).
+
+## Setup
+
+### `TopGunProvider`
+
+Required React context provider. Wrap your app once at the root.
+
+```tsx
+import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+import { TopGunProvider } from '@topgunbuild/react';
+
+const client = new TopGunClient({
+  storage: new IDBAdapter(),
+});
+
+export function App() {
+  return (
+    <TopGunProvider client={client}>
+      <YourApp />
+    </TopGunProvider>
+  );
+}
+```
+
+### `useClient`
+
+Escape hatch returning the underlying `TopGunClient`. Use this for imperative operations (calling `client.getEventJournal`, `client.topic`, etc.) inside event handlers and effects.
+
+```tsx
+import { useClient } from '@topgunbuild/react';
+
+function ResetButton() {
+  const client = useClient();
+  return <button onClick={() => client.resetConnection()}>Reset</button>;
+}
+```
+
+Throws if used outside `<TopGunProvider>`.
+
+## Reactive Data Hooks
+
+### `useQuery<T>`
+
+Live query subscription. Returns `data`, `loading`, `error`, change-tracking fields, pagination info, and per-record sync state. See [Search & live queries](/docs/guides/search-and-live-queries) for canonical examples.
+
+```tsx
+import { useQuery } from '@topgunbuild/react';
+
+interface Todo { text: string; done: boolean }
+
+function TodoList() {
+  const { data, loading, error } = useQuery<Todo>('todos', {
+    where: { done: false },
+    sort: { createdAt: 'desc' },
+    limit: 10,
+  });
+
+  if (loading) return <p>Loading…</p>;
+  if (error) return <p>Error: {error.message}</p>;
+
+  return (
+    <ul>
+      {data.map(item => <li key={item._key}>{item.text}</li>)}
+    </ul>
+  );
+}
+```
+
+Signature:
+
+```typescript
+function useQuery<T = any>(
+  mapName: string,
+  query?: QueryFilter,
+  options?: UseQueryOptions<T>
+): UseQueryResult<T>
+```
+
+`UseQueryOptions<T>` (all optional):
+
+| Field | Description |
+|---|---|
+| `onChange` | Called for any change event with the `ChangeEvent<T>`. |
+| `onAdd` | Called when an item is added: `(key, value)`. |
+| `onUpdate` | Called when an item is updated: `(key, value, previous)`. |
+| `onRemove` | Called when an item is removed: `(key, previous)`. |
+| `maxChanges` | Cap on accumulated `changes[]`. Default 1000. |
+
+`UseQueryResult<T>` fields:
+
+| Field | Description |
+|---|---|
+| `data` | `QueryResultItem<T>[]` — current rows; each item carries `_key`. |
+| `loading` | True until first result arrives. |
+| `error` | `Error \| null`. |
+| `lastChange` | Most recent `ChangeEvent<T>` (or `null`). |
+| `changes` | All `ChangeEvent<T>` since the last `clearChanges()`. |
+| `clearChanges` | Resets `changes` and `lastChange`. |
+| `nextCursor` / `hasMore` / `cursorStatus` | Pagination state. |
+| `syncState` | `ReadonlyMap<string, RecordSyncState>` keyed by `_key`. |
+
+Pagination example:
+
+```tsx
+const [cursor, setCursor] = useState<string | undefined>();
+const { data, nextCursor, hasMore } = useQuery<Todo>('todos', {
+  sort: { createdAt: 'desc' },
+  limit: 20,
+  cursor,
+});
+// {hasMore && <button onClick={() => setCursor(nextCursor)}>Load more</button>}
+```
+
+### `useMutation<T, K>`
+
+Imperative write helper. Returns `{ create, update, remove, map }`.
+
+```tsx
+import { useMutation } from '@topgunbuild/react';
+
+function AddTodo() {
+  const { create } = useMutation<Todo>('todos');
+
+  return (
+    <button onClick={() => create(crypto.randomUUID(), { text: 'New', done: false })}>
+      Add
+    </button>
+  );
+}
+```
+
+Signature:
+
+```typescript
+function useMutation<T = any, K = string>(mapName: string): UseMutationResult<T, K>
+```
+
+`UseMutationResult<T, K>`:
+
+| Field | Type | Description |
+|---|---|---|
+| `create` | `(key: K, value: T) => void` | Write a new entry. |
+| `update` | `(key: K, value: T) => void` | Overwrite an entry. (Same semantics as `create` under LWW.) |
+| `remove` | `(key: K) => void` | Delete (tombstone) an entry. |
+| `map` | `LWWMap<K, T>` | Underlying map instance for advanced consumers. |
+
+### `useMap<K, V>`
+
+Lower-level escape hatch returning the raw `LWWMap` instance for the named map. Useful when you need direct access to `merge`, `prune`, or `subscribe` — but for most UI code, `useQuery`/`useMutation` is the right choice.
+
+```typescript
+function useMap<K = string, V = any>(mapName: string): LWWMap<K, V>
+```
+
+A companion `useMapWithSyncState` variant exposes per-record sync state alongside the map.
+
+### `useORMap<K, V>`
+
+Same shape as `useMap` but returns the `ORMap` for multi-value-per-key data.
+
+```typescript
+function useORMap<K = string, V = any>(mapName: string): ORMap<K, V>
+```
+
+Companion: `useORMapWithSyncState`.
+
+## Sync State
+
+### `useSyncState`
+
+Returns the current `RecordSyncState` for a `(mapName, key)` pair. The state is one of `synced`, `pending`, `conflict`, or `offline`. Re-renders only when *that* key's state changes. See [Offline-first apps](/docs/guides/offline-first) for the canonical reconnect-and-merge pattern.
+
+```tsx
+import { useSyncState } from '@topgunbuild/react';
+
+function SyncBadge({ id }: { id: string }) {
+  const state = useSyncState('todos', id);
+  return <span className={`badge badge-${state}`}>{state}</span>;
+}
+```
+
+```typescript
+function useSyncState(mapName: string, key: string): RecordSyncState
+```
+
+## Pub/Sub
+
+### `useTopic`
+
+Subscribe to (and publish on) an ephemeral pub/sub topic. See [Live notifications](/docs/guides/live-notifications) for canonical examples.
+
+```tsx
+import { useTopic } from '@topgunbuild/react';
+
+function ChatLog() {
+  const [messages, setMessages] = useState<string[]>([]);
+
+  const topic = useTopic('chat-room', (msg) => {
+    setMessages(prev => [...prev, msg as string]);
+  });
+
+  return (
+    <>
+      <ul>{messages.map((m, i) => <li key={i}>{m}</li>)}</ul>
+      <button onClick={() => topic.publish('hi')}>Send</button>
+    </>
+  );
+}
+```
+
+```typescript
+function useTopic(topicName: string, callback?: TopicCallback): TopicHandle
+```
+
+## Counters
+
+### `usePNCounter`
+
+PN-Counter handle with reactive value.
+
+```tsx
+import { usePNCounter } from '@topgunbuild/react';
+
+function LikeButton() {
+  const { value, increment } = usePNCounter('likes:post-123');
+  return <button onClick={increment}>👍 {value}</button>;
+}
+```
+
+```typescript
+function usePNCounter(name: string): UsePNCounterResult
+```
+
+`UsePNCounterResult` exposes `value` plus `increment`, `decrement`, and `addAndGet` callbacks.
+
+## Server-Side Logic
+
+### `useEventJournal`
+
+Subscribe to the journal of map-change events. Useful for audit trails, activity feeds, undo stacks.
+
+```typescript
+function useEventJournal(
+  options?: { mapName?: string; types?: JournalEventType[]; limit?: number }
+): { events: JournalEvent[]; loading: boolean; error: Error | null }
+```
+
+## Conflict Resolvers
+
+### `useMergeRejections`
+
+Surface merge rejections (the built-in CRDT merge logic rejected a remote change). Useful for telling the user "your edit conflicted".
+
+```typescript
+function useMergeRejections(
+  options?: { mapName?: string; key?: string }
+): MergeRejection[]
+```
+
+> Custom user-defined resolvers (`useConflictResolver`, `client.executeOnKey`, server-side entry processors) require a WASM sandbox on the v2.x roadmap. See [/docs/roadmap](/docs/roadmap). The SDK surface for those features was removed pre-launch to avoid runtime errors.
+
+## Search
+
+### `useSearch<T>`
+
+Live BM25 full-text search. Re-runs when `query` changes.
+
+```tsx
+import { useSearch } from '@topgunbuild/react';
+
+function ArticleSearch() {
+  const [q, setQ] = useState('');
+  const { results, loading } = useSearch<Article>('articles', q, {
+    limit: 20,
+    minScore: 0.5,
+  });
+
+  return (
+    <>
+      <input value={q} onChange={(e) => setQ(e.target.value)} />
+      {loading ? <p>…</p> : results.map(r => (
+        <li key={r.key}>{r.value.title} <small>({r.score.toFixed(2)})</small></li>
+      ))}
+    </>
+  );
+}
+```
+
+```typescript
+function useSearch<T = unknown>(
+  mapName: string,
+  query: string,
+  options?: SearchOptions,
+): { results: SearchResult<T>[]; loading: boolean; error: Error | null }
+```
+
+### `useHybridQuery<T>`
+
+Combine FTS predicates with traditional filter predicates (`where`/`sort`/`limit`/`cursor`) in one query. Results include `_score` for FTS ranking.
+
+```tsx
+import { useHybridQuery } from '@topgunbuild/react';
+import { Predicates } from '@topgunbuild/core';
+
+const { data } = useHybridQuery<Article>('articles', {
+  predicate: Predicates.and(
+    Predicates.match('body', 'machine learning'),
+    Predicates.equal('category', 'tech')
+  ),
+  sort: { _score: 'desc' },
+  limit: 20,
+});
+```
+
+```typescript
+function useHybridQuery<T = unknown>(
+  mapName: string,
+  filter?: HybridQueryFilter,
+): { data: HybridResultItem<T>[]; loading: boolean; error: Error | null; nextCursor?: string; hasMore: boolean }
+```
+
+### `useVectorSearch`
+
+ANN vector search via the HNSW index.
+
+```typescript
+function useVectorSearch(
+  mapName: string,
+  queryVector: Float32Array | number[] | null,
+  options?: VectorSearchClientOptions,
+): { results: VectorSearchClientResult[]; loading: boolean; error: Error | null }
+```
+
+Passing `null` as the vector pauses the search (useful while the user is still typing).
+
+### `useHybridSearch`
+
+Tri-hybrid search (exact + full-text + semantic, fused via Reciprocal Rank Fusion).
+
+```typescript
+function useHybridSearch(
+  mapName: string,
+  queryText: string,
+  options?: HybridSearchClientOptions,
+): { results: HybridSearchClientResult[]; loading: boolean; error: Error | null }
+```
+
+### `useHybridSearchSubscribe<T>`
+
+Live tri-hybrid search subscription with ENTER/UPDATE/LEAVE deltas. Pair with optimistic UI for animated results.
+
+```typescript
+function useHybridSearchSubscribe<T = unknown>(
+  mapName: string,
+  queryText: string,
+  options?: HybridSearchSubscribeOptions,
+): { results: HybridSearchHandleResult<T>[]; loading: boolean; error: Error | null }
+```
+
+---
+
+[← Core](/docs/reference/core) · [Adapters →](/docs/reference/adapters)
