@@ -13,6 +13,7 @@ on:
       - 'packages/schema/**'
       - 'packages/create-topgun-app/**'
       - 'apps/docs-astro/**'
+      - 'apps/admin-dashboard/**'
       - 'package.json'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
@@ -31,6 +32,7 @@ on:
       - 'packages/schema/**'
       - 'packages/create-topgun-app/**'
       - 'apps/docs-astro/**'
+      - 'apps/admin-dashboard/**'
       - 'package.json'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
@@ -53,15 +55,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install pnpm
-        # Version is read from root package.json `packageManager` field.
-        uses: pnpm/action-setup@v4
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: 'pnpm'
+
+      - name: Setup pnpm via corepack
+        # Mirrors the proven pattern in rust.yml/cross-lang. Avoids the
+        # pnpm/action-setup@v4 + packageManager-field interaction that
+        # caused a workflow-level startup_failure on commits 6bbe8ab5
+        # and 09256e90.
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.13.1 --activate
 
       - name: Install dependencies (frozen lockfile)
         run: pnpm install --frozen-lockfile
@@ -87,15 +92,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install pnpm
-        # Version is read from root package.json `packageManager` field.
-        uses: pnpm/action-setup@v4
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: 'pnpm'
+
+      - name: Setup pnpm via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.13.1 --activate
 
       - name: Install dependencies (frozen lockfile)
         run: pnpm install --frozen-lockfile
