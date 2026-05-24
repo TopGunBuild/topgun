@@ -17,7 +17,9 @@ export default defineConfig({
     '/docs/reference/react-hooks': '/docs/reference/react',
     '/docs/reference/adapter': '/docs/reference/adapters',
     '/docs/reference/cli': '/docs/reference/server',
-    '/docs/guides/mcp-server': '/docs/reference/mcp',
+    // '/docs/guides/mcp-server' redirect removed 2026-05-24 — the page
+    // now exists as a how-to (setup for Claude Desktop / Cursor + 8 tools
+    // overview). /docs/reference/mcp stays as the API reference companion.
     '/docs/guides/deployment': '/docs/deploy/self-host',
     '/docs/guides/postgresql': '/docs/deploy/storage-backends',
     '/docs/guides/performance': '/docs/deploy/performance',
@@ -40,7 +42,11 @@ export default defineConfig({
     '/docs/guides/observability': '/docs/deploy/performance',
     '/docs/guides/event-journal': '/docs/reference/client',
     '/docs/guides/rbac': '/docs/roadmap',
-    '/docs/guides/security': '/docs/roadmap',
+    // '/docs/guides/security' redirect removed 2026-05-24 — the page now
+    // exists as a how-to for the security primitives that ship in v2.0
+    // (TLS termination, EncryptedStorageAdapter, JWT_SECRET hygiene).
+    // RBAC, cluster mTLS, field-level redaction remain Planned and are
+    // tracked on /docs/roadmap which the guide cross-links to.
     '/docs/guides/adoption-path': '/docs/quickstart',
     '/docs/guides/cluster-replication': '/docs/roadmap',
     '/docs/guides/cluster-client': '/docs/roadmap',
