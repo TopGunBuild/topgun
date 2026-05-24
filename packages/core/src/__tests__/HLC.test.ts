@@ -112,7 +112,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
     });
 
     test('should handle update when local clock is ahead', () => {
-      let currentTime = 1000100;
+      const currentTime = 1000100;
       jest.spyOn(Date, 'now').mockImplementation(() => currentTime);
 
       // Generate a local timestamp first
@@ -324,7 +324,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
       const hlc1 = new HLC('node-1');
       const hlc2 = new HLC('node-2');
 
-      let currentTime = 1000000;
+      const currentTime = 1000000;
       jest.spyOn(Date, 'now').mockImplementation(() => currentTime);
 
       // Node 1 generates some timestamps

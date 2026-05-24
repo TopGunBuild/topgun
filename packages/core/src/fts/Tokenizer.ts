@@ -62,7 +62,7 @@ export class BM25Tokenizer implements ITokenizer {
     }
 
     // 1. Lowercase if enabled
-    let processed = this.options.lowercase ? text.toLowerCase() : text;
+    const processed = this.options.lowercase ? text.toLowerCase() : text;
 
     // 2. Split on non-alphanumeric characters (Unicode-aware)
     // This regex matches Unicode letters and numbers

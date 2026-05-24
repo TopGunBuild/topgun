@@ -61,7 +61,7 @@ export async function createTestClient(
     `test-client-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
   const messages: any[] = [];
-  let isAuthenticated = false;
+  const isAuthenticated = false;
   const resolvers: Map<
     string,
     { resolve: (value: any) => void; timeout: ReturnType<typeof setTimeout> }

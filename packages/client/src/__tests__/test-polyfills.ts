@@ -8,7 +8,7 @@ import * as crypto from 'crypto';
 
 // Extend globalThis for WebCrypto polyfill (Node.js environment)
 declare global {
-  // eslint-disable-next-line no-var
+   
   var crypto: Crypto;
 }
 
