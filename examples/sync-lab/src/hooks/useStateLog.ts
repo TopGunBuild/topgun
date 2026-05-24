@@ -56,7 +56,8 @@ export function useStateLog(
   useEffect(() => {
     if (!map) return;
 
-    const unsubscribe = map.onChange(() => {
+    // v2.0: LWWMap exposes change notification via .subscribe(cb).
+    const unsubscribe = map.subscribe(() => {
       // If this fires outside a loggedSet() call, it is a remote merge
       if (!isLocalWriteRef.current) {
         // Scan for changed keys by comparing against our previous snapshot

@@ -117,6 +117,9 @@ importers:
       '@radix-ui/react-tabs':
         specifier: ^1.1.2
         version: 1.1.13(@types/react-dom@19.2.3(@types/react@19.2.7))(@types/react@19.2.7)(react-dom@19.2.1(react@19.2.1))(react@19.2.1)
+      '@topgunbuild/adapters':
+        specifier: workspace:*
+        version: link:../../packages/adapters
       '@topgunbuild/client':
         specifier: workspace:*
         version: link:../../packages/client

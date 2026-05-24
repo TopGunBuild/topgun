@@ -1,4 +1,5 @@
-import { TopGunClient, IDBAdapter } from '@topgunbuild/client';
+import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
 
 // Use environment variable for server URL
 const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8080';

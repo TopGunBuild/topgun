@@ -65,13 +65,14 @@ export function useDeviceClient(deviceId: string): UseDeviceClientReturn {
     });
   }, []);
 
-  // Subscribe to a map's onChange and store the unsubscribe function
+  // Subscribe to a map's changes and store the unsubscribe function.
+  // v2.0 unified the per-handle observation API on .subscribe(callback).
   const subscribeToMap = useCallback((map: LWWMap<string, any>) => {
     // Clean up previous subscription
     if (unsubscribeRef.current) {
       unsubscribeRef.current();
     }
-    const unsub = map.onChange(() => {
+    const unsub = map.subscribe(() => {
       setTodos(getAllTodos(map));
     });
     unsubscribeRef.current = unsub;
