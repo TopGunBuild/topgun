@@ -71,7 +71,7 @@ path = "src/bin/topgun_server.rs"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util", "time"] }
-tokio-tungstenite = "0.26"
+tokio-tungstenite = "0.28"
 hdrhistogram = "7"
 proptest = "1"
 serial_test = "3"
