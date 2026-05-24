@@ -30,7 +30,7 @@
   },
   "devDependencies": {
     "pino-pretty": "^13.1.2",
-    "typescript": "^5.0.0"
+    "typescript": "^6.0.3"
   },
   "engines": {
     "node": ">=18"
