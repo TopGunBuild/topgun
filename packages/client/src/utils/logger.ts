@@ -1,29 +1,41 @@
 import pino from 'pino';
 
-// Simple check for browser environment
 const isBrowser = typeof window !== 'undefined';
 
-// In browser, we might not have process.env, so we default to 'info'
-// Users can configure this via window.LOG_LEVEL or similar if needed,
-// but for now we stick to a safe default.
 const logLevel = (typeof process !== 'undefined' && process.env && process.env.LOG_LEVEL) || 'info';
 
-export const logger = pino({
-  level: logLevel,
-  transport: !isBrowser && (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') ? {
-    target: 'pino-pretty',
-    options: {
-      colorize: true,
-      translateTime: 'SYS:standard',
-      ignore: 'pid,hostname',
-      // stderr — pino-pretty defaults to stdout, which breaks stdio-protocol consumers (MCP JSON-RPC)
-      destination: 2
+function createNodeLogger() {
+  const wantPretty = typeof process !== 'undefined' && process.env.NODE_ENV !== 'production';
+
+  if (wantPretty) {
+    try {
+      // pino-pretty is a devDependency — when this package is consumed from npm without dev deps
+      // (e.g. `npx -y @topgunbuild/mcp-server`), pino() throws synchronously here because the
+      // transport target can't be resolved. Catch and fall back to plain JSON on stderr.
+      return pino({
+        level: logLevel,
+        transport: {
+          target: 'pino-pretty',
+          options: {
+            colorize: true,
+            translateTime: 'SYS:standard',
+            ignore: 'pid,hostname',
+            destination: 2,
+          },
+        },
+      });
+    } catch {
+      // fall through to the plain-stderr logger below
     }
-  } : undefined,
-  browser: {
-    asObject: true
   }
-});
+
+  // stderr destination keeps stdout clean for stdio-protocol consumers (MCP JSON-RPC).
+  return pino({ level: logLevel }, pino.destination(2));
+}
+
+export const logger = isBrowser
+  ? pino({ level: logLevel, browser: { asObject: true } })
+  : createNodeLogger();
 
 export type Logger = typeof logger;
 
