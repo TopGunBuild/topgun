@@ -38,4 +38,3 @@ export const logger = isBrowser
   : createNodeLogger();
 
 export type Logger = typeof logger;
-

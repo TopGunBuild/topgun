@@ -85,6 +85,34 @@ jobs:
       - name: Format check (prettier)
         run: pnpm format:check
 
+  mcp-publish-check:
+    name: MCP publish pre-check (boot-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.13.1 --activate
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify `npx -y @topgunbuild/mcp-server` boot path
+        # Packs the three user-facing packages with `pnpm pack`, installs them
+        # in a clean sandbox WITHOUT devDependencies (matching what an npm
+        # user gets via `npx -y @topgunbuild/mcp-server`), and asserts the
+        # server boots and registers all 8 MCP tools. Guards against
+        # devDep-only modules sneaking into the runtime path (see commit
+        # e6050a93 where pino-pretty crashed the whole flow).
+        run: ./scripts/verify-mcp-publish.sh
+
   docs-build:
     name: docs-astro build
     runs-on: ubuntu-latest

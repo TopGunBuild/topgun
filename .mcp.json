@@ -2,10 +2,7 @@
   "mcpServers": {
     "topgun": {
       "command": "npx",
-      "args": [
-        "-y",
-        "@topgunbuild/mcp-server"
-      ],
+      "args": ["-y", "@topgunbuild/mcp-server"],
       "env": {
         "TOPGUN_URL": "ws://localhost:8080",
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/koristuvac/.nvm/versions/node/v22.17.1/bin",
