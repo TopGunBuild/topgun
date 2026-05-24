@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "topgun": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@topgunbuild/mcp-server"
+      ],
+      "env": {
+        "TOPGUN_URL": "ws://localhost:8080"
+      }
+    }
+  }
+}

@@ -117,3 +117,4 @@ topgun.redb
 
 # Local scratch directories (not part of the release)
 my-test-review/
+.gstack/
