@@ -31,7 +31,7 @@
     "vitest": "^4.0.16"
   },
   "dependencies": {
-    "msgpackr": "^1.11.8",
+    "msgpackr": "^2.0.1",
     "pino": "^9.5.0",
     "sorted-btree": "^2.1.0",
     "zod": "^4.1.13"
