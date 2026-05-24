@@ -1,18 +1,23 @@
 version: 2
 updates:
-  # GitHub Actions versions — keeps actions/* and docker/* pinned to the
-  # latest stable major, opens PRs for new minors.
+  # GitHub Actions versions.
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
       day: monday
       time: '06:00'
       timezone: UTC
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
+    groups:
+      all-actions:
+        patterns:
+          - '*'
 
-  # npm (root workspace) — covers every package.json under packages/, apps/,
-  # examples/, and the root. pnpm's workspace protocol is preserved.
+  # npm (root workspace) — security-only by default so a single weekly sweep
+  # doesn't open dozens of PRs (Cloudflare Pages spins a preview for each).
+  # Use `gh pr create` manually if you need a version-bump PR outside of an
+  # advisory.
   - package-ecosystem: npm
     directory: /
     schedule:
@@ -20,36 +25,30 @@ updates:
       day: monday
       time: '06:00'
       timezone: UTC
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 3
+    versioning-strategy: increase-if-necessary
     groups:
-      # Cluster security-relevant ecosystem deps into one PR to keep noise low.
-      auth:
+      # Bundle everything not security-related into a single PR per sweep.
+      all-npm:
         patterns:
-          - 'better-auth'
-          - '@clerk/*'
-          - 'jsonwebtoken'
-          - '@types/jsonwebtoken'
-      react:
-        patterns:
-          - 'react'
-          - 'react-dom'
-          - '@types/react'
-          - '@types/react-dom'
-      build:
-        patterns:
-          - 'tsup'
-          - 'typescript'
-          - 'eslint*'
-          - 'prettier'
-          - 'vite'
-          - '@vitejs/*'
+          - '*'
+        update-types:
+          - patch
+          - minor
 
-  # Cargo workspace.
+  # Cargo — same shape.
   - package-ecosystem: cargo
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
       day: monday
       time: '06:00'
       timezone: UTC
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 2
+    groups:
+      all-cargo:
+        patterns:
+          - '*'
+        update-types:
+          - patch
+          - minor
