@@ -98,9 +98,7 @@ export interface UseEventJournalResult {
  * }
  * ```
  */
-export function useEventJournal(
-  options: UseEventJournalOptions = {}
-): UseEventJournalResult {
+export function useEventJournal(options: UseEventJournalOptions = {}): UseEventJournalResult {
   const client = useClient();
   const [events, setEvents] = useState<JournalEvent[]>([]);
   const [lastEvent, setLastEvent] = useState<JournalEvent | null>(null);
@@ -129,7 +127,7 @@ export function useEventJournal(
       }
       return journalRef.current.readFrom(sequence, limit);
     },
-    [client]
+    [client],
   );
 
   // Get latest sequence
@@ -149,7 +147,7 @@ export function useEventJournal(
         fromSequence: options.fromSequence?.toString(),
         paused: options.paused,
       }),
-    [options.mapName, options.types, options.fromSequence, options.paused]
+    [options.mapName, options.types, options.fromSequence, options.paused],
   );
 
   useEffect(() => {
@@ -206,6 +204,6 @@ export function useEventJournal(
       getLatestSequence,
       isSubscribed,
     }),
-    [events, lastEvent, clearEvents, readFrom, getLatestSequence, isSubscribed]
+    [events, lastEvent, clearEvents, readFrom, getLatestSequence, isSubscribed],
   );
 }

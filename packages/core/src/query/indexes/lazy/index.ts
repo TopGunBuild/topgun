@@ -5,10 +5,7 @@
  * This provides fast application startup and memory efficiency.
  */
 
-export type {
-  LazyIndex,
-  LazyIndexOptions,
-} from './types';
+export type { LazyIndex, LazyIndexOptions } from './types';
 export { isLazyIndex } from './types';
 export { LazyHashIndex } from './LazyHashIndex';
 export { LazyNavigableIndex } from './LazyNavigableIndex';

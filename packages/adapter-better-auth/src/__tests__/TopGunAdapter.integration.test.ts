@@ -77,11 +77,11 @@ class MemoryStorageAdapter implements IStorageAdapter {
   }
 
   async getPendingOps(): Promise<OpLogEntry[]> {
-    return this.opLog.filter(op => !op.synced);
+    return this.opLog.filter((op) => !op.synced);
   }
 
   async markOpsSynced(lastId: number): Promise<void> {
-    this.opLog.forEach(op => {
+    this.opLog.forEach((op) => {
       if (op.id !== undefined && op.id <= lastId) op.synced = 1;
     });
   }
@@ -119,8 +119,12 @@ describe('BetterAuth Integration', () => {
   describe('via auth.api methods (primary)', () => {
     let auth: {
       api: {
-        signUpEmail: (opts: { body: { email: string; password: string; name: string } }) => Promise<{ token: string; user: { email: string; name: string; id: string } }>;
-        signInEmail: (opts: { body: { email: string; password: string } }) => Promise<{ token: string; user: { email: string; id: string } }>;
+        signUpEmail: (opts: {
+          body: { email: string; password: string; name: string };
+        }) => Promise<{ token: string; user: { email: string; name: string; id: string } }>;
+        signInEmail: (opts: {
+          body: { email: string; password: string };
+        }) => Promise<{ token: string; user: { email: string; id: string } }>;
       };
     } | null = null;
     let client: TopGunClient;
@@ -170,7 +174,11 @@ describe('BetterAuth Integration', () => {
 
     itIfBetterAuth('creates a session record in the TopGun map after signUpEmail', async () => {
       const result = await auth!.api.signUpEmail({
-        body: { email: `session-check-${Date.now()}@example.com`, password: TEST_PASSWORD, name: TEST_NAME },
+        body: {
+          email: `session-check-${Date.now()}@example.com`,
+          password: TEST_PASSWORD,
+          name: TEST_NAME,
+        },
       });
 
       expect(result.token).toBeDefined();
@@ -206,10 +214,10 @@ describe('BetterAuth Integration', () => {
         body: { email: uniqueEmail, password: TEST_PASSWORD, name: TEST_NAME },
       });
 
-      const session = await adapter.findOne({
+      const session = (await adapter.findOne({
         model: 'session',
         where: [{ field: 'token', value: signupResult.token }],
-      }) as Record<string, unknown> | null;
+      })) as Record<string, unknown> | null;
 
       expect(session).not.toBeNull();
       const sessionId = session!['id'] as string;

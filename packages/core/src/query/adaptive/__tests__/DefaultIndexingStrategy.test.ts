@@ -262,7 +262,12 @@ describe('DefaultIndexingStrategy', () => {
 
     it('skips existing indexes', () => {
       // Pre-add an index
-      map.addHashIndex({ name: 'category', type: 'simple', getValue: () => '', getValues: () => [] });
+      map.addHashIndex({
+        name: 'category',
+        type: 'simple',
+        getValue: () => '',
+        getValues: () => [],
+      });
 
       const sample: Product = {
         id: '1',
@@ -344,8 +349,8 @@ describe('DefaultIndexingStrategy', () => {
       const recommendations = strategy.analyzeAndRecommend(sample);
 
       expect(recommendations.length).toBeGreaterThan(0);
-      expect(recommendations.find(r => r.field === 'id')).toBeDefined();
-      expect(recommendations.find(r => r.field === 'price')).toBeDefined();
+      expect(recommendations.find((r) => r.field === 'id')).toBeDefined();
+      expect(recommendations.find((r) => r.field === 'price')).toBeDefined();
 
       // Should not apply to any map
       expect(strategy.isApplied()).toBe(false);

@@ -277,11 +277,13 @@ export type ListResolversRequest = z.infer<typeof ListResolversRequestSchema>;
 export const ListResolversResponseSchema = z.object({
   type: z.literal('LIST_RESOLVERS_RESPONSE'),
   requestId: z.string(),
-  resolvers: z.array(z.object({
-    mapName: z.string(),
-    name: z.string(),
-    priority: z.number().optional(),
-    keyPattern: z.string().optional(),
-  })),
+  resolvers: z.array(
+    z.object({
+      mapName: z.string(),
+      name: z.string(),
+      priority: z.number().optional(),
+      keyPattern: z.string().optional(),
+    }),
+  ),
 });
 export type ListResolversResponse = z.infer<typeof ListResolversResponseSchema>;

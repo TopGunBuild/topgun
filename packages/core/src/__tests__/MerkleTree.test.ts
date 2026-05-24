@@ -4,7 +4,7 @@ import { LWWRecord } from '../LWWMap';
 // Helper to create a dummy record
 const createRecord = (val: string, millis: number): LWWRecord<string> => ({
   value: val,
-  timestamp: { millis, counter: 0, nodeId: 'test' }
+  timestamp: { millis, counter: 0, nodeId: 'test' },
 });
 
 describe('MerkleTree', () => {
@@ -41,16 +41,16 @@ describe('MerkleTree', () => {
     // Create a tree with sufficient depth
     const depth = 3;
     const data = new Map<string, LWWRecord<string>>();
-    
+
     // Add enough items to likely populate different buckets
     data.set('key1', createRecord('val1', 100));
     data.set('key2', createRecord('val2', 100));
 
     const tree = new MerkleTree(data, depth);
     const rootHash = tree.getRootHash();
-    
+
     // Check level 1 buckets
-    const buckets = tree.getBuckets(""); // Root children
+    const buckets = tree.getBuckets(''); // Root children
     expect(Object.keys(buckets).length).toBeGreaterThan(0);
   });
 
@@ -60,4 +60,3 @@ describe('MerkleTree', () => {
     expect(tree.getRootHash()).toBe(0);
   });
 });
-

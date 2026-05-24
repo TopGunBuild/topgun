@@ -26,9 +26,7 @@ import type { IndexBuildProgressCallback } from '../../adaptive/types';
  *
  * K = record key type, V = record value type, A = attribute value type (should be string)
  */
-export class LazyInvertedIndex<K, V, A extends string = string>
-  implements LazyIndex<K, V, A>
-{
+export class LazyInvertedIndex<K, V, A extends string = string> implements LazyIndex<K, V, A> {
   readonly type = 'inverted' as const;
   readonly isLazy = true as const;
 
@@ -53,7 +51,7 @@ export class LazyInvertedIndex<K, V, A extends string = string>
   constructor(
     readonly attribute: Attribute<V, A>,
     pipeline?: TokenizationPipeline,
-    options: LazyIndexOptions = {}
+    options: LazyIndexOptions = {},
   ) {
     this.pipeline = pipeline ?? TokenizationPipeline.simple();
     this.onProgress = options.onProgress;

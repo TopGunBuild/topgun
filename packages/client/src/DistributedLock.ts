@@ -32,33 +32,39 @@ export class DistributedLock implements ILock {
   public async lock(ttl: number = 10000): Promise<boolean> {
     const requestId = crypto.randomUUID();
     try {
-        const result = await this.syncEngine.requestLock(this.name, requestId, ttl);
-        this.fencingToken = result.fencingToken;
-        this._isLocked = true;
-        return true;
+      const result = await this.syncEngine.requestLock(this.name, requestId, ttl);
+      this.fencingToken = result.fencingToken;
+      this._isLocked = true;
+      return true;
     } catch (e) {
-        return false;
+      return false;
     }
   }
 
   public async unlock(): Promise<void> {
-      if (!this._isLocked || this.fencingToken === null) return;
+    if (!this._isLocked || this.fencingToken === null) return;
 
-      const requestId = crypto.randomUUID();
-      try {
-          const acked = await this.syncEngine.releaseLock(this.name, requestId, this.fencingToken);
-          if (!acked) {
-            logger.debug({ name: this.name, requestId }, 'DistributedLock: release not acknowledged by server');
-          }
-      } catch (e) {
-          logger.debug({ name: this.name, requestId, error: (e as Error).message }, 'DistributedLock: release threw');
-      } finally {
-          this._isLocked = false;
-          this.fencingToken = null;
+    const requestId = crypto.randomUUID();
+    try {
+      const acked = await this.syncEngine.releaseLock(this.name, requestId, this.fencingToken);
+      if (!acked) {
+        logger.debug(
+          { name: this.name, requestId },
+          'DistributedLock: release not acknowledged by server',
+        );
       }
+    } catch (e) {
+      logger.debug(
+        { name: this.name, requestId, error: (e as Error).message },
+        'DistributedLock: release threw',
+      );
+    } finally {
+      this._isLocked = false;
+      this.fencingToken = null;
+    }
   }
 
   public isLocked(): boolean {
-      return this._isLocked;
+    return this._isLocked;
   }
 }

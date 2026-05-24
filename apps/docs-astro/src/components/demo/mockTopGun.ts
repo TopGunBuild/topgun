@@ -5,18 +5,22 @@ export const generateHLC = (lastTimestamp: number): number => {
   return Math.max(now, lastTimestamp + 1);
 };
 
-export const mergeDrones = (local: Drone[], remote: Drone[]): { merged: Drone[], conflicts: number } => {
+export const mergeDrones = (
+  local: Drone[],
+  remote: Drone[],
+): { merged: Drone[]; conflicts: number } => {
   const droneMap = new Map<string, Drone>();
   let conflictCount = 0;
 
-  local.forEach(d => droneMap.set(d.id, d));
+  local.forEach((d) => droneMap.set(d.id, d));
 
-  remote.forEach(remoteDrone => {
+  remote.forEach((remoteDrone) => {
     const localDrone = droneMap.get(remoteDrone.id);
 
     if (localDrone) {
-      const dataChanged = JSON.stringify(localDrone.coordinates) !== JSON.stringify(remoteDrone.coordinates) ||
-                          localDrone.status !== remoteDrone.status;
+      const dataChanged =
+        JSON.stringify(localDrone.coordinates) !== JSON.stringify(remoteDrone.coordinates) ||
+        localDrone.status !== remoteDrone.status;
 
       if (dataChanged) {
         if (remoteDrone.hlcTimestamp > localDrone.hlcTimestamp) {
@@ -31,6 +35,6 @@ export const mergeDrones = (local: Drone[], remote: Drone[]): { merged: Drone[],
 
   return {
     merged: Array.from(droneMap.values()),
-    conflicts: conflictCount
+    conflicts: conflictCount,
   };
 };

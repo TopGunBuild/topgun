@@ -3,7 +3,12 @@ import { LWWMap, LWWRecord } from './LWWMap';
 import { ORMap, ORMapRecord, MergeKeyResult, ORMapSnapshot } from './ORMap';
 import { MerkleTree } from './MerkleTree';
 import { ORMapMerkleTree, ORMapMerkleNode } from './ORMapMerkleTree';
-import { hashORMapEntry, hashORMapRecord, timestampToString, compareTimestamps } from './ORMapMerkle';
+import {
+  hashORMapEntry,
+  hashORMapRecord,
+  timestampToString,
+  compareTimestamps,
+} from './ORMapMerkle';
 import { PNCounterImpl } from './PNCounter';
 import type { PNCounter, PNCounterState, PNCounterStateObject, PNCounterConfig } from './PNCounter';
 import { Ringbuffer } from './Ringbuffer';
@@ -309,11 +314,7 @@ export type {
 } from './fts';
 
 // Search utilities exports
-export {
-  ReciprocalRankFusion,
-  SearchCursor,
-  DEFAULT_CURSOR_MAX_AGE_MS,
-} from './search';
+export { ReciprocalRankFusion, SearchCursor, DEFAULT_CURSOR_MAX_AGE_MS } from './search';
 export type {
   RankedResult,
   RRFConfig,

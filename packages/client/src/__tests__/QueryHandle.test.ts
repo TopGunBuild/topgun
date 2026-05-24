@@ -11,18 +11,21 @@ const mockSyncEngine = {
 describe('QueryHandle', () => {
   test('should sort results on client side', () => {
     const handle = new QueryHandle<any>(mockSyncEngine, 'items', {
-      sort: { score: 'desc' }
+      sort: { score: 'desc' },
     });
 
     const callback = jest.fn();
     handle.subscribe(callback);
 
     // Simulate receiving unsorted data from server
-    handle.onResult([
-      { key: 'A', value: { id: 'A', score: 10 } },
-      { key: 'B', value: { id: 'B', score: 30 } },
-      { key: 'C', value: { id: 'C', score: 20 } },
-    ], 'server');
+    handle.onResult(
+      [
+        { key: 'A', value: { id: 'A', score: 10 } },
+        { key: 'B', value: { id: 'B', score: 30 } },
+        { key: 'C', value: { id: 'C', score: 20 } },
+      ],
+      'server',
+    );
 
     expect(callback).toHaveBeenCalled();
     const lastCall = callback.mock.calls[callback.mock.calls.length - 1][0];
@@ -38,17 +41,20 @@ describe('QueryHandle', () => {
 
   test('should maintain sort order on updates', () => {
     const handle = new QueryHandle<any>(mockSyncEngine, 'items', {
-      sort: { score: 'desc' }
+      sort: { score: 'desc' },
     });
 
     const callback = jest.fn();
     handle.subscribe(callback);
 
     // Initial server response
-    handle.onResult([
-      { key: 'A', value: { id: 'A', score: 10 } },
-      { key: 'B', value: { id: 'B', score: 30 } },
-    ], 'server');
+    handle.onResult(
+      [
+        { key: 'A', value: { id: 'A', score: 10 } },
+        { key: 'B', value: { id: 'B', score: 30 } },
+      ],
+      'server',
+    );
 
     // Update A to be 40 (should move to top)
     handle.onUpdate('A', { id: 'A', score: 40 });
@@ -66,10 +72,13 @@ describe('QueryHandle', () => {
     const callback = jest.fn();
     handle.subscribe(callback);
 
-    handle.onResult([
-      { key: 'node-123', value: { name: 'Node 1' } },
-      { key: 'node-456', value: { name: 'Node 2' } },
-    ], 'server');
+    handle.onResult(
+      [
+        { key: 'node-123', value: { name: 'Node 1' } },
+        { key: 'node-456', value: { name: 'Node 2' } },
+      ],
+      'server',
+    );
 
     const lastCall = callback.mock.calls[callback.mock.calls.length - 1][0];
     expect(lastCall[0]._key).toBe('node-123');
@@ -85,10 +94,13 @@ describe('QueryHandle', () => {
       handle.subscribe(callback);
 
       // First: local data loads
-      handle.onResult([
-        { key: 'A', value: { name: 'Local Item A' } },
-        { key: 'B', value: { name: 'Local Item B' } },
-      ], 'local');
+      handle.onResult(
+        [
+          { key: 'A', value: { name: 'Local Item A' } },
+          { key: 'B', value: { name: 'Local Item B' } },
+        ],
+        'local',
+      );
 
       // Server sends empty response (race condition - server hasn't loaded from storage yet)
       handle.onResult([], 'server');
@@ -106,9 +118,7 @@ describe('QueryHandle', () => {
       handle.subscribe(callback);
 
       // First: server sends data (authoritative)
-      handle.onResult([
-        { key: 'A', value: { name: 'Server Item A' } },
-      ], 'server');
+      handle.onResult([{ key: 'A', value: { name: 'Server Item A' } }], 'server');
 
       // Later: server sends empty (all data was deleted)
       handle.onResult([], 'server');
@@ -124,14 +134,10 @@ describe('QueryHandle', () => {
       handle.subscribe(callback);
 
       // Local data first
-      handle.onResult([
-        { key: 'local-only', value: { name: 'Local Only' } },
-      ], 'local');
+      handle.onResult([{ key: 'local-only', value: { name: 'Local Only' } }], 'local');
 
       // Server sends different data
-      handle.onResult([
-        { key: 'server-item', value: { name: 'Server Item' } },
-      ], 'server');
+      handle.onResult([{ key: 'server-item', value: { name: 'Server Item' } }], 'server');
 
       // Server data should replace local
       const lastCall = callback.mock.calls[callback.mock.calls.length - 1][0];
@@ -146,9 +152,7 @@ describe('QueryHandle', () => {
       handle.subscribe(callback);
 
       // Client loads from IndexedDB
-      handle.onResult([
-        { key: 'note1', value: { title: 'My Note', content: 'Content' } },
-      ], 'local');
+      handle.onResult([{ key: 'note1', value: { title: 'My Note', content: 'Content' } }], 'local');
 
       // In-Memory server responds empty (it has no persistent data)
       handle.onResult([], 'server');
@@ -173,15 +177,13 @@ describe('QueryHandle', () => {
         const changeListener = jest.fn();
         const unsubscribe = handle.onDelta(changeListener);
 
-        handle.onResult([
-          { key: 'a', value: { name: 'Alice' } },
-        ], 'server');
+        handle.onResult([{ key: 'a', value: { name: 'Alice' } }], 'server');
 
         expect(changeListener).toHaveBeenCalledTimes(1);
         expect(changeListener).toHaveBeenCalledWith(
           expect.arrayContaining([
-            expect.objectContaining({ type: 'add', key: 'a', value: { name: 'Alice' } })
-          ])
+            expect.objectContaining({ type: 'add', key: 'a', value: { name: 'Alice' } }),
+          ]),
         );
 
         unsubscribe();
@@ -217,7 +219,9 @@ describe('QueryHandle', () => {
       });
 
       test('should catch errors in change listeners without affecting others', () => {
-        const errorListener = jest.fn(() => { throw new Error('Test error'); });
+        const errorListener = jest.fn(() => {
+          throw new Error('Test error');
+        });
         const normalListener = jest.fn();
 
         handle.onDelta(errorListener);
@@ -274,7 +278,7 @@ describe('QueryHandle', () => {
           type: 'update',
           key: 'a',
           value: { name: 'Alice Updated' },
-          previousValue: { name: 'Alice' }
+          previousValue: { name: 'Alice' },
         });
 
         // Calling again should return the same
@@ -304,7 +308,7 @@ describe('QueryHandle', () => {
         expect(pending1).toHaveLength(2);
         expect(pending2).toHaveLength(2);
         expect(pending1).not.toBe(pending2); // Different array instances
-        expect(pending1).toEqual(pending2);  // Same content
+        expect(pending1).toEqual(pending2); // Same content
       });
 
       test('should return empty array when no changes', () => {
@@ -350,7 +354,7 @@ describe('QueryHandle', () => {
         expect(changes[0]).toMatchObject({
           type: 'add',
           key: 'a',
-          value: { name: 'Alice' }
+          value: { name: 'Alice' },
         });
         expect(changes[0].previousValue).toBeUndefined();
       });
@@ -367,7 +371,7 @@ describe('QueryHandle', () => {
           type: 'update',
           key: 'a',
           value: { name: 'Alice Updated' },
-          previousValue: { name: 'Alice' }
+          previousValue: { name: 'Alice' },
         });
       });
 
@@ -382,30 +386,36 @@ describe('QueryHandle', () => {
         expect(changes[0]).toMatchObject({
           type: 'remove',
           key: 'a',
-          previousValue: { name: 'Alice' }
+          previousValue: { name: 'Alice' },
         });
         expect(changes[0].value).toBeUndefined();
       });
 
       test('should detect mixed changes in batch', () => {
-        handle.onResult([
-          { key: 'a', value: { name: 'Alice' } },
-          { key: 'b', value: { name: 'Bob' } },
-        ], 'server');
+        handle.onResult(
+          [
+            { key: 'a', value: { name: 'Alice' } },
+            { key: 'b', value: { name: 'Bob' } },
+          ],
+          'server',
+        );
         handle.consumeChanges();
 
         // a: updated, b: removed, c: added
-        handle.onResult([
-          { key: 'a', value: { name: 'Alice Updated' } },
-          { key: 'c', value: { name: 'Charlie' } },
-        ], 'server');
+        handle.onResult(
+          [
+            { key: 'a', value: { name: 'Alice Updated' } },
+            { key: 'c', value: { name: 'Charlie' } },
+          ],
+          'server',
+        );
 
         const changes = handle.getPendingChanges();
         expect(changes).toHaveLength(3);
 
-        const update = changes.find(c => c.type === 'update');
-        const add = changes.find(c => c.type === 'add');
-        const remove = changes.find(c => c.type === 'remove');
+        const update = changes.find((c) => c.type === 'update');
+        const add = changes.find((c) => c.type === 'add');
+        const remove = changes.find((c) => c.type === 'remove');
 
         expect(update).toMatchObject({ key: 'a', value: { name: 'Alice Updated' } });
         expect(add).toMatchObject({ key: 'c', value: { name: 'Charlie' } });
@@ -434,4 +444,3 @@ describe('QueryHandle', () => {
     });
   });
 });
-

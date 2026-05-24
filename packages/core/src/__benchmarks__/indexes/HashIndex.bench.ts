@@ -54,18 +54,12 @@ describe('HashIndex Performance', () => {
       });
 
       bench('retrieve in (10 values)', () => {
-        const values = Array.from(
-          { length: 10 },
-          (_, i) => `user${i * 100}@test.com`
-        );
+        const values = Array.from({ length: 10 }, (_, i) => `user${i * 100}@test.com`);
         index.retrieve({ type: 'in', values });
       });
 
       bench('retrieve in (100 values)', () => {
-        const values = Array.from(
-          { length: 100 },
-          (_, i) => `user${i * 10}@test.com`
-        );
+        const values = Array.from({ length: 100 }, (_, i) => `user${i * 10}@test.com`);
         index.retrieve({ type: 'in', values });
       });
 

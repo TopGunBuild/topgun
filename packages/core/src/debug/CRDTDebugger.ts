@@ -125,7 +125,7 @@ export class CRDTDebugger {
     timestamp: Timestamp,
     nodeId: string,
     oldValue?: unknown,
-    merkleRoot?: string
+    merkleRoot?: string,
   ): void {
     this.recordOperation({
       timestamp,
@@ -145,7 +145,7 @@ export class CRDTDebugger {
     timestamp: Timestamp,
     nodeId: string,
     oldValue?: unknown,
-    merkleRoot?: string
+    merkleRoot?: string,
   ): void {
     this.recordOperation({
       timestamp,
@@ -166,7 +166,7 @@ export class CRDTDebugger {
     nodeId: string,
     wasUpdated: boolean,
     oldValue?: unknown,
-    merkleRoot?: string
+    merkleRoot?: string,
   ): void {
     this.recordOperation({
       timestamp,
@@ -206,15 +206,11 @@ export class CRDTDebugger {
     }
 
     if (options.since) {
-      results = results.filter(
-        (s) => this.compareTimestamp(s.timestamp, options.since!) >= 0
-      );
+      results = results.filter((s) => this.compareTimestamp(s.timestamp, options.since!) >= 0);
     }
 
     if (options.until) {
-      results = results.filter(
-        (s) => this.compareTimestamp(s.timestamp, options.until!) <= 0
-      );
+      results = results.filter((s) => this.compareTimestamp(s.timestamp, options.until!) <= 0);
     }
 
     if (options.limit) {
@@ -244,9 +240,7 @@ export class CRDTDebugger {
   // ============================================================================
 
   getStatistics(mapId?: string): DebugStatistics {
-    const ops = mapId
-      ? this.snapshots.filter((s) => s.mapId === mapId)
-      : this.snapshots;
+    const ops = mapId ? this.snapshots.filter((s) => s.mapId === mapId) : this.snapshots;
 
     const operationsByType: Record<string, number> = {};
     const operationsByNode: Record<string, number> = {};
@@ -292,7 +286,7 @@ export class CRDTDebugger {
   replayUntil<K extends string, V>(
     targetTimestamp: Timestamp,
     mapId?: string,
-    hlc?: HLC
+    hlc?: HLC,
   ): LWWMap<K, V> {
     const map = new LWWMap<K, V>(hlc || new HLC('replay-node'));
     const ops = this.getOperations({ mapId, until: targetTimestamp });
@@ -328,11 +322,9 @@ export class CRDTDebugger {
    */
   getTimeline(
     intervalMs: number = 1000,
-    mapId?: string
+    mapId?: string,
   ): Array<{ timestamp: number; operations: CRDTSnapshot[] }> {
-    const ops = mapId
-      ? this.snapshots.filter((s) => s.mapId === mapId)
-      : this.snapshots;
+    const ops = mapId ? this.snapshots.filter((s) => s.mapId === mapId) : this.snapshots;
 
     if (ops.length === 0) return [];
 
@@ -381,7 +373,7 @@ export class CRDTDebugger {
             conflicts: this.conflicts,
           },
           null,
-          2
+          2,
         );
     }
   }
@@ -392,7 +384,7 @@ export class CRDTDebugger {
     const rows = this.snapshots
       .map(
         (s) =>
-          `${s.id},${s.timestamp.millis},${s.timestamp.counter},${s.operation},${s.mapId},${s.key || ''},${s.nodeId},${s.merkleRoot || ''}`
+          `${s.id},${s.timestamp.millis},${s.timestamp.counter},${s.operation},${s.mapId},${s.key || ''},${s.nodeId},${s.merkleRoot || ''}`,
       )
       .join('\n');
     return header + rows;
@@ -413,7 +405,7 @@ export class CRDTDebugger {
     } else {
       throw new Error(
         'Unsupported history format. Expected v1.0 format with { version: "1.0", operations: [...], conflicts: [...] }. ' +
-        'Legacy array format is no longer supported.'
+          'Legacy array format is no longer supported.',
       );
     }
   }
@@ -428,7 +420,7 @@ export class CRDTDebugger {
   diff(
     fromTimestamp: Timestamp,
     toTimestamp: Timestamp,
-    mapId?: string
+    mapId?: string,
   ): {
     added: CRDTSnapshot[];
     modified: CRDTSnapshot[];

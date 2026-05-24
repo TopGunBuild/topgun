@@ -4,7 +4,11 @@
  * Tests for cursor-based pagination in distributed queries.
  */
 
-import { QueryCursor, type QueryCursorData, DEFAULT_QUERY_CURSOR_MAX_AGE_MS } from '../../query/QueryCursor';
+import {
+  QueryCursor,
+  type QueryCursorData,
+  DEFAULT_QUERY_CURSOR_MAX_AGE_MS,
+} from '../../query/QueryCursor';
 import { encodeBase64Url, decodeBase64Url } from '../../utils/base64url';
 
 describe('QueryCursor', () => {
@@ -39,10 +43,12 @@ describe('QueryCursor', () => {
 
     it('should return null for cursor with missing required fields', () => {
       // Missing sortField
-      const incomplete = encodeBase64Url(JSON.stringify({
-        nodeValues: {},
-        nodeKeys: {},
-      }));
+      const incomplete = encodeBase64Url(
+        JSON.stringify({
+          nodeValues: {},
+          nodeKeys: {},
+        }),
+      );
       expect(QueryCursor.decode(incomplete)).toBeNull();
     });
   });
@@ -106,7 +112,7 @@ describe('QueryCursor', () => {
       const cursor = QueryCursor.fromLastResult(
         { key: 'key1', sortValue: 100 },
         testSort,
-        testPredicate
+        testPredicate,
       );
       const decoded = QueryCursor.decode(cursor)!;
 
@@ -117,7 +123,7 @@ describe('QueryCursor', () => {
       const cursor = QueryCursor.fromLastResult(
         { key: 'key1', sortValue: 100 },
         testSort,
-        testPredicate
+        testPredicate,
       );
       const decoded = QueryCursor.decode(cursor)!;
 
@@ -129,7 +135,7 @@ describe('QueryCursor', () => {
       const cursor = QueryCursor.fromLastResult(
         { key: 'key1', sortValue: 100 },
         testSort,
-        testPredicate
+        testPredicate,
       );
       const decoded = QueryCursor.decode(cursor)!;
 
@@ -141,7 +147,7 @@ describe('QueryCursor', () => {
       const cursor = QueryCursor.fromLastResult(
         { key: 'key1', sortValue: 100 },
         testSort,
-        testPredicate
+        testPredicate,
       );
       const decoded = QueryCursor.decode(cursor)!;
 
@@ -155,7 +161,7 @@ describe('QueryCursor', () => {
       const cursor = QueryCursor.fromLastResult(
         { key: 'key1', sortValue: 100 },
         testSort,
-        testPredicate
+        testPredicate,
       );
       const decoded = QueryCursor.decode(cursor)!;
 
@@ -175,7 +181,7 @@ describe('QueryCursor', () => {
       const cursor = QueryCursor.fromLastResult(
         { key: 'key1', sortValue: 100, nodeId: 'node1' },
         testSort,
-        testPredicate
+        testPredicate,
       );
       const decoded = QueryCursor.decode(cursor)!;
 
@@ -187,7 +193,7 @@ describe('QueryCursor', () => {
       const cursor = QueryCursor.fromLastResult(
         { key: 'key1', sortValue: 100, nodeId: 'node1' },
         testSort,
-        testPredicate
+        testPredicate,
       );
       const decoded = QueryCursor.decode(cursor)!;
 
@@ -199,7 +205,7 @@ describe('QueryCursor', () => {
       const cursor = QueryCursor.fromLastResult(
         { key: 'key1', sortValue: 100 },
         testSort,
-        testPredicate
+        testPredicate,
       );
       const decoded = QueryCursor.decode(cursor)!;
 
@@ -216,7 +222,7 @@ describe('QueryCursor', () => {
         const cursor = QueryCursor.fromLastResult(
           { key: 'key1', sortValue: 100 },
           ascSort,
-          testPredicate
+          testPredicate,
         );
         const decoded = QueryCursor.decode(cursor)!;
 
@@ -228,7 +234,7 @@ describe('QueryCursor', () => {
         const cursor = QueryCursor.fromLastResult(
           { key: 'key1', sortValue: 100 },
           ascSort,
-          testPredicate
+          testPredicate,
         );
         const decoded = QueryCursor.decode(cursor)!;
 
@@ -240,7 +246,7 @@ describe('QueryCursor', () => {
         const cursor = QueryCursor.fromLastResult(
           { key: 'key1', sortValue: 100 },
           ascSort,
-          testPredicate
+          testPredicate,
         );
         const decoded = QueryCursor.decode(cursor)!;
 
@@ -255,7 +261,7 @@ describe('QueryCursor', () => {
         const cursor = QueryCursor.fromLastResult(
           { key: 'key1', sortValue: 100 },
           testSort, // DESC
-          testPredicate
+          testPredicate,
         );
         const decoded = QueryCursor.decode(cursor)!;
 
@@ -267,7 +273,7 @@ describe('QueryCursor', () => {
         const cursor = QueryCursor.fromLastResult(
           { key: 'key1', sortValue: 100 },
           testSort, // DESC
-          testPredicate
+          testPredicate,
         );
         const decoded = QueryCursor.decode(cursor)!;
 
@@ -279,7 +285,7 @@ describe('QueryCursor', () => {
         const cursor = QueryCursor.fromLastResult(
           { key: 'key1', sortValue: 100 },
           testSort, // DESC
-          testPredicate
+          testPredicate,
         );
         const decoded = QueryCursor.decode(cursor)!;
 
@@ -292,13 +298,17 @@ describe('QueryCursor', () => {
       const cursor = QueryCursor.fromLastResult(
         { key: 'key1', sortValue: 100, nodeId: 'node1' },
         testSort,
-        testPredicate
+        testPredicate,
       );
       const decoded = QueryCursor.decode(cursor)!;
 
       // Results from node2 should always be included
-      expect(QueryCursor.isAfterCursor({ key: 'key2', sortValue: 50, nodeId: 'node2' }, decoded)).toBe(true);
-      expect(QueryCursor.isAfterCursor({ key: 'key2', sortValue: 200, nodeId: 'node2' }, decoded)).toBe(true);
+      expect(
+        QueryCursor.isAfterCursor({ key: 'key2', sortValue: 50, nodeId: 'node2' }, decoded),
+      ).toBe(true);
+      expect(
+        QueryCursor.isAfterCursor({ key: 'key2', sortValue: 200, nodeId: 'node2' }, decoded),
+      ).toBe(true);
     });
   });
 
@@ -342,12 +352,12 @@ describe('QueryCursor', () => {
       const cursor1 = QueryCursor.fromLastResult(
         { key: 'key1', sortValue: 100, nodeId: 'node1' },
         testSort,
-        testPredicate
+        testPredicate,
       );
       const cursor2 = QueryCursor.fromLastResult(
         { key: 'key2', sortValue: 200, nodeId: 'node2' },
         testSort,
-        testPredicate
+        testPredicate,
       );
 
       const decoded1 = QueryCursor.decode(cursor1)!;
@@ -365,12 +375,12 @@ describe('QueryCursor', () => {
       const cursor1 = QueryCursor.fromLastResult(
         { key: 'key1', sortValue: 100, nodeId: 'node1' },
         testSort, // DESC - lower values are further
-        testPredicate
+        testPredicate,
       );
       const cursor2 = QueryCursor.fromLastResult(
         { key: 'key2', sortValue: 50, nodeId: 'node1' }, // Same node, lower value
         testSort,
-        testPredicate
+        testPredicate,
       );
 
       const decoded1 = QueryCursor.decode(cursor1)!;
@@ -389,12 +399,12 @@ describe('QueryCursor', () => {
       const cursor1 = QueryCursor.fromLastResult(
         { key: 'key1', sortValue: 100, nodeId: 'node1' },
         ascSort,
-        testPredicate
+        testPredicate,
       );
       const cursor2 = QueryCursor.fromLastResult(
         { key: 'key2', sortValue: 150, nodeId: 'node1' }, // Same node, higher value
         ascSort,
-        testPredicate
+        testPredicate,
       );
 
       const decoded1 = QueryCursor.decode(cursor1)!;
@@ -411,12 +421,7 @@ describe('QueryCursor', () => {
 
 describe('base64url utilities', () => {
   it('should encode and decode strings correctly', () => {
-    const testStrings = [
-      'hello world',
-      '{"key":"value"}',
-      'special chars: +/= あいう',
-      '',
-    ];
+    const testStrings = ['hello world', '{"key":"value"}', 'special chars: +/= あいう', ''];
 
     for (const str of testStrings) {
       const encoded = encodeBase64Url(str);

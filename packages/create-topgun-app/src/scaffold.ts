@@ -32,13 +32,17 @@ export interface ScaffoldOptions {
  *  2. Rewrite package.json with the slugified appName and strip private field.
  *  3. Rename .gitignore.template → .gitignore (npm strips bare .gitignore on publish).
  */
-export async function scaffold({ appName, targetDir, templateDir }: ScaffoldOptions): Promise<void> {
+export async function scaffold({
+  appName,
+  targetDir,
+  templateDir,
+}: ScaffoldOptions): Promise<void> {
   // Guard: target directory must not be non-empty.
   if (await pathExists(targetDir)) {
     const entries = await readdir(targetDir);
     if (entries.length > 0) {
       throw new Error(
-        `Target directory "${targetDir}" already exists and is not empty. Choose a different name or remove the directory first.`
+        `Target directory "${targetDir}" already exists and is not empty. Choose a different name or remove the directory first.`,
       );
     }
   }

@@ -44,10 +44,7 @@ export class PartitionRouter {
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
   private pendingRefresh: Promise<void> | null = null;
 
-  constructor(
-    connectionPool: ConnectionPool,
-    config: Partial<PartitionRouterConfig> = {}
-  ) {
+  constructor(connectionPool: ConnectionPool, config: Partial<PartitionRouterConfig> = {}) {
     this.connectionPool = connectionPool;
     this.config = {
       ...DEFAULT_PARTITION_ROUTER_CONFIG,
@@ -136,7 +133,7 @@ export class PartitionRouter {
     }
 
     const partitionId = this.getPartitionId(key);
-    const partition = this.partitionMap.partitions.find(p => p.partitionId === partitionId);
+    const partition = this.partitionMap.partitions.find((p) => p.partitionId === partitionId);
 
     if (!partition) {
       logger.warn({ key, partitionId }, 'Partition not found in map');
@@ -175,7 +172,9 @@ export class PartitionRouter {
     }
 
     // Owner not available, try backup
-    const partition = this.partitionMap!.partitions.find(p => p.partitionId === routing.partitionId);
+    const partition = this.partitionMap!.partitions.find(
+      (p) => p.partitionId === routing.partitionId,
+    );
     if (partition) {
       for (const backupId of partition.backupNodeIds) {
         const backupConnection = this.connectionPool.getConnection(backupId);
@@ -221,8 +220,8 @@ export class PartitionRouter {
     if (!this.partitionMap) return [];
 
     return this.partitionMap.partitions
-      .filter(p => p.ownerNodeId === nodeId)
-      .map(p => p.partitionId);
+      .filter((p) => p.ownerNodeId === nodeId)
+      .map((p) => p.partitionId);
   }
 
   /**
@@ -247,7 +246,7 @@ export class PartitionRouter {
     if (!this.partitionMap) return null;
 
     const partitionId = this.getPartitionId(key);
-    const partition = this.partitionMap.partitions.find(p => p.partitionId === partitionId);
+    const partition = this.partitionMap.partitions.find((p) => p.partitionId === partitionId);
 
     return partition?.ownerNodeId ?? null;
   }
@@ -260,7 +259,7 @@ export class PartitionRouter {
     if (!this.partitionMap) return [];
 
     const partitionId = this.getPartitionId(key);
-    const partition = this.partitionMap.partitions.find(p => p.partitionId === partitionId);
+    const partition = this.partitionMap.partitions.find((p) => p.partitionId === partitionId);
 
     return partition?.backupNodeIds ?? [];
   }
@@ -289,11 +288,14 @@ export class PartitionRouter {
     this.updateConnectionPool(map);
 
     const changesCount = map.partitions.length;
-    logger.info({
-      version: map.version,
-      partitions: map.partitionCount,
-      nodes: map.nodes.length
-    }, 'Partition map updated via updateMap');
+    logger.info(
+      {
+        version: map.version,
+        partitions: map.partitionCount,
+        nodes: map.nodes.length,
+      },
+      'Partition map updated via updateMap',
+    );
 
     this.emit('partitionMap:updated', map.version, changesCount);
     return true;
@@ -305,7 +307,7 @@ export class PartitionRouter {
   public updatePartition(partitionId: number, owner: string, backups: string[]): void {
     if (!this.partitionMap) return;
 
-    const partition = this.partitionMap.partitions.find(p => p.partitionId === partitionId);
+    const partition = this.partitionMap.partitions.find((p) => p.partitionId === partitionId);
     if (partition) {
       partition.ownerNodeId = owner;
       partition.backupNodeIds = backups;
@@ -319,7 +321,7 @@ export class PartitionRouter {
     if (!this.partitionMap) return true;
 
     const now = Date.now();
-    return (now - this.lastRefreshTime) > this.config.maxMapStalenessMs;
+    return now - this.lastRefreshTime > this.config.maxMapStalenessMs;
   }
 
   /**
@@ -348,7 +350,7 @@ export class PartitionRouter {
     this.refreshTimer = setInterval(() => {
       if (this.isMapStale()) {
         this.emit('partitionMap:stale', this.getMapVersion(), this.lastRefreshTime);
-        this.refreshPartitionMap().catch(err => {
+        this.refreshPartitionMap().catch((err) => {
           logger.error({ error: err }, 'Failed to refresh partition map');
         });
       }
@@ -369,15 +371,19 @@ export class PartitionRouter {
    * Handle NOT_OWNER error from server -- triggers partition map refresh when the
    * server has a newer version, keeping client routing in sync after partition rebalancing.
    */
-  public handleNotOwnerError(partitionId: number, actualOwner: string, newMapVersion: number): void {
-    const partition = this.partitionMap?.partitions.find(p => p.partitionId === partitionId);
+  public handleNotOwnerError(
+    partitionId: number,
+    actualOwner: string,
+    newMapVersion: number,
+  ): void {
+    const partition = this.partitionMap?.partitions.find((p) => p.partitionId === partitionId);
     const expectedOwner = partition?.ownerNodeId ?? 'unknown';
 
     this.emit('routing:miss', partitionId, expectedOwner, actualOwner);
 
     // If server has newer map, request it
     if (newMapVersion > this.getMapVersion()) {
-      this.refreshPartitionMap().catch(err => {
+      this.refreshPartitionMap().catch((err) => {
         logger.error({ error: err }, 'Failed to refresh partition map after NOT_OWNER');
       });
     }
@@ -419,10 +425,13 @@ export class PartitionRouter {
 
     // Only accept newer versions
     if (this.partitionMap && newMap.version <= this.partitionMap.version) {
-      logger.debug({
-        current: this.partitionMap.version,
-        received: newMap.version
-      }, 'Ignoring older partition map');
+      logger.debug(
+        {
+          current: this.partitionMap.version,
+          received: newMap.version,
+        },
+        'Ignoring older partition map',
+      );
       return;
     }
 
@@ -433,11 +442,14 @@ export class PartitionRouter {
     this.updateConnectionPool(newMap);
 
     const changesCount = newMap.partitions.length;
-    logger.info({
-      version: newMap.version,
-      partitions: newMap.partitionCount,
-      nodes: newMap.nodes.length
-    }, 'Partition map updated');
+    logger.info(
+      {
+        version: newMap.version,
+        partitions: newMap.partitionCount,
+        nodes: newMap.nodes.length,
+      },
+      'Partition map updated',
+    );
 
     this.emit('partitionMap:updated', newMap.version, changesCount);
   }
@@ -453,10 +465,13 @@ export class PartitionRouter {
     }
 
     if (delta.previousVersion !== this.partitionMap.version) {
-      logger.warn({
-        expected: this.partitionMap.version,
-        received: delta.previousVersion
-      }, 'Delta version mismatch, requesting full map');
+      logger.warn(
+        {
+          expected: this.partitionMap.version,
+          received: delta.previousVersion,
+        },
+        'Delta version mismatch, requesting full map',
+      );
       this.refreshPartitionMap();
       return;
     }
@@ -469,10 +484,13 @@ export class PartitionRouter {
     this.partitionMap.version = delta.version;
     this.lastRefreshTime = Date.now();
 
-    logger.info({
-      version: delta.version,
-      changes: delta.changes.length
-    }, 'Applied partition map delta');
+    logger.info(
+      {
+        version: delta.version,
+        changes: delta.changes.length,
+      },
+      'Applied partition map delta',
+    );
 
     this.emit('partitionMap:updated', delta.version, delta.changes.length);
   }
@@ -480,7 +498,9 @@ export class PartitionRouter {
   private applyPartitionChange(change: PartitionChange): void {
     if (!this.partitionMap) return;
 
-    const partition = this.partitionMap.partitions.find(p => p.partitionId === change.partitionId);
+    const partition = this.partitionMap.partitions.find(
+      (p) => p.partitionId === change.partitionId,
+    );
     if (partition) {
       partition.ownerNodeId = change.newOwner;
       // Backups would also be updated but simplified here
@@ -496,7 +516,7 @@ export class PartitionRouter {
     }
 
     // Remove nodes that are no longer in the map
-    const currentNodeIds = new Set(map.nodes.map(n => n.nodeId));
+    const currentNodeIds = new Set(map.nodes.map((n) => n.nodeId));
     for (const nodeId of this.connectionPool.getAllNodes()) {
       if (!currentNodeIds.has(nodeId)) {
         this.connectionPool.removeNode(nodeId);

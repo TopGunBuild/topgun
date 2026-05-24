@@ -70,7 +70,7 @@ export async function spawnRustServer(
   options: {
     timeout?: number;
     env?: Record<string, string>;
-  } = {}
+  } = {},
 ): Promise<SpawnedServer> {
   const timeoutMs =
     options.timeout ??
@@ -91,7 +91,12 @@ export async function spawnRustServer(
       cwd: REPO_ROOT,
       detached: true,
       stdio: ['ignore', 'pipe', 'inherit'],
-      env: { ...process.env, STORAGE_BACKEND: 'null', JWT_SECRET: 'test-e2e-secret', ...options.env },
+      env: {
+        ...process.env,
+        STORAGE_BACKEND: 'null',
+        JWT_SECRET: 'test-e2e-secret',
+        ...options.env,
+      },
     });
   } else {
     // Development: let cargo build and run the binary.
@@ -104,8 +109,13 @@ export async function spawnRustServer(
         cwd: REPO_ROOT,
         detached: true,
         stdio: ['ignore', 'pipe', 'inherit'],
-        env: { ...process.env, STORAGE_BACKEND: 'null', JWT_SECRET: 'test-e2e-secret', ...options.env },
-      }
+        env: {
+          ...process.env,
+          STORAGE_BACKEND: 'null',
+          JWT_SECRET: 'test-e2e-secret',
+          ...options.env,
+        },
+      },
     );
   }
 
@@ -132,7 +142,7 @@ export async function createRustTestClient(
     autoAuth?: boolean;
     userId?: string;
     roles?: string[];
-  } = {}
+  } = {},
 ): Promise<TestClient> {
   const serverUrl = `ws://localhost:${port}/ws`;
   return createTestClient(serverUrl, options);
@@ -148,11 +158,9 @@ export async function createRustTestContext(
   options: {
     clientOptions?: Parameters<typeof createRustTestClient>[1];
     serverOptions?: Parameters<typeof spawnRustServer>[0];
-  } = {}
+  } = {},
 ): Promise<RustTestContext> {
-  const { port, cleanup: killServer } = await spawnRustServer(
-    options.serverOptions
-  );
+  const { port, cleanup: killServer } = await spawnRustServer(options.serverOptions);
 
   const clients: TestClient[] = [];
   try {
@@ -196,10 +204,7 @@ export async function createRustTestContext(
  * `PORT=<number>` is seen.  Rejects if the timeout elapses first or if the
  * process exits before printing the port.
  */
-function waitForPort(
-  proc: child_process.ChildProcess,
-  timeoutMs: number
-): Promise<number> {
+function waitForPort(proc: child_process.ChildProcess, timeoutMs: number): Promise<number> {
   return new Promise((resolve, reject) => {
     const rl = readline.createInterface({ input: proc.stdout! });
 
@@ -217,9 +222,9 @@ function waitForPort(
         reject(
           new Error(
             `Rust server did not print PORT= within ${timeoutMs} ms. ` +
-              `Set RUST_SERVER_BINARY to use a pre-built binary and skip cargo build time.`
-          )
-        )
+              `Set RUST_SERVER_BINARY to use a pre-built binary and skip cargo build time.`,
+          ),
+        ),
       );
     }, timeoutMs);
 
@@ -233,11 +238,7 @@ function waitForPort(
 
     proc.on('exit', (code) => {
       settle(() =>
-        reject(
-          new Error(
-            `Rust server process exited with code ${code} before printing PORT=`
-          )
-        )
+        reject(new Error(`Rust server process exited with code ${code} before printing PORT=`)),
       );
     });
 

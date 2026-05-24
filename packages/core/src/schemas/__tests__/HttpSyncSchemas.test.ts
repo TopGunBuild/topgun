@@ -9,17 +9,15 @@ describe('HttpSyncSchemas', () => {
         clientId: 'client-1',
         clientHlc: validTimestamp,
         operations: [
-          { mapName: 'users', key: 'user-1', record: { value: { name: 'Alice' }, timestamp: validTimestamp } },
+          {
+            mapName: 'users',
+            key: 'user-1',
+            record: { value: { name: 'Alice' }, timestamp: validTimestamp },
+          },
         ],
-        syncMaps: [
-          { mapName: 'users', lastSyncTimestamp: validTimestamp },
-        ],
-        queries: [
-          { queryId: 'q1', mapName: 'users', filter: { name: 'Alice' }, limit: 10 },
-        ],
-        searches: [
-          { searchId: 's1', mapName: 'users', query: 'alice', options: { limit: 5 } },
-        ],
+        syncMaps: [{ mapName: 'users', lastSyncTimestamp: validTimestamp }],
+        queries: [{ queryId: 'q1', mapName: 'users', filter: { name: 'Alice' }, limit: 10 }],
+        searches: [{ searchId: 's1', mapName: 'users', query: 'alice', options: { limit: 5 } }],
       };
 
       const result = HttpSyncRequestSchema.safeParse(input);
@@ -31,7 +29,11 @@ describe('HttpSyncSchemas', () => {
         clientId: 'client-1',
         clientHlc: validTimestamp,
         operations: [
-          { mapName: 'users', key: 'user-1', record: { value: { name: 'Bob' }, timestamp: validTimestamp } },
+          {
+            mapName: 'users',
+            key: 'user-1',
+            record: { value: { name: 'Bob' }, timestamp: validTimestamp },
+          },
         ],
       };
 
@@ -86,7 +88,10 @@ describe('HttpSyncSchemas', () => {
         clientId: 'client-1',
         clientHlc: validTimestamp,
         syncMaps: [
-          { mapName: 'users', lastSyncTimestamp: { millis: 1700000000000, counter: 42, nodeId: 'node-abc' } },
+          {
+            mapName: 'users',
+            lastSyncTimestamp: { millis: 1700000000000, counter: 42, nodeId: 'node-abc' },
+          },
         ],
       };
 
@@ -105,9 +110,7 @@ describe('HttpSyncSchemas', () => {
       const input = {
         clientId: 'client-1',
         clientHlc: validTimestamp,
-        syncMaps: [
-          { mapName: 'users', lastSyncTimestamp: 1700000000000 },
-        ],
+        syncMaps: [{ mapName: 'users', lastSyncTimestamp: 1700000000000 }],
       };
 
       const result = HttpSyncRequestSchema.safeParse(input);
@@ -156,9 +159,7 @@ describe('HttpSyncSchemas', () => {
         serverHlc: validTimestamp,
         ack: {
           lastId: 'op-5',
-          results: [
-            { opId: 'op-5', success: true, achievedLevel: 'MEMORY' },
-          ],
+          results: [{ opId: 'op-5', success: true, achievedLevel: 'MEMORY' }],
         },
         queryResults: [
           {

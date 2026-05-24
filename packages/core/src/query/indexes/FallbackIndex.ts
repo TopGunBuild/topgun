@@ -37,7 +37,7 @@ export class FallbackIndex<K, V> implements Index<K, V, unknown> {
   constructor(
     private readonly getAllKeys: () => Iterable<K>,
     private readonly getRecord: (key: K) => V | undefined,
-    private readonly matchesPredicate: (record: V, query: IndexQuery<unknown>) => boolean
+    private readonly matchesPredicate: (record: V, query: IndexQuery<unknown>) => boolean,
   ) {}
 
   getRetrievalCost(): number {
@@ -89,7 +89,7 @@ export class FallbackIndex<K, V> implements Index<K, V, unknown> {
  * @param getAttribute - Function to get attribute value from record
  */
 export function createPredicateMatcher<V>(
-  getAttribute: (record: V, attrName: string) => unknown
+  getAttribute: (record: V, attrName: string) => unknown,
 ): (record: V, query: IndexQuery<unknown>) => boolean {
   return (record: V, query: IndexQuery<unknown>): boolean => {
     // For wildcard queries, match everything

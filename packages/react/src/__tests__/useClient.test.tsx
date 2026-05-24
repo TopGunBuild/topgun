@@ -75,9 +75,7 @@ describe('useClient', () => {
 
     const nestedWrapper = ({ children }: { children: React.ReactNode }) => (
       <TopGunProvider client={outerClient}>
-        <TopGunProvider client={innerClient}>
-          {children}
-        </TopGunProvider>
+        <TopGunProvider client={innerClient}>{children}</TopGunProvider>
       </TopGunProvider>
     );
 

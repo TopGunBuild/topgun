@@ -1,14 +1,26 @@
-
 export type PredicateOp =
-  | 'eq' | 'neq'
-  | 'gt' | 'gte'
-  | 'lt' | 'lte'
-  | 'like' | 'regex'
-  | 'in' | 'between' | 'isNull' | 'isNotNull'
-  | 'contains' | 'containsAll' | 'containsAny'
-  | 'and' | 'or' | 'not'
+  | 'eq'
+  | 'neq'
+  | 'gt'
+  | 'gte'
+  | 'lt'
+  | 'lte'
+  | 'like'
+  | 'regex'
+  | 'in'
+  | 'between'
+  | 'isNull'
+  | 'isNotNull'
+  | 'contains'
+  | 'containsAll'
+  | 'containsAny'
+  | 'and'
+  | 'or'
+  | 'not'
   // Full-Text Search predicates
-  | 'match' | 'matchPhrase' | 'matchPrefix';
+  | 'match'
+  | 'matchPhrase'
+  | 'matchPrefix';
 
 /**
  * Options for full-text search match predicate.
@@ -42,36 +54,36 @@ export interface PredicateNode {
 }
 
 export class Predicates {
-  static equal(attribute: string, value: any): PredicateNode { 
-    return { op: 'eq', attribute, value }; 
+  static equal(attribute: string, value: any): PredicateNode {
+    return { op: 'eq', attribute, value };
   }
-  
-  static notEqual(attribute: string, value: any): PredicateNode { 
-    return { op: 'neq', attribute, value }; 
+
+  static notEqual(attribute: string, value: any): PredicateNode {
+    return { op: 'neq', attribute, value };
   }
-  
-  static greaterThan(attribute: string, value: any): PredicateNode { 
-    return { op: 'gt', attribute, value }; 
+
+  static greaterThan(attribute: string, value: any): PredicateNode {
+    return { op: 'gt', attribute, value };
   }
-  
-  static greaterThanOrEqual(attribute: string, value: any): PredicateNode { 
-    return { op: 'gte', attribute, value }; 
+
+  static greaterThanOrEqual(attribute: string, value: any): PredicateNode {
+    return { op: 'gte', attribute, value };
   }
-  
-  static lessThan(attribute: string, value: any): PredicateNode { 
-    return { op: 'lt', attribute, value }; 
+
+  static lessThan(attribute: string, value: any): PredicateNode {
+    return { op: 'lt', attribute, value };
   }
-  
-  static lessThanOrEqual(attribute: string, value: any): PredicateNode { 
-    return { op: 'lte', attribute, value }; 
+
+  static lessThanOrEqual(attribute: string, value: any): PredicateNode {
+    return { op: 'lte', attribute, value };
   }
-  
-  static like(attribute: string, pattern: string): PredicateNode { 
-    return { op: 'like', attribute, value: pattern }; 
+
+  static like(attribute: string, pattern: string): PredicateNode {
+    return { op: 'like', attribute, value: pattern };
   }
-  
-  static regex(attribute: string, pattern: string): PredicateNode { 
-    return { op: 'regex', attribute, value: pattern }; 
+
+  static regex(attribute: string, pattern: string): PredicateNode {
+    return { op: 'regex', attribute, value: pattern };
   }
 
   static between(attribute: string, from: any, to: any): PredicateNode {
@@ -79,8 +91,8 @@ export class Predicates {
       op: 'and',
       children: [
         { op: 'gte', attribute, value: from },
-        { op: 'lte', attribute, value: to }
-      ]
+        { op: 'lte', attribute, value: to },
+      ],
     };
   }
 
@@ -106,14 +118,14 @@ export class Predicates {
     return { op: 'isNotNull', attribute };
   }
 
-  static and(...predicates: PredicateNode[]): PredicateNode { 
-    return { op: 'and', children: predicates }; 
+  static and(...predicates: PredicateNode[]): PredicateNode {
+    return { op: 'and', children: predicates };
   }
-  
-  static or(...predicates: PredicateNode[]): PredicateNode { 
-    return { op: 'or', children: predicates }; 
+
+  static or(...predicates: PredicateNode[]): PredicateNode {
+    return { op: 'or', children: predicates };
   }
-  
+
   static not(predicate: PredicateNode): PredicateNode {
     return { op: 'not', children: [predicate] };
   }
@@ -238,7 +250,7 @@ export class Predicates {
   static multiMatch(
     attributes: string[],
     query: string,
-    options?: { boost?: Record<string, number> }
+    options?: { boost?: Record<string, number> },
   ): PredicateNode {
     const children = attributes.map((attr) => ({
       op: 'match' as const,
@@ -252,12 +264,12 @@ export class Predicates {
 
 export function evaluatePredicate(predicate: PredicateNode, data: any): boolean {
   if (!data) return false;
-  
+
   switch (predicate.op) {
     case 'and':
-      return (predicate.children || []).every(p => evaluatePredicate(p, data));
+      return (predicate.children || []).every((p) => evaluatePredicate(p, data));
     case 'or':
-      return (predicate.children || []).some(p => evaluatePredicate(p, data));
+      return (predicate.children || []).some((p) => evaluatePredicate(p, data));
     case 'not': {
       const child = (predicate.children || [])[0];
       if (!child) return true; // NOT of nothing is true (vacuous)
@@ -267,7 +279,7 @@ export function evaluatePredicate(predicate: PredicateNode, data: any): boolean 
 
   // Leaf nodes require an attribute
   if (!predicate.attribute) return false;
-  
+
   const value = data[predicate.attribute];
   const target = predicate.value;
 
@@ -295,9 +307,11 @@ export function evaluatePredicate(predicate: PredicateNode, data: any): boolean 
       if (typeof value !== 'string' || typeof target !== 'string') return false;
       return new RegExp(target).test(value);
     case 'in':
-      return Array.isArray(target) && target.some(t => t === value);
+      return Array.isArray(target) && target.some((t) => t === value);
     case 'between':
-      return Array.isArray(target) && target.length === 2 && value >= target[0] && value <= target[1];
+      return (
+        Array.isArray(target) && target.length === 2 && value >= target[0] && value <= target[1]
+      );
     case 'isNull':
       return value === null || value === undefined;
     case 'isNotNull':
@@ -308,12 +322,12 @@ export function evaluatePredicate(predicate: PredicateNode, data: any): boolean 
     case 'containsAll':
       if (typeof value !== 'string' || !Array.isArray(target)) return false;
       return target.every(
-        (t) => typeof t === 'string' && value.toLowerCase().includes(t.toLowerCase())
+        (t) => typeof t === 'string' && value.toLowerCase().includes(t.toLowerCase()),
       );
     case 'containsAny':
       if (typeof value !== 'string' || !Array.isArray(target)) return false;
       return target.some(
-        (t) => typeof t === 'string' && value.toLowerCase().includes(t.toLowerCase())
+        (t) => typeof t === 'string' && value.toLowerCase().includes(t.toLowerCase()),
       );
     default:
       return false;

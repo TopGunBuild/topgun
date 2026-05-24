@@ -273,7 +273,7 @@ describe('EventJournalImpl', () => {
       const events: JournalEvent[] = [];
       const unsubscribe = journal.subscribe(
         (event) => events.push(event),
-        1n // Start from sequence 1
+        1n, // Start from sequence 1
       );
 
       // Should have received replay of b and c
@@ -329,7 +329,7 @@ describe('EventJournalImpl', () => {
 
       expect(loggerSpy).toHaveBeenCalledWith(
         { err: expect.any(Error), context: 'listener' },
-        'EventJournal listener error'
+        'EventJournal listener error',
       );
 
       loggerSpy.mockRestore();

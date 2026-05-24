@@ -22,7 +22,11 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
    * Handle ORMAP_SYNC_RESP_ROOT message from server.
    * Compares root hashes and requests buckets if mismatch detected.
    */
-  public async handleORMapSyncRespRoot(payload: { mapName: string; rootHash: number; timestamp?: any }): Promise<void> {
+  public async handleORMapSyncRespRoot(payload: {
+    mapName: string;
+    rootHash: number;
+    timestamp?: any;
+  }): Promise<void> {
     const { mapName, rootHash, timestamp } = payload;
     const map = this.config.getMap(mapName);
     if (map instanceof ORMap) {
@@ -30,10 +34,13 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
       const localRootHash = localTree.getRootHash();
 
       if (localRootHash !== rootHash) {
-        logger.info({ mapName, localRootHash, remoteRootHash: rootHash }, 'ORMap root hash mismatch, requesting buckets');
+        logger.info(
+          { mapName, localRootHash, remoteRootHash: rootHash },
+          'ORMap root hash mismatch, requesting buckets',
+        );
         this.config.sendMessage({
           type: 'ORMAP_MERKLE_REQ_BUCKET',
-          payload: { mapName, path: '' }
+          payload: { mapName, path: '' },
         });
       } else {
         logger.info({ mapName }, 'ORMap is in sync');
@@ -50,7 +57,11 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
    * Compares bucket hashes and requests mismatched buckets.
    * Also pushes local data that server doesn't have.
    */
-  public async handleORMapSyncRespBuckets(payload: { mapName: string; path: string; buckets: Record<string, number> }): Promise<void> {
+  public async handleORMapSyncRespBuckets(payload: {
+    mapName: string;
+    path: string;
+    buckets: Record<string, number>;
+  }): Promise<void> {
     const { mapName, path, buckets } = payload;
     const map = this.config.getMap(mapName);
     if (map instanceof ORMap) {
@@ -63,7 +74,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
           const newPath = path + bucketKey;
           this.config.sendMessage({
             type: 'ORMAP_MERKLE_REQ_BUCKET',
-            payload: { mapName, path: newPath }
+            payload: { mapName, path: newPath },
           });
         }
       }
@@ -86,7 +97,10 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
    * Handle ORMAP_SYNC_RESP_LEAF message from server.
    * Merges leaf entries into local map and pushes local diff back.
    */
-  public async handleORMapSyncRespLeaf(payload: { mapName: string; entries: Array<{ key: string; records: any[]; tombstones: string[] }> }): Promise<void> {
+  public async handleORMapSyncRespLeaf(payload: {
+    mapName: string;
+    entries: Array<{ key: string; records: any[]; tombstones: string[] }>;
+  }): Promise<void> {
     const { mapName, entries } = payload;
     const map = this.config.getMap(mapName);
     if (map instanceof ORMap) {
@@ -101,7 +115,10 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
       }
 
       if (totalAdded > 0 || totalUpdated > 0) {
-        logger.info({ mapName, added: totalAdded, updated: totalUpdated }, 'Synced ORMap records from server');
+        logger.info(
+          { mapName, added: totalAdded, updated: totalUpdated },
+          'Synced ORMap records from server',
+        );
       }
 
       // Now push any local records that server might not have
@@ -114,7 +131,10 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
    * Handle ORMAP_DIFF_RESPONSE message from server.
    * Merges diff entries into local map.
    */
-  public async handleORMapDiffResponse(payload: { mapName: string; entries: Array<{ key: string; records: any[]; tombstones: string[] }> }): Promise<void> {
+  public async handleORMapDiffResponse(payload: {
+    mapName: string;
+    entries: Array<{ key: string; records: any[]; tombstones: string[] }>;
+  }): Promise<void> {
     const { mapName, entries } = payload;
     const map = this.config.getMap(mapName);
     if (map instanceof ORMap) {
@@ -129,7 +149,10 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
       }
 
       if (totalAdded > 0 || totalUpdated > 0) {
-        logger.info({ mapName, added: totalAdded, updated: totalUpdated }, 'Merged ORMap diff from server');
+        logger.info(
+          { mapName, added: totalAdded, updated: totalUpdated },
+          'Merged ORMap diff from server',
+        );
       }
     }
   }
@@ -138,11 +161,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
    * Push local ORMap diff to server for the given keys.
    * Sends local records and tombstones that the server might not have.
    */
-  public async pushORMapDiff(
-    mapName: string,
-    keys: string[],
-    map: ORMap<any, any>
-  ): Promise<void> {
+  public async pushORMapDiff(mapName: string, keys: string[], map: ORMap<any, any>): Promise<void> {
     const entries: Array<{
       key: string;
       records: ORMapRecord<any>[];
@@ -168,7 +187,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
         entries.push({
           key,
           records,
-          tombstones
+          tombstones,
         });
       }
     }
@@ -178,8 +197,8 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
         type: 'ORMAP_PUSH_DIFF',
         payload: {
           mapName,
-          entries
-        }
+          entries,
+        },
       });
       logger.debug({ mapName, keyCount: entries.length }, 'Pushed ORMap diff to server');
     }
@@ -205,7 +224,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
         mapName,
         rootHash,
         bucketHashes,
-        lastSyncTimestamp
+        lastSyncTimestamp,
       });
     }
   }

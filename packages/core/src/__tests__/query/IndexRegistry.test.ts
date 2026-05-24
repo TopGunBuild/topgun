@@ -69,7 +69,7 @@ describe('IndexRegistry', () => {
 
       expect(registry.size).toBe(3);
       expect(registry.getIndexedAttributes()).toEqual(
-        expect.arrayContaining(['name', 'age', 'status'])
+        expect.arrayContaining(['name', 'age', 'status']),
       );
     });
   });

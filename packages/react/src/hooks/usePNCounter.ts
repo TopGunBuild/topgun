@@ -106,12 +106,15 @@ export function usePNCounter(name: string): UsePNCounterResult {
     counter.decrement();
   }, [counter]);
 
-  const add = useCallback((delta: number) => {
-    counter.addAndGet(delta);
-  }, [counter]);
+  const add = useCallback(
+    (delta: number) => {
+      counter.addAndGet(delta);
+    },
+    [counter],
+  );
 
   return useMemo(
     () => ({ value, increment, decrement, add, loading }),
-    [value, increment, decrement, add, loading]
+    [value, increment, decrement, add, loading],
   );
 }

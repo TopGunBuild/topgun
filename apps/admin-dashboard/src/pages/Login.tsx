@@ -39,9 +39,7 @@ export function Login() {
       <Card className="w-full max-w-md">
         <CardHeader className="text-center">
           <CardTitle className="text-2xl font-bold">TopGun Admin</CardTitle>
-          <p className="text-sm text-muted-foreground">
-            Sign in to access the admin dashboard
-          </p>
+          <p className="text-sm text-muted-foreground">Sign in to access the admin dashboard</p>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleLogin} className="space-y-4">

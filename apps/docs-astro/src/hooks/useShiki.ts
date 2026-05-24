@@ -7,7 +7,11 @@ interface UseShikiResult {
   isLoading: boolean;
 }
 
-export function useShiki(code: string, language: string = 'bash', theme: string = 'vitesse-dark'): UseShikiResult {
+export function useShiki(
+  code: string,
+  language: string = 'bash',
+  theme: string = 'vitesse-dark',
+): UseShikiResult {
   const [html, setHtml] = useState<string | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -22,7 +26,7 @@ export function useShiki(code: string, language: string = 'bash', theme: string 
         const highlighter = await getHighlighter();
         const highlighted = highlighter.codeToHtml(code, {
           lang: language,
-          theme: theme
+          theme: theme,
         });
         if (mounted) {
           setHtml(highlighted);
@@ -46,4 +50,3 @@ export function useShiki(code: string, language: string = 'bash', theme: string 
 
   return { html, error, isLoading };
 }
-

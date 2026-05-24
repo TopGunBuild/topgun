@@ -11,9 +11,18 @@ describe('Serializer Module', () => {
     });
 
     test('should serialize and deserialize numbers', () => {
-      const testCases = [0, 1, -1, 42, 3.14159, -273.15, Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER];
+      const testCases = [
+        0,
+        1,
+        -1,
+        42,
+        3.14159,
+        -273.15,
+        Number.MAX_SAFE_INTEGER,
+        Number.MIN_SAFE_INTEGER,
+      ];
 
-      testCases.forEach(original => {
+      testCases.forEach((original) => {
         const serialized = serialize(original);
         const deserialized = deserialize<number>(serialized);
         expect(deserialized).toBe(original);
@@ -48,7 +57,7 @@ describe('Serializer Module', () => {
         number: 42,
         boolean: true,
         null: null,
-        nested: { key: 'nested value' }
+        nested: { key: 'nested value' },
       };
       const serialized = serialize(original);
       const deserialized = deserialize<typeof original>(serialized);
@@ -86,7 +95,7 @@ describe('Serializer Module', () => {
       const original = [
         { id: 1, name: 'Item 1' },
         { id: 2, name: 'Item 2' },
-        { id: 3, name: 'Item 3' }
+        { id: 3, name: 'Item 3' },
       ];
       const serialized = serialize(original);
       const deserialized = deserialize<typeof original>(serialized);
@@ -118,11 +127,11 @@ describe('Serializer Module', () => {
           level2: {
             level3: {
               level4: {
-                value: 'deep value'
-              }
-            }
-          }
-        }
+                value: 'deep value',
+              },
+            },
+          },
+        },
       };
       const serialized = serialize(original);
       const deserialized = deserialize<typeof original>(serialized);
@@ -135,11 +144,11 @@ describe('Serializer Module', () => {
       const original = {
         users: [
           { id: 1, tags: ['admin', 'user'] },
-          { id: 2, tags: ['user'] }
+          { id: 2, tags: ['user'] },
         ],
         metadata: {
-          counts: [10, 20, 30]
-        }
+          counts: [10, 20, 30],
+        },
       };
       const serialized = serialize(original);
       const deserialized = deserialize<typeof original>(serialized);
@@ -148,10 +157,7 @@ describe('Serializer Module', () => {
     });
 
     test('should serialize and deserialize arrays with nested objects', () => {
-      const original = [
-        { nested: { deep: { value: 1 } } },
-        { nested: { deep: { value: 2 } } }
-      ];
+      const original = [{ nested: { deep: { value: 1 } } }, { nested: { deep: { value: 2 } } }];
       const serialized = serialize(original);
       const deserialized = deserialize<typeof original>(serialized);
 
@@ -179,13 +185,13 @@ describe('Serializer Module', () => {
         data: {
           items: [
             { name: 'item1', value: 100 },
-            { name: 'item2', value: 200 }
+            { name: 'item2', value: 200 },
           ],
           metadata: {
             created: true,
-            tags: ['important', 'reviewed']
-          }
-        }
+            tags: ['important', 'reviewed'],
+          },
+        },
       };
 
       const serialized = serialize(original);
@@ -209,7 +215,7 @@ describe('Serializer Module', () => {
     test('should handle floating point numbers', () => {
       const testCases = [0.1, 0.2, 0.1 + 0.2, Math.PI, Math.E];
 
-      testCases.forEach(original => {
+      testCases.forEach((original) => {
         const serialized = serialize(original);
         const deserialized = deserialize<number>(serialized);
         expect(deserialized).toBeCloseTo(original, 10);
@@ -288,7 +294,7 @@ describe('Serializer Module', () => {
       const serialized = serialize(original);
       const arrayBuffer = serialized.buffer.slice(
         serialized.byteOffset,
-        serialized.byteOffset + serialized.byteLength
+        serialized.byteOffset + serialized.byteLength,
       ) as ArrayBuffer;
       const deserialized = deserialize<typeof original>(arrayBuffer);
 
@@ -364,9 +370,9 @@ describe('Serializer Module', () => {
         timestamp: {
           millis: Date.now(),
           counter: 0,
-          nodeId: 'node-123'
+          nodeId: 'node-123',
         },
-        ttlMs: 3600000
+        ttlMs: 3600000,
       };
 
       const serialized = serialize(record);
@@ -381,10 +387,10 @@ describe('Serializer Module', () => {
         timestamp: {
           millis: 1000000,
           counter: 5,
-          nodeId: 'node-abc'
+          nodeId: 'node-abc',
         },
         tag: 'unique-tag-123',
-        ttlMs: undefined
+        ttlMs: undefined,
       };
 
       const serialized = serialize(record);
@@ -400,8 +406,8 @@ describe('Serializer Module', () => {
         ops: [
           { mapName: 'users', key: 'user1', record: { value: 'data1' } },
           { mapName: 'users', key: 'user2', record: { value: 'data2' } },
-          { mapName: 'posts', key: 'post1', record: { value: 'content' } }
-        ]
+          { mapName: 'posts', key: 'post1', record: { value: 'content' } },
+        ],
       };
 
       const serialized = serialize(batch);

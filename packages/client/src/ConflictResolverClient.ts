@@ -32,11 +32,14 @@ export interface RegisterResult {
 export class ConflictResolverClient {
   private readonly syncEngine: SyncEngine;
   private readonly rejectionListeners: Set<(rejection: MergeRejection) => void> = new Set();
-  private readonly pendingRequests: Map<string, {
-    resolve: (result: any) => void;
-    reject: (error: Error) => void;
-    timeout: NodeJS.Timeout;
-  }> = new Map();
+  private readonly pendingRequests: Map<
+    string,
+    {
+      resolve: (result: any) => void;
+      reject: (error: Error) => void;
+      timeout: NodeJS.Timeout;
+    }
+  > = new Map();
 
   private static readonly REQUEST_TIMEOUT = 10000; // 10 seconds
 
@@ -79,7 +82,7 @@ export class ConflictResolverClient {
   ): Promise<RegisterResult> {
     throw new Error(
       'Custom conflict resolvers require server-side WASM sandbox execution, which is on the v2.x roadmap. ' +
-        'See https://topgun.build/docs/roadmap. Use onRejection(cb) to observe built-in merge rejections.'
+        'See https://topgun.build/docs/roadmap. Use onRejection(cb) to observe built-in merge rejections.',
     );
   }
 
@@ -96,7 +99,7 @@ export class ConflictResolverClient {
   async unregister(_mapName: string, _resolverName: string): Promise<RegisterResult> {
     throw new Error(
       'Custom conflict resolvers require server-side WASM sandbox execution, which is on the v2.x roadmap. ' +
-        'See https://topgun.build/docs/roadmap.'
+        'See https://topgun.build/docs/roadmap.',
     );
   }
 
@@ -108,7 +111,7 @@ export class ConflictResolverClient {
   async list(_mapName?: string): Promise<ResolverInfo[]> {
     throw new Error(
       'Custom conflict resolvers require server-side WASM sandbox execution, which is on the v2.x roadmap. ' +
-        'See https://topgun.build/docs/roadmap.'
+        'See https://topgun.build/docs/roadmap.',
     );
   }
 
@@ -138,11 +141,7 @@ export class ConflictResolverClient {
    * Handle REGISTER_RESOLVER_RESPONSE from server.
    * Called by SyncEngine.
    */
-  handleRegisterResponse(message: {
-    requestId: string;
-    success: boolean;
-    error?: string;
-  }): void {
+  handleRegisterResponse(message: { requestId: string; success: boolean; error?: string }): void {
     const pending = this.pendingRequests.get(message.requestId);
     if (pending) {
       this.pendingRequests.delete(message.requestId);
@@ -154,11 +153,7 @@ export class ConflictResolverClient {
    * Handle UNREGISTER_RESOLVER_RESPONSE from server.
    * Called by SyncEngine.
    */
-  handleUnregisterResponse(message: {
-    requestId: string;
-    success: boolean;
-    error?: string;
-  }): void {
+  handleUnregisterResponse(message: { requestId: string; success: boolean; error?: string }): void {
     const pending = this.pendingRequests.get(message.requestId);
     if (pending) {
       this.pendingRequests.delete(message.requestId);
@@ -170,10 +165,7 @@ export class ConflictResolverClient {
    * Handle LIST_RESOLVERS_RESPONSE from server.
    * Called by SyncEngine.
    */
-  handleListResponse(message: {
-    requestId: string;
-    resolvers: ResolverInfo[];
-  }): void {
+  handleListResponse(message: { requestId: string; resolvers: ResolverInfo[] }): void {
     const pending = this.pendingRequests.get(message.requestId);
     if (pending) {
       this.pendingRequests.delete(message.requestId);

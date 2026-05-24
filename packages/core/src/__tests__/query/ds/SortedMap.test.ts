@@ -585,9 +585,7 @@ describe('SortedMap', () => {
       map.set(5, 'five');
 
       expect([...map.keys()]).toEqual([-5, 0, 5]);
-      expect([...map.range(-10, 10, { toInclusive: true })].map(([k]) => k)).toEqual([
-        -5, 0, 5,
-      ]);
+      expect([...map.range(-10, 10, { toInclusive: true })].map(([k]) => k)).toEqual([-5, 0, 5]);
     });
 
     it('should handle floating point numbers', () => {

@@ -66,13 +66,15 @@ export class InvariantChecker<T> {
           failures.push(name);
         }
       } catch (error) {
-        failures.push(`${name} (exception: ${error instanceof Error ? error.message : String(error)})`);
+        failures.push(
+          `${name} (exception: ${error instanceof Error ? error.message : String(error)})`,
+        );
       }
     }
 
     return {
       passed: failures.length === 0,
-      failures
+      failures,
     };
   }
 
@@ -214,5 +216,5 @@ export const CRDTInvariants = {
       }
     }
     return true;
-  }
+  },
 };

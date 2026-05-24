@@ -1,6 +1,14 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  Wifi, WifiOff, RefreshCw, Shield, Server, Move, Database, Activity, Crosshair
+  Wifi,
+  WifiOff,
+  RefreshCw,
+  Shield,
+  Server,
+  Move,
+  Database,
+  Activity,
+  Crosshair,
 } from 'lucide-react';
 
 import type { Drone, LogEntry, MetricPoint } from './types';
@@ -13,8 +21,12 @@ import { generateHLC, mergeDrones } from './mockTopGun';
 
 export const TacticalDemo: React.FC = () => {
   const [network, setNetwork] = useState<NetworkState>(NetworkState.ONLINE);
-  const [localDrones, setLocalDrones] = useState<Drone[]>(JSON.parse(JSON.stringify(INITIAL_DRONES)));
-  const [serverDrones, setServerDrones] = useState<Drone[]>(JSON.parse(JSON.stringify(INITIAL_DRONES)));
+  const [localDrones, setLocalDrones] = useState<Drone[]>(
+    JSON.parse(JSON.stringify(INITIAL_DRONES)),
+  );
+  const [serverDrones, setServerDrones] = useState<Drone[]>(
+    JSON.parse(JSON.stringify(INITIAL_DRONES)),
+  );
   const [pendingOps, setPendingOps] = useState<number>(0);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [selectedDroneId, setSelectedDroneId] = useState<string | null>('D-01');
@@ -27,23 +39,31 @@ export const TacticalDemo: React.FC = () => {
     serverDronesRef.current = serverDrones;
   }, [serverDrones]);
 
-  const addLog = useCallback((source: LogEntry['source'], type: LogEntry['type'], message: string) => {
-    const newLog: LogEntry = {
-      id: Math.random().toString(36).substring(2, 11),
-      timestamp: new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-      source,
-      type,
-      message
-    };
-    setLogs(prev => [...prev.slice(-29), newLog]);
-    throughputRef.current = Math.min(100, throughputRef.current + 20);
-  }, []);
+  const addLog = useCallback(
+    (source: LogEntry['source'], type: LogEntry['type'], message: string) => {
+      const newLog: LogEntry = {
+        id: Math.random().toString(36).substring(2, 11),
+        timestamp: new Date().toLocaleTimeString([], {
+          hour12: false,
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        }),
+        source,
+        type,
+        message,
+      };
+      setLogs((prev) => [...prev.slice(-29), newLog]);
+      throughputRef.current = Math.min(100, throughputRef.current + 20);
+    },
+    [],
+  );
 
   // Metric generation
   useEffect(() => {
     const interval = setInterval(() => {
-      setMetrics(prev => {
-        throughputRef.current = Math.max(0, throughputRef.current * 0.90);
+      setMetrics((prev) => {
+        throughputRef.current = Math.max(0, throughputRef.current * 0.9);
         const noise = Math.random() * 3;
         const currentOps = Math.floor(throughputRef.current + noise);
         const newPoint = { time: Date.now(), ops: currentOps };
@@ -58,14 +78,17 @@ export const TacticalDemo: React.FC = () => {
   // Simulated Peer Activity (Client B)
   useEffect(() => {
     const interval = setInterval(() => {
-      if (Math.random() > 0.5) { // 50% chance (was 30%)
+      if (Math.random() > 0.5) {
+        // 50% chance (was 30%)
         const currentDrones = [...serverDronesRef.current];
         const targetIndex = Math.floor(Math.random() * currentDrones.length);
         const target = currentDrones[targetIndex];
 
         // Calculate group center
-        const centerX = currentDrones.reduce((sum, d) => sum + d.coordinates.x, 0) / currentDrones.length;
-        const centerY = currentDrones.reduce((sum, d) => sum + d.coordinates.y, 0) / currentDrones.length;
+        const centerX =
+          currentDrones.reduce((sum, d) => sum + d.coordinates.x, 0) / currentDrones.length;
+        const centerY =
+          currentDrones.reduce((sum, d) => sum + d.coordinates.y, 0) / currentDrones.length;
 
         // Random offset ±8 units (was ±5)
         let newX = target.coordinates.x + (Math.random() * 16 - 8);
@@ -92,12 +115,16 @@ export const TacticalDemo: React.FC = () => {
           ...target,
           coordinates: { x: newX, y: newY },
           hlcTimestamp: generateHLC(target.hlcTimestamp),
-          lastUpdatedBy: 'Client B (Peer)'
+          lastUpdatedBy: 'Client B (Peer)',
         };
 
         currentDrones[targetIndex] = updatedDrone;
         setServerDrones(currentDrones);
-        addLog('SERVER', 'INFO', `[PEER] Client B updated ${target.name} → [${newX.toFixed(0)}, ${newY.toFixed(0)}]`);
+        addLog(
+          'SERVER',
+          'INFO',
+          `[PEER] Client B updated ${target.name} → [${newX.toFixed(0)}, ${newY.toFixed(0)}]`,
+        );
       }
     }, 1800); // 1.8s interval (was 2.5s)
     return () => clearInterval(interval);
@@ -107,7 +134,7 @@ export const TacticalDemo: React.FC = () => {
   useEffect(() => {
     if (network === NetworkState.ONLINE) {
       const syncInterval = setInterval(() => {
-        setLocalDrones(currentLocal => {
+        setLocalDrones((currentLocal) => {
           const currentServer = serverDronesRef.current;
           const { merged, conflicts } = mergeDrones(currentLocal, currentServer);
 
@@ -155,14 +182,14 @@ export const TacticalDemo: React.FC = () => {
   };
 
   const updateDroneById = (id: string, field: keyof Drone, value: any) => {
-    setLocalDrones(prev => {
-      const newDrones = prev.map(d => {
+    setLocalDrones((prev) => {
+      const newDrones = prev.map((d) => {
         if (d.id === id) {
           return {
             ...d,
             [field]: value,
             hlcTimestamp: generateHLC(d.hlcTimestamp),
-            lastUpdatedBy: 'Client A (You)'
+            lastUpdatedBy: 'Client A (You)',
           };
         }
         return d;
@@ -174,7 +201,7 @@ export const TacticalDemo: React.FC = () => {
     const msg = `[${opType}] ${id} ${field} → ${JSON.stringify(value)}`;
 
     if (network === NetworkState.OFFLINE) {
-      setPendingOps(p => p + 1);
+      setPendingOps((p) => p + 1);
       addLog('CLIENT_A', 'WRITE', `${msg} (Queued)`);
     } else {
       addLog('CLIENT_A', 'WRITE', `${msg} (Syncing...)`);
@@ -185,17 +212,20 @@ export const TacticalDemo: React.FC = () => {
     updateDroneById(id, 'coordinates', { x, y });
   };
 
-  const selectedDrone = localDrones.find(d => d.id === selectedDroneId);
+  const selectedDrone = localDrones.find((d) => d.id === selectedDroneId);
 
   return (
-    <section id="demo" className="py-16 border-t border-card-border bg-neutral-50 dark:bg-background transition-colors">
+    <section
+      id="demo"
+      className="py-16 border-t border-card-border bg-neutral-50 dark:bg-background transition-colors"
+    >
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         {/* Section Header */}
         <div className="text-center mb-10">
           <h2 className="text-3xl font-bold text-foreground mb-4">Sync Visualization</h2>
           <p className="text-neutral-600 dark:text-neutral-300 max-w-2xl mx-auto">
-            Experience offline-first sync in action. Drag drones on the local map, toggle offline mode,
-            and watch how conflicts are resolved automatically.
+            Experience offline-first sync in action. Drag drones on the local map, toggle offline
+            mode, and watch how conflicts are resolved automatically.
           </p>
           <p className="text-sm text-neutral-500 dark:text-neutral-400 mt-2">
             Delays slowed for visual clarity
@@ -210,7 +240,9 @@ export const TacticalDemo: React.FC = () => {
               <div className="bg-brand p-1 rounded">
                 <Database className="w-3 h-3 text-white" />
               </div>
-              <span className="text-sm font-bold tracking-wider text-white font-mono">TOPGUN<span className="text-brand-muted">v2</span></span>
+              <span className="text-sm font-bold tracking-wider text-white font-mono">
+                TOPGUN<span className="text-brand-muted">v2</span>
+              </span>
             </div>
 
             <div className="flex items-center gap-4">
@@ -252,10 +284,11 @@ export const TacticalDemo: React.FC = () => {
           {/* Main Content */}
           <div className="p-4 md:p-6">
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-
               {/* LEFT: Local Client */}
               <div className="lg:col-span-4 bg-slate-900 border border-slate-700 rounded-xl p-4 relative overflow-hidden">
-                <div className={`absolute top-0 left-0 w-1 h-full ${network === NetworkState.ONLINE ? 'bg-green-500' : 'bg-red-500'} transition-colors duration-500`}></div>
+                <div
+                  className={`absolute top-0 left-0 w-1 h-full ${network === NetworkState.ONLINE ? 'bg-green-500' : 'bg-red-500'} transition-colors duration-500`}
+                ></div>
                 <div className="flex justify-between items-start mb-3">
                   <h3 className="text-xs font-bold text-slate-100 uppercase tracking-widest flex items-center gap-2">
                     <Shield className="w-3 h-3 text-brand-subtle" />
@@ -277,15 +310,37 @@ export const TacticalDemo: React.FC = () => {
                 <div className="mt-3 p-3 bg-slate-800/50 rounded-lg border border-slate-700/50">
                   <div className="flex justify-between items-center mb-2">
                     <span className="text-xs text-slate-400 font-mono">SELECTED</span>
-                    <span className="text-xs text-brand-muted font-bold font-mono">{selectedDrone?.name || 'NONE'}</span>
+                    <span className="text-xs text-brand-muted font-bold font-mono">
+                      {selectedDrone?.name || 'NONE'}
+                    </span>
                   </div>
 
                   {selectedDrone && (
                     <div className="grid grid-cols-2 gap-1.5">
-                      <button onClick={() => updateDrone('status', DroneStatus.PATROL)} className={`p-2 text-xs font-bold rounded border transition-colors ${selectedDrone.status === DroneStatus.PATROL ? 'bg-brand-subtle/20 border-brand-subtle text-brand-muted' : 'bg-slate-800 border-slate-600 hover:border-slate-500 text-slate-400'}`}>PATROL</button>
-                      <button onClick={() => updateDrone('status', DroneStatus.COMBAT)} className={`p-2 text-xs font-bold rounded border transition-colors ${selectedDrone.status === DroneStatus.COMBAT ? 'bg-red-500/20 border-red-500 text-red-400' : 'bg-slate-800 border-slate-600 hover:border-slate-500 text-slate-400'}`}>COMBAT</button>
-                      <button onClick={() => updateDrone('status', DroneStatus.RTB)} className={`p-2 text-xs font-bold rounded border transition-colors ${selectedDrone.status === DroneStatus.RTB ? 'bg-yellow-500/20 border-yellow-500 text-yellow-400' : 'bg-slate-800 border-slate-600 hover:border-slate-500 text-slate-400'}`}>RTB</button>
-                      <button onClick={() => updateDrone('status', DroneStatus.IDLE)} className={`p-2 text-xs font-bold rounded border transition-colors ${selectedDrone.status === DroneStatus.IDLE ? 'bg-slate-500/20 border-slate-500 text-slate-300' : 'bg-slate-800 border-slate-600 hover:border-slate-500 text-slate-400'}`}>IDLE</button>
+                      <button
+                        onClick={() => updateDrone('status', DroneStatus.PATROL)}
+                        className={`p-2 text-xs font-bold rounded border transition-colors ${selectedDrone.status === DroneStatus.PATROL ? 'bg-brand-subtle/20 border-brand-subtle text-brand-muted' : 'bg-slate-800 border-slate-600 hover:border-slate-500 text-slate-400'}`}
+                      >
+                        PATROL
+                      </button>
+                      <button
+                        onClick={() => updateDrone('status', DroneStatus.COMBAT)}
+                        className={`p-2 text-xs font-bold rounded border transition-colors ${selectedDrone.status === DroneStatus.COMBAT ? 'bg-red-500/20 border-red-500 text-red-400' : 'bg-slate-800 border-slate-600 hover:border-slate-500 text-slate-400'}`}
+                      >
+                        COMBAT
+                      </button>
+                      <button
+                        onClick={() => updateDrone('status', DroneStatus.RTB)}
+                        className={`p-2 text-xs font-bold rounded border transition-colors ${selectedDrone.status === DroneStatus.RTB ? 'bg-yellow-500/20 border-yellow-500 text-yellow-400' : 'bg-slate-800 border-slate-600 hover:border-slate-500 text-slate-400'}`}
+                      >
+                        RTB
+                      </button>
+                      <button
+                        onClick={() => updateDrone('status', DroneStatus.IDLE)}
+                        className={`p-2 text-xs font-bold rounded border transition-colors ${selectedDrone.status === DroneStatus.IDLE ? 'bg-slate-500/20 border-slate-500 text-slate-300' : 'bg-slate-800 border-slate-600 hover:border-slate-500 text-slate-400'}`}
+                      >
+                        IDLE
+                      </button>
                     </div>
                   )}
 
@@ -348,17 +403,24 @@ export const TacticalDemo: React.FC = () => {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800/50">
-                      {serverDrones.map(d => (
+                      {serverDrones.map((d) => (
                         <tr key={d.id} className="hover:bg-slate-800/30 transition-colors">
                           <td className="p-1.5 font-bold text-slate-300">{d.id}</td>
-                          <td className="p-1.5 text-slate-400">[{d.coordinates.x.toFixed(0)}, {d.coordinates.y.toFixed(0)}]</td>
+                          <td className="p-1.5 text-slate-400">
+                            [{d.coordinates.x.toFixed(0)}, {d.coordinates.y.toFixed(0)}]
+                          </td>
                           <td className="p-1.5">
-                            <span className={`px-1 py-0.5 rounded border text-[10px] ${
-                              d.status === DroneStatus.COMBAT ? 'border-red-500/30 text-red-400 bg-red-500/10' :
-                              d.status === DroneStatus.PATROL ? 'border-brand-subtle/30 text-brand-muted bg-brand-subtle/10' :
-                              d.status === DroneStatus.RTB ? 'border-yellow-500/30 text-yellow-400 bg-yellow-500/10' :
-                              'border-slate-500/30 text-slate-400'
-                            }`}>
+                            <span
+                              className={`px-1 py-0.5 rounded border text-[10px] ${
+                                d.status === DroneStatus.COMBAT
+                                  ? 'border-red-500/30 text-red-400 bg-red-500/10'
+                                  : d.status === DroneStatus.PATROL
+                                    ? 'border-brand-subtle/30 text-brand-muted bg-brand-subtle/10'
+                                    : d.status === DroneStatus.RTB
+                                      ? 'border-yellow-500/30 text-yellow-400 bg-yellow-500/10'
+                                      : 'border-slate-500/30 text-slate-400'
+                              }`}
+                            >
                               {d.status}
                             </span>
                           </td>
@@ -371,10 +433,16 @@ export const TacticalDemo: React.FC = () => {
 
                 {/* Info Box */}
                 <div className="mt-3 p-3 bg-indigo-950/20 border border-indigo-500/20 rounded-lg">
-                  <p className="text-[10px] text-indigo-300 mb-1 font-bold uppercase tracking-wide">TopGun Architecture:</p>
+                  <p className="text-[10px] text-indigo-300 mb-1 font-bold uppercase tracking-wide">
+                    TopGun Architecture:
+                  </p>
                   <p className="text-xs text-slate-400 font-mono leading-relaxed">
-                    The Server acts as source of truth using <span className="text-indigo-400">Hybrid Logical Clocks (HLC)</span> to order events.
-                    When offline, local changes are queued. Upon reconnect, <span className="text-indigo-400">Merkle Trees</span> detect diffs, and <span className="text-indigo-400">Last-Write-Wins</span> resolves conflicts automatically.
+                    The Server acts as source of truth using{' '}
+                    <span className="text-indigo-400">Hybrid Logical Clocks (HLC)</span> to order
+                    events. When offline, local changes are queued. Upon reconnect,{' '}
+                    <span className="text-indigo-400">Merkle Trees</span> detect diffs, and{' '}
+                    <span className="text-indigo-400">Last-Write-Wins</span> resolves conflicts
+                    automatically.
                   </p>
                 </div>
               </div>
@@ -408,13 +476,13 @@ export const TacticalDemo: React.FC = () => {
 
                     <div className="p-3 border border-orange-500/20 bg-orange-500/5 rounded-lg">
                       <p className="text-xs text-orange-200 font-mono leading-relaxed">
-                        <strong>TRY THIS:</strong> Go offline, then reconnect. Watch how TopGun resolves conflicting coordinates based on HLC timestamps!
+                        <strong>TRY THIS:</strong> Go offline, then reconnect. Watch how TopGun
+                        resolves conflicting coordinates based on HLC timestamps!
                       </p>
                     </div>
                   </div>
                 </div>
               </div>
-
             </div>
           </div>
         </div>

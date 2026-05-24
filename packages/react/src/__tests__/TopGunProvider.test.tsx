@@ -4,17 +4,18 @@ import { TopGunProvider, useClient } from '../TopGunProvider';
 import { TopGunClient } from '@topgunbuild/client';
 
 // Mock TopGunClient
-const createMockClient = (id?: string) => ({
-  _id: id || 'test-client',
-  query: jest.fn(),
-  getMap: jest.fn(),
-  getORMap: jest.fn(),
-  topic: jest.fn(),
-  getLock: jest.fn(),
-  start: jest.fn(),
-  setAuthToken: jest.fn(),
-  setAuthTokenProvider: jest.fn(),
-}) as unknown as TopGunClient;
+const createMockClient = (id?: string) =>
+  ({
+    _id: id || 'test-client',
+    query: jest.fn(),
+    getMap: jest.fn(),
+    getORMap: jest.fn(),
+    topic: jest.fn(),
+    getLock: jest.fn(),
+    start: jest.fn(),
+    setAuthToken: jest.fn(),
+    setAuthTokenProvider: jest.fn(),
+  }) as unknown as TopGunClient;
 
 describe('TopGunProvider', () => {
   it('should render children', () => {
@@ -23,7 +24,7 @@ describe('TopGunProvider', () => {
     const { container } = render(
       <TopGunProvider client={mockClient}>
         <div data-testid="child">Hello World</div>
-      </TopGunProvider>
+      </TopGunProvider>,
     );
 
     expect(container.querySelector('[data-testid="child"]')?.textContent).toBe('Hello World');
@@ -36,7 +37,7 @@ describe('TopGunProvider', () => {
       <TopGunProvider client={mockClient}>
         <div data-testid="child1">First</div>
         <div data-testid="child2">Second</div>
-      </TopGunProvider>
+      </TopGunProvider>,
     );
 
     expect(container.querySelector('[data-testid="child1"]')?.textContent).toBe('First');
@@ -53,7 +54,7 @@ describe('TopGunProvider', () => {
         <div>
           <NestedComponent />
         </div>
-      </TopGunProvider>
+      </TopGunProvider>,
     );
 
     expect(container.querySelector('[data-testid="nested"]')?.textContent).toBe('Nested');
@@ -70,7 +71,7 @@ describe('TopGunProvider', () => {
     const { container } = render(
       <TopGunProvider client={mockClient}>
         <ClientConsumer />
-      </TopGunProvider>
+      </TopGunProvider>,
     );
 
     expect(container.querySelector('[data-testid="client-id"]')?.textContent).toBe('my-client');
@@ -84,9 +85,7 @@ describe('TopGunProvider', () => {
       return <span data-testid="deep">{(client as any)._id}</span>;
     };
 
-    const MiddleComponent = ({ children }: { children: React.ReactNode }) => (
-      <div>{children}</div>
-    );
+    const MiddleComponent = ({ children }: { children: React.ReactNode }) => <div>{children}</div>;
 
     const { container } = render(
       <TopGunProvider client={mockClient}>
@@ -97,7 +96,7 @@ describe('TopGunProvider', () => {
             </MiddleComponent>
           </MiddleComponent>
         </MiddleComponent>
-      </TopGunProvider>
+      </TopGunProvider>,
     );
 
     expect(container.querySelector('[data-testid="deep"]')?.textContent).toBe('deep-client');
@@ -115,7 +114,7 @@ describe('TopGunProvider', () => {
     const { container, rerender } = render(
       <TopGunProvider client={client1}>
         <ClientConsumer />
-      </TopGunProvider>
+      </TopGunProvider>,
     );
 
     expect(container.querySelector('[data-testid="client-id"]')?.textContent).toBe('client-1');
@@ -123,7 +122,7 @@ describe('TopGunProvider', () => {
     rerender(
       <TopGunProvider client={client2}>
         <ClientConsumer />
-      </TopGunProvider>
+      </TopGunProvider>,
     );
 
     expect(container.querySelector('[data-testid="client-id"]')?.textContent).toBe('client-2');
@@ -144,7 +143,7 @@ describe('TopGunProvider', () => {
         <TopGunProvider client={innerClient}>
           <ClientConsumer testId="inner-consumer" />
         </TopGunProvider>
-      </TopGunProvider>
+      </TopGunProvider>,
     );
 
     expect(container.querySelector('[data-testid="outer-consumer"]')?.textContent).toBe('outer');
@@ -160,7 +159,7 @@ describe('TopGunProvider', () => {
           <div data-testid="fragment-child-1">One</div>
           <div data-testid="fragment-child-2">Two</div>
         </>
-      </TopGunProvider>
+      </TopGunProvider>,
     );
 
     expect(container.querySelector('[data-testid="fragment-child-1"]')).not.toBeNull();
@@ -170,11 +169,7 @@ describe('TopGunProvider', () => {
   it('should handle empty children gracefully', () => {
     const mockClient = createMockClient();
 
-    const { container } = render(
-      <TopGunProvider client={mockClient}>
-        {null}
-      </TopGunProvider>
-    );
+    const { container } = render(<TopGunProvider client={mockClient}>{null}</TopGunProvider>);
 
     expect(container.childNodes.length).toBe(0);
   });
@@ -192,19 +187,19 @@ describe('TopGunProvider', () => {
     const { rerender } = render(
       <TopGunProvider client={mockClient}>
         <ClientTracker />
-      </TopGunProvider>
+      </TopGunProvider>,
     );
 
     rerender(
       <TopGunProvider client={mockClient}>
         <ClientTracker />
-      </TopGunProvider>
+      </TopGunProvider>,
     );
 
     rerender(
       <TopGunProvider client={mockClient}>
         <ClientTracker />
-      </TopGunProvider>
+      </TopGunProvider>,
     );
 
     // All refs should be the same object

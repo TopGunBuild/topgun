@@ -9,7 +9,11 @@
  * - Cleanup on close
  */
 
-import type { EntryProcessorDef, EntryProcessorResult, EntryProcessKeyResult } from '@topgunbuild/core';
+import type {
+  EntryProcessorDef,
+  EntryProcessorResult,
+  EntryProcessKeyResult,
+} from '@topgunbuild/core';
 import { logger } from '../utils/logger';
 import type { IEntryProcessorClient, EntryProcessorClientConfig } from './types';
 
@@ -103,17 +107,20 @@ export class EntryProcessorClient implements IEntryProcessorClient {
       });
 
       // Send request
-      const sent = this.config.sendMessage({
-        type: 'ENTRY_PROCESS',
-        requestId,
-        mapName,
-        key,
-        processor: {
-          name: processor.name,
-          code: processor.code,
-          args: processor.args,
+      const sent = this.config.sendMessage(
+        {
+          type: 'ENTRY_PROCESS',
+          requestId,
+          mapName,
+          key,
+          processor: {
+            name: processor.name,
+            code: processor.code,
+            args: processor.args,
+          },
         },
-      }, key);
+        key,
+      );
 
       if (!sent) {
         this.pendingProcessorRequests.delete(requestId);

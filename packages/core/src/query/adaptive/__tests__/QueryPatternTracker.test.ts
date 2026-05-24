@@ -49,9 +49,9 @@ describe('QueryPatternTracker', () => {
       const stats = tracker.getStatistics();
       expect(stats).toHaveLength(3);
 
-      const gtStats = stats.find(s => s.queryType === 'gt');
-      const lteStats = stats.find(s => s.queryType === 'lte');
-      const betweenStats = stats.find(s => s.queryType === 'between');
+      const gtStats = stats.find((s) => s.queryType === 'gt');
+      const lteStats = stats.find((s) => s.queryType === 'lte');
+      const betweenStats = stats.find((s) => s.queryType === 'between');
 
       expect(gtStats?.queryCount).toBe(1);
       expect(lteStats?.queryCount).toBe(1);
@@ -66,9 +66,9 @@ describe('QueryPatternTracker', () => {
       const stats = tracker.getStatistics();
       expect(stats).toHaveLength(3);
 
-      const categoryStats = stats.find(s => s.attribute === 'category');
-      const statusStats = stats.find(s => s.attribute === 'status');
-      const priceStats = stats.find(s => s.attribute === 'price');
+      const categoryStats = stats.find((s) => s.attribute === 'category');
+      const statusStats = stats.find((s) => s.attribute === 'status');
+      const priceStats = stats.find((s) => s.attribute === 'price');
 
       expect(categoryStats?.hasIndex).toBe(false);
       expect(statusStats?.hasIndex).toBe(true);
@@ -118,7 +118,7 @@ describe('QueryPatternTracker', () => {
 
       const categoryStats = tracker.getAttributeStats('category');
       expect(categoryStats).toHaveLength(2);
-      expect(categoryStats.every(s => s.attribute === 'category')).toBe(true);
+      expect(categoryStats.every((s) => s.attribute === 'category')).toBe(true);
     });
 
     it('returns empty array for unknown attribute', () => {
@@ -199,7 +199,7 @@ describe('QueryPatternTracker', () => {
       tracker.updateIndexStatus('category', true);
 
       const categoryStats = tracker.getAttributeStats('category');
-      expect(categoryStats.every(s => s.hasIndex)).toBe(true);
+      expect(categoryStats.every((s) => s.hasIndex)).toBe(true);
 
       const statusStats = tracker.getAttributeStats('status');
       expect(statusStats[0].hasIndex).toBe(false);

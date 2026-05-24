@@ -66,18 +66,12 @@ describe('Integration: Pub/Sub (Rust Server)', () => {
       // Wait for subscriber to receive TOPIC_MESSAGE
       await waitUntil(
         () =>
-          subscriber.messages.some(
-            (m) =>
-              m.type === 'TOPIC_MESSAGE' &&
-              m.payload?.topic === topic
-          ),
-        5000
+          subscriber.messages.some((m) => m.type === 'TOPIC_MESSAGE' && m.payload?.topic === topic),
+        5000,
       );
 
       const message = subscriber.messages.find(
-        (m) =>
-          m.type === 'TOPIC_MESSAGE' &&
-          m.payload?.topic === topic
+        (m) => m.type === 'TOPIC_MESSAGE' && m.payload?.topic === topic,
       );
       expect(message).toBeDefined();
       expect(message.payload.data).toEqual({ greeting: 'hello world' });
@@ -144,12 +138,8 @@ describe('Integration: Pub/Sub (Rust Server)', () => {
       // Wait for verifier to receive the message (proves it was published)
       await waitUntil(
         () =>
-          verifier.messages.some(
-            (m) =>
-              m.type === 'TOPIC_MESSAGE' &&
-              m.payload?.topic === topic
-          ),
-        5000
+          verifier.messages.some((m) => m.type === 'TOPIC_MESSAGE' && m.payload?.topic === topic),
+        5000,
       );
 
       // Give extra time for the publisher to potentially receive its own message
@@ -157,9 +147,7 @@ describe('Integration: Pub/Sub (Rust Server)', () => {
 
       // Publisher should NOT have received a TOPIC_MESSAGE
       const selfMessages = pubSub.messages.filter(
-        (m) =>
-          m.type === 'TOPIC_MESSAGE' &&
-          m.payload?.topic === topic
+        (m) => m.type === 'TOPIC_MESSAGE' && m.payload?.topic === topic,
       );
       expect(selfMessages.length).toBe(0);
 
@@ -223,19 +211,12 @@ describe('Integration: Pub/Sub (Rust Server)', () => {
       // Wait for all subscribers to receive the message
       for (const sub of subscribers) {
         await waitUntil(
-          () =>
-            sub.messages.some(
-              (m) =>
-                m.type === 'TOPIC_MESSAGE' &&
-                m.payload?.topic === topic
-            ),
-          5000
+          () => sub.messages.some((m) => m.type === 'TOPIC_MESSAGE' && m.payload?.topic === topic),
+          5000,
         );
 
         const msg = sub.messages.find(
-          (m) =>
-            m.type === 'TOPIC_MESSAGE' &&
-            m.payload?.topic === topic
+          (m) => m.type === 'TOPIC_MESSAGE' && m.payload?.topic === topic,
         );
         expect(msg).toBeDefined();
         expect(msg.payload.data).toEqual({ broadcast: 'to all' });
@@ -302,20 +283,8 @@ describe('Integration: Pub/Sub (Rust Server)', () => {
       });
 
       // Both should receive
-      await waitUntil(
-        () =>
-          subscriber.messages.some(
-            (m) => m.type === 'TOPIC_MESSAGE'
-          ),
-        5000
-      );
-      await waitUntil(
-        () =>
-          stayer.messages.some(
-            (m) => m.type === 'TOPIC_MESSAGE'
-          ),
-        5000
-      );
+      await waitUntil(() => subscriber.messages.some((m) => m.type === 'TOPIC_MESSAGE'), 5000);
+      await waitUntil(() => stayer.messages.some((m) => m.type === 'TOPIC_MESSAGE'), 5000);
 
       // Now unsubscribe the first subscriber
       subscriber.send({
@@ -339,21 +308,13 @@ describe('Integration: Pub/Sub (Rust Server)', () => {
       });
 
       // Stayer should receive
-      await waitUntil(
-        () =>
-          stayer.messages.some(
-            (m) => m.type === 'TOPIC_MESSAGE'
-          ),
-        5000
-      );
+      await waitUntil(() => stayer.messages.some((m) => m.type === 'TOPIC_MESSAGE'), 5000);
 
       // Give extra time for unsubscribed client to potentially receive
       await waitForSync(500);
 
       // Unsubscribed client should NOT receive the message
-      const afterMessages = subscriber.messages.filter(
-        (m) => m.type === 'TOPIC_MESSAGE'
-      );
+      const afterMessages = subscriber.messages.filter((m) => m.type === 'TOPIC_MESSAGE');
       expect(afterMessages.length).toBe(0);
 
       subscriber.close();
@@ -418,19 +379,12 @@ describe('Integration: Pub/Sub (Rust Server)', () => {
 
       // subA should receive the message
       await waitUntil(
-        () =>
-          subA.messages.some(
-            (m) =>
-              m.type === 'TOPIC_MESSAGE' &&
-              m.payload?.topic === topicA
-          ),
-        5000
+        () => subA.messages.some((m) => m.type === 'TOPIC_MESSAGE' && m.payload?.topic === topicA),
+        5000,
       );
 
       const msgA = subA.messages.find(
-        (m) =>
-          m.type === 'TOPIC_MESSAGE' &&
-          m.payload?.topic === topicA
+        (m) => m.type === 'TOPIC_MESSAGE' && m.payload?.topic === topicA,
       );
       expect(msgA).toBeDefined();
       expect(msgA.payload.data).toEqual({ target: 'A only' });
@@ -439,9 +393,7 @@ describe('Integration: Pub/Sub (Rust Server)', () => {
       await waitForSync(500);
 
       // subB should NOT have received the message
-      const bMessages = subB.messages.filter(
-        (m) => m.type === 'TOPIC_MESSAGE'
-      );
+      const bMessages = subB.messages.filter((m) => m.type === 'TOPIC_MESSAGE');
       expect(bMessages.length).toBe(0);
 
       subA.close();
@@ -498,24 +450,18 @@ describe('Integration: Pub/Sub (Rust Server)', () => {
       await waitUntil(
         () =>
           subscriber.messages.filter(
-            (m) =>
-              m.type === 'TOPIC_MESSAGE' &&
-              m.payload?.topic === topic
+            (m) => m.type === 'TOPIC_MESSAGE' && m.payload?.topic === topic,
           ).length >= 10,
-        10000
+        10000,
       );
 
       const receivedMessages = subscriber.messages.filter(
-        (m) =>
-          m.type === 'TOPIC_MESSAGE' &&
-          m.payload?.topic === topic
+        (m) => m.type === 'TOPIC_MESSAGE' && m.payload?.topic === topic,
       );
       expect(receivedMessages.length).toBe(10);
 
       // Verify ordering
-      const sequences = receivedMessages.map(
-        (m: any) => m.payload.data.seq
-      );
+      const sequences = receivedMessages.map((m: any) => m.payload.data.seq);
       expect(sequences).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
 
       subscriber.close();
@@ -578,17 +524,13 @@ describe('Integration: Pub/Sub (Rust Server)', () => {
       await waitUntil(
         () =>
           subscriber.messages.filter(
-            (m) =>
-              m.type === 'TOPIC_MESSAGE' &&
-              m.payload?.topic === topic
+            (m) => m.type === 'TOPIC_MESSAGE' && m.payload?.topic === topic,
           ).length >= testPayloads.length,
-        10000
+        10000,
       );
 
       const received = subscriber.messages.filter(
-        (m) =>
-          m.type === 'TOPIC_MESSAGE' &&
-          m.payload?.topic === topic
+        (m) => m.type === 'TOPIC_MESSAGE' && m.payload?.topic === topic,
       );
       expect(received.length).toBe(testPayloads.length);
 

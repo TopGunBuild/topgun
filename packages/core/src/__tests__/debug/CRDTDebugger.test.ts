@@ -1,8 +1,4 @@
-import {
-  CRDTDebugger,
-  getCRDTDebugger,
-  resetCRDTDebugger,
-} from '../../debug/CRDTDebugger';
+import { CRDTDebugger, getCRDTDebugger, resetCRDTDebugger } from '../../debug/CRDTDebugger';
 import { HLC, Timestamp } from '../../HLC';
 
 describe('CRDTDebugger', () => {

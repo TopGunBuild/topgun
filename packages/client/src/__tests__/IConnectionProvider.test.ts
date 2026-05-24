@@ -123,10 +123,13 @@ describe('IConnectionProvider', () => {
         setMeta: jest.fn(),
       };
 
-      expect(() => new SyncEngine({
-        nodeId: 'test-node',
-        storageAdapter: mockStorage,
-      } as any)).toThrow('SyncEngine requires connectionProvider');
+      expect(
+        () =>
+          new SyncEngine({
+            nodeId: 'test-node',
+            storageAdapter: mockStorage,
+          } as any),
+      ).toThrow('SyncEngine requires connectionProvider');
     });
   });
 });

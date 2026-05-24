@@ -80,9 +80,7 @@ describe('Integration: Queries (Rust Server)', () => {
 
       // Each result should be { key, value } format
       for (const rec of records) {
-        const found = response.payload.results.find(
-          (r: any) => r.key === rec.key
-        );
+        const found = response.payload.results.find((r: any) => r.key === rec.key);
         expect(found).toBeDefined();
         expect(found.value).toEqual(rec.value);
       }
@@ -391,9 +389,7 @@ describe('Integration: Queries (Rust Server)', () => {
       expect(response.payload.results.length).toBe(3);
 
       // Verify ascending order
-      const prices = response.payload.results.map(
-        (r: any) => r.value.price
-      );
+      const prices = response.payload.results.map((r: any) => r.value.price);
       expect(prices).toEqual([100, 200, 300]);
 
       client.close();
@@ -448,9 +444,7 @@ describe('Integration: Queries (Rust Server)', () => {
       expect(response.payload.results.length).toBe(3);
 
       // Verify descending order
-      const prices = response.payload.results.map(
-        (r: any) => r.value.price
-      );
+      const prices = response.payload.results.map((r: any) => r.value.price);
       expect(prices).toEqual([300, 200, 100]);
 
       client.close();
@@ -564,17 +558,13 @@ describe('Integration: Queries (Rust Server)', () => {
       await waitUntil(
         () =>
           subscriber.messages.some(
-            (m) =>
-              m.type === 'QUERY_UPDATE' &&
-              m.payload?.queryId === 'live-q-enter'
+            (m) => m.type === 'QUERY_UPDATE' && m.payload?.queryId === 'live-q-enter',
           ),
-        5000
+        5000,
       );
 
       const update = subscriber.messages.find(
-        (m) =>
-          m.type === 'QUERY_UPDATE' &&
-          m.payload?.queryId === 'live-q-enter'
+        (m) => m.type === 'QUERY_UPDATE' && m.payload?.queryId === 'live-q-enter',
       );
       expect(update).toBeDefined();
       expect(update.payload.key).toBe('new-item');
@@ -658,16 +648,16 @@ describe('Integration: Queries (Rust Server)', () => {
             (m) =>
               m.type === 'QUERY_UPDATE' &&
               m.payload?.queryId === 'live-q-update' &&
-              m.payload?.changeType === 'UPDATE'
+              m.payload?.changeType === 'UPDATE',
           ),
-        5000
+        5000,
       );
 
       const update = subscriber.messages.find(
         (m) =>
           m.type === 'QUERY_UPDATE' &&
           m.payload?.queryId === 'live-q-update' &&
-          m.payload?.changeType === 'UPDATE'
+          m.payload?.changeType === 'UPDATE',
       );
       expect(update).toBeDefined();
       expect(update.payload.key).toBe('upd-item');
@@ -754,16 +744,16 @@ describe('Integration: Queries (Rust Server)', () => {
             (m) =>
               m.type === 'QUERY_UPDATE' &&
               m.payload?.queryId === 'live-q-leave' &&
-              m.payload?.changeType === 'LEAVE'
+              m.payload?.changeType === 'LEAVE',
           ),
-        5000
+        5000,
       );
 
       const leaveUpdate = subscriber.messages.find(
         (m) =>
           m.type === 'QUERY_UPDATE' &&
           m.payload?.queryId === 'live-q-leave' &&
-          m.payload?.changeType === 'LEAVE'
+          m.payload?.changeType === 'LEAVE',
       );
       expect(leaveUpdate).toBeDefined();
       expect(leaveUpdate.payload.key).toBe('leave-item');
@@ -823,13 +813,7 @@ describe('Integration: Queries (Rust Server)', () => {
       });
 
       // Wait for QUERY_UPDATE proving subscription works
-      await waitUntil(
-        () =>
-          subscriber.messages.some(
-            (m) => m.type === 'QUERY_UPDATE'
-          ),
-        5000
-      );
+      await waitUntil(() => subscriber.messages.some((m) => m.type === 'QUERY_UPDATE'), 5000);
 
       // Now unsubscribe
       subscriber.send({
@@ -862,9 +846,7 @@ describe('Integration: Queries (Rust Server)', () => {
       // Wait to ensure no QUERY_UPDATE arrives
       await waitForSync(1000);
 
-      const postUnsubUpdates = subscriber.messages.filter(
-        (m) => m.type === 'QUERY_UPDATE'
-      );
+      const postUnsubUpdates = subscriber.messages.filter((m) => m.type === 'QUERY_UPDATE');
       expect(postUnsubUpdates.length).toBe(0);
 
       subscriber.close();
@@ -876,7 +858,7 @@ describe('Integration: Queries (Rust Server)', () => {
   // Multi-Client Live Updates
   // ========================================
   describe('Multi-client live updates', () => {
-    test('subscriber receives updates from another client\'s writes', async () => {
+    test("subscriber receives updates from another client's writes", async () => {
       const mapName = `live-multi-${Date.now()}`;
 
       const subscriber = await createRustTestClient(port, {
@@ -944,17 +926,13 @@ describe('Integration: Queries (Rust Server)', () => {
       await waitUntil(
         () =>
           subscriber.messages.filter(
-            (m) =>
-              m.type === 'QUERY_UPDATE' &&
-              m.payload?.queryId === 'multi-live-q'
+            (m) => m.type === 'QUERY_UPDATE' && m.payload?.queryId === 'multi-live-q',
           ).length >= 2,
-        5000
+        5000,
       );
 
       const updates = subscriber.messages.filter(
-        (m) =>
-          m.type === 'QUERY_UPDATE' &&
-          m.payload?.queryId === 'multi-live-q'
+        (m) => m.type === 'QUERY_UPDATE' && m.payload?.queryId === 'multi-live-q',
       );
       expect(updates.length).toBeGreaterThanOrEqual(2);
 
@@ -1041,9 +1019,9 @@ describe('Integration: Queries (Rust Server)', () => {
             (m) =>
               m.type === 'QUERY_UPDATE' &&
               m.payload?.queryId === 'mq-active' &&
-              m.payload?.key === 'task-1'
+              m.payload?.key === 'task-1',
           ),
-        5000
+        5000,
       );
 
       // Verify the active query got an ENTER
@@ -1051,7 +1029,7 @@ describe('Integration: Queries (Rust Server)', () => {
         (m) =>
           m.type === 'QUERY_UPDATE' &&
           m.payload?.queryId === 'mq-active' &&
-          m.payload?.key === 'task-1'
+          m.payload?.key === 'task-1',
       );
       expect(activeUpdate).toBeDefined();
       expect(activeUpdate.payload.changeType).toBe('ENTER');
@@ -1079,16 +1057,16 @@ describe('Integration: Queries (Rust Server)', () => {
             (m) =>
               m.type === 'QUERY_UPDATE' &&
               m.payload?.queryId === 'mq-archived' &&
-              m.payload?.key === 'task-2'
+              m.payload?.key === 'task-2',
           ),
-        5000
+        5000,
       );
 
       const archivedUpdate = subscriber.messages.find(
         (m) =>
           m.type === 'QUERY_UPDATE' &&
           m.payload?.queryId === 'mq-archived' &&
-          m.payload?.key === 'task-2'
+          m.payload?.key === 'task-2',
       );
       expect(archivedUpdate).toBeDefined();
       expect(archivedUpdate.payload.changeType).toBe('ENTER');
@@ -1098,7 +1076,7 @@ describe('Integration: Queries (Rust Server)', () => {
         (m) =>
           m.type === 'QUERY_UPDATE' &&
           m.payload?.queryId === 'mq-active' &&
-          m.payload?.key === 'task-2'
+          m.payload?.key === 'task-2',
       );
       expect(activeUpdatesForTask2.length).toBe(0);
 
@@ -1123,7 +1101,10 @@ describe('Integration: Queries (Rust Server)', () => {
 
       // Write records with multiple fields
       const records = [
-        { key: 'fp-1', value: { name: 'Alice', email: 'alice@example.com', age: 30, role: 'admin' } },
+        {
+          key: 'fp-1',
+          value: { name: 'Alice', email: 'alice@example.com', age: 30, role: 'admin' },
+        },
         { key: 'fp-2', value: { name: 'Bob', email: 'bob@example.com', age: 25, role: 'user' } },
       ];
 

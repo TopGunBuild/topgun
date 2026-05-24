@@ -13,12 +13,12 @@ const createMockLWWMap = () => {
     get: jest.fn((key: string) => data.get(key)),
     set: jest.fn((key: string, value: any) => {
       data.set(key, value);
-      listeners.forEach(cb => cb());
+      listeners.forEach((cb) => cb());
       return { value, timestamp: Date.now(), deleted: false };
     }),
     remove: jest.fn((key: string) => {
       data.delete(key);
-      listeners.forEach(cb => cb());
+      listeners.forEach((cb) => cb());
       return { value: null, timestamp: Date.now(), deleted: true };
     }),
     has: jest.fn((key: string) => data.has(key)),
@@ -33,7 +33,7 @@ const createMockLWWMap = () => {
     }),
     // Helper to trigger changes externally
     _triggerChange: () => {
-      listeners.forEach(cb => cb());
+      listeners.forEach((cb) => cb());
     },
     _set: (key: string, value: any) => {
       data.set(key, value);
@@ -98,10 +98,13 @@ describe('useMap', () => {
 
   it('should trigger re-render on map changes', () => {
     let renderCount = 0;
-    const { result } = renderHook(() => {
-      renderCount++;
-      return useMap('test-map');
-    }, { wrapper });
+    const { result } = renderHook(
+      () => {
+        renderCount++;
+        return useMap('test-map');
+      },
+      { wrapper },
+    );
 
     const initialRenderCount = renderCount;
 
@@ -154,7 +157,9 @@ describe('useMap', () => {
     const typedMockMap = createMockLWWMap();
     mockGetMap.mockReturnValue(typedMockMap);
 
-    const { result } = renderHook(() => useMap<string, { name: string; age: number }>('users'), { wrapper });
+    const { result } = renderHook(() => useMap<string, { name: string; age: number }>('users'), {
+      wrapper,
+    });
 
     act(() => {
       result.current.set('user1', { name: 'John', age: 30 });

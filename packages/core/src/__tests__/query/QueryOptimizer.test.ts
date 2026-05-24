@@ -491,7 +491,13 @@ describe('QueryOptimizer', () => {
       records = new Map();
       records.set('1', { id: '1', name: 'Alice', age: 30, status: 'active', category: 'premium' });
       records.set('2', { id: '2', name: 'Bob', age: 25, status: 'inactive', category: 'basic' });
-      records.set('3', { id: '3', name: 'Charlie', age: 35, status: 'active', category: 'premium' });
+      records.set('3', {
+        id: '3',
+        name: 'Charlie',
+        age: 35,
+        status: 'active',
+        category: 'premium',
+      });
 
       standingRegistry = new StandingQueryRegistry({
         getRecord: (key) => records.get(key),

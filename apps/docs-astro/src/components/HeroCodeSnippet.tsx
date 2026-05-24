@@ -40,7 +40,10 @@ export const HeroCodeSnippet = () => {
         </div>
         <div className="flex items-center gap-2">
           <span className="text-xs text-neutral-500 font-mono">app.tsx</span>
-          <button onClick={handleCopy} className="text-neutral-500 hover:text-white transition-colors">
+          <button
+            onClick={handleCopy}
+            className="text-neutral-500 hover:text-white transition-colors"
+          >
             {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
           </button>
         </div>

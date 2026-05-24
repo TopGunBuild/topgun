@@ -30,9 +30,7 @@ export class IntersectionResultSet<K> implements ResultSet<K> {
    */
   constructor(resultSets: ResultSet<K>[]) {
     // Sort by merge cost (ascending) - iterate smallest first
-    this.sortedResultSets = [...resultSets].sort(
-      (a, b) => a.getMergeCost() - b.getMergeCost()
-    );
+    this.sortedResultSets = [...resultSets].sort((a, b) => a.getMergeCost() - b.getMergeCost());
   }
 
   /**

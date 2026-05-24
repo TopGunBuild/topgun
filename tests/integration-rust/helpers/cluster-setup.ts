@@ -74,9 +74,7 @@ export interface ClusterSetup {
  * Waits for all three nodes to print PORT= before resolving, confirming
  * that their WebSocket handlers are ready.
  */
-export async function spawnCluster(
-  options: { timeout?: number } = {}
-): Promise<ClusterSetup> {
+export async function spawnCluster(options: { timeout?: number } = {}): Promise<ClusterSetup> {
   const timeoutMs = options.timeout ?? DEFAULT_CLUSTER_TIMEOUT_MS;
   const binaryPath = process.env.RUST_SERVER_BINARY;
 
@@ -91,7 +89,7 @@ export async function spawnCluster(
    */
   function buildSeedNodes(index: number): string {
     return NODE_CONFIGS.filter((_, i) => i !== index)
-      .map(c => `localhost:${c.clusterPort}`)
+      .map((c) => `localhost:${c.clusterPort}`)
       .join(',');
   }
 
@@ -100,10 +98,14 @@ export async function spawnCluster(
     const seedNodes = buildSeedNodes(index);
 
     const args = [
-      '--node-id', cfg.nodeId,
-      '--port', String(cfg.wsPort),
-      '--cluster-port', String(cfg.clusterPort),
-      '--seed-nodes', seedNodes,
+      '--node-id',
+      cfg.nodeId,
+      '--port',
+      String(cfg.wsPort),
+      '--cluster-port',
+      String(cfg.clusterPort),
+      '--seed-nodes',
+      seedNodes,
     ];
 
     let proc: child_process.ChildProcess;
@@ -124,7 +126,7 @@ export async function spawnCluster(
           detached: true,
           stdio: ['ignore', 'pipe', 'inherit'],
           env: { ...process.env, STORAGE_BACKEND: 'null', TOPGUN_NO_AUTH: 'true' },
-        }
+        },
       );
     }
 
@@ -140,7 +142,7 @@ export async function spawnCluster(
   }
   try {
     await Promise.all(
-      processes.map((proc, i) => waitForPort(proc!, timeoutMs, NODE_CONFIGS[i].wsPort))
+      processes.map((proc, i) => waitForPort(proc!, timeoutMs, NODE_CONFIGS[i].wsPort)),
     );
     await waitForClusterMembership(NODE_COUNT, /* observerIndex */ 0);
   } catch (err) {
@@ -152,7 +154,7 @@ export async function spawnCluster(
         if (!proc) return Promise.resolve();
         processes[i] = null;
         return makeCleanup(proc)();
-      })
+      }),
     );
     throw err;
   }
@@ -197,7 +199,7 @@ export async function spawnCluster(
    */
   async function waitForClusterMembership(
     expectedNodeCount: number,
-    observerIndex: number
+    observerIndex: number,
   ): Promise<void> {
     const observerSeed = `ws://localhost:${NODE_CONFIGS[observerIndex].wsPort}/ws`;
     const verifier = new ClusterClient({
@@ -215,12 +217,12 @@ export async function spawnCluster(
             return;
           }
         }
-        await new Promise<void>(r => setTimeout(r, 100));
+        await new Promise<void>((r) => setTimeout(r, 100));
       }
       const finalStats = verifier.getRouterStats();
       throw new Error(
         `waitForClusterMembership: expected ${expectedNodeCount} members via ${observerSeed} within ${VERIFY_REJOIN_BUDGET_MS}ms ` +
-          `(final nodeCount=${finalStats?.nodeCount ?? 'unknown'}, mapVersion=${finalStats?.mapVersion ?? 'unknown'})`
+          `(final nodeCount=${finalStats?.nodeCount ?? 'unknown'}, mapVersion=${finalStats?.mapVersion ?? 'unknown'})`,
       );
     } finally {
       await verifier.close();
@@ -233,13 +235,13 @@ export async function spawnCluster(
         if (!proc) return Promise.resolve();
         processes[i] = null;
         return makeCleanup(proc)();
-      })
+      }),
     );
   }
 
   return {
-    wsPorts: NODE_CONFIGS.map(c => c.wsPort),
-    seedAddresses: NODE_CONFIGS.map(c => `ws://localhost:${c.wsPort}/ws`),
+    wsPorts: NODE_CONFIGS.map((c) => c.wsPort),
+    seedAddresses: NODE_CONFIGS.map((c) => `ws://localhost:${c.wsPort}/ws`),
     stopNode,
     restartNode,
     cleanup,
@@ -257,7 +259,7 @@ export async function spawnCluster(
 function waitForPort(
   proc: child_process.ChildProcess,
   timeoutMs: number,
-  expectedPort: number
+  expectedPort: number,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const rl = readline.createInterface({ input: proc.stdout! });
@@ -276,9 +278,9 @@ function waitForPort(
         reject(
           new Error(
             `Cluster node (port ${expectedPort}) did not print PORT= within ${timeoutMs} ms. ` +
-              `Set RUST_SERVER_BINARY to use a pre-built binary and skip cargo build time.`
-          )
-        )
+              `Set RUST_SERVER_BINARY to use a pre-built binary and skip cargo build time.`,
+          ),
+        ),
       );
     }, timeoutMs);
 
@@ -293,9 +295,9 @@ function waitForPort(
       settle(() =>
         reject(
           new Error(
-            `Cluster node (port ${expectedPort}) exited with code ${code} before printing PORT=`
-          )
-        )
+            `Cluster node (port ${expectedPort}) exited with code ${code} before printing PORT=`,
+          ),
+        ),
       );
     });
 

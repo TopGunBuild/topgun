@@ -28,10 +28,12 @@ export type CursorStatus = z.infer<typeof CursorStatusSchema>;
 
 export const QueryRespPayloadSchema = z.object({
   queryId: z.string(),
-  results: z.array(z.object({
-    key: z.string(),
-    value: z.unknown(),
-  })),
+  results: z.array(
+    z.object({
+      key: z.string(),
+      value: z.unknown(),
+    }),
+  ),
   nextCursor: z.string().optional(),
   hasMore: z.boolean().optional(),
   cursorStatus: CursorStatusSchema.optional(),

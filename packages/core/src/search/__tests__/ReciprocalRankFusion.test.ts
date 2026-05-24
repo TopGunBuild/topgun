@@ -2,11 +2,7 @@
  * ReciprocalRankFusion Tests
  */
 
-import {
-  ReciprocalRankFusion,
-  RankedResult,
-  MergedResult,
-} from '../ReciprocalRankFusion';
+import { ReciprocalRankFusion, RankedResult, MergedResult } from '../ReciprocalRankFusion';
 
 describe('ReciprocalRankFusion', () => {
   describe('constructor', () => {
@@ -54,9 +50,7 @@ describe('ReciprocalRankFusion', () => {
     });
 
     it('should correctly apply RRF formula: 1/(k + rank)', () => {
-      const results: RankedResult[] = [
-        { docId: 'doc1', score: 1.0, source: 'exact' },
-      ];
+      const results: RankedResult[] = [{ docId: 'doc1', score: 1.0, source: 'exact' }];
 
       const rrf10 = new ReciprocalRankFusion({ k: 10 });
       const merged = rrf10.merge([results]);
@@ -90,17 +84,11 @@ describe('ReciprocalRankFusion', () => {
     });
 
     it('should combine sources alphabetically', () => {
-      const exactResults: RankedResult[] = [
-        { docId: 'doc1', score: 1.0, source: 'exact' },
-      ];
+      const exactResults: RankedResult[] = [{ docId: 'doc1', score: 1.0, source: 'exact' }];
 
-      const rangeResults: RankedResult[] = [
-        { docId: 'doc1', score: 0.5, source: 'range' },
-      ];
+      const rangeResults: RankedResult[] = [{ docId: 'doc1', score: 0.5, source: 'range' }];
 
-      const ftsResults: RankedResult[] = [
-        { docId: 'doc1', score: 2.0, source: 'fulltext' },
-      ];
+      const ftsResults: RankedResult[] = [{ docId: 'doc1', score: 2.0, source: 'fulltext' }];
 
       const merged = rrf.merge([exactResults, rangeResults, ftsResults]);
 
@@ -109,13 +97,9 @@ describe('ReciprocalRankFusion', () => {
     });
 
     it('should track original scores from each source', () => {
-      const exactResults: RankedResult[] = [
-        { docId: 'doc1', score: 1.0, source: 'exact' },
-      ];
+      const exactResults: RankedResult[] = [{ docId: 'doc1', score: 1.0, source: 'exact' }];
 
-      const ftsResults: RankedResult[] = [
-        { docId: 'doc1', score: 2.5, source: 'fulltext' },
-      ];
+      const ftsResults: RankedResult[] = [{ docId: 'doc1', score: 2.5, source: 'fulltext' }];
 
       const merged = rrf.merge([exactResults, ftsResults]);
 
@@ -158,9 +142,7 @@ describe('ReciprocalRankFusion', () => {
     });
 
     it('should skip empty sets but process non-empty ones', () => {
-      const exactResults: RankedResult[] = [
-        { docId: 'doc1', score: 1.0, source: 'exact' },
-      ];
+      const exactResults: RankedResult[] = [{ docId: 'doc1', score: 1.0, source: 'exact' }];
 
       const merged = rrf.merge([[], exactResults, []]);
 
@@ -183,18 +165,14 @@ describe('ReciprocalRankFusion', () => {
       ];
 
       expect(() => rrf.mergeWeighted(results, [1.0])).toThrow(
-        'Weights array length (1) must match resultSets length (2)'
+        'Weights array length (1) must match resultSets length (2)',
       );
     });
 
     it('should apply weights correctly', () => {
-      const exactResults: RankedResult[] = [
-        { docId: 'doc1', score: 1.0, source: 'exact' },
-      ];
+      const exactResults: RankedResult[] = [{ docId: 'doc1', score: 1.0, source: 'exact' }];
 
-      const ftsResults: RankedResult[] = [
-        { docId: 'doc2', score: 1.0, source: 'fulltext' },
-      ];
+      const ftsResults: RankedResult[] = [{ docId: 'doc2', score: 1.0, source: 'fulltext' }];
 
       // Weight exact 2x higher than fulltext
       const merged = rrf.mergeWeighted([exactResults, ftsResults], [2.0, 1.0]);
@@ -210,13 +188,9 @@ describe('ReciprocalRankFusion', () => {
     });
 
     it('should handle zero weights', () => {
-      const exactResults: RankedResult[] = [
-        { docId: 'doc1', score: 1.0, source: 'exact' },
-      ];
+      const exactResults: RankedResult[] = [{ docId: 'doc1', score: 1.0, source: 'exact' }];
 
-      const ftsResults: RankedResult[] = [
-        { docId: 'doc2', score: 1.0, source: 'fulltext' },
-      ];
+      const ftsResults: RankedResult[] = [{ docId: 'doc2', score: 1.0, source: 'fulltext' }];
 
       // Zero weight for exact, so only fulltext contributes
       const merged = rrf.mergeWeighted([exactResults, ftsResults], [0, 1.0]);
@@ -228,13 +202,9 @@ describe('ReciprocalRankFusion', () => {
     });
 
     it('should handle documents appearing in multiple weighted sets', () => {
-      const exactResults: RankedResult[] = [
-        { docId: 'commonDoc', score: 1.0, source: 'exact' },
-      ];
+      const exactResults: RankedResult[] = [{ docId: 'commonDoc', score: 1.0, source: 'exact' }];
 
-      const ftsResults: RankedResult[] = [
-        { docId: 'commonDoc', score: 2.0, source: 'fulltext' },
-      ];
+      const ftsResults: RankedResult[] = [{ docId: 'commonDoc', score: 2.0, source: 'fulltext' }];
 
       const merged = rrf.mergeWeighted([exactResults, ftsResults], [2.0, 1.0]);
 
@@ -252,9 +222,7 @@ describe('ReciprocalRankFusion', () => {
     });
 
     it('should skip empty sets but apply weights to non-empty ones', () => {
-      const exactResults: RankedResult[] = [
-        { docId: 'doc1', score: 1.0, source: 'exact' },
-      ];
+      const exactResults: RankedResult[] = [{ docId: 'doc1', score: 1.0, source: 'exact' }];
 
       const merged = rrf.mergeWeighted([[], exactResults], [1.0, 2.0]);
 
@@ -344,13 +312,9 @@ describe('ReciprocalRankFusion', () => {
     it('should prioritize exact matches with weighted merge', () => {
       const rrf = new ReciprocalRankFusion({ k: 60 });
 
-      const exactResults: RankedResult[] = [
-        { docId: 'exactOnly', score: 1.0, source: 'exact' },
-      ];
+      const exactResults: RankedResult[] = [{ docId: 'exactOnly', score: 1.0, source: 'exact' }];
 
-      const ftsResults: RankedResult[] = [
-        { docId: 'ftsOnly', score: 5.0, source: 'fulltext' },
-      ];
+      const ftsResults: RankedResult[] = [{ docId: 'ftsOnly', score: 5.0, source: 'fulltext' }];
 
       // Strong preference for exact matches
       const merged = rrf.mergeWeighted([exactResults, ftsResults], [10.0, 1.0]);

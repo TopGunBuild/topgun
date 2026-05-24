@@ -144,13 +144,10 @@ export const WRITE_CONCERN_ORDER: readonly WriteConcern[] = [
  * @param target - Target Write Concern level to check
  * @returns true if target level (or higher) is achieved
  */
-export function isWriteConcernAchieved(
-  achieved: Set<WriteConcern>,
-  target: WriteConcern
-): boolean {
+export function isWriteConcernAchieved(achieved: Set<WriteConcern>, target: WriteConcern): boolean {
   const targetIndex = WRITE_CONCERN_ORDER.indexOf(target);
   const achievedIndex = Math.max(
-    ...Array.from(achieved).map((l) => WRITE_CONCERN_ORDER.indexOf(l))
+    ...Array.from(achieved).map((l) => WRITE_CONCERN_ORDER.indexOf(l)),
   );
   return achievedIndex >= targetIndex;
 }
@@ -161,9 +158,7 @@ export function isWriteConcernAchieved(
  * @param achieved - Set of achieved Write Concern levels
  * @returns The highest achieved level
  */
-export function getHighestWriteConcernLevel(
-  achieved: Set<WriteConcern>
-): WriteConcern {
+export function getHighestWriteConcernLevel(achieved: Set<WriteConcern>): WriteConcern {
   for (let i = WRITE_CONCERN_ORDER.length - 1; i >= 0; i--) {
     if (achieved.has(WRITE_CONCERN_ORDER[i])) {
       return WRITE_CONCERN_ORDER[i];

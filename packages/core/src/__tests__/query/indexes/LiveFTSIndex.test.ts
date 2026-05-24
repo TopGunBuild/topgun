@@ -48,7 +48,11 @@ describe('LiveFTSIndex', () => {
   describe('onRecordAdded()', () => {
     it('should return ENTER delta when record matches', () => {
       // Pre-populate FTS index
-      const doc: TestDocument = { id: 'doc1', title: 'Machine Learning Basics', body: 'Introduction' };
+      const doc: TestDocument = {
+        id: 'doc1',
+        title: 'Machine Learning Basics',
+        body: 'Introduction',
+      };
       ftsIndex.onSet('doc1', doc);
 
       const liveIndex = new LiveFTSIndex<string, TestDocument>(ftsIndex, {
@@ -137,7 +141,11 @@ describe('LiveFTSIndex', () => {
 
     it('should return UPDATE delta when score changes', () => {
       const oldDoc: TestDocument = { id: 'doc1', title: 'Machine Learning', body: 'Test' };
-      const newDoc: TestDocument = { id: 'doc1', title: 'Machine Learning Machine Learning', body: 'Test' };
+      const newDoc: TestDocument = {
+        id: 'doc1',
+        title: 'Machine Learning Machine Learning',
+        body: 'Test',
+      };
 
       ftsIndex.onSet('doc1', oldDoc);
       liveIndex.onRecordAdded('doc1', oldDoc);
@@ -293,7 +301,7 @@ describe('LiveFTSIndex', () => {
       expect(results).toHaveLength(2);
 
       // High scorer should be in results
-      expect(results.find(r => r.key === 'high')).toBeDefined();
+      expect(results.find((r) => r.key === 'high')).toBeDefined();
     });
   });
 
@@ -333,7 +341,7 @@ describe('LiveFTSIndex', () => {
         query: 'learning',
       });
 
-      const entries: Array<[string, TestDocument]> = docs.map(d => [d.id, d]);
+      const entries: Array<[string, TestDocument]> = docs.map((d) => [d.id, d]);
       liveIndex.buildFromData(entries);
 
       expect(liveIndex.getResultCount()).toBe(2); // doc1 and doc2

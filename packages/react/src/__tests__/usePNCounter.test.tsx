@@ -13,17 +13,17 @@ const createMockPNCounterHandle = () => {
     get: jest.fn(() => currentValue),
     increment: jest.fn(() => {
       currentValue++;
-      listeners.forEach(l => l(currentValue));
+      listeners.forEach((l) => l(currentValue));
       return currentValue;
     }),
     decrement: jest.fn(() => {
       currentValue--;
-      listeners.forEach(l => l(currentValue));
+      listeners.forEach((l) => l(currentValue));
       return currentValue;
     }),
     addAndGet: jest.fn((delta: number) => {
       currentValue += delta;
-      listeners.forEach(l => l(currentValue));
+      listeners.forEach((l) => l(currentValue));
       return currentValue;
     }),
     subscribe: jest.fn((cb) => {
@@ -37,7 +37,7 @@ const createMockPNCounterHandle = () => {
     // Test helpers
     setValue: (v: number) => {
       currentValue = v;
-      listeners.forEach(l => l(currentValue));
+      listeners.forEach((l) => l(currentValue));
     },
     getCurrentValue: () => currentValue,
   };
@@ -204,10 +204,10 @@ describe('usePNCounter', () => {
 
   describe('counter name changes', () => {
     it('should create new counter when name changes', () => {
-      const { rerender } = renderHook(
-        ({ name }) => usePNCounter(name),
-        { wrapper, initialProps: { name: 'counter-1' } }
-      );
+      const { rerender } = renderHook(({ name }) => usePNCounter(name), {
+        wrapper,
+        initialProps: { name: 'counter-1' },
+      });
 
       expect(mockClient.getPNCounter).toHaveBeenCalledWith('counter-1');
 

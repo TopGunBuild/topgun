@@ -387,8 +387,14 @@ describe('PNCounter', () => {
   describe('initial state', () => {
     it('should restore from initial state', () => {
       const initial = {
-        positive: new Map([['A', 10], ['B', 5]]),
-        negative: new Map([['A', 2], ['B', 1]]),
+        positive: new Map([
+          ['A', 10],
+          ['B', 5],
+        ]),
+        negative: new Map([
+          ['A', 2],
+          ['B', 1],
+        ]),
       };
 
       const counter = new PNCounterImpl({

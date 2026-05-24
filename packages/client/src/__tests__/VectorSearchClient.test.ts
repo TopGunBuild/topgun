@@ -65,7 +65,7 @@ describe('VectorSearchClient', () => {
 
     it('should throw error when not authenticated', async () => {
       await expect(
-        syncEngine.vectorSearch('notes', new Float32Array([0.1, 0.2, 0.3]))
+        syncEngine.vectorSearch('notes', new Float32Array([0.1, 0.2, 0.3])),
       ).rejects.toThrow('Not connected to server');
     });
 
@@ -84,7 +84,7 @@ describe('VectorSearchClient', () => {
             queryVector: expect.any(Uint8Array),
             k: 5,
           }),
-        })
+        }),
       );
 
       // Verify queryVector is wire-format Uint8Array (3 floats * 4 bytes = 12 bytes)
@@ -222,9 +222,9 @@ describe('VectorSearchClient', () => {
       (syncEngine as any).stateMachine.state = SyncState.CONNECTED;
       mockSendMessage.mockReturnValue(false);
 
-      await expect(
-        syncEngine.vectorSearch('notes', [0.1])
-      ).rejects.toThrow('Failed to send vector search request');
+      await expect(syncEngine.vectorSearch('notes', [0.1])).rejects.toThrow(
+        'Failed to send vector search request',
+      );
     });
 
     it('should generate unique request ids for concurrent requests', async () => {
@@ -241,11 +241,21 @@ describe('VectorSearchClient', () => {
       // Resolve both
       (syncEngine as any).handleServerMessage({
         type: 'VECTOR_SEARCH_RESP',
-        payload: { id: id1, results: [{ key: 'a', score: 0.9 }], totalCandidates: 1, searchTimeMs: 1 },
+        payload: {
+          id: id1,
+          results: [{ key: 'a', score: 0.9 }],
+          totalCandidates: 1,
+          searchTimeMs: 1,
+        },
       });
       (syncEngine as any).handleServerMessage({
         type: 'VECTOR_SEARCH_RESP',
-        payload: { id: id2, results: [{ key: 'b', score: 0.8 }], totalCandidates: 1, searchTimeMs: 1 },
+        payload: {
+          id: id2,
+          results: [{ key: 'b', score: 0.8 }],
+          totalCandidates: 1,
+          searchTimeMs: 1,
+        },
       });
 
       const result1 = await promise1;

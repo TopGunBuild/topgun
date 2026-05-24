@@ -58,8 +58,6 @@ export interface LazyIndexOptions {
 /**
  * Check if an index is a lazy index.
  */
-export function isLazyIndex<K, V, A>(
-  index: Index<K, V, A>
-): index is LazyIndex<K, V, A> {
+export function isLazyIndex<K, V, A>(index: Index<K, V, A>): index is LazyIndex<K, V, A> {
   return 'isLazy' in index && (index as LazyIndex<K, V, A>).isLazy === true;
 }

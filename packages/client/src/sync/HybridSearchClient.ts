@@ -83,7 +83,7 @@ export class HybridSearchClient implements IHybridSearchClient {
   public async hybridSearch(
     mapName: string,
     queryText: string,
-    options?: HybridSearchClientOptions
+    options?: HybridSearchClientOptions,
   ): Promise<HybridSearchClientResult[]> {
     if (!this.config.isAuthenticated()) {
       throw new Error('Not connected to server');
@@ -181,7 +181,7 @@ export class HybridSearchClient implements IHybridSearchClient {
     } else {
       logger.warn(
         { requestId: payload.requestId },
-        'Received HYBRID_SEARCH_RESP for unknown request id'
+        'Received HYBRID_SEARCH_RESP for unknown request id',
       );
     }
   }

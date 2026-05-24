@@ -117,21 +117,25 @@ describe('Backpressure', () => {
 
       // This should pause (not resolve until capacity freed)
       let resolved = false;
-      const writePromise = engine.recordOperation('map1', 'PUT', 'key-blocked', {
-        record: { value: 'blocked', timestamp: createTimestamp() },
-        timestamp: createTimestamp(),
-      }).then(() => {
-        resolved = true;
-      });
+      const writePromise = engine
+        .recordOperation('map1', 'PUT', 'key-blocked', {
+          record: { value: 'blocked', timestamp: createTimestamp() },
+          timestamp: createTimestamp(),
+        })
+        .then(() => {
+          resolved = true;
+        });
 
       // Wait a bit to ensure it's paused
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
       expect(resolved).toBe(false);
       expect(engine.isBackpressurePaused()).toBe(true);
 
       // Simulate ACKs to free up capacity (mark all as synced)
       // Access internal opLog to simulate ACK
-      (engine as any).opLog.forEach((op: any) => { op.synced = true; });
+      (engine as any).opLog.forEach((op: any) => {
+        op.synced = true;
+      });
       (engine as any).backpressureController.checkLowWaterMark();
 
       // Now the write should resolve
@@ -162,7 +166,7 @@ describe('Backpressure', () => {
         timestamp: createTimestamp(),
       });
 
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 10));
       expect(pausedHandler).toHaveBeenCalled();
     });
 
@@ -189,10 +193,12 @@ describe('Backpressure', () => {
         timestamp: createTimestamp(),
       });
 
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 10));
 
       // Simulate ACKs
-      (engine as any).opLog.forEach((op: any) => { op.synced = true; });
+      (engine as any).opLog.forEach((op: any) => {
+        op.synced = true;
+      });
       (engine as any).backpressureController.checkLowWaterMark();
 
       expect(resumedHandler).toHaveBeenCalled();
@@ -220,21 +226,23 @@ describe('Backpressure', () => {
           engine.recordOperation('map1', 'PUT', `key-waiting-${i}`, {
             record: { value: `waiting-${i}`, timestamp: createTimestamp() },
             timestamp: createTimestamp(),
-          })
+          }),
         );
       }
 
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 10));
       expect(engine.isBackpressurePaused()).toBe(true);
 
       // Simulate ACKs
-      (engine as any).opLog.forEach((op: any) => { op.synced = true; });
+      (engine as any).opLog.forEach((op: any) => {
+        op.synced = true;
+      });
       (engine as any).backpressureController.checkLowWaterMark();
 
       // All should resolve
       const results = await Promise.all(promises);
       expect(results).toHaveLength(3);
-      results.forEach(id => expect(id).toBeDefined());
+      results.forEach((id) => expect(id).toBeDefined());
     });
   });
 
@@ -258,7 +266,7 @@ describe('Backpressure', () => {
         engine.recordOperation('map1', 'PUT', 'key-throw', {
           record: { value: 'throw', timestamp: createTimestamp() },
           timestamp: createTimestamp(),
-        })
+        }),
       ).rejects.toThrow(BackpressureError);
     });
 
@@ -309,11 +317,13 @@ describe('Backpressure', () => {
         engine.recordOperation('map1', 'PUT', 'key-throw', {
           record: { value: 'throw', timestamp: createTimestamp() },
           timestamp: createTimestamp(),
-        })
+        }),
       ).rejects.toThrow(BackpressureError);
 
       // Simulate ACKs
-      (engine as any).opLog.forEach((op: any) => { op.synced = true; });
+      (engine as any).opLog.forEach((op: any) => {
+        op.synced = true;
+      });
 
       // Now it should work
       const opId = await engine.recordOperation('map1', 'PUT', 'key-success', {
@@ -476,11 +486,13 @@ describe('Backpressure', () => {
         timestamp: createTimestamp(),
       });
 
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 10));
       expect(engine.isBackpressurePaused()).toBe(true);
 
       // Simulate ACKs
-      (engine as any).opLog.forEach((op: any) => { op.synced = true; });
+      (engine as any).opLog.forEach((op: any) => {
+        op.synced = true;
+      });
       (engine as any).backpressureController.checkLowWaterMark();
 
       expect(lowHandler).toHaveBeenCalled();
@@ -573,7 +585,7 @@ describe('Backpressure', () => {
         timestamp: createTimestamp(),
       });
 
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 10));
       expect(engine.isBackpressurePaused()).toBe(true);
       expect(engine.getBackpressureStatus().isPaused).toBe(true);
     });
@@ -605,7 +617,9 @@ describe('Backpressure', () => {
 
       // Reset high water mark flag
       (engine as any).highWaterMarkEmitted = false;
-      (engine as any).opLog.forEach((op: any) => { op.synced = true; });
+      (engine as any).opLog.forEach((op: any) => {
+        op.synced = true;
+      });
 
       // Trigger again
       for (let i = 0; i < 2; i++) {

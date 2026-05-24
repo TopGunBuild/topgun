@@ -8,4 +8,3 @@ import { useClient } from '../TopGunProvider';
 // I will create this file to export it from hooks folder as well.
 
 export { useClient } from '../TopGunProvider';
-

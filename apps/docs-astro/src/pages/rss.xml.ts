@@ -10,7 +10,8 @@ export async function GET(context: APIContext) {
 
   return rss({
     title: 'TopGun Blog',
-    description: 'Latest news, technical deep dives, and tutorials about TopGun - the offline-first in-memory data grid.',
+    description:
+      'Latest news, technical deep dives, and tutorials about TopGun - the offline-first in-memory data grid.',
     site: context.site!,
     items: posts.map((post) => ({
       title: post.data.title,

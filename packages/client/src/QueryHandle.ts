@@ -53,7 +53,8 @@ export class QueryHandle<T> {
 
   // Per-record sync-state subscription. Lazily wired on first onSyncStateChange
   // or syncState read so QueryHandles that never observe syncState pay nothing.
-  private syncStateListeners: Set<(snapshot: ReadonlyMap<string, RecordSyncState>) => void> = new Set();
+  private syncStateListeners: Set<(snapshot: ReadonlyMap<string, RecordSyncState>) => void> =
+    new Set();
   private syncStateUnsubscribe: (() => void) | null = null;
   private cachedSyncStateSnapshot: ReadonlyMap<string, RecordSyncState> | null = null;
 
@@ -85,12 +86,12 @@ export class QueryHandle<T> {
     // [FIX]: Attempt to load local results immediately if available
     // This ensures that if data is already in storage but sync hasn't happened,
     // we still show something.
-    this.loadInitialLocalData().then(data => {
+    this.loadInitialLocalData().then((data) => {
       // If we haven't received server results yet (currentResults empty),
       // and we have local data OR it's just the initial load, we should notify.
       // Even if data is empty, we might want to tell the subscriber "nothing here yet".
       if (this.currentResults.size === 0) {
-         this.onResult(data, 'local');
+        this.onResult(data, 'local');
       }
     });
 
@@ -103,10 +104,10 @@ export class QueryHandle<T> {
   }
 
   private async loadInitialLocalData() {
-      // This requires SyncEngine to expose a method to query local storage
-      // For now, we can't easily reach storageAdapter directly from here without leaking abstraction.
-      // A better approach is for SyncEngine.subscribeToQuery to trigger a local load.
-      return this.syncEngine.runLocalQuery(this.mapName, this.filter);
+    // This requires SyncEngine to expose a method to query local storage
+    // For now, we can't easily reach storageAdapter directly from here without leaking abstraction.
+    // A better approach is for SyncEngine.subscribeToQuery to trigger a local load.
+    return this.syncEngine.runLocalQuery(this.mapName, this.filter);
   }
 
   // Track if we've received authoritative server response
@@ -124,14 +125,21 @@ export class QueryHandle<T> {
    * - This prevents clearing local data when server hasn't loaded from storage yet
    * - Works with any async storage adapter (PostgreSQL, SQLite, Redis, etc.)
    */
-  public onResult(items: { key: string, value: T }[], source: QueryResultSource = 'server', merkleRootHash?: number) {
-    logger.debug({
-      mapName: this.mapName,
-      itemCount: items.length,
-      source,
-      currentResultsCount: this.currentResults.size,
-      hasReceivedServerData: this.hasReceivedServerData
-    }, 'QueryHandle onResult');
+  public onResult(
+    items: { key: string; value: T }[],
+    source: QueryResultSource = 'server',
+    merkleRootHash?: number,
+  ) {
+    logger.debug(
+      {
+        mapName: this.mapName,
+        itemCount: items.length,
+        source,
+        currentResultsCount: this.currentResults.size,
+        hasReceivedServerData: this.hasReceivedServerData,
+      },
+      'QueryHandle onResult',
+    );
 
     // [FIX] Race condition protection for any async storage adapter:
     // If server sends empty QUERY_RESP before loading data from storage,
@@ -140,7 +148,10 @@ export class QueryHandle<T> {
     // 1. If server truly has no data, next non-empty response will clear local-only items
     // 2. If server is still loading, we preserve local data until real data arrives
     if (source === 'server' && items.length === 0 && !this.hasReceivedServerData) {
-      logger.debug({ mapName: this.mapName }, 'QueryHandle ignoring empty server response - waiting for authoritative data');
+      logger.debug(
+        { mapName: this.mapName },
+        'QueryHandle ignoring empty server response - waiting for authoritative data',
+      );
       return;
     }
 
@@ -154,7 +165,7 @@ export class QueryHandle<T> {
       this.merkleRootHash = merkleRootHash;
     }
 
-    const newKeys = new Set(items.map(i => i.key));
+    const newKeys = new Set(items.map((i) => i.key));
 
     // Remove only keys that are not in the new results
     const removedKeys: string[] = [];
@@ -165,21 +176,27 @@ export class QueryHandle<T> {
       }
     }
     if (removedKeys.length > 0) {
-      logger.debug({
-        mapName: this.mapName,
-        removedCount: removedKeys.length,
-        removedKeys
-      }, 'QueryHandle removed keys');
+      logger.debug(
+        {
+          mapName: this.mapName,
+          removedCount: removedKeys.length,
+          removedKeys,
+        },
+        'QueryHandle removed keys',
+      );
     }
 
     // Add/update new results
     for (const item of items) {
       this.currentResults.set(item.key, item.value);
     }
-    logger.debug({
-      mapName: this.mapName,
-      resultCount: this.currentResults.size
-    }, 'QueryHandle after merge');
+    logger.debug(
+      {
+        mapName: this.mapName,
+        resultCount: this.currentResults.size,
+      },
+      'QueryHandle after merge',
+    );
 
     // Compute changes for delta tracking
     this.computeAndNotifyChanges(Date.now());
@@ -298,7 +315,7 @@ export class QueryHandle<T> {
   private getSortedResults(): (T & { _key: string })[] {
     // Include _key in each result for client-side matching/lookup
     const results = Array.from(this.currentResults.entries()).map(
-      ([key, value]) => ({ ...(value as object), _key: key } as T & { _key: string })
+      ([key, value]) => ({ ...(value as object), _key: key }) as T & { _key: string },
     );
 
     if (this.filter.sort) {

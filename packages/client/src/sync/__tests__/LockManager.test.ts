@@ -61,7 +61,9 @@ describe('LockManager', () => {
 
       // Should reject at 65s (60000 + 5000 grace)
       jest.advanceTimersByTime(35000); // total: 65001ms
-      await expect(lockPromise).rejects.toThrow('Lock request timed out waiting for server response');
+      await expect(lockPromise).rejects.toThrow(
+        'Lock request timed out waiting for server response',
+      );
     });
 
     test('rejects at ~6s (1s + 5s grace) for ttl=1000 when no server response', async () => {
@@ -79,7 +81,9 @@ describe('LockManager', () => {
 
       // Should reject at 6s
       jest.advanceTimersByTime(2); // total: 6001ms
-      await expect(lockPromise).rejects.toThrow('Lock request timed out waiting for server response');
+      await expect(lockPromise).rejects.toThrow(
+        'Lock request timed out waiting for server response',
+      );
     });
 
     test('rejects at 5100ms (floor) for ttl=100', async () => {
@@ -96,7 +100,9 @@ describe('LockManager', () => {
       expect(raceResult).toBe('pending');
 
       jest.advanceTimersByTime(2); // total: 5101ms
-      await expect(lockPromise).rejects.toThrow('Lock request timed out waiting for server response');
+      await expect(lockPromise).rejects.toThrow(
+        'Lock request timed out waiting for server response',
+      );
     });
 
     test('rejects at 5s (floor) for ttl=0 edge case', async () => {
@@ -113,13 +119,17 @@ describe('LockManager', () => {
       expect(raceResult).toBe('pending');
 
       jest.advanceTimersByTime(2); // total: 5001ms
-      await expect(lockPromise).rejects.toThrow('Lock request timed out waiting for server response');
+      await expect(lockPromise).rejects.toThrow(
+        'Lock request timed out waiting for server response',
+      );
     });
 
     test('rejects immediately when not authenticated', async () => {
       const config = makeConfig({ isAuthenticated: jest.fn().mockReturnValue(false) });
       const manager = new LockManager(config);
-      await expect(manager.requestLock('lock-a', 'req-5', 5000)).rejects.toThrow('Not connected or authenticated');
+      await expect(manager.requestLock('lock-a', 'req-5', 5000)).rejects.toThrow(
+        'Not connected or authenticated',
+      );
     });
   });
 
@@ -185,7 +195,11 @@ describe('LockManager', () => {
     });
 
     test('resolves false when sendMessage throws and emits reason: send_threw debug log', async () => {
-      const config = makeConfig({ sendMessage: jest.fn().mockImplementation(() => { throw new Error('socket closed'); }) });
+      const config = makeConfig({
+        sendMessage: jest.fn().mockImplementation(() => {
+          throw new Error('socket closed');
+        }),
+      });
       const manager = new LockManager(config);
       const result = await manager.releaseLock('lock-b', 'req-15', 42);
       expect(result).toBe(false);

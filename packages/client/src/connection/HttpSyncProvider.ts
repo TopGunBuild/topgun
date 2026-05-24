@@ -31,9 +31,7 @@ class HttpConnection implements IConnection {
   }
 
   get readyState(): number {
-    return this.provider.isConnected()
-      ? ConnectionReadyState.OPEN
-      : ConnectionReadyState.CLOSED;
+    return this.provider.isConnected() ? ConnectionReadyState.OPEN : ConnectionReadyState.CLOSED;
   }
 }
 
@@ -185,9 +183,7 @@ export class HttpSyncProvider implements IConnectionProvider {
    */
   send(data: ArrayBuffer | Uint8Array, _key?: string): void {
     try {
-      const message = deserialize<any>(
-        data instanceof ArrayBuffer ? new Uint8Array(data) : data,
-      );
+      const message = deserialize<any>(data instanceof ArrayBuffer ? new Uint8Array(data) : data);
 
       switch (message.type) {
         case 'OP_BATCH':
@@ -310,7 +306,7 @@ export class HttpSyncProvider implements IConnectionProvider {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-msgpack',
-          'Authorization': `Bearer ${this.authToken}`,
+          Authorization: `Bearer ${this.authToken}`,
         },
         body: bodyBuffer,
         signal: controller.signal,
@@ -332,10 +328,14 @@ export class HttpSyncProvider implements IConnectionProvider {
 
       // Process operation acknowledgments
       if (syncResponse.ack) {
-        this.emit('message', 'http', serialize({
-          type: 'OP_ACK',
-          payload: syncResponse.ack,
-        }));
+        this.emit(
+          'message',
+          'http',
+          serialize({
+            type: 'OP_ACK',
+            payload: syncResponse.ack,
+          }),
+        );
       }
 
       // Process deltas as server events
@@ -346,15 +346,19 @@ export class HttpSyncProvider implements IConnectionProvider {
 
           // Emit each record as a server event
           for (const record of delta.records) {
-            this.emit('message', 'http', serialize({
-              type: 'SERVER_EVENT',
-              payload: {
-                mapName: delta.mapName,
-                key: record.key,
-                record: record.record,
-                eventType: record.eventType,
-              },
-            }));
+            this.emit(
+              'message',
+              'http',
+              serialize({
+                type: 'SERVER_EVENT',
+                payload: {
+                  mapName: delta.mapName,
+                  key: record.key,
+                  record: record.record,
+                  eventType: record.eventType,
+                },
+              }),
+            );
           }
         }
       }
@@ -362,15 +366,19 @@ export class HttpSyncProvider implements IConnectionProvider {
       // Process query results
       if (syncResponse.queryResults) {
         for (const result of syncResponse.queryResults) {
-          this.emit('message', 'http', serialize({
-            type: 'QUERY_RESP',
-            payload: {
-              requestId: result.queryId,
-              results: result.results,
-              hasMore: result.hasMore,
-              nextCursor: result.nextCursor,
-            },
-          }));
+          this.emit(
+            'message',
+            'http',
+            serialize({
+              type: 'QUERY_RESP',
+              payload: {
+                requestId: result.queryId,
+                results: result.results,
+                hasMore: result.hasMore,
+                nextCursor: result.nextCursor,
+              },
+            }),
+          );
         }
       }
 

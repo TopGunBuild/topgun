@@ -201,7 +201,7 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
                     'flex items-start gap-4 p-4 border-2 rounded-lg cursor-pointer transition-all',
                     config.deploymentMode === 'standalone'
                       ? 'border-primary bg-primary/5'
-                      : 'border-border hover:border-primary/50'
+                      : 'border-border hover:border-primary/50',
                   )}
                 >
                   <RadioGroupItem value="standalone" className="mt-1" />
@@ -218,7 +218,7 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
                     'flex items-start gap-4 p-4 border-2 rounded-lg cursor-pointer transition-all',
                     config.deploymentMode === 'cluster'
                       ? 'border-primary bg-primary/5'
-                      : 'border-border hover:border-primary/50'
+                      : 'border-border hover:border-primary/50',
                   )}
                 >
                   <RadioGroupItem value="cluster" className="mt-1" />
@@ -256,7 +256,7 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
                         'flex flex-col items-center p-3 border-2 rounded-lg cursor-pointer text-center',
                         config.storage?.type === opt.value
                           ? 'border-primary bg-primary/5'
-                          : 'border-border'
+                          : 'border-border',
                       )}
                     >
                       <RadioGroupItem value={opt.value} className="sr-only" />
@@ -297,7 +297,7 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
                       <span
                         className={cn(
                           'text-sm flex items-center gap-1',
-                          testResult.success ? 'text-green-600' : 'text-red-600'
+                          testResult.success ? 'text-green-600' : 'text-red-600',
                         )}
                       >
                         {testResult.success ? (

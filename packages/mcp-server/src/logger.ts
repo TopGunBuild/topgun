@@ -13,12 +13,15 @@ import pino from 'pino';
 export function createLogger(options: { debug?: boolean; name?: string } = {}) {
   const { debug = false, name = 'topgun-mcp' } = options;
 
-  return pino({
-    name,
-    level: debug ? 'debug' : 'info',
-    // Always use stderr to not interfere with MCP stdio protocol
-    transport: undefined,
-  }, pino.destination(2)); // fd 2 = stderr
+  return pino(
+    {
+      name,
+      level: debug ? 'debug' : 'info',
+      // Always use stderr to not interfere with MCP stdio protocol
+      transport: undefined,
+    },
+    pino.destination(2),
+  ); // fd 2 = stderr
 }
 
 /**

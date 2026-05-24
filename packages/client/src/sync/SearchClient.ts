@@ -60,7 +60,7 @@ export class SearchClient implements ISearchClient {
   public async search<T>(
     mapName: string,
     query: string,
-    options?: SearchOptions
+    options?: SearchOptions,
   ): Promise<SearchResult<T>[]> {
     if (!this.config.isAuthenticated()) {
       throw new Error('Not connected to server');

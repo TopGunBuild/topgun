@@ -48,8 +48,8 @@ describe('Predicate', () => {
         op: 'and',
         children: [
           { op: 'gte', attribute: 'age', value: 18 },
-          { op: 'lte', attribute: 'age', value: 65 }
-        ]
+          { op: 'lte', attribute: 'age', value: 65 },
+        ],
       });
     });
   });
@@ -58,7 +58,7 @@ describe('Predicate', () => {
     test('and() should combine multiple predicates', () => {
       const node = Predicates.and(
         Predicates.equal('status', 'active'),
-        Predicates.greaterThan('age', 18)
+        Predicates.greaterThan('age', 18),
       );
       expect(node.op).toBe('and');
       expect(node.children).toHaveLength(2);
@@ -67,7 +67,7 @@ describe('Predicate', () => {
     test('or() should combine multiple predicates', () => {
       const node = Predicates.or(
         Predicates.equal('role', 'admin'),
-        Predicates.equal('role', 'moderator')
+        Predicates.equal('role', 'moderator'),
       );
       expect(node.op).toBe('or');
       expect(node.children).toHaveLength(2);
@@ -211,7 +211,10 @@ describe('Predicate', () => {
       });
 
       test('should match email pattern', () => {
-        const predicate = Predicates.regex('email', '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$');
+        const predicate = Predicates.regex(
+          'email',
+          '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$',
+        );
         expect(evaluatePredicate(predicate, { email: 'test@example.com' })).toBe(true);
         expect(evaluatePredicate(predicate, { email: 'invalid-email' })).toBe(false);
       });
@@ -235,7 +238,7 @@ describe('Predicate', () => {
       const predicate = Predicates.and(
         Predicates.equal('status', 'active'),
         Predicates.greaterThan('age', 18),
-        Predicates.lessThan('age', 65)
+        Predicates.lessThan('age', 65),
       );
       expect(evaluatePredicate(predicate, { status: 'active', age: 30 })).toBe(true);
       expect(evaluatePredicate(predicate, { status: 'inactive', age: 30 })).toBe(false);
@@ -247,7 +250,7 @@ describe('Predicate', () => {
       const predicate = Predicates.or(
         Predicates.equal('role', 'admin'),
         Predicates.equal('role', 'moderator'),
-        Predicates.equal('role', 'owner')
+        Predicates.equal('role', 'owner'),
       );
       expect(evaluatePredicate(predicate, { role: 'admin' })).toBe(true);
       expect(evaluatePredicate(predicate, { role: 'moderator' })).toBe(true);
@@ -274,11 +277,8 @@ describe('Predicate', () => {
     test('nested logical operators should work', () => {
       // (role = 'admin' OR role = 'moderator') AND status = 'active'
       const predicate = Predicates.and(
-        Predicates.or(
-          Predicates.equal('role', 'admin'),
-          Predicates.equal('role', 'moderator')
-        ),
-        Predicates.equal('status', 'active')
+        Predicates.or(Predicates.equal('role', 'admin'), Predicates.equal('role', 'moderator')),
+        Predicates.equal('status', 'active'),
       );
       expect(evaluatePredicate(predicate, { role: 'admin', status: 'active' })).toBe(true);
       expect(evaluatePredicate(predicate, { role: 'moderator', status: 'active' })).toBe(true);
@@ -292,10 +292,10 @@ describe('Predicate', () => {
         Predicates.and(
           Predicates.or(
             Predicates.equal('status', 'deleted'),
-            Predicates.equal('status', 'banned')
+            Predicates.equal('status', 'banned'),
           ),
-          Predicates.lessThan('age', 18)
-        )
+          Predicates.lessThan('age', 18),
+        ),
       );
       expect(evaluatePredicate(predicate, { status: 'active', age: 25 })).toBe(true);
       expect(evaluatePredicate(predicate, { status: 'deleted', age: 25 })).toBe(true);
@@ -376,7 +376,11 @@ describe('Predicate', () => {
     });
 
     test('should return false for unknown operator', () => {
-      const unknownPredicate: PredicateNode = { op: 'unknown' as any, attribute: 'name', value: 'test' };
+      const unknownPredicate: PredicateNode = {
+        op: 'unknown' as any,
+        attribute: 'name',
+        value: 'test',
+      };
       expect(evaluatePredicate(unknownPredicate, { name: 'test' })).toBe(false);
     });
   });
@@ -389,16 +393,52 @@ describe('Predicate', () => {
         Predicates.greaterThanOrEqual('age', 18),
         Predicates.or(
           Predicates.like('email', '%@company.com'),
-          Predicates.equal('verified', true)
-        )
+          Predicates.equal('verified', true),
+        ),
       );
 
-      const activeVerifiedUser = { status: 'active', role: 'user', age: 25, email: 'test@gmail.com', verified: true };
-      const activeCompanyUser = { status: 'active', role: 'admin', age: 30, email: 'admin@company.com', verified: false };
-      const guestUser = { status: 'active', role: 'guest', age: 25, email: 'guest@company.com', verified: true };
-      const inactiveUser = { status: 'inactive', role: 'user', age: 25, email: 'user@company.com', verified: true };
-      const minorUser = { status: 'active', role: 'user', age: 16, email: 'minor@company.com', verified: true };
-      const unverifiedExternal = { status: 'active', role: 'user', age: 25, email: 'user@external.com', verified: false };
+      const activeVerifiedUser = {
+        status: 'active',
+        role: 'user',
+        age: 25,
+        email: 'test@gmail.com',
+        verified: true,
+      };
+      const activeCompanyUser = {
+        status: 'active',
+        role: 'admin',
+        age: 30,
+        email: 'admin@company.com',
+        verified: false,
+      };
+      const guestUser = {
+        status: 'active',
+        role: 'guest',
+        age: 25,
+        email: 'guest@company.com',
+        verified: true,
+      };
+      const inactiveUser = {
+        status: 'inactive',
+        role: 'user',
+        age: 25,
+        email: 'user@company.com',
+        verified: true,
+      };
+      const minorUser = {
+        status: 'active',
+        role: 'user',
+        age: 16,
+        email: 'minor@company.com',
+        verified: true,
+      };
+      const unverifiedExternal = {
+        status: 'active',
+        role: 'user',
+        age: 25,
+        email: 'user@external.com',
+        verified: false,
+      };
 
       expect(evaluatePredicate(predicate, activeVerifiedUser)).toBe(true);
       expect(evaluatePredicate(predicate, activeCompanyUser)).toBe(true);
@@ -412,13 +452,19 @@ describe('Predicate', () => {
       const predicate = Predicates.and(
         Predicates.between('price', 10, 100),
         Predicates.regex('name', '^(iPhone|Samsung|Pixel)'),
-        Predicates.greaterThan('stock', 0)
+        Predicates.greaterThan('stock', 0),
       );
 
       expect(evaluatePredicate(predicate, { name: 'iPhone 14', price: 50, stock: 10 })).toBe(true);
-      expect(evaluatePredicate(predicate, { name: 'Samsung Galaxy', price: 80, stock: 5 })).toBe(true);
-      expect(evaluatePredicate(predicate, { name: 'Nokia Phone', price: 50, stock: 10 })).toBe(false);
-      expect(evaluatePredicate(predicate, { name: 'iPhone 15', price: 150, stock: 10 })).toBe(false);
+      expect(evaluatePredicate(predicate, { name: 'Samsung Galaxy', price: 80, stock: 5 })).toBe(
+        true,
+      );
+      expect(evaluatePredicate(predicate, { name: 'Nokia Phone', price: 50, stock: 10 })).toBe(
+        false,
+      );
+      expect(evaluatePredicate(predicate, { name: 'iPhone 15', price: 150, stock: 10 })).toBe(
+        false,
+      );
       expect(evaluatePredicate(predicate, { name: 'Pixel 8', price: 50, stock: 0 })).toBe(false);
     });
 
@@ -428,9 +474,15 @@ describe('Predicate', () => {
 
       const predicate = Predicates.between('createdAt', startOfYear, endOfYear);
 
-      expect(evaluatePredicate(predicate, { createdAt: new Date('2024-06-15').getTime() })).toBe(true);
-      expect(evaluatePredicate(predicate, { createdAt: new Date('2023-12-31').getTime() })).toBe(false);
-      expect(evaluatePredicate(predicate, { createdAt: new Date('2025-01-01').getTime() })).toBe(false);
+      expect(evaluatePredicate(predicate, { createdAt: new Date('2024-06-15').getTime() })).toBe(
+        true,
+      );
+      expect(evaluatePredicate(predicate, { createdAt: new Date('2023-12-31').getTime() })).toBe(
+        false,
+      );
+      expect(evaluatePredicate(predicate, { createdAt: new Date('2025-01-01').getTime() })).toBe(
+        false,
+      );
     });
   });
 });

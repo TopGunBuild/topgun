@@ -17,7 +17,7 @@ export function useServerStatus() {
         if (!res.ok) throw new Error('Failed to fetch server status');
         return res.json();
       },
-    }
+    },
   );
 
   return {

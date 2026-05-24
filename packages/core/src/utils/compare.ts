@@ -84,7 +84,7 @@ export function compareValues(a: unknown, b: unknown): number {
  */
 export function createFieldComparator<T extends Record<string, unknown>>(
   field: string,
-  direction: 'asc' | 'desc' = 'asc'
+  direction: 'asc' | 'desc' = 'asc',
 ): (a: T, b: T) => number {
   return (a: T, b: T) => {
     const comparison = compareValues(a[field], b[field]);

@@ -254,7 +254,13 @@ async function main(): Promise<void> {
       await httpTransport.start(server);
 
       logger.info({ port: options.port }, 'TopGun MCP Server (HTTP) listening');
-      logger.info({ health: `http://localhost:${options.port}/health`, mcp: `http://localhost:${options.port}/mcp` }, 'Endpoints');
+      logger.info(
+        {
+          health: `http://localhost:${options.port}/health`,
+          mcp: `http://localhost:${options.port}/mcp`,
+        },
+        'Endpoints',
+      );
     } else {
       // Start stdio transport (default)
       await server.start();

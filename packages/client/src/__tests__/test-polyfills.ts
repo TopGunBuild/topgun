@@ -8,7 +8,6 @@ import * as crypto from 'crypto';
 
 // Extend globalThis for WebCrypto polyfill (Node.js environment)
 declare global {
-   
   var crypto: Crypto;
 }
 

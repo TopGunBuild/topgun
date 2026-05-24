@@ -18,7 +18,9 @@ export async function handleStats(rawArgs: unknown, ctx: ToolContext): Promise<M
   // Validate arguments with Zod
   const parseResult = StatsArgsSchema.safeParse(rawArgs);
   if (!parseResult.success) {
-    const errors = parseResult.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`).join(', ');
+    const errors = parseResult.error.issues
+      .map((e) => `${e.path.join('.')}: ${e.message}`)
+      .join(', ');
     return {
       content: [{ type: 'text', text: `Invalid arguments: ${errors}` }],
       isError: true,
@@ -124,7 +126,7 @@ export async function handleStats(rawArgs: unknown, ctx: ToolContext): Promise<M
               (m) =>
                 `  ${m.name}:\n` +
                 `    - Records: ${m.recordCount}\n` +
-                `    - Tombstones: ${m.tombstoneCount}`
+                `    - Tombstones: ${m.tombstoneCount}`,
             )
             .join('\n')
         : map

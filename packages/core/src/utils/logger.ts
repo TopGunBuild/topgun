@@ -11,8 +11,8 @@ const logLevel = (typeof process !== 'undefined' && process.env && process.env.L
 export const logger = pino({
   level: logLevel,
   browser: {
-    asObject: true
-  }
+    asObject: true,
+  },
 });
 
 export type Logger = typeof logger;

@@ -68,7 +68,7 @@ export class TopicManager implements ITopicManager {
     if (this.config.isAuthenticated()) {
       this.config.sendMessage({
         type: 'TOPIC_UNSUB',
-        payload: { topic }
+        payload: { topic },
       });
     }
   }
@@ -81,7 +81,7 @@ export class TopicManager implements ITopicManager {
     if (this.config.isAuthenticated()) {
       this.config.sendMessage({
         type: 'TOPIC_PUB',
-        payload: { topic, data }
+        payload: { topic, data },
       });
     } else {
       this.queueTopicMessage(topic, data);
@@ -138,7 +138,12 @@ export class TopicManager implements ITopicManager {
   /**
    * Handle incoming topic message from server.
    */
-  public handleTopicMessage(topic: string, data: any, publisherId: string, timestamp: number): void {
+  public handleTopicMessage(
+    topic: string,
+    data: any,
+    publisherId: string,
+    timestamp: number,
+  ): void {
     const handle = this.topics.get(topic);
     if (handle) {
       handle.onMessage(data, { publisherId, timestamp });
@@ -179,7 +184,7 @@ export class TopicManager implements ITopicManager {
   private sendTopicSubscription(topic: string): void {
     this.config.sendMessage({
       type: 'TOPIC_SUB',
-      payload: { topic }
+      payload: { topic },
     });
   }
 }

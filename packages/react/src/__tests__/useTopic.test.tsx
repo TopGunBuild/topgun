@@ -18,7 +18,7 @@ const createMockTopicHandle = () => {
     publish: jest.fn(),
     // Helper to trigger messages
     _triggerMessage: (data: any, context: any = { timestamp: Date.now() }) => {
-      listeners.forEach(cb => cb(data, context));
+      listeners.forEach((cb) => cb(data, context));
     },
     _getListenerCount: () => listeners.size,
   };
@@ -136,10 +136,10 @@ describe('useTopic', () => {
     const callback1 = jest.fn();
     const callback2 = jest.fn();
 
-    const { rerender } = renderHook(
-      ({ callback }) => useTopic('test-topic', callback),
-      { wrapper, initialProps: { callback: callback1 } }
-    );
+    const { rerender } = renderHook(({ callback }) => useTopic('test-topic', callback), {
+      wrapper,
+      initialProps: { callback: callback1 },
+    });
 
     act(() => {
       mockTopicHandle._triggerMessage({ msg: 'first' }, { timestamp: 1 });

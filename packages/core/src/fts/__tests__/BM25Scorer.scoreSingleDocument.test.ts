@@ -30,11 +30,7 @@ describe('BM25Scorer.scoreSingleDocument', () => {
     test('should return 0 for non-matching document', () => {
       index.addDocument('doc1', ['hello', 'world']);
 
-      const score = scorer.scoreSingleDocument(
-        ['goodbye'],
-        ['hello', 'world'],
-        index
-      );
+      const score = scorer.scoreSingleDocument(['goodbye'], ['hello', 'world'], index);
 
       expect(score).toBe(0);
     });
@@ -59,11 +55,7 @@ describe('BM25Scorer.scoreSingleDocument', () => {
       // Empty index has avgDocLength = 0
       const emptyIndex = new BM25InvertedIndex();
 
-      const score = scorer.scoreSingleDocument(
-        ['hello'],
-        ['hello', 'world'],
-        emptyIndex
-      );
+      const score = scorer.scoreSingleDocument(['hello'], ['hello', 'world'], emptyIndex);
 
       expect(score).toBe(0);
     });
@@ -95,11 +87,7 @@ describe('BM25Scorer.scoreSingleDocument', () => {
       const queryTerms = ['hello', 'world', 'missing'];
 
       // Score doc1 which has 'hello' and 'world' but not 'missing'
-      const score = scorer.scoreSingleDocument(
-        queryTerms,
-        ['hello', 'world', 'test'],
-        index
-      );
+      const score = scorer.scoreSingleDocument(queryTerms, ['hello', 'world', 'test'], index);
 
       // Score should include contributions from 'hello' and 'world'
       expect(score).toBeGreaterThan(0);
@@ -135,16 +123,8 @@ describe('BM25Scorer.scoreSingleDocument', () => {
       index.addDocument('doc2', ['common']);
       index.addDocument('doc3', ['common']);
 
-      const rareScore = scorer.scoreSingleDocument(
-        ['rare'],
-        ['rare', 'common'],
-        index
-      );
-      const commonScore = scorer.scoreSingleDocument(
-        ['common'],
-        ['rare', 'common'],
-        index
-      );
+      const rareScore = scorer.scoreSingleDocument(['rare'], ['rare', 'common'], index);
+      const commonScore = scorer.scoreSingleDocument(['common'], ['rare', 'common'], index);
 
       // Rare term should contribute more to score
       expect(rareScore).toBeGreaterThan(commonScore);
@@ -155,18 +135,10 @@ describe('BM25Scorer.scoreSingleDocument', () => {
       index.addDocument('doc2', ['term', 'term', 'term']);
 
       // Same tokens as doc2
-      const highTfScore = scorer.scoreSingleDocument(
-        ['term'],
-        ['term', 'term', 'term'],
-        index
-      );
+      const highTfScore = scorer.scoreSingleDocument(['term'], ['term', 'term', 'term'], index);
 
       // Same tokens as doc1
-      const lowTfScore = scorer.scoreSingleDocument(
-        ['term'],
-        ['term', 'other'],
-        index
-      );
+      const lowTfScore = scorer.scoreSingleDocument(['term'], ['term', 'other'], index);
 
       expect(highTfScore).toBeGreaterThan(lowTfScore);
     });
@@ -182,7 +154,7 @@ describe('BM25Scorer.scoreSingleDocument', () => {
       const longDocScore = scorer.scoreSingleDocument(
         ['term'],
         ['term', 'other', 'words', 'here'],
-        index
+        index,
       );
 
       // Shorter doc should score higher
@@ -198,15 +170,11 @@ describe('BM25Scorer.scoreSingleDocument', () => {
       const lowK1Scorer = new BM25Scorer({ k1: 0.5 });
       const highK1Scorer = new BM25Scorer({ k1: 2.0 });
 
-      const lowK1Score = lowK1Scorer.scoreSingleDocument(
-        ['term'],
-        ['term', 'term', 'term'],
-        index
-      );
+      const lowK1Score = lowK1Scorer.scoreSingleDocument(['term'], ['term', 'term', 'term'], index);
       const highK1Score = highK1Scorer.scoreSingleDocument(
         ['term'],
         ['term', 'term', 'term'],
-        index
+        index,
       );
 
       // Higher k1 should amplify effect of repeated terms
@@ -224,14 +192,14 @@ describe('BM25Scorer.scoreSingleDocument', () => {
       const longLowB = lowBScorer.scoreSingleDocument(
         ['term'],
         ['term', 'word', 'word', 'word'],
-        index
+        index,
       );
 
       // Long doc with high b
       const longHighB = highBScorer.scoreSingleDocument(
         ['term'],
         ['term', 'word', 'word', 'word'],
-        index
+        index,
       );
 
       // Higher b penalizes long docs more
@@ -243,11 +211,7 @@ describe('BM25Scorer.scoreSingleDocument', () => {
     test('should handle single document in index', () => {
       index.addDocument('doc1', ['hello', 'world']);
 
-      const score = scorer.scoreSingleDocument(
-        ['hello'],
-        ['hello', 'world'],
-        index
-      );
+      const score = scorer.scoreSingleDocument(['hello'], ['hello', 'world'], index);
 
       expect(score).toBeGreaterThan(0);
     });
@@ -255,17 +219,9 @@ describe('BM25Scorer.scoreSingleDocument', () => {
     test('should handle duplicate query terms', () => {
       index.addDocument('doc1', ['hello', 'world']);
 
-      const singleScore = scorer.scoreSingleDocument(
-        ['hello'],
-        ['hello', 'world'],
-        index
-      );
+      const singleScore = scorer.scoreSingleDocument(['hello'], ['hello', 'world'], index);
 
-      const doubleScore = scorer.scoreSingleDocument(
-        ['hello', 'hello'],
-        ['hello', 'world'],
-        index
-      );
+      const doubleScore = scorer.scoreSingleDocument(['hello', 'hello'], ['hello', 'world'], index);
 
       // Duplicate query terms should increase score
       expect(doubleScore).toBeGreaterThan(singleScore);
@@ -275,11 +231,7 @@ describe('BM25Scorer.scoreSingleDocument', () => {
       index.addDocument('doc1', ['hello', 'hello', 'hello']);
       index.addDocument('doc2', ['world']);
 
-      const score = scorer.scoreSingleDocument(
-        ['hello'],
-        ['hello', 'hello', 'hello'],
-        index
-      );
+      const score = scorer.scoreSingleDocument(['hello'], ['hello', 'hello', 'hello'], index);
 
       expect(score).toBeGreaterThan(0);
     });
@@ -288,11 +240,7 @@ describe('BM25Scorer.scoreSingleDocument', () => {
       index.addDocument('doc1', ['hello', 'world']);
 
       // Query with term not in any document
-      const score = scorer.scoreSingleDocument(
-        ['notinindex'],
-        ['notinindex'],
-        index
-      );
+      const score = scorer.scoreSingleDocument(['notinindex'], ['notinindex'], index);
 
       // Term not in index has IDF = 0
       expect(score).toBe(0);
@@ -316,11 +264,7 @@ describe('BM25Scorer.scoreSingleDocument', () => {
         .fill(null)
         .map((_, i) => `term${i}`);
 
-      const score = scorer.scoreSingleDocument(
-        longQuery,
-        ['term1', 'term2', 'term3'],
-        index
-      );
+      const score = scorer.scoreSingleDocument(longQuery, ['term1', 'term2', 'term3'], index);
 
       expect(score).toBeGreaterThan(0);
     });

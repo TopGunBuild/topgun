@@ -67,7 +67,7 @@ describe('Network-aware Cost Model', () => {
 
       expect(calculateTotalCost(networkOnly)).toBeGreaterThan(calculateTotalCost(cpuOnly));
       expect(calculateTotalCost(networkOnly)).toBe(100); // 10 * 10
-      expect(calculateTotalCost(cpuOnly)).toBe(10);      // 10 * 1
+      expect(calculateTotalCost(cpuOnly)).toBe(10); // 10 * 1
     });
   });
 
@@ -194,7 +194,10 @@ describe('Network-aware Cost Model', () => {
           expect(plan.root.source.type).toBe('index-scan');
 
           const filterCost = optimizer.estimateDistributedCost(plan.root, distributedContext);
-          const sourceCost = optimizer.estimateDistributedCost(plan.root.source, distributedContext);
+          const sourceCost = optimizer.estimateDistributedCost(
+            plan.root.source,
+            distributedContext,
+          );
 
           // Filter should inherit source network cost
           expect(filterCost.network).toBe(sourceCost.network);

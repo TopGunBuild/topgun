@@ -18,7 +18,9 @@ export async function handleSearch(rawArgs: unknown, ctx: ToolContext): Promise<
   // Validate arguments with Zod
   const parseResult = SearchArgsSchema.safeParse(rawArgs);
   if (!parseResult.success) {
-    const errors = parseResult.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`).join(', ');
+    const errors = parseResult.error.issues
+      .map((e) => `${e.path.join('.')}: ${e.message}`)
+      .join(', ');
     return {
       content: [{ type: 'text', text: `Invalid arguments: ${errors}` }],
       isError: true,
@@ -66,7 +68,7 @@ export async function handleSearch(rawArgs: unknown, ctx: ToolContext): Promise<
         (result, idx) =>
           `${idx + 1}. [Score: ${result.score.toFixed(3)}] [${result.key}]\n` +
           `   Matched: ${result.matchedTerms.join(', ')}\n` +
-          `   Data: ${JSON.stringify(result.value, null, 2).split('\n').join('\n   ')}`
+          `   Data: ${JSON.stringify(result.value, null, 2).split('\n').join('\n   ')}`,
       )
       .join('\n\n');
 

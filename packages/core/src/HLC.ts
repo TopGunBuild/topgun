@@ -84,7 +84,7 @@ export class HLC {
    */
   public now(): Timestamp {
     const systemTime = this.clockSource.now();
-    
+
     // If local physical time catches up to logical time, reset counter
     if (systemTime > this.lastMillis) {
       this.lastMillis = systemTime;
@@ -97,7 +97,7 @@ export class HLC {
     return {
       millis: this.lastMillis,
       counter: this.lastCounter,
-      nodeId: this.nodeId
+      nodeId: this.nodeId,
     };
   }
 
@@ -113,7 +113,10 @@ export class HLC {
     // Guard against NaN — if millis/counter are undefined or invalid,
     // Math.max() returns NaN which permanently poisons the clock.
     if (!Number.isFinite(remoteMillis) || !Number.isFinite(remoteCounter)) {
-      logger.warn({ remoteMillis, remoteCounter, remote }, 'HLC.update() received invalid timestamp, ignoring');
+      logger.warn(
+        { remoteMillis, remoteCounter, remote },
+        'HLC.update() received invalid timestamp, ignoring',
+      );
       return;
     }
 
@@ -123,14 +126,19 @@ export class HLC {
     const drift = remoteMillis - systemTime;
     if (drift > this.maxDriftMs) {
       if (this.strictMode) {
-        throw new Error(`Clock drift detected: Remote time ${remoteMillis} is ${drift}ms ahead of local ${systemTime} (threshold: ${this.maxDriftMs}ms)`);
+        throw new Error(
+          `Clock drift detected: Remote time ${remoteMillis} is ${drift}ms ahead of local ${systemTime} (threshold: ${this.maxDriftMs}ms)`,
+        );
       } else {
-        logger.warn({
-          drift,
-          remoteMillis,
-          localMillis: systemTime,
-          maxDriftMs: this.maxDriftMs
-        }, 'Clock drift detected');
+        logger.warn(
+          {
+            drift,
+            remoteMillis,
+            localMillis: systemTime,
+            maxDriftMs: this.maxDriftMs,
+          },
+          'Clock drift detected',
+        );
         // In AP systems we accept and fast-forward
       }
     }
@@ -187,7 +195,7 @@ export class HLC {
     return {
       millis: parseInt(parts[0], 10),
       counter: parseInt(parts[1], 10),
-      nodeId: parts[2]
+      nodeId: parts[2],
     };
   }
 }

@@ -34,8 +34,8 @@ export interface ConnectionPoolEvents {
   'node:healthy': (nodeId: string) => void;
   'node:unhealthy': (nodeId: string, reason: string) => void;
   'node:remapped': (oldId: string, newId: string) => void;
-  'message': (nodeId: string, message: any) => void;
-  'error': (nodeId: string, error: Error) => void;
+  message: (nodeId: string, message: any) => void;
+  error: (nodeId: string, error: Error) => void;
 }
 
 interface NodeConnection {
@@ -190,9 +190,8 @@ export class ConnectionPool {
 
     // Update primary if needed
     if (this.primaryNodeId === nodeId) {
-      this.primaryNodeId = this.connections.size > 0
-        ? this.connections.keys().next().value ?? null
-        : null;
+      this.primaryNodeId =
+        this.connections.size > 0 ? (this.connections.keys().next().value ?? null) : null;
     }
 
     logger.info({ nodeId }, 'Node removed from connection pool');
@@ -386,7 +385,7 @@ export class ConnectionPool {
     this.stopHealthCheck();
 
     const nodeIds = Array.from(this.connections.keys());
-    await Promise.all(nodeIds.map(nodeId => this.removeNode(nodeId)));
+    await Promise.all(nodeIds.map((nodeId) => this.removeNode(nodeId)));
 
     this.connections.clear();
     this.primaryNodeId = null;
@@ -439,7 +438,11 @@ export class ConnectionPool {
 
       socket.onerror = (error) => {
         logger.error({ nodeId: connection.nodeId, error }, 'WebSocket error');
-        this.emit('error', connection.nodeId, error instanceof Error ? error : new Error('WebSocket error'));
+        this.emit(
+          'error',
+          connection.nodeId,
+          error instanceof Error ? error : new Error('WebSocket error'),
+        );
       };
 
       socket.onclose = () => {
@@ -459,7 +462,6 @@ export class ConnectionPool {
         // Schedule reconnect
         this.scheduleReconnect(connection.nodeId);
       };
-
     } catch (error) {
       connection.state = 'FAILED';
       logger.error({ nodeId: connection.nodeId, error }, 'Failed to connect');
@@ -470,10 +472,12 @@ export class ConnectionPool {
   private sendAuth(connection: NodeConnection): void {
     if (!this.authToken || !connection.socket) return;
 
-    connection.socket.send(serialize({
-      type: 'AUTH',
-      token: this.authToken,
-    }));
+    connection.socket.send(
+      serialize({
+        type: 'AUTH',
+        token: this.authToken,
+      }),
+    );
   }
 
   private handleMessage(nodeId: string, event: MessageEvent): void {
@@ -542,7 +546,10 @@ export class ConnectionPool {
     }
 
     if (pending.length > 0) {
-      logger.debug({ nodeId: connection.nodeId, count: pending.length }, 'Flushed pending messages');
+      logger.debug(
+        { nodeId: connection.nodeId, count: pending.length },
+        'Flushed pending messages',
+      );
     }
   }
 
@@ -559,7 +566,10 @@ export class ConnectionPool {
     // Check max attempts
     if (connection.reconnectAttempts >= this.config.maxReconnectAttempts) {
       connection.state = 'FAILED';
-      logger.error({ nodeId, attempts: connection.reconnectAttempts }, 'Max reconnect attempts reached');
+      logger.error(
+        { nodeId, attempts: connection.reconnectAttempts },
+        'Max reconnect attempts reached',
+      );
       this.emit('node:unhealthy', nodeId, 'Max reconnect attempts reached');
       return;
     }
@@ -567,7 +577,7 @@ export class ConnectionPool {
     // Calculate backoff delay
     const delay = Math.min(
       this.config.reconnectDelayMs * Math.pow(2, connection.reconnectAttempts),
-      this.config.maxReconnectDelayMs
+      this.config.maxReconnectDelayMs,
     );
 
     connection.state = 'RECONNECTING';
@@ -596,10 +606,12 @@ export class ConnectionPool {
 
       // Send ping
       if (connection.socket?.readyState === WebSocket.OPEN) {
-        connection.socket.send(serialize({
-          type: 'PING',
-          timestamp: now,
-        }));
+        connection.socket.send(
+          serialize({
+            type: 'PING',
+            timestamp: now,
+          }),
+        );
       }
     }
   }

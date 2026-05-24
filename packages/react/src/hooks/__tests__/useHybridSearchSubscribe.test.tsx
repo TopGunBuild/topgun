@@ -10,9 +10,7 @@ const mockSubscribe = jest.fn();
 const mockSetQuery = jest.fn();
 const mockSetOptions = jest.fn();
 
-const createMockHandle = (
-  subscribeCb?: (callback: (results: any[]) => void) => () => void
-) => ({
+const createMockHandle = (subscribeCb?: (callback: (results: any[]) => void) => () => void) => ({
   dispose: mockDispose,
   subscribe: subscribeCb ?? mockSubscribe,
   setQuery: mockSetQuery,
@@ -55,7 +53,7 @@ describe('useHybridSearchSubscribe', () => {
 
     const { result } = renderHook(
       () => useHybridSearchSubscribe('docs', 'query', { methods: ['fullText'] }),
-      { wrapper }
+      { wrapper },
     );
 
     // Should be loading initially
@@ -94,10 +92,7 @@ describe('useHybridSearchSubscribe', () => {
   // ============================================
 
   it('AC #11a: returns { results:[], loading:false, error:null } and does NOT subscribe when queryText is empty', () => {
-    const { result } = renderHook(
-      () => useHybridSearchSubscribe('docs', ''),
-      { wrapper }
-    );
+    const { result } = renderHook(() => useHybridSearchSubscribe('docs', ''), { wrapper });
 
     expect(result.current.results).toEqual([]);
     expect(result.current.loading).toBe(false);
@@ -106,10 +101,7 @@ describe('useHybridSearchSubscribe', () => {
   });
 
   it('AC #11b: returns { results:[], loading:false, error:null } and does NOT subscribe when queryText is whitespace-only', () => {
-    const { result } = renderHook(
-      () => useHybridSearchSubscribe('docs', '   '),
-      { wrapper }
-    );
+    const { result } = renderHook(() => useHybridSearchSubscribe('docs', '   '), { wrapper });
 
     expect(result.current.results).toEqual([]);
     expect(result.current.loading).toBe(false);
@@ -120,7 +112,7 @@ describe('useHybridSearchSubscribe', () => {
   it('AC #11c: returns { results:[], loading:false, error:null } and does NOT subscribe when enabled is false', () => {
     const { result } = renderHook(
       () => useHybridSearchSubscribe('docs', 'query', { enabled: false }),
-      { wrapper }
+      { wrapper },
     );
 
     expect(result.current.results).toEqual([]);
@@ -150,7 +142,7 @@ describe('useHybridSearchSubscribe', () => {
       {
         wrapper,
         initialProps: { vector: new Float32Array([0.1, 0.2]) },
-      }
+      },
     );
 
     act(() => {
@@ -181,7 +173,7 @@ describe('useHybridSearchSubscribe', () => {
       {
         wrapper,
         initialProps: { vector: new Float32Array([0.1, 0.2]) },
-      }
+      },
     );
 
     act(() => capturedCallback!([]));
@@ -206,10 +198,9 @@ describe('useHybridSearchSubscribe', () => {
     });
     mockHybridSearchSubscribe.mockReturnValue(handle);
 
-    const { result, unmount } = renderHook(
-      () => useHybridSearchSubscribe('docs', 'query'),
-      { wrapper }
-    );
+    const { result, unmount } = renderHook(() => useHybridSearchSubscribe('docs', 'query'), {
+      wrapper,
+    });
 
     act(() => capturedCallback!([]));
     await waitFor(() => expect(result.current.loading).toBe(false));
@@ -236,7 +227,7 @@ describe('useHybridSearchSubscribe', () => {
       {
         wrapper,
         initialProps: { query: 'first' },
-      }
+      },
     );
 
     act(() => capturedCallback!([]));

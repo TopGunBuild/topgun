@@ -52,7 +52,7 @@ export class VirtualNetwork {
     this.config = {
       latencyMs: { min: 0, max: 0 },
       packetLossRate: 0,
-      partitions: []
+      partitions: [],
     };
   }
 
@@ -95,10 +95,7 @@ export class VirtualNetwork {
     }
 
     // Calculate delivery time
-    const latency = this.rng.randomInt(
-      this.config.latencyMs.min,
-      this.config.latencyMs.max
-    );
+    const latency = this.rng.randomInt(this.config.latencyMs.min, this.config.latencyMs.max);
     const scheduledTime = this.clock.now() + latency;
 
     // Add to pending messages
@@ -106,7 +103,7 @@ export class VirtualNetwork {
       from,
       to,
       payload,
-      scheduledTime
+      scheduledTime,
     });
   }
 

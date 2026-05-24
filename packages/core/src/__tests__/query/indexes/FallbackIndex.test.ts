@@ -210,7 +210,11 @@ describe('createPredicateMatcher', () => {
     });
 
     it('should not match undefined attribute', () => {
-      const recordWithUndefined = { name: 'Alice', age: undefined, score: 85 } as unknown as TestRecord;
+      const recordWithUndefined = {
+        name: 'Alice',
+        age: undefined,
+        score: 85,
+      } as unknown as TestRecord;
       const matcher = createPredicateMatcher<TestRecord>(getAttribute);
       const query: IndexQuery<unknown> & { attribute: string } = {
         type: 'has',

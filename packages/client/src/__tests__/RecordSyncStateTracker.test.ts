@@ -120,7 +120,7 @@ describe('RecordSyncStateTracker', () => {
       expect(tracker.get('todos', 'k')).toBe('conflicted');
     });
 
-    it("late-arrival rejection (timestamp < latest local write) does NOT mark conflicted", () => {
+    it('late-arrival rejection (timestamp < latest local write) does NOT mark conflicted', () => {
       const tracker = new RecordSyncStateTracker(SyncState.CONNECTED);
       // Local write at t=100.
       tracker.onAppend(makeOp('todos', 'k', ts(100)));
@@ -132,7 +132,7 @@ describe('RecordSyncStateTracker', () => {
       expect(tracker.get('todos', 'k')).toBe('pending');
     });
 
-    it("conflicted clears when a subsequent ack lands for the same key", () => {
+    it('conflicted clears when a subsequent ack lands for the same key', () => {
       const tracker = new RecordSyncStateTracker(SyncState.CONNECTED);
       // Initial write -> rejected.
       tracker.onAppend(makeOp('todos', 'k', ts(100)));

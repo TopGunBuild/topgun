@@ -17,8 +17,9 @@ import { HLC, Timestamp } from '../HLC';
 
 // Arbitrary generators for test data
 
-const arbNodeId: fc.Arbitrary<string> = fc.string({ minLength: 1, maxLength: 10 })
-  .filter(s => /^[a-z0-9]+$/.test(s));
+const arbNodeId: fc.Arbitrary<string> = fc
+  .string({ minLength: 1, maxLength: 10 })
+  .filter((s) => /^[a-z0-9]+$/.test(s));
 
 const arbTimestamp: fc.Arbitrary<Timestamp> = fc.record({
   millis: fc.integer({ min: 1000000000000, max: 2000000000000 }), // Reasonable timestamp range
@@ -34,7 +35,7 @@ const arbValue: fc.Arbitrary<any> = fc.oneof(
   fc.record({
     name: fc.string(),
     count: fc.integer(),
-  })
+  }),
 );
 
 const arbRecord = (arbVal: fc.Arbitrary<any>): fc.Arbitrary<LWWRecord<any>> =>
@@ -44,8 +45,9 @@ const arbRecord = (arbVal: fc.Arbitrary<any>): fc.Arbitrary<LWWRecord<any>> =>
     ttlMs: fc.option(fc.integer({ min: 1000, max: 3600000 }), { nil: undefined }),
   });
 
-const arbKey: fc.Arbitrary<string> = fc.string({ minLength: 1, maxLength: 5 })
-  .filter(s => /^[a-z]+$/.test(s));
+const arbKey: fc.Arbitrary<string> = fc
+  .string({ minLength: 1, maxLength: 5 })
+  .filter((s) => /^[a-z]+$/.test(s));
 
 // Helper to create a fresh LWWMap
 function createMap(nodeId: string = 'test-node'): LWWMap<string, any> {
@@ -111,35 +113,40 @@ describe('LWWMap Property-Based Tests', () => {
             expect(HLC.compare(rec.timestamp, rec2!.timestamp)).toBe(0);
           }
         }),
-        { numRuns: 100 }
+        { numRuns: 100 },
       );
     });
 
     it('multiple identical merges should be idempotent', () => {
       fc.assert(
-        fc.property(arbKey, arbRecord(arbValue), fc.integer({ min: 2, max: 10 }), (key, record, times) => {
-          const map = createMap('node-1');
+        fc.property(
+          arbKey,
+          arbRecord(arbValue),
+          fc.integer({ min: 2, max: 10 }),
+          (key, record, times) => {
+            const map = createMap('node-1');
 
-          // First merge
-          map.merge(key, record);
-          const initialState = cloneMapState(map);
-
-          // Merge the same record multiple times
-          for (let i = 0; i < times; i++) {
+            // First merge
             map.merge(key, record);
-          }
+            const initialState = cloneMapState(map);
 
-          const finalState = cloneMapState(map);
+            // Merge the same record multiple times
+            for (let i = 0; i < times; i++) {
+              map.merge(key, record);
+            }
 
-          // State should be identical to initial
-          expect(initialState.size).toBe(finalState.size);
-          for (const [k, rec] of initialState) {
-            const rec2 = finalState.get(k);
-            expect(rec2).toBeDefined();
-            expect(rec.value).toEqual(rec2!.value);
-          }
-        }),
-        { numRuns: 50 }
+            const finalState = cloneMapState(map);
+
+            // State should be identical to initial
+            expect(initialState.size).toBe(finalState.size);
+            for (const [k, rec] of initialState) {
+              const rec2 = finalState.get(k);
+              expect(rec2).toBeDefined();
+              expect(rec.value).toEqual(rec2!.value);
+            }
+          },
+        ),
+        { numRuns: 50 },
       );
     });
   });
@@ -167,7 +174,7 @@ describe('LWWMap Property-Based Tests', () => {
           expect(rec1!.value).toEqual(rec2!.value);
           expect(HLC.compare(rec1!.timestamp, rec2!.timestamp)).toBe(0);
         }),
-        { numRuns: 100 }
+        { numRuns: 100 },
       );
     });
 
@@ -190,9 +197,9 @@ describe('LWWMap Property-Based Tests', () => {
 
             // Both should converge to same state
             expect(mapsEqual(map1, map2)).toBe(true);
-          }
+          },
         ),
-        { numRuns: 50 }
+        { numRuns: 50 },
       );
     });
   });
@@ -233,9 +240,9 @@ describe('LWWMap Property-Based Tests', () => {
             expect(recRight).toBeDefined();
             expect(recLeft!.value).toEqual(recRight!.value);
             expect(HLC.compare(recLeft!.timestamp, recRight!.timestamp)).toBe(0);
-          }
+          },
         ),
-        { numRuns: 100 }
+        { numRuns: 100 },
       );
     });
   });
@@ -249,7 +256,7 @@ describe('LWWMap Property-Based Tests', () => {
           (operations, numReplicas) => {
             // Create replicas
             const replicas = Array.from({ length: numReplicas }, (_, i) =>
-              createMap(`replica-${i}`)
+              createMap(`replica-${i}`),
             );
 
             // Each replica receives operations in a different shuffled order
@@ -265,53 +272,49 @@ describe('LWWMap Property-Based Tests', () => {
             for (let i = 1; i < numReplicas; i++) {
               expect(mapsEqual(replicas[0], replicas[i])).toBe(true);
             }
-          }
+          },
         ),
-        { numRuns: 30 }
+        { numRuns: 30 },
       );
     });
 
     it('replicas should converge even with concurrent writes', () => {
       fc.assert(
-        fc.property(
-          arbKey,
-          fc.array(arbValue, { minLength: 2, maxLength: 5 }),
-          (key, values) => {
-            // Each "node" writes a different value with its own timestamp
-            const records: LWWRecord<any>[] = values.map((value, i) => ({
-              value,
-              timestamp: {
-                millis: Date.now() + i, // Slightly different times
-                counter: 0,
-                nodeId: `node-${i}`,
-              },
-            }));
+        fc.property(arbKey, fc.array(arbValue, { minLength: 2, maxLength: 5 }), (key, values) => {
+          // Each "node" writes a different value with its own timestamp
+          const records: LWWRecord<any>[] = values.map((value, i) => ({
+            value,
+            timestamp: {
+              millis: Date.now() + i, // Slightly different times
+              counter: 0,
+              nodeId: `node-${i}`,
+            },
+          }));
 
-            // Create two replicas
-            const replica1 = createMap('replica-1');
-            const replica2 = createMap('replica-2');
+          // Create two replicas
+          const replica1 = createMap('replica-1');
+          const replica2 = createMap('replica-2');
 
-            // Replica 1 receives in order
-            for (const record of records) {
-              replica1.merge(key, record);
-            }
-
-            // Replica 2 receives in reverse order
-            for (const record of [...records].reverse()) {
-              replica2.merge(key, record);
-            }
-
-            // Should converge to the same value
-            const rec1 = replica1.getRecord(key);
-            const rec2 = replica2.getRecord(key);
-
-            expect(rec1).toBeDefined();
-            expect(rec2).toBeDefined();
-            expect(rec1!.value).toEqual(rec2!.value);
-            expect(HLC.compare(rec1!.timestamp, rec2!.timestamp)).toBe(0);
+          // Replica 1 receives in order
+          for (const record of records) {
+            replica1.merge(key, record);
           }
-        ),
-        { numRuns: 50 }
+
+          // Replica 2 receives in reverse order
+          for (const record of [...records].reverse()) {
+            replica2.merge(key, record);
+          }
+
+          // Should converge to the same value
+          const rec1 = replica1.getRecord(key);
+          const rec2 = replica2.getRecord(key);
+
+          expect(rec1).toBeDefined();
+          expect(rec2).toBeDefined();
+          expect(rec1!.value).toEqual(rec2!.value);
+          expect(HLC.compare(rec1!.timestamp, rec2!.timestamp)).toBe(0);
+        }),
+        { numRuns: 50 },
       );
     });
   });
@@ -341,7 +344,7 @@ describe('LWWMap Property-Based Tests', () => {
           expect(changed).toBe(false);
           expect(map.getRecord(key)!.value).toEqual(value2);
         }),
-        { numRuns: 100 }
+        { numRuns: 100 },
       );
     });
 
@@ -369,7 +372,7 @@ describe('LWWMap Property-Based Tests', () => {
           expect(changed).toBe(false);
           expect(map.getRecord(key)!.value).toEqual(value2);
         }),
-        { numRuns: 100 }
+        { numRuns: 100 },
       );
     });
 
@@ -398,7 +401,7 @@ describe('LWWMap Property-Based Tests', () => {
           expect(changed).toBe(true);
           expect(map.getRecord(key)!.value).toEqual(value2);
         }),
-        { numRuns: 50 }
+        { numRuns: 50 },
       );
     });
   });
@@ -428,7 +431,7 @@ describe('LWWMap Property-Based Tests', () => {
           expect(map.getRecord(key)).toBeDefined();
           expect(map.getRecord(key)!.value).toBeNull();
         }),
-        { numRuns: 50 }
+        { numRuns: 50 },
       );
     });
 
@@ -455,7 +458,7 @@ describe('LWWMap Property-Based Tests', () => {
           map.merge(key, resurrection);
           expect(map.get(key)).toEqual(value);
         }),
-        { numRuns: 50 }
+        { numRuns: 50 },
       );
     });
   });

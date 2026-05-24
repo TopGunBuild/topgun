@@ -49,18 +49,33 @@ export type ChangeEventType = z.infer<typeof ChangeEventTypeSchema>;
 
 // --- Predicate Types ---
 export const PredicateOpSchema = z.enum([
-  'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'like', 'regex', 'and', 'or', 'not',
-  'in', 'between', 'isNull', 'isNotNull'
+  'eq',
+  'neq',
+  'gt',
+  'gte',
+  'lt',
+  'lte',
+  'like',
+  'regex',
+  'and',
+  'or',
+  'not',
+  'in',
+  'between',
+  'isNull',
+  'isNotNull',
 ]);
 // Type export omitted: PredicateOp is already exported from predicate.ts
 
-export const PredicateNodeSchema: z.ZodType<any> = z.lazy(() => z.object({
-  op: PredicateOpSchema,
-  attribute: z.string().optional(),
-  value: z.any().optional(),
-  children: z.array(PredicateNodeSchema).optional(),
-  valueRef: z.string().optional(),
-}));
+export const PredicateNodeSchema: z.ZodType<any> = z.lazy(() =>
+  z.object({
+    op: PredicateOpSchema,
+    attribute: z.string().optional(),
+    value: z.any().optional(),
+    children: z.array(PredicateNodeSchema).optional(),
+    valueRef: z.string().optional(),
+  }),
+);
 // Type export omitted: PredicateNode is already exported from predicate.ts
 
 // --- Query Types ---

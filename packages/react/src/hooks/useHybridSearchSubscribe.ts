@@ -79,7 +79,7 @@ export interface UseHybridSearchSubscribeResult<T> {
 export function useHybridSearchSubscribe<T = unknown>(
   mapName: string,
   queryText: string,
-  options?: UseHybridSearchSubscribeOptions
+  options?: UseHybridSearchSubscribeOptions,
 ): UseHybridSearchSubscribeResult<T> {
   const client = useClient();
   const [results, setResults] = useState<HybridSearchHandleResult<T>[]>([]);
@@ -116,9 +116,7 @@ export function useHybridSearchSubscribe<T = unknown>(
   // where queryVector identity changes. For typical embedding sizes (e.g. 1536-dim)
   // this is acceptable for search-on-change workloads. If this becomes a bottleneck,
   // switch to a (length + FNV-1a hash) key to reduce allocation while staying O(n).
-  const queryVectorKey = options?.queryVector
-    ? Array.from(options.queryVector).join(',')
-    : '';
+  const queryVectorKey = options?.queryVector ? Array.from(options.queryVector).join(',') : '';
 
   // Memoize search options (excluding debounceMs and enabled) for stable identity
   const searchOptions = useMemo<HybridSearchSubscribeOptions>(() => {

@@ -49,7 +49,7 @@ export class BackpressureController implements IBackpressureController {
    * Get the current number of pending (unsynced) operations.
    */
   public getPendingOpsCount(): number {
-    return this.opLog.filter(op => !op.synced).length;
+    return this.opLog.filter((op) => !op.synced).length;
   }
 
   /**
@@ -94,10 +94,7 @@ export class BackpressureController implements IBackpressureController {
         await this.waitForCapacity();
         break;
       case 'throw':
-        throw new BackpressureError(
-          pendingCount,
-          this.config.maxPendingOps
-        );
+        throw new BackpressureError(pendingCount, this.config.maxPendingOps);
       case 'drop-oldest':
         this.dropOldestOp();
         break;
@@ -109,15 +106,13 @@ export class BackpressureController implements IBackpressureController {
    */
   public checkHighWaterMark(): void {
     const pendingCount = this.getPendingOpsCount();
-    const threshold = Math.floor(
-      this.config.maxPendingOps * this.config.highWaterMark
-    );
+    const threshold = Math.floor(this.config.maxPendingOps * this.config.highWaterMark);
 
     if (pendingCount >= threshold && !this.highWaterMarkEmitted) {
       this.highWaterMarkEmitted = true;
       logger.warn(
         { pending: pendingCount, max: this.config.maxPendingOps },
-        'Backpressure high water mark reached'
+        'Backpressure high water mark reached',
       );
       this.emitBackpressureEvent('backpressure:high', {
         pending: pendingCount,
@@ -131,12 +126,8 @@ export class BackpressureController implements IBackpressureController {
    */
   public checkLowWaterMark(): void {
     const pendingCount = this.getPendingOpsCount();
-    const lowThreshold = Math.floor(
-      this.config.maxPendingOps * this.config.lowWaterMark
-    );
-    const highThreshold = Math.floor(
-      this.config.maxPendingOps * this.config.highWaterMark
-    );
+    const lowThreshold = Math.floor(this.config.maxPendingOps * this.config.lowWaterMark);
+    const highThreshold = Math.floor(this.config.maxPendingOps * this.config.highWaterMark);
 
     // Reset high water mark flag when below high threshold
     if (pendingCount < highThreshold && this.highWaterMarkEmitted) {
@@ -149,7 +140,7 @@ export class BackpressureController implements IBackpressureController {
         this.backpressurePaused = false;
         logger.info(
           { pending: pendingCount, max: this.config.maxPendingOps },
-          'Backpressure low water mark reached, resuming writes'
+          'Backpressure low water mark reached, resuming writes',
         );
         this.emitBackpressureEvent('backpressure:low', {
           pending: pendingCount,
@@ -178,8 +169,13 @@ export class BackpressureController implements IBackpressureController {
    * @returns Unsubscribe function
    */
   public onBackpressure(
-    event: 'backpressure:high' | 'backpressure:low' | 'backpressure:paused' | 'backpressure:resumed' | 'operation:dropped',
-    listener: (data?: BackpressureThresholdEvent | OperationDroppedEvent) => void
+    event:
+      | 'backpressure:high'
+      | 'backpressure:low'
+      | 'backpressure:paused'
+      | 'backpressure:resumed'
+      | 'operation:dropped',
+    listener: (data?: BackpressureThresholdEvent | OperationDroppedEvent) => void,
   ): () => void {
     if (!this.backpressureListeners.has(event)) {
       this.backpressureListeners.set(event, new Set());
@@ -199,8 +195,13 @@ export class BackpressureController implements IBackpressureController {
    * Emit a backpressure event to all listeners.
    */
   private emitBackpressureEvent(
-    event: 'backpressure:high' | 'backpressure:low' | 'backpressure:paused' | 'backpressure:resumed' | 'operation:dropped',
-    data?: BackpressureThresholdEvent | OperationDroppedEvent
+    event:
+      | 'backpressure:high'
+      | 'backpressure:low'
+      | 'backpressure:paused'
+      | 'backpressure:resumed'
+      | 'operation:dropped',
+    data?: BackpressureThresholdEvent | OperationDroppedEvent,
   ): void {
     const listeners = this.backpressureListeners.get(event);
     if (listeners) {
@@ -235,7 +236,7 @@ export class BackpressureController implements IBackpressureController {
    */
   private dropOldestOp(): void {
     // Find oldest unsynced operation by array order (oldest first)
-    const oldestIndex = this.opLog.findIndex(op => !op.synced);
+    const oldestIndex = this.opLog.findIndex((op) => !op.synced);
 
     if (oldestIndex !== -1) {
       const dropped = this.opLog[oldestIndex];
@@ -243,7 +244,7 @@ export class BackpressureController implements IBackpressureController {
 
       logger.warn(
         { opId: dropped.id, mapName: dropped.mapName, key: dropped.key },
-        'Dropped oldest pending operation due to backpressure'
+        'Dropped oldest pending operation due to backpressure',
       );
 
       this.emitBackpressureEvent('operation:dropped', {

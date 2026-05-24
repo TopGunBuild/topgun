@@ -194,11 +194,7 @@ export class StandingQueryRegistry<K, V> {
    * @param newRecord - New record value
    * @returns Map of query hash to change type
    */
-  onRecordUpdated(
-    key: K,
-    oldRecord: V,
-    newRecord: V
-  ): Map<string, StandingQueryChange> {
+  onRecordUpdated(key: K, oldRecord: V, newRecord: V): Map<string, StandingQueryChange> {
     const changes = new Map<string, StandingQueryChange>();
 
     for (const [hash, index] of this.indexes) {
@@ -260,13 +256,10 @@ export class StandingQueryRegistry<K, V> {
   getStats(): StandingQueryRegistryStats {
     return {
       indexCount: this.indexes.size,
-      totalRefCount: Array.from(this.refCounts.values()).reduce(
-        (a, b) => a + b,
-        0
-      ),
+      totalRefCount: Array.from(this.refCounts.values()).reduce((a, b) => a + b, 0),
       totalResults: Array.from(this.indexes.values()).reduce(
         (sum, idx) => sum + idx.getResultCount(),
-        0
+        0,
       ),
     };
   }

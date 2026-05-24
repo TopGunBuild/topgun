@@ -7,7 +7,7 @@ export type { ClockSource };
  * Real clock source using system time.
  */
 export const RealClock: ClockSource = {
-  now: () => Date.now()
+  now: () => Date.now(),
 };
 
 /**

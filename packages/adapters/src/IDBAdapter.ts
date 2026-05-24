@@ -122,7 +122,7 @@ export class IDBAdapter implements IStorageAdapter {
   private queueOrExecute<T>(
     type: QueuedOperation['type'],
     args: any[],
-    executor: () => Promise<T>
+    executor: () => Promise<T>,
   ): Promise<T> {
     if (this.isReady) {
       return executor();
@@ -164,7 +164,7 @@ export class IDBAdapter implements IStorageAdapter {
 
   async getAllKeys(): Promise<string[]> {
     await this.waitForReady();
-    return (await this.db?.getAllKeys('kv_store')) as string[] || [];
+    return ((await this.db?.getAllKeys('kv_store')) as string[]) || [];
   }
 
   // ============================================
@@ -204,9 +204,7 @@ export class IDBAdapter implements IStorageAdapter {
     if (!tx) return;
 
     await Promise.all(
-      Array.from(entries.entries()).map(([key, value]) =>
-        tx.store.put({ key, value })
-      )
+      Array.from(entries.entries()).map(([key, value]) => tx.store.put({ key, value })),
     );
     await tx.done;
   }
@@ -217,7 +215,7 @@ export class IDBAdapter implements IStorageAdapter {
 
   private async appendOpLogInternal(entry: any): Promise<number> {
     const entryToSave = { ...entry, synced: 0 };
-    return await this.db?.add('op_log', entryToSave) as number;
+    return (await this.db?.add('op_log', entryToSave)) as number;
   }
 
   async markOpsSynced(lastId: number): Promise<void> {

@@ -1,7 +1,12 @@
 import { HLC } from '../HLC';
 import { ORMap, ORMapRecord } from '../ORMap';
 import { ORMapMerkleTree } from '../ORMapMerkleTree';
-import { hashORMapEntry, hashORMapRecord, timestampToString, compareTimestamps } from '../ORMapMerkle';
+import {
+  hashORMapEntry,
+  hashORMapRecord,
+  timestampToString,
+  compareTimestamps,
+} from '../ORMapMerkle';
 
 describe('ORMapMerkle hash functions', () => {
   describe('timestampToString', () => {
@@ -67,14 +72,14 @@ describe('ORMapMerkle hash functions', () => {
       records1.set('tag-1', {
         value: 'value',
         timestamp: { millis: 1000, counter: 1, nodeId: 'node-1' },
-        tag: 'tag-1'
+        tag: 'tag-1',
       });
 
       const records2 = new Map<string, ORMapRecord<string>>();
       records2.set('tag-1', {
         value: 'value',
         timestamp: { millis: 2000, counter: 1, nodeId: 'node-1' },
-        tag: 'tag-1'
+        tag: 'tag-1',
       });
 
       const hash1 = hashORMapEntry('key1', records1);
@@ -118,14 +123,14 @@ describe('ORMapMerkle hash functions', () => {
       records1.set('tag-1', {
         value: { a: 1, b: 'test' },
         timestamp: ts,
-        tag: 'tag-1'
+        tag: 'tag-1',
       });
 
       const records2 = new Map<string, ORMapRecord<{ b: string; a: number }>>();
       records2.set('tag-1', {
         value: { b: 'test', a: 1 },
         timestamp: ts,
-        tag: 'tag-1'
+        tag: 'tag-1',
       });
 
       const hash1 = hashORMapEntry('key1', records1);
@@ -151,7 +156,7 @@ describe('ORMapMerkle hash functions', () => {
       const record: ORMapRecord<string> = {
         value: 'test',
         timestamp: { millis: 1000, counter: 1, nodeId: 'node-1' },
-        tag: 'tag-1'
+        tag: 'tag-1',
       };
 
       const hash = hashORMapRecord(record);
@@ -227,7 +232,7 @@ describe('ORMapMerkleTree', () => {
 
       // Check that some buckets have data
       const buckets = tree.getBuckets('');
-      const nonEmptyBuckets = Object.values(buckets).filter(h => h !== 0);
+      const nonEmptyBuckets = Object.values(buckets).filter((h) => h !== 0);
       expect(nonEmptyBuckets.length).toBeGreaterThan(0);
     });
 
@@ -352,7 +357,7 @@ describe('ORMap merge', () => {
       const remoteRecord: ORMapRecord<string> = {
         value: 'remote-value',
         timestamp: { millis: 1000, counter: 1, nodeId: 'node-b' },
-        tag: 'remote-tag-1'
+        tag: 'remote-tag-1',
       };
 
       const result = mapA.mergeKey('key1', [remoteRecord]);
@@ -375,7 +380,7 @@ describe('ORMap merge', () => {
       const remoteRecord: ORMapRecord<string> = {
         value: 'remote-value-newer',
         timestamp: { millis: Date.now() + 10000, counter: 1, nodeId: 'node-b' },
-        tag: localTag
+        tag: localTag,
       };
 
       const result = mapA.mergeKey('key1', [remoteRecord]);
@@ -397,7 +402,7 @@ describe('ORMap merge', () => {
       const remoteRecord: ORMapRecord<string> = {
         value: 'remote-value-older',
         timestamp: { millis: 1, counter: 1, nodeId: 'node-b' },
-        tag: localTag
+        tag: localTag,
       };
 
       const result = mapA.mergeKey('key1', [remoteRecord]);
@@ -418,7 +423,7 @@ describe('ORMap merge', () => {
       const remoteRecord: ORMapRecord<string> = {
         value: 'remote-value',
         timestamp: { millis: Date.now(), counter: 1, nodeId: 'node-b' },
-        tag: 'different-tag'
+        tag: 'different-tag',
       };
 
       const result = mapA.mergeKey('key1', [remoteRecord]);
@@ -456,7 +461,7 @@ describe('ORMap merge', () => {
       const remoteRecord: ORMapRecord<string> = {
         value: 'remote-value',
         timestamp: { millis: Date.now(), counter: 1, nodeId: 'node-b' },
-        tag: tombstonedTag
+        tag: tombstonedTag,
       };
 
       // Merge with both record and its tombstone

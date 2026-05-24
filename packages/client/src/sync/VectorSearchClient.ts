@@ -74,7 +74,7 @@ export class VectorSearchClient implements IVectorSearchClient {
   public async vectorSearch(
     mapName: string,
     queryVector: Float32Array | number[],
-    options?: VectorSearchClientOptions
+    options?: VectorSearchClientOptions,
   ): Promise<VectorSearchClientResult[]> {
     if (!this.config.isAuthenticated()) {
       throw new Error('Not connected to server');
@@ -115,12 +115,14 @@ export class VectorSearchClient implements IVectorSearchClient {
           ...(options?.indexName !== undefined && { indexName: options.indexName }),
           ...(options?.efSearch !== undefined && { efSearch: options.efSearch }),
           ...(options?.includeValue !== undefined ||
-            options?.includeVectors !== undefined ||
-            options?.minScore !== undefined
+          options?.includeVectors !== undefined ||
+          options?.minScore !== undefined
             ? {
                 options: {
                   ...(options.includeValue !== undefined && { includeValue: options.includeValue }),
-                  ...(options.includeVectors !== undefined && { includeVectors: options.includeVectors }),
+                  ...(options.includeVectors !== undefined && {
+                    includeVectors: options.includeVectors,
+                  }),
                   ...(options.minScore !== undefined && { minScore: options.minScore }),
                 },
               }

@@ -4,31 +4,31 @@ import type { RecordSyncState } from '@topgunbuild/client';
 import { useClient } from './useClient';
 
 export function useMap<K = string, V = any>(mapName: string): LWWMap<K, V> {
-    const client = useClient();
-    // Get the map instance. This is stable for the same mapName.
-    const map = client.getMap<K, V>(mapName);
+  const client = useClient();
+  // Get the map instance. This is stable for the same mapName.
+  const map = client.getMap<K, V>(mapName);
 
-    // We use a dummy state to trigger re-renders when the map changes
-    const [, setTick] = useState(0);
-    const isMounted = useRef(true);
+  // We use a dummy state to trigger re-renders when the map changes
+  const [, setTick] = useState(0);
+  const isMounted = useRef(true);
 
-    useEffect(() => {
-        isMounted.current = true;
+  useEffect(() => {
+    isMounted.current = true;
 
-        // Subscribe to map changes
-        const unsubscribe = map.subscribe(() => {
-            if (isMounted.current) {
-                setTick(t => t + 1);
-            }
-        });
+    // Subscribe to map changes
+    const unsubscribe = map.subscribe(() => {
+      if (isMounted.current) {
+        setTick((t) => t + 1);
+      }
+    });
 
-        return () => {
-            isMounted.current = false;
-            unsubscribe();
-        };
-    }, [map]);
+    return () => {
+      isMounted.current = false;
+      unsubscribe();
+    };
+  }, [map]);
 
-    return map;
+  return map;
 }
 
 const EMPTY_SYNC_STATE: ReadonlyMap<string, RecordSyncState> = new Map();
@@ -50,40 +50,41 @@ const EMPTY_SYNC_STATE: ReadonlyMap<string, RecordSyncState> = new Map();
  * ```
  */
 export function useMapWithSyncState<K = string, V = any>(
-    mapName: string,
+  mapName: string,
 ): { map: LWWMap<K, V>; syncState: ReadonlyMap<string, RecordSyncState> } {
-    const client = useClient();
-    const map = client.getMap<K, V>(mapName);
+  const client = useClient();
+  const map = client.getMap<K, V>(mapName);
 
-    const [, setTick] = useState(0);
-    const [syncState, setSyncState] = useState<ReadonlyMap<string, RecordSyncState>>(EMPTY_SYNC_STATE);
-    const isMounted = useRef(true);
+  const [, setTick] = useState(0);
+  const [syncState, setSyncState] =
+    useState<ReadonlyMap<string, RecordSyncState>>(EMPTY_SYNC_STATE);
+  const isMounted = useRef(true);
 
-    useEffect(() => {
-        isMounted.current = true;
+  useEffect(() => {
+    isMounted.current = true;
 
-        const unsubscribeMap = map.subscribe(() => {
-            if (isMounted.current) {
-                setTick(t => t + 1);
-            }
-        });
+    const unsubscribeMap = map.subscribe(() => {
+      if (isMounted.current) {
+        setTick((t) => t + 1);
+      }
+    });
 
-        const tracker = client.getRecordSyncStateTracker();
-        // Seed with current snapshot so the first render reflects any
-        // pre-existing tracker state for this map name.
-        setSyncState(tracker.getMapSnapshot(mapName));
-        const unsubscribeSync = tracker.onChange(mapName, (snapshot) => {
-            if (isMounted.current) {
-                setSyncState(snapshot);
-            }
-        });
+    const tracker = client.getRecordSyncStateTracker();
+    // Seed with current snapshot so the first render reflects any
+    // pre-existing tracker state for this map name.
+    setSyncState(tracker.getMapSnapshot(mapName));
+    const unsubscribeSync = tracker.onChange(mapName, (snapshot) => {
+      if (isMounted.current) {
+        setSyncState(snapshot);
+      }
+    });
 
-        return () => {
-            isMounted.current = false;
-            unsubscribeMap();
-            unsubscribeSync();
-        };
-    }, [client, map, mapName]);
+    return () => {
+      isMounted.current = false;
+      unsubscribeMap();
+      unsubscribeSync();
+    };
+  }, [client, map, mapName]);
 
-    return { map, syncState };
+  return { map, syncState };
 }

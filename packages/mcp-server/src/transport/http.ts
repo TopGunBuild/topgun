@@ -148,7 +148,7 @@ export class HTTPTransport {
   private async handleRequest(
     req: IncomingMessage,
     res: ServerResponse,
-    mcpServer: TopGunMCPServer
+    mcpServer: TopGunMCPServer,
   ): Promise<void> {
     // Set CORS headers
     this.setCorsHeaders(req, res);
@@ -183,7 +183,7 @@ export class HTTPTransport {
           transport: 'http+sse',
           mcpPath: this.config.mcpPath,
           eventPath: this.config.eventPath,
-        })
+        }),
       );
       return;
     }
@@ -211,7 +211,7 @@ export class HTTPTransport {
   private async handleSSEConnection(
     _req: IncomingMessage,
     res: ServerResponse,
-    mcpServer: TopGunMCPServer
+    mcpServer: TopGunMCPServer,
   ): Promise<void> {
     const sessionId = randomUUID();
 
@@ -245,7 +245,7 @@ export class HTTPTransport {
   private async handleMCPRequest(
     req: IncomingMessage,
     res: ServerResponse,
-    mcpServer: TopGunMCPServer
+    mcpServer: TopGunMCPServer,
   ): Promise<void> {
     try {
       // Read body
@@ -273,7 +273,7 @@ export class HTTPTransport {
         res.end(
           JSON.stringify({
             error: 'Unsupported method. Use SSE transport for full MCP support.',
-          })
+          }),
         );
       }
     } catch (error) {
@@ -343,7 +343,7 @@ export class HTTPTransport {
  */
 export async function createHTTPServer(
   mcpServer: TopGunMCPServer,
-  config?: HTTPServerConfig
+  config?: HTTPServerConfig,
 ): Promise<HTTPTransport> {
   const transport = new HTTPTransport(config);
   await transport.start(mcpServer);

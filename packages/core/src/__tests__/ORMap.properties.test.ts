@@ -19,8 +19,9 @@ import { HLC, Timestamp } from '../HLC';
 
 // Arbitrary generators
 
-const arbNodeId: fc.Arbitrary<string> = fc.string({ minLength: 1, maxLength: 10 })
-  .filter(s => /^[a-z0-9]+$/.test(s));
+const arbNodeId: fc.Arbitrary<string> = fc
+  .string({ minLength: 1, maxLength: 10 })
+  .filter((s) => /^[a-z0-9]+$/.test(s));
 
 const arbTimestamp: fc.Arbitrary<Timestamp> = fc.record({
   millis: fc.integer({ min: 1000000000000, max: 2000000000000 }),
@@ -34,21 +35,24 @@ const arbValue: fc.Arbitrary<any> = fc.oneof(
   fc.record({
     id: fc.integer(),
     name: fc.string(),
-  })
+  }),
 );
 
-const arbTag: fc.Arbitrary<string> = arbTimestamp.map(ts => HLC.toString(ts));
+const arbTag: fc.Arbitrary<string> = arbTimestamp.map((ts) => HLC.toString(ts));
 
 // Generate records without TTL for property tests to avoid expiration issues
 const arbRecord = (arbVal: fc.Arbitrary<any>): fc.Arbitrary<ORMapRecord<any>> =>
-  fc.record({
-    value: arbVal,
-    timestamp: arbTimestamp,
-    tag: arbTag,
-  }).map(r => ({ ...r, ttlMs: undefined }));
+  fc
+    .record({
+      value: arbVal,
+      timestamp: arbTimestamp,
+      tag: arbTag,
+    })
+    .map((r) => ({ ...r, ttlMs: undefined }));
 
-const arbKey: fc.Arbitrary<string> = fc.string({ minLength: 1, maxLength: 5 })
-  .filter(s => /^[a-z]+$/.test(s));
+const arbKey: fc.Arbitrary<string> = fc
+  .string({ minLength: 1, maxLength: 5 })
+  .filter((s) => /^[a-z]+$/.test(s));
 
 // Helper to create a fresh ORMap
 function createMap(nodeId: string = 'test-node'): ORMap<string, any> {
@@ -95,7 +99,7 @@ function mapsEqual(a: ORMap<string, any>, b: ORMap<string, any>): boolean {
 
 // Helper to get all values from a key (sorted for comparison)
 function getValuesSet(map: ORMap<string, any>, key: string): Set<string> {
-  return new Set(map.get(key).map(v => JSON.stringify(v)));
+  return new Set(map.get(key).map((v) => JSON.stringify(v)));
 }
 
 describe('ORMap Property-Based Tests', () => {
@@ -116,7 +120,7 @@ describe('ORMap Property-Based Tests', () => {
           // Should have same number of records
           expect(recordsAfterSecond).toBe(recordsAfterFirst);
         }),
-        { numRuns: 100 }
+        { numRuns: 100 },
       );
     });
 
@@ -139,7 +143,7 @@ describe('ORMap Property-Based Tests', () => {
           expect(recordsAfterSecond).toBe(recordsAfterFirst);
           expect(tombstonesAfterSecond).toBe(tombstonesAfterFirst);
         }),
-        { numRuns: 100 }
+        { numRuns: 100 },
       );
     });
   });
@@ -164,9 +168,9 @@ describe('ORMap Property-Based Tests', () => {
 
             // Both should have the same state
             expect(mapsEqual(map1, map2)).toBe(true);
-          }
+          },
         ),
-        { numRuns: 50 }
+        { numRuns: 50 },
       );
     });
 
@@ -197,9 +201,9 @@ describe('ORMap Property-Based Tests', () => {
 
             // Both should have same tombstones
             expect(new Set(map1.getTombstones())).toEqual(new Set(map2.getTombstones()));
-          }
+          },
         ),
-        { numRuns: 50 }
+        { numRuns: 50 },
       );
     });
   });
@@ -235,9 +239,9 @@ describe('ORMap Property-Based Tests', () => {
             mapRight.apply(key, recordC);
 
             expect(mapsEqual(mapLeft, mapRight)).toBe(true);
-          }
+          },
         ),
-        { numRuns: 50 }
+        { numRuns: 50 },
       );
     });
   });
@@ -252,12 +256,15 @@ describe('ORMap Property-Based Tests', () => {
             // Ensure unique tags
             const uniqueOps = operations.map(([key, record], i) => {
               const ts = { millis: 1000000000000 + i * 1000, counter: 0, nodeId: `n${i}` };
-              return [key, { ...record, tag: HLC.toString(ts), timestamp: ts }] as [string, ORMapRecord<any>];
+              return [key, { ...record, tag: HLC.toString(ts), timestamp: ts }] as [
+                string,
+                ORMapRecord<any>,
+              ];
             });
 
             // Create replicas that receive operations in different orders
             const replicas = Array.from({ length: numReplicas }, (_, i) =>
-              createMap(`replica-${i}`)
+              createMap(`replica-${i}`),
             );
 
             // Each replica receives operations in a shuffled order
@@ -272,52 +279,49 @@ describe('ORMap Property-Based Tests', () => {
             for (let i = 1; i < numReplicas; i++) {
               expect(mapsEqual(replicas[0], replicas[i])).toBe(true);
             }
-          }
+          },
         ),
-        { numRuns: 30 }
+        { numRuns: 30 },
       );
     });
 
     it('replicas should converge with mixed adds and removes', () => {
       fc.assert(
-        fc.property(
-          fc.array(arbValue, { minLength: 3, maxLength: 6 }),
-          (values) => {
-            const key = 'test-key';
+        fc.property(fc.array(arbValue, { minLength: 3, maxLength: 6 }), (values) => {
+          const key = 'test-key';
 
-            // Create records with unique tags
-            const records = values.map((value, i) => {
-              const ts: Timestamp = { millis: 1000 + i, counter: 0, nodeId: `node-${i}` };
-              return {
-                value,
-                timestamp: ts,
-                tag: HLC.toString(ts),
-              };
-            });
+          // Create records with unique tags
+          const records = values.map((value, i) => {
+            const ts: Timestamp = { millis: 1000 + i, counter: 0, nodeId: `node-${i}` };
+            return {
+              value,
+              timestamp: ts,
+              tag: HLC.toString(ts),
+            };
+          });
 
-            // Replica 1: add all, then remove first half
-            const replica1 = createMap('replica-1');
-            for (const record of records) {
-              replica1.apply(key, record);
-            }
-            for (let i = 0; i < Math.floor(records.length / 2); i++) {
-              replica1.applyTombstone(records[i].tag);
-            }
-
-            // Replica 2: add all, then remove same first half (but in reverse)
-            const replica2 = createMap('replica-2');
-            for (const record of [...records].reverse()) {
-              replica2.apply(key, record);
-            }
-            for (let i = Math.floor(records.length / 2) - 1; i >= 0; i--) {
-              replica2.applyTombstone(records[i].tag);
-            }
-
-            // Should converge
-            expect(mapsEqual(replica1, replica2)).toBe(true);
+          // Replica 1: add all, then remove first half
+          const replica1 = createMap('replica-1');
+          for (const record of records) {
+            replica1.apply(key, record);
           }
-        ),
-        { numRuns: 30 }
+          for (let i = 0; i < Math.floor(records.length / 2); i++) {
+            replica1.applyTombstone(records[i].tag);
+          }
+
+          // Replica 2: add all, then remove same first half (but in reverse)
+          const replica2 = createMap('replica-2');
+          for (const record of [...records].reverse()) {
+            replica2.apply(key, record);
+          }
+          for (let i = Math.floor(records.length / 2) - 1; i >= 0; i--) {
+            replica2.applyTombstone(records[i].tag);
+          }
+
+          // Should converge
+          expect(mapsEqual(replica1, replica2)).toBe(true);
+        }),
+        { numRuns: 30 },
       );
     });
   });
@@ -356,7 +360,7 @@ describe('ORMap Property-Based Tests', () => {
           expect(remaining.length).toBe(1);
           expect(remaining[0].tag).toBe(record2.tag);
         }),
-        { numRuns: 50 }
+        { numRuns: 50 },
       );
     });
 
@@ -391,7 +395,7 @@ describe('ORMap Property-Based Tests', () => {
           map.apply(key, record2);
           expect(map.getRecords(key).length).toBe(1);
         }),
-        { numRuns: 50 }
+        { numRuns: 50 },
       );
     });
 
@@ -413,7 +417,7 @@ describe('ORMap Property-Based Tests', () => {
           expect(applied).toBe(false);
           expect(map.getRecords(key).length).toBe(0);
         }),
-        { numRuns: 50 }
+        { numRuns: 50 },
       );
     });
   });
@@ -421,31 +425,27 @@ describe('ORMap Property-Based Tests', () => {
   describe('Multi-Value Semantics', () => {
     it('same key can hold multiple values with different tags', () => {
       fc.assert(
-        fc.property(
-          arbKey,
-          fc.array(arbValue, { minLength: 2, maxLength: 5 }),
-          (key, values) => {
-            const map = createMap('node-1');
+        fc.property(arbKey, fc.array(arbValue, { minLength: 2, maxLength: 5 }), (key, values) => {
+          const map = createMap('node-1');
 
-            // Add all values with unique tags
-            const records = values.map((value, i) => {
-              const ts: Timestamp = { millis: 1000 + i, counter: 0, nodeId: `n${i}` };
-              return {
-                value,
-                timestamp: ts,
-                tag: HLC.toString(ts),
-              };
-            });
+          // Add all values with unique tags
+          const records = values.map((value, i) => {
+            const ts: Timestamp = { millis: 1000 + i, counter: 0, nodeId: `n${i}` };
+            return {
+              value,
+              timestamp: ts,
+              tag: HLC.toString(ts),
+            };
+          });
 
-            for (const record of records) {
-              map.apply(key, record);
-            }
-
-            // All values should be present
-            expect(map.getRecords(key).length).toBe(values.length);
+          for (const record of records) {
+            map.apply(key, record);
           }
-        ),
-        { numRuns: 50 }
+
+          // All values should be present
+          expect(map.getRecords(key).length).toBe(values.length);
+        }),
+        { numRuns: 50 },
       );
     });
   });
@@ -476,9 +476,9 @@ describe('ORMap Property-Based Tests', () => {
 
             expect(result.added).toBe(uniqueRecords.length);
             expect(mapsEqual(map1, map2)).toBe(true);
-          }
+          },
         ),
-        { numRuns: 50 }
+        { numRuns: 50 },
       );
     });
 
@@ -502,7 +502,9 @@ describe('ORMap Property-Based Tests', () => {
             }
 
             // Merge with tombstones for first half
-            const tombstones = uniqueRecords.slice(0, Math.floor(uniqueRecords.length / 2)).map(r => r.tag);
+            const tombstones = uniqueRecords
+              .slice(0, Math.floor(uniqueRecords.length / 2))
+              .map((r) => r.tag);
             const remainingRecords = uniqueRecords.slice(Math.floor(uniqueRecords.length / 2));
 
             map.mergeKey(key, remainingRecords, tombstones);
@@ -510,9 +512,9 @@ describe('ORMap Property-Based Tests', () => {
             // Only remaining records should exist
             const finalRecords = map.getRecords(key);
             expect(finalRecords.length).toBe(remainingRecords.length);
-          }
+          },
         ),
-        { numRuns: 50 }
+        { numRuns: 50 },
       );
     });
   });

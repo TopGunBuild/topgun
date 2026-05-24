@@ -138,7 +138,7 @@ describe('RealClock', () => {
 
   test('time advances automatically', async () => {
     const time1 = RealClock.now();
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await new Promise((resolve) => setTimeout(resolve, 10));
     const time2 = RealClock.now();
 
     expect(time2).toBeGreaterThan(time1);

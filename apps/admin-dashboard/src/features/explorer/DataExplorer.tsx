@@ -52,11 +52,12 @@ export function DataExplorer() {
       const data = await res.json();
       if (data.maps && Array.isArray(data.maps)) {
         // Filter out system maps and internal placeholder maps
-        setMaps(data.maps.filter((m: MapInfo) =>
-          !m.name.startsWith('$sys/') &&
-          !m.name.startsWith('__') &&
-          m.name !== '_empty'
-        ));
+        setMaps(
+          data.maps.filter(
+            (m: MapInfo) =>
+              !m.name.startsWith('$sys/') && !m.name.startsWith('__') && m.name !== '_empty',
+          ),
+        );
       }
     } catch (err) {
       console.error('Failed to load maps:', err);
@@ -83,7 +84,8 @@ export function DataExplorer() {
     for (const [key, value] of mapInstance.entries()) {
       if (typeof key === 'string' && !key.startsWith('_')) {
         const valueObj = value as Record<string, unknown>;
-        const matchesFilter = !searchFilter ||
+        const matchesFilter =
+          !searchFilter ||
           key.toLowerCase().includes(searchFilter.toLowerCase()) ||
           JSON.stringify(value).toLowerCase().includes(searchFilter.toLowerCase());
 
@@ -101,7 +103,7 @@ export function DataExplorer() {
   }, [selectedMap, mapInstance, searchFilter, refreshKey]);
 
   const filteredMaps = maps.filter((m) =>
-    mapFilter ? m.name.toLowerCase().includes(mapFilter.toLowerCase()) : true
+    mapFilter ? m.name.toLowerCase().includes(mapFilter.toLowerCase()) : true,
   );
 
   const handleRefresh = useCallback(() => {
@@ -131,7 +133,7 @@ export function DataExplorer() {
         console.error('Failed to delete record:', err);
       }
     },
-    [selectedMap, mapInstance, handleRefresh]
+    [selectedMap, mapInstance, handleRefresh],
   );
 
   const handleNewRecord = () => {
@@ -234,7 +236,7 @@ export function DataExplorer() {
                   'w-full text-left px-3 py-2 rounded-md text-sm transition-colors',
                   selectedMap === map.name
                     ? 'bg-primary text-primary-foreground'
-                    : 'hover:bg-muted'
+                    : 'hover:bg-muted',
                 )}
               >
                 <div className="font-medium truncate">{map.name}</div>
@@ -255,7 +257,7 @@ export function DataExplorer() {
               'flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors',
               activeView === 'data'
                 ? 'bg-primary text-primary-foreground'
-                : 'text-muted-foreground hover:bg-muted'
+                : 'text-muted-foreground hover:bg-muted',
             )}
           >
             <Database className="h-4 w-4" />
@@ -267,7 +269,7 @@ export function DataExplorer() {
               'flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors',
               activeView === 'crdt-debug'
                 ? 'bg-primary text-primary-foreground'
-                : 'text-muted-foreground hover:bg-muted'
+                : 'text-muted-foreground hover:bg-muted',
             )}
           >
             <Bug className="h-4 w-4" />
@@ -323,7 +325,9 @@ export function DataExplorer() {
       <Dialog open={!!editingRecord} onOpenChange={() => setEditingRecord(null)}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>{isNewRecord ? 'New Record' : `Edit Record: ${editingRecord?.id}`}</DialogTitle>
+            <DialogTitle>
+              {isNewRecord ? 'New Record' : `Edit Record: ${editingRecord?.id}`}
+            </DialogTitle>
           </DialogHeader>
 
           {isNewRecord && (
@@ -343,7 +347,7 @@ export function DataExplorer() {
             value={editingRecord?.data}
             onChange={(data) =>
               setEditingRecord((prev) =>
-                prev ? { ...prev, data: data as Record<string, unknown> } : null
+                prev ? { ...prev, data: data as Record<string, unknown> } : null,
               )
             }
             className="min-h-[300px]"

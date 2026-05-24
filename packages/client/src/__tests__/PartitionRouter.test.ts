@@ -29,7 +29,7 @@ describe('PartitionRouter', () => {
     return {
       version,
       partitionCount: PARTITION_COUNT,
-      nodes: nodes.map(nodeId => ({
+      nodes: nodes.map((nodeId) => ({
         nodeId,
         endpoints: { websocket: `ws://node-${nodeId}:8080` },
         status: 'ACTIVE' as const,
@@ -96,7 +96,7 @@ describe('PartitionRouter', () => {
 
       // Simulate receiving partition map
       const messageHandler = (connectionPool.on as jest.Mock).mock.calls.find(
-        call => call[0] === 'message'
+        (call) => call[0] === 'message',
       )?.[1];
 
       if (messageHandler) {
@@ -121,7 +121,7 @@ describe('PartitionRouter', () => {
 
     it('should report partition map after receiving one', () => {
       const messageHandler = (connectionPool.on as jest.Mock).mock.calls.find(
-        call => call[0] === 'message'
+        (call) => call[0] === 'message',
       )?.[1];
 
       if (messageHandler) {
@@ -143,7 +143,7 @@ describe('PartitionRouter', () => {
 
     it('should return version from partition map', () => {
       const messageHandler = (connectionPool.on as jest.Mock).mock.calls.find(
-        call => call[0] === 'message'
+        (call) => call[0] === 'message',
       )?.[1];
 
       const map = createMockPartitionMap(['node-1'], 42);
@@ -193,7 +193,7 @@ describe('PartitionRouter', () => {
 
     it('should update stats after receiving partition map', () => {
       const messageHandler = (connectionPool.on as jest.Mock).mock.calls.find(
-        call => call[0] === 'message'
+        (call) => call[0] === 'message',
       )?.[1];
 
       const map = createMockPartitionMap(['node-1', 'node-2'], 5);
@@ -219,7 +219,7 @@ describe('PartitionRouter', () => {
 
     it('should return correct partitions for node', () => {
       const messageHandler = (connectionPool.on as jest.Mock).mock.calls.find(
-        call => call[0] === 'message'
+        (call) => call[0] === 'message',
       )?.[1];
 
       // With 3 nodes, each should own ~90 partitions (271/3)
@@ -236,7 +236,7 @@ describe('PartitionRouter', () => {
 
       // Verify all returned partitions are owned by node-1
       for (const p of partitions) {
-        const partitionInfo = map.partitions.find(pi => pi.partitionId === p);
+        const partitionInfo = map.partitions.find((pi) => pi.partitionId === p);
         expect(partitionInfo?.ownerNodeId).toBe('node-1');
       }
     });
@@ -251,7 +251,7 @@ describe('PartitionRouter', () => {
       });
 
       const messageHandler = (connectionPool.on as jest.Mock).mock.calls.find(
-        call => call[0] === 'message'
+        (call) => call[0] === 'message',
       )?.[1];
 
       if (messageHandler) {

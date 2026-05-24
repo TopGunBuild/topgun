@@ -32,10 +32,7 @@ function stringifyValue(value: unknown): string {
  * @param records Map of tag -> record for this key
  * @returns Hash as a number (FNV-1a hash)
  */
-export function hashORMapEntry<V>(
-  key: string,
-  records: Map<string, ORMapRecord<V>>
-): number {
+export function hashORMapEntry<V>(key: string, records: Map<string, ORMapRecord<V>>): number {
   // Sort records by tag for deterministic ordering
   const sortedTags = Array.from(records.keys()).sort();
 

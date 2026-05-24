@@ -25,7 +25,11 @@ import type {
   SimpleQueryNode,
 } from './QueryTypes';
 import { isSimpleQuery, isLogicalQuery, isFTSQuery } from './QueryTypes';
-import { ReciprocalRankFusion, type RankedResult, type MergedResult } from '../search/ReciprocalRankFusion';
+import {
+  ReciprocalRankFusion,
+  type RankedResult,
+  type MergedResult,
+} from '../search/ReciprocalRankFusion';
 import type { FullTextIndex } from '../fts';
 import { SetResultSet } from './resultset/SetResultSet';
 import type { ResultSet } from './resultset/ResultSet';
@@ -128,10 +132,7 @@ export class QueryExecutor<K extends string, V> {
   private readonly optimizer: QueryOptimizer<K, V>;
   private readonly rrf: ReciprocalRankFusion;
 
-  constructor(
-    optimizer: QueryOptimizer<K, V>,
-    rrfConfig?: { k?: number }
-  ) {
+  constructor(optimizer: QueryOptimizer<K, V>, rrfConfig?: { k?: number }) {
     this.optimizer = optimizer;
     this.rrf = new ReciprocalRankFusion(rrfConfig);
   }
@@ -144,11 +145,7 @@ export class QueryExecutor<K extends string, V> {
    * @param options - Execution options (orderBy, limit, cursor)
    * @returns Query results
    */
-  execute(
-    query: Query,
-    data: Map<K, V>,
-    options?: ExecuteOptions
-  ): QueryResult<K, V>[] {
+  execute(query: Query, data: Map<K, V>, options?: ExecuteOptions): QueryResult<K, V>[] {
     const result = this.executeWithCursor(query, data, options);
     return result.results;
   }
@@ -165,7 +162,7 @@ export class QueryExecutor<K extends string, V> {
   executeWithCursor(
     query: Query,
     data: Map<K, V>,
-    options?: ExecuteOptions
+    options?: ExecuteOptions,
   ): QueryResultWithCursor<K, V> {
     // Get execution plan from optimizer
     const plan = this.optimizer.optimize(query);
@@ -210,10 +207,7 @@ export class QueryExecutor<K extends string, V> {
         cursorStatus = 'valid';
         results = results.filter((result) => {
           const sortValue = this.extractSortValue(result, sortField);
-          return QueryCursor.isAfterCursor(
-            { key: result.key, sortValue },
-            cursorData
-          );
+          return QueryCursor.isAfterCursor({ key: result.key, sortValue }, cursorData);
         });
       }
     }
@@ -237,7 +231,7 @@ export class QueryExecutor<K extends string, V> {
       nextCursor = QueryCursor.fromLastResult(
         { key: lastResult.key, sortValue },
         sort,
-        options?.predicate
+        options?.predicate,
       );
     }
 
@@ -302,7 +296,10 @@ export class QueryExecutor<K extends string, V> {
   /**
    * Execute a point lookup step - O(1) direct key access.
    */
-  private executePointLookup(step: import('./QueryTypes').PointLookupStep, data: Map<K, V>): StepResult<K> {
+  private executePointLookup(
+    step: import('./QueryTypes').PointLookupStep,
+    data: Map<K, V>,
+  ): StepResult<K> {
     const key = step.key as K;
     const keys = new Set<K>();
 
@@ -319,7 +316,10 @@ export class QueryExecutor<K extends string, V> {
   /**
    * Execute a multi-point lookup step - O(k) batch key access.
    */
-  private executeMultiPointLookup(step: import('./QueryTypes').MultiPointLookupStep, data: Map<K, V>): StepResult<K> {
+  private executeMultiPointLookup(
+    step: import('./QueryTypes').MultiPointLookupStep,
+    data: Map<K, V>,
+  ): StepResult<K> {
     const keys = new Set<K>();
 
     for (const key of step.keys) {
@@ -527,10 +527,7 @@ export class QueryExecutor<K extends string, V> {
    * @param strategy - Fusion strategy
    * @returns Fused result
    */
-  fuseResults(
-    stepResults: StepResult<K>[],
-    strategy: FusionStrategy
-  ): StepResult<K> {
+  fuseResults(stepResults: StepResult<K>[], strategy: FusionStrategy): StepResult<K> {
     switch (strategy) {
       case 'intersection':
         return this.intersectResults(stepResults);
@@ -586,8 +583,7 @@ export class QueryExecutor<K extends string, V> {
 
       if (stepResult.scores && stepResult.scores.size > 0) {
         // Scored results - sort by score
-        const sorted = Array.from(stepResult.scores.entries())
-          .sort((a, b) => b[1] - a[1]);
+        const sorted = Array.from(stepResult.scores.entries()).sort((a, b) => b[1] - a[1]);
 
         for (const [key, score] of sorted) {
           rankedResults.push({
@@ -701,7 +697,7 @@ export class QueryExecutor<K extends string, V> {
   applyOrdering(
     results: QueryResult<K, V>[],
     orderBy: OrderBy[],
-    data: Map<K, V>
+    data: Map<K, V>,
   ): QueryResult<K, V>[] {
     if (orderBy.length === 0) {
       return results;
@@ -744,7 +740,7 @@ export class QueryExecutor<K extends string, V> {
    */
   private stepResultToQueryResults(
     stepResult: StepResult<K>,
-    data: Map<K, V>
+    data: Map<K, V>,
   ): QueryResult<K, V>[] {
     const results: QueryResult<K, V>[] = [];
 
@@ -802,9 +798,7 @@ export class QueryExecutor<K extends string, V> {
         return false;
       }
 
-      const searchText = predicate.type === 'matchPrefix'
-        ? predicate.prefix
-        : predicate.query;
+      const searchText = predicate.type === 'matchPrefix' ? predicate.prefix : predicate.query;
 
       // Simple case-insensitive substring match as fallback
       return fieldValue.toLowerCase().includes(searchText.toLowerCase());
@@ -816,7 +810,10 @@ export class QueryExecutor<K extends string, V> {
   /**
    * Evaluate a simple predicate.
    */
-  private evaluateSimplePredicate(predicate: SimpleQueryNode, record: Record<string, unknown>): boolean {
+  private evaluateSimplePredicate(
+    predicate: SimpleQueryNode,
+    record: Record<string, unknown>,
+  ): boolean {
     const fieldValue = record[predicate.attribute];
 
     switch (predicate.type) {
@@ -858,9 +855,7 @@ export class QueryExecutor<K extends string, V> {
           return false;
         }
         // Simple LIKE implementation: % = any, _ = single char
-        const pattern = (predicate.value as string)
-          .replace(/%/g, '.*')
-          .replace(/_/g, '.');
+        const pattern = (predicate.value as string).replace(/%/g, '.*').replace(/_/g, '.');
         const regex = new RegExp(`^${pattern}$`, 'i');
         return regex.test(fieldValue);
       }

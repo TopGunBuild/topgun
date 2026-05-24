@@ -216,14 +216,11 @@ describe('AuthProviders', () => {
       const result = await provider.getToken();
 
       expect(result).toBe(topgunToken);
-      expect(mockFetch).toHaveBeenCalledWith(
-        'http://localhost:8080/api/auth/token',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: externalToken, provider: 'custom' }),
-        }
-      );
+      expect(mockFetch).toHaveBeenCalledWith('http://localhost:8080/api/auth/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: externalToken, provider: 'custom' }),
+      });
     });
 
     it('correctly extracts exp from a JWT payload', async () => {
@@ -251,7 +248,7 @@ describe('AuthProviders', () => {
         () =>
           new Promise<string>((resolve) => {
             resolveToken = resolve;
-          })
+          }),
       );
       const provider = new CustomAuthProvider(getTokenFn);
 
@@ -287,7 +284,8 @@ describe('AuthProviders', () => {
 
       const mockFetch = jest.fn().mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({ token: topgunToken, refreshToken, refreshExpiresAt: 9999999 }),
+        json: () =>
+          Promise.resolve({ token: topgunToken, refreshToken, refreshExpiresAt: 9999999 }),
       });
       global.fetch = mockFetch;
 
@@ -330,7 +328,8 @@ describe('AuthProviders', () => {
       });
 
       // First call: successful token exchange that stores a refresh token.
-      const mockFetch = jest.fn()
+      const mockFetch = jest
+        .fn()
         .mockResolvedValueOnce({
           ok: true,
           json: () => Promise.resolve({ token: topgunToken, refreshToken }),
@@ -414,7 +413,7 @@ describe('AuthProviders', () => {
         'http://localhost:8080/api/auth/refresh',
         expect.objectContaining({
           body: JSON.stringify({ refreshToken: storedRefresh }),
-        })
+        }),
       );
     });
 
@@ -483,7 +482,8 @@ describe('AuthProviders', () => {
         storageAdapter: storage,
       });
 
-      const mockFetch = jest.fn()
+      const mockFetch = jest
+        .fn()
         // First call: exchange succeeds with refresh token
         .mockResolvedValueOnce({
           ok: true,

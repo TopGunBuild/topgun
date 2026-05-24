@@ -26,44 +26,28 @@ describe('FilteringResultSet', () => {
   describe('filtering logic', () => {
     it('should filter by predicate', () => {
       const source = new SetResultSet(new Set(['1', '2', '3', '4', '5']), 30);
-      const result = new FilteringResultSet(
-        source,
-        getRecord,
-        (r) => r.active
-      );
+      const result = new FilteringResultSet(source, getRecord, (r) => r.active);
 
       expect(result.toArray().sort()).toEqual(['1', '3', '4']);
     });
 
     it('should filter by age predicate', () => {
       const source = new SetResultSet(new Set(['1', '2', '3', '4', '5']), 30);
-      const result = new FilteringResultSet(
-        source,
-        getRecord,
-        (r) => r.age >= 30
-      );
+      const result = new FilteringResultSet(source, getRecord, (r) => r.age >= 30);
 
       expect(result.toArray().sort()).toEqual(['1', '3', '5']);
     });
 
     it('should filter by complex predicate', () => {
       const source = new SetResultSet(new Set(['1', '2', '3', '4', '5']), 30);
-      const result = new FilteringResultSet(
-        source,
-        getRecord,
-        (r) => r.active && r.age < 35
-      );
+      const result = new FilteringResultSet(source, getRecord, (r) => r.active && r.age < 35);
 
       expect(result.toArray().sort()).toEqual(['1', '4']);
     });
 
     it('should handle empty source', () => {
       const source = new SetResultSet(new Set<string>(), 30);
-      const result = new FilteringResultSet(
-        source,
-        getRecord,
-        (r) => r.active
-      );
+      const result = new FilteringResultSet(source, getRecord, (r) => r.active);
 
       expect(result.toArray()).toEqual([]);
       expect(result.isEmpty()).toBe(true);
@@ -71,11 +55,7 @@ describe('FilteringResultSet', () => {
 
     it('should handle predicate matching nothing', () => {
       const source = new SetResultSet(new Set(['1', '2', '3']), 30);
-      const result = new FilteringResultSet(
-        source,
-        getRecord,
-        (r) => r.age > 100
-      );
+      const result = new FilteringResultSet(source, getRecord, (r) => r.age > 100);
 
       expect(result.toArray()).toEqual([]);
       expect(result.isEmpty()).toBe(true);
@@ -83,22 +63,14 @@ describe('FilteringResultSet', () => {
 
     it('should handle predicate matching everything', () => {
       const source = new SetResultSet(new Set(['1', '2', '3']), 30);
-      const result = new FilteringResultSet(
-        source,
-        getRecord,
-        () => true
-      );
+      const result = new FilteringResultSet(source, getRecord, () => true);
 
       expect(result.toArray().sort()).toEqual(['1', '2', '3']);
     });
 
     it('should skip records that do not exist', () => {
       const source = new SetResultSet(new Set(['1', '99', '2']), 30);
-      const result = new FilteringResultSet(
-        source,
-        getRecord,
-        (r) => r.active
-      );
+      const result = new FilteringResultSet(source, getRecord, (r) => r.active);
 
       expect(result.toArray().sort()).toEqual(['1']);
     });
@@ -107,11 +79,7 @@ describe('FilteringResultSet', () => {
   describe('contains', () => {
     it('should check source and predicate', () => {
       const source = new SetResultSet(new Set(['1', '2', '3']), 30);
-      const result = new FilteringResultSet(
-        source,
-        getRecord,
-        (r) => r.active
-      );
+      const result = new FilteringResultSet(source, getRecord, (r) => r.active);
 
       expect(result.contains('1')).toBe(true); // In source, passes predicate
       expect(result.contains('2')).toBe(false); // In source, fails predicate
@@ -120,11 +88,7 @@ describe('FilteringResultSet', () => {
 
     it('should return false for missing records', () => {
       const source = new SetResultSet(new Set(['99']), 30);
-      const result = new FilteringResultSet(
-        source,
-        getRecord,
-        () => true
-      );
+      const result = new FilteringResultSet(source, getRecord, () => true);
 
       expect(result.contains('99')).toBe(false);
     });
@@ -133,11 +97,7 @@ describe('FilteringResultSet', () => {
   describe('size', () => {
     it('should return correct filtered size', () => {
       const source = new SetResultSet(new Set(['1', '2', '3', '4', '5']), 30);
-      const result = new FilteringResultSet(
-        source,
-        getRecord,
-        (r) => r.active
-      );
+      const result = new FilteringResultSet(source, getRecord, (r) => r.active);
 
       expect(result.size()).toBe(3);
     });
@@ -146,22 +106,14 @@ describe('FilteringResultSet', () => {
   describe('isEmpty', () => {
     it('should return true when no matches', () => {
       const source = new SetResultSet(new Set(['1', '2', '3']), 30);
-      const result = new FilteringResultSet(
-        source,
-        getRecord,
-        (r) => r.age > 100
-      );
+      const result = new FilteringResultSet(source, getRecord, (r) => r.age > 100);
 
       expect(result.isEmpty()).toBe(true);
     });
 
     it('should return false when has matches', () => {
       const source = new SetResultSet(new Set(['1', '2', '3']), 30);
-      const result = new FilteringResultSet(
-        source,
-        getRecord,
-        (r) => r.active
-      );
+      const result = new FilteringResultSet(source, getRecord, (r) => r.active);
 
       expect(result.isEmpty()).toBe(false);
     });
@@ -170,33 +122,21 @@ describe('FilteringResultSet', () => {
   describe('costs', () => {
     it('should add overhead to retrieval cost', () => {
       const source = new SetResultSet(new Set(['1', '2']), 30);
-      const result = new FilteringResultSet(
-        source,
-        getRecord,
-        (r) => r.active
-      );
+      const result = new FilteringResultSet(source, getRecord, (r) => r.active);
 
       expect(result.getRetrievalCost()).toBe(40); // 30 + 10
     });
 
     it('should estimate merge cost as half of source', () => {
       const source = new SetResultSet(new Set(['1', '2', '3', '4']), 30);
-      const result = new FilteringResultSet(
-        source,
-        getRecord,
-        (r) => r.active
-      );
+      const result = new FilteringResultSet(source, getRecord, (r) => r.active);
 
       expect(result.getMergeCost()).toBe(2); // 4 / 2
     });
 
     it('should have minimum merge cost of 1', () => {
       const source = new SetResultSet(new Set(['1']), 30);
-      const result = new FilteringResultSet(
-        source,
-        getRecord,
-        (r) => r.active
-      );
+      const result = new FilteringResultSet(source, getRecord, (r) => r.active);
 
       expect(result.getMergeCost()).toBe(1);
     });
@@ -205,11 +145,7 @@ describe('FilteringResultSet', () => {
   describe('caching', () => {
     it('should cache results after first iteration', () => {
       const source = new SetResultSet(new Set(['1', '2', '3']), 30);
-      const result = new FilteringResultSet(
-        source,
-        getRecord,
-        (r) => r.active
-      );
+      const result = new FilteringResultSet(source, getRecord, (r) => r.active);
 
       expect(result.isMaterialized()).toBe(false);
 
@@ -229,7 +165,7 @@ describe('FilteringResultSet', () => {
           callCount++;
           return getRecord(key);
         },
-        (r) => r.active
+        (r) => r.active,
       );
 
       // First call to toArray populates cache
@@ -246,14 +182,10 @@ describe('FilteringResultSet', () => {
     it('should not materialize until accessed', () => {
       const source = new SetResultSet(new Set(['1', '2', '3']), 30);
       let filterCalled = false;
-      const result = new FilteringResultSet(
-        source,
-        getRecord,
-        (r) => {
-          filterCalled = true;
-          return r.active;
-        }
-      );
+      const result = new FilteringResultSet(source, getRecord, (r) => {
+        filterCalled = true;
+        return r.active;
+      });
 
       expect(filterCalled).toBe(false);
       expect(result.isMaterialized()).toBe(false);

@@ -42,10 +42,9 @@ describe('useHybridSearch', () => {
   });
 
   it('should return empty results when enabled is false', () => {
-    const { result } = renderHook(
-      () => useHybridSearch('docs', 'query', { enabled: false }),
-      { wrapper }
-    );
+    const { result } = renderHook(() => useHybridSearch('docs', 'query', { enabled: false }), {
+      wrapper,
+    });
 
     expect(result.current.results).toEqual([]);
     expect(result.current.loading).toBe(false);
@@ -66,7 +65,7 @@ describe('useHybridSearch', () => {
 
     const { result } = renderHook(
       () => useHybridSearch('docs', 'machine learning', { methods: ['fullText'], k: 10 }),
-      { wrapper }
+      { wrapper },
     );
 
     // Initially loading
@@ -87,10 +86,7 @@ describe('useHybridSearch', () => {
   it('should set error state on rejection', async () => {
     mockHybridSearch.mockRejectedValue(new Error('Map not found'));
 
-    const { result } = renderHook(
-      () => useHybridSearch('docs', 'test query'),
-      { wrapper }
-    );
+    const { result } = renderHook(() => useHybridSearch('docs', 'test query'), { wrapper });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -115,8 +111,10 @@ describe('useHybridSearch', () => {
         }),
       {
         wrapper,
-        initialProps: { vector: new Float32Array([0.1, 0.2]) as Float32Array | number[] | undefined },
-      }
+        initialProps: {
+          vector: new Float32Array([0.1, 0.2]) as Float32Array | number[] | undefined,
+        },
+      },
     );
 
     await waitFor(() => {
@@ -143,7 +141,7 @@ describe('useHybridSearch', () => {
       {
         wrapper,
         initialProps: { vector: [0.1, 0.2] as Float32Array | number[] | undefined },
-      }
+      },
     );
 
     await waitFor(() => {
@@ -164,12 +162,11 @@ describe('useHybridSearch', () => {
     mockHybridSearch.mockResolvedValue([]);
 
     const { result, rerender } = renderHook(
-      ({ methods }) =>
-        useHybridSearch('docs', 'query', { methods }),
+      ({ methods }) => useHybridSearch('docs', 'query', { methods }),
       {
         wrapper,
         initialProps: { methods: ['fullText'] as ('exact' | 'fullText' | 'semantic')[] },
-      }
+      },
     );
 
     await waitFor(() => {
@@ -188,13 +185,10 @@ describe('useHybridSearch', () => {
   it('should re-fire when queryText changes', async () => {
     mockHybridSearch.mockResolvedValue([]);
 
-    const { result, rerender } = renderHook(
-      ({ queryText }) => useHybridSearch('docs', queryText),
-      {
-        wrapper,
-        initialProps: { queryText: 'first query' },
-      }
-    );
+    const { result, rerender } = renderHook(({ queryText }) => useHybridSearch('docs', queryText), {
+      wrapper,
+      initialProps: { queryText: 'first query' },
+    });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -217,17 +211,12 @@ describe('useHybridSearch', () => {
 
     const secondResults = [{ key: 'doc-new', score: 0.99, methodScores: {} }];
 
-    mockHybridSearch
-      .mockReturnValueOnce(firstPromise)
-      .mockResolvedValueOnce(secondResults);
+    mockHybridSearch.mockReturnValueOnce(firstPromise).mockResolvedValueOnce(secondResults);
 
-    const { result, rerender } = renderHook(
-      ({ queryText }) => useHybridSearch('docs', queryText),
-      {
-        wrapper,
-        initialProps: { queryText: 'first' },
-      }
-    );
+    const { result, rerender } = renderHook(({ queryText }) => useHybridSearch('docs', queryText), {
+      wrapper,
+      initialProps: { queryText: 'first' },
+    });
 
     // Change query before first resolves — first response becomes stale
     rerender({ queryText: 'second' });
@@ -248,13 +237,10 @@ describe('useHybridSearch', () => {
   it('should reset state when queryText becomes null', async () => {
     mockHybridSearch.mockResolvedValue([{ key: 'doc-1', score: 0.9, methodScores: {} }]);
 
-    const { result, rerender } = renderHook(
-      ({ queryText }) => useHybridSearch('docs', queryText),
-      {
-        wrapper,
-        initialProps: { queryText: 'active query' as string | null },
-      }
-    );
+    const { result, rerender } = renderHook(({ queryText }) => useHybridSearch('docs', queryText), {
+      wrapper,
+      initialProps: { queryText: 'active query' as string | null },
+    });
 
     await waitFor(() => {
       expect(result.current.results).toHaveLength(1);
@@ -270,13 +256,10 @@ describe('useHybridSearch', () => {
   it('should reset state when queryText becomes empty string', async () => {
     mockHybridSearch.mockResolvedValue([{ key: 'doc-1', score: 0.9, methodScores: {} }]);
 
-    const { result, rerender } = renderHook(
-      ({ queryText }) => useHybridSearch('docs', queryText),
-      {
-        wrapper,
-        initialProps: { queryText: 'active query' as string | null },
-      }
-    );
+    const { result, rerender } = renderHook(({ queryText }) => useHybridSearch('docs', queryText), {
+      wrapper,
+      initialProps: { queryText: 'active query' as string | null },
+    });
 
     await waitFor(() => {
       expect(result.current.results).toHaveLength(1);

@@ -1,5 +1,12 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { QueryFilter, QueryResultItem, ChangeEvent, QueryHandle, CursorStatus, PaginationInfo } from '@topgunbuild/client';
+import {
+  QueryFilter,
+  QueryResultItem,
+  ChangeEvent,
+  QueryHandle,
+  CursorStatus,
+  PaginationInfo,
+} from '@topgunbuild/client';
 import type { RecordSyncState } from '@topgunbuild/client';
 import { useClient } from './useClient';
 
@@ -113,7 +120,7 @@ export interface UseQueryResult<T> {
 export function useQuery<T = any>(
   mapName: string,
   query: QueryFilter = {},
-  options?: UseQueryOptions<T>
+  options?: UseQueryOptions<T>,
 ): UseQueryResult<T> {
   const client = useClient();
   const [data, setData] = useState<QueryResultItem<T>[]>([]);
@@ -128,7 +135,8 @@ export function useQuery<T = any>(
     cursorStatus: 'none',
   });
 
-  const [syncState, setSyncState] = useState<ReadonlyMap<string, RecordSyncState>>(EMPTY_SYNC_STATE);
+  const [syncState, setSyncState] =
+    useState<ReadonlyMap<string, RecordSyncState>>(EMPTY_SYNC_STATE);
 
   // Use a ref to track if the component is mounted to avoid state updates on unmounted components
   const isMounted = useRef(true);
@@ -260,7 +268,7 @@ export function useQuery<T = any>(
       cursorStatus: paginationInfo.cursorStatus,
       syncState,
     }),
-    [data, loading, error, lastChange, changes, clearChanges, paginationInfo, syncState]
+    [data, loading, error, lastChange, changes, clearChanges, paginationInfo, syncState],
   );
 }
 

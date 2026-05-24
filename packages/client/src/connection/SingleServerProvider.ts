@@ -234,16 +234,22 @@ export class SingleServerProvider implements IConnectionProvider {
 
     // When browser reports offline, don't schedule reconnects —
     // the 'online' event listener will call forceReconnect() when network returns
-    if (typeof globalThis.navigator !== 'undefined' && globalThis.navigator.onLine === false
-        && this.config.listenNetworkEvents) {
-      logger.info({ url: this.url }, 'Browser offline — waiting for online event instead of polling');
+    if (
+      typeof globalThis.navigator !== 'undefined' &&
+      globalThis.navigator.onLine === false &&
+      this.config.listenNetworkEvents
+    ) {
+      logger.info(
+        { url: this.url },
+        'Browser offline — waiting for online event instead of polling',
+      );
       return;
     }
 
     if (this.reconnectAttempts >= this.config.maxReconnectAttempts) {
       logger.error(
         { attempts: this.reconnectAttempts, url: this.url },
-        'SingleServerProvider max reconnect attempts reached'
+        'SingleServerProvider max reconnect attempts reached',
       );
       this.emit('error', new Error('Max reconnection attempts reached'));
       return;
@@ -252,7 +258,7 @@ export class SingleServerProvider implements IConnectionProvider {
     const delay = this.calculateBackoffDelay();
     logger.info(
       { delay, attempt: this.reconnectAttempts, url: this.url },
-      `SingleServerProvider scheduling reconnect in ${delay}ms`
+      `SingleServerProvider scheduling reconnect in ${delay}ms`,
     );
 
     this.reconnectTimer = setTimeout(async () => {

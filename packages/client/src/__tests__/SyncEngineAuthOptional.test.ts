@@ -421,9 +421,10 @@ describe('SyncEngine — auth-optional fast path', () => {
     expect(engine.getConnectionState()).toBe(SyncState.AUTHENTICATING);
 
     // No "Invalid state transition" warning should have been logged.
-    const invalidTransitionWarn = warnSpy.mock.calls.find((args) =>
-      typeof args[args.length - 1] === 'string' &&
-      (args[args.length - 1] as string).includes('Invalid state transition')
+    const invalidTransitionWarn = warnSpy.mock.calls.find(
+      (args) =>
+        typeof args[args.length - 1] === 'string' &&
+        (args[args.length - 1] as string).includes('Invalid state transition'),
     );
     expect(invalidTransitionWarn).toBeUndefined();
 

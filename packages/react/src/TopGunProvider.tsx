@@ -9,11 +9,7 @@ export interface TopGunProviderProps {
 }
 
 export const TopGunProvider: React.FC<TopGunProviderProps> = ({ client, children }) => {
-  return (
-    <TopGunContext.Provider value={client}>
-      {children}
-    </TopGunContext.Provider>
-  );
+  return <TopGunContext.Provider value={client}>{children}</TopGunContext.Provider>;
 };
 
 export function useClient(): TopGunClient {
@@ -23,4 +19,3 @@ export function useClient(): TopGunClient {
   }
   return client;
 }
-

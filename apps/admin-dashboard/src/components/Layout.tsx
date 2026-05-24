@@ -103,7 +103,7 @@ export function Layout() {
                   'flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors',
                   isActive(item.path)
                     ? 'bg-primary text-primary-foreground'
-                    : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
+                    : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
                 )}
               >
                 <Icon className="h-5 w-5" />
@@ -134,12 +134,7 @@ export function Layout() {
 
         {/* Bottom actions */}
         <div className="p-4 border-t space-y-1">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="w-full justify-start"
-            onClick={toggleTheme}
-          >
+          <Button variant="ghost" size="sm" className="w-full justify-start" onClick={toggleTheme}>
             {isDark ? (
               <>
                 <Sun className="h-4 w-4 mr-2" />

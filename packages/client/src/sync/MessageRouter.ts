@@ -24,9 +24,7 @@ export class MessageRouter implements IMessageRouter {
 
   constructor(config: MessageRouterConfig = {}) {
     // Copy handlers from config or create new Map
-    this.handlers = config.handlers
-      ? new Map(config.handlers)
-      : new Map();
+    this.handlers = config.handlers ? new Map(config.handlers) : new Map();
     this.onUnhandled = config.onUnhandled;
   }
 

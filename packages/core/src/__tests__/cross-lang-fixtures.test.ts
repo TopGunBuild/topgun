@@ -13,10 +13,7 @@ import * as path from 'path';
 import { pack } from 'msgpackr';
 
 // Fixture output directory (relative to repo root)
-const FIXTURES_DIR = path.resolve(
-  __dirname,
-  '../../../../packages/core-rust/tests/fixtures'
-);
+const FIXTURES_DIR = path.resolve(__dirname, '../../../../packages/core-rust/tests/fixtures');
 
 // Helper to write a fixture: both .msgpack (binary) and .json (human-readable)
 function writeFixture(name: string, data: Record<string, unknown>): void {
@@ -161,7 +158,7 @@ describe('Cross-language fixture generation', () => {
     writeFixture('BATCH', {
       type: 'BATCH',
       count: 3,
-      data: Buffer.from([0xDE, 0xAD, 0xBE, 0xEF]),
+      data: Buffer.from([0xde, 0xad, 0xbe, 0xef]),
     });
   });
 
@@ -380,9 +377,7 @@ describe('Cross-language fixture generation', () => {
         subscriptionId: 'csub-001',
         nodeId: 'node-2',
         success: true,
-        initialResults: [
-          { key: 'doc-1', value: 'content', score: 0.9, matchedTerms: ['rust'] },
-        ],
+        initialResults: [{ key: 'doc-1', value: 'content', score: 0.9, matchedTerms: ['rust'] }],
         totalHits: 42,
       },
     });
@@ -435,9 +430,7 @@ describe('Cross-language fixture generation', () => {
       payload: {
         requestId: 'csearch-001',
         nodeId: 'node-3',
-        results: [
-          { key: 'prod-1', value: 'Laptop Pro', score: 0.92, matchedTerms: ['laptop'] },
-        ],
+        results: [{ key: 'prod-1', value: 'Laptop Pro', score: 0.92, matchedTerms: ['laptop'] }],
         totalHits: 150,
         executionTimeMs: 23,
       },
@@ -770,18 +763,13 @@ describe('Cross-language fixture generation', () => {
           record: { value: 'Alice', timestamp },
         },
       ],
-      syncMaps: [
-        { mapName: 'users', lastSyncTimestamp: timestamp },
-      ],
+      syncMaps: [{ mapName: 'users', lastSyncTimestamp: timestamp }],
     };
     const packed = pack(data);
-    fs.writeFileSync(
-      path.join(FIXTURES_DIR, 'HTTP_SYNC_REQUEST.msgpack'),
-      packed
-    );
+    fs.writeFileSync(path.join(FIXTURES_DIR, 'HTTP_SYNC_REQUEST.msgpack'), packed);
     fs.writeFileSync(
       path.join(FIXTURES_DIR, 'HTTP_SYNC_REQUEST.json'),
-      JSON.stringify(data, null, 2)
+      JSON.stringify(data, null, 2),
     );
   });
 
@@ -804,13 +792,10 @@ describe('Cross-language fixture generation', () => {
       ],
     };
     const packed = pack(data);
-    fs.writeFileSync(
-      path.join(FIXTURES_DIR, 'HTTP_SYNC_RESPONSE.msgpack'),
-      packed
-    );
+    fs.writeFileSync(path.join(FIXTURES_DIR, 'HTTP_SYNC_RESPONSE.msgpack'), packed);
     fs.writeFileSync(
       path.join(FIXTURES_DIR, 'HTTP_SYNC_RESPONSE.json'),
-      JSON.stringify(data, null, 2)
+      JSON.stringify(data, null, 2),
     );
   });
 
@@ -819,7 +804,7 @@ describe('Cross-language fixture generation', () => {
   // =========================================================================
 
   test('generated at least 40 fixtures', () => {
-    const files = fs.readdirSync(FIXTURES_DIR).filter(f => f.endsWith('.msgpack'));
+    const files = fs.readdirSync(FIXTURES_DIR).filter((f) => f.endsWith('.msgpack'));
     expect(files.length).toBeGreaterThanOrEqual(40);
   });
 });

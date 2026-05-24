@@ -1,9 +1,6 @@
 import { TopGunClient, Predicates } from '@topgunbuild/client';
 import type { BetterAuthOptions } from 'better-auth';
-import type {
-  DBAdapter,
-  Where,
-} from 'better-auth/adapters';
+import type { DBAdapter, Where } from 'better-auth/adapters';
 import type { PredicateNode } from '@topgunbuild/core';
 
 /**
@@ -68,7 +65,9 @@ export type TopGunDBAdapter = DBAdapter & {
   }): Promise<{ data: Record<string, unknown>[]; nextCursor: string | null }>;
 };
 
-export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): ((options: BetterAuthOptions) => TopGunDBAdapter) => {
+export const topGunAdapter = (
+  adapterOptions: TopGunAdapterOptions,
+): ((options: BetterAuthOptions) => TopGunDBAdapter) => {
   return (options: BetterAuthOptions): TopGunDBAdapter => {
     const { client, modelMap = {} } = adapterOptions;
 
@@ -95,31 +94,41 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): ((options: 
     const whereToPredicate = (where: Where[]): PredicateNode | undefined => {
       if (!where || where.length === 0) return undefined;
 
-      const predicates: PredicateNode[] = where.map(w => {
+      const predicates: PredicateNode[] = where.map((w) => {
         const field = w.field;
         const value = w.value;
-        
+
         switch (w.operator) {
-          case 'eq': return Predicates.equal(field, value);
-          case 'ne': return Predicates.notEqual(field, value);
-          case 'lt': return Predicates.lessThan(field, value);
-          case 'lte': return Predicates.lessThanOrEqual(field, value);
-          case 'gt': return Predicates.greaterThan(field, value);
-          case 'gte': return Predicates.greaterThanOrEqual(field, value);
-          case 'contains': return Predicates.like(field, `%${value}%`);
-          case 'starts_with': return Predicates.like(field, `${value}%`);
-          case 'ends_with': return Predicates.like(field, `%${value}`);
-          case 'in': 
+          case 'eq':
+            return Predicates.equal(field, value);
+          case 'ne':
+            return Predicates.notEqual(field, value);
+          case 'lt':
+            return Predicates.lessThan(field, value);
+          case 'lte':
+            return Predicates.lessThanOrEqual(field, value);
+          case 'gt':
+            return Predicates.greaterThan(field, value);
+          case 'gte':
+            return Predicates.greaterThanOrEqual(field, value);
+          case 'contains':
+            return Predicates.like(field, `%${value}%`);
+          case 'starts_with':
+            return Predicates.like(field, `${value}%`);
+          case 'ends_with':
+            return Predicates.like(field, `%${value}`);
+          case 'in':
             if (Array.isArray(value)) {
-              return Predicates.or(...value.map(v => Predicates.equal(field, v)));
+              return Predicates.or(...value.map((v) => Predicates.equal(field, v)));
             }
             return Predicates.equal(field, value);
           case 'not_in':
-             if (Array.isArray(value)) {
-               return Predicates.and(...value.map(v => Predicates.notEqual(field, v)));
-             }
-             return Predicates.notEqual(field, value);
-          default: return Predicates.equal(field, value);
+            if (Array.isArray(value)) {
+              return Predicates.and(...value.map((v) => Predicates.notEqual(field, v)));
+            }
+            return Predicates.notEqual(field, value);
+          default:
+            return Predicates.equal(field, value);
         }
       });
 
@@ -140,7 +149,14 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): ((options: 
      * by fetching limit+offset records and slicing client-side. Acceptable for auth
      * queries which typically have small result sets.
      */
-    const runQuery = async <T extends AuthRecord>(model: string, where?: Where[], sort?: SortSpec, limit?: number, offset?: number, cursor?: string): Promise<T[]> => {
+    const runQuery = async <T extends AuthRecord>(
+      model: string,
+      where?: Where[],
+      sort?: SortSpec,
+      limit?: number,
+      offset?: number,
+      cursor?: string,
+    ): Promise<T[]> => {
       const mapName = getMapName(model);
 
       if (cursor !== undefined) {
@@ -188,10 +204,12 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): ((options: 
 
         // Subscribe returns an unsubscribe function
         const unsubscribe = handle.subscribe((results: T[]) => {
-           unsubscribe();
-           // Apply offset client-side for BetterAuth compatibility
-           const sliced = offset ? results.slice(offset, offset + (limit || results.length)) : results;
-           resolve(sliced);
+          unsubscribe();
+          // Apply offset client-side for BetterAuth compatibility
+          const sliced = offset
+            ? results.slice(offset, offset + (limit || results.length))
+            : results;
+          resolve(sliced);
         });
       });
     };
@@ -224,7 +242,7 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): ((options: 
       async findOne({ model, where, select, join }) {
         await ensureReady();
         const results = await runQuery<AuthRecord>(model, where, undefined, 1);
-        
+
         if (results.length > 0) {
           const result = results[0];
 
@@ -246,61 +264,61 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): ((options: 
            * consider a direct TopGun query instead of the BetterAuth adapter.
            */
           if (join) {
-             for (const [joinModel, joinConfig] of Object.entries(join)) {
-                 if (joinConfig === false) continue;
+            for (const [joinModel, joinConfig] of Object.entries(join)) {
+              if (joinConfig === false) continue;
 
-                 const foreignKey = adapterOptions.foreignKeyMap?.[joinModel] ?? 'userId';
-                 const joinWhere: Where[] = [{ field: foreignKey, value: result.id }];
-                 
-                 const limit = typeof joinConfig === 'object' ? joinConfig.limit : undefined;
-                 
-                 const joinResults = await runQuery(joinModel, joinWhere, undefined, limit);
-                 
-                 // Attach to result using pluralized name (simple heuristic)
-                 const pluralName = joinModel.endsWith('s') ? joinModel : joinModel + 's';
-                 result[pluralName] = joinResults;
-             }
+              const foreignKey = adapterOptions.foreignKeyMap?.[joinModel] ?? 'userId';
+              const joinWhere: Where[] = [{ field: foreignKey, value: result.id }];
+
+              const limit = typeof joinConfig === 'object' ? joinConfig.limit : undefined;
+
+              const joinResults = await runQuery(joinModel, joinWhere, undefined, limit);
+
+              // Attach to result using pluralized name (simple heuristic)
+              const pluralName = joinModel.endsWith('s') ? joinModel : joinModel + 's';
+              result[pluralName] = joinResults;
+            }
           }
 
           // console.log(`[Adapter] findOne final result:`, result);
-          
+
           // Ensure Dates are Date objects if they are strings (basic fix for JSON/serialization issues)
           const fixDates = (obj: Record<string, unknown>): Record<string, unknown> => {
-              if (!obj) return obj;
-              for (const key in obj) {
-                  const value = obj[key];
-                  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value)) {
-                      obj[key] = new Date(value);
-                  } else if (typeof value === 'object' && value !== null) {
-                      if (Array.isArray(value)) {
-                          value.forEach((item: unknown) => {
-                              if (typeof item === 'object' && item !== null) {
-                                  fixDates(item as Record<string, unknown>);
-                              }
-                          });
-                      }
-                  }
+            if (!obj) return obj;
+            for (const key in obj) {
+              const value = obj[key];
+              if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value)) {
+                obj[key] = new Date(value);
+              } else if (typeof value === 'object' && value !== null) {
+                if (Array.isArray(value)) {
+                  value.forEach((item: unknown) => {
+                    if (typeof item === 'object' && item !== null) {
+                      fixDates(item as Record<string, unknown>);
+                    }
+                  });
+                }
               }
-              return obj;
+            }
+            return obj;
           };
           fixDates(result);
 
           if (select) {
-             const selected: Partial<AuthRecord> = {};
-             select.forEach(field => selected[field] = result[field]);
-             // Ensure joined props are kept if they are not in select?
-             // Usually select applies to the main model fields.
-             // If join is requested, it implies we want those too.
-             if (join) {
-                 for (const joinModel of Object.keys(join)) {
-                     const propName = joinModel.endsWith('s') ? joinModel : joinModel + 's';
-                     if (result[propName]) {
-                         selected[propName] = result[propName];
-                     }
-                 }
-             }
-             // Type assertion needed to match DBAdapter's generic return type
-             return selected as unknown as Record<string, unknown>;
+            const selected: Partial<AuthRecord> = {};
+            select.forEach((field) => (selected[field] = result[field]));
+            // Ensure joined props are kept if they are not in select?
+            // Usually select applies to the main model fields.
+            // If join is requested, it implies we want those too.
+            if (join) {
+              for (const joinModel of Object.keys(join)) {
+                const propName = joinModel.endsWith('s') ? joinModel : joinModel + 's';
+                if (result[propName]) {
+                  selected[propName] = result[propName];
+                }
+              }
+            }
+            // Type assertion needed to match DBAdapter's generic return type
+            return selected as unknown as Record<string, unknown>;
           }
           // Type assertion needed to match DBAdapter's generic return type
           return result as unknown as Record<string, unknown>;
@@ -309,10 +327,16 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): ((options: 
       },
 
       async findMany({ model, where, limit, offset, sortBy }) {
-         await ensureReady();
-         const results = await runQuery<AuthRecord>(model, where, sortBy ? {[sortBy.field]: sortBy.direction} : undefined, limit, offset);
-         // Type assertion needed to match DBAdapter's generic return type
-         return results as unknown as Record<string, unknown>[];
+        await ensureReady();
+        const results = await runQuery<AuthRecord>(
+          model,
+          where,
+          sortBy ? { [sortBy.field]: sortBy.direction } : undefined,
+          limit,
+          offset,
+        );
+        // Type assertion needed to match DBAdapter's generic return type
+        return results as unknown as Record<string, unknown>[];
       },
 
       async update({ model, where, update }) {
@@ -345,38 +369,38 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): ((options: 
         const map = client.getMap<string, AuthRecord>(mapName);
 
         for (const item of results) {
-           map.set(item.id, { ...item, ...update });
+          map.set(item.id, { ...item, ...update });
         }
         return results.length;
       },
 
       async delete({ model, where }) {
-         await ensureReady();
-         const results = await runQuery<AuthRecord>(model, where);
-         const mapName = getMapName(model);
-         const map = client.getMap<string, AuthRecord>(mapName);
+        await ensureReady();
+        const results = await runQuery<AuthRecord>(model, where);
+        const mapName = getMapName(model);
+        const map = client.getMap<string, AuthRecord>(mapName);
 
-         if (results.length > 0) {
-            map.remove(results[0].id);
-         }
+        if (results.length > 0) {
+          map.remove(results[0].id);
+        }
       },
 
       async deleteMany({ model, where }) {
-         await ensureReady();
-         const results = await runQuery<AuthRecord>(model, where);
-         const mapName = getMapName(model);
-         const map = client.getMap<string, AuthRecord>(mapName);
+        await ensureReady();
+        const results = await runQuery<AuthRecord>(model, where);
+        const mapName = getMapName(model);
+        const map = client.getMap<string, AuthRecord>(mapName);
 
-         for (const item of results) {
-            map.remove(item.id);
-         }
-         return results.length;
+        for (const item of results) {
+          map.remove(item.id);
+        }
+        return results.length;
       },
-      
+
       async count({ model, where }) {
-         await ensureReady();
-         const results = await runQuery<AuthRecord>(model, where);
-         return results.length;
+        await ensureReady();
+        const results = await runQuery<AuthRecord>(model, where);
+        return results.length;
       },
 
       /**
@@ -393,7 +417,7 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): ((options: 
        * For deployments requiring strict atomicity, use a traditional SQL adapter.
        */
       async transaction(callback) {
-         return callback(this as Omit<DBAdapter, 'transaction'>);
+        return callback(this as Omit<DBAdapter, 'transaction'>);
       },
 
       /**
@@ -414,15 +438,23 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): ((options: 
         // so greaterThan('id', '') returns all records. This ensures the cursor code path always enforces
         // id asc sort and limit enforcement regardless of whether a cursor was provided.
         const effectiveCursor = cursor !== undefined ? cursor : '';
-        const results = await runQuery<AuthRecord>(model, where, undefined, limit, undefined, effectiveCursor);
+        const results = await runQuery<AuthRecord>(
+          model,
+          where,
+          undefined,
+          limit,
+          undefined,
+          effectiveCursor,
+        );
         const data = results as unknown as Record<string, unknown>[];
         // nextCursor is null when: no results, fewer results than limit (last page),
         // or limit is undefined (pagination without a page size is meaningless)
-        const nextCursor = limit === undefined
-          ? null
-          : results.length < limit
+        const nextCursor =
+          limit === undefined
             ? null
-            : String(results[results.length - 1].id);
+            : results.length < limit
+              ? null
+              : String(results[results.length - 1].id);
         return { data, nextCursor };
       },
     } as TopGunDBAdapter;

@@ -84,7 +84,7 @@ export class ScenarioRunner {
     this.config = {
       ...config,
       seed: this.seed,
-      tickInterval: config.tickInterval ?? 1
+      tickInterval: config.tickInterval ?? 1,
     };
 
     // Initialize simulation components
@@ -139,7 +139,7 @@ export class ScenarioRunner {
   public run(
     setup: (runner: ScenarioRunner) => void,
     step: (runner: ScenarioRunner, tick: number) => void,
-    invariants: InvariantChecker<unknown>
+    invariants: InvariantChecker<unknown>,
   ): ScenarioResult {
     const finalStates = new Map<string, unknown>();
     const invariantFailures: string[] = [];
@@ -180,7 +180,7 @@ export class ScenarioRunner {
       passed: invariantFailures.length === 0,
       ticks: tickCount,
       invariantFailures,
-      finalStates
+      finalStates,
     };
   }
 

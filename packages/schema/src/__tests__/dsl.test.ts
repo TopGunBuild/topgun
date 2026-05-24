@@ -144,12 +144,16 @@ describe('MapBuilder.field()', () => {
   });
 
   test('pattern constraint maps correctly', () => {
-    const result = defineMap('test').field('email', t.string(), { pattern: '^[^@]+@[^@]+$' }).build();
+    const result = defineMap('test')
+      .field('email', t.string(), { pattern: '^[^@]+@[^@]+$' })
+      .build();
     expect(result.schema.fields[0].constraints?.pattern).toBe('^[^@]+@[^@]+$');
   });
 
   test('enumValues constraint maps correctly', () => {
-    const result = defineMap('test').field('status', t.string(), { enumValues: ['active', 'inactive'] }).build();
+    const result = defineMap('test')
+      .field('status', t.string(), { enumValues: ['active', 'inactive'] })
+      .build();
     expect(result.schema.fields[0].constraints?.enumValues).toEqual(['active', 'inactive']);
   });
 
@@ -209,8 +213,7 @@ describe('SchemaRegistry', () => {
 
   test('register stores correct schema for map name', () => {
     registry.register(
-      defineMap('items', { strict: true, version: 2 })
-        .field('id', t.string(), { required: true })
+      defineMap('items', { strict: true, version: 2 }).field('id', t.string(), { required: true }),
     );
 
     const schemas = registry.getSchemas();

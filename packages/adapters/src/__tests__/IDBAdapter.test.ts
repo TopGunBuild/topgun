@@ -75,10 +75,10 @@ describe('IDBAdapter', () => {
         level1: {
           level2: {
             level3: {
-              value: 'deep'
-            }
-          }
-        }
+              value: 'deep',
+            },
+          },
+        },
       };
       await adapter.put('nestedKey', nested);
       const result = await adapter.get('nestedKey');
@@ -175,7 +175,7 @@ describe('IDBAdapter', () => {
       const entries = new Map<string, any>([
         ['batch1', { data: 'first' }],
         ['batch2', { data: 'second' }],
-        ['batch3', { data: 'third' }]
+        ['batch3', { data: 'third' }],
       ]);
 
       await adapter.batchPut(entries);
@@ -195,7 +195,7 @@ describe('IDBAdapter', () => {
 
       const entries = new Map<string, any>([
         ['existing', 'new'],
-        ['fresh', 'value']
+        ['fresh', 'value'],
       ]);
 
       await adapter.batchPut(entries);
@@ -253,7 +253,7 @@ describe('IDBAdapter', () => {
         op: 'PUT',
         value: { name: 'Alice' },
         synced: 0,
-        mapName: 'users'
+        mapName: 'users',
       };
 
       const id = await adapter.appendOpLog(entry);
@@ -267,14 +267,14 @@ describe('IDBAdapter', () => {
         op: 'PUT',
         value: 'value1',
         synced: 0,
-        mapName: 'test'
+        mapName: 'test',
       };
       const entry2: Omit<OpLogEntry, 'id'> = {
         key: 'key2',
         op: 'PUT',
         value: 'value2',
         synced: 0,
-        mapName: 'test'
+        mapName: 'test',
       };
 
       const id1 = await adapter.appendOpLog(entry1);
@@ -289,18 +289,18 @@ describe('IDBAdapter', () => {
         op: 'PUT',
         value: 'value1',
         synced: 0,
-        mapName: 'test'
+        mapName: 'test',
       });
       await adapter.appendOpLog({
         key: 'key2',
         op: 'REMOVE',
         synced: 0,
-        mapName: 'test'
+        mapName: 'test',
       });
 
       const pending = await adapter.getPendingOps();
       expect(pending.length).toBe(2);
-      expect(pending.every(op => op.synced === 0)).toBe(true);
+      expect(pending.every((op) => op.synced === 0)).toBe(true);
     });
 
     it('should mark operations as synced', async () => {
@@ -309,21 +309,21 @@ describe('IDBAdapter', () => {
         op: 'PUT',
         value: 'value1',
         synced: 0,
-        mapName: 'test'
+        mapName: 'test',
       });
       const id2 = await adapter.appendOpLog({
         key: 'key2',
         op: 'PUT',
         value: 'value2',
         synced: 0,
-        mapName: 'test'
+        mapName: 'test',
       });
       const id3 = await adapter.appendOpLog({
         key: 'key3',
         op: 'PUT',
         value: 'value3',
         synced: 0,
-        mapName: 'test'
+        mapName: 'test',
       });
 
       // Mark first two as synced
@@ -340,7 +340,7 @@ describe('IDBAdapter', () => {
         op: 'PUT',
         record: { value: 'test', hlc: '123' },
         synced: 0,
-        mapName: 'lwwMap'
+        mapName: 'lwwMap',
       });
 
       await adapter.appendOpLog({
@@ -348,7 +348,7 @@ describe('IDBAdapter', () => {
         op: 'OR_ADD',
         orRecord: { value: 'item', tag: 'abc', hlc: '456' },
         synced: 0,
-        mapName: 'orMap'
+        mapName: 'orMap',
       });
 
       await adapter.appendOpLog({
@@ -356,12 +356,12 @@ describe('IDBAdapter', () => {
         op: 'OR_REMOVE',
         orTag: 'abc',
         synced: 0,
-        mapName: 'orMap'
+        mapName: 'orMap',
       });
 
       const pending = await adapter.getPendingOps();
       expect(pending.length).toBe(3);
-      expect(pending.map(p => p.op)).toEqual(['PUT', 'OR_ADD', 'OR_REMOVE']);
+      expect(pending.map((p) => p.op)).toEqual(['PUT', 'OR_ADD', 'OR_REMOVE']);
     });
   });
 
@@ -407,11 +407,13 @@ describe('IDBAdapter', () => {
     });
 
     it('should handle large values', async () => {
-      const largeArray = Array(1000).fill(null).map((_, i) => ({
-        id: i,
-        name: `Item ${i}`,
-        description: 'Lorem ipsum dolor sit amet '.repeat(10)
-      }));
+      const largeArray = Array(1000)
+        .fill(null)
+        .map((_, i) => ({
+          id: i,
+          name: `Item ${i}`,
+          description: 'Lorem ipsum dolor sit amet '.repeat(10),
+        }));
 
       await adapter.put('largeValue', largeArray);
       const result = await adapter.get('largeValue');
@@ -430,7 +432,7 @@ describe('IDBAdapter', () => {
           op: 'PUT',
           value: { index: i },
           synced: 0,
-          mapName: 'test'
+          mapName: 'test',
         });
       }
 
@@ -456,7 +458,7 @@ describe('IDBAdapter', () => {
     it('should store and retrieve LWWRecord-like structures', async () => {
       const lwwRecord = {
         value: { name: 'Test User', email: 'test@example.com' },
-        hlc: '1234567890-0-node1'
+        hlc: '1234567890-0-node1',
       };
 
       await adapter.put('users/user1', lwwRecord);
@@ -469,7 +471,7 @@ describe('IDBAdapter', () => {
       const orMapRecords = [
         { value: 'item1', tag: 'tag1', hlc: '1234567890-0-node1' },
         { value: 'item2', tag: 'tag2', hlc: '1234567891-0-node1' },
-        { value: 'item3', tag: 'tag3', hlc: '1234567892-0-node2' }
+        { value: 'item3', tag: 'tag3', hlc: '1234567892-0-node2' },
       ];
 
       await adapter.put('set/items', orMapRecords);

@@ -14,10 +14,10 @@ describe('HttpSyncProvider', () => {
       status,
       statusText: status === 200 ? 'OK' : 'Error',
       headers: new Headers({ 'content-type': 'application/x-msgpack' }),
-      arrayBuffer: () => Promise.resolve(bodyBytes.buffer.slice(
-        bodyBytes.byteOffset,
-        bodyBytes.byteOffset + bodyBytes.byteLength,
-      )),
+      arrayBuffer: () =>
+        Promise.resolve(
+          bodyBytes.buffer.slice(bodyBytes.byteOffset, bodyBytes.byteOffset + bodyBytes.byteLength),
+        ),
     } as unknown as Response;
   }
 
@@ -58,7 +58,7 @@ describe('HttpSyncProvider', () => {
         method: 'POST',
         headers: expect.objectContaining({
           'Content-Type': 'application/x-msgpack',
-          'Authorization': 'Bearer test-token',
+          Authorization: 'Bearer test-token',
         }),
       }),
     );
@@ -71,7 +71,11 @@ describe('HttpSyncProvider', () => {
       type: 'OP_BATCH',
       payload: {
         ops: [
-          { mapName: 'users', key: 'user-1', record: { value: { name: 'Alice' }, timestamp: hlc.now() } },
+          {
+            mapName: 'users',
+            key: 'user-1',
+            record: { value: { name: 'Alice' }, timestamp: hlc.now() },
+          },
         ],
       },
     });
@@ -176,15 +180,25 @@ describe('HttpSyncProvider', () => {
     const messageHandler = jest.fn();
     provider.on('message', messageHandler);
 
-    mockFetch.mockResolvedValue(createMockResponse(defaultSyncResponse({
-      deltas: [{
-        mapName: 'users',
-        records: [
-          { key: 'user-1', record: { value: { name: 'Alice' }, timestamp: hlc.now() }, eventType: 'PUT' },
-        ],
-        serverSyncTimestamp: hlc.now(),
-      }],
-    })));
+    mockFetch.mockResolvedValue(
+      createMockResponse(
+        defaultSyncResponse({
+          deltas: [
+            {
+              mapName: 'users',
+              records: [
+                {
+                  key: 'user-1',
+                  record: { value: { name: 'Alice' }, timestamp: hlc.now() },
+                  eventType: 'PUT',
+                },
+              ],
+              serverSyncTimestamp: hlc.now(),
+            },
+          ],
+        }),
+      ),
+    );
 
     await provider.connect();
 
@@ -278,10 +292,12 @@ describe('HttpSyncProvider', () => {
     await provider.connect();
 
     // Queue some operations
-    provider.send(serialize({
-      type: 'CLIENT_OP',
-      payload: { mapName: 'users', key: 'k1', record: { value: {}, timestamp: hlc.now() } },
-    }));
+    provider.send(
+      serialize({
+        type: 'CLIENT_OP',
+        payload: { mapName: 'users', key: 'k1', record: { value: {}, timestamp: hlc.now() } },
+      }),
+    );
 
     await provider.close();
 
@@ -328,7 +344,11 @@ describe('HttpSyncProvider', () => {
     const conn = provider.getConnection('key');
     const opBatchMsg = serialize({
       type: 'CLIENT_OP',
-      payload: { mapName: 'users', key: 'user-x', record: { value: { name: 'Test' }, timestamp: hlc.now() } },
+      payload: {
+        mapName: 'users',
+        key: 'user-x',
+        record: { value: { name: 'Test' }, timestamp: hlc.now() },
+      },
     });
     conn.send(opBatchMsg);
 

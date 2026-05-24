@@ -6,9 +6,11 @@ import { SearchOptionsSchema } from './search-schemas';
 // --- Partition Map ---
 export const PartitionMapRequestSchema = z.object({
   type: z.literal('PARTITION_MAP_REQUEST'),
-  payload: z.object({
-    currentVersion: z.number().optional(),
-  }).optional(),
+  payload: z
+    .object({
+      currentVersion: z.number().optional(),
+    })
+    .optional(),
 });
 export type PartitionMapRequest = z.infer<typeof PartitionMapRequestSchema>;
 
@@ -70,12 +72,16 @@ export const ClusterSubAckPayloadSchema = z.object({
   nodeId: z.string(),
   success: z.boolean(),
   error: z.string().optional(),
-  initialResults: z.array(z.object({
-    key: z.string(),
-    value: z.unknown(),
-    score: z.number().optional(),
-    matchedTerms: z.array(z.string()).optional(),
-  })).optional(),
+  initialResults: z
+    .array(
+      z.object({
+        key: z.string(),
+        value: z.unknown(),
+        score: z.number().optional(),
+        matchedTerms: z.array(z.string()).optional(),
+      }),
+    )
+    .optional(),
   totalHits: z.number().int().nonnegative().optional(),
 });
 export type ClusterSubAckPayload = z.infer<typeof ClusterSubAckPayloadSchema>;
@@ -139,12 +145,14 @@ export type ClusterSearchReqMessage = z.infer<typeof ClusterSearchReqMessageSche
 export const ClusterSearchRespPayloadSchema = z.object({
   requestId: z.string(),
   nodeId: z.string(),
-  results: z.array(z.object({
-    key: z.string(),
-    value: z.unknown(),
-    score: z.number(),
-    matchedTerms: z.array(z.string()).optional(),
-  })),
+  results: z.array(
+    z.object({
+      key: z.string(),
+      value: z.unknown(),
+      score: z.number(),
+      matchedTerms: z.array(z.string()).optional(),
+    }),
+  ),
   totalHits: z.number().int().nonnegative(),
   executionTimeMs: z.number().nonnegative(),
   error: z.string().optional(),

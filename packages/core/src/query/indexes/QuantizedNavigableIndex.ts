@@ -47,8 +47,7 @@ export const Quantizers = {
    */
   timestampInterval(intervalMs: number): Quantizer<number> {
     return {
-      quantize: (value: number) =>
-        Math.floor(value / intervalMs) * intervalMs,
+      quantize: (value: number) => Math.floor(value / intervalMs) * intervalMs,
     };
   },
 
@@ -90,7 +89,7 @@ class QuantizedAttribute<V, A extends number> implements Attribute<V, A> {
 
   constructor(
     private readonly inner: Attribute<V, A>,
-    private readonly quantizer: Quantizer<A>
+    private readonly quantizer: Quantizer<A>,
   ) {
     this.type = inner.type;
   }
@@ -122,9 +121,7 @@ class QuantizedAttribute<V, A extends number> implements Attribute<V, A> {
  *
  * K = record key type, V = record value type, A = attribute value type (must be number)
  */
-export class QuantizedNavigableIndex<K, V, A extends number>
-  implements Index<K, V, A>
-{
+export class QuantizedNavigableIndex<K, V, A extends number> implements Index<K, V, A> {
   readonly type = 'navigable' as const;
 
   /** Sorted map from quantized value to set of record keys */
@@ -164,11 +161,7 @@ export class QuantizedNavigableIndex<K, V, A extends number>
    * @param quantizer - Quantizer for grouping values
    * @param comparator - Optional custom comparator for ordering
    */
-  constructor(
-    attribute: Attribute<V, A>,
-    quantizer: Quantizer<A>,
-    comparator?: Comparator<A>
-  ) {
+  constructor(attribute: Attribute<V, A>, quantizer: Quantizer<A>, comparator?: Comparator<A>) {
     this.originalAttribute = attribute;
     this.quantizer = quantizer;
     this.quantizedAttribute = new QuantizedAttribute(attribute, quantizer);
@@ -208,12 +201,10 @@ export class QuantizedNavigableIndex<K, V, A extends number>
           query.from as A,
           query.to as A,
           query.fromInclusive ?? true,
-          query.toInclusive ?? false
+          query.toInclusive ?? false,
         );
       default:
-        throw new Error(
-          `QuantizedNavigableIndex does not support query type: ${query.type}`
-        );
+        throw new Error(`QuantizedNavigableIndex does not support query type: ${query.type}`);
     }
   }
 
@@ -225,7 +216,7 @@ export class QuantizedNavigableIndex<K, V, A extends number>
     const keys = this.data.get(quantizedValue);
     return new SetResultSet(
       keys ? new Set(keys) : new Set(),
-      QuantizedNavigableIndex.RETRIEVAL_COST
+      QuantizedNavigableIndex.RETRIEVAL_COST,
     );
   }
 
@@ -250,10 +241,7 @@ export class QuantizedNavigableIndex<K, V, A extends number>
   }
 
   private retrieveHas(): ResultSet<K> {
-    return new SetResultSet(
-      new Set(this.allKeys),
-      QuantizedNavigableIndex.RETRIEVAL_COST
-    );
+    return new SetResultSet(new Set(this.allKeys), QuantizedNavigableIndex.RETRIEVAL_COST);
   }
 
   // ============== Range Queries ==============
@@ -263,7 +251,7 @@ export class QuantizedNavigableIndex<K, V, A extends number>
     return new LazyResultSet(
       () => this.iterateGreaterThan(quantizedValue, inclusive),
       QuantizedNavigableIndex.RETRIEVAL_COST,
-      this.estimateGreaterThanSize()
+      this.estimateGreaterThanSize(),
     );
   }
 
@@ -272,7 +260,7 @@ export class QuantizedNavigableIndex<K, V, A extends number>
     return new LazyResultSet(
       () => this.iterateLessThan(quantizedValue, inclusive),
       QuantizedNavigableIndex.RETRIEVAL_COST,
-      this.estimateLessThanSize()
+      this.estimateLessThanSize(),
     );
   }
 
@@ -280,15 +268,14 @@ export class QuantizedNavigableIndex<K, V, A extends number>
     from: A,
     to: A,
     fromInclusive: boolean,
-    toInclusive: boolean
+    toInclusive: boolean,
   ): ResultSet<K> {
     const quantizedFrom = this.quantizer.quantize(from);
     const quantizedTo = this.quantizer.quantize(to);
     return new LazyResultSet(
-      () =>
-        this.iterateBetween(quantizedFrom, quantizedTo, fromInclusive, toInclusive),
+      () => this.iterateBetween(quantizedFrom, quantizedTo, fromInclusive, toInclusive),
       QuantizedNavigableIndex.RETRIEVAL_COST,
-      this.estimateBetweenSize()
+      this.estimateBetweenSize(),
     );
   }
 
@@ -314,7 +301,7 @@ export class QuantizedNavigableIndex<K, V, A extends number>
     from: A,
     to: A,
     fromInclusive: boolean,
-    toInclusive: boolean
+    toInclusive: boolean,
   ): Generator<K> {
     for (const [, keys] of this.data.range(from, to, {
       fromInclusive,
@@ -401,8 +388,7 @@ export class QuantizedNavigableIndex<K, V, A extends number>
     return {
       distinctValues: this.data.size,
       totalEntries,
-      avgEntriesPerValue:
-        this.data.size > 0 ? totalEntries / this.data.size : 0,
+      avgEntriesPerValue: this.data.size > 0 ? totalEntries / this.data.size : 0,
     };
   }
 

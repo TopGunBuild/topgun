@@ -93,7 +93,7 @@ export interface UseSearchResult<T> {
 export function useSearch<T = unknown>(
   mapName: string,
   query: string,
-  options?: UseSearchOptions
+  options?: UseSearchOptions,
 ): UseSearchResult<T> {
   const client = useClient();
   const [results, setResults] = useState<SearchResult<T>[]>([]);
@@ -236,8 +236,5 @@ export function useSearch<T = unknown>(
     handleRef.current.setOptions(searchOptions);
   }, [searchOptions]);
 
-  return useMemo(
-    () => ({ results, loading, error }),
-    [results, loading, error]
-  );
+  return useMemo(() => ({ results, loading, error }), [results, loading, error]);
 }

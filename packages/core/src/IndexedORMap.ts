@@ -39,7 +39,11 @@ import { evaluatePredicate, PredicateNode } from './predicate';
 
 // Full-Text Search imports
 import { FullTextIndex } from './fts/FullTextIndex';
-import type { FullTextIndexConfig, SearchOptions as FTSSearchOptions, ScoredDocument } from './fts/types';
+import type {
+  FullTextIndexConfig,
+  SearchOptions as FTSSearchOptions,
+  ScoredDocument,
+} from './fts/types';
 
 // Adaptive indexing imports
 import {
@@ -116,8 +120,8 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
       new FallbackIndex<string, V>(
         () => this.getAllCompositeKeys(),
         (compositeKey) => this.getRecordByCompositeKey(compositeKey),
-        (record, query) => this.matchesIndexQuery(record, query)
-      )
+        (record, query) => this.matchesIndexQuery(record, query),
+      ),
     );
 
     // Initialize adaptive indexing
@@ -129,7 +133,7 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
       this.autoIndexManager = new AutoIndexManager(
         this.queryTracker,
         this.indexAdvisor,
-        options.adaptiveIndexing.autoIndex
+        options.adaptiveIndexing.autoIndex,
       );
       this.autoIndexManager.setMap(this);
     } else {
@@ -169,7 +173,7 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
    */
   addNavigableIndex<A extends string | number>(
     attribute: Attribute<V, A>,
-    comparator?: (a: A, b: A) => number
+    comparator?: (a: A, b: A) => number,
   ): NavigableIndex<string, V, A> {
     const index = new NavigableIndex<string, V, A>(attribute, comparator);
     this.indexRegistry.addIndex(index);
@@ -187,7 +191,7 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
    */
   addInvertedIndex<A extends string = string>(
     attribute: Attribute<V, A>,
-    pipeline?: TokenizationPipeline
+    pipeline?: TokenizationPipeline,
   ): InvertedIndex<string, V, A> {
     const index = new InvertedIndex<string, V, A>(attribute, pipeline);
     this.indexRegistry.addIndex(index);
@@ -430,15 +434,15 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
         const fallback = this.indexRegistry.getFallbackIndex();
         if (fallback) {
           // FallbackIndex uses predicate internally - cast through unknown for compatibility
-          return fallback.retrieve(step.predicate as unknown as IndexQuery<unknown>) as ResultSet<string>;
+          return fallback.retrieve(
+            step.predicate as unknown as IndexQuery<unknown>,
+          ) as ResultSet<string>;
         }
         return this.fullScan(step.predicate as Query);
       }
 
       case 'intersection':
-        return new IntersectionResultSet(
-          step.steps.map((s) => this.executePlan(s))
-        );
+        return new IntersectionResultSet(step.steps.map((s) => this.executePlan(s)));
 
       case 'union':
         return new UnionResultSet(step.steps.map((s) => this.executePlan(s)));
@@ -450,7 +454,7 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
           (record) => {
             if (record === undefined) return false;
             return this.matchesPredicate(record, step.predicate as Query);
-          }
+          },
         );
 
       case 'not': {
@@ -607,10 +611,7 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
       // Fallback for malformed keys
       return [compositeKey, ''];
     }
-    return [
-      compositeKey.substring(0, separatorIndex),
-      compositeKey.substring(separatorIndex + 2),
-    ];
+    return [compositeKey.substring(0, separatorIndex), compositeKey.substring(separatorIndex + 2)];
   }
 
   /**
@@ -714,23 +715,21 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
         case 'and':
           return {
             op: 'and',
-            children: ((query as { children: Query[] }).children || []).map(
-              (c) => this.queryToPredicate(c)
+            children: ((query as { children: Query[] }).children || []).map((c) =>
+              this.queryToPredicate(c),
             ),
           };
         case 'or':
           return {
             op: 'or',
-            children: ((query as { children: Query[] }).children || []).map(
-              (c) => this.queryToPredicate(c)
+            children: ((query as { children: Query[] }).children || []).map((c) =>
+              this.queryToPredicate(c),
             ),
           };
         case 'not':
           return {
             op: 'not',
-            children: [
-              this.queryToPredicate((query as { child: Query }).child),
-            ],
+            children: [this.queryToPredicate((query as { child: Query }).child)],
           };
         case 'contains':
           return {
@@ -805,7 +804,7 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
    */
   registerAttribute<A>(
     attribute: Attribute<V, A>,
-    allowedIndexTypes?: RecommendedIndexType[]
+    allowedIndexTypes?: RecommendedIndexType[],
   ): void {
     if (this.autoIndexManager) {
       this.autoIndexManager.registerAttribute(attribute, allowedIndexTypes);
@@ -890,11 +889,11 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
     query: Query,
     duration: number,
     resultSize: number,
-    usedIndex: boolean
+    usedIndex: boolean,
   ): void {
     // Only track if advisor is enabled (default: true)
-    const advisorEnabled = this.options.adaptiveIndexing?.advisor?.enabled ??
-      ADAPTIVE_INDEXING_DEFAULTS.advisor.enabled;
+    const advisorEnabled =
+      this.options.adaptiveIndexing?.advisor?.enabled ?? ADAPTIVE_INDEXING_DEFAULTS.advisor.enabled;
 
     if (!advisorEnabled && !this.autoIndexManager) {
       return;
@@ -912,13 +911,7 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
     const hasIndex = this.indexRegistry.hasIndex(attribute);
 
     // Record query in tracker
-    this.queryTracker.recordQuery(
-      attribute,
-      queryType,
-      duration,
-      resultSize,
-      hasIndex
-    );
+    this.queryTracker.recordQuery(attribute, queryType, duration, resultSize, hasIndex);
 
     // Notify auto-index manager if enabled
     if (this.autoIndexManager) {
@@ -960,8 +953,18 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
       const type = query.type;
       // Only track types that can be indexed
       const indexableTypes: TrackedQueryType[] = [
-        'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'between', 'in', 'has',
-        'contains', 'containsAll', 'containsAny',
+        'eq',
+        'neq',
+        'gt',
+        'gte',
+        'lt',
+        'lte',
+        'between',
+        'in',
+        'has',
+        'contains',
+        'containsAll',
+        'containsAny',
       ];
       if (indexableTypes.includes(type as TrackedQueryType)) {
         return type as TrackedQueryType;

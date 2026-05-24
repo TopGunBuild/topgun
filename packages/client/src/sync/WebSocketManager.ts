@@ -10,7 +10,11 @@
  */
 
 import { serialize, deserialize } from '@topgunbuild/core';
-import type { IConnectionProvider, ConnectionProviderEvent, ConnectionEventHandler } from '../types';
+import type {
+  IConnectionProvider,
+  ConnectionProviderEvent,
+  ConnectionEventHandler,
+} from '../types';
 import { SyncState } from '../SyncState';
 import { logger } from '../utils/logger';
 import type { IWebSocketManager, WebSocketManagerConfig } from './types';
@@ -288,11 +292,14 @@ export class WebSocketManager implements IWebSocketManager {
     this.lastPongReceived = now;
     this.lastRoundTripTime = now - msg.timestamp;
 
-    logger.debug({
-      rtt: this.lastRoundTripTime,
-      serverTime: msg.serverTime,
-      clockSkew: msg.serverTime - (msg.timestamp + this.lastRoundTripTime / 2),
-    }, 'Received PONG');
+    logger.debug(
+      {
+        rtt: this.lastRoundTripTime,
+        serverTime: msg.serverTime,
+        clockSkew: msg.serverTime - (msg.timestamp + this.lastRoundTripTime / 2),
+      },
+      'Received PONG',
+    );
   }
 
   /**
@@ -303,10 +310,13 @@ export class WebSocketManager implements IWebSocketManager {
     const timeSinceLastPong = now - this.lastPongReceived;
 
     if (timeSinceLastPong > this.config.heartbeatConfig.timeoutMs) {
-      logger.warn({
-        timeSinceLastPong,
-        timeoutMs: this.config.heartbeatConfig.timeoutMs,
-      }, 'Heartbeat timeout - triggering reconnection');
+      logger.warn(
+        {
+          timeSinceLastPong,
+          timeoutMs: this.config.heartbeatConfig.timeoutMs,
+        },
+        'Heartbeat timeout - triggering reconnection',
+      );
 
       this.stopHeartbeat();
 
@@ -328,12 +338,11 @@ export class WebSocketManager implements IWebSocketManager {
    */
   isConnectionHealthy(): boolean {
     const state = this.config.stateMachine.getState();
-    const isOnline = (
+    const isOnline =
       state === SyncState.CONNECTING ||
       state === SyncState.AUTHENTICATING ||
       state === SyncState.SYNCING ||
-      state === SyncState.CONNECTED
-    );
+      state === SyncState.CONNECTED;
     const isAuthenticated = state === SyncState.SYNCING || state === SyncState.CONNECTED;
 
     if (!isOnline || !isAuthenticated) {

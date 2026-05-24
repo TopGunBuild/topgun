@@ -1,16 +1,15 @@
-import { 
-  MessageSchema, 
-  AuthMessageSchema, 
+import {
+  MessageSchema,
+  AuthMessageSchema,
   QuerySubMessageSchema,
-  ClientOpMessageSchema 
+  ClientOpMessageSchema,
 } from '../schemas';
 
 describe('Message Schemas', () => {
-  
   test('validates AUTH message', () => {
     const validAuth = {
       type: 'AUTH',
-      token: 'some-jwt-token'
+      token: 'some-jwt-token',
     };
     expect(AuthMessageSchema.safeParse(validAuth).success).toBe(true);
 
@@ -29,9 +28,9 @@ describe('Message Schemas', () => {
         mapName: 'users',
         query: {
           where: { age: { $gt: 18 } },
-          limit: 10
-        }
-      }
+          limit: 10,
+        },
+      },
     };
     expect(QuerySubMessageSchema.safeParse(validQuery).success).toBe(true);
 
@@ -40,8 +39,8 @@ describe('Message Schemas', () => {
       payload: {
         // missing queryId
         mapName: 'users',
-        query: {}
-      }
+        query: {},
+      },
     };
     expect(QuerySubMessageSchema.safeParse(invalidQuery).success).toBe(false);
   });
@@ -56,9 +55,9 @@ describe('Message Schemas', () => {
         opType: 'PUT',
         record: {
           value: { name: 'Alice' },
-          timestamp: { millis: 100, counter: 0, nodeId: 'client1' }
-        }
-      }
+          timestamp: { millis: 100, counter: 0, nodeId: 'client1' },
+        },
+      },
     };
     expect(ClientOpMessageSchema.safeParse(validOp).success).toBe(true);
   });
@@ -67,22 +66,21 @@ describe('Message Schemas', () => {
     const msg = {
       type: 'SYNC_INIT',
       mapName: 'todos',
-      lastSyncTimestamp: 123456
+      lastSyncTimestamp: 123456,
     };
     const result = MessageSchema.safeParse(msg);
     expect(result.success).toBe(true);
     if (result.success) {
-        expect(result.data.type).toBe('SYNC_INIT');
+      expect(result.data.type).toBe('SYNC_INIT');
     }
   });
 
   test('rejects unknown message types', () => {
     const unknownMsg = {
       type: 'UNKNOWN_TYPE',
-      payload: {}
+      payload: {},
     };
     const result = MessageSchema.safeParse(unknownMsg);
     expect(result.success).toBe(false);
   });
 });
-

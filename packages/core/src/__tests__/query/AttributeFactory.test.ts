@@ -9,12 +9,7 @@
  * - createSchema() fluent builder
  */
 
-import {
-  generateAttributes,
-  attr,
-  multiAttr,
-  createSchema,
-} from '../../query/AttributeFactory';
+import { generateAttributes, attr, multiAttr, createSchema } from '../../query/AttributeFactory';
 import type { AttributeSchema } from '../../query/AttributeFactory';
 
 interface TestUser {
@@ -168,7 +163,7 @@ describe('generateAttributes', () => {
   it('should apply name prefix when provided', () => {
     const attrs = generateAttributes<TestUser>()(
       { id: 'string', name: 'string' },
-      { namePrefix: 'user' }
+      { namePrefix: 'user' },
     );
 
     expect(attrs.id.name).toBe('user.id');
@@ -241,10 +236,7 @@ describe('multiAttr helper', () => {
 
 describe('createSchema fluent builder', () => {
   it('should build schema with string fields', () => {
-    const schema = createSchema<TestUser>()
-      .string('id')
-      .string('name')
-      .build();
+    const schema = createSchema<TestUser>().string('id').string('name').build();
 
     expect(schema).toEqual({
       id: 'string',
@@ -253,9 +245,7 @@ describe('createSchema fluent builder', () => {
   });
 
   it('should build schema with number fields', () => {
-    const schema = createSchema<TestUser>()
-      .number('age')
-      .build();
+    const schema = createSchema<TestUser>().number('age').build();
 
     expect(schema).toEqual({
       age: 'number',
@@ -263,9 +253,7 @@ describe('createSchema fluent builder', () => {
   });
 
   it('should build schema with boolean fields', () => {
-    const schema = createSchema<TestUser>()
-      .boolean('isActive')
-      .build();
+    const schema = createSchema<TestUser>().boolean('isActive').build();
 
     expect(schema).toEqual({
       isActive: 'boolean',
@@ -273,10 +261,7 @@ describe('createSchema fluent builder', () => {
   });
 
   it('should build schema with array fields', () => {
-    const schema = createSchema<TestUser>()
-      .stringArray('tags')
-      .numberArray('scores')
-      .build();
+    const schema = createSchema<TestUser>().stringArray('tags').numberArray('scores').build();
 
     expect(schema).toEqual({
       tags: 'string[]',
@@ -307,11 +292,7 @@ describe('createSchema fluent builder', () => {
   });
 
   it('should generate attributes directly', () => {
-    const attrs = createSchema<TestUser>()
-      .string('id')
-      .string('name')
-      .number('age')
-      .generate();
+    const attrs = createSchema<TestUser>().string('id').string('name').number('age').generate();
 
     expect(attrs.id.getValue(testUser)).toBe('user-1');
     expect(attrs.name.getValue(testUser)).toBe('Alice');
@@ -319,9 +300,7 @@ describe('createSchema fluent builder', () => {
   });
 
   it('should support generate with options', () => {
-    const attrs = createSchema<TestUser>()
-      .string('id')
-      .generate({ namePrefix: 'test' });
+    const attrs = createSchema<TestUser>().string('id').generate({ namePrefix: 'test' });
 
     expect(attrs.id.name).toBe('test.id');
     expect(attrs.id.getValue(testUser)).toBe('user-1');
@@ -352,7 +331,11 @@ describe('Integration with IndexedLWWMap', () => {
     expect(resultById.toArray()).toContain('user-1');
 
     // Query by nested path
-    const resultByCity = map.query({ type: 'eq', attribute: 'address.city', value: 'San Francisco' });
+    const resultByCity = map.query({
+      type: 'eq',
+      attribute: 'address.city',
+      value: 'San Francisco',
+    });
     expect(resultByCity.toArray()).toContain('user-1');
   });
 

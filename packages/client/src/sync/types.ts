@@ -5,7 +5,11 @@
  * WebSocket/connection operations and query management for SyncEngine.
  */
 
-import type { IConnectionProvider, ConnectionProviderEvent, ConnectionEventHandler } from '../types';
+import type {
+  IConnectionProvider,
+  ConnectionProviderEvent,
+  ConnectionEventHandler,
+} from '../types';
 import type { SyncStateMachine } from '../SyncStateMachine';
 import type { BackoffConfig, HeartbeatConfig, OpLogEntry, TopicQueueConfig } from '../SyncEngine';
 import type {
@@ -208,8 +212,13 @@ export interface IBackpressureController {
    * @returns Unsubscribe function
    */
   onBackpressure(
-    event: 'backpressure:high' | 'backpressure:low' | 'backpressure:paused' | 'backpressure:resumed' | 'operation:dropped',
-    listener: (data?: BackpressureThresholdEvent | OperationDroppedEvent) => void
+    event:
+      | 'backpressure:high'
+      | 'backpressure:low'
+      | 'backpressure:paused'
+      | 'backpressure:resumed'
+      | 'operation:dropped',
+    listener: (data?: BackpressureThresholdEvent | OperationDroppedEvent) => void,
   ): () => void;
 }
 
@@ -291,7 +300,7 @@ export interface IQueryManager {
    */
   runLocalHybridQuery<T>(
     mapName: string,
-    filter: HybridQueryFilter
+    filter: HybridQueryFilter,
   ): Promise<Array<{ key: string; value: T; score?: number; matchedTerms?: string[] }>>;
 
   /**
@@ -561,7 +570,10 @@ export interface ICounterManager {
    * @param name - Counter name
    * @param stateObj - Counter state object
    */
-  handleCounterUpdate(name: string, stateObj: { positive: Record<string, number>; negative: Record<string, number> }): void;
+  handleCounterUpdate(
+    name: string,
+    stateObj: { positive: Record<string, number>; negative: Record<string, number> },
+  ): void;
 
   /**
    * Clean up resources (clear listeners).
@@ -606,7 +618,7 @@ export interface IEntryProcessorClient {
   executeOnKey<V, R = V>(
     mapName: string,
     key: string,
-    processor: EntryProcessorDef<V, R>
+    processor: EntryProcessorDef<V, R>,
   ): Promise<EntryProcessorResult<R>>;
 
   /**
@@ -619,7 +631,7 @@ export interface IEntryProcessorClient {
   executeOnKeys<V, R = V>(
     mapName: string,
     keys: string[],
-    processor: EntryProcessorDef<V, R>
+    processor: EntryProcessorDef<V, R>,
   ): Promise<Map<string, EntryProcessorResult<R>>>;
 
   /**
@@ -640,7 +652,10 @@ export interface IEntryProcessorClient {
    */
   handleEntryProcessBatchResponse(message: {
     requestId: string;
-    results: Record<string, { success: boolean; result?: unknown; newValue?: unknown; error?: string }>;
+    results: Record<
+      string,
+      { success: boolean; result?: unknown; newValue?: unknown; error?: string }
+    >;
   }): void;
 
   /**
@@ -703,7 +718,7 @@ export interface ISearchClient {
   search<T>(
     mapName: string,
     query: string,
-    options?: { limit?: number; minScore?: number; boost?: Record<string, number> }
+    options?: { limit?: number; minScore?: number; boost?: Record<string, number> },
   ): Promise<SearchResult<T>[]>;
 
   /**
@@ -827,19 +842,30 @@ export interface IMerkleSyncHandler {
    * Handle SYNC_RESP_ROOT message from server.
    * @param payload - Root hash and timestamp from server
    */
-  handleSyncRespRoot(payload: { mapName: string; rootHash: number; timestamp?: any }): Promise<void>;
+  handleSyncRespRoot(payload: {
+    mapName: string;
+    rootHash: number;
+    timestamp?: any;
+  }): Promise<void>;
 
   /**
    * Handle SYNC_RESP_BUCKETS message from server.
    * @param payload - Bucket hashes for a path
    */
-  handleSyncRespBuckets(payload: { mapName: string; path: string; buckets: Record<string, number> }): void;
+  handleSyncRespBuckets(payload: {
+    mapName: string;
+    path: string;
+    buckets: Record<string, number>;
+  }): void;
 
   /**
    * Handle SYNC_RESP_LEAF message from server.
    * @param payload - Leaf records to merge
    */
-  handleSyncRespLeaf(payload: { mapName: string; records: Array<{ key: string; record: any }> }): Promise<void>;
+  handleSyncRespLeaf(payload: {
+    mapName: string;
+    records: Array<{ key: string; record: any }>;
+  }): Promise<void>;
 
   /**
    * Handle SYNC_RESET_REQUIRED message from server.
@@ -916,25 +942,39 @@ export interface IORMapSyncHandler {
    * Handle ORMAP_SYNC_RESP_ROOT message from server.
    * @param payload - Root hash and timestamp from server
    */
-  handleORMapSyncRespRoot(payload: { mapName: string; rootHash: number; timestamp?: any }): Promise<void>;
+  handleORMapSyncRespRoot(payload: {
+    mapName: string;
+    rootHash: number;
+    timestamp?: any;
+  }): Promise<void>;
 
   /**
    * Handle ORMAP_SYNC_RESP_BUCKETS message from server.
    * @param payload - Bucket hashes for a path
    */
-  handleORMapSyncRespBuckets(payload: { mapName: string; path: string; buckets: Record<string, number> }): Promise<void>;
+  handleORMapSyncRespBuckets(payload: {
+    mapName: string;
+    path: string;
+    buckets: Record<string, number>;
+  }): Promise<void>;
 
   /**
    * Handle ORMAP_SYNC_RESP_LEAF message from server.
    * @param payload - Leaf entries to merge
    */
-  handleORMapSyncRespLeaf(payload: { mapName: string; entries: Array<{ key: string; records: any[]; tombstones: string[] }> }): Promise<void>;
+  handleORMapSyncRespLeaf(payload: {
+    mapName: string;
+    entries: Array<{ key: string; records: any[]; tombstones: string[] }>;
+  }): Promise<void>;
 
   /**
    * Handle ORMAP_DIFF_RESPONSE message from server.
    * @param payload - Diff entries to merge
    */
-  handleORMapDiffResponse(payload: { mapName: string; entries: Array<{ key: string; records: any[]; tombstones: string[] }> }): Promise<void>;
+  handleORMapDiffResponse(payload: {
+    mapName: string;
+    entries: Array<{ key: string; records: any[]; tombstones: string[] }>;
+  }): Promise<void>;
 
   /**
    * Push local ORMap diff to server for given keys.
@@ -1061,7 +1101,7 @@ export interface IVectorSearchClient {
   vectorSearch(
     mapName: string,
     queryVector: Float32Array | number[],
-    options?: VectorSearchClientOptions
+    options?: VectorSearchClientOptions,
   ): Promise<VectorSearchClientResult[]>;
 
   /**
@@ -1222,7 +1262,7 @@ export interface IHybridSearchClient {
   hybridSearch(
     mapName: string,
     queryText: string,
-    options?: HybridSearchClientOptions
+    options?: HybridSearchClientOptions,
   ): Promise<HybridSearchClientResult[]>;
 
   /**

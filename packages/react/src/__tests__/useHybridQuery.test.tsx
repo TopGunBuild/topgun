@@ -95,10 +95,9 @@ describe('useHybridQuery', () => {
   });
 
   it('should skip query when skip option is true', () => {
-    const { result } = renderHook(
-      () => useHybridQuery('articles', {}, { skip: true }),
-      { wrapper }
-    );
+    const { result } = renderHook(() => useHybridQuery('articles', {}, { skip: true }), {
+      wrapper,
+    });
 
     expect(mockHybridQuery).not.toHaveBeenCalled();
     expect(result.current.loading).toBe(false);
@@ -106,13 +105,10 @@ describe('useHybridQuery', () => {
   });
 
   it('should recreate handle when mapName changes', () => {
-    const { rerender } = renderHook(
-      ({ mapName }) => useHybridQuery(mapName),
-      {
-        wrapper,
-        initialProps: { mapName: 'articles' },
-      }
-    );
+    const { rerender } = renderHook(({ mapName }) => useHybridQuery(mapName), {
+      wrapper,
+      initialProps: { mapName: 'articles' },
+    });
 
     expect(mockHybridQuery).toHaveBeenCalledTimes(1);
     expect(mockHybridQuery).toHaveBeenLastCalledWith('articles', {});
@@ -125,13 +121,10 @@ describe('useHybridQuery', () => {
   });
 
   it('should recreate handle when filter changes', () => {
-    const { rerender } = renderHook(
-      ({ filter }) => useHybridQuery('articles', filter),
-      {
-        wrapper,
-        initialProps: { filter: { limit: 10 } },
-      }
-    );
+    const { rerender } = renderHook(({ filter }) => useHybridQuery('articles', filter), {
+      wrapper,
+      initialProps: { filter: { limit: 10 } },
+    });
 
     expect(mockHybridQuery).toHaveBeenCalledTimes(1);
     expect(mockHybridQuery).toHaveBeenLastCalledWith('articles', { limit: 10 });
@@ -150,10 +143,9 @@ describe('useHybridQuery', () => {
       return () => {};
     });
 
-    const { result } = renderHook(
-      () => useHybridQuery('articles', { sort: { _score: 'desc' } }),
-      { wrapper }
-    );
+    const { result } = renderHook(() => useHybridQuery('articles', { sort: { _score: 'desc' } }), {
+      wrapper,
+    });
 
     act(() => {
       // Results should be preserved in the order returned by HybridQueryHandle
@@ -224,13 +216,21 @@ describe('useHybridQuery', () => {
     });
 
     const { result } = renderHook(
-      () => useHybridQuery('articles', { predicate: { op: 'match' as const, attribute: 'body', query: 'test' } }),
-      { wrapper }
+      () =>
+        useHybridQuery('articles', {
+          predicate: { op: 'match' as const, attribute: 'body', query: 'test' },
+        }),
+      { wrapper },
     );
 
     act(() => {
       subscriptionCallback([
-        { value: { title: 'Test Article' }, _key: 'doc1', _score: 2.5, _matchedTerms: ['test', 'testing'] },
+        {
+          value: { title: 'Test Article' },
+          _key: 'doc1',
+          _score: 2.5,
+          _matchedTerms: ['test', 'testing'],
+        },
       ]);
     });
 

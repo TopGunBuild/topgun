@@ -6,11 +6,11 @@ export class BackpressureError extends Error {
 
   constructor(
     public readonly pendingCount: number,
-    public readonly maxPending: number
+    public readonly maxPending: number,
   ) {
     super(
       `Backpressure limit reached: ${pendingCount}/${maxPending} pending operations. ` +
-      `Wait for acknowledgments or increase maxPendingOps.`
+        `Wait for acknowledgments or increase maxPendingOps.`,
     );
 
     // Maintains proper stack trace for where error was thrown (only available on V8)

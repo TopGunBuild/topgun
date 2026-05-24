@@ -6,12 +6,7 @@
  */
 
 import { serialize, deserialize } from '@topgunbuild/core';
-import {
-  spawnRustServer,
-  createRustTestClient,
-  createLWWRecord,
-  waitForSync,
-} from './helpers';
+import { spawnRustServer, createRustTestClient, createLWWRecord, waitForSync } from './helpers';
 
 // ---------------------------------------------------------------------------
 // Helpers

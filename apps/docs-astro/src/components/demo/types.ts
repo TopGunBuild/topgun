@@ -2,7 +2,7 @@ export enum DroneStatus {
   IDLE = 'IDLE',
   PATROL = 'PATROL',
   COMBAT = 'COMBAT',
-  RTB = 'RTB'
+  RTB = 'RTB',
 }
 
 export interface Coordinates {
@@ -23,7 +23,7 @@ export interface Drone {
 export enum NetworkState {
   ONLINE = 'ONLINE',
   OFFLINE = 'OFFLINE',
-  SYNCING = 'SYNCING'
+  SYNCING = 'SYNCING',
 }
 
 export interface LogEntry {

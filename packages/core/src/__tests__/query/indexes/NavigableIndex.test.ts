@@ -13,10 +13,7 @@ interface Product {
 
 const priceAttr = simpleAttribute<Product, number>('price', (p) => p.price);
 const ratingAttr = simpleAttribute<Product, number>('rating', (p) => p.rating);
-const categoryAttr = simpleAttribute<Product, string>(
-  'category',
-  (p) => p.category
-);
+const categoryAttr = simpleAttribute<Product, string>('category', (p) => p.category);
 const tagsAttr = multiAttribute<Product, string>('tags', (p) => p.tags);
 
 describe('NavigableIndex', () => {
@@ -280,7 +277,14 @@ describe('NavigableIndex', () => {
     it('should not materialize until iterated', () => {
       const index = new NavigableIndex(priceAttr);
       for (let i = 0; i < 100; i++) {
-        index.add(String(i), { id: String(i), name: '', price: i, rating: 0, category: '', tags: [] });
+        index.add(String(i), {
+          id: String(i),
+          name: '',
+          price: i,
+          rating: 0,
+          category: '',
+          tags: [],
+        });
       }
 
       const result = index.retrieve({ type: 'gt', value: 50 });
@@ -291,7 +295,14 @@ describe('NavigableIndex', () => {
     it('should cache after first iteration via toArray', () => {
       const index = new NavigableIndex(priceAttr);
       for (let i = 0; i < 10; i++) {
-        index.add(String(i), { id: String(i), name: '', price: i * 10, rating: 0, category: '', tags: [] });
+        index.add(String(i), {
+          id: String(i),
+          name: '',
+          price: i * 10,
+          rating: 0,
+          category: '',
+          tags: [],
+        });
       }
 
       const result = index.retrieve({ type: 'gte', value: 50 }) as LazyResultSet<string>;
@@ -304,7 +315,14 @@ describe('NavigableIndex', () => {
     it('should provide estimated merge cost before materialization', () => {
       const index = new NavigableIndex(priceAttr);
       for (let i = 0; i < 100; i++) {
-        index.add(String(i), { id: String(i), name: '', price: i, rating: 0, category: '', tags: [] });
+        index.add(String(i), {
+          id: String(i),
+          name: '',
+          price: i,
+          rating: 0,
+          category: '',
+          tags: [],
+        });
       }
 
       const result = index.retrieve({ type: 'gt', value: 50 }) as LazyResultSet<string>;
@@ -317,7 +335,14 @@ describe('NavigableIndex', () => {
     it('should report actual size after materialization', () => {
       const index = new NavigableIndex(priceAttr);
       for (let i = 0; i < 100; i++) {
-        index.add(String(i), { id: String(i), name: '', price: i, rating: 0, category: '', tags: [] });
+        index.add(String(i), {
+          id: String(i),
+          name: '',
+          price: i,
+          rating: 0,
+          category: '',
+          tags: [],
+        });
       }
 
       const result = index.retrieve({ type: 'gt', value: 50 }) as LazyResultSet<string>;
@@ -339,7 +364,14 @@ describe('NavigableIndex', () => {
   describe('add/remove/update', () => {
     it('should add record to index', () => {
       const index = new NavigableIndex(priceAttr);
-      const product: Product = { id: '1', name: 'A', price: 100, rating: 0, category: '', tags: [] };
+      const product: Product = {
+        id: '1',
+        name: 'A',
+        price: 100,
+        rating: 0,
+        category: '',
+        tags: [],
+      };
 
       index.add('1', product);
 
@@ -350,7 +382,14 @@ describe('NavigableIndex', () => {
 
     it('should remove record from index', () => {
       const index = new NavigableIndex(priceAttr);
-      const product: Product = { id: '1', name: 'A', price: 100, rating: 0, category: '', tags: [] };
+      const product: Product = {
+        id: '1',
+        name: 'A',
+        price: 100,
+        rating: 0,
+        category: '',
+        tags: [],
+      };
 
       index.add('1', product);
       index.remove('1', product);
@@ -360,7 +399,14 @@ describe('NavigableIndex', () => {
 
     it('should handle multi-value attributes', () => {
       const index = new NavigableIndex(tagsAttr);
-      const product: Product = { id: '1', name: 'A', price: 100, rating: 0, category: '', tags: ['tag1', 'tag2'] };
+      const product: Product = {
+        id: '1',
+        name: 'A',
+        price: 100,
+        rating: 0,
+        category: '',
+        tags: ['tag1', 'tag2'],
+      };
 
       index.add('1', product);
 
@@ -370,7 +416,14 @@ describe('NavigableIndex', () => {
 
     it('should clean empty buckets on remove', () => {
       const index = new NavigableIndex(priceAttr);
-      const product: Product = { id: '1', name: 'A', price: 100, rating: 0, category: '', tags: [] };
+      const product: Product = {
+        id: '1',
+        name: 'A',
+        price: 100,
+        rating: 0,
+        category: '',
+        tags: [],
+      };
 
       index.add('1', product);
       expect(index.getStats().distinctValues).toBe(1);
@@ -381,7 +434,14 @@ describe('NavigableIndex', () => {
 
     it('should not add record with empty values', () => {
       const index = new NavigableIndex(tagsAttr);
-      const product: Product = { id: '1', name: 'A', price: 100, rating: 0, category: '', tags: [] };
+      const product: Product = {
+        id: '1',
+        name: 'A',
+        price: 100,
+        rating: 0,
+        category: '',
+        tags: [],
+      };
 
       index.add('1', product);
       expect(index.getStats().totalEntries).toBe(0);
@@ -389,8 +449,22 @@ describe('NavigableIndex', () => {
 
     it('should update record correctly', () => {
       const index = new NavigableIndex(priceAttr);
-      const product1: Product = { id: '1', name: 'A', price: 100, rating: 0, category: '', tags: [] };
-      const product2: Product = { id: '1', name: 'A', price: 200, rating: 0, category: '', tags: [] };
+      const product1: Product = {
+        id: '1',
+        name: 'A',
+        price: 100,
+        rating: 0,
+        category: '',
+        tags: [],
+      };
+      const product2: Product = {
+        id: '1',
+        name: 'A',
+        price: 200,
+        rating: 0,
+        category: '',
+        tags: [],
+      };
 
       index.add('1', product1);
       index.update('1', product1, product2);
@@ -401,8 +475,22 @@ describe('NavigableIndex', () => {
 
     it('should skip update if value unchanged', () => {
       const index = new NavigableIndex(priceAttr);
-      const product1: Product = { id: '1', name: 'A', price: 100, rating: 1, category: '', tags: [] };
-      const product2: Product = { id: '1', name: 'B', price: 100, rating: 2, category: '', tags: [] };
+      const product1: Product = {
+        id: '1',
+        name: 'A',
+        price: 100,
+        rating: 1,
+        category: '',
+        tags: [],
+      };
+      const product2: Product = {
+        id: '1',
+        name: 'B',
+        price: 100,
+        rating: 2,
+        category: '',
+        tags: [],
+      };
 
       index.add('1', product1);
       const statsBefore = index.getStats();

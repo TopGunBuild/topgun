@@ -36,10 +36,7 @@ export function isAuthenticated(): boolean {
 /**
  * Login with username and password
  */
-export async function login(
-  username: string,
-  password: string
-): Promise<{ token: string }> {
+export async function login(username: string, password: string): Promise<{ token: string }> {
   const res = await fetch(`${API_BASE}/api/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -70,10 +67,7 @@ export function logout(): void {
  * Authenticated fetch for admin endpoints
  * Automatically includes Authorization header and handles 401 responses
  */
-export async function adminFetch(
-  url: string,
-  options: RequestInit = {}
-): Promise<Response> {
+export async function adminFetch(url: string, options: RequestInit = {}): Promise<Response> {
   const token = getAuthToken();
 
   const headers: HeadersInit = {
@@ -100,10 +94,7 @@ export async function adminFetch(
 /**
  * Authenticated JSON fetch helper
  */
-export async function adminFetchJson<T>(
-  url: string,
-  options: RequestInit = {}
-): Promise<T> {
+export async function adminFetchJson<T>(url: string, options: RequestInit = {}): Promise<T> {
   const res = await adminFetch(url, options);
   return res.json();
 }

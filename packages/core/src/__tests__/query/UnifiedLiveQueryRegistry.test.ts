@@ -7,7 +7,12 @@
 
 import { UnifiedLiveQueryRegistry } from '../../query/UnifiedLiveQueryRegistry';
 import { FullTextIndex } from '../../fts';
-import type { Query, MatchQueryNode, SimpleQueryNode, LogicalQueryNode } from '../../query/QueryTypes';
+import type {
+  Query,
+  MatchQueryNode,
+  SimpleQueryNode,
+  LogicalQueryNode,
+} from '../../query/QueryTypes';
 import type { LiveQueryDelta } from '../../query/indexes/ILiveQueryIndex';
 import type { StandingQueryChange } from '../../query/indexes/StandingQueryIndex';
 
@@ -26,11 +31,41 @@ describe('UnifiedLiveQueryRegistry', () => {
   let registry: UnifiedLiveQueryRegistry<string, TestDocument>;
 
   const docs: TestDocument[] = [
-    { id: 'doc1', title: 'Machine Learning Basics', body: 'Introduction to ML', category: 'tech', price: 29.99 },
-    { id: 'doc2', title: 'Deep Learning', body: 'Neural networks explained', category: 'tech', price: 39.99 },
-    { id: 'doc3', title: 'Cooking for Beginners', body: 'Easy recipes', category: 'food', price: 19.99 },
-    { id: 'doc4', title: 'JavaScript Patterns', body: 'Design patterns in JS', category: 'tech', price: 34.99 },
-    { id: 'doc5', title: 'Machine Learning Advanced', body: 'Deep dive into ML', category: 'tech', price: 49.99 },
+    {
+      id: 'doc1',
+      title: 'Machine Learning Basics',
+      body: 'Introduction to ML',
+      category: 'tech',
+      price: 29.99,
+    },
+    {
+      id: 'doc2',
+      title: 'Deep Learning',
+      body: 'Neural networks explained',
+      category: 'tech',
+      price: 39.99,
+    },
+    {
+      id: 'doc3',
+      title: 'Cooking for Beginners',
+      body: 'Easy recipes',
+      category: 'food',
+      price: 19.99,
+    },
+    {
+      id: 'doc4',
+      title: 'JavaScript Patterns',
+      body: 'Design patterns in JS',
+      category: 'tech',
+      price: 34.99,
+    },
+    {
+      id: 'doc5',
+      title: 'Machine Learning Advanced',
+      body: 'Deep dive into ML',
+      category: 'tech',
+      price: 49.99,
+    },
   ];
 
   beforeEach(() => {
@@ -485,8 +520,8 @@ describe('UnifiedLiveQueryRegistry', () => {
 
       // Both queries should have deltas
       expect(deltas.length).toBe(2);
-      expect(deltas.some(d => !d.isFTS && d.delta === 'added')).toBe(true);
-      expect(deltas.some(d => d.isFTS)).toBe(true);
+      expect(deltas.some((d) => !d.isFTS && d.delta === 'added')).toBe(true);
+      expect(deltas.some((d) => d.isFTS)).toBe(true);
     });
   });
 

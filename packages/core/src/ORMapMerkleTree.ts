@@ -84,7 +84,7 @@ export class ORMapMerkleTree {
     key: string,
     entryHash: number,
     pathHash: string,
-    level: number
+    level: number,
   ): number {
     // Leaf Node Logic
     if (level >= this.depth) {
@@ -119,12 +119,7 @@ export class ORMapMerkleTree {
     return node.hash;
   }
 
-  private removeNode(
-    node: ORMapMerkleNode,
-    key: string,
-    pathHash: string,
-    level: number
-  ): number {
+  private removeNode(node: ORMapMerkleNode, key: string, pathHash: string, level: number): number {
     // Leaf Node Logic
     if (level >= this.depth) {
       if (node.entries) {

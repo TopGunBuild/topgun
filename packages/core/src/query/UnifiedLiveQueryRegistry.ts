@@ -491,7 +491,7 @@ export class UnifiedLiveQueryRegistry<K extends string, V> {
    * @returns FTS info or null if not a simple FTS query
    */
   private extractFTSInfo(
-    query: Query
+    query: Query,
   ): { field: string; query: string; minScore?: number; maxResults?: number } | null {
     // Only handle simple match queries at root level for now
     // Hybrid queries (FTS + filter) will need QueryExecutor

@@ -77,10 +77,7 @@ export class CompoundIndex<K, V> implements Index<K, V, unknown> {
    * const compoundIndex = new CompoundIndex<string, Product>([statusAttr, categoryAttr]);
    * ```
    */
-  constructor(
-    attributes: Attribute<V, unknown>[],
-    options: CompoundIndexOptions = {}
-  ) {
+  constructor(attributes: Attribute<V, unknown>[], options: CompoundIndexOptions = {}) {
     if (attributes.length < 2) {
       throw new Error('CompoundIndex requires at least 2 attributes');
     }
@@ -143,17 +140,14 @@ export class CompoundIndex<K, V> implements Index<K, V, unknown> {
 
     if (values.length !== this._attributes.length) {
       throw new Error(
-        `CompoundIndex requires ${this._attributes.length} values, got ${values.length}`
+        `CompoundIndex requires ${this._attributes.length} values, got ${values.length}`,
       );
     }
 
     const compositeKey = this.buildCompositeKey(values);
     const keys = this.data.get(compositeKey);
 
-    return new SetResultSet(
-      keys ? new Set(keys) : new Set(),
-      CompoundIndex.RETRIEVAL_COST
-    );
+    return new SetResultSet(keys ? new Set(keys) : new Set(), CompoundIndex.RETRIEVAL_COST);
   }
 
   /**
@@ -294,10 +288,7 @@ export class CompoundIndex<K, V> implements Index<K, V, unknown> {
 
     const str = String(value);
     // Escape any separator characters in the value
-    return str.replace(
-      new RegExp(this.escapeRegex(this.separator), 'g'),
-      `\\${this.separator}`
-    );
+    return str.replace(new RegExp(this.escapeRegex(this.separator), 'g'), `\\${this.separator}`);
   }
 
   /**

@@ -64,8 +64,8 @@ class MemoryStorageAdapter implements IStorageAdapter {
   }
 
   async markOpsSynced(lastId: number): Promise<void> {
-    this._pendingOps = this._pendingOps.filter(op => op.id! > lastId);
-    this.opLog.forEach(op => {
+    this._pendingOps = this._pendingOps.filter((op) => op.id! > lastId);
+    this.opLog.forEach((op) => {
       if (op.id! <= lastId) op.synced = 1;
     });
   }
@@ -80,13 +80,13 @@ class MemoryStorageAdapter implements IStorageAdapter {
 // ----------------------------------------------------------------
 
 function waitMs(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function waitUntil(
   condition: () => boolean | Promise<boolean>,
   timeoutMs: number,
-  pollIntervalMs = 200
+  pollIntervalMs = 200,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -293,10 +293,7 @@ describe('Integration: 3-node cluster smart routing', () => {
 
       // Wait up to 15 s for partition map version to increment
       // HeartbeatService phi-accrual detects failure; MembershipReactor rebalances
-      await waitUntil(
-        () => clusterClient.getRouterStats()!.mapVersion > versionBefore,
-        15_000
-      );
+      await waitUntil(() => clusterClient.getRouterStats()!.mapVersion > versionBefore, 15_000);
 
       const statsAfter = clusterClient.getRouterStats()!;
       expect(statsAfter.mapVersion).toBeGreaterThan(versionBefore);
@@ -305,7 +302,7 @@ describe('Integration: 3-node cluster smart routing', () => {
       const partitionMap = (clusterClient as any).partitionRouter?.partitionMap;
       if (partitionMap) {
         const node1Partitions = partitionMap.partitions.filter(
-          (p: any) => p.ownerNodeId === 'node-1'
+          (p: any) => p.ownerNodeId === 'node-1',
         );
         expect(node1Partitions.length).toBe(0);
       }

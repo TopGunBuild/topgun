@@ -4,8 +4,8 @@
 
 /** Labeled metric value from Prometheus */
 export interface LabeledMetric {
-    value: number;
-    labels?: Record<string, string>;
+  value: number;
+  labels?: Record<string, string>;
 }
 
 /**
@@ -26,13 +26,13 @@ export interface LabeledMetric {
  * getMetricValue(undefined) // => 0
  */
 export function getMetricValue(metric: unknown): number {
-    if (typeof metric === 'number') {
-        return metric;
-    }
-    if (Array.isArray(metric)) {
-        return metric.reduce((sum: number, m: LabeledMetric) => sum + (m?.value || 0), 0);
-    }
-    return 0;
+  if (typeof metric === 'number') {
+    return metric;
+  }
+  if (Array.isArray(metric)) {
+    return metric.reduce((sum: number, m: LabeledMetric) => sum + (m?.value || 0), 0);
+  }
+  return 0;
 }
 
 /**
@@ -46,11 +46,11 @@ export function getMetricValue(metric: unknown): number {
  * formatBytes(1073741824) // => '1.0 GB'
  */
 export function formatBytes(bytes: number): string {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
 }
 
 /**
@@ -63,14 +63,12 @@ export function formatBytes(bytes: number): string {
  * ];
  * createLookupByKey(items) // => { 'node-1': {...}, 'node-2': {...} }
  */
-export function createLookupByKey<T extends { _key: string }>(
-    items: T[]
-): Record<string, T> {
-    const lookup: Record<string, T> = {};
-    for (const item of items) {
-        if (item._key) {
-            lookup[item._key] = item;
-        }
+export function createLookupByKey<T extends { _key: string }>(items: T[]): Record<string, T> {
+  const lookup: Record<string, T> = {};
+  for (const item of items) {
+    if (item._key) {
+      lookup[item._key] = item;
     }
-    return lookup;
+  }
+  return lookup;
 }

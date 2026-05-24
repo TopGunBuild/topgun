@@ -49,7 +49,7 @@ describe('Index Hints', () => {
       const query: SimpleQueryNode = { type: 'eq', attribute: 'status', value: 'active' };
 
       expect(() => optimizer.optimizeWithOptions(query, { useIndex: 'nonexistent' })).toThrow(
-        'Index hint: no index found for attribute "nonexistent"'
+        'Index hint: no index found for attribute "nonexistent"',
       );
     });
 
@@ -153,9 +153,7 @@ describe('Index Hints', () => {
       const query: SimpleQueryNode = { type: 'eq', attribute: 'status', value: 'active' };
 
       // Should not throw because an index exists
-      expect(() =>
-        optimizer.optimizeWithOptions(query, { forceIndexScan: true })
-      ).not.toThrow();
+      expect(() => optimizer.optimizeWithOptions(query, { forceIndexScan: true })).not.toThrow();
 
       const plan = optimizer.optimizeWithOptions(query, { forceIndexScan: true });
       expect(plan.usesIndexes).toBe(true);
@@ -165,9 +163,9 @@ describe('Index Hints', () => {
       // No indexes registered
       const query: SimpleQueryNode = { type: 'eq', attribute: 'status', value: 'active' };
 
-      expect(() =>
-        optimizer.optimizeWithOptions(query, { forceIndexScan: true })
-      ).toThrow('No suitable index found and forceIndexScan is enabled');
+      expect(() => optimizer.optimizeWithOptions(query, { forceIndexScan: true })).toThrow(
+        'No suitable index found and forceIndexScan is enabled',
+      );
     });
   });
 
@@ -228,7 +226,7 @@ describe('Index Hints', () => {
         optimizer.optimizeWithOptions(query, {
           disableOptimization: true,
           forceIndexScan: true,
-        })
+        }),
       ).not.toThrow();
 
       const plan = optimizer.optimizeWithOptions(query, {

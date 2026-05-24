@@ -16,7 +16,9 @@ export const QueryArgsSchema = z.object({
   filter: z
     .record(z.string(), z.unknown())
     .optional()
-    .describe('Filter criteria as key-value pairs. Example: { "status": "active", "priority": "high" }'),
+    .describe(
+      'Filter criteria as key-value pairs. Example: { "status": "active", "priority": "high" }',
+    ),
   sort: z
     .object({
       field: z.string().describe('Field name to sort by'),
@@ -25,7 +27,10 @@ export const QueryArgsSchema = z.object({
     .optional()
     .describe('Sort configuration'),
   limit: z.number().optional().default(10).describe('Maximum number of results to return'),
-  cursor: z.string().optional().describe('Opaque cursor for pagination (from previous response nextCursor)'),
+  cursor: z
+    .string()
+    .optional()
+    .describe('Opaque cursor for pagination (from previous response nextCursor)'),
   fields: z
     .array(z.string())
     .optional()
@@ -40,7 +45,9 @@ export type QueryArgs = z.infer<typeof QueryArgsSchema>;
 
 export const MutateArgsSchema = z.object({
   map: z.string().describe("Name of the map to modify (e.g., 'tasks', 'users')"),
-  operation: z.enum(['set', 'remove']).describe('"set" creates or updates a record, "remove" deletes it'),
+  operation: z
+    .enum(['set', 'remove'])
+    .describe('"set" creates or updates a record, "remove" deletes it'),
   key: z.string().describe('Unique key for the record'),
   data: z
     .record(z.string(), z.unknown())
@@ -73,11 +80,7 @@ export const SubscribeArgsSchema = z.object({
     .record(z.string(), z.unknown())
     .optional()
     .describe('Filter criteria - only report changes matching these conditions'),
-  timeout: z
-    .number()
-    .optional()
-    .default(60)
-    .describe('How long to watch for changes (in seconds)'),
+  timeout: z.number().optional().default(60).describe('How long to watch for changes (in seconds)'),
 });
 
 export type SubscribeArgs = z.infer<typeof SubscribeArgsSchema>;
@@ -143,20 +146,28 @@ export const toolSchemas = {
       },
       filter: {
         type: 'object',
-        description: 'Filter criteria as key-value pairs. Example: { "status": "active", "priority": "high" }',
+        description:
+          'Filter criteria as key-value pairs. Example: { "status": "active", "priority": "high" }',
         additionalProperties: true,
       },
       sort: {
         type: 'object',
         properties: {
           field: { type: 'string', description: 'Field name to sort by' },
-          order: { type: 'string', enum: ['asc', 'desc'], description: 'Sort order: ascending or descending' },
+          order: {
+            type: 'string',
+            enum: ['asc', 'desc'],
+            description: 'Sort order: ascending or descending',
+          },
         },
         required: ['field', 'order'],
         description: 'Sort configuration',
       },
       limit: { type: 'number', description: 'Maximum number of results to return', default: 10 },
-      cursor: { type: 'string', description: 'Opaque cursor for pagination (from previous response nextCursor)' },
+      cursor: {
+        type: 'string',
+        description: 'Opaque cursor for pagination (from previous response nextCursor)',
+      },
       fields: {
         type: 'array',
         items: { type: 'string' },
@@ -186,23 +197,37 @@ export const toolSchemas = {
   search: {
     type: 'object',
     properties: {
-      map: { type: 'string', description: "Name of the map to search (e.g., 'articles', 'documents', 'tasks')" },
+      map: {
+        type: 'string',
+        description: "Name of the map to search (e.g., 'articles', 'documents', 'tasks')",
+      },
       query: { type: 'string', description: 'Search query (keywords or phrases to find)' },
       limit: { type: 'number', description: 'Maximum number of results to return', default: 10 },
-      minScore: { type: 'number', description: 'Minimum relevance score (0-1) for results', default: 0 },
+      minScore: {
+        type: 'number',
+        description: 'Minimum relevance score (0-1) for results',
+        default: 0,
+      },
     },
     required: ['map', 'query'],
   },
   subscribe: {
     type: 'object',
     properties: {
-      map: { type: 'string', description: "Name of the map to watch (e.g., 'tasks', 'notifications')" },
+      map: {
+        type: 'string',
+        description: "Name of the map to watch (e.g., 'tasks', 'notifications')",
+      },
       filter: {
         type: 'object',
         description: 'Filter criteria - only report changes matching these conditions',
         additionalProperties: true,
       },
-      timeout: { type: 'number', description: 'How long to watch for changes (in seconds)', default: 60 },
+      timeout: {
+        type: 'number',
+        description: 'How long to watch for changes (in seconds)',
+        default: 60,
+      },
     },
     required: ['map'],
   },

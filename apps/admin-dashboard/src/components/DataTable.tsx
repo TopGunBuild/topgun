@@ -59,10 +59,7 @@ export function DataTable<T extends Record<string, unknown>>({
           {data.map((row, i) => (
             <tr
               key={i}
-              className={cn(
-                'hover:bg-muted/30 transition-colors',
-                onRowClick && 'cursor-pointer'
-              )}
+              className={cn('hover:bg-muted/30 transition-colors', onRowClick && 'cursor-pointer')}
               onClick={() => onRowClick?.(row)}
             >
               {columns.map((col) => (

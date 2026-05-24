@@ -49,10 +49,7 @@ export class StandingQueryIndex<K, V> implements Index<K, V, unknown> {
    * Wildcard attribute - StandingQueryIndex doesn't index by attribute,
    * it indexes by query match.
    */
-  readonly attribute: Attribute<V, unknown> = simpleAttribute<V, unknown>(
-    '*',
-    () => undefined
-  );
+  readonly attribute: Attribute<V, unknown> = simpleAttribute<V, unknown>('*', () => undefined);
 
   /** Pre-computed result set */
   private results: Set<K> = new Set();
@@ -161,7 +158,7 @@ export class StandingQueryIndex<K, V> implements Index<K, V, unknown> {
   determineChange(
     _key: K,
     oldRecord: V | undefined,
-    newRecord: V | undefined
+    newRecord: V | undefined,
   ): StandingQueryChange {
     const wasMatch = oldRecord ? this.evaluateRecord(oldRecord) : false;
     const isMatch = newRecord ? this.evaluateRecord(newRecord) : false;
@@ -243,31 +240,19 @@ export class StandingQueryIndex<K, V> implements Index<K, V, unknown> {
         return value !== query.value;
 
       case 'gt':
-        return (
-          value !== undefined &&
-          value !== null &&
-          (value as number) > (query.value as number)
-        );
+        return value !== undefined && value !== null && (value as number) > (query.value as number);
 
       case 'gte':
         return (
-          value !== undefined &&
-          value !== null &&
-          (value as number) >= (query.value as number)
+          value !== undefined && value !== null && (value as number) >= (query.value as number)
         );
 
       case 'lt':
-        return (
-          value !== undefined &&
-          value !== null &&
-          (value as number) < (query.value as number)
-        );
+        return value !== undefined && value !== null && (value as number) < (query.value as number);
 
       case 'lte':
         return (
-          value !== undefined &&
-          value !== null &&
-          (value as number) <= (query.value as number)
+          value !== undefined && value !== null && (value as number) <= (query.value as number)
         );
 
       case 'in':
@@ -314,7 +299,7 @@ export class StandingQueryIndex<K, V> implements Index<K, V, unknown> {
           return false;
         }
         return query.values.every(
-          (v) => typeof v === 'string' && value.toLowerCase().includes(v.toLowerCase())
+          (v) => typeof v === 'string' && value.toLowerCase().includes(v.toLowerCase()),
         );
 
       case 'containsAny':
@@ -322,7 +307,7 @@ export class StandingQueryIndex<K, V> implements Index<K, V, unknown> {
           return false;
         }
         return query.values.some(
-          (v) => typeof v === 'string' && value.toLowerCase().includes(v.toLowerCase())
+          (v) => typeof v === 'string' && value.toLowerCase().includes(v.toLowerCase()),
         );
 
       default:

@@ -80,7 +80,7 @@ describe('HybridSearchHandle', () => {
     const msg = mockSendMessage.mock.calls[0][0];
     expect(msg.type).toBe('HYBRID_SEARCH_SUB');
     expect(msg.payload.subscriptionId).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
     );
     expect(msg.payload.mapName).toBe('docs');
     expect(msg.payload.queryText).toBe('query');
@@ -136,7 +136,7 @@ describe('HybridSearchHandle', () => {
 
     const results = handle.getResults();
     expect(results).toHaveLength(2);
-    expect(results[0].key).toBe('doc1');   // highest score first
+    expect(results[0].key).toBe('doc1'); // highest score first
     expect(results[0].score).toBe(2.5);
     expect(results[1].key).toBe('doc2');
     expect(callback).toHaveBeenCalledTimes(1);
@@ -160,9 +160,7 @@ describe('HybridSearchHandle', () => {
       type: 'HYBRID_SEARCH_RESP',
       payload: {
         requestId: 'wrong-id',
-        results: [
-          { key: 'doc1', score: 1.0, methodScores: {}, value: { title: 'Test' } },
-        ],
+        results: [{ key: 'doc1', score: 1.0, methodScores: {}, value: { title: 'Test' } }],
         searchTimeMs: 1,
       },
     });
@@ -355,7 +353,7 @@ describe('HybridSearchHandle', () => {
     expect(subCall.payload.queryText).toBe('new query');
     expect(subCall.payload.subscriptionId).not.toBe(oldSubId);
     expect(subCall.payload.subscriptionId).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
     );
 
     // Results cleared, subscribers notified with empty array
@@ -393,7 +391,7 @@ describe('HybridSearchHandle', () => {
       expect.objectContaining({
         type: 'HYBRID_SEARCH_UNSUB',
         payload: { subscriptionId },
-      })
+      }),
     );
 
     expect(handle.isDisposed()).toBe(true);

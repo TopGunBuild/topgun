@@ -95,10 +95,7 @@ export interface EventJournal {
   getOldestSequence(): bigint;
 
   /** Subscribe to new events */
-  subscribe(
-    listener: (event: JournalEvent) => void,
-    fromSequence?: bigint
-  ): () => void;
+  subscribe(listener: (event: JournalEvent) => void, fromSequence?: bigint): () => void;
 
   /** Get capacity info */
   getCapacity(): { used: number; total: number };
@@ -203,10 +200,7 @@ export class EventJournalImpl implements EventJournal {
    * @param fromSequence Optional sequence to start replay from
    * @returns Unsubscribe function
    */
-  subscribe(
-    listener: JournalEventListener,
-    fromSequence?: bigint
-  ): () => void {
+  subscribe(listener: JournalEventListener, fromSequence?: bigint): () => void {
     // Replay events if fromSequence is specified
     if (fromSequence !== undefined) {
       const events = this.readFrom(fromSequence, this.config.capacity);

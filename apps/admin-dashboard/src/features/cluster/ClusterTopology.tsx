@@ -38,7 +38,7 @@ export function ClusterTopology() {
 
   const { data, error, isLoading, mutate } = useSWR<ClusterStatusResponse>(
     '/api/admin/cluster/status',
-    { refreshInterval: 5000 }
+    { refreshInterval: 5000 },
   );
 
   const nodes: NodeInfo[] = data?.nodes ?? [];
@@ -48,7 +48,12 @@ export function ClusterTopology() {
 
   const healthyNodes = nodes.filter((n) => n.status === 'healthy').length;
 
-  const nodeColors = ['hsl(200, 70%, 50%)', 'hsl(150, 70%, 50%)', 'hsl(280, 70%, 50%)', 'hsl(30, 70%, 50%)'];
+  const nodeColors = [
+    'hsl(200, 70%, 50%)',
+    'hsl(150, 70%, 50%)',
+    'hsl(280, 70%, 50%)',
+    'hsl(30, 70%, 50%)',
+  ];
   const nodeColorClasses = ['bg-blue-500', 'bg-green-500', 'bg-purple-500', 'bg-orange-500'];
 
   if (isLoading) {
@@ -114,7 +119,12 @@ export function ClusterTopology() {
         <Card>
           <CardContent className="pt-4">
             <div className="flex items-center gap-3">
-              <RefreshCw className={cn('h-8 w-8', isRebalancing ? 'text-yellow-500 animate-spin' : 'text-muted-foreground')} />
+              <RefreshCw
+                className={cn(
+                  'h-8 w-8',
+                  isRebalancing ? 'text-yellow-500 animate-spin' : 'text-muted-foreground',
+                )}
+              />
               <div>
                 <div className="text-2xl font-bold">
                   {isRebalancing ? (
@@ -189,7 +199,12 @@ export function ClusterTopology() {
           <div className="flex justify-center gap-4 mt-4">
             {nodes.map((node, i) => (
               <div key={node.nodeId} className="flex items-center gap-2">
-                <div className={cn('w-3 h-3 rounded-full', nodeColorClasses[i % nodeColorClasses.length])} />
+                <div
+                  className={cn(
+                    'w-3 h-3 rounded-full',
+                    nodeColorClasses[i % nodeColorClasses.length],
+                  )}
+                />
                 <span className="text-sm">{node.nodeId}</span>
               </div>
             ))}
@@ -204,7 +219,7 @@ export function ClusterTopology() {
             key={node.nodeId}
             className={cn(
               'cursor-pointer transition-all',
-              selectedNode === node.nodeId && 'ring-2 ring-primary'
+              selectedNode === node.nodeId && 'ring-2 ring-primary',
             )}
             onClick={() => setSelectedNode(node.nodeId)}
           >

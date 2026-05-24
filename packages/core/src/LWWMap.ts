@@ -30,14 +30,14 @@ export class LWWMap<K, V> {
   public subscribe(callback: (entries: Array<[K, V]>) => void): () => void {
     this.listeners.push(callback);
     return () => {
-      this.listeners = this.listeners.filter(cb => cb !== callback);
+      this.listeners = this.listeners.filter((cb) => cb !== callback);
     };
   }
 
   private notify(): void {
     if (this.listeners.length === 0) return;
     const snapshot = Array.from(this.entries()) as Array<[K, V]>;
-    this.listeners.forEach(cb => cb(snapshot));
+    this.listeners.forEach((cb) => cb(snapshot));
   }
 
   public getMerkleTree(): MerkleTree {
@@ -55,7 +55,7 @@ export class LWWMap<K, V> {
   public set(key: K, value: V, ttlMs?: number): LWWRecord<V> {
     const timestamp = this.hlc.now();
     const record: LWWRecord<V> = { value, timestamp };
-    
+
     if (ttlMs !== undefined) {
       if (typeof ttlMs !== 'number' || ttlMs <= 0 || !Number.isFinite(ttlMs)) {
         // We could throw, but to be resilient we might just ignore invalid TTL or log warning.
@@ -64,13 +64,13 @@ export class LWWMap<K, V> {
       }
       record.ttlMs = ttlMs;
     }
-    
+
     // We assume K is string for MerkleTree compatibility in this system
     // If K is not string, we might need to stringify it.
     // The project seems to use string keys for maps.
     this.data.set(key, record);
     this.merkleTree.update(String(key), record);
-    
+
     this.notify();
     return record;
   }
@@ -110,10 +110,10 @@ export class LWWMap<K, V> {
   public remove(key: K): LWWRecord<V> {
     const timestamp = this.hlc.now();
     const tombstone: LWWRecord<V> = { value: null, timestamp };
-    
+
     this.data.set(key, tombstone);
     this.merkleTree.update(String(key), tombstone);
-    
+
     this.notify();
     return tombstone;
   }
@@ -131,13 +131,13 @@ export class LWWMap<K, V> {
     // LWW Logic:
     // 1. If no local record, accept remote.
     // 2. If remote is strictly greater than local, accept remote.
-    // 3. If equal, we can arbitrarily choose (e.g. by NodeID) to ensure convergence, 
+    // 3. If equal, we can arbitrarily choose (e.g. by NodeID) to ensure convergence,
     //    but HLC.compare handles nodeId tie-breaking already.
-    
+
     if (!localRecord || HLC.compare(remoteRecord.timestamp, localRecord.timestamp) > 0) {
       this.data.set(key, remoteRecord);
       this.merkleTree.update(String(key), remoteRecord);
-      
+
       this.notify();
       return true;
     }
@@ -148,13 +148,13 @@ export class LWWMap<K, V> {
   /**
    * Garbage Collection: Prunes tombstones older than the specified timestamp.
    * Only removes records that are tombstones (deleted) AND older than the threshold.
-   * 
+   *
    * @param olderThan The timestamp threshold. Tombstones older than this will be removed.
    * @returns The number of tombstones removed.
    */
   public prune(olderThan: Timestamp): K[] {
     const removedKeys: K[] = [];
-    
+
     for (const [key, record] of this.data.entries()) {
       // Only prune tombstones (value === null)
       if (record.value === null) {
@@ -193,7 +193,9 @@ export class LWWMap<K, V> {
     const clockSource = this.hlc.getClockSource();
 
     return {
-      [Symbol.iterator]() { return this; },
+      [Symbol.iterator]() {
+        return this;
+      },
       next: () => {
         let result = iterator.next();
         while (!result.done) {
@@ -201,15 +203,15 @@ export class LWWMap<K, V> {
           if (record.value !== null) {
             // Check TTL using clock source
             if (record.ttlMs && record.timestamp.millis + record.ttlMs < clockSource.now()) {
-                result = iterator.next();
-                continue;
+              result = iterator.next();
+              continue;
             }
             return { value: [key, record.value], done: false };
           }
           result = iterator.next();
         }
         return { value: undefined, done: true };
-      }
+      },
     };
   }
 

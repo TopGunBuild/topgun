@@ -63,7 +63,9 @@ export async function handleSchema(rawArgs: unknown, ctx: ToolContext): Promise<
   // Validate arguments with Zod
   const parseResult = SchemaArgsSchema.safeParse(rawArgs);
   if (!parseResult.success) {
-    const errors = parseResult.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`).join(', ');
+    const errors = parseResult.error.issues
+      .map((e) => `${e.path.join('.')}: ${e.message}`)
+      .join(', ');
     return {
       content: [{ type: 'text', text: `Invalid arguments: ${errors}` }],
       isError: true,

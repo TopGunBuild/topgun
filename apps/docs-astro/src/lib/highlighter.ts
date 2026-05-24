@@ -6,7 +6,18 @@ export const getHighlighter = async (): Promise<Highlighter> => {
   if (!highlighterPromise) {
     highlighterPromise = createHighlighter({
       themes: ['vitesse-dark', 'github-dark'],
-      langs: ['typescript', 'bash', 'json', 'javascript', 'tsx', 'jsx', 'css', 'html', 'yaml', 'shell'],
+      langs: [
+        'typescript',
+        'bash',
+        'json',
+        'javascript',
+        'tsx',
+        'jsx',
+        'css',
+        'html',
+        'yaml',
+        'shell',
+      ],
     }).catch((error) => {
       highlighterPromise = null;
       throw error;
@@ -14,4 +25,3 @@ export const getHighlighter = async (): Promise<Highlighter> => {
   }
   return highlighterPromise;
 };
-

@@ -287,7 +287,10 @@ describe('EntryProcessor', () => {
 
     describe('CONDITIONAL_UPDATE', () => {
       it('should create valid processor definition', () => {
-        const processor = BuiltInProcessors.CONDITIONAL_UPDATE<{ version?: number; name?: string }>(5, { name: 'updated' });
+        const processor = BuiltInProcessors.CONDITIONAL_UPDATE<{ version?: number; name?: string }>(
+          5,
+          { name: 'updated' },
+        );
 
         expect(processor.name).toBe('builtin:conditional_update');
         expect(processor.args).toEqual({

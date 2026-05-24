@@ -72,14 +72,14 @@ describe('AutoIndexManager', () => {
 
   describe('attribute registration', () => {
     it('registers attributes', () => {
-      const attr = simpleAttribute<Product, string>('category', p => p.category);
+      const attr = simpleAttribute<Product, string>('category', (p) => p.category);
       manager.registerAttribute(attr);
 
       expect(manager.hasAttribute('category')).toBe(true);
     });
 
     it('unregisters attributes', () => {
-      const attr = simpleAttribute<Product, string>('category', p => p.category);
+      const attr = simpleAttribute<Product, string>('category', (p) => p.category);
       manager.registerAttribute(attr);
       manager.unregisterAttribute('category');
 
@@ -87,8 +87,8 @@ describe('AutoIndexManager', () => {
     });
 
     it('returns registered attribute names', () => {
-      const categoryAttr = simpleAttribute<Product, string>('category', p => p.category);
-      const priceAttr = simpleAttribute<Product, number>('price', p => p.price);
+      const categoryAttr = simpleAttribute<Product, string>('category', (p) => p.category);
+      const priceAttr = simpleAttribute<Product, number>('price', (p) => p.price);
 
       manager.registerAttribute(categoryAttr);
       manager.registerAttribute(priceAttr);
@@ -99,7 +99,7 @@ describe('AutoIndexManager', () => {
     });
 
     it('allows restricting index types for attribute', () => {
-      const attr = simpleAttribute<Product, string>('category', p => p.category);
+      const attr = simpleAttribute<Product, string>('category', (p) => p.category);
       manager.registerAttribute(attr, ['hash']); // Only allow hash
 
       // Simulate queries
@@ -119,7 +119,7 @@ describe('AutoIndexManager', () => {
       });
       disabledManager.setMap(map);
 
-      const attr = simpleAttribute<Product, string>('category', p => p.category);
+      const attr = simpleAttribute<Product, string>('category', (p) => p.category);
       disabledManager.registerAttribute(attr);
 
       for (let i = 0; i < 10; i++) {
@@ -130,7 +130,7 @@ describe('AutoIndexManager', () => {
     });
 
     it('creates hash index after threshold for equality queries', () => {
-      const attr = simpleAttribute<Product, string>('category', p => p.category);
+      const attr = simpleAttribute<Product, string>('category', (p) => p.category);
       manager.registerAttribute(attr);
 
       // Queries 1-4: No index yet
@@ -147,7 +147,7 @@ describe('AutoIndexManager', () => {
     });
 
     it('creates navigable index for range queries', () => {
-      const attr = simpleAttribute<Product, number>('price', p => p.price);
+      const attr = simpleAttribute<Product, number>('price', (p) => p.price);
       manager.registerAttribute(attr);
 
       for (let i = 0; i < 5; i++) {
@@ -159,7 +159,7 @@ describe('AutoIndexManager', () => {
     });
 
     it('creates inverted index for text search queries', () => {
-      const attr = simpleAttribute<Product, string>('description', p => p.description);
+      const attr = simpleAttribute<Product, string>('description', (p) => p.description);
       manager.registerAttribute(attr);
 
       for (let i = 0; i < 5; i++) {
@@ -181,7 +181,7 @@ describe('AutoIndexManager', () => {
     });
 
     it('does not create duplicate indexes', () => {
-      const attr = simpleAttribute<Product, string>('category', p => p.category);
+      const attr = simpleAttribute<Product, string>('category', (p) => p.category);
       manager.registerAttribute(attr);
 
       // Create first index
@@ -207,10 +207,10 @@ describe('AutoIndexManager', () => {
       limitedManager.setMap(map);
 
       // Register three attributes
-      const attrs = ['a', 'b', 'c'].map(name =>
-        simpleAttribute<Product, string>(name, () => name)
+      const attrs = ['a', 'b', 'c'].map((name) =>
+        simpleAttribute<Product, string>(name, () => name),
       );
-      attrs.forEach(attr => limitedManager.registerAttribute(attr));
+      attrs.forEach((attr) => limitedManager.registerAttribute(attr));
 
       // Create indexes for a and b
       limitedManager.onQueryExecuted('a', 'eq');
@@ -229,7 +229,7 @@ describe('AutoIndexManager', () => {
     });
 
     it('skips already indexed attributes', () => {
-      const attr = simpleAttribute<Product, string>('category', p => p.category);
+      const attr = simpleAttribute<Product, string>('category', (p) => p.category);
       manager.registerAttribute(attr);
 
       // Manually add index
@@ -269,7 +269,7 @@ describe('AutoIndexManager', () => {
     it('returns count of auto-created indexes', () => {
       expect(manager.getAutoCreatedIndexCount()).toBe(0);
 
-      const attr = simpleAttribute<Product, string>('category', p => p.category);
+      const attr = simpleAttribute<Product, string>('category', (p) => p.category);
       manager.registerAttribute(attr);
 
       for (let i = 0; i < 5; i++) {
@@ -282,7 +282,7 @@ describe('AutoIndexManager', () => {
 
   describe('getRemainingCapacity', () => {
     it('returns remaining index slots', () => {
-      const attr = simpleAttribute<Product, string>('category', p => p.category);
+      const attr = simpleAttribute<Product, string>('category', (p) => p.category);
       map.addHashIndex(attr);
 
       expect(manager.getRemainingCapacity()).toBe(9); // 10 - 1
@@ -291,7 +291,7 @@ describe('AutoIndexManager', () => {
 
   describe('resetCounts', () => {
     it('clears query counts', () => {
-      const attr = simpleAttribute<Product, string>('category', p => p.category);
+      const attr = simpleAttribute<Product, string>('category', (p) => p.category);
       manager.registerAttribute(attr);
 
       // 4 queries, not enough for threshold

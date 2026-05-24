@@ -34,7 +34,7 @@ const createRejection = (
   key: string,
   reason: string,
   millis: number = Date.now(),
-  counter: number = 0
+  counter: number = 0,
 ): MergeRejection => ({
   mapName,
   key,
@@ -105,10 +105,9 @@ describe('useMergeRejections', () => {
 
   describe('Filtering by mapName', () => {
     it('should only include rejections matching mapName when specified', () => {
-      const { result } = renderHook(
-        () => useMergeRejections({ mapName: 'targetMap' }),
-        { wrapper }
-      );
+      const { result } = renderHook(() => useMergeRejections({ mapName: 'targetMap' }), {
+        wrapper,
+      });
 
       const rejection1 = createRejection('targetMap', 'key1', 'Should be included');
       const rejection2 = createRejection('otherMap', 'key2', 'Should be filtered out');
@@ -150,7 +149,7 @@ describe('useMergeRejections', () => {
       act(() => {
         for (let i = 0; i < 150; i++) {
           mockConflictResolvers._triggerRejection(
-            createRejection('testMap', `key${i}`, `Rejection ${i}`, Date.now() + i, i)
+            createRejection('testMap', `key${i}`, `Rejection ${i}`, Date.now() + i, i),
           );
         }
       });
@@ -164,16 +163,13 @@ describe('useMergeRejections', () => {
     });
 
     it('should keep most recent rejections when limit exceeded', () => {
-      const { result } = renderHook(
-        () => useMergeRejections({ maxHistory: 5 }),
-        { wrapper }
-      );
+      const { result } = renderHook(() => useMergeRejections({ maxHistory: 5 }), { wrapper });
 
       // Add 10 rejections
       act(() => {
         for (let i = 0; i < 10; i++) {
           mockConflictResolvers._triggerRejection(
-            createRejection('testMap', `key${i}`, `Rejection ${i}`, Date.now() + i, i)
+            createRejection('testMap', `key${i}`, `Rejection ${i}`, Date.now() + i, i),
           );
         }
       });
@@ -228,7 +224,9 @@ describe('useMergeRejections', () => {
 
       // Add a rejection before unmount
       act(() => {
-        mockConflictResolvers._triggerRejection(createRejection('testMap', 'key1', 'Before unmount'));
+        mockConflictResolvers._triggerRejection(
+          createRejection('testMap', 'key1', 'Before unmount'),
+        );
       });
 
       expect(result.current.rejections).toHaveLength(1);
@@ -237,7 +235,9 @@ describe('useMergeRejections', () => {
 
       // Try to trigger after unmount - should not affect the hook
       act(() => {
-        mockConflictResolvers._triggerRejection(createRejection('testMap', 'key2', 'After unmount'));
+        mockConflictResolvers._triggerRejection(
+          createRejection('testMap', 'key2', 'After unmount'),
+        );
       });
 
       // Still only 1 rejection (the one before unmount)

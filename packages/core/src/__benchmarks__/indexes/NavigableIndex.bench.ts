@@ -17,10 +17,7 @@ interface Product {
 }
 
 describe('NavigableIndex Performance', () => {
-  const priceAttr = simpleAttribute<Product, number>(
-    'price',
-    (p) => p.price
-  );
+  const priceAttr = simpleAttribute<Product, number>('price', (p) => p.price);
 
   const sizes = isQuickMode ? [1_000, 10_000] : [1_000, 10_000, 100_000, 1_000_000];
 
@@ -184,10 +181,7 @@ describe('NavigableIndex Performance', () => {
 
   // String attribute benchmark
   describe(`String attribute (${isQuickMode ? '10,000' : '100,000'} records)`, () => {
-    const nameAttr = simpleAttribute<{ name: string }, string>(
-      'name',
-      (r) => r.name
-    );
+    const nameAttr = simpleAttribute<{ name: string }, string>('name', (r) => r.name);
     const index = new NavigableIndex(nameAttr);
     const stringSize = isQuickMode ? 10_000 : 100_000;
 

@@ -137,7 +137,7 @@ describe('TopGunMCPServer', () => {
 
       expect(result).toBeDefined();
       expect((result as { content: Array<{ text: string }> }).content[0].text).toContain(
-        'No results found'
+        'No results found',
       );
     });
 
@@ -160,7 +160,7 @@ describe('TopGunMCPServer', () => {
 
       expect(result).toBeDefined();
       expect((result as { content: Array<{ text: string }> }).content[0].text).toContain(
-        'Connection'
+        'Connection',
       );
     });
 
@@ -184,7 +184,7 @@ describe('TopGunMCPServer', () => {
 
       expect((result as { isError?: boolean }).isError).toBeUndefined();
       expect((result as { content: Array<{ text: string }> }).content[0].text).toContain(
-        'Successfully created'
+        'Successfully created',
       );
     });
 
@@ -200,7 +200,7 @@ describe('TopGunMCPServer', () => {
 
       expect((result as { isError?: boolean }).isError).toBe(true);
       expect((result as { content: Array<{ text: string }> }).content[0].text).toContain(
-        'disabled'
+        'disabled',
       );
     });
   });
@@ -225,7 +225,7 @@ describe('TopGunMCPServer', () => {
 
       expect((result as { isError?: boolean }).isError).toBe(true);
       expect((result as { content: Array<{ text: string }> }).content[0].text).toContain(
-        'not allowed'
+        'not allowed',
       );
     });
   });

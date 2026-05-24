@@ -30,7 +30,12 @@ describe('IndexedLWWMap', () => {
 
     it('should update existing values', () => {
       const user1: User = { name: 'Alice', email: 'alice@example.com', age: 30, status: 'active' };
-      const user2: User = { name: 'Alice Updated', email: 'alice@example.com', age: 31, status: 'active' };
+      const user2: User = {
+        name: 'Alice Updated',
+        email: 'alice@example.com',
+        age: 31,
+        status: 'active',
+      };
 
       map.set('user1', user1);
       map.set('user1', user2);
@@ -129,7 +134,12 @@ describe('IndexedLWWMap', () => {
       // Add data
       map.set('user1', { name: 'Alice', email: 'alice@example.com', age: 30, status: 'active' });
       map.set('user2', { name: 'Bob', email: 'bob@example.com', age: 25, status: 'active' });
-      map.set('user3', { name: 'Charlie', email: 'charlie@example.com', age: 35, status: 'inactive' });
+      map.set('user3', {
+        name: 'Charlie',
+        email: 'charlie@example.com',
+        age: 35,
+        status: 'inactive',
+      });
       map.set('user4', { name: 'Diana', email: 'diana@example.com', age: 28, status: 'active' });
     });
 
@@ -224,7 +234,12 @@ describe('IndexedLWWMap', () => {
 
     it('should update index on set (update existing)', () => {
       map.set('user1', { name: 'Alice', email: 'alice@example.com', age: 30, status: 'active' });
-      map.set('user1', { name: 'Alice Updated', email: 'newalice@example.com', age: 30, status: 'active' });
+      map.set('user1', {
+        name: 'Alice Updated',
+        email: 'newalice@example.com',
+        age: 30,
+        status: 'active',
+      });
 
       // Old email should not match
       const oldQuery: Query = { type: 'eq', attribute: 'email', value: 'alice@example.com' };
@@ -268,7 +283,12 @@ describe('IndexedLWWMap', () => {
       for (let i = 0; i < 5; i++) hlc2.now();
 
       const record = {
-        value: { name: 'Alice New', email: 'newalice@example.com', age: 30, status: 'active' as const },
+        value: {
+          name: 'Alice New',
+          email: 'newalice@example.com',
+          age: 30,
+          status: 'active' as const,
+        },
         timestamp: hlc2.now(),
       };
 

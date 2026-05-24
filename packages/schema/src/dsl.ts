@@ -38,12 +38,15 @@ export class MapBuilder {
     const { required = false, ...constraintOptions } = options;
 
     const constraints: JsonFieldConstraint = {};
-    if (constraintOptions.minLength !== undefined) constraints.minLength = constraintOptions.minLength;
-    if (constraintOptions.maxLength !== undefined) constraints.maxLength = constraintOptions.maxLength;
+    if (constraintOptions.minLength !== undefined)
+      constraints.minLength = constraintOptions.minLength;
+    if (constraintOptions.maxLength !== undefined)
+      constraints.maxLength = constraintOptions.maxLength;
     if (constraintOptions.minValue !== undefined) constraints.minValue = constraintOptions.minValue;
     if (constraintOptions.maxValue !== undefined) constraints.maxValue = constraintOptions.maxValue;
     if (constraintOptions.pattern !== undefined) constraints.pattern = constraintOptions.pattern;
-    if (constraintOptions.enumValues !== undefined) constraints.enumValues = constraintOptions.enumValues;
+    if (constraintOptions.enumValues !== undefined)
+      constraints.enumValues = constraintOptions.enumValues;
 
     const fieldDef: JsonFieldDef = {
       name,
@@ -79,7 +82,7 @@ export class MapBuilder {
  */
 export function defineMap(
   name: string,
-  options: { strict?: boolean; version?: number } = {}
+  options: { strict?: boolean; version?: number } = {},
 ): MapBuilder {
   return new MapBuilder(name, options.strict ?? false, options.version ?? 1);
 }

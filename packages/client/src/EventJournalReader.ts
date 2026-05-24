@@ -92,7 +92,7 @@ export class EventJournalReader {
   async readMapEvents(
     mapName: string,
     sequence: bigint = 0n,
-    limit: number = 100
+    limit: number = 100,
   ): Promise<JournalEvent[]> {
     const requestId = this.generateRequestId();
 
@@ -132,7 +132,7 @@ export class EventJournalReader {
    */
   subscribe(
     listener: (event: JournalEvent) => void,
-    options: JournalSubscribeOptions = {}
+    options: JournalSubscribeOptions = {},
   ): () => void {
     const subscriptionId = this.generateRequestId();
 
@@ -215,4 +215,3 @@ export class EventJournalReader {
     return `journal_${Date.now()}_${++this.subscriptionCounter}`;
   }
 }
-

@@ -96,7 +96,8 @@ export class BM25Scorer {
 
         // BM25 term score calculation
         const numerator = termFrequency * (this.k1 + 1);
-        const denominator = termFrequency + this.k1 * (1 - this.b + this.b * (docLength / avgDocLength));
+        const denominator =
+          termFrequency + this.k1 * (1 - this.b + this.b * (docLength / avgDocLength));
         const termScore = idf * (numerator / denominator);
 
         // Accumulate score for this document
@@ -133,11 +134,7 @@ export class BM25Scorer {
    * @param index - Inverted index for IDF and avgDocLength
    * @returns BM25 score (0 if no matching terms)
    */
-  scoreSingleDocument(
-    queryTerms: string[],
-    docTokens: string[],
-    index: BM25InvertedIndex
-  ): number {
+  scoreSingleDocument(queryTerms: string[], docTokens: string[], index: BM25InvertedIndex): number {
     if (queryTerms.length === 0 || docTokens.length === 0) {
       return 0;
     }

@@ -115,7 +115,10 @@ export class LiveQueryManager<K, V> {
         results: initialResults,
       });
     } catch (error) {
-      logger.error({ err: error, query, context: 'initial_callback' }, 'LiveQueryManager initial callback error');
+      logger.error(
+        { err: error, query, context: 'initial_callback' },
+        'LiveQueryManager initial callback error',
+      );
     }
 
     // Return unsubscribe function
@@ -208,7 +211,7 @@ export class LiveQueryManager<K, V> {
     key: K,
     record: V,
     changes: Map<string, StandingQueryChange>,
-    operation: 'added' | 'updated' | 'removed'
+    operation: 'added' | 'updated' | 'removed',
   ): void {
     for (const [hash, change] of changes) {
       const callbacks = this.subscriptions.get(hash);
@@ -232,7 +235,10 @@ export class LiveQueryManager<K, V> {
           });
         } catch (error) {
           // Don't let one callback failure affect others
-          logger.error({ err: error, operation, context: 'delta_callback' }, 'LiveQueryManager callback error');
+          logger.error(
+            { err: error, operation, context: 'delta_callback' },
+            'LiveQueryManager callback error',
+          );
         }
       }
     }
@@ -266,7 +272,7 @@ export class LiveQueryManager<K, V> {
     const registryStats = this.registry.getStats();
     const totalSubscribers = Array.from(this.subscriptions.values()).reduce(
       (sum, callbacks) => sum + callbacks.size,
-      0
+      0,
     );
 
     return {

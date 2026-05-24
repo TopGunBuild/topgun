@@ -14,7 +14,7 @@ export class AuthRequiredError extends Error {
   constructor() {
     super(
       'Server requires authentication but no token is configured. ' +
-        'Call client.setAuthToken(token), client.setAuthTokenProvider(fn), or pass `auth` to TopGunClient.'
+        'Call client.setAuthToken(token), client.setAuthTokenProvider(fn), or pass `auth` to TopGunClient.',
     );
 
     if (Error.captureStackTrace) {

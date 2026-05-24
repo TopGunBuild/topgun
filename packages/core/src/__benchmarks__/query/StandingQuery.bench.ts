@@ -25,14 +25,8 @@ describe('StandingQueryIndex Performance', () => {
     const hlc = new HLC('bench-node');
     const map = new IndexedLWWMap<string, Task>(hlc);
 
-    const statusAttr = simpleAttribute<Task, string>(
-      'status',
-      (t) => t.status
-    );
-    const priorityAttr = simpleAttribute<Task, number>(
-      'priority',
-      (t) => t.priority
-    );
+    const statusAttr = simpleAttribute<Task, string>('status', (t) => t.status);
+    const priorityAttr = simpleAttribute<Task, number>('priority', (t) => t.priority);
 
     map.addHashIndex(statusAttr);
     map.addNavigableIndex(priorityAttr);
@@ -93,14 +87,8 @@ describe('StandingQueryIndex Performance', () => {
     const hlc = new HLC('bench-node');
     const map = new IndexedLWWMap<string, Task>(hlc);
 
-    const statusAttr = simpleAttribute<Task, string>(
-      'status',
-      (t) => t.status
-    );
-    const priorityAttr = simpleAttribute<Task, number>(
-      'priority',
-      (t) => t.priority
-    );
+    const statusAttr = simpleAttribute<Task, string>('status', (t) => t.status);
+    const priorityAttr = simpleAttribute<Task, number>('priority', (t) => t.priority);
 
     map.addHashIndex(statusAttr);
     map.addNavigableIndex(priorityAttr);
@@ -146,9 +134,7 @@ describe('StandingQueryIndex Performance', () => {
       { type: 'lte' as const, attribute: 'priority', value: 2 },
     ];
 
-    const unsubscribes = queries.map((q) =>
-      map.subscribeLiveQuery(q, () => {})
-    );
+    const unsubscribes = queries.map((q) => map.subscribeLiveQuery(q, () => {}));
 
     bench('update with 10 active live queries', () => {
       const id = `${Math.floor(Math.random() * 50_000)}`;
@@ -173,10 +159,7 @@ describe('StandingQueryIndex Performance', () => {
     const hlc = new HLC('bench-node');
     const map = new IndexedLWWMap<string, Task>(hlc);
 
-    const statusAttr = simpleAttribute<Task, string>(
-      'status',
-      (t) => t.status
-    );
+    const statusAttr = simpleAttribute<Task, string>('status', (t) => t.status);
     map.addHashIndex(statusAttr);
 
     // Populate
@@ -226,7 +209,7 @@ describe('StandingQueryIndex Performance', () => {
     const unsubs10 = Array.from({ length: 10 }, () =>
       map.subscribeLiveQuery(query, () => {
         callbackCount10++;
-      })
+      }),
     );
 
     bench('update with 10 live query callbacks', () => {
@@ -245,7 +228,7 @@ describe('StandingQueryIndex Performance', () => {
     const unsubs100 = Array.from({ length: 100 }, () =>
       map.subscribeLiveQuery(query, () => {
         callbackCount100++;
-      })
+      }),
     );
 
     bench('update with 100 live query callbacks', () => {
@@ -268,10 +251,7 @@ describe('StandingQueryIndex Performance', () => {
         const hlc = new HLC('bench-node');
         const map = new IndexedLWWMap<string, Task>(hlc);
 
-        const statusAttr = simpleAttribute<Task, string>(
-          'status',
-          (t) => t.status
-        );
+        const statusAttr = simpleAttribute<Task, string>('status', (t) => t.status);
         map.addHashIndex(statusAttr);
 
         // Populate

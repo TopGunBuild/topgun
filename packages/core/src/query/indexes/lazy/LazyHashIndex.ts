@@ -46,7 +46,7 @@ export class LazyHashIndex<K, V, A> implements LazyIndex<K, V, A> {
 
   constructor(
     readonly attribute: Attribute<V, A>,
-    options: LazyIndexOptions = {}
+    options: LazyIndexOptions = {},
   ) {
     this.onProgress = options.onProgress;
     this.progressBatchSize = options.progressBatchSize ?? 1000;

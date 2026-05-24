@@ -36,7 +36,12 @@ export class PNCounterHandle implements PNCounter {
   private persistScheduled = false;
   private unsubscribeFromUpdates?: () => void;
 
-  constructor(name: string, nodeId: string, syncEngine: SyncEngine, storageAdapter?: IStorageAdapter) {
+  constructor(
+    name: string,
+    nodeId: string,
+    syncEngine: SyncEngine,
+    storageAdapter?: IStorageAdapter,
+  ) {
     this.name = name;
     this.syncEngine = syncEngine;
     this.storageAdapter = storageAdapter;
@@ -75,7 +80,10 @@ export class PNCounterHandle implements PNCounter {
         // Convert stored object to PNCounterState
         const state = PNCounterImpl.objectToState(stored as PNCounterStateObject);
         this.counter.merge(state);
-        logger.debug({ name: this.name, value: this.counter.get() }, 'PNCounter restored from storage');
+        logger.debug(
+          { name: this.name, value: this.counter.get() },
+          'PNCounter restored from storage',
+        );
       }
     } catch (err) {
       logger.error({ err, name: this.name }, 'Failed to restore PNCounter from storage');
@@ -107,7 +115,10 @@ export class PNCounterHandle implements PNCounter {
       const storageKey = COUNTER_STORAGE_PREFIX + this.name;
       const stateObj = PNCounterImpl.stateToObject(this.counter.getState());
       await this.storageAdapter.setMeta(storageKey, stateObj);
-      logger.debug({ name: this.name, value: this.counter.get() }, 'PNCounter persisted to storage');
+      logger.debug(
+        { name: this.name, value: this.counter.get() },
+        'PNCounter persisted to storage',
+      );
     } catch (err) {
       logger.error({ err, name: this.name }, 'Failed to persist PNCounter to storage');
     }

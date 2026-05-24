@@ -18,7 +18,9 @@ export async function handleExplain(rawArgs: unknown, ctx: ToolContext): Promise
   // Validate arguments with Zod
   const parseResult = ExplainArgsSchema.safeParse(rawArgs);
   if (!parseResult.success) {
-    const errors = parseResult.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`).join(', ');
+    const errors = parseResult.error.issues
+      .map((e) => `${e.path.join('.')}: ${e.message}`)
+      .join(', ');
     return {
       content: [{ type: 'text', text: `Invalid arguments: ${errors}` }],
       isError: true,
@@ -96,20 +98,20 @@ export async function handleExplain(rawArgs: unknown, ctx: ToolContext): Promise
       // Add recommendations based on selectivity
       if (plan.selectivity < 0.1) {
         plan.recommendations.push(
-          `Consider creating an index on ${filterFields.join(', ')} for better performance.`
+          `Consider creating an index on ${filterFields.join(', ')} for better performance.`,
         );
       }
       if (totalRecords > 1000 && plan.selectivity > 0.5) {
         plan.recommendations.push(
           `Query is not selective (${(plan.selectivity * 100).toFixed(1)}% of records match). ` +
-            `Consider adding more filter criteria.`
+            `Consider adding more filter criteria.`,
         );
       }
     } else {
       plan.steps.push(`2. Return all records`);
       if (totalRecords > 100) {
         plan.recommendations.push(
-          `No filter applied. Consider adding filter criteria to reduce result size.`
+          `No filter applied. Consider adding filter criteria to reduce result size.`,
         );
       }
     }
@@ -117,12 +119,12 @@ export async function handleExplain(rawArgs: unknown, ctx: ToolContext): Promise
     // Check for potential FTS usage
     if (filter) {
       const stringFilters = Object.entries(filter).filter(
-        ([, v]) => typeof v === 'string' && String(v).length > 3
+        ([, v]) => typeof v === 'string' && String(v).length > 3,
       );
       if (stringFilters.length > 0) {
         plan.recommendations.push(
           `For text search on fields [${stringFilters.map(([k]) => k).join(', ')}], ` +
-            `consider using topgun_search instead for better relevance ranking.`
+            `consider using topgun_search instead for better relevance ranking.`,
         );
       }
     }

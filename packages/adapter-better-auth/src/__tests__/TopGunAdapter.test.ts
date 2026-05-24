@@ -65,11 +65,11 @@ class MemoryStorageAdapter implements IStorageAdapter {
   }
 
   async getPendingOps(): Promise<OpLogEntry[]> {
-    return this.opLog.filter(op => !op.synced);
+    return this.opLog.filter((op) => !op.synced);
   }
 
   async markOpsSynced(lastId: number): Promise<void> {
-    this.opLog.forEach(op => {
+    this.opLog.forEach((op) => {
       if (op.id !== undefined && op.id <= lastId) {
         op.synced = 1;
       }
@@ -84,13 +84,13 @@ class MemoryStorageAdapter implements IStorageAdapter {
 describe('TopGunAdapter', () => {
   let client: TopGunClient;
   let adapter: ReturnType<ReturnType<typeof topGunAdapter>>;
-  
+
   beforeEach(async () => {
     const storage = new MemoryStorageAdapter();
     client = new TopGunClient({
       serverUrl: 'ws://fake-url', // Mock doesn't use net
       storage,
-      nodeId: 'test-node'
+      nodeId: 'test-node',
     });
     // We don't start sync engine network, just storage load
     await client.start();
@@ -106,13 +106,13 @@ describe('TopGunAdapter', () => {
     name: 'Test User',
     emailVerified: true,
     createdAt: new Date(),
-    updatedAt: new Date()
+    updatedAt: new Date(),
   };
 
   it('should create a user', async () => {
     const created = await adapter.create({
       model: 'user',
-      data: testUser
+      data: testUser,
     });
 
     expect(created).toEqual(testUser);
@@ -128,22 +128,22 @@ describe('TopGunAdapter', () => {
 
     const found = await adapter.findOne({
       model: 'user',
-      where: [{ field: 'id', value: 'user-1' }]
+      where: [{ field: 'id', value: 'user-1' }],
     });
 
     expect(found).toMatchObject({
-        id: testUser.id,
-        email: testUser.email
+      id: testUser.id,
+      email: testUser.email,
     });
   });
 
   it('should find a user by email', async () => {
     await adapter.create({ model: 'user', data: testUser });
 
-    const found = await adapter.findOne({
+    const found = (await adapter.findOne({
       model: 'user',
-      where: [{ field: 'email', value: 'test@example.com' }]
-    }) as typeof testUser | null;
+      where: [{ field: 'email', value: 'test@example.com' }],
+    })) as typeof testUser | null;
 
     expect(found).not.toBeNull();
     expect(found?.email).toBe('test@example.com');
@@ -152,7 +152,7 @@ describe('TopGunAdapter', () => {
   it('should return null if user not found', async () => {
     const found = await adapter.findOne({
       model: 'user',
-      where: [{ field: 'email', value: 'missing@example.com' }]
+      where: [{ field: 'email', value: 'missing@example.com' }],
     });
 
     expect(found).toBeNull();
@@ -164,7 +164,7 @@ describe('TopGunAdapter', () => {
     const updated = await adapter.update({
       model: 'user',
       where: [{ field: 'id', value: 'user-1' }],
-      update: { name: 'Updated Name' }
+      update: { name: 'Updated Name' },
     });
 
     expect(updated).toMatchObject({ name: 'Updated Name' });
@@ -178,12 +178,12 @@ describe('TopGunAdapter', () => {
 
     await adapter.delete({
       model: 'user',
-      where: [{ field: 'id', value: 'user-1' }]
+      where: [{ field: 'id', value: 'user-1' }],
     });
 
     const found = await adapter.findOne({
       model: 'user',
-      where: [{ field: 'id', value: 'user-1' }]
+      where: [{ field: 'id', value: 'user-1' }],
     });
 
     expect(found).toBeNull();
@@ -198,103 +198,101 @@ describe('TopGunAdapter', () => {
       model: 'user',
       where: [
         { field: 'email', value: 'test@example.com' },
-        { field: 'name', value: 'Test User' }
-      ]
+        { field: 'name', value: 'Test User' },
+      ],
     });
 
     expect(found).toHaveLength(1);
     expect(found[0]).toHaveProperty('id', 'user-1');
   });
-  
+
   it('should handle IN operator', async () => {
-      const user2 = { ...testUser, id: 'user-2', email: 'other@example.com' };
-      await adapter.create({ model: 'user', data: testUser });
-      await adapter.create({ model: 'user', data: user2 });
-      
-      const found = await adapter.findMany({
-          model: 'user',
-          where: [
-              { field: 'email', operator: 'in', value: ['test@example.com', 'other@example.com'] }
-          ]
-      });
-      
-      expect(found).toHaveLength(2);
+    const user2 = { ...testUser, id: 'user-2', email: 'other@example.com' };
+    await adapter.create({ model: 'user', data: testUser });
+    await adapter.create({ model: 'user', data: user2 });
+
+    const found = await adapter.findMany({
+      model: 'user',
+      where: [{ field: 'email', operator: 'in', value: ['test@example.com', 'other@example.com'] }],
+    });
+
+    expect(found).toHaveLength(2);
   });
 
   it('should handle join (find user with accounts)', async () => {
-      await adapter.create({ model: 'user', data: testUser });
-      const account = {
-          id: 'acc-1',
-          userId: testUser.id,
-          providerId: 'credential',
-          accountId: testUser.id,
-          password: 'hashed-password'
-      };
-      await adapter.create({ model: 'account', data: account });
+    await adapter.create({ model: 'user', data: testUser });
+    const account = {
+      id: 'acc-1',
+      userId: testUser.id,
+      providerId: 'credential',
+      accountId: testUser.id,
+      password: 'hashed-password',
+    };
+    await adapter.create({ model: 'account', data: account });
 
-      const found = await adapter.findOne({
-          model: 'user',
-          where: [{ field: 'email', value: 'test@example.com' }],
-          join: { account: true }
-      });
+    const found = await adapter.findOne({
+      model: 'user',
+      where: [{ field: 'email', value: 'test@example.com' }],
+      join: { account: true },
+    });
 
-      expect(found).not.toBeNull();
-      // Expect accounts array attached
-      if (found && typeof found === 'object' && 'accounts' in found) {
-          const accounts = found.accounts as unknown[];
-          expect(accounts).toBeDefined();
-          expect(accounts).toHaveLength(1);
-          expect(accounts[0]).toHaveProperty('providerId', 'credential');
-      } else {
-          throw new Error('Expected found to have accounts property');
-      }
+    expect(found).not.toBeNull();
+    // Expect accounts array attached
+    if (found && typeof found === 'object' && 'accounts' in found) {
+      const accounts = found.accounts as unknown[];
+      expect(accounts).toBeDefined();
+      expect(accounts).toHaveLength(1);
+      expect(accounts[0]).toHaveProperty('providerId', 'credential');
+    } else {
+      throw new Error('Expected found to have accounts property');
+    }
   });
 
   it('should handle custom foreign key via foreignKeyMap', async () => {
-      const storage = new MemoryStorageAdapter();
-      const customClient = new TopGunClient({
-          serverUrl: 'ws://fake-url',
-          storage,
-          nodeId: 'test-node-custom'
-      });
-      await customClient.start();
+    const storage = new MemoryStorageAdapter();
+    const customClient = new TopGunClient({
+      serverUrl: 'ws://fake-url',
+      storage,
+      nodeId: 'test-node-custom',
+    });
+    await customClient.start();
 
-      const customAdapter = topGunAdapter({
-          client: customClient,
-          foreignKeyMap: { document: 'ownerId' }
-      })({} as BetterAuthOptions);
+    const customAdapter = topGunAdapter({
+      client: customClient,
+      foreignKeyMap: { document: 'ownerId' },
+    })({} as BetterAuthOptions);
 
-      const owner = {
-          id: 'owner-1',
-          email: 'owner@example.com',
-          name: 'Document Owner'
-      };
-      await customAdapter.create({ model: 'user', data: owner });
+    const owner = {
+      id: 'owner-1',
+      email: 'owner@example.com',
+      name: 'Document Owner',
+    };
+    await customAdapter.create({ model: 'user', data: owner });
 
-      const document = {
-          id: 'doc-1',
-          ownerId: owner.id,
-          title: 'My Document',
-          content: 'Some content'
-      };
-      await customAdapter.create({ model: 'document', data: document });
+    const document = {
+      id: 'doc-1',
+      ownerId: owner.id,
+      title: 'My Document',
+      content: 'Some content',
+    };
+    await customAdapter.create({ model: 'document', data: document });
 
-      const found = await customAdapter.findOne({
-          model: 'user',
-          where: [{ field: 'id', value: 'owner-1' }],
-          join: { document: true }
-      });
+    const found = await customAdapter.findOne({
+      model: 'user',
+      where: [{ field: 'id', value: 'owner-1' }],
+      join: { document: true },
+    });
 
-      expect(found).not.toBeNull();
-      if (found && typeof found === 'object' && 'documents' in found) {
-          const documents = found.documents as unknown[];
-          expect(documents).toBeDefined();
-          expect(documents).toHaveLength(1);
-          expect(documents[0]).toHaveProperty('title', 'My Document');
-          expect(documents[0]).toHaveProperty('ownerId', 'owner-1');
-      } else {
-          throw new Error('Expected found to have documents property');
-      }
+    expect(found).not.toBeNull();
+    if (found && typeof found === 'object' && 'documents' in found) {
+      const documents = found.documents as unknown[];
+      expect(documents).toBeDefined();
+      expect(documents).toHaveLength(1);
+      expect(documents[0]).toHaveProperty('title', 'My Document');
+      expect(documents[0]).toHaveProperty('ownerId', 'owner-1');
+    } else {
+      throw new Error('Expected found to have documents property');
+    }
   });
 });
 
@@ -304,7 +302,7 @@ describe('cold start handling', () => {
     let startResolved = false;
     const mockClient: MockTopGunClient = {
       start: jest.fn().mockImplementation(() => {
-        return new Promise<void>(resolve => {
+        return new Promise<void>((resolve) => {
           setTimeout(() => {
             startResolved = true;
             resolve();
@@ -345,7 +343,7 @@ describe('cold start handling', () => {
     const mockClient: MockTopGunClient = {
       start: jest.fn().mockImplementation(() => {
         startCallCount++;
-        return new Promise<void>(resolve => setTimeout(resolve, 50));
+        return new Promise<void>((resolve) => setTimeout(resolve, 50));
       }),
       getMap: jest.fn().mockReturnValue({
         set: jest.fn(),
@@ -413,7 +411,7 @@ describe('cold start handling', () => {
 
     const adapter = topGunAdapter({
       client: mockClient as TopGunClient,
-      waitForReady: false
+      waitForReady: false,
     })({} as BetterAuthOptions);
 
     await adapter.create({ model: 'user', data: { name: 'test' } });
@@ -442,7 +440,7 @@ describe('findManyWithCursor', () => {
     client = new TopGunClient({
       serverUrl: 'ws://fake-url',
       storage,
-      nodeId: 'test-cursor-node'
+      nodeId: 'test-cursor-node',
     });
     await client.start();
 
@@ -465,7 +463,7 @@ describe('findManyWithCursor', () => {
     const result = await adapter.findManyWithCursor({ model: 'user', limit: 5 });
 
     expect(result.data).toHaveLength(5);
-    const ids = result.data.map(r => r['id'] as string);
+    const ids = result.data.map((r) => r['id'] as string);
     // Verify ascending order
     for (let i = 1; i < ids.length; i++) {
       expect(ids[i] > ids[i - 1]).toBe(true);
@@ -488,8 +486,8 @@ describe('findManyWithCursor', () => {
     expect(page2.data).toHaveLength(2);
 
     // No overlap between pages
-    const page1Ids = new Set(page1.data.map(r => r['id'] as string));
-    const page2Ids = page2.data.map(r => r['id'] as string);
+    const page1Ids = new Set(page1.data.map((r) => r['id'] as string));
+    const page2Ids = page2.data.map((r) => r['id'] as string);
     for (const id of page2Ids) {
       expect(page1Ids.has(id)).toBe(false);
     }
@@ -524,25 +522,24 @@ describe('findManyWithCursor', () => {
     const allIds: string[] = [];
 
     const page1 = await adapter.findManyWithCursor({ model: 'user', limit: 2 });
-    allIds.push(...page1.data.map(r => r['id'] as string));
+    allIds.push(...page1.data.map((r) => r['id'] as string));
 
     const page2 = await adapter.findManyWithCursor({
       model: 'user',
       limit: 2,
       cursor: page1.nextCursor!,
     });
-    allIds.push(...page2.data.map(r => r['id'] as string));
+    allIds.push(...page2.data.map((r) => r['id'] as string));
 
     const page3 = await adapter.findManyWithCursor({
       model: 'user',
       limit: 2,
       cursor: page2.nextCursor!,
     });
-    allIds.push(...page3.data.map(r => r['id'] as string));
+    allIds.push(...page3.data.map((r) => r['id'] as string));
 
     // All 5 users found, sorted by id asc, no duplicates
     expect(allIds).toHaveLength(5);
     expect(allIds).toEqual(['user-a', 'user-b', 'user-c', 'user-d', 'user-e']);
   });
 });
-

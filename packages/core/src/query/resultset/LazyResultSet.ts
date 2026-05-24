@@ -34,7 +34,7 @@ export class LazyResultSet<K> implements ResultSet<K> {
   constructor(
     private readonly iteratorFactory: IteratorFactory<K>,
     private readonly retrievalCost: number,
-    private readonly estimatedSize: number
+    private readonly estimatedSize: number,
   ) {}
 
   *[Symbol.iterator](): Generator<K> {

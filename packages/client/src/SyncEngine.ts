@@ -32,8 +32,33 @@ import type { IConnectionProvider } from './types';
 import { ConflictResolverClient } from './ConflictResolverClient';
 import { AuthRequiredError } from './errors/AuthRequiredError';
 import { RecordSyncStateTracker } from './RecordSyncState';
-import { WebSocketManager, BackpressureController, QueryManager, TopicManager, LockManager, WriteConcernManager, CounterManager, EntryProcessorClient, SearchClient, SqlClient, VectorSearchClient, HybridSearchClient, MerkleSyncHandler, ORMapSyncHandler, MessageRouter, registerClientMessageHandlers } from './sync';
-import type { SearchResult, SqlQueryResult, VectorSearchClientOptions, VectorSearchClientResult, HybridSearchClientOptions, HybridSearchClientResult, IMessageRouter } from './sync';
+import {
+  WebSocketManager,
+  BackpressureController,
+  QueryManager,
+  TopicManager,
+  LockManager,
+  WriteConcernManager,
+  CounterManager,
+  EntryProcessorClient,
+  SearchClient,
+  SqlClient,
+  VectorSearchClient,
+  HybridSearchClient,
+  MerkleSyncHandler,
+  ORMapSyncHandler,
+  MessageRouter,
+  registerClientMessageHandlers,
+} from './sync';
+import type {
+  SearchResult,
+  SqlQueryResult,
+  VectorSearchClientOptions,
+  VectorSearchClientResult,
+  HybridSearchClientOptions,
+  HybridSearchClientResult,
+  IMessageRouter,
+} from './sync';
 
 // Re-export SearchResult and SqlQueryResult from sync module for backwards compatibility
 export type { SearchResult, SqlQueryResult } from './sync';
@@ -51,9 +76,9 @@ export interface OpLogEntry {
 }
 
 export interface HeartbeatConfig {
-  intervalMs: number;      // Default: 5000 (5 seconds)
-  timeoutMs: number;       // Default: 15000 (15 seconds)
-  enabled: boolean;        // Default: true
+  intervalMs: number; // Default: 5000 (5 seconds)
+  timeoutMs: number; // Default: 15000 (15 seconds)
+  enabled: boolean; // Default: true
 }
 
 export interface BackoffConfig {
@@ -274,7 +299,8 @@ export class SyncEngine {
 
     // Initialize EntryProcessorClient for server-side entry processing
     this.entryProcessorClient = new EntryProcessorClient({
-      sendMessage: (msg, key) => key !== undefined ? this.sendMessage(msg, key) : this.sendMessage(msg),
+      sendMessage: (msg, key) =>
+        key !== undefined ? this.sendMessage(msg, key) : this.sendMessage(msg),
       isAuthenticated: () => this.isAuthenticated(),
     });
 
@@ -376,7 +402,7 @@ export class SyncEngine {
         hybridSearchClient: this.hybridSearchClient,
         merkleSyncHandler: this.merkleSyncHandler,
         orMapSyncHandler: this.orMapSyncHandler,
-      }
+      },
     );
 
     // Start connection
@@ -405,7 +431,10 @@ export class SyncEngine {
 
     // Auth-optional wait: allow the server AUTH_REQUIRED_GRACE_MS to send
     // AUTH_REQUIRED. If nothing arrives, assume auth-optional and drive to CONNECTED.
-    logger.info({ graceMs: this.AUTH_REQUIRED_GRACE_MS }, 'Connection established. Waiting briefly for AUTH_REQUIRED...');
+    logger.info(
+      { graceMs: this.AUTH_REQUIRED_GRACE_MS },
+      'Connection established. Waiting briefly for AUTH_REQUIRED...',
+    );
     this.authRequiredGraceTimer = setTimeout(() => {
       this.authRequiredGraceTimer = null;
       this.completeAuthOptionalConnection();
@@ -437,7 +466,10 @@ export class SyncEngine {
     }
 
     // Auth-optional wait on reconnect: same grace-timeout logic as initial connect.
-    logger.info({ graceMs: this.AUTH_REQUIRED_GRACE_MS }, 'Reconnected. Waiting briefly for AUTH_REQUIRED...');
+    logger.info(
+      { graceMs: this.AUTH_REQUIRED_GRACE_MS },
+      'Reconnected. Waiting briefly for AUTH_REQUIRED...',
+    );
     this.authRequiredGraceTimer = setTimeout(() => {
       this.authRequiredGraceTimer = null;
       this.completeAuthOptionalConnection();
@@ -467,7 +499,7 @@ export class SyncEngine {
     logger.info('No AUTH_REQUIRED received within grace window — assuming auth-optional server.');
     // Traverse the canonical pre-auth → ready path (no new state transitions added).
     this.stateMachine.transition(SyncState.AUTHENTICATING);
-    this.handleAuthAck();  // Reuses existing SYNCING → CONNECTED wiring.
+    this.handleAuthAck(); // Reuses existing SYNCING → CONNECTED wiring.
   }
 
   /**
@@ -502,7 +534,7 @@ export class SyncEngine {
       const error = new AuthRequiredError();
       logger.warn(
         { code: error.code },
-        'AUTH_REQUIRED received but no token configured. Call client.setAuthToken(token) or configure config.auth/config.onAuthRequired.'
+        'AUTH_REQUIRED received but no token configured. Call client.setAuthToken(token) or configure config.auth/config.onAuthRequired.',
       );
       if (this.onAuthRequired) {
         try {
@@ -626,7 +658,12 @@ export class SyncEngine {
     mapName: string,
     opType: 'PUT' | 'REMOVE' | 'OR_ADD' | 'OR_REMOVE',
     key: string,
-    data: { record?: LWWRecord<any>; orRecord?: ORMapRecord<any>; orTag?: string; timestamp: Timestamp }
+    data: {
+      record?: LWWRecord<any>;
+      orRecord?: ORMapRecord<any>;
+      orTag?: string;
+      timestamp: Timestamp;
+    },
   ): Promise<string> {
     // Check backpressure before adding new operation (delegates to BackpressureController)
     await this.backpressureController.checkBackpressure();
@@ -660,7 +697,7 @@ export class SyncEngine {
   }
 
   private syncPendingOperations(): void {
-    const pending = this.opLog.filter(op => !op.synced);
+    const pending = this.opLog.filter((op) => !op.synced);
     if (pending.length === 0) return;
 
     logger.info({ count: pending.length }, 'Syncing pending operations');
@@ -670,10 +707,17 @@ export class SyncEngine {
     // and send separate OP_BATCH messages per node.
     const connectionProvider = this.webSocketManager.getConnectionProvider();
     if (connectionProvider.sendBatch) {
-      const results = connectionProvider.sendBatch(pending.map(op => ({ key: op.key, message: op })));
-      const failedKeys = [...results.entries()].filter(([, success]) => !success).map(([key]) => key);
+      const results = connectionProvider.sendBatch(
+        pending.map((op) => ({ key: op.key, message: op })),
+      );
+      const failedKeys = [...results.entries()]
+        .filter(([, success]) => !success)
+        .map(([key]) => key);
       if (failedKeys.length > 0) {
-        logger.warn({ failedKeys, count: failedKeys.length }, 'Some batch operations failed to send');
+        logger.warn(
+          { failedKeys, count: failedKeys.length },
+          'Some batch operations failed to send',
+        );
       }
       return;
     }
@@ -682,8 +726,8 @@ export class SyncEngine {
     this.sendMessage({
       type: 'OP_BATCH',
       payload: {
-        ops: pending
-      }
+        ops: pending,
+      },
     });
   }
 
@@ -741,7 +785,7 @@ export class SyncEngine {
 
     this.sendMessage({
       type: 'AUTH',
-      token
+      token,
     });
   }
 
@@ -789,7 +833,10 @@ export class SyncEngine {
    * Executes a query against local storage immediately.
    * Delegates to QueryManager.
    */
-  public async runLocalQuery(mapName: string, filter: QueryFilter): Promise<{ key: string; value: any }[]> {
+  public async runLocalQuery(
+    mapName: string,
+    filter: QueryFilter,
+  ): Promise<{ key: string; value: any }[]> {
     return this.queryManager.runLocalQuery(mapName, filter);
   }
 
@@ -805,7 +852,11 @@ export class SyncEngine {
    * Request a distributed lock.
    * Delegates to LockManager.
    */
-  public requestLock(name: string, requestId: string, ttl: number): Promise<{ fencingToken: number }> {
+  public requestLock(
+    name: string,
+    requestId: string,
+    ttl: number,
+  ): Promise<{ fencingToken: number }> {
     return this.lockManager.requestLock(name, requestId, ttl);
   }
 
@@ -817,7 +868,11 @@ export class SyncEngine {
     return this.lockManager.releaseLock(name, requestId, fencingToken);
   }
 
-  private async handleServerMessage(message: { type: string; payload?: unknown; timestamp?: Timestamp }): Promise<void> {
+  private async handleServerMessage(message: {
+    type: string;
+    payload?: unknown;
+    timestamp?: Timestamp;
+  }): Promise<void> {
     // Emit to generic listeners (used by EventJournalReader)
     this.emitMessage(message);
 
@@ -862,7 +917,11 @@ export class SyncEngine {
       const msgData = batchData.slice(offset, offset + msgLen);
       offset += msgLen;
 
-      const innerMsg = deserialize(msgData) as { type: string; payload?: unknown; timestamp?: Timestamp };
+      const innerMsg = deserialize(msgData) as {
+        type: string;
+        payload?: unknown;
+        timestamp?: Timestamp;
+      };
       await this.handleServerMessage(innerMsg);
     }
   }
@@ -911,10 +970,13 @@ export class SyncEngine {
     // Handle per-operation results if available
     if (results && Array.isArray(results)) {
       for (const result of results) {
-        const op = this.opLog.find(o => o.id === result.opId);
+        const op = this.opLog.find((o) => o.id === result.opId);
         if (op && !op.synced) {
           op.synced = true;
-          logger.debug({ opId: result.opId, achievedLevel: result.achievedLevel, success: result.success }, 'Op ACK with Write Concern');
+          logger.debug(
+            { opId: result.opId, achievedLevel: result.achievedLevel, success: result.success },
+            'Op ACK with Write Concern',
+          );
           // Notify per-record sync-state tracker that this op flipped synced=true.
           this.recordSyncStateTracker.onAcknowledge(op);
         }
@@ -930,7 +992,7 @@ export class SyncEngine {
 
     if (!isNaN(lastIdNum)) {
       // Normal path: server returned a valid numeric lastId
-      this.opLog.forEach(op => {
+      this.opLog.forEach((op) => {
         if (op.id) {
           const opIdNum = parseInt(op.id, 10);
           if (!isNaN(opIdNum) && opIdNum <= lastIdNum) {
@@ -952,7 +1014,7 @@ export class SyncEngine {
       // Fallback: server returned non-numeric lastId (e.g. "unknown", "undefined").
       // The server ACKed the batch, so mark ALL pending ops as synced.
       logger.warn({ lastId }, 'OP_ACK has non-numeric lastId — marking all pending ops as synced');
-      this.opLog.forEach(op => {
+      this.opLog.forEach((op) => {
         if (!op.synced) {
           ackedCount++;
           op.synced = true;
@@ -967,7 +1029,9 @@ export class SyncEngine {
     }
 
     if (maxSyncedId !== -1) {
-      this.storageAdapter.markOpsSynced(maxSyncedId).catch(err => logger.error({ err }, 'Failed to mark ops synced'));
+      this.storageAdapter
+        .markOpsSynced(maxSyncedId)
+        .catch((err) => logger.error({ err }, 'Failed to mark ops synced'));
     }
     // Check low water mark after ACKs reduce pending count (delegates to BackpressureController)
     if (ackedCount > 0) {
@@ -1009,7 +1073,7 @@ export class SyncEngine {
         event.key,
         event.record,
         event.orRecord,
-        event.orTag
+        event.orTag,
       );
     }
   }
@@ -1025,7 +1089,10 @@ export class SyncEngine {
           await this.storageAdapter.remove(`${name}:${key}`);
         }
         if (removedKeys.length > 0) {
-          logger.info({ mapName: name, count: removedKeys.length }, 'Pruned tombstones from LWWMap');
+          logger.info(
+            { mapName: name, count: removedKeys.length },
+            'Pruned tombstones from LWWMap',
+          );
         }
       } else if (map instanceof ORMap) {
         const removedTags = map.prune(olderThan);
@@ -1050,7 +1117,7 @@ export class SyncEngine {
     key: string,
     record?: LWWRecord<unknown>,
     orRecord?: ORMapRecord<unknown>,
-    orTag?: string
+    orTag?: string,
   ): Promise<void> {
     const localMap = this.maps.get(mapName);
     if (localMap) {
@@ -1242,11 +1309,14 @@ export class SyncEngine {
 
     // Clear storage
     const allKeys = await this.storageAdapter.getAllKeys();
-    const mapKeys = allKeys.filter(k => k.startsWith(mapName + ':'));
+    const mapKeys = allKeys.filter((k) => k.startsWith(mapName + ':'));
     for (const key of mapKeys) {
       await this.storageAdapter.remove(key);
     }
-    logger.info({ mapName, removedStorageCount: mapKeys.length }, 'Reset map: Cleared memory and storage');
+    logger.info(
+      { mapName, removedStorageCount: mapKeys.length },
+      'Reset map: Cleared memory and storage',
+    );
   }
 
   // ============ Heartbeat Methods (delegate to WebSocketManager) ============
@@ -1302,8 +1372,13 @@ export class SyncEngine {
    * @returns Unsubscribe function
    */
   public onBackpressure(
-    event: 'backpressure:high' | 'backpressure:low' | 'backpressure:paused' | 'backpressure:resumed' | 'operation:dropped',
-    listener: (data?: BackpressureThresholdEvent | OperationDroppedEvent) => void
+    event:
+      | 'backpressure:high'
+      | 'backpressure:low'
+      | 'backpressure:paused'
+      | 'backpressure:resumed'
+      | 'operation:dropped',
+    listener: (data?: BackpressureThresholdEvent | OperationDroppedEvent) => void,
   ): () => void {
     return this.backpressureController.onBackpressure(event, listener);
   }
@@ -1335,7 +1410,10 @@ export class SyncEngine {
    * @param listener Callback when counter state is updated
    * @returns Unsubscribe function
    */
-  public onCounterUpdate(name: string, listener: (state: { positive: Map<string, number>; negative: Map<string, number> }) => void): () => void {
+  public onCounterUpdate(
+    name: string,
+    listener: (state: { positive: Map<string, number>; negative: Map<string, number> }) => void,
+  ): () => void {
     return this.counterManager.onCounterUpdate(name, listener);
   }
 
@@ -1354,7 +1432,10 @@ export class SyncEngine {
    * @param name Counter name
    * @param state Counter state to sync
    */
-  public syncCounter(name: string, state: { positive: Map<string, number>; negative: Map<string, number> }): void {
+  public syncCounter(
+    name: string,
+    state: { positive: Map<string, number>; negative: Map<string, number> },
+  ): void {
     this.counterManager.syncCounter(name, state);
   }
 
@@ -1468,7 +1549,7 @@ export class SyncEngine {
   public async search<T>(
     mapName: string,
     query: string,
-    options?: SearchOptions
+    options?: SearchOptions,
   ): Promise<SearchResult<T>[]> {
     return this.searchClient.search<T>(mapName, query, options);
   }
@@ -1504,7 +1585,7 @@ export class SyncEngine {
   public async vectorSearch(
     mapName: string,
     queryVector: Float32Array | number[],
-    options?: VectorSearchClientOptions
+    options?: VectorSearchClientOptions,
   ): Promise<VectorSearchClientResult[]> {
     return this.vectorSearchClient.vectorSearch(mapName, queryVector, options);
   }
@@ -1525,7 +1606,7 @@ export class SyncEngine {
   public async hybridSearch(
     mapName: string,
     queryText: string,
-    options?: HybridSearchClientOptions
+    options?: HybridSearchClientOptions,
   ): Promise<HybridSearchClientResult[]> {
     return this.hybridSearchClient.hybridSearch(mapName, queryText, options);
   }
@@ -1577,7 +1658,7 @@ export class SyncEngine {
    */
   public async runLocalHybridQuery<T>(
     mapName: string,
-    filter: HybridQueryFilter
+    filter: HybridQueryFilter,
   ): Promise<Array<{ key: string; value: T; score?: number; matchedTerms?: string[] }>> {
     return this.queryManager.runLocalHybridQuery<T>(mapName, filter);
   }

@@ -56,4 +56,3 @@ describe('useMutation', () => {
     expect(mockRemove).toHaveBeenCalledWith('key1');
   });
 });
-

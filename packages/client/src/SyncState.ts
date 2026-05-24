@@ -26,9 +26,24 @@ export enum SyncState {
  */
 export const VALID_TRANSITIONS: Record<SyncState, SyncState[]> = {
   [SyncState.INITIAL]: [SyncState.CONNECTING],
-  [SyncState.CONNECTING]: [SyncState.AUTHENTICATING, SyncState.BACKOFF, SyncState.ERROR, SyncState.DISCONNECTED],
-  [SyncState.AUTHENTICATING]: [SyncState.SYNCING, SyncState.BACKOFF, SyncState.ERROR, SyncState.DISCONNECTED],
-  [SyncState.SYNCING]: [SyncState.CONNECTED, SyncState.BACKOFF, SyncState.ERROR, SyncState.DISCONNECTED],
+  [SyncState.CONNECTING]: [
+    SyncState.AUTHENTICATING,
+    SyncState.BACKOFF,
+    SyncState.ERROR,
+    SyncState.DISCONNECTED,
+  ],
+  [SyncState.AUTHENTICATING]: [
+    SyncState.SYNCING,
+    SyncState.BACKOFF,
+    SyncState.ERROR,
+    SyncState.DISCONNECTED,
+  ],
+  [SyncState.SYNCING]: [
+    SyncState.CONNECTED,
+    SyncState.BACKOFF,
+    SyncState.ERROR,
+    SyncState.DISCONNECTED,
+  ],
   [SyncState.CONNECTED]: [SyncState.SYNCING, SyncState.DISCONNECTED, SyncState.BACKOFF],
   [SyncState.DISCONNECTED]: [SyncState.CONNECTING, SyncState.BACKOFF, SyncState.INITIAL],
   [SyncState.BACKOFF]: [SyncState.CONNECTING, SyncState.DISCONNECTED, SyncState.INITIAL],

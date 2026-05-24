@@ -245,7 +245,13 @@ describe('StandingQueryRegistry', () => {
 
       it('should return updated for continued match', () => {
         const oldUser: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin' };
-        const newUser: User = { id: '1', name: 'Alice Updated', age: 31, status: 'active', role: 'admin' };
+        const newUser: User = {
+          id: '1',
+          name: 'Alice Updated',
+          age: 31,
+          status: 'active',
+          role: 'admin',
+        };
 
         // First add
         const activeIndex = registry.getIndex(activeQuery);

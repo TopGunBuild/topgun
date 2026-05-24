@@ -27,12 +27,14 @@ export type SearchMessage = z.infer<typeof SearchMessageSchema>;
 
 export const SearchRespPayloadSchema = z.object({
   requestId: z.string(),
-  results: z.array(z.object({
-    key: z.string(),
-    value: z.unknown(),
-    score: z.number(),
-    matchedTerms: z.array(z.string()),
-  })),
+  results: z.array(
+    z.object({
+      key: z.string(),
+      value: z.unknown(),
+      score: z.number(),
+      matchedTerms: z.array(z.string()),
+    }),
+  ),
   totalCount: z.number(),
   error: z.string().optional(),
 });

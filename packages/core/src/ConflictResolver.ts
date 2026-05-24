@@ -45,10 +45,10 @@ export interface MergeContext<V = unknown> {
  * Result of conflict resolution.
  */
 export type MergeResult<V = unknown> =
-  | { action: 'accept'; value: V }    // Accept remote value
+  | { action: 'accept'; value: V } // Accept remote value
   | { action: 'reject'; reason: string } // Reject with error
-  | { action: 'merge'; value: V }     // Custom merged value
-  | { action: 'local' };              // Keep local value
+  | { action: 'merge'; value: V } // Custom merged value
+  | { action: 'local' }; // Keep local value
 
 // --- Conflict Resolver Function ---
 

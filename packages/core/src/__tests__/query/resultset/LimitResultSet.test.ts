@@ -68,7 +68,10 @@ describe('LimitResultSet', () => {
     });
 
     it('should handle pagination', () => {
-      const source = new SetResultSet(new Set(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j']), 30);
+      const source = new SetResultSet(
+        new Set(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j']),
+        30,
+      );
 
       // Page 1: offset=0, limit=3
       const page1 = new LimitResultSet(source, 0, 3);

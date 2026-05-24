@@ -28,10 +28,7 @@ interface TestProduct {
 }
 
 describe('LazyHashIndex', () => {
-  const categoryAttr = simpleAttribute<TestProduct, string>(
-    'category',
-    (p) => p.category
-  );
+  const categoryAttr = simpleAttribute<TestProduct, string>('category', (p) => p.category);
 
   it('should buffer records before first query', () => {
     const index = new LazyHashIndex<string, TestProduct, string>(categoryAttr);
@@ -68,7 +65,12 @@ describe('LazyHashIndex', () => {
   });
 
   it('should call progress callback during materialization', () => {
-    const progressCalls: Array<{ attr: string; progress: number; processed: number; total: number }> = [];
+    const progressCalls: Array<{
+      attr: string;
+      progress: number;
+      processed: number;
+      total: number;
+    }> = [];
     const callback: IndexBuildProgressCallback = (attr, progress, processed, total) => {
       progressCalls.push({ attr, progress, processed, total });
     };
@@ -80,7 +82,13 @@ describe('LazyHashIndex', () => {
 
     // Add 5 records
     for (let i = 1; i <= 5; i++) {
-      index.add(`${i}`, { id: `${i}`, name: `Product ${i}`, category: 'A', price: i * 10, description: 'Test' });
+      index.add(`${i}`, {
+        id: `${i}`,
+        name: `Product ${i}`,
+        category: 'A',
+        price: i * 10,
+        description: 'Test',
+      });
     }
 
     index.materialize();
@@ -94,9 +102,10 @@ describe('LazyHashIndex', () => {
     const index = new LazyHashIndex<string, TestProduct, string>(categoryAttr);
 
     index.add('1', { id: '1', name: 'Product 1', category: 'A', price: 10, description: 'Test' });
-    index.update('1',
+    index.update(
+      '1',
       { id: '1', name: 'Product 1', category: 'A', price: 10, description: 'Test' },
-      { id: '1', name: 'Product 1', category: 'B', price: 10, description: 'Test' }
+      { id: '1', name: 'Product 1', category: 'B', price: 10, description: 'Test' },
     );
 
     const result = index.retrieve({ type: 'equal', value: 'B' });
@@ -111,7 +120,13 @@ describe('LazyHashIndex', () => {
 
     index.add('1', { id: '1', name: 'Product 1', category: 'A', price: 10, description: 'Test' });
     index.add('2', { id: '2', name: 'Product 2', category: 'A', price: 20, description: 'Test' });
-    index.remove('1', { id: '1', name: 'Product 1', category: 'A', price: 10, description: 'Test' });
+    index.remove('1', {
+      id: '1',
+      name: 'Product 1',
+      category: 'A',
+      price: 10,
+      description: 'Test',
+    });
 
     expect(index.pendingCount).toBe(1);
 
@@ -206,8 +221,20 @@ describe('LazyInvertedIndex', () => {
   it('should buffer records before first query', () => {
     const index = new LazyInvertedIndex<string, TestProduct, string>(nameAttr);
 
-    index.add('1', { id: '1', name: 'Wireless Mouse', category: 'A', price: 10, description: 'Test' });
-    index.add('2', { id: '2', name: 'Wireless Keyboard', category: 'B', price: 20, description: 'Test' });
+    index.add('1', {
+      id: '1',
+      name: 'Wireless Mouse',
+      category: 'A',
+      price: 10,
+      description: 'Test',
+    });
+    index.add('2', {
+      id: '2',
+      name: 'Wireless Keyboard',
+      category: 'B',
+      price: 20,
+      description: 'Test',
+    });
 
     expect(index.isBuilt).toBe(false);
     expect(index.pendingCount).toBe(2);
@@ -216,8 +243,20 @@ describe('LazyInvertedIndex', () => {
   it('should materialize and support contains queries', () => {
     const index = new LazyInvertedIndex<string, TestProduct, string>(nameAttr);
 
-    index.add('1', { id: '1', name: 'Wireless Mouse', category: 'A', price: 10, description: 'Test' });
-    index.add('2', { id: '2', name: 'Wireless Keyboard', category: 'B', price: 20, description: 'Test' });
+    index.add('1', {
+      id: '1',
+      name: 'Wireless Mouse',
+      category: 'A',
+      price: 10,
+      description: 'Test',
+    });
+    index.add('2', {
+      id: '2',
+      name: 'Wireless Keyboard',
+      category: 'B',
+      price: 20,
+      description: 'Test',
+    });
     index.add('3', { id: '3', name: 'USB Cable', category: 'C', price: 5, description: 'Test' });
 
     // Query should trigger materialization
@@ -233,8 +272,20 @@ describe('LazyInvertedIndex', () => {
   it('should support hasToken and getTokenDocumentCount', () => {
     const index = new LazyInvertedIndex<string, TestProduct, string>(nameAttr);
 
-    index.add('1', { id: '1', name: 'Wireless Mouse', category: 'A', price: 10, description: 'Test' });
-    index.add('2', { id: '2', name: 'Wireless Keyboard', category: 'B', price: 20, description: 'Test' });
+    index.add('1', {
+      id: '1',
+      name: 'Wireless Mouse',
+      category: 'A',
+      price: 10,
+      description: 'Test',
+    });
+    index.add('2', {
+      id: '2',
+      name: 'Wireless Keyboard',
+      category: 'B',
+      price: 20,
+      description: 'Test',
+    });
 
     // These should trigger materialization
     expect(index.hasToken('wireless')).toBe(true);
@@ -366,8 +417,20 @@ describe('IndexedLWWMap with Lazy Indexes', () => {
     const nameAttr = simpleAttribute<TestProduct, string>('name', (p) => p.name);
     map.addInvertedIndex(nameAttr);
 
-    map.set('1', { id: '1', name: 'Wireless Mouse', category: 'A', price: 10, description: 'Test' });
-    map.set('2', { id: '2', name: 'Wireless Keyboard', category: 'B', price: 20, description: 'Test' });
+    map.set('1', {
+      id: '1',
+      name: 'Wireless Mouse',
+      category: 'A',
+      price: 10,
+      description: 'Test',
+    });
+    map.set('2', {
+      id: '2',
+      name: 'Wireless Keyboard',
+      category: 'B',
+      price: 20,
+      description: 'Test',
+    });
     map.set('3', { id: '3', name: 'USB Cable', category: 'C', price: 5, description: 'Test' });
 
     expect(map.hasUnbuiltIndexes()).toBe(true);

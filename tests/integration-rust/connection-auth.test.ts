@@ -122,16 +122,14 @@ describe('Integration: Connection & Auth (Rust Server)', () => {
           createRustTestClient(port, {
             nodeId: `multi-client-${i}`,
             userId: `user-${i}`,
-          })
+          }),
         );
 
         const connectedClients = await Promise.all(clientPromises);
         clients.push(...connectedClients);
 
         // Wait for all clients to authenticate
-        await Promise.all(
-          clients.map((c) => c.waitForMessage('AUTH_ACK', 10_000))
-        );
+        await Promise.all(clients.map((c) => c.waitForMessage('AUTH_ACK', 10_000)));
 
         // Verify all clients are authenticated
         for (const client of clients) {

@@ -7,12 +7,7 @@
 import { QueryOptimizer, ClassifiedPredicates } from '../../query/QueryOptimizer';
 import { IndexRegistry } from '../../query/IndexRegistry';
 import { FullTextIndex } from '../../fts';
-import type {
-  Query,
-  FTSScanStep,
-  FusionStrategy,
-  PlanStep,
-} from '../../query/QueryTypes';
+import type { Query, FTSScanStep, FusionStrategy, PlanStep } from '../../query/QueryTypes';
 
 describe('QueryOptimizer FTS Extension', () => {
   let indexRegistry: IndexRegistry<string, Record<string, unknown>>;

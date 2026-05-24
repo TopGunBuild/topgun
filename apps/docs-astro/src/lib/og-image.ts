@@ -12,11 +12,11 @@ export async function generateOgImage(options: OgImageOptions): Promise<Buffer> 
 
   // Load font from Google Fonts CDN
   const interBold = await fetch(
-    'https://fonts.gstatic.com/s/inter/v13/UcCO3FwrK3iLTeHuS_fvQtMwCp50KnMw2boKoduKmMEVuFuYMZhrib2Bg-4.ttf'
+    'https://fonts.gstatic.com/s/inter/v13/UcCO3FwrK3iLTeHuS_fvQtMwCp50KnMw2boKoduKmMEVuFuYMZhrib2Bg-4.ttf',
   ).then((res) => res.arrayBuffer());
 
   const interRegular = await fetch(
-    'https://fonts.gstatic.com/s/inter/v13/UcCO3FwrK3iLTeHuS_fvQtMwCp50KnMw2boKoduKmMEVuLyfMZhrib2Bg-4.ttf'
+    'https://fonts.gstatic.com/s/inter/v13/UcCO3FwrK3iLTeHuS_fvQtMwCp50KnMw2boKoduKmMEVuLyfMZhrib2Bg-4.ttf',
   ).then((res) => res.arrayBuffer());
 
   // Color schemes based on type
@@ -66,7 +66,8 @@ export async function generateOgImage(options: OgImageOptions): Promise<Buffer> 
                 left: 0,
                 right: 0,
                 bottom: 0,
-                backgroundImage: 'radial-gradient(circle at 1px 1px, rgba(255,255,255,0.05) 1px, transparent 0)',
+                backgroundImage:
+                  'radial-gradient(circle at 1px 1px, rgba(255,255,255,0.05) 1px, transparent 0)',
                 backgroundSize: '40px 40px',
               },
             },
@@ -189,7 +190,10 @@ export async function generateOgImage(options: OgImageOptions): Promise<Buffer> 
                             margin: 0,
                             maxWidth: '800px',
                           },
-                          children: description.length > 120 ? description.slice(0, 120) + '...' : description,
+                          children:
+                            description.length > 120
+                              ? description.slice(0, 120) + '...'
+                              : description,
                         },
                       },
                     ].filter(Boolean),
@@ -252,7 +256,7 @@ export async function generateOgImage(options: OgImageOptions): Promise<Buffer> 
           style: 'normal',
         },
       ],
-    }
+    },
   );
 
   // Convert SVG to PNG using sharp

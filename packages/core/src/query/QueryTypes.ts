@@ -23,7 +23,21 @@ export interface QueryNode {
  * Simple query node for attribute-based conditions.
  */
 export interface SimpleQueryNode extends QueryNode {
-  type: 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'between' | 'like' | 'regex' | 'in' | 'has' | 'contains' | 'containsAll' | 'containsAny';
+  type:
+    | 'eq'
+    | 'neq'
+    | 'gt'
+    | 'gte'
+    | 'lt'
+    | 'lte'
+    | 'between'
+    | 'like'
+    | 'regex'
+    | 'in'
+    | 'has'
+    | 'contains'
+    | 'containsAll'
+    | 'containsAny';
   attribute: string;
   value?: unknown;
   values?: unknown[];
@@ -319,9 +333,9 @@ export interface DistributedCost {
  */
 export const COST_WEIGHTS = {
   CPU: 1.0,
-  NETWORK: 10.0,    // Network is expensive (latency, bandwidth)
-  IO: 5.0,          // Disk I/O is moderately expensive
-  ROWS: 0.001,      // Row count factor
+  NETWORK: 10.0, // Network is expensive (latency, bandwidth)
+  IO: 5.0, // Disk I/O is moderately expensive
+  ROWS: 0.001, // Row count factor
 } as const;
 
 /**

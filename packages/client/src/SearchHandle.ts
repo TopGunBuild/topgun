@@ -74,12 +74,7 @@ export class SearchHandle<T = unknown> {
   /** Handler for all messages (SEARCH_RESP and SEARCH_UPDATE) */
   private messageHandler: (message: any) => void;
 
-  constructor(
-    syncEngine: SyncEngine,
-    mapName: string,
-    query: string,
-    options?: SearchOptions
-  ) {
+  constructor(syncEngine: SyncEngine, mapName: string, query: string, options?: SearchOptions) {
     this.syncEngine = syncEngine;
     this.mapName = mapName;
     this._query = query;
@@ -142,8 +137,7 @@ export class SearchHandle<T = unknown> {
    * @returns Array of search results
    */
   getResults(): SearchResult<T>[] {
-    return Array.from(this.results.values())
-      .sort((a, b) => b.score - a.score);
+    return Array.from(this.results.values()).sort((a, b) => b.score - a.score);
   }
 
   /**
@@ -341,7 +335,10 @@ export class SearchHandle<T = unknown> {
       try {
         listener(results);
       } catch (err) {
-        logger.error({ err, mapName: this.mapName, context: 'listener' }, 'SearchHandle listener error');
+        logger.error(
+          { err, mapName: this.mapName, context: 'listener' },
+          'SearchHandle listener error',
+        );
       }
     }
   }

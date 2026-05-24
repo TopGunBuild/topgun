@@ -65,7 +65,9 @@ describe('QueryManager', () => {
 
     it('should send subscription message when authenticated', () => {
       mockIsAuthenticated.mockReturnValue(true);
-      const query = new QueryHandle<any>(mockSyncEngine, 'test-map', { where: { status: 'active' } });
+      const query = new QueryHandle<any>(mockSyncEngine, 'test-map', {
+        where: { status: 'active' },
+      });
 
       queryManager.subscribeToQuery(query);
 

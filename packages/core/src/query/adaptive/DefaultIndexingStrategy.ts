@@ -117,7 +117,10 @@ export class DefaultIndexingStrategy<V> {
         }
       } catch (error) {
         // Log but don't fail if index creation fails
-        console.warn(`DefaultIndexing: Failed to create ${rec.indexType} index on '${rec.field}':`, error);
+        console.warn(
+          `DefaultIndexing: Failed to create ${rec.indexType} index on '${rec.field}':`,
+          error,
+        );
       }
     }
 

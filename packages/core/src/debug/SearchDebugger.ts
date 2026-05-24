@@ -188,9 +188,7 @@ export class SearchDebugger {
       const bm25 = result.scoreBreakdown.bm25;
       lines.push('BM25 Full-Text Search:');
       lines.push(`  Score: ${bm25.score.toFixed(4)}`);
-      lines.push(
-        `  Document length: ${bm25.docLength} (avg: ${bm25.avgDocLength.toFixed(1)})`
-      );
+      lines.push(`  Document length: ${bm25.docLength} (avg: ${bm25.avgDocLength.toFixed(1)})`);
       lines.push(`  Parameters: k1=${bm25.k1}, b=${bm25.b}`);
       lines.push('  Term contributions:');
 
@@ -199,7 +197,7 @@ export class SearchDebugger {
         const idf = bm25.idf[term] || 0;
         const contribution = tf * idf;
         lines.push(
-          `    "${term}": TF=${tf.toFixed(3)}, IDF=${idf.toFixed(3)}, contribution=${contribution.toFixed(4)}`
+          `    "${term}": TF=${tf.toFixed(3)}, IDF=${idf.toFixed(3)}, contribution=${contribution.toFixed(4)}`,
         );
       }
       lines.push('');
@@ -292,14 +290,14 @@ export class SearchDebugger {
         const topTerms = bm25.matchedTerms.slice(0, 3);
         for (const term of topTerms) {
           lines.push(
-            `     - "${term}": TF=${bm25.tf[term]?.toFixed(3)}, IDF=${bm25.idf[term]?.toFixed(3)}`
+            `     - "${term}": TF=${bm25.tf[term]?.toFixed(3)}, IDF=${bm25.idf[term]?.toFixed(3)}`,
           );
         }
       }
 
       if (result.scoreBreakdown.exact) {
         lines.push(
-          `   Exact: ${result.scoreBreakdown.exact.score.toFixed(4)} (${result.scoreBreakdown.exact.matchedFields.join(', ')})`
+          `   Exact: ${result.scoreBreakdown.exact.score.toFixed(4)} (${result.scoreBreakdown.exact.matchedFields.join(', ')})`,
         );
       }
 
@@ -330,7 +328,7 @@ export class SearchDebugger {
         queries: this.history,
       },
       null,
-      2
+      2,
     );
   }
 
@@ -358,8 +356,7 @@ export class SearchDebugger {
     let totalLatency = 0;
 
     for (const q of this.history) {
-      queryTypeBreakdown[q.searchType] =
-        (queryTypeBreakdown[q.searchType] || 0) + 1;
+      queryTypeBreakdown[q.searchType] = (queryTypeBreakdown[q.searchType] || 0) + 1;
       totalResults += q.matchingDocuments;
       totalLatency += q.timing.total;
     }

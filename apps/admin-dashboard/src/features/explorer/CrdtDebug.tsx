@@ -49,9 +49,7 @@ export function CrdtDebug() {
                   <Icon className="h-4 w-4" />
                   {section.title}
                 </CardTitle>
-                <CardDescription className="text-xs">
-                  {section.description}
-                </CardDescription>
+                <CardDescription className="text-xs">{section.description}</CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="h-24 flex items-center justify-center text-xs text-muted-foreground border border-dashed rounded-md">

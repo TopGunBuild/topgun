@@ -39,7 +39,7 @@ export class SimpleAttribute<V, A> implements Attribute<V, A> {
 
   constructor(
     readonly name: string,
-    private readonly extractor: (record: V) => A | undefined
+    private readonly extractor: (record: V) => A | undefined,
   ) {}
 
   getValue(record: V): A | undefined {
@@ -57,7 +57,7 @@ export class SimpleAttribute<V, A> implements Attribute<V, A> {
  */
 export function simpleAttribute<V, A>(
   name: string,
-  extractor: (record: V) => A | undefined
+  extractor: (record: V) => A | undefined,
 ): SimpleAttribute<V, A> {
   return new SimpleAttribute(name, extractor);
 }
@@ -71,7 +71,7 @@ export class MultiValueAttribute<V, A> implements Attribute<V, A> {
 
   constructor(
     readonly name: string,
-    private readonly extractor: (record: V) => A[]
+    private readonly extractor: (record: V) => A[],
   ) {}
 
   getValue(record: V): A | undefined {
@@ -89,7 +89,7 @@ export class MultiValueAttribute<V, A> implements Attribute<V, A> {
  */
 export function multiAttribute<V, A>(
   name: string,
-  extractor: (record: V) => A[]
+  extractor: (record: V) => A[],
 ): MultiValueAttribute<V, A> {
   return new MultiValueAttribute(name, extractor);
 }

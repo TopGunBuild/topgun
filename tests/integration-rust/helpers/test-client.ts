@@ -30,11 +30,7 @@ export interface TestClient {
  * The Rust test server uses "test-e2e-secret" as the JWT secret.
  */
 export function createTestToken(userId: string, roles: string[] = ['USER']): string {
-  return jwt.sign(
-    { sub: userId, roles },
-    JWT_SECRET,
-    { expiresIn: '1h' }
-  );
+  return jwt.sign({ sub: userId, roles }, JWT_SECRET, { expiresIn: '1h' });
 }
 
 /**
@@ -54,11 +50,10 @@ export async function createTestClient(
     autoAuth?: boolean;
     userId?: string;
     roles?: string[];
-  } = {}
+  } = {},
 ): Promise<TestClient> {
   const nodeId =
-    options.nodeId ||
-    `test-client-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    options.nodeId || `test-client-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
   const messages: any[] = [];
   const isAuthenticated = false;
@@ -154,10 +149,7 @@ export async function createTestClient(
 
         // Auto-authenticate when the server challenges the connection
         if (message.type === 'AUTH_REQUIRED' && options.autoAuth !== false) {
-          const token = createTestToken(
-            options.userId || nodeId,
-            options.roles || ['USER']
-          );
+          const token = createTestToken(options.userId || nodeId, options.roles || ['USER']);
           client.send({ type: 'AUTH', token });
         }
 
@@ -200,7 +192,7 @@ export function waitForSync(ms = 100): Promise<void> {
 export async function waitUntil(
   condition: () => boolean | Promise<boolean>,
   timeout = 5000,
-  interval = 50
+  interval = 50,
 ): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeout) {
@@ -255,7 +247,7 @@ export function createORRecord<T>(value: T, nodeId = 'test-node'): any {
 export async function completeMerkleSync(
   client: TestClient,
   mapName: string,
-  timeout = 15000
+  timeout = 15000,
 ): Promise<Map<string, { value: any; timestamp: any }>> {
   const records = new Map<string, { value: any; timestamp: any }>();
   const deadline = Date.now() + timeout;
@@ -301,7 +293,11 @@ export async function completeMerkleSync(
       for (let i = consumedIndex; i < client.messages.length; i++) {
         const msg = client.messages[i];
 
-        if (msg.type === 'SYNC_RESP_BUCKETS' && msg.payload?.path === path && msg.payload?.mapName === mapName) {
+        if (
+          msg.type === 'SYNC_RESP_BUCKETS' &&
+          msg.payload?.path === path &&
+          msg.payload?.mapName === mapName
+        ) {
           consumedIndex = i + 1;
           // Internal node: queue non-zero child buckets for traversal
           const buckets: Record<string, number> = msg.payload.buckets;
@@ -314,7 +310,11 @@ export async function completeMerkleSync(
           break;
         }
 
-        if (msg.type === 'SYNC_RESP_LEAF' && msg.payload?.path === path && msg.payload?.mapName === mapName) {
+        if (
+          msg.type === 'SYNC_RESP_LEAF' &&
+          msg.payload?.path === path &&
+          msg.payload?.mapName === mapName
+        ) {
           consumedIndex = i + 1;
           // Leaf node: collect records
           for (const entry of msg.payload.records) {

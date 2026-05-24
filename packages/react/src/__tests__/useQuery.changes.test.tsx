@@ -221,14 +221,17 @@ describe('useQuery with change tracking', () => {
     it('should call onChange callback for all changes', async () => {
       const onChange = jest.fn();
 
-      const { result } = renderHook(
-        () => useQuery('testMap', {}, { onChange }),
-        { wrapper }
-      );
+      const { result } = renderHook(() => useQuery('testMap', {}, { onChange }), { wrapper });
 
       const changes: ChangeEvent<any>[] = [
         { type: 'add', key: 'item-1', value: { title: 'Added' }, timestamp: 1 },
-        { type: 'update', key: 'item-2', value: { title: 'Updated' }, previousValue: { title: 'Old' }, timestamp: 2 },
+        {
+          type: 'update',
+          key: 'item-2',
+          value: { title: 'Updated' },
+          previousValue: { title: 'Old' },
+          timestamp: 2,
+        },
       ];
 
       act(() => {
@@ -236,17 +239,18 @@ describe('useQuery with change tracking', () => {
       });
 
       expect(onChange).toHaveBeenCalledTimes(2);
-      expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ type: 'add', key: 'item-1' }));
-      expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ type: 'update', key: 'item-2' }));
+      expect(onChange).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'add', key: 'item-1' }),
+      );
+      expect(onChange).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'update', key: 'item-2' }),
+      );
     });
 
     it('should call onAdd callback for add events', async () => {
       const onAdd = jest.fn();
 
-      renderHook(
-        () => useQuery('testMap', {}, { onAdd }),
-        { wrapper }
-      );
+      renderHook(() => useQuery('testMap', {}, { onAdd }), { wrapper });
 
       const addChange: ChangeEvent<any> = {
         type: 'add',
@@ -266,10 +270,7 @@ describe('useQuery with change tracking', () => {
     it('should call onUpdate callback for update events', async () => {
       const onUpdate = jest.fn();
 
-      renderHook(
-        () => useQuery('testMap', {}, { onUpdate }),
-        { wrapper }
-      );
+      renderHook(() => useQuery('testMap', {}, { onUpdate }), { wrapper });
 
       const updateChange: ChangeEvent<any> = {
         type: 'update',
@@ -290,10 +291,7 @@ describe('useQuery with change tracking', () => {
     it('should call onRemove callback for remove events', async () => {
       const onRemove = jest.fn();
 
-      renderHook(
-        () => useQuery('testMap', {}, { onRemove }),
-        { wrapper }
-      );
+      renderHook(() => useQuery('testMap', {}, { onRemove }), { wrapper });
 
       const removeChange: ChangeEvent<any> = {
         type: 'remove',
@@ -315,10 +313,7 @@ describe('useQuery with change tracking', () => {
       const onUpdate = jest.fn();
       const onRemove = jest.fn();
 
-      renderHook(
-        () => useQuery('testMap', {}, { onAdd, onUpdate, onRemove }),
-        { wrapper }
-      );
+      renderHook(() => useQuery('testMap', {}, { onAdd, onUpdate, onRemove }), { wrapper });
 
       const addChange: ChangeEvent<any> = {
         type: 'add',
@@ -339,10 +334,10 @@ describe('useQuery with change tracking', () => {
 
   describe('query changes reset', () => {
     it('should reset changes when query changes', async () => {
-      const { result, rerender } = renderHook(
-        ({ mapName }) => useQuery(mapName),
-        { wrapper, initialProps: { mapName: 'todos' } }
-      );
+      const { result, rerender } = renderHook(({ mapName }) => useQuery(mapName), {
+        wrapper,
+        initialProps: { mapName: 'todos' },
+      });
 
       const addChange: ChangeEvent<any> = {
         type: 'add',
@@ -387,10 +382,7 @@ describe('useQuery with change tracking', () => {
 
   describe('maxChanges option', () => {
     it('should rotate oldest changes when exceeding maxChanges limit', async () => {
-      const { result } = renderHook(
-        () => useQuery('testMap', {}, { maxChanges: 3 }),
-        { wrapper }
-      );
+      const { result } = renderHook(() => useQuery('testMap', {}, { maxChanges: 3 }), { wrapper });
 
       // Emit 5 changes, exceeding the limit of 3
       for (let i = 1; i <= 5; i++) {
@@ -414,7 +406,12 @@ describe('useQuery with change tracking', () => {
       // Emit a batch that doesn't exceed default limit
       const changes: ChangeEvent<any>[] = [];
       for (let i = 0; i < 100; i++) {
-        changes.push({ type: 'add', key: `item-${i}`, value: { title: `Item ${i}` }, timestamp: i });
+        changes.push({
+          type: 'add',
+          key: `item-${i}`,
+          value: { title: `Item ${i}` },
+          timestamp: i,
+        });
       }
 
       act(() => {
@@ -426,15 +423,17 @@ describe('useQuery with change tracking', () => {
     });
 
     it('should handle batch emission exceeding maxChanges', async () => {
-      const { result } = renderHook(
-        () => useQuery('testMap', {}, { maxChanges: 5 }),
-        { wrapper }
-      );
+      const { result } = renderHook(() => useQuery('testMap', {}, { maxChanges: 5 }), { wrapper });
 
       // Emit 10 changes at once
       const batchChanges: ChangeEvent<any>[] = [];
       for (let i = 1; i <= 10; i++) {
-        batchChanges.push({ type: 'add', key: `item-${i}`, value: { title: `Item ${i}` }, timestamp: i });
+        batchChanges.push({
+          type: 'add',
+          key: `item-${i}`,
+          value: { title: `Item ${i}` },
+          timestamp: i,
+        });
       }
 
       act(() => {

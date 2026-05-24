@@ -10,8 +10,7 @@ export function SyncLabDemo() {
 
   // Sync theme from host page (initial read + watch for changes)
   useEffect(() => {
-    const read = () =>
-      document.documentElement.classList.contains('dark') ? 'dark' : 'light';
+    const read = () => (document.documentElement.classList.contains('dark') ? 'dark' : 'light');
     setTheme(read());
 
     const observer = new MutationObserver(() => setTheme(read()));
@@ -24,10 +23,7 @@ export function SyncLabDemo() {
 
   // Send theme changes to iframe via postMessage (avoids iframe reload)
   useEffect(() => {
-    iframeRef.current?.contentWindow?.postMessage(
-      { type: 'theme-change', theme },
-      DEMO_URL,
-    );
+    iframeRef.current?.contentWindow?.postMessage({ type: 'theme-change', theme }, DEMO_URL);
   }, [theme]);
 
   // Listen for session ID from embedded sync-lab
@@ -55,12 +51,9 @@ export function SyncLabDemo() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         {/* Section Header */}
         <div className="text-center mb-10">
-          <h2 className="text-3xl font-bold text-foreground mb-4">
-            Live Sync Demo
-          </h2>
+          <h2 className="text-3xl font-bold text-foreground mb-4">Live Sync Demo</h2>
           <p className="text-neutral-600 dark:text-neutral-300 max-w-2xl mx-auto">
-            Two devices, one session — watch CRDT conflict resolution happen in
-            real time. Open in a{' '}
+            Two devices, one session — watch CRDT conflict resolution happen in real time. Open in a{' '}
             <a
               href={tabUrl}
               target="_blank"

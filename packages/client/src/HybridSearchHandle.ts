@@ -26,9 +26,7 @@ export interface HybridSearchHandleResult<T = unknown> {
 /**
  * Callback type for result change notifications.
  */
-export type HybridSearchResultsCallback<T> = (
-  results: HybridSearchHandleResult<T>[]
-) => void;
+export type HybridSearchResultsCallback<T> = (results: HybridSearchHandleResult<T>[]) => void;
 
 /**
  * Options for a live hybrid search subscription.
@@ -111,7 +109,7 @@ export class HybridSearchHandle<T = unknown> {
     syncEngine: SyncEngine,
     mapName: string,
     queryText: string,
-    options?: HybridSearchSubscribeOptions
+    options?: HybridSearchSubscribeOptions,
   ) {
     this.syncEngine = syncEngine;
     this.mapName = mapName;
@@ -361,7 +359,9 @@ export class HybridSearchHandle<T = unknown> {
         k: this._options?.k ?? 10,
         ...(queryVector !== undefined ? { queryVector } : {}),
         ...(this._options?.predicate !== undefined ? { predicate: this._options.predicate } : {}),
-        ...(this._options?.includeValue !== undefined ? { includeValue: this._options.includeValue } : {}),
+        ...(this._options?.includeValue !== undefined
+          ? { includeValue: this._options.includeValue }
+          : {}),
         ...(this._options?.minScore !== undefined ? { minScore: this._options.minScore } : {}),
       },
     });
@@ -396,7 +396,7 @@ export class HybridSearchHandle<T = unknown> {
       } catch (err) {
         logger.error(
           { err, mapName: this.mapName, context: 'listener' },
-          'HybridSearchHandle listener error'
+          'HybridSearchHandle listener error',
         );
       }
     }

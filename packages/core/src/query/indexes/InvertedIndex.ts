@@ -60,7 +60,7 @@ export class InvertedIndex<K, V, A extends string = string> implements Index<K, 
    */
   constructor(
     readonly attribute: Attribute<V, A>,
-    private readonly pipeline: TokenizationPipeline = TokenizationPipeline.simple()
+    private readonly pipeline: TokenizationPipeline = TokenizationPipeline.simple(),
   ) {}
 
   getRetrievalCost(): number {
@@ -304,8 +304,7 @@ export class InvertedIndex<K, V, A extends string = string> implements Index<K, 
     return {
       distinctValues: this.tokenIndex.size,
       totalEntries: this.allKeys.size,
-      avgEntriesPerValue:
-        this.tokenIndex.size > 0 ? this.allKeys.size / this.tokenIndex.size : 0,
+      avgEntriesPerValue: this.tokenIndex.size > 0 ? this.allKeys.size / this.tokenIndex.size : 0,
     };
   }
 

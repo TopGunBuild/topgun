@@ -52,7 +52,14 @@ describe('StandingQueryIndex', () => {
       const query: SimpleQueryNode = { type: 'eq', attribute: 'status', value: 'active' };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const user: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
+      const user: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
       index.add('1', user);
 
       expect(index.contains('1')).toBe(true);
@@ -63,7 +70,14 @@ describe('StandingQueryIndex', () => {
       const query: SimpleQueryNode = { type: 'eq', attribute: 'status', value: 'active' };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const user: User = { id: '1', name: 'Bob', age: 25, status: 'inactive', role: 'user', tags: [] };
+      const user: User = {
+        id: '1',
+        name: 'Bob',
+        age: 25,
+        status: 'inactive',
+        role: 'user',
+        tags: [],
+      };
       index.add('1', user);
 
       expect(index.contains('1')).toBe(false);
@@ -74,7 +88,14 @@ describe('StandingQueryIndex', () => {
       const query: SimpleQueryNode = { type: 'eq', attribute: 'status', value: 'active' };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const user: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
+      const user: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
       index.add('1', user);
       expect(index.contains('1')).toBe(true);
 
@@ -87,7 +108,14 @@ describe('StandingQueryIndex', () => {
       const query: SimpleQueryNode = { type: 'eq', attribute: 'status', value: 'active' };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const user: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
+      const user: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
 
       // Should not throw
       expect(() => index.remove('nonexistent', user)).not.toThrow();
@@ -99,8 +127,22 @@ describe('StandingQueryIndex', () => {
       const query: SimpleQueryNode = { type: 'eq', attribute: 'status', value: 'active' };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const oldUser: User = { id: '1', name: 'Alice', age: 30, status: 'inactive', role: 'admin', tags: [] };
-      const newUser: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
+      const oldUser: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'inactive',
+        role: 'admin',
+        tags: [],
+      };
+      const newUser: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
 
       index.add('1', oldUser);
       expect(index.contains('1')).toBe(false);
@@ -113,8 +155,22 @@ describe('StandingQueryIndex', () => {
       const query: SimpleQueryNode = { type: 'eq', attribute: 'status', value: 'active' };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const oldUser: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
-      const newUser: User = { id: '1', name: 'Alice', age: 30, status: 'inactive', role: 'admin', tags: [] };
+      const oldUser: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
+      const newUser: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'inactive',
+        role: 'admin',
+        tags: [],
+      };
 
       index.add('1', oldUser);
       expect(index.contains('1')).toBe(true);
@@ -127,8 +183,22 @@ describe('StandingQueryIndex', () => {
       const query: SimpleQueryNode = { type: 'eq', attribute: 'status', value: 'active' };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const oldUser: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
-      const newUser: User = { id: '1', name: 'Alice Updated', age: 31, status: 'active', role: 'admin', tags: [] };
+      const oldUser: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
+      const newUser: User = {
+        id: '1',
+        name: 'Alice Updated',
+        age: 31,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
 
       index.add('1', oldUser);
       expect(index.contains('1')).toBe(true);
@@ -141,8 +211,22 @@ describe('StandingQueryIndex', () => {
       const query: SimpleQueryNode = { type: 'eq', attribute: 'status', value: 'active' };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const oldUser: User = { id: '1', name: 'Alice', age: 30, status: 'inactive', role: 'admin', tags: [] };
-      const newUser: User = { id: '1', name: 'Alice Updated', age: 31, status: 'pending', role: 'admin', tags: [] };
+      const oldUser: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'inactive',
+        role: 'admin',
+        tags: [],
+      };
+      const newUser: User = {
+        id: '1',
+        name: 'Alice Updated',
+        age: 31,
+        status: 'pending',
+        role: 'admin',
+        tags: [],
+      };
 
       index.add('1', oldUser);
       expect(index.contains('1')).toBe(false);
@@ -161,41 +245,111 @@ describe('StandingQueryIndex', () => {
     });
 
     it('should return "added" for new match', () => {
-      const user: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
+      const user: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
       const change = index.determineChange('1', undefined, user);
       expect(change).toBe('added');
     });
 
     it('should return "removed" for lost match', () => {
-      const user: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
+      const user: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
       const change = index.determineChange('1', user, undefined);
       expect(change).toBe('removed');
     });
 
     it('should return "updated" for continued match', () => {
-      const oldUser: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
-      const newUser: User = { id: '1', name: 'Alice Updated', age: 31, status: 'active', role: 'admin', tags: [] };
+      const oldUser: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
+      const newUser: User = {
+        id: '1',
+        name: 'Alice Updated',
+        age: 31,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
       const change = index.determineChange('1', oldUser, newUser);
       expect(change).toBe('updated');
     });
 
     it('should return "unchanged" for continued non-match', () => {
-      const oldUser: User = { id: '1', name: 'Alice', age: 30, status: 'inactive', role: 'admin', tags: [] };
-      const newUser: User = { id: '1', name: 'Alice Updated', age: 31, status: 'pending', role: 'admin', tags: [] };
+      const oldUser: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'inactive',
+        role: 'admin',
+        tags: [],
+      };
+      const newUser: User = {
+        id: '1',
+        name: 'Alice Updated',
+        age: 31,
+        status: 'pending',
+        role: 'admin',
+        tags: [],
+      };
       const change = index.determineChange('1', oldUser, newUser);
       expect(change).toBe('unchanged');
     });
 
     it('should return "added" when transitioning from non-match to match', () => {
-      const oldUser: User = { id: '1', name: 'Alice', age: 30, status: 'inactive', role: 'admin', tags: [] };
-      const newUser: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
+      const oldUser: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'inactive',
+        role: 'admin',
+        tags: [],
+      };
+      const newUser: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
       const change = index.determineChange('1', oldUser, newUser);
       expect(change).toBe('added');
     });
 
     it('should return "removed" when transitioning from match to non-match', () => {
-      const oldUser: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
-      const newUser: User = { id: '1', name: 'Alice', age: 30, status: 'inactive', role: 'admin', tags: [] };
+      const oldUser: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
+      const newUser: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'inactive',
+        role: 'admin',
+        tags: [],
+      };
       const change = index.determineChange('1', oldUser, newUser);
       expect(change).toBe('removed');
     });
@@ -247,7 +401,14 @@ describe('StandingQueryIndex', () => {
       const query: SimpleQueryNode = { type: 'eq', attribute: 'status', value: 'active' };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const user: User = { id: 'pre', name: 'Pre', age: 20, status: 'active', role: 'admin', tags: [] };
+      const user: User = {
+        id: 'pre',
+        name: 'Pre',
+        age: 20,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
       index.add('pre', user);
       expect(index.contains('pre')).toBe(true);
 
@@ -268,8 +429,22 @@ describe('StandingQueryIndex', () => {
       const query: SimpleQueryNode = { type: 'eq', attribute: 'role', value: 'admin' };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const admin: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
-      const user: User = { id: '2', name: 'Bob', age: 25, status: 'active', role: 'user', tags: [] };
+      const admin: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
+      const user: User = {
+        id: '2',
+        name: 'Bob',
+        age: 25,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
 
       index.add('1', admin);
       index.add('2', user);
@@ -282,8 +457,22 @@ describe('StandingQueryIndex', () => {
       const query: SimpleQueryNode = { type: 'neq', attribute: 'role', value: 'admin' };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const admin: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
-      const user: User = { id: '2', name: 'Bob', age: 25, status: 'active', role: 'user', tags: [] };
+      const admin: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
+      const user: User = {
+        id: '2',
+        name: 'Bob',
+        age: 25,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
 
       index.add('1', admin);
       index.add('2', user);
@@ -296,8 +485,22 @@ describe('StandingQueryIndex', () => {
       const query: SimpleQueryNode = { type: 'gt', attribute: 'age', value: 28 };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const older: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
-      const younger: User = { id: '2', name: 'Bob', age: 25, status: 'active', role: 'user', tags: [] };
+      const older: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
+      const younger: User = {
+        id: '2',
+        name: 'Bob',
+        age: 25,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
 
       index.add('1', older);
       index.add('2', younger);
@@ -310,8 +513,22 @@ describe('StandingQueryIndex', () => {
       const query: SimpleQueryNode = { type: 'gte', attribute: 'age', value: 30 };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const exact: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
-      const younger: User = { id: '2', name: 'Bob', age: 25, status: 'active', role: 'user', tags: [] };
+      const exact: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
+      const younger: User = {
+        id: '2',
+        name: 'Bob',
+        age: 25,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
 
       index.add('1', exact);
       index.add('2', younger);
@@ -324,8 +541,22 @@ describe('StandingQueryIndex', () => {
       const query: SimpleQueryNode = { type: 'lt', attribute: 'age', value: 28 };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const older: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
-      const younger: User = { id: '2', name: 'Bob', age: 25, status: 'active', role: 'user', tags: [] };
+      const older: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
+      const younger: User = {
+        id: '2',
+        name: 'Bob',
+        age: 25,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
 
       index.add('1', older);
       index.add('2', younger);
@@ -338,8 +569,22 @@ describe('StandingQueryIndex', () => {
       const query: SimpleQueryNode = { type: 'lte', attribute: 'age', value: 25 };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const older: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
-      const exact: User = { id: '2', name: 'Bob', age: 25, status: 'active', role: 'user', tags: [] };
+      const older: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
+      const exact: User = {
+        id: '2',
+        name: 'Bob',
+        age: 25,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
 
       index.add('1', older);
       index.add('2', exact);
@@ -349,12 +594,37 @@ describe('StandingQueryIndex', () => {
     });
 
     it('should evaluate in query', () => {
-      const query: SimpleQueryNode = { type: 'in', attribute: 'status', values: ['active', 'pending'] };
+      const query: SimpleQueryNode = {
+        type: 'in',
+        attribute: 'status',
+        values: ['active', 'pending'],
+      };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const active: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
-      const inactive: User = { id: '2', name: 'Bob', age: 25, status: 'inactive', role: 'user', tags: [] };
-      const pending: User = { id: '3', name: 'Charlie', age: 35, status: 'pending', role: 'user', tags: [] };
+      const active: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
+      const inactive: User = {
+        id: '2',
+        name: 'Bob',
+        age: 25,
+        status: 'inactive',
+        role: 'user',
+        tags: [],
+      };
+      const pending: User = {
+        id: '3',
+        name: 'Charlie',
+        age: 35,
+        status: 'pending',
+        role: 'user',
+        tags: [],
+      };
 
       index.add('1', active);
       index.add('2', inactive);
@@ -369,8 +639,23 @@ describe('StandingQueryIndex', () => {
       const query: SimpleQueryNode = { type: 'has', attribute: 'metadata' };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const withMeta: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [], metadata: { level: 5, verified: true } };
-      const withoutMeta: User = { id: '2', name: 'Bob', age: 25, status: 'active', role: 'user', tags: [] };
+      const withMeta: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+        metadata: { level: 5, verified: true },
+      };
+      const withoutMeta: User = {
+        id: '2',
+        name: 'Bob',
+        age: 25,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
 
       index.add('1', withMeta);
       index.add('2', withoutMeta);
@@ -383,8 +668,22 @@ describe('StandingQueryIndex', () => {
       const query: SimpleQueryNode = { type: 'like', attribute: 'name', value: 'Al%' };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const alice: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
-      const alex: User = { id: '2', name: 'Alex', age: 25, status: 'active', role: 'user', tags: [] };
+      const alice: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
+      const alex: User = {
+        id: '2',
+        name: 'Alex',
+        age: 25,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
       const bob: User = { id: '3', name: 'Bob', age: 35, status: 'active', role: 'user', tags: [] };
 
       index.add('1', alice);
@@ -400,9 +699,30 @@ describe('StandingQueryIndex', () => {
       const query: SimpleQueryNode = { type: 'like', attribute: 'name', value: 'Al_ce' };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const alice: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
-      const alyce: User = { id: '2', name: 'Alyce', age: 25, status: 'active', role: 'user', tags: [] };
-      const alccccce: User = { id: '3', name: 'Alccccce', age: 35, status: 'active', role: 'user', tags: [] };
+      const alice: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
+      const alyce: User = {
+        id: '2',
+        name: 'Alyce',
+        age: 25,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
+      const alccccce: User = {
+        id: '3',
+        name: 'Alccccce',
+        age: 35,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
 
       index.add('1', alice);
       index.add('2', alyce);
@@ -417,10 +737,31 @@ describe('StandingQueryIndex', () => {
       const query: SimpleQueryNode = { type: 'regex', attribute: 'name', value: '^[A-C].*' };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const alice: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
+      const alice: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
       const bob: User = { id: '2', name: 'Bob', age: 25, status: 'active', role: 'user', tags: [] };
-      const charlie: User = { id: '3', name: 'Charlie', age: 35, status: 'active', role: 'user', tags: [] };
-      const david: User = { id: '4', name: 'David', age: 40, status: 'active', role: 'user', tags: [] };
+      const charlie: User = {
+        id: '3',
+        name: 'Charlie',
+        age: 35,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
+      const david: User = {
+        id: '4',
+        name: 'David',
+        age: 40,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
 
       index.add('1', alice);
       index.add('2', bob);
@@ -434,21 +775,56 @@ describe('StandingQueryIndex', () => {
     });
 
     it('should evaluate between query', () => {
-      const query: SimpleQueryNode = { 
-        type: 'between', 
-        attribute: 'age', 
-        from: 25, 
+      const query: SimpleQueryNode = {
+        type: 'between',
+        attribute: 'age',
+        from: 25,
         to: 35,
         fromInclusive: true,
-        toInclusive: false 
+        toInclusive: false,
       };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const tooYoung: User = { id: '1', name: 'Alice', age: 20, status: 'active', role: 'user', tags: [] };
-      const lowerBound: User = { id: '2', name: 'Bob', age: 25, status: 'active', role: 'user', tags: [] };
-      const middle: User = { id: '3', name: 'Charlie', age: 30, status: 'active', role: 'user', tags: [] };
-      const upperBound: User = { id: '4', name: 'David', age: 35, status: 'active', role: 'user', tags: [] };
-      const tooOld: User = { id: '5', name: 'Eve', age: 40, status: 'active', role: 'user', tags: [] };
+      const tooYoung: User = {
+        id: '1',
+        name: 'Alice',
+        age: 20,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
+      const lowerBound: User = {
+        id: '2',
+        name: 'Bob',
+        age: 25,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
+      const middle: User = {
+        id: '3',
+        name: 'Charlie',
+        age: 30,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
+      const upperBound: User = {
+        id: '4',
+        name: 'David',
+        age: 35,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
+      const tooOld: User = {
+        id: '5',
+        name: 'Eve',
+        age: 40,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
 
       index.add('1', tooYoung);
       index.add('2', lowerBound);
@@ -457,7 +833,7 @@ describe('StandingQueryIndex', () => {
       index.add('5', tooOld);
 
       expect(index.contains('1')).toBe(false);
-      expect(index.contains('2')).toBe(true);  // inclusive start
+      expect(index.contains('2')).toBe(true); // inclusive start
       expect(index.contains('3')).toBe(true);
       expect(index.contains('4')).toBe(false); // exclusive end
       expect(index.contains('5')).toBe(false);
@@ -475,9 +851,30 @@ describe('StandingQueryIndex', () => {
       };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const activeAdmin: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
-      const activeUser: User = { id: '2', name: 'Bob', age: 25, status: 'active', role: 'user', tags: [] };
-      const inactiveAdmin: User = { id: '3', name: 'Charlie', age: 35, status: 'inactive', role: 'admin', tags: [] };
+      const activeAdmin: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
+      const activeUser: User = {
+        id: '2',
+        name: 'Bob',
+        age: 25,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
+      const inactiveAdmin: User = {
+        id: '3',
+        name: 'Charlie',
+        age: 35,
+        status: 'inactive',
+        role: 'admin',
+        tags: [],
+      };
 
       index.add('1', activeAdmin);
       index.add('2', activeUser);
@@ -498,9 +895,30 @@ describe('StandingQueryIndex', () => {
       };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const admin: User = { id: '1', name: 'Alice', age: 25, status: 'active', role: 'admin', tags: [] };
-      const older: User = { id: '2', name: 'Bob', age: 35, status: 'active', role: 'user', tags: [] };
-      const neither: User = { id: '3', name: 'Charlie', age: 25, status: 'active', role: 'user', tags: [] };
+      const admin: User = {
+        id: '1',
+        name: 'Alice',
+        age: 25,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
+      const older: User = {
+        id: '2',
+        name: 'Bob',
+        age: 35,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
+      const neither: User = {
+        id: '3',
+        name: 'Charlie',
+        age: 25,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
 
       index.add('1', admin);
       index.add('2', older);
@@ -518,9 +936,30 @@ describe('StandingQueryIndex', () => {
       };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const active: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
-      const inactive: User = { id: '2', name: 'Bob', age: 25, status: 'inactive', role: 'user', tags: [] };
-      const pending: User = { id: '3', name: 'Charlie', age: 35, status: 'pending', role: 'user', tags: [] };
+      const active: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
+      const inactive: User = {
+        id: '2',
+        name: 'Bob',
+        age: 25,
+        status: 'inactive',
+        role: 'user',
+        tags: [],
+      };
+      const pending: User = {
+        id: '3',
+        name: 'Charlie',
+        age: 35,
+        status: 'pending',
+        role: 'user',
+        tags: [],
+      };
 
       index.add('1', active);
       index.add('2', inactive);
@@ -547,18 +986,46 @@ describe('StandingQueryIndex', () => {
       };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const activeAdmin: User = { id: '1', name: 'Alice', age: 25, status: 'active', role: 'admin', tags: [] };
-      const activeOlder: User = { id: '2', name: 'Bob', age: 35, status: 'active', role: 'user', tags: [] };
-      const inactiveAdmin: User = { id: '3', name: 'Charlie', age: 25, status: 'inactive', role: 'admin', tags: [] };
-      const activeYoung: User = { id: '4', name: 'David', age: 25, status: 'active', role: 'user', tags: [] };
+      const activeAdmin: User = {
+        id: '1',
+        name: 'Alice',
+        age: 25,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
+      const activeOlder: User = {
+        id: '2',
+        name: 'Bob',
+        age: 35,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
+      const inactiveAdmin: User = {
+        id: '3',
+        name: 'Charlie',
+        age: 25,
+        status: 'inactive',
+        role: 'admin',
+        tags: [],
+      };
+      const activeYoung: User = {
+        id: '4',
+        name: 'David',
+        age: 25,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
 
       index.add('1', activeAdmin);
       index.add('2', activeOlder);
       index.add('3', inactiveAdmin);
       index.add('4', activeYoung);
 
-      expect(index.contains('1')).toBe(true);  // active + admin
-      expect(index.contains('2')).toBe(true);  // active + older than 30
+      expect(index.contains('1')).toBe(true); // active + admin
+      expect(index.contains('2')).toBe(true); // active + older than 30
       expect(index.contains('3')).toBe(false); // inactive
       expect(index.contains('4')).toBe(false); // active but not admin and not older than 30
     });
@@ -569,9 +1036,32 @@ describe('StandingQueryIndex', () => {
       const query: SimpleQueryNode = { type: 'eq', attribute: 'metadata.verified', value: true };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const verified: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [], metadata: { level: 5, verified: true } };
-      const unverified: User = { id: '2', name: 'Bob', age: 25, status: 'active', role: 'user', tags: [], metadata: { level: 1, verified: false } };
-      const noMeta: User = { id: '3', name: 'Charlie', age: 35, status: 'active', role: 'user', tags: [] };
+      const verified: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+        metadata: { level: 5, verified: true },
+      };
+      const unverified: User = {
+        id: '2',
+        name: 'Bob',
+        age: 25,
+        status: 'active',
+        role: 'user',
+        tags: [],
+        metadata: { level: 1, verified: false },
+      };
+      const noMeta: User = {
+        id: '3',
+        name: 'Charlie',
+        age: 35,
+        status: 'active',
+        role: 'user',
+        tags: [],
+      };
 
       index.add('1', verified);
       index.add('2', unverified);
@@ -591,7 +1081,11 @@ describe('StandingQueryIndex', () => {
         };
       }
 
-      const query: SimpleQueryNode = { type: 'eq', attribute: 'profile.settings.theme', value: 'dark' };
+      const query: SimpleQueryNode = {
+        type: 'eq',
+        attribute: 'profile.settings.theme',
+        value: 'dark',
+      };
       const index = new StandingQueryIndex<string, DeepUser>({ query });
 
       const dark: DeepUser = { profile: { settings: { theme: 'dark' } } };
@@ -676,7 +1170,14 @@ describe('StandingQueryIndex', () => {
       const query: SimpleQueryNode = { type: 'eq', attribute: 'status', value: 'active' };
       const index = new StandingQueryIndex<string, User>({ query });
 
-      const user: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
+      const user: User = {
+        id: '1',
+        name: 'Alice',
+        age: 30,
+        status: 'active',
+        role: 'admin',
+        tags: [],
+      };
       index.add('1', user);
       expect(index.getResultCount()).toBe(1);
 

@@ -9,7 +9,7 @@ describe('ScenarioRunner', () => {
       const runner = new ScenarioRunner({
         seed: 12345,
         nodes: ['a', 'b'],
-        duration: 1000
+        duration: 1000,
       });
 
       expect(runner.getSeed()).toBe(12345);
@@ -18,7 +18,7 @@ describe('ScenarioRunner', () => {
     test('generates seed if not provided', () => {
       const runner = new ScenarioRunner({
         nodes: ['a', 'b'],
-        duration: 1000
+        duration: 1000,
       });
 
       expect(typeof runner.getSeed()).toBe('number');
@@ -29,7 +29,7 @@ describe('ScenarioRunner', () => {
       expect(() => {
         new ScenarioRunner({
           nodes: [],
-          duration: 1000
+          duration: 1000,
         });
       }).toThrow('at least one node');
     });
@@ -38,7 +38,7 @@ describe('ScenarioRunner', () => {
       expect(() => {
         new ScenarioRunner({
           nodes: ['a'],
-          duration: 0
+          duration: 0,
         });
       }).toThrow('Duration must be positive');
     });
@@ -46,7 +46,7 @@ describe('ScenarioRunner', () => {
     test('uses default tick interval of 1', () => {
       const runner = new ScenarioRunner({
         nodes: ['a'],
-        duration: 100
+        duration: 100,
       });
 
       let tickCount = 0;
@@ -54,8 +54,10 @@ describe('ScenarioRunner', () => {
 
       runner.run(
         () => {},
-        () => { tickCount++; },
-        checker
+        () => {
+          tickCount++;
+        },
+        checker,
       );
 
       expect(tickCount).toBe(100);
@@ -65,7 +67,7 @@ describe('ScenarioRunner', () => {
       const runner = new ScenarioRunner({
         nodes: ['a'],
         duration: 100,
-        tickInterval: 10
+        tickInterval: 10,
       });
 
       let tickCount = 0;
@@ -73,8 +75,10 @@ describe('ScenarioRunner', () => {
 
       runner.run(
         () => {},
-        () => { tickCount++; },
-        checker
+        () => {
+          tickCount++;
+        },
+        checker,
       );
 
       expect(tickCount).toBe(10);
@@ -85,7 +89,7 @@ describe('ScenarioRunner', () => {
     test('getClock() returns VirtualClock', () => {
       const runner = new ScenarioRunner({
         nodes: ['a'],
-        duration: 1000
+        duration: 1000,
       });
 
       const clock = runner.getClock();
@@ -99,7 +103,7 @@ describe('ScenarioRunner', () => {
       const runner = new ScenarioRunner({
         seed: 42,
         nodes: ['a'],
-        duration: 1000
+        duration: 1000,
       });
 
       const rng = runner.getRNG();
@@ -112,7 +116,7 @@ describe('ScenarioRunner', () => {
     test('getNetwork() returns VirtualNetwork', () => {
       const runner = new ScenarioRunner({
         nodes: ['a', 'b'],
-        duration: 1000
+        duration: 1000,
       });
 
       const network = runner.getNetwork();
@@ -124,7 +128,7 @@ describe('ScenarioRunner', () => {
     test('getNodes() returns node list', () => {
       const runner = new ScenarioRunner({
         nodes: ['a', 'b', 'c'],
-        duration: 1000
+        duration: 1000,
       });
 
       expect(runner.getNodes()).toEqual(['a', 'b', 'c']);
@@ -135,16 +139,18 @@ describe('ScenarioRunner', () => {
     test('executes setup once', () => {
       const runner = new ScenarioRunner({
         nodes: ['a'],
-        duration: 100
+        duration: 100,
       });
 
       let setupCount = 0;
       const checker = new InvariantChecker();
 
       runner.run(
-        () => { setupCount++; },
+        () => {
+          setupCount++;
+        },
         () => {},
-        checker
+        checker,
       );
 
       expect(setupCount).toBe(1);
@@ -154,7 +160,7 @@ describe('ScenarioRunner', () => {
       const runner = new ScenarioRunner({
         nodes: ['a'],
         duration: 100,
-        tickInterval: 10
+        tickInterval: 10,
       });
 
       let stepCount = 0;
@@ -162,8 +168,10 @@ describe('ScenarioRunner', () => {
 
       runner.run(
         () => {},
-        () => { stepCount++; },
-        checker
+        () => {
+          stepCount++;
+        },
+        checker,
       );
 
       expect(stepCount).toBe(10);
@@ -173,7 +181,7 @@ describe('ScenarioRunner', () => {
       const runner = new ScenarioRunner({
         nodes: ['a'],
         duration: 30,
-        tickInterval: 10
+        tickInterval: 10,
       });
 
       const ticks: number[] = [];
@@ -181,8 +189,10 @@ describe('ScenarioRunner', () => {
 
       runner.run(
         () => {},
-        (r, tick) => { ticks.push(tick); },
-        checker
+        (r, tick) => {
+          ticks.push(tick);
+        },
+        checker,
       );
 
       expect(ticks).toEqual([1, 2, 3]);
@@ -192,7 +202,7 @@ describe('ScenarioRunner', () => {
       const runner = new ScenarioRunner({
         nodes: ['a'],
         duration: 100,
-        tickInterval: 25
+        tickInterval: 25,
       });
 
       const times: number[] = [];
@@ -200,8 +210,10 @@ describe('ScenarioRunner', () => {
 
       runner.run(
         () => {},
-        (r) => { times.push(r.getClock().now()); },
-        checker
+        (r) => {
+          times.push(r.getClock().now());
+        },
+        checker,
       );
 
       expect(times).toEqual([25, 50, 75, 100]);
@@ -211,7 +223,7 @@ describe('ScenarioRunner', () => {
       const runner = new ScenarioRunner({
         nodes: ['a', 'b'],
         duration: 200,
-        tickInterval: 50
+        tickInterval: 50,
       });
 
       runner.getNetwork().configure({ latencyMs: { min: 100, max: 100 } });
@@ -227,14 +239,14 @@ describe('ScenarioRunner', () => {
           const messages = r.getNetwork().tick();
           delivered.push(...messages);
         },
-        checker
+        checker,
       );
 
       expect(delivered).toHaveLength(1);
       expect(delivered[0]).toMatchObject({
         from: 'a',
         to: 'b',
-        payload: { data: 'test' }
+        payload: { data: 'test' },
       });
     });
 
@@ -242,11 +254,15 @@ describe('ScenarioRunner', () => {
       const runner = new ScenarioRunner({
         seed: 99999,
         nodes: ['a'],
-        duration: 10
+        duration: 10,
       });
 
       const checker = new InvariantChecker();
-      const result = runner.run(() => {}, () => {}, checker);
+      const result = runner.run(
+        () => {},
+        () => {},
+        checker,
+      );
 
       expect(result.seed).toBe(99999);
     });
@@ -255,11 +271,15 @@ describe('ScenarioRunner', () => {
       const runner = new ScenarioRunner({
         nodes: ['a'],
         duration: 100,
-        tickInterval: 20
+        tickInterval: 20,
       });
 
       const checker = new InvariantChecker();
-      const result = runner.run(() => {}, () => {}, checker);
+      const result = runner.run(
+        () => {},
+        () => {},
+        checker,
+      );
 
       expect(result.ticks).toBe(5);
     });
@@ -267,13 +287,17 @@ describe('ScenarioRunner', () => {
     test('passes when no invariants fail', () => {
       const runner = new ScenarioRunner({
         nodes: ['a'],
-        duration: 10
+        duration: 10,
       });
 
       const checker = new InvariantChecker<unknown>();
       checker.addInvariant('always-true', () => true);
 
-      const result = runner.run(() => {}, () => {}, checker);
+      const result = runner.run(
+        () => {},
+        () => {},
+        checker,
+      );
 
       expect(result.passed).toBe(true);
       expect(result.invariantFailures).toHaveLength(0);
@@ -282,13 +306,17 @@ describe('ScenarioRunner', () => {
     test('fails when invariants fail', () => {
       const runner = new ScenarioRunner({
         nodes: ['a'],
-        duration: 10
+        duration: 10,
       });
 
       const checker = new InvariantChecker<unknown>();
       checker.addInvariant('always-false', () => false);
 
-      const result = runner.run(() => {}, () => {}, checker);
+      const result = runner.run(
+        () => {},
+        () => {},
+        checker,
+      );
 
       expect(result.passed).toBe(false);
       expect(result.invariantFailures).toContain('always-false');
@@ -301,7 +329,7 @@ describe('ScenarioRunner', () => {
         seed: 42,
         nodes: ['a', 'b'],
         duration: 100,
-        tickInterval: 10
+        tickInterval: 10,
       };
 
       const checker = new InvariantChecker();
@@ -317,7 +345,7 @@ describe('ScenarioRunner', () => {
         (r) => {
           r.getNetwork().tick();
         },
-        checker
+        checker,
       );
 
       const runner2 = new ScenarioRunner(config);
@@ -331,7 +359,7 @@ describe('ScenarioRunner', () => {
         (r) => {
           r.getNetwork().tick();
         },
-        checker
+        checker,
       );
 
       expect(result2.seed).toBe(result1.seed);
@@ -346,7 +374,7 @@ describe('ScenarioRunner', () => {
         seed: 12345,
         nodes: ['node-a', 'node-b'],
         duration: 1000,
-        tickInterval: 100
+        tickInterval: 100,
       });
 
       const maps: LWWMap<string, number>[] = [];
@@ -370,7 +398,7 @@ describe('ScenarioRunner', () => {
             maps[1].set('key1', 200);
           }
         },
-        checker
+        checker,
       );
 
       expect(result.passed).toBe(true);

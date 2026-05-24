@@ -90,9 +90,7 @@ class MockTopGunClient {
     // Apply where filter
     if (filter.where) {
       const where = filter.where as Record<string, unknown>;
-      items = items.filter((item) =>
-        Object.entries(where).every(([k, v]) => item[k] === v)
-      );
+      items = items.filter((item) => Object.entries(where).every(([k, v]) => item[k] === v));
     }
 
     // Apply limit
@@ -108,7 +106,9 @@ class MockTopGunClient {
         callback(captured);
         return () => {};
       },
-      onPaginationChange: (listener: (info: { hasMore: boolean; cursorStatus: string }) => void) => {
+      onPaginationChange: (
+        listener: (info: { hasMore: boolean; cursorStatus: string }) => void,
+      ) => {
         // Report 'valid' cursor status so the pagination race in handleQuery resolves without waiting
         listener({ hasMore: false, cursorStatus: 'valid' });
         return () => {};
@@ -191,10 +191,7 @@ describe('MCP Tools', () => {
       map.set('task1', { title: 'Test Task', status: 'todo' });
       map.set('task2', { title: 'Done Task', status: 'done' });
 
-      const result = await handleQuery(
-        { map: 'tasks', filter: { status: 'done' } },
-        ctx
-      );
+      const result = await handleQuery({ map: 'tasks', filter: { status: 'done' } }, ctx);
 
       expect(result.isError).toBeUndefined();
       expect(result.content[0].text).toContain('1 result');
@@ -238,7 +235,7 @@ describe('MCP Tools', () => {
           key: 'task1',
           data: { title: 'New Task', status: 'todo' },
         },
-        ctx
+        ctx,
       );
 
       expect(result.isError).toBeUndefined();
@@ -258,7 +255,7 @@ describe('MCP Tools', () => {
           key: 'task1',
           data: { title: 'Updated Title', status: 'done' },
         },
-        ctx
+        ctx,
       );
 
       expect(result.isError).toBeUndefined();
@@ -276,7 +273,7 @@ describe('MCP Tools', () => {
           operation: 'remove',
           key: 'task1',
         },
-        ctx
+        ctx,
       );
 
       expect(result.isError).toBeUndefined();
@@ -292,7 +289,7 @@ describe('MCP Tools', () => {
           operation: 'remove',
           key: 'nonexistent',
         },
-        ctx
+        ctx,
       );
 
       expect(result.isError).toBeUndefined();
@@ -309,7 +306,7 @@ describe('MCP Tools', () => {
           key: 'task1',
           data: { title: 'Test' },
         },
-        ctx
+        ctx,
       );
 
       expect(result.isError).toBe(true);
@@ -325,7 +322,7 @@ describe('MCP Tools', () => {
           operation: 'set',
           key: 'task1',
         },
-        ctx
+        ctx,
       );
 
       expect(result.isError).toBe(true);
@@ -424,10 +421,7 @@ describe('MCP Tools', () => {
         map.set(`task${i}`, { title: `Task ${i}`, status: i % 2 === 0 ? 'done' : 'todo' });
       }
 
-      const result = await handleExplain(
-        { map: 'tasks', filter: { status: 'done' } },
-        ctx
-      );
+      const result = await handleExplain({ map: 'tasks', filter: { status: 'done' } }, ctx);
 
       expect(result.isError).toBeUndefined();
       expect(result.content[0].text).toContain('FILTER_SCAN');
@@ -443,10 +437,7 @@ describe('MCP Tools', () => {
         map.set(`task${i}`, { title: `Task ${i}`, status: 'todo' });
       }
 
-      const result = await handleExplain(
-        { map: 'tasks', filter: { status: 'todo' } },
-        ctx
-      );
+      const result = await handleExplain({ map: 'tasks', filter: { status: 'todo' } }, ctx);
 
       expect(result.isError).toBeUndefined();
       expect(result.content[0].text).toContain('Recommendations');

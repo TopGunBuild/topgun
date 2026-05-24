@@ -1,4 +1,10 @@
-import type { AuthProvider, AuthEvent, AuthEventType, TokenExchangeConfig, TokenExchangeResponse } from './types';
+import type {
+  AuthProvider,
+  AuthEvent,
+  AuthEventType,
+  TokenExchangeConfig,
+  TokenExchangeResponse,
+} from './types';
 import type { IStorageAdapter } from '../IStorageAdapter';
 
 export interface BaseAuthProviderConfig {
@@ -85,10 +91,7 @@ export abstract class BaseAuthProvider implements AuthProvider {
       // Attempt server-issued refresh before calling the external provider.
       // This avoids a round-trip to the external provider when a refresh token
       // from a previous exchange is still valid.
-      if (
-        this.refreshTokenValue &&
-        this.tokenExchangeConfig?.enableRefresh
-      ) {
+      if (this.refreshTokenValue && this.tokenExchangeConfig?.enableRefresh) {
         const refreshed = await this.attemptServerRefresh(this.refreshTokenValue);
         if (refreshed) return refreshed;
         // Fall through to external token fetch if server refresh fails.

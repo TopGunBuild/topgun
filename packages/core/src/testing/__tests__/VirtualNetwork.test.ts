@@ -69,7 +69,7 @@ describe('VirtualNetwork', () => {
         from: 'a',
         to: 'b',
         payload: { data: 'test' },
-        scheduledTime: 1000
+        scheduledTime: 1000,
       });
     });
 
@@ -158,7 +158,7 @@ describe('VirtualNetwork', () => {
       expect(delivered[0]).toMatchObject({
         from: 'a',
         to: 'b',
-        payload: { data: 'test' }
+        payload: { data: 'test' },
       });
     });
 

@@ -173,7 +173,7 @@ export class ReciprocalRankFusion {
     // Validate weights array length
     if (weights.length !== resultSets.length) {
       throw new Error(
-        `Weights array length (${weights.length}) must match resultSets length (${resultSets.length})`
+        `Weights array length (${weights.length}) must match resultSets length (${resultSets.length})`,
       );
     }
 

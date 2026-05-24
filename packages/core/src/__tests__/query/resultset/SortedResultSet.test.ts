@@ -26,12 +26,7 @@ describe('SortedResultSet', () => {
   describe('sorting logic', () => {
     it('should sort by field ascending', () => {
       const source = new SetResultSet(new Set(['1', '2', '3', '4', '5']), 30);
-      const result = new SortedResultSet(
-        source,
-        getRecord,
-        'age',
-        'asc'
-      );
+      const result = new SortedResultSet(source, getRecord, 'age', 'asc');
 
       const sorted = result.toArray();
       const ages = sorted.map((k) => getRecord(k)!.age);
@@ -41,12 +36,7 @@ describe('SortedResultSet', () => {
 
     it('should sort by field descending', () => {
       const source = new SetResultSet(new Set(['1', '2', '3', '4', '5']), 30);
-      const result = new SortedResultSet(
-        source,
-        getRecord,
-        'age',
-        'desc'
-      );
+      const result = new SortedResultSet(source, getRecord, 'age', 'desc');
 
       const sorted = result.toArray();
       const ages = sorted.map((k) => getRecord(k)!.age);
@@ -56,12 +46,7 @@ describe('SortedResultSet', () => {
 
     it('should sort by string field ascending', () => {
       const source = new SetResultSet(new Set(['1', '2', '3', '4', '5']), 30);
-      const result = new SortedResultSet(
-        source,
-        getRecord,
-        'name',
-        'asc'
-      );
+      const result = new SortedResultSet(source, getRecord, 'name', 'asc');
 
       const sorted = result.toArray();
       const names = sorted.map((k) => getRecord(k)!.name);
@@ -71,12 +56,7 @@ describe('SortedResultSet', () => {
 
     it('should sort by string field descending', () => {
       const source = new SetResultSet(new Set(['1', '2', '3', '4', '5']), 30);
-      const result = new SortedResultSet(
-        source,
-        getRecord,
-        'name',
-        'desc'
-      );
+      const result = new SortedResultSet(source, getRecord, 'name', 'desc');
 
       const sorted = result.toArray();
       const names = sorted.map((k) => getRecord(k)!.name);
@@ -86,24 +66,14 @@ describe('SortedResultSet', () => {
 
     it('should handle empty source', () => {
       const source = new SetResultSet(new Set<string>(), 30);
-      const result = new SortedResultSet(
-        source,
-        getRecord,
-        'age',
-        'asc'
-      );
+      const result = new SortedResultSet(source, getRecord, 'age', 'asc');
 
       expect(result.toArray()).toEqual([]);
     });
 
     it('should handle single element', () => {
       const source = new SetResultSet(new Set(['1']), 30);
-      const result = new SortedResultSet(
-        source,
-        getRecord,
-        'age',
-        'asc'
-      );
+      const result = new SortedResultSet(source, getRecord, 'age', 'asc');
 
       expect(result.toArray()).toEqual(['1']);
     });
@@ -117,7 +87,7 @@ describe('SortedResultSet', () => {
         getRecord,
         'age',
         'asc',
-        true // pre-sorted
+        true, // pre-sorted
       );
 
       // Should not sort, just pass through in order
@@ -132,7 +102,7 @@ describe('SortedResultSet', () => {
         getRecord,
         'age',
         'desc',
-        true // pre-sorted ascending
+        true, // pre-sorted ascending
       );
 
       const items = [...result];
@@ -159,12 +129,7 @@ describe('SortedResultSet', () => {
       ]);
 
       const source = new SetResultSet(new Set(['1', '2', '3']), 30);
-      const result = new SortedResultSet(
-        source,
-        (k) => mixedRecords.get(k),
-        'age',
-        'asc'
-      );
+      const result = new SortedResultSet(source, (k) => mixedRecords.get(k), 'age', 'asc');
 
       const sorted = result.toArray();
       expect(sorted[sorted.length - 1]).toBe('2'); // undefined at end
@@ -178,12 +143,7 @@ describe('SortedResultSet', () => {
       ]);
 
       const source = new SetResultSet(new Set(['1', '2', '3']), 30);
-      const result = new SortedResultSet(
-        source,
-        (k) => mixedRecords.get(k),
-        'age',
-        'desc'
-      );
+      const result = new SortedResultSet(source, (k) => mixedRecords.get(k), 'age', 'desc');
 
       const sorted = result.toArray();
       expect(sorted[0]).toBe('2'); // undefined at start
@@ -193,12 +153,7 @@ describe('SortedResultSet', () => {
   describe('contains', () => {
     it('should check membership in source', () => {
       const source = new SetResultSet(new Set(['1', '2', '3']), 30);
-      const result = new SortedResultSet(
-        source,
-        getRecord,
-        'age',
-        'asc'
-      );
+      const result = new SortedResultSet(source, getRecord, 'age', 'asc');
 
       expect(result.contains('1')).toBe(true);
       expect(result.contains('4')).toBe(false);
@@ -208,12 +163,7 @@ describe('SortedResultSet', () => {
   describe('size', () => {
     it('should return same size as source', () => {
       const source = new SetResultSet(new Set(['1', '2', '3', '4', '5']), 30);
-      const result = new SortedResultSet(
-        source,
-        getRecord,
-        'age',
-        'asc'
-      );
+      const result = new SortedResultSet(source, getRecord, 'age', 'asc');
 
       expect(result.size()).toBe(5);
     });
@@ -222,21 +172,11 @@ describe('SortedResultSet', () => {
   describe('isEmpty', () => {
     it('should reflect source emptiness', () => {
       const emptySource = new SetResultSet(new Set<string>(), 30);
-      const emptyResult = new SortedResultSet(
-        emptySource,
-        getRecord,
-        'age',
-        'asc'
-      );
+      const emptyResult = new SortedResultSet(emptySource, getRecord, 'age', 'asc');
       expect(emptyResult.isEmpty()).toBe(true);
 
       const nonEmptySource = new SetResultSet(new Set(['1']), 30);
-      const nonEmptyResult = new SortedResultSet(
-        nonEmptySource,
-        getRecord,
-        'age',
-        'asc'
-      );
+      const nonEmptyResult = new SortedResultSet(nonEmptySource, getRecord, 'age', 'asc');
       expect(nonEmptyResult.isEmpty()).toBe(false);
     });
   });
@@ -244,38 +184,21 @@ describe('SortedResultSet', () => {
   describe('costs', () => {
     it('should have minimal overhead for pre-sorted', () => {
       const source = new SetResultSet(new Set(['1', '2']), 30);
-      const result = new SortedResultSet(
-        source,
-        getRecord,
-        'age',
-        'asc',
-        true
-      );
+      const result = new SortedResultSet(source, getRecord, 'age', 'asc', true);
 
       expect(result.getRetrievalCost()).toBe(31); // 30 + 1
     });
 
     it('should have higher overhead for in-memory sort', () => {
       const source = new SetResultSet(new Set(['1', '2']), 30);
-      const result = new SortedResultSet(
-        source,
-        getRecord,
-        'age',
-        'asc',
-        false
-      );
+      const result = new SortedResultSet(source, getRecord, 'age', 'asc', false);
 
       expect(result.getRetrievalCost()).toBe(80); // 30 + 50
     });
 
     it('should have same merge cost as source', () => {
       const source = new SetResultSet(new Set(['1', '2', '3']), 30);
-      const result = new SortedResultSet(
-        source,
-        getRecord,
-        'age',
-        'asc'
-      );
+      const result = new SortedResultSet(source, getRecord, 'age', 'asc');
 
       expect(result.getMergeCost()).toBe(3);
     });
@@ -284,12 +207,7 @@ describe('SortedResultSet', () => {
   describe('caching', () => {
     it('should cache sorted results', () => {
       const source = new SetResultSet(new Set(['1', '2', '3']), 30);
-      const result = new SortedResultSet(
-        source,
-        getRecord,
-        'age',
-        'asc'
-      );
+      const result = new SortedResultSet(source, getRecord, 'age', 'asc');
 
       expect(result.isMaterialized()).toBe(false);
 
@@ -304,12 +222,7 @@ describe('SortedResultSet', () => {
   describe('metadata', () => {
     it('should return sort field', () => {
       const source = new SetResultSet(new Set(['1']), 30);
-      const result = new SortedResultSet(
-        source,
-        getRecord,
-        'age',
-        'asc'
-      );
+      const result = new SortedResultSet(source, getRecord, 'age', 'asc');
 
       expect(result.getSortField()).toBe('age');
     });

@@ -179,7 +179,7 @@ export class SearchCursor {
   static isValid(
     cursor: SearchCursorData,
     query: string,
-    maxAgeMs: number = DEFAULT_CURSOR_MAX_AGE_MS
+    maxAgeMs: number = DEFAULT_CURSOR_MAX_AGE_MS,
   ): boolean {
     // Check query hash matches
     if (cursor.queryHash !== hashString(query)) {
@@ -203,7 +203,7 @@ export class SearchCursor {
    */
   static getNodePosition(
     cursor: SearchCursorData,
-    nodeId: string
+    nodeId: string,
   ): { afterScore: number; afterKey: string } | null {
     if (!(nodeId in cursor.nodeScores)) {
       return null;
@@ -227,10 +227,7 @@ export class SearchCursor {
    * @param cursor - Decoded cursor data
    * @returns true if result should be included (is after cursor)
    */
-  static isAfterCursor(
-    result: CursorableResult,
-    cursor: SearchCursorData
-  ): boolean {
+  static isAfterCursor(result: CursorableResult, cursor: SearchCursorData): boolean {
     const position = this.getNodePosition(cursor, result.nodeId);
 
     // If node not in cursor, include all results from that node

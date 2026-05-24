@@ -160,10 +160,7 @@ export class IndexRegistry<K, V> {
    * @param queryType - Query type (e.g., 'equal', 'gt', 'between')
    * @returns Best matching index or null if none found
    */
-  findBestIndex(
-    attributeName: string,
-    queryType: string
-  ): Index<K, V, unknown> | null {
+  findBestIndex(attributeName: string, queryType: string): Index<K, V, unknown> | null {
     const indexes = this.getIndexes(attributeName);
     let best: Index<K, V, unknown> | null = null;
     let bestCost = Infinity;
@@ -185,10 +182,7 @@ export class IndexRegistry<K, V> {
    * @param queryType - Query type
    * @returns Array of matching indexes sorted by retrieval cost
    */
-  findIndexes(
-    attributeName: string,
-    queryType: string
-  ): Index<K, V, unknown>[] {
+  findIndexes(attributeName: string, queryType: string): Index<K, V, unknown>[] {
     const indexes = this.getIndexes(attributeName);
     return indexes
       .filter((index) => index.supportsQuery(queryType))

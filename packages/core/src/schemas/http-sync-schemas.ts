@@ -1,11 +1,7 @@
 // packages/core/src/schemas/http-sync-schemas.ts
 // HTTP sync request/response schemas for stateless serverless environments
 import { z } from 'zod';
-import {
-  TimestampSchema,
-  LWWRecordSchema,
-  ClientOpSchema,
-} from './base-schemas';
+import { TimestampSchema, LWWRecordSchema, ClientOpSchema } from './base-schemas';
 import { OpResultSchema } from './sync-schemas';
 
 // --- HTTP Sync Request ---
@@ -129,10 +125,12 @@ export const HttpSyncResponseSchema = z.object({
   // Server's current HLC
   serverHlc: TimestampSchema,
   // Acknowledgment of received operations
-  ack: z.object({
-    lastId: z.string(),
-    results: z.array(OpResultSchema).optional(),
-  }).optional(),
+  ack: z
+    .object({
+      lastId: z.string(),
+      results: z.array(OpResultSchema).optional(),
+    })
+    .optional(),
   // Delta records for requested maps (new/changed since lastSyncTimestamp)
   deltas: z.array(MapDeltaSchema).optional(),
   // Query results

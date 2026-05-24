@@ -54,10 +54,7 @@ describe('SimpleAttribute', () => {
 
 describe('MultiValueAttribute', () => {
   const tagsAttr = multiAttribute<User, string>('tags', (u) => u.tags);
-  const emptyArrayAttr = multiAttribute<User, string>(
-    'empty',
-    () => []
-  );
+  const emptyArrayAttr = multiAttribute<User, string>('empty', () => []);
 
   it('should extract array of values', () => {
     const user: User = { id: '1', email: 'test@example.com', tags: ['admin', 'dev'] };
@@ -104,7 +101,7 @@ describe('Attribute edge cases', () => {
   it('should handle null values in simple attribute', () => {
     const nullableAttr = simpleAttribute<{ val: string | null }, string | null>(
       'val',
-      (r) => r.val
+      (r) => r.val,
     );
     expect(nullableAttr.getValue({ val: null })).toBeNull();
     expect(nullableAttr.getValues({ val: null })).toEqual([null]);
@@ -127,10 +124,7 @@ describe('Attribute edge cases', () => {
     interface Nested {
       user: { profile: { name: string } };
     }
-    const nestedAttr = simpleAttribute<Nested, string>(
-      'userName',
-      (r) => r.user.profile.name
-    );
+    const nestedAttr = simpleAttribute<Nested, string>('userName', (r) => r.user.profile.name);
     expect(nestedAttr.getValue({ user: { profile: { name: 'John' } } })).toBe('John');
   });
 });

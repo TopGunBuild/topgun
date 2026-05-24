@@ -7,10 +7,7 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { TopGunClient } from '@topgunbuild/client';
 import type { IStorageAdapter, OpLogEntry } from '@topgunbuild/client';
 import type { MCPServerConfig, MCPToolResult, ResolvedMCPServerConfig, ToolContext } from './types';
@@ -113,17 +110,20 @@ export class TopGunMCPServer {
         capabilities: {
           tools: {},
         },
-      }
+      },
     );
 
     // Register handlers
     this.registerHandlers();
 
-    this.logger.info({
-      topgunUrl: this.config.topgunUrl,
-      allowedMaps: this.config.allowedMaps,
-      enableMutations: this.config.enableMutations,
-    }, 'TopGunMCPServer initialized');
+    this.logger.info(
+      {
+        topgunUrl: this.config.topgunUrl,
+        allowedMaps: this.config.allowedMaps,
+        enableMutations: this.config.enableMutations,
+      },
+      'TopGunMCPServer initialized',
+    );
   }
 
   /**
@@ -155,51 +155,56 @@ export class TopGunMCPServer {
     });
 
     // Handle tool calls
-    this.server.setRequestHandler(CallToolRequestSchema, async (request): Promise<{
-      content: Array<{ type: 'text'; text: string }>;
-      isError?: boolean;
-    }> => {
-      const { name, arguments: args } = request.params;
+    this.server.setRequestHandler(
+      CallToolRequestSchema,
+      async (
+        request,
+      ): Promise<{
+        content: Array<{ type: 'text'; text: string }>;
+        isError?: boolean;
+      }> => {
+        const { name, arguments: args } = request.params;
 
-      this.logger.debug({ name, args }, 'tools/call');
+        this.logger.debug({ name, args }, 'tools/call');
 
-      const handler = toolHandlers[name];
-      if (!handler) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Unknown tool: ${name}. Use tools/list to see available tools.`,
-            },
-          ],
-          isError: true,
-        };
-      }
+        const handler = toolHandlers[name];
+        if (!handler) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Unknown tool: ${name}. Use tools/list to see available tools.`,
+              },
+            ],
+            isError: true,
+          };
+        }
 
-      try {
-        const result = await handler(args ?? {}, this.toolContext);
-        this.logger.debug({ name, isError: result.isError }, 'Tool result');
-        return {
-          content: result.content.map((c) => ({
-            type: 'text' as const,
-            text: c.text ?? '',
-          })),
-          isError: result.isError,
-        };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.logger.error({ name, error: message }, 'Tool error');
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Error executing ${name}: ${message}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-    });
+        try {
+          const result = await handler(args ?? {}, this.toolContext);
+          this.logger.debug({ name, isError: result.isError }, 'Tool result');
+          return {
+            content: result.content.map((c) => ({
+              type: 'text' as const,
+              text: c.text ?? '',
+            })),
+            isError: result.isError,
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logger.error({ name, error: message }, 'Tool error');
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Error executing ${name}: ${message}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      },
+    );
   }
 
   /**

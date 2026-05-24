@@ -61,7 +61,7 @@ export class CounterManager implements ICounterManager {
     if (this.config.isAuthenticated()) {
       this.config.sendMessage({
         type: 'COUNTER_REQUEST',
-        payload: { name }
+        payload: { name },
       });
     }
   }
@@ -83,8 +83,8 @@ export class CounterManager implements ICounterManager {
         type: 'COUNTER_SYNC',
         payload: {
           name,
-          state: stateObj
-        }
+          state: stateObj,
+        },
       });
     }
   }
@@ -93,7 +93,10 @@ export class CounterManager implements ICounterManager {
    * Handle incoming counter update from server.
    * Called by SyncEngine for COUNTER_UPDATE and COUNTER_RESPONSE messages.
    */
-  public handleCounterUpdate(name: string, stateObj: { positive: Record<string, number>; negative: Record<string, number> }): void {
+  public handleCounterUpdate(
+    name: string,
+    stateObj: { positive: Record<string, number>; negative: Record<string, number> },
+  ): void {
     // Convert objects to Maps
     const state = {
       positive: new Map(Object.entries(stateObj.positive)),

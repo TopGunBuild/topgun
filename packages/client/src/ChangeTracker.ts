@@ -85,8 +85,8 @@ export class ChangeTracker<T> {
     this.previousSnapshot = new Map(
       Array.from(current.entries()).map(([k, v]) => [
         k,
-        typeof v === 'object' && v !== null ? { ...(v as object) } as T : v,
-      ])
+        typeof v === 'object' && v !== null ? ({ ...(v as object) } as T) : v,
+      ]),
     );
 
     return changes;

@@ -14,14 +14,13 @@ export const listMapsTool: MCPTool = {
   inputSchema: toolSchemas.listMaps as MCPTool['inputSchema'],
 };
 
-export async function handleListMaps(
-  rawArgs: unknown,
-  ctx: ToolContext
-): Promise<MCPToolResult> {
+export async function handleListMaps(rawArgs: unknown, ctx: ToolContext): Promise<MCPToolResult> {
   // Validate arguments with Zod (no required fields, but validates structure)
   const parseResult = ListMapsArgsSchema.safeParse(rawArgs);
   if (!parseResult.success) {
-    const errors = parseResult.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`).join(', ');
+    const errors = parseResult.error.issues
+      .map((e) => `${e.path.join('.')}: ${e.message}`)
+      .join(', ');
     return {
       content: [{ type: 'text', text: `Invalid arguments: ${errors}` }],
       isError: true,
@@ -61,9 +60,9 @@ export async function handleListMaps(
             `  - 'posts' - Blog posts or messages\n` +
             `  - 'products' - E-commerce products\n\n` +
             `Tip: Ask the user what maps are available in their application.`,
-          },
-        ],
-      };
+        },
+      ],
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return {

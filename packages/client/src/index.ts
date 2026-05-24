@@ -15,15 +15,31 @@ import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
 import { ConnectionPool, PartitionRouter, ClusterClient } from './cluster';
 
 // Connection provider imports
-import { SingleServerProvider, HttpSyncProvider, AutoConnectionProvider, WebSocketConnection, ConnectionReadyState } from './connection';
+import {
+  SingleServerProvider,
+  HttpSyncProvider,
+  AutoConnectionProvider,
+  WebSocketConnection,
+  ConnectionReadyState,
+} from './connection';
 
 // Type imports
 import type { IStorageAdapter, OpLogEntry } from './IStorageAdapter';
 import type { LWWRecord, PredicateNode } from '@topgunbuild/core';
-import type { QueryFilter, QueryResultItem, QueryResultSource, CursorStatus, PaginationInfo } from './QueryHandle';
+import type {
+  QueryFilter,
+  QueryResultItem,
+  QueryResultSource,
+  CursorStatus,
+  PaginationInfo,
+} from './QueryHandle';
 import type { TopicCallback } from './TopicHandle';
 import type { BackoffConfig, HeartbeatConfig, SyncEngineConfig } from './SyncEngine';
-import type { StateChangeEvent, StateChangeListener, SyncStateMachineConfig } from './SyncStateMachine';
+import type {
+  StateChangeEvent,
+  StateChangeListener,
+  SyncStateMachineConfig,
+} from './SyncStateMachine';
 import type {
   BackpressureConfig,
   BackpressureStrategy,
@@ -35,7 +51,12 @@ import type {
 // Value exports
 export { SyncEngine, TopGunClient, QueryHandle, LWWMap, Predicates, TopicHandle };
 export { SyncState, VALID_TRANSITIONS, isValidTransition, SyncStateMachine };
-export { BackpressureError, AuthRequiredError, DEFAULT_BACKPRESSURE_CONFIG, DEFAULT_CLUSTER_CONFIG };
+export {
+  BackpressureError,
+  AuthRequiredError,
+  DEFAULT_BACKPRESSURE_CONFIG,
+  DEFAULT_CLUSTER_CONFIG,
+};
 export { logger } from './utils/logger';
 
 // Change tracking exports
@@ -67,7 +88,11 @@ export type { SqlQueryResult } from './SyncEngine';
 export type { VectorSearchClientOptions, VectorSearchClientResult } from './sync';
 
 // Hybrid Search exports
-export type { HybridSearchClientOptions, HybridSearchClientResult, HybridSearchMethod } from './sync';
+export type {
+  HybridSearchClientOptions,
+  HybridSearchClientResult,
+  HybridSearchMethod,
+} from './sync';
 
 // Live Search exports
 export { SearchHandle } from './SearchHandle';
@@ -98,7 +123,13 @@ export type {
 } from './cluster';
 
 // Connection provider exports
-export { SingleServerProvider, HttpSyncProvider, AutoConnectionProvider, WebSocketConnection, ConnectionReadyState };
+export {
+  SingleServerProvider,
+  HttpSyncProvider,
+  AutoConnectionProvider,
+  WebSocketConnection,
+  ConnectionReadyState,
+};
 export type {
   IConnection,
   IConnectionProvider,

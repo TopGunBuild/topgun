@@ -38,7 +38,7 @@ export class SortedResultSet<K, V> implements ResultSet<K> {
     private readonly getRecord: (key: K) => V | undefined,
     private readonly sortField: string,
     private readonly direction: 'asc' | 'desc',
-    private readonly isPreSorted: boolean = false
+    private readonly isPreSorted: boolean = false,
   ) {}
 
   /**
@@ -194,10 +194,7 @@ export class SortedResultSet<K, V> implements ResultSet<K> {
  * @param field - Field name to compare
  * @param direction - Sort direction
  */
-export function createFieldComparator<V>(
-  field: string,
-  direction: 'asc' | 'desc'
-): CompareFn<V> {
+export function createFieldComparator<V>(field: string, direction: 'asc' | 'desc'): CompareFn<V> {
   return (a: V, b: V): number => {
     const valA = (a as Record<string, unknown>)[field];
     const valB = (b as Record<string, unknown>)[field];

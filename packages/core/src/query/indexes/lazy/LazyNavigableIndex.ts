@@ -26,9 +26,7 @@ import type { IndexBuildProgressCallback } from '../../adaptive/types';
  *
  * K = record key type, V = record value type, A = attribute value type (must be orderable)
  */
-export class LazyNavigableIndex<K, V, A extends string | number>
-  implements LazyIndex<K, V, A>
-{
+export class LazyNavigableIndex<K, V, A extends string | number> implements LazyIndex<K, V, A> {
   readonly type = 'navigable' as const;
   readonly isLazy = true as const;
 
@@ -53,7 +51,7 @@ export class LazyNavigableIndex<K, V, A extends string | number>
   constructor(
     readonly attribute: Attribute<V, A>,
     comparator?: Comparator<A>,
-    options: LazyIndexOptions = {}
+    options: LazyIndexOptions = {},
   ) {
     this.comparator = comparator;
     this.onProgress = options.onProgress;

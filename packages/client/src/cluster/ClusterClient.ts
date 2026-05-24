@@ -21,14 +21,19 @@ import {
 import { ConnectionPool } from './ConnectionPool';
 import { PartitionRouter } from './PartitionRouter';
 import { logger } from '../utils/logger';
-import type { IConnectionProvider, IConnection, ConnectionProviderEvent, ConnectionEventHandler } from '../types';
+import type {
+  IConnectionProvider,
+  IConnection,
+  ConnectionProviderEvent,
+  ConnectionEventHandler,
+} from '../types';
 
 export interface ClusterClientEvents {
-  'connected': () => void;
-  'disconnected': (reason: string) => void;
+  connected: () => void;
+  disconnected: (reason: string) => void;
   'partitionMap:ready': (version: number) => void;
   'routing:active': () => void;
-  'error': (error: Error) => void;
+  error: (error: Error) => void;
   'circuit:open': (nodeId: string) => void;
   'circuit:closed': (nodeId: string) => void;
   'circuit:half-open': (nodeId: string) => void;
@@ -236,7 +241,7 @@ export class ClusterClient implements IConnectionProvider {
    * Called when routing to an unknown/disconnected owner.
    */
   private requestPartitionMapRefresh(): void {
-    this.partitionRouter.refreshPartitionMap().catch(err => {
+    this.partitionRouter.refreshPartitionMap().catch((err) => {
       logger.error({ err }, 'Failed to refresh partition map');
     });
   }
@@ -264,12 +269,14 @@ export class ClusterClient implements IConnectionProvider {
     const socket = this.connectionPool.getConnection(nodeId);
     if (socket) {
       logger.debug({ nodeId }, 'Requesting partition map from node');
-      socket.send(serialize({
-        type: 'PARTITION_MAP_REQUEST',
-        payload: {
-          currentVersion: this.partitionRouter.getMapVersion(),
-        },
-      }));
+      socket.send(
+        serialize({
+          type: 'PARTITION_MAP_REQUEST',
+          payload: {
+            currentVersion: this.partitionRouter.getMapVersion(),
+          },
+        }),
+      );
     }
   }
 
@@ -307,13 +314,9 @@ export class ClusterClient implements IConnectionProvider {
       maxRetries?: number;
       retryDelayMs?: number;
       retryOnNotOwner?: boolean;
-    } = {}
+    } = {},
   ): Promise<void> {
-    const {
-      maxRetries = 3,
-      retryDelayMs = 100,
-      retryOnNotOwner = true,
-    } = options;
+    const { maxRetries = 3, retryDelayMs = 100, retryOnNotOwner = true } = options;
 
     let lastError: Error | null = null;
     let nodeId: string | null = null;
@@ -333,9 +336,8 @@ export class ClusterClient implements IConnectionProvider {
         }
 
         // Get connection and send
-        const socket = key && nodeId
-          ? this.connectionPool.getConnection(nodeId)
-          : this.getAnyConnection();
+        const socket =
+          key && nodeId ? this.connectionPool.getConnection(nodeId) : this.getAnyConnection();
 
         if (!socket) {
           throw new Error('No connection available');
@@ -361,10 +363,7 @@ export class ClusterClient implements IConnectionProvider {
 
         // Check if error is retryable
         if (this.isRetryableError(error)) {
-          logger.debug(
-            { attempt, maxRetries, errorCode, nodeId },
-            'Retryable error, will retry'
-          );
+          logger.debug({ attempt, maxRetries, errorCode, nodeId }, 'Retryable error, will retry');
 
           // Handle specific error types
           if (errorCode === 'NOT_OWNER' && retryOnNotOwner) {
@@ -385,9 +384,7 @@ export class ClusterClient implements IConnectionProvider {
       }
     }
 
-    throw new Error(
-      `Operation failed after ${maxRetries} retries: ${lastError?.message}`
-    );
+    throw new Error(`Operation failed after ${maxRetries} retries: ${lastError?.message}`);
   }
 
   /**
@@ -533,7 +530,10 @@ export class ClusterClient implements IConnectionProvider {
 
     if (this.config.routingMode === 'direct' && this.routingActive) {
       // Group by target node, tracking per-key routing decisions for metrics.
-      const nodeMessages = new Map<string, Array<{ key: string; message: any; isDirect: boolean }>>();
+      const nodeMessages = new Map<
+        string,
+        Array<{ key: string; message: any; isDirect: boolean }>
+      >();
 
       for (const { key, message } of operations) {
         this.routingMetrics.totalRoutes++;
@@ -570,12 +570,12 @@ export class ClusterClient implements IConnectionProvider {
         if (nodeId === 'primary') {
           success = this.connectionPool.sendToPrimary({
             type: 'OP_BATCH',
-            payload: { ops: messages.map(m => m.message) },
+            payload: { ops: messages.map((m) => m.message) },
           });
         } else {
           success = this.connectionPool.send(nodeId, {
             type: 'OP_BATCH',
-            payload: { ops: messages.map(m => m.message) },
+            payload: { ops: messages.map((m) => m.message) },
           });
         }
 
@@ -587,7 +587,7 @@ export class ClusterClient implements IConnectionProvider {
       // Forward all to primary (fallback or forward mode)
       const success = this.connectionPool.sendToPrimary({
         type: 'OP_BATCH',
-        payload: { ops: operations.map(o => o.message) },
+        payload: { ops: operations.map((o) => o.message) },
       });
 
       this.routingMetrics.totalRoutes += operations.length;
@@ -875,10 +875,13 @@ export class ClusterClient implements IConnectionProvider {
       this.emit('partitionMapUpdated');
     });
 
-    this.partitionRouter.on('routing:miss', (partitionId: number, expected: string, actual: string) => {
-      logger.debug({ partitionId, expected, actual }, 'Routing miss detected');
-      this.emit('routing:miss', partitionId, expected, actual);
-    });
+    this.partitionRouter.on(
+      'routing:miss',
+      (partitionId: number, expected: string, actual: string) => {
+        logger.debug({ partitionId, expected, actual }, 'Routing miss detected');
+        this.emit('routing:miss', partitionId, expected, actual);
+      },
+    );
   }
 
   private async waitForPartitionMap(timeoutMs: number = 10000): Promise<void> {

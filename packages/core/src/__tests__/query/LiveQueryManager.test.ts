@@ -133,7 +133,13 @@ describe('LiveQueryManager', () => {
 
     it('should notify when matching record updated', () => {
       const oldUser: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin' };
-      const newUser: User = { id: '1', name: 'Alice Updated', age: 31, status: 'active', role: 'admin' };
+      const newUser: User = {
+        id: '1',
+        name: 'Alice Updated',
+        age: 31,
+        status: 'active',
+        role: 'admin',
+      };
       users.set('1', oldUser);
 
       const query: SimpleQueryNode = { type: 'eq', attribute: 'status', value: 'active' };
@@ -499,13 +505,19 @@ describe('LiveQueryManager', () => {
 
       // Rapid adds
       for (let i = 0; i < 100; i++) {
-        const user: User = { id: String(i), name: `User ${i}`, age: 20 + i, status: 'active', role: 'user' };
+        const user: User = {
+          id: String(i),
+          name: `User ${i}`,
+          age: 20 + i,
+          status: 'active',
+          role: 'user',
+        };
         users.set(String(i), user);
         manager.onRecordAdded(String(i), user);
       }
 
       expect(events).toHaveLength(100);
-      expect(events.every(e => e.type === 'delta' && e.change === 'added')).toBe(true);
+      expect(events.every((e) => e.type === 'delta' && e.change === 'added')).toBe(true);
     });
 
     it('should handle lifecycle correctly', () => {
@@ -516,7 +528,7 @@ describe('LiveQueryManager', () => {
       const unsub = manager.subscribe(query, (event) => events.push(event));
 
       // Initial
-      expect(events.filter(e => e.type === 'initial')).toHaveLength(1);
+      expect(events.filter((e) => e.type === 'initial')).toHaveLength(1);
 
       // Add
       const user: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin' };
@@ -541,7 +553,7 @@ describe('LiveQueryManager', () => {
       manager.onRecordAdded('2', newUser);
 
       // Should have: initial, added, updated, removed (no more after unsub)
-      const deltaEvents = events.filter(e => e.type === 'delta');
+      const deltaEvents = events.filter((e) => e.type === 'delta');
       expect(deltaEvents).toHaveLength(3);
     });
   });

@@ -35,10 +35,10 @@ describe('AutoConnectionProvider', () => {
       status: 200,
       statusText: 'OK',
       headers: new Headers({ 'content-type': 'application/x-msgpack' }),
-      arrayBuffer: () => Promise.resolve(bodyBytes.buffer.slice(
-        bodyBytes.byteOffset,
-        bodyBytes.byteOffset + bodyBytes.byteLength,
-      )),
+      arrayBuffer: () =>
+        Promise.resolve(
+          bodyBytes.buffer.slice(bodyBytes.byteOffset, bodyBytes.byteOffset + bodyBytes.byteLength),
+        ),
     } as unknown as Response;
   }
 

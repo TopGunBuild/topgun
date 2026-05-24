@@ -66,7 +66,7 @@ describe('IntersectionResultSet', () => {
       // Create sets with different sizes and costs
       const largeSet = new SetResultSet(
         new Set(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j']),
-        30
+        30,
       );
       const smallSet = new SetResultSet(new Set(['a', 'b', 'c']), 30);
 
@@ -81,10 +81,7 @@ describe('IntersectionResultSet', () => {
 
     it('should sort by merge cost not retrieval cost', () => {
       const expensiveSmall = new SetResultSet(new Set(['a', 'b']), 100);
-      const cheapLarge = new SetResultSet(
-        new Set(['a', 'b', 'c', 'd', 'e', 'f']),
-        10
-      );
+      const cheapLarge = new SetResultSet(new Set(['a', 'b', 'c', 'd', 'e', 'f']), 10);
 
       const result = new IntersectionResultSet([cheapLarge, expensiveSmall]);
 

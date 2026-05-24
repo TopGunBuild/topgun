@@ -48,7 +48,7 @@ function makeRequest(options: {
           });
         });
         res.on('error', reject);
-      }
+      },
     );
 
     req.on('error', reject);
@@ -339,7 +339,7 @@ describe('HTTP Transport', () => {
         makeRequest({
           method: 'GET',
           path: '/health',
-        })
+        }),
       ).rejects.toThrow();
     });
   });

@@ -9,7 +9,8 @@ export const Performance = () => {
         <h2 className="text-3xl font-bold text-foreground mb-4">Performance</h2>
         <p className="text-neutral-600 dark:text-neutral-300 max-w-2xl mx-auto">
           Measured on Apple M1 Max, 200 concurrent WebSocket connections, using the in-process load
-          harness in <code className="font-mono text-sm">packages/server-rust/benches/load_harness/</code>.
+          harness in{' '}
+          <code className="font-mono text-sm">packages/server-rust/benches/load_harness/</code>.
         </p>
       </div>
 
@@ -17,20 +18,34 @@ export const Performance = () => {
         <table className="w-full text-left border-collapse">
           <thead>
             <tr className="border-b border-card-border">
-              <th className="py-4 px-4 text-sm font-mono text-neutral-500 uppercase tracking-wider">Mode</th>
-              <th className="py-4 px-4 text-sm font-mono text-neutral-500 uppercase tracking-wider text-right">Throughput</th>
-              <th className="py-4 px-4 text-sm font-mono text-neutral-500 uppercase tracking-wider text-right">Latency</th>
+              <th className="py-4 px-4 text-sm font-mono text-neutral-500 uppercase tracking-wider">
+                Mode
+              </th>
+              <th className="py-4 px-4 text-sm font-mono text-neutral-500 uppercase tracking-wider text-right">
+                Throughput
+              </th>
+              <th className="py-4 px-4 text-sm font-mono text-neutral-500 uppercase tracking-wider text-right">
+                Latency
+              </th>
             </tr>
           </thead>
           <tbody>
             <tr className="border-b border-card-border hover:bg-black/5 dark:hover:bg-white/[0.02] transition-colors">
-              <td className="py-4 px-4 text-sm font-medium text-neutral-700 dark:text-neutral-300">Fire-and-forget</td>
-              <td className="py-4 px-4 text-right text-brand font-semibold text-sm">483K ops/sec</td>
+              <td className="py-4 px-4 text-sm font-medium text-neutral-700 dark:text-neutral-300">
+                Fire-and-forget
+              </td>
+              <td className="py-4 px-4 text-right text-brand font-semibold text-sm">
+                483K ops/sec
+              </td>
               <td className="py-4 px-4 text-right text-neutral-500 text-sm">—</td>
             </tr>
             <tr className="border-b border-card-border hover:bg-black/5 dark:hover:bg-white/[0.02] transition-colors">
-              <td className="py-4 px-4 text-sm font-medium text-neutral-700 dark:text-neutral-300">Fire-and-wait</td>
-              <td className="py-4 px-4 text-right text-brand font-semibold text-sm">~37K ops/sec</td>
+              <td className="py-4 px-4 text-sm font-medium text-neutral-700 dark:text-neutral-300">
+                Fire-and-wait
+              </td>
+              <td className="py-4 px-4 text-right text-brand font-semibold text-sm">
+                ~37K ops/sec
+              </td>
               <td className="py-4 px-4 text-right text-brand font-semibold text-sm">1.5ms p50</td>
             </tr>
           </tbody>

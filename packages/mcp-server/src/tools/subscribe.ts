@@ -14,14 +14,13 @@ export const subscribeTool: MCPTool = {
   inputSchema: toolSchemas.subscribe as MCPTool['inputSchema'],
 };
 
-export async function handleSubscribe(
-  rawArgs: unknown,
-  ctx: ToolContext
-): Promise<MCPToolResult> {
+export async function handleSubscribe(rawArgs: unknown, ctx: ToolContext): Promise<MCPToolResult> {
   // Validate arguments with Zod
   const parseResult = SubscribeArgsSchema.safeParse(rawArgs);
   if (!parseResult.success) {
-    const errors = parseResult.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`).join(', ');
+    const errors = parseResult.error.issues
+      .map((e) => `${e.path.join('.')}: ${e.message}`)
+      .join(', ');
     return {
       content: [{ type: 'text', text: `Invalid arguments: ${errors}` }],
       isError: true,
@@ -59,7 +58,7 @@ export async function handleSubscribe(
 
   const effectiveTimeout = Math.min(
     timeout ?? ctx.config.subscriptionTimeoutSeconds,
-    ctx.config.subscriptionTimeoutSeconds
+    ctx.config.subscriptionTimeoutSeconds,
   );
 
   try {
@@ -77,23 +76,25 @@ export async function handleSubscribe(
     let isInitialLoad = true;
 
     // Subscribe to changes
-    const unsubscribe = queryHandle.subscribe((results: Array<Record<string, unknown> & { _key: string }>) => {
-      // Skip initial load
-      if (isInitialLoad) {
-        isInitialLoad = false;
-        return;
-      }
+    const unsubscribe = queryHandle.subscribe(
+      (results: Array<Record<string, unknown> & { _key: string }>) => {
+        // Skip initial load
+        if (isInitialLoad) {
+          isInitialLoad = false;
+          return;
+        }
 
-      // Record the change
-      for (const result of results) {
-        changes.push({
-          type: 'update',
-          key: result._key ?? 'unknown',
-          value: result,
-          timestamp: new Date().toISOString(),
-        });
-      }
-    });
+        // Record the change
+        for (const result of results) {
+          changes.push({
+            type: 'update',
+            key: result._key ?? 'unknown',
+            value: result,
+            timestamp: new Date().toISOString(),
+          });
+        }
+      },
+    );
 
     // Wait for the timeout period
     await new Promise((resolve) => setTimeout(resolve, effectiveTimeout * 1000));
@@ -117,7 +118,9 @@ export async function handleSubscribe(
       .map(
         (change, idx) =>
           `${idx + 1}. [${change.timestamp}] ${change.type.toUpperCase()} - ${change.key}\n` +
-          (change.value ? `   ${JSON.stringify(change.value, null, 2).split('\n').join('\n   ')}` : '')
+          (change.value
+            ? `   ${JSON.stringify(change.value, null, 2).split('\n').join('\n   ')}`
+            : ''),
       )
       .join('\n\n');
 

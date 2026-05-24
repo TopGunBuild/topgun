@@ -5,7 +5,7 @@ describe('Security Module', () => {
     test('should accept valid permission types', () => {
       const validTypes: PermissionType[] = ['READ', 'PUT', 'REMOVE', 'ALL'];
 
-      validTypes.forEach(type => {
+      validTypes.forEach((type) => {
         const permission: PermissionType = type;
         expect(permission).toBe(type);
       });
@@ -28,7 +28,7 @@ describe('Security Module', () => {
         role: 'admin',
         mapNamePattern: '*',
         actions: ['ALL'],
-        allowedFields: ['id', 'name', 'email']
+        allowedFields: ['id', 'name', 'email'],
       };
 
       expect(policy.role).toBe('admin');
@@ -41,7 +41,7 @@ describe('Security Module', () => {
       const policy: PermissionPolicy = {
         role: 'viewer',
         mapNamePattern: 'public.*',
-        actions: ['READ']
+        actions: ['READ'],
       };
 
       expect(policy.role).toBe('viewer');
@@ -54,7 +54,7 @@ describe('Security Module', () => {
       const policy: PermissionPolicy = {
         role: 'editor',
         mapNamePattern: 'documents.*',
-        actions: ['READ', 'PUT']
+        actions: ['READ', 'PUT'],
       };
 
       expect(policy.actions).toHaveLength(2);
@@ -81,7 +81,7 @@ describe('Security Module', () => {
         role: 'restricted',
         mapNamePattern: 'sensitive',
         actions: ['READ'],
-        allowedFields: []
+        allowedFields: [],
       };
 
       expect(policy.allowedFields).toEqual([]);
@@ -93,7 +93,7 @@ describe('Security Module', () => {
     test('should create a valid principal with required fields', () => {
       const principal: Principal = {
         userId: 'user-123',
-        roles: ['admin', 'user']
+        roles: ['admin', 'user'],
       };
 
       expect(principal.userId).toBe('user-123');
@@ -104,7 +104,7 @@ describe('Security Module', () => {
     test('should support empty roles array', () => {
       const principal: Principal = {
         userId: 'guest-user',
-        roles: []
+        roles: [],
       };
 
       expect(principal.userId).toBe('guest-user');
@@ -118,7 +118,7 @@ describe('Security Module', () => {
         email: 'test@example.com',
         department: 'engineering',
         permissions: ['read', 'write'],
-        metadata: { lastLogin: Date.now() }
+        metadata: { lastLogin: Date.now() },
       };
 
       expect(principal.userId).toBe('user-456');
@@ -132,7 +132,7 @@ describe('Security Module', () => {
     test('should handle principal with single role', () => {
       const principal: Principal = {
         userId: 'single-role-user',
-        roles: ['viewer']
+        roles: ['viewer'],
       };
 
       expect(principal.roles).toHaveLength(1);
@@ -143,11 +143,11 @@ describe('Security Module', () => {
       const roles = ['admin', 'user', 'moderator', 'editor', 'reviewer'];
       const principal: Principal = {
         userId: 'multi-role-user',
-        roles
+        roles,
       };
 
       expect(principal.roles).toHaveLength(5);
-      roles.forEach(role => {
+      roles.forEach((role) => {
         expect(principal.roles).toContain(role);
       });
     });
@@ -158,7 +158,7 @@ describe('Security Module', () => {
       const adminPolicy: PermissionPolicy = {
         role: 'admin',
         mapNamePattern: '*',
-        actions: ['ALL']
+        actions: ['ALL'],
       };
 
       expect(adminPolicy.actions).toContain('ALL');
@@ -170,7 +170,7 @@ describe('Security Module', () => {
         role: 'viewer',
         mapNamePattern: 'public.*',
         actions: ['READ'],
-        allowedFields: ['title', 'description', 'createdAt']
+        allowedFields: ['title', 'description', 'createdAt'],
       };
 
       expect(readOnlyPolicy.actions).toEqual(['READ']);
@@ -183,7 +183,7 @@ describe('Security Module', () => {
         role: 'editor',
         mapNamePattern: 'articles.*',
         actions: ['READ', 'PUT'],
-        allowedFields: ['title', 'content', 'tags', 'updatedAt']
+        allowedFields: ['title', 'content', 'tags', 'updatedAt'],
       };
 
       expect(editorPolicy.actions).toContain('READ');
@@ -197,17 +197,19 @@ describe('Security Module', () => {
     test('should handle principal with UUID-style userId', () => {
       const principal: Principal = {
         userId: '550e8400-e29b-41d4-a716-446655440000',
-        roles: ['user']
+        roles: ['user'],
       };
 
-      expect(principal.userId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+      expect(principal.userId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      );
     });
 
     test('should handle policy with complex mapNamePattern', () => {
       const policy: PermissionPolicy = {
         role: 'service',
         mapNamePattern: 'api.v1.users.*',
-        actions: ['READ', 'PUT', 'REMOVE']
+        actions: ['READ', 'PUT', 'REMOVE'],
       };
 
       expect(policy.mapNamePattern).toBe('api.v1.users.*');
@@ -220,7 +222,7 @@ describe('Security Module', () => {
         roles: ['user'],
         nullableField: null,
         undefinedField: undefined,
-        emptyString: ''
+        emptyString: '',
       };
 
       expect(principal.nullableField).toBeNull();
@@ -232,7 +234,7 @@ describe('Security Module', () => {
       const fullAccessPolicy: PermissionPolicy = {
         role: 'superadmin',
         mapNamePattern: '*',
-        actions: ['ALL']
+        actions: ['ALL'],
       };
 
       // ALL should imply READ, PUT, REMOVE

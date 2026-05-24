@@ -14,18 +14,26 @@ export function useMutation<T = any, K = string>(mapName: string): UseMutationRe
   // LWWMap is the default assumption for simple mutations.
   const map = client.getMap<K, T>(mapName);
 
-  const create = useCallback((key: K, value: T) => {
-    map.set(key, value);
-  }, [map]);
+  const create = useCallback(
+    (key: K, value: T) => {
+      map.set(key, value);
+    },
+    [map],
+  );
 
-  const update = useCallback((key: K, value: T) => {
-    map.set(key, value);
-  }, [map]);
+  const update = useCallback(
+    (key: K, value: T) => {
+      map.set(key, value);
+    },
+    [map],
+  );
 
-  const remove = useCallback((key: K) => {
-    map.remove(key);
-  }, [map]);
+  const remove = useCallback(
+    (key: K) => {
+      map.remove(key);
+    },
+    [map],
+  );
 
   return { create, update, remove, map };
 }
-

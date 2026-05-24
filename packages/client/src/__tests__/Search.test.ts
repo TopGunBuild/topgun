@@ -63,7 +63,9 @@ describe('Client Search', () => {
     });
 
     it('should throw error when not authenticated', async () => {
-      await expect(syncEngine.search('articles', 'test')).rejects.toThrow('Not connected to server');
+      await expect(syncEngine.search('articles', 'test')).rejects.toThrow(
+        'Not connected to server',
+      );
     });
 
     it('should send SEARCH message with correct payload', async () => {
@@ -82,7 +84,7 @@ describe('Client Search', () => {
             query: 'machine learning',
             options: { limit: 10 },
           }),
-        })
+        }),
       );
 
       // Simulate response
@@ -92,7 +94,12 @@ describe('Client Search', () => {
         payload: {
           requestId: sentMessage.payload.requestId,
           results: [
-            { key: 'doc1', value: { title: 'ML Basics' }, score: 1.5, matchedTerms: ['machine', 'learning'] },
+            {
+              key: 'doc1',
+              value: { title: 'ML Basics' },
+              score: 1.5,
+              matchedTerms: ['machine', 'learning'],
+            },
           ],
           totalCount: 1,
         },
@@ -172,7 +179,7 @@ describe('Client Search', () => {
           payload: expect.objectContaining({
             options,
           }),
-        })
+        }),
       );
 
       // Cleanup
@@ -193,7 +200,9 @@ describe('Client Search', () => {
       (syncEngine as any).stateMachine.state = SyncState.CONNECTED;
       mockSendMessage.mockReturnValue(false);
 
-      await expect(syncEngine.search('articles', 'test')).rejects.toThrow('Failed to send search request');
+      await expect(syncEngine.search('articles', 'test')).rejects.toThrow(
+        'Failed to send search request',
+      );
     });
   });
 
@@ -212,7 +221,9 @@ describe('Client Search', () => {
       const mockSearch = jest.fn().mockResolvedValue(mockResults);
       (client as any).syncEngine.search = mockSearch;
 
-      const results = await client.search<{ title: string }>('articles', 'test query', { limit: 10 });
+      const results = await client.search<{ title: string }>('articles', 'test query', {
+        limit: 10,
+      });
 
       expect(mockSearch).toHaveBeenCalledWith('articles', 'test query', { limit: 10 });
       expect(results).toEqual(mockResults);
@@ -275,7 +286,7 @@ describe('Client Search', () => {
             query: 'machine learning',
             options: { limit: 10 },
           }),
-        })
+        }),
       );
 
       handle.dispose();
@@ -320,9 +331,7 @@ describe('Client Search', () => {
         type: 'SEARCH_RESP',
         payload: {
           requestId: sentMessage.payload.subscriptionId,
-          results: [
-            { key: 'doc1', value: { title: 'Test' }, score: 1.0, matchedTerms: ['test'] },
-          ],
+          results: [{ key: 'doc1', value: { title: 'Test' }, score: 1.0, matchedTerms: ['test'] }],
           totalCount: 1,
         },
       });
@@ -455,7 +464,7 @@ describe('Client Search', () => {
         expect.objectContaining({
           type: 'SEARCH_UNSUB',
           payload: { subscriptionId },
-        })
+        }),
       );
     });
 
@@ -473,7 +482,7 @@ describe('Client Search', () => {
         expect.objectContaining({
           type: 'SEARCH_UNSUB',
           payload: { subscriptionId: originalSubId },
-        })
+        }),
       );
 
       // Should send SUB for new query
@@ -483,7 +492,7 @@ describe('Client Search', () => {
           payload: expect.objectContaining({
             query: 'updated',
           }),
-        })
+        }),
       );
 
       expect(handle.query).toBe('updated');

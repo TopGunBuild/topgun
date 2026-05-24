@@ -170,7 +170,7 @@ describe('useEventJournal', () => {
 
       expect(mockJournalReader.subscribe).toHaveBeenCalledWith(
         expect.any(Function),
-        expect.objectContaining({ mapName: 'users' })
+        expect.objectContaining({ mapName: 'users' }),
       );
     });
 
@@ -179,7 +179,7 @@ describe('useEventJournal', () => {
 
       expect(mockJournalReader.subscribe).toHaveBeenCalledWith(
         expect.any(Function),
-        expect.objectContaining({ types: ['PUT', 'DELETE'] })
+        expect.objectContaining({ types: ['PUT', 'DELETE'] }),
       );
     });
 
@@ -188,7 +188,7 @@ describe('useEventJournal', () => {
 
       expect(mockJournalReader.subscribe).toHaveBeenCalledWith(
         expect.any(Function),
-        expect.objectContaining({ fromSequence: 100n })
+        expect.objectContaining({ fromSequence: 100n }),
       );
     });
   });
@@ -202,10 +202,10 @@ describe('useEventJournal', () => {
     });
 
     it('should subscribe when paused changes from true to false', () => {
-      const { result, rerender } = renderHook(
-        ({ paused }) => useEventJournal({ paused }),
-        { wrapper, initialProps: { paused: true } }
-      );
+      const { result, rerender } = renderHook(({ paused }) => useEventJournal({ paused }), {
+        wrapper,
+        initialProps: { paused: true },
+      });
 
       expect(result.current.isSubscribed).toBe(false);
       expect(mockJournalReader.subscribe).not.toHaveBeenCalled();
@@ -217,10 +217,10 @@ describe('useEventJournal', () => {
     });
 
     it('should unsubscribe when paused changes from false to true', () => {
-      const { result, rerender } = renderHook(
-        ({ paused }) => useEventJournal({ paused }),
-        { wrapper, initialProps: { paused: false } }
-      );
+      const { result, rerender } = renderHook(({ paused }) => useEventJournal({ paused }), {
+        wrapper,
+        initialProps: { paused: false },
+      });
 
       expect(result.current.isSubscribed).toBe(true);
       expect(mockJournalReader._getListenerCount()).toBe(1);
@@ -256,10 +256,7 @@ describe('useEventJournal', () => {
 
   describe('readFrom', () => {
     it('should call readFrom on the journal reader', async () => {
-      const mockEvents = [
-        createMockEvent({ sequence: 1n }),
-        createMockEvent({ sequence: 2n }),
-      ];
+      const mockEvents = [createMockEvent({ sequence: 1n }), createMockEvent({ sequence: 2n })];
       mockJournalReader.readFrom.mockResolvedValue(mockEvents);
 
       const { result } = renderHook(() => useEventJournal(), { wrapper });
@@ -336,15 +333,15 @@ describe('useEventJournal', () => {
 
   describe('re-subscription on option changes', () => {
     it('should re-subscribe when mapName changes', () => {
-      const { rerender } = renderHook(
-        ({ mapName }) => useEventJournal({ mapName }),
-        { wrapper, initialProps: { mapName: 'users' } }
-      );
+      const { rerender } = renderHook(({ mapName }) => useEventJournal({ mapName }), {
+        wrapper,
+        initialProps: { mapName: 'users' },
+      });
 
       expect(mockJournalReader.subscribe).toHaveBeenCalledTimes(1);
       expect(mockJournalReader.subscribe).toHaveBeenLastCalledWith(
         expect.any(Function),
-        expect.objectContaining({ mapName: 'users' })
+        expect.objectContaining({ mapName: 'users' }),
       );
 
       rerender({ mapName: 'orders' });
@@ -352,15 +349,15 @@ describe('useEventJournal', () => {
       expect(mockJournalReader.subscribe).toHaveBeenCalledTimes(2);
       expect(mockJournalReader.subscribe).toHaveBeenLastCalledWith(
         expect.any(Function),
-        expect.objectContaining({ mapName: 'orders' })
+        expect.objectContaining({ mapName: 'orders' }),
       );
     });
 
     it('should re-subscribe when types change', () => {
-      const { rerender } = renderHook(
-        ({ types }) => useEventJournal({ types }),
-        { wrapper, initialProps: { types: ['PUT'] as JournalEvent['type'][] } }
-      );
+      const { rerender } = renderHook(({ types }) => useEventJournal({ types }), {
+        wrapper,
+        initialProps: { types: ['PUT'] as JournalEvent['type'][] },
+      });
 
       expect(mockJournalReader.subscribe).toHaveBeenCalledTimes(1);
 
@@ -375,10 +372,10 @@ describe('useEventJournal', () => {
       const onEvent1 = jest.fn();
       const onEvent2 = jest.fn();
 
-      const { rerender } = renderHook(
-        ({ onEvent }) => useEventJournal({ onEvent }),
-        { wrapper, initialProps: { onEvent: onEvent1 } }
-      );
+      const { rerender } = renderHook(({ onEvent }) => useEventJournal({ onEvent }), {
+        wrapper,
+        initialProps: { onEvent: onEvent1 },
+      });
 
       // First event with first callback
       act(() => {
@@ -406,26 +403,32 @@ describe('useEventJournal', () => {
       const { result } = renderHook(() => useEventJournal(), { wrapper });
 
       act(() => {
-        mockJournalReader._triggerEvent(createMockEvent({
-          sequence: 1n,
-          type: 'PUT',
-          key: 'user1',
-          value: { name: 'Alice' },
-        }));
-        mockJournalReader._triggerEvent(createMockEvent({
-          sequence: 2n,
-          type: 'UPDATE',
-          key: 'user1',
-          value: { name: 'Alice Updated' },
-          previousValue: { name: 'Alice' },
-        }));
-        mockJournalReader._triggerEvent(createMockEvent({
-          sequence: 3n,
-          type: 'DELETE',
-          key: 'user1',
-          value: undefined,
-          previousValue: { name: 'Alice Updated' },
-        }));
+        mockJournalReader._triggerEvent(
+          createMockEvent({
+            sequence: 1n,
+            type: 'PUT',
+            key: 'user1',
+            value: { name: 'Alice' },
+          }),
+        );
+        mockJournalReader._triggerEvent(
+          createMockEvent({
+            sequence: 2n,
+            type: 'UPDATE',
+            key: 'user1',
+            value: { name: 'Alice Updated' },
+            previousValue: { name: 'Alice' },
+          }),
+        );
+        mockJournalReader._triggerEvent(
+          createMockEvent({
+            sequence: 3n,
+            type: 'DELETE',
+            key: 'user1',
+            value: undefined,
+            previousValue: { name: 'Alice Updated' },
+          }),
+        );
       });
 
       expect(result.current.events).toHaveLength(3);

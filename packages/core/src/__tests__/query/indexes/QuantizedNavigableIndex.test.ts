@@ -10,14 +10,8 @@ interface TimestampedEvent {
   value: number;
 }
 
-const timestampAttr = simpleAttribute<TimestampedEvent, number>(
-  'timestamp',
-  (e) => e.timestamp
-);
-const valueAttr = simpleAttribute<TimestampedEvent, number>(
-  'value',
-  (e) => e.value
-);
+const timestampAttr = simpleAttribute<TimestampedEvent, number>('timestamp', (e) => e.timestamp);
+const valueAttr = simpleAttribute<TimestampedEvent, number>('value', (e) => e.value);
 
 describe('QuantizedNavigableIndex', () => {
   describe('Quantizers', () => {
@@ -103,26 +97,17 @@ describe('QuantizedNavigableIndex', () => {
 
   describe('basic properties', () => {
     it('should have type navigable', () => {
-      const index = new QuantizedNavigableIndex(
-        timestampAttr,
-        Quantizers.integerMultiple(1000)
-      );
+      const index = new QuantizedNavigableIndex(timestampAttr, Quantizers.integerMultiple(1000));
       expect(index.type).toBe('navigable');
     });
 
     it('should return correct retrieval cost (40)', () => {
-      const index = new QuantizedNavigableIndex(
-        timestampAttr,
-        Quantizers.integerMultiple(1000)
-      );
+      const index = new QuantizedNavigableIndex(timestampAttr, Quantizers.integerMultiple(1000));
       expect(index.getRetrievalCost()).toBe(40);
     });
 
     it('should expose original attribute', () => {
-      const index = new QuantizedNavigableIndex(
-        timestampAttr,
-        Quantizers.integerMultiple(1000)
-      );
+      const index = new QuantizedNavigableIndex(timestampAttr, Quantizers.integerMultiple(1000));
       expect(index.attribute).toBe(timestampAttr);
     });
 
@@ -135,10 +120,7 @@ describe('QuantizedNavigableIndex', () => {
 
   describe('quantized indexing', () => {
     it('should group values into buckets', () => {
-      const index = new QuantizedNavigableIndex(
-        valueAttr,
-        Quantizers.integerMultiple(10)
-      );
+      const index = new QuantizedNavigableIndex(valueAttr, Quantizers.integerMultiple(10));
 
       // Add values that will be quantized to the same bucket
       index.add('1', { id: '1', timestamp: 0, value: 5 }); // -> bucket 0
@@ -152,10 +134,7 @@ describe('QuantizedNavigableIndex', () => {
     });
 
     it('should retrieve all values in bucket for equal query', () => {
-      const index = new QuantizedNavigableIndex(
-        valueAttr,
-        Quantizers.integerMultiple(10)
-      );
+      const index = new QuantizedNavigableIndex(valueAttr, Quantizers.integerMultiple(10));
 
       index.add('1', { id: '1', timestamp: 0, value: 5 });
       index.add('2', { id: '2', timestamp: 0, value: 8 });
@@ -167,10 +146,7 @@ describe('QuantizedNavigableIndex', () => {
     });
 
     it('should deduplicate buckets in "in" query', () => {
-      const index = new QuantizedNavigableIndex(
-        valueAttr,
-        Quantizers.integerMultiple(10)
-      );
+      const index = new QuantizedNavigableIndex(valueAttr, Quantizers.integerMultiple(10));
 
       index.add('1', { id: '1', timestamp: 0, value: 5 });
       index.add('2', { id: '2', timestamp: 0, value: 15 });
@@ -185,10 +161,7 @@ describe('QuantizedNavigableIndex', () => {
     let index: QuantizedNavigableIndex<string, TimestampedEvent, number>;
 
     beforeEach(() => {
-      index = new QuantizedNavigableIndex(
-        valueAttr,
-        Quantizers.integerMultiple(10)
-      );
+      index = new QuantizedNavigableIndex(valueAttr, Quantizers.integerMultiple(10));
 
       // Add values: 5->0, 15->10, 25->20, 35->30, 45->40
       index.add('1', { id: '1', timestamp: 0, value: 5 });
@@ -233,7 +206,7 @@ describe('QuantizedNavigableIndex', () => {
     it('should group events by minute', () => {
       const index = new QuantizedNavigableIndex(
         timestampAttr,
-        Quantizers.timestampInterval(60000) // 1 minute
+        Quantizers.timestampInterval(60000), // 1 minute
       );
 
       const baseTime = 1704067200000;
@@ -263,10 +236,7 @@ describe('QuantizedNavigableIndex', () => {
 
   describe('add/remove/update', () => {
     it('should add records with quantized values', () => {
-      const index = new QuantizedNavigableIndex(
-        valueAttr,
-        Quantizers.integerMultiple(10)
-      );
+      const index = new QuantizedNavigableIndex(valueAttr, Quantizers.integerMultiple(10));
 
       index.add('1', { id: '1', timestamp: 0, value: 5 });
       index.add('2', { id: '2', timestamp: 0, value: 8 });
@@ -276,10 +246,7 @@ describe('QuantizedNavigableIndex', () => {
     });
 
     it('should remove records correctly', () => {
-      const index = new QuantizedNavigableIndex(
-        valueAttr,
-        Quantizers.integerMultiple(10)
-      );
+      const index = new QuantizedNavigableIndex(valueAttr, Quantizers.integerMultiple(10));
 
       const event = { id: '1', timestamp: 0, value: 5 };
       index.add('1', event);
@@ -290,10 +257,7 @@ describe('QuantizedNavigableIndex', () => {
     });
 
     it('should update when quantized value changes', () => {
-      const index = new QuantizedNavigableIndex(
-        valueAttr,
-        Quantizers.integerMultiple(10)
-      );
+      const index = new QuantizedNavigableIndex(valueAttr, Quantizers.integerMultiple(10));
 
       const event1 = { id: '1', timestamp: 0, value: 5 }; // bucket 0
       const event2 = { id: '1', timestamp: 0, value: 15 }; // bucket 10
@@ -306,10 +270,7 @@ describe('QuantizedNavigableIndex', () => {
     });
 
     it('should skip update when quantized value unchanged', () => {
-      const index = new QuantizedNavigableIndex(
-        valueAttr,
-        Quantizers.integerMultiple(10)
-      );
+      const index = new QuantizedNavigableIndex(valueAttr, Quantizers.integerMultiple(10));
 
       const event1 = { id: '1', timestamp: 0, value: 5 }; // bucket 0
       const event2 = { id: '1', timestamp: 0, value: 8 }; // still bucket 0
@@ -325,10 +286,7 @@ describe('QuantizedNavigableIndex', () => {
 
   describe('clear', () => {
     it('should clear all entries', () => {
-      const index = new QuantizedNavigableIndex(
-        valueAttr,
-        Quantizers.integerMultiple(10)
-      );
+      const index = new QuantizedNavigableIndex(valueAttr, Quantizers.integerMultiple(10));
 
       index.add('1', { id: '1', timestamp: 0, value: 5 });
       index.add('2', { id: '2', timestamp: 0, value: 15 });
@@ -342,10 +300,7 @@ describe('QuantizedNavigableIndex', () => {
 
   describe('has query', () => {
     it('should return all indexed keys', () => {
-      const index = new QuantizedNavigableIndex(
-        valueAttr,
-        Quantizers.integerMultiple(10)
-      );
+      const index = new QuantizedNavigableIndex(valueAttr, Quantizers.integerMultiple(10));
 
       index.add('1', { id: '1', timestamp: 0, value: 5 });
       index.add('2', { id: '2', timestamp: 0, value: 15 });
@@ -358,10 +313,7 @@ describe('QuantizedNavigableIndex', () => {
 
   describe('edge cases', () => {
     it('should handle empty index', () => {
-      const index = new QuantizedNavigableIndex(
-        valueAttr,
-        Quantizers.integerMultiple(10)
-      );
+      const index = new QuantizedNavigableIndex(valueAttr, Quantizers.integerMultiple(10));
 
       expect([...index.retrieve({ type: 'equal', value: 10 })]).toEqual([]);
       expect([...index.retrieve({ type: 'gt', value: 10 })]).toEqual([]);
@@ -369,10 +321,7 @@ describe('QuantizedNavigableIndex', () => {
     });
 
     it('should throw for unsupported query type', () => {
-      const index = new QuantizedNavigableIndex(
-        valueAttr,
-        Quantizers.integerMultiple(10)
-      );
+      const index = new QuantizedNavigableIndex(valueAttr, Quantizers.integerMultiple(10));
 
       expect(() => {
         index.retrieve({ type: 'contains' as 'equal', value: 10 });
@@ -384,12 +333,12 @@ describe('QuantizedNavigableIndex', () => {
     it('should reduce bucket count with quantization', () => {
       const regularIndex = new QuantizedNavigableIndex(
         valueAttr,
-        Quantizers.integerMultiple(1) // No quantization
+        Quantizers.integerMultiple(1), // No quantization
       );
 
       const quantizedIndex = new QuantizedNavigableIndex(
         valueAttr,
-        Quantizers.integerMultiple(100)
+        Quantizers.integerMultiple(100),
       );
 
       // Add 1000 events with sequential values

@@ -48,7 +48,7 @@ describe('SearchCursor', () => {
     it('should create cursor from results', () => {
       const results = [
         { key: 'doc-1', score: 0.95, nodeId: 'node-1' },
-        { key: 'doc-2', score: 0.90, nodeId: 'node-2' },
+        { key: 'doc-2', score: 0.9, nodeId: 'node-2' },
         { key: 'doc-3', score: 0.85, nodeId: 'node-1' },
       ];
 
@@ -58,7 +58,7 @@ describe('SearchCursor', () => {
       expect(decoded).not.toBeNull();
       // Last result per node should be tracked
       expect(decoded!.nodeScores['node-1']).toBe(0.85);
-      expect(decoded!.nodeScores['node-2']).toBe(0.90);
+      expect(decoded!.nodeScores['node-2']).toBe(0.9);
       expect(decoded!.nodeKeys['node-1']).toBe('doc-3');
       expect(decoded!.nodeKeys['node-2']).toBe('doc-2');
       expect(decoded!.queryHash).toBe(hashString('test query'));
@@ -67,7 +67,7 @@ describe('SearchCursor', () => {
     it('should create cursor from single result', () => {
       const cursor = SearchCursor.fromLastResult(
         { key: 'doc-1', score: 0.95, nodeId: 'node-1' },
-        'single query'
+        'single query',
       );
 
       const decoded = SearchCursor.decode(cursor);
@@ -82,7 +82,7 @@ describe('SearchCursor', () => {
       const query = 'machine learning';
       const cursor = SearchCursor.fromResults(
         [{ key: 'doc-1', score: 0.95, nodeId: 'node-1' }],
-        query
+        query,
       );
       const decoded = SearchCursor.decode(cursor)!;
 
@@ -92,7 +92,7 @@ describe('SearchCursor', () => {
     it('should reject cursor for different query', () => {
       const cursor = SearchCursor.fromResults(
         [{ key: 'doc-1', score: 0.95, nodeId: 'node-1' }],
-        'original query'
+        'original query',
       );
       const decoded = SearchCursor.decode(cursor)!;
 
@@ -163,29 +163,29 @@ describe('SearchCursor', () => {
 
   describe('isAfterCursor', () => {
     const cursor: SearchCursorData = {
-      nodeScores: { 'node-1': 0.80 },
+      nodeScores: { 'node-1': 0.8 },
       nodeKeys: { 'node-1': 'doc-m' },
       queryHash: 123,
       timestamp: Date.now(),
     };
 
     it('should include result with lower score', () => {
-      const result = { key: 'doc-x', score: 0.70, nodeId: 'node-1' };
+      const result = { key: 'doc-x', score: 0.7, nodeId: 'node-1' };
       expect(SearchCursor.isAfterCursor(result, cursor)).toBe(true);
     });
 
     it('should include result with equal score but higher key', () => {
-      const result = { key: 'doc-z', score: 0.80, nodeId: 'node-1' };
+      const result = { key: 'doc-z', score: 0.8, nodeId: 'node-1' };
       expect(SearchCursor.isAfterCursor(result, cursor)).toBe(true);
     });
 
     it('should exclude result with higher score', () => {
-      const result = { key: 'doc-x', score: 0.90, nodeId: 'node-1' };
+      const result = { key: 'doc-x', score: 0.9, nodeId: 'node-1' };
       expect(SearchCursor.isAfterCursor(result, cursor)).toBe(false);
     });
 
     it('should exclude result with equal score and lower key', () => {
-      const result = { key: 'doc-a', score: 0.80, nodeId: 'node-1' };
+      const result = { key: 'doc-a', score: 0.8, nodeId: 'node-1' };
       expect(SearchCursor.isAfterCursor(result, cursor)).toBe(false);
     });
 
@@ -198,14 +198,14 @@ describe('SearchCursor', () => {
   describe('merge', () => {
     it('should merge multiple cursors', () => {
       const cursor1: SearchCursorData = {
-        nodeScores: { 'node-1': 0.80 },
+        nodeScores: { 'node-1': 0.8 },
         nodeKeys: { 'node-1': 'doc-a' },
         queryHash: hashString('test'),
         timestamp: Date.now() - 1000,
       };
 
       const cursor2: SearchCursorData = {
-        nodeScores: { 'node-1': 0.70, 'node-2': 0.85 },
+        nodeScores: { 'node-1': 0.7, 'node-2': 0.85 },
         nodeKeys: { 'node-1': 'doc-b', 'node-2': 'doc-c' },
         queryHash: hashString('test'),
         timestamp: Date.now() - 500,
@@ -214,7 +214,7 @@ describe('SearchCursor', () => {
       const merged = SearchCursor.merge([cursor1, cursor2], 'test');
 
       // Should keep lowest score per node (furthest position)
-      expect(merged.nodeScores['node-1']).toBe(0.70);
+      expect(merged.nodeScores['node-1']).toBe(0.7);
       expect(merged.nodeKeys['node-1']).toBe('doc-b');
       // Should include nodes from both cursors
       expect(merged.nodeScores['node-2']).toBe(0.85);
@@ -226,14 +226,14 @@ describe('SearchCursor', () => {
 
     it('should handle tie-breaking by highest key', () => {
       const cursor1: SearchCursorData = {
-        nodeScores: { 'node-1': 0.80 },
+        nodeScores: { 'node-1': 0.8 },
         nodeKeys: { 'node-1': 'doc-a' },
         queryHash: hashString('test'),
         timestamp: Date.now(),
       };
 
       const cursor2: SearchCursorData = {
-        nodeScores: { 'node-1': 0.80 },
+        nodeScores: { 'node-1': 0.8 },
         nodeKeys: { 'node-1': 'doc-z' },
         queryHash: hashString('test'),
         timestamp: Date.now(),
@@ -242,7 +242,7 @@ describe('SearchCursor', () => {
       const merged = SearchCursor.merge([cursor1, cursor2], 'test');
 
       // Same score, should take higher key
-      expect(merged.nodeScores['node-1']).toBe(0.80);
+      expect(merged.nodeScores['node-1']).toBe(0.8);
       expect(merged.nodeKeys['node-1']).toBe('doc-z');
     });
   });

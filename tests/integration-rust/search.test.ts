@@ -38,19 +38,31 @@ describe('Integration: Search (Rust Server)', () => {
       const articles = [
         {
           key: 'art-1',
-          value: { title: 'Introduction to Machine Learning', body: 'Machine learning is a subset of artificial intelligence.' },
+          value: {
+            title: 'Introduction to Machine Learning',
+            body: 'Machine learning is a subset of artificial intelligence.',
+          },
         },
         {
           key: 'art-2',
-          value: { title: 'Deep Learning Fundamentals', body: 'Deep learning uses neural networks with many layers.' },
+          value: {
+            title: 'Deep Learning Fundamentals',
+            body: 'Deep learning uses neural networks with many layers.',
+          },
         },
         {
           key: 'art-3',
-          value: { title: 'Natural Language Processing', body: 'NLP helps computers understand human language.' },
+          value: {
+            title: 'Natural Language Processing',
+            body: 'NLP helps computers understand human language.',
+          },
         },
         {
           key: 'art-4',
-          value: { title: 'Advanced Machine Learning Techniques', body: 'Covers advanced ML algorithms and optimization.' },
+          value: {
+            title: 'Advanced Machine Learning Techniques',
+            body: 'Covers advanced ML algorithms and optimization.',
+          },
         },
       ];
 
@@ -103,8 +115,9 @@ describe('Integration: Search (Rust Server)', () => {
 
       // Results should be sorted by score descending
       for (let i = 1; i < response.payload.results.length; i++) {
-        expect(response.payload.results[i - 1].score)
-          .toBeGreaterThanOrEqual(response.payload.results[i].score);
+        expect(response.payload.results[i - 1].score).toBeGreaterThanOrEqual(
+          response.payload.results[i].score,
+        );
       }
 
       client.close();
@@ -177,9 +190,21 @@ describe('Integration: Search (Rust Server)', () => {
 
       // Write docs with varying relevance to "quantum"
       const docs = [
-        { key: 'q-1', value: { title: 'Quantum physics introduction', body: 'Quantum mechanics is fundamental.' } },
-        { key: 'q-2', value: { title: 'Classical physics', body: 'Newton laws of motion and gravity.' } },
-        { key: 'q-3', value: { title: 'Quantum computing', body: 'Quantum bits and quantum entanglement.' } },
+        {
+          key: 'q-1',
+          value: {
+            title: 'Quantum physics introduction',
+            body: 'Quantum mechanics is fundamental.',
+          },
+        },
+        {
+          key: 'q-2',
+          value: { title: 'Classical physics', body: 'Newton laws of motion and gravity.' },
+        },
+        {
+          key: 'q-3',
+          value: { title: 'Quantum computing', body: 'Quantum bits and quantum entanglement.' },
+        },
       ];
 
       for (const doc of docs) {
@@ -338,7 +363,10 @@ describe('Integration: Search (Rust Server)', () => {
           mapName,
           opType: 'PUT',
           key: 'existing-doc',
-          record: createLWWRecord({ name: 'Wireless Keyboard', description: 'Bluetooth wireless keyboard' }),
+          record: createLWWRecord({
+            name: 'Wireless Keyboard',
+            description: 'Bluetooth wireless keyboard',
+          }),
         },
       });
       await writer.waitForMessage('OP_ACK');
@@ -359,9 +387,7 @@ describe('Integration: Search (Rust Server)', () => {
       const initialResp = await subscriber.waitForMessage('SEARCH_RESP');
       expect(initialResp.payload.requestId).toBe('sub-wireless');
       expect(initialResp.payload.results.length).toBeGreaterThanOrEqual(1);
-      const existingResult = initialResp.payload.results.find(
-        (r: any) => r.key === 'existing-doc'
-      );
+      const existingResult = initialResp.payload.results.find((r: any) => r.key === 'existing-doc');
       expect(existingResult).toBeDefined();
       expect(existingResult.score).toBeGreaterThan(0);
 
@@ -377,7 +403,10 @@ describe('Integration: Search (Rust Server)', () => {
           mapName,
           opType: 'PUT',
           key: 'new-wireless-mouse',
-          record: createLWWRecord({ name: 'Wireless Mouse', description: 'Ergonomic wireless mouse' }),
+          record: createLWWRecord({
+            name: 'Wireless Mouse',
+            description: 'Ergonomic wireless mouse',
+          }),
         },
       });
 
@@ -388,16 +417,16 @@ describe('Integration: Search (Rust Server)', () => {
             (m) =>
               m.type === 'SEARCH_UPDATE' &&
               m.payload?.subscriptionId === 'sub-wireless' &&
-              m.payload?.changeType === 'ENTER'
+              m.payload?.changeType === 'ENTER',
           ),
-        5000
+        5000,
       );
 
       const enterUpdate = subscriber.messages.find(
         (m) =>
           m.type === 'SEARCH_UPDATE' &&
           m.payload?.subscriptionId === 'sub-wireless' &&
-          m.payload?.changeType === 'ENTER'
+          m.payload?.changeType === 'ENTER',
       );
       expect(enterUpdate).toBeDefined();
       expect(enterUpdate.payload.key).toBe('new-wireless-mouse');
@@ -488,16 +517,16 @@ describe('Integration: Search (Rust Server)', () => {
             (m) =>
               m.type === 'SEARCH_UPDATE' &&
               m.payload?.subscriptionId === 'sub-keyboard-upd' &&
-              m.payload?.changeType === 'UPDATE'
+              m.payload?.changeType === 'UPDATE',
           ),
-        5000
+        5000,
       );
 
       const updateMsg = subscriber.messages.find(
         (m) =>
           m.type === 'SEARCH_UPDATE' &&
           m.payload?.subscriptionId === 'sub-keyboard-upd' &&
-          m.payload?.changeType === 'UPDATE'
+          m.payload?.changeType === 'UPDATE',
       );
       expect(updateMsg).toBeDefined();
       expect(updateMsg.payload.key).toBe('updatable-doc');
@@ -588,16 +617,16 @@ describe('Integration: Search (Rust Server)', () => {
             (m) =>
               m.type === 'SEARCH_UPDATE' &&
               m.payload?.subscriptionId === 'sub-removable' &&
-              m.payload?.changeType === 'LEAVE'
+              m.payload?.changeType === 'LEAVE',
           ),
-        5000
+        5000,
       );
 
       const leaveMsg = subscriber.messages.find(
         (m) =>
           m.type === 'SEARCH_UPDATE' &&
           m.payload?.subscriptionId === 'sub-removable' &&
-          m.payload?.changeType === 'LEAVE'
+          m.payload?.changeType === 'LEAVE',
       );
       expect(leaveMsg).toBeDefined();
       expect(leaveMsg.payload.key).toBe('removable-doc');
@@ -659,11 +688,9 @@ describe('Integration: Search (Rust Server)', () => {
       await waitUntil(
         () =>
           subscriber.messages.some(
-            (m) =>
-              m.type === 'SEARCH_UPDATE' &&
-              m.payload?.subscriptionId === 'sub-monitor'
+            (m) => m.type === 'SEARCH_UPDATE' && m.payload?.subscriptionId === 'sub-monitor',
           ),
-        5000
+        5000,
       );
 
       // Now unsubscribe
@@ -688,7 +715,10 @@ describe('Integration: Search (Rust Server)', () => {
           mapName,
           opType: 'PUT',
           key: 'monitor-2',
-          record: createLWWRecord({ name: 'Curved Monitor', description: 'Ultrawide curved monitor' }),
+          record: createLWWRecord({
+            name: 'Curved Monitor',
+            description: 'Ultrawide curved monitor',
+          }),
         },
       });
 
@@ -698,9 +728,7 @@ describe('Integration: Search (Rust Server)', () => {
       await waitForSync(1000);
 
       const postUnsubUpdates = subscriber.messages.filter(
-        (m) =>
-          m.type === 'SEARCH_UPDATE' &&
-          m.payload?.subscriptionId === 'sub-monitor'
+        (m) => m.type === 'SEARCH_UPDATE' && m.payload?.subscriptionId === 'sub-monitor',
       );
       expect(postUnsubUpdates.length).toBe(0);
 
@@ -765,15 +793,13 @@ describe('Integration: Search (Rust Server)', () => {
             (m) =>
               m.type === 'SEARCH_UPDATE' &&
               m.payload?.subscriptionId === 'sub-important' &&
-              m.payload?.key === 'important-doc'
+              m.payload?.key === 'important-doc',
           ),
-        5000
+        5000,
       );
 
       const update = subscriber.messages.find(
-        (m) =>
-          m.type === 'SEARCH_UPDATE' &&
-          m.payload?.subscriptionId === 'sub-important'
+        (m) => m.type === 'SEARCH_UPDATE' && m.payload?.subscriptionId === 'sub-important',
       );
       expect(update).toBeDefined();
       expect(update.payload.changeType).toBe('ENTER');

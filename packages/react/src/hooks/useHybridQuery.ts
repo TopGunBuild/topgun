@@ -1,5 +1,11 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
-import type { HybridQueryHandle, HybridResultItem, HybridQueryFilter, CursorStatus, PaginationInfo } from '@topgunbuild/client';
+import type {
+  HybridQueryHandle,
+  HybridResultItem,
+  HybridQueryFilter,
+  CursorStatus,
+  PaginationInfo,
+} from '@topgunbuild/client';
 import { useClient } from './useClient';
 
 /**
@@ -120,7 +126,7 @@ export interface UseHybridQueryResult<T> {
 export function useHybridQuery<T = unknown>(
   mapName: string,
   filter: HybridQueryFilter = {},
-  options?: UseHybridQueryOptions
+  options?: UseHybridQueryOptions,
 ): UseHybridQueryResult<T> {
   const client = useClient();
   const [results, setResults] = useState<HybridResultItem<T>[]>([]);
@@ -142,13 +148,16 @@ export function useHybridQuery<T = unknown>(
   const unsubscribeRef = useRef<(() => void) | null>(null);
 
   // Memoize filter to avoid unnecessary re-renders
-  const memoizedFilter = useMemo(() => filter, [
-    JSON.stringify(filter.predicate),
-    JSON.stringify(filter.where),
-    JSON.stringify(filter.sort),
-    filter.limit,
-    filter.cursor,
-  ]);
+  const memoizedFilter = useMemo(
+    () => filter,
+    [
+      JSON.stringify(filter.predicate),
+      JSON.stringify(filter.where),
+      JSON.stringify(filter.sort),
+      filter.limit,
+      filter.cursor,
+    ],
+  );
 
   // Skip option
   const skip = options?.skip ?? false;
@@ -234,6 +243,6 @@ export function useHybridQuery<T = unknown>(
       hasMore: paginationInfo.hasMore,
       cursorStatus: paginationInfo.cursorStatus,
     }),
-    [results, loading, error, paginationInfo]
+    [results, loading, error, paginationInfo],
   );
 }

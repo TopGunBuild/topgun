@@ -37,7 +37,7 @@ class MockWebSocket {
 let uuidCounter = 0;
 const mockUUID = jest.fn(() => `test-uuid-${++uuidCounter}`);
 Object.defineProperty(global, 'crypto', {
-  value: { randomUUID: mockUUID }
+  value: { randomUUID: mockUUID },
 });
 
 // Mock Storage Adapter (reused from ORMapPersistence.test.ts)
@@ -94,8 +94,8 @@ class MemoryStorageAdapter implements IStorageAdapter {
   }
 
   async markOpsSynced(lastId: number): Promise<void> {
-    this._pendingOps = this._pendingOps.filter(op => op.id! > lastId);
-    this.opLog.forEach(op => {
+    this._pendingOps = this._pendingOps.filter((op) => op.id! > lastId);
+    this.opLog.forEach((op) => {
       if (op.id! <= lastId) op.synced = 1;
     });
   }
@@ -114,7 +114,7 @@ describe('TopGunClient', () => {
     storage = new MemoryStorageAdapter();
     client = new TopGunClient({
       serverUrl: 'ws://localhost:1234',
-      storage
+      storage,
     });
   });
 
@@ -123,7 +123,7 @@ describe('TopGunClient', () => {
       const customClient = new TopGunClient({
         nodeId: 'custom-node-id',
         serverUrl: 'ws://localhost:5678',
-        storage
+        storage,
       });
 
       expect(customClient).toBeInstanceOf(TopGunClient);
@@ -141,7 +141,7 @@ describe('TopGunClient', () => {
       const customClient = new TopGunClient({
         nodeId: 'my-custom-node',
         serverUrl: 'ws://localhost:1234',
-        storage
+        storage,
       });
 
       // When nodeId is provided, randomUUID should not be called for nodeId
@@ -282,7 +282,7 @@ describe('TopGunClient', () => {
 
       // Then try to get it as LWWMap
       expect(() => client.getMap<string, string>('tags')).toThrow(
-        'Map tags exists but is not an LWWMap'
+        'Map tags exists but is not an LWWMap',
       );
     });
 
@@ -299,7 +299,7 @@ describe('TopGunClient', () => {
       map.set('theme', 'dark');
 
       // Wait for async storage
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 10));
 
       const stored = await storage.get('settings:theme');
       expect(stored).toBeDefined();
@@ -310,10 +310,10 @@ describe('TopGunClient', () => {
       const map = client.getMap<string, string>('settings');
 
       map.set('theme', 'dark');
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 10));
 
       map.remove('theme');
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 10));
 
       const stored = await storage.get('settings:theme');
       expect(stored).toBeDefined();
@@ -328,7 +328,7 @@ describe('TopGunClient', () => {
 
       // Then try to get it as ORMap
       expect(() => client.getORMap<string, string>('items')).toThrow(
-        'Map items exists but is not an ORMap'
+        'Map items exists but is not an ORMap',
       );
     });
 
@@ -346,16 +346,19 @@ describe('TopGunClient', () => {
 
   describe('Cluster Mode Configuration', () => {
     test('should reject both serverUrl and cluster config', () => {
-      expect(() => new TopGunClient({
-        serverUrl: 'ws://localhost:8080',
-        cluster: { seeds: ['ws://node1:8080'] },
-        storage
-      })).toThrow('Cannot specify both serverUrl and cluster config');
+      expect(
+        () =>
+          new TopGunClient({
+            serverUrl: 'ws://localhost:8080',
+            cluster: { seeds: ['ws://node1:8080'] },
+            storage,
+          }),
+      ).toThrow('Cannot specify both serverUrl and cluster config');
     });
 
     test('should create client in local-only mode when no serverUrl or cluster provided', () => {
       const localClient = new TopGunClient({
-        storage
+        storage,
       });
 
       expect(localClient).toBeInstanceOf(TopGunClient);
@@ -363,16 +366,19 @@ describe('TopGunClient', () => {
     });
 
     test('should require at least one seed in cluster config', () => {
-      expect(() => new TopGunClient({
-        cluster: { seeds: [] },
-        storage
-      })).toThrow('Cluster config requires at least one seed node');
+      expect(
+        () =>
+          new TopGunClient({
+            cluster: { seeds: [] },
+            storage,
+          }),
+      ).toThrow('Cluster config requires at least one seed node');
     });
 
     test('should create client in cluster mode with valid cluster config', () => {
       const clusterClient = new TopGunClient({
         cluster: { seeds: ['ws://node1:8080', 'ws://node2:8080'] },
-        storage
+        storage,
       });
 
       expect(clusterClient).toBeInstanceOf(TopGunClient);
@@ -382,7 +388,7 @@ describe('TopGunClient', () => {
     test('should create client in single-server mode with serverUrl', () => {
       const singleClient = new TopGunClient({
         serverUrl: 'ws://localhost:8080',
-        storage
+        storage,
       });
 
       expect(singleClient).toBeInstanceOf(TopGunClient);
@@ -405,9 +411,9 @@ describe('TopGunClient', () => {
           smartRouting: false,
           partitionMapRefreshMs: 60000,
           connectionTimeoutMs: 10000,
-          retryAttempts: 5
+          retryAttempts: 5,
         },
-        storage
+        storage,
       });
 
       expect(clusterClient.isCluster()).toBe(true);
@@ -421,12 +427,12 @@ describe('TopGunClient', () => {
     beforeEach(() => {
       clusterClient = new TopGunClient({
         cluster: { seeds: ['ws://node1:8080', 'ws://node2:8080'] },
-        storage
+        storage,
       });
 
       singleClient = new TopGunClient({
         serverUrl: 'ws://localhost:8080',
-        storage
+        storage,
       });
     });
 
@@ -504,7 +510,7 @@ describe('TopGunClient', () => {
     test('close() should not throw in cluster mode', async () => {
       const tempClient = new TopGunClient({
         cluster: { seeds: ['ws://node1:8080'] },
-        storage
+        storage,
       });
 
       await expect(tempClient.close()).resolves.not.toThrow();

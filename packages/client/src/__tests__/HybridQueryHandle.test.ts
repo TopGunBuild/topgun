@@ -94,9 +94,10 @@ describe('HybridQueryHandle', () => {
 
       handle.subscribe(callback);
 
-      handle.onResult([
-        { key: 'doc1', value: { title: 'Test' }, score: 2.5, matchedTerms: ['test'] },
-      ], 'server');
+      handle.onResult(
+        [{ key: 'doc1', value: { title: 'Test' }, score: 2.5, matchedTerms: ['test'] }],
+        'server',
+      );
 
       expect(callback).toHaveBeenCalled();
       const results = callback.mock.calls[callback.mock.calls.length - 1][0];
@@ -106,20 +107,21 @@ describe('HybridQueryHandle', () => {
     });
 
     it('should sort results by _score desc', () => {
-      const handle = new HybridQueryHandle<{ title: string }>(
-        mockSyncEngine,
-        'articles',
-        { sort: { _score: 'desc' } }
-      );
+      const handle = new HybridQueryHandle<{ title: string }>(mockSyncEngine, 'articles', {
+        sort: { _score: 'desc' },
+      });
       const callback = jest.fn();
 
       handle.subscribe(callback);
 
-      handle.onResult([
-        { key: 'doc1', value: { title: 'Low' }, score: 1.0, matchedTerms: [] },
-        { key: 'doc2', value: { title: 'High' }, score: 5.0, matchedTerms: [] },
-        { key: 'doc3', value: { title: 'Medium' }, score: 3.0, matchedTerms: [] },
-      ], 'server');
+      handle.onResult(
+        [
+          { key: 'doc1', value: { title: 'Low' }, score: 1.0, matchedTerms: [] },
+          { key: 'doc2', value: { title: 'High' }, score: 5.0, matchedTerms: [] },
+          { key: 'doc3', value: { title: 'Medium' }, score: 3.0, matchedTerms: [] },
+        ],
+        'server',
+      );
 
       const results = callback.mock.calls[callback.mock.calls.length - 1][0];
       expect(results[0]._score).toBe(5.0);
@@ -128,31 +130,30 @@ describe('HybridQueryHandle', () => {
     });
 
     it('should apply limit', () => {
-      const handle = new HybridQueryHandle<{ title: string }>(
-        mockSyncEngine,
-        'articles',
-        { limit: 2 }
-      );
+      const handle = new HybridQueryHandle<{ title: string }>(mockSyncEngine, 'articles', {
+        limit: 2,
+      });
       const callback = jest.fn();
 
       handle.subscribe(callback);
 
-      handle.onResult([
-        { key: 'doc1', value: { title: 'First' }, score: 1.0, matchedTerms: [] },
-        { key: 'doc2', value: { title: 'Second' }, score: 2.0, matchedTerms: [] },
-        { key: 'doc3', value: { title: 'Third' }, score: 3.0, matchedTerms: [] },
-      ], 'server');
+      handle.onResult(
+        [
+          { key: 'doc1', value: { title: 'First' }, score: 1.0, matchedTerms: [] },
+          { key: 'doc2', value: { title: 'Second' }, score: 2.0, matchedTerms: [] },
+          { key: 'doc3', value: { title: 'Third' }, score: 3.0, matchedTerms: [] },
+        ],
+        'server',
+      );
 
       const results = callback.mock.calls[callback.mock.calls.length - 1][0];
       expect(results).toHaveLength(2);
     });
 
     it('should store cursor in filter', () => {
-      const handle = new HybridQueryHandle<{ title: string }>(
-        mockSyncEngine,
-        'articles',
-        { cursor: 'someCursorValue' }
-      );
+      const handle = new HybridQueryHandle<{ title: string }>(mockSyncEngine, 'articles', {
+        cursor: 'someCursorValue',
+      });
 
       expect(handle.getFilter().cursor).toBe('someCursorValue');
     });
@@ -197,9 +198,10 @@ describe('HybridQueryHandle', () => {
       handle.subscribe(callback);
 
       // First add local data
-      handle.onResult([
-        { key: 'doc1', value: { title: 'Local' }, score: 1.0, matchedTerms: [] },
-      ], 'local');
+      handle.onResult(
+        [{ key: 'doc1', value: { title: 'Local' }, score: 1.0, matchedTerms: [] }],
+        'local',
+      );
 
       // Then empty server response should be ignored
       handle.onResult([], 'server');

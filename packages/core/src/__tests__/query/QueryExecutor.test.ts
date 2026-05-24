@@ -237,7 +237,9 @@ describe('QueryExecutor', () => {
       const results = executor.execute(query, data);
 
       expect(results.length).toBe(3); // doc1, doc2, doc4
-      expect(results.every((r) => r.value.status === 'published' && r.value.category === 'tech')).toBe(true);
+      expect(
+        results.every((r) => r.value.status === 'published' && r.value.category === 'tech'),
+      ).toBe(true);
     });
 
     it('should execute OR query', () => {
@@ -458,12 +460,18 @@ describe('QueryExecutor', () => {
     it('should fuse with score-filter strategy', () => {
       const result1 = {
         keys: new Set(['doc1', 'doc2'] as const),
-        scores: new Map([['doc1', 2.0], ['doc2', 1.5]] as const),
+        scores: new Map([
+          ['doc1', 2.0],
+          ['doc2', 1.5],
+        ] as const),
         source: 'fulltext' as const,
       };
       const result2 = {
         keys: new Set(['doc2', 'doc3'] as const),
-        scores: new Map([['doc2', 1.0], ['doc3', 0.5]] as const),
+        scores: new Map([
+          ['doc2', 1.0],
+          ['doc3', 0.5],
+        ] as const),
         source: 'fulltext' as const,
       };
 
@@ -478,7 +486,11 @@ describe('QueryExecutor', () => {
     it('should fuse with rrf strategy', () => {
       const result1 = {
         keys: new Set(['doc1', 'doc2', 'doc3'] as const),
-        scores: new Map([['doc1', 3.0], ['doc2', 2.0], ['doc3', 1.0]] as const),
+        scores: new Map([
+          ['doc1', 3.0],
+          ['doc2', 2.0],
+          ['doc3', 1.0],
+        ] as const),
         source: 'fulltext' as const,
       };
       const result2 = {

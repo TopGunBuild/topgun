@@ -30,10 +30,7 @@ describe('IndexedLWWMap Query Performance', () => {
       const indexedMap = new IndexedLWWMap<string, User>(hlc);
 
       const emailAttr = simpleAttribute<User, string>('email', (u) => u.email);
-      const statusAttr = simpleAttribute<User, string>(
-        'status',
-        (u) => u.status
-      );
+      const statusAttr = simpleAttribute<User, string>('status', (u) => u.status);
       const ageAttr = simpleAttribute<User, number>('age', (u) => u.age);
 
       indexedMap.addHashIndex(emailAttr);

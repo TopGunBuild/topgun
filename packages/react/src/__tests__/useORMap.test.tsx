@@ -19,33 +19,33 @@ const createMockORMap = () => {
       }
       const tag = `tag-${++tagCounter}`;
       data.get(key)!.add({ value, tag });
-      listeners.forEach(cb => cb());
+      listeners.forEach((cb) => cb());
       return { value, tag, timestamp: Date.now() };
     }),
     get: jest.fn((key: string) => {
       const items = data.get(key);
       if (!items) return [];
-      return Array.from(items).map(item => item.value);
+      return Array.from(items).map((item) => item.value);
     }),
     remove: jest.fn((key: string, value: any) => {
       const items = data.get(key);
       if (!items) return [];
       const removedTags: string[] = [];
-      items.forEach(item => {
+      items.forEach((item) => {
         if (item.value === value || JSON.stringify(item.value) === JSON.stringify(value)) {
           tombstones.add(item.tag);
           removedTags.push(item.tag);
           items.delete(item);
         }
       });
-      listeners.forEach(cb => cb());
+      listeners.forEach((cb) => cb());
       return removedTags;
     }),
     has: jest.fn((key: string) => {
       const items = data.get(key);
       return items && items.size > 0;
     }),
-    keys: jest.fn(() => Array.from(data.keys()).filter(k => data.get(k)!.size > 0)),
+    keys: jest.fn(() => Array.from(data.keys()).filter((k) => data.get(k)!.size > 0)),
     subscribe: jest.fn((callback: () => void) => {
       listeners.add(callback);
       return () => {
@@ -54,7 +54,7 @@ const createMockORMap = () => {
     }),
     // Test helpers
     _triggerChange: () => {
-      listeners.forEach(cb => cb());
+      listeners.forEach((cb) => cb());
     },
     _getListenerCount: () => listeners.size,
     _getTombstoneCount: () => tombstones.size,
@@ -125,10 +125,13 @@ describe('useORMap', () => {
 
   it('should trigger re-render on map changes', () => {
     let renderCount = 0;
-    const { result } = renderHook(() => {
-      renderCount++;
-      return useORMap('test-ormap');
-    }, { wrapper });
+    const { result } = renderHook(
+      () => {
+        renderCount++;
+        return useORMap('test-ormap');
+      },
+      { wrapper },
+    );
 
     const initialRenderCount = renderCount;
 
@@ -188,7 +191,9 @@ describe('useORMap', () => {
   });
 
   it('should work with object values', () => {
-    const { result } = renderHook(() => useORMap<string, { id: number; name: string }>('users'), { wrapper });
+    const { result } = renderHook(() => useORMap<string, { id: number; name: string }>('users'), {
+      wrapper,
+    });
 
     const user1 = { id: 1, name: 'Alice' };
     const user2 = { id: 2, name: 'Bob' };
@@ -226,10 +231,13 @@ describe('useORMap', () => {
 
   it('should re-render when external changes occur', () => {
     let renderCount = 0;
-    renderHook(() => {
-      renderCount++;
-      return useORMap('test-ormap');
-    }, { wrapper });
+    renderHook(
+      () => {
+        renderCount++;
+        return useORMap('test-ormap');
+      },
+      { wrapper },
+    );
 
     const countAfterMount = renderCount;
 

@@ -82,17 +82,13 @@ describe('Integration: ORMap CRDT (Rust Server)', () => {
       await waitUntil(
         () =>
           observer.messages.some(
-            (m) =>
-              m.type === 'SERVER_EVENT' &&
-              m.payload?.eventType === 'OR_ADD'
+            (m) => m.type === 'SERVER_EVENT' && m.payload?.eventType === 'OR_ADD',
           ),
-        5000
+        5000,
       );
 
       const serverEvent = observer.messages.find(
-        (m) =>
-          m.type === 'SERVER_EVENT' &&
-          m.payload?.eventType === 'OR_ADD'
+        (m) => m.type === 'SERVER_EVENT' && m.payload?.eventType === 'OR_ADD',
       );
       expect(serverEvent).toBeDefined();
       expect(serverEvent.payload.mapName).toBe('or-items');
@@ -145,11 +141,9 @@ describe('Integration: ORMap CRDT (Rust Server)', () => {
       await waitUntil(
         () =>
           observer.messages.some(
-            (m) =>
-              m.type === 'SERVER_EVENT' &&
-              m.payload?.eventType === 'OR_ADD'
+            (m) => m.type === 'SERVER_EVENT' && m.payload?.eventType === 'OR_ADD',
           ),
-        5000
+        5000,
       );
 
       // Clear observer messages to isolate the OR_REMOVE event
@@ -171,17 +165,13 @@ describe('Integration: ORMap CRDT (Rust Server)', () => {
       await waitUntil(
         () =>
           observer.messages.some(
-            (m) =>
-              m.type === 'SERVER_EVENT' &&
-              m.payload?.eventType === 'OR_REMOVE'
+            (m) => m.type === 'SERVER_EVENT' && m.payload?.eventType === 'OR_REMOVE',
           ),
-        5000
+        5000,
       );
 
       const removeEvent = observer.messages.find(
-        (m) =>
-          m.type === 'SERVER_EVENT' &&
-          m.payload?.eventType === 'OR_REMOVE'
+        (m) => m.type === 'SERVER_EVENT' && m.payload?.eventType === 'OR_REMOVE',
       );
       expect(removeEvent).toBeDefined();
       expect(removeEvent.payload.mapName).toBe('removable');
@@ -255,18 +245,16 @@ describe('Integration: ORMap CRDT (Rust Server)', () => {
       await waitUntil(
         () =>
           observer.messages.filter(
-            (m) =>
-              m.type === 'SERVER_EVENT' &&
-              m.payload?.eventType === 'OR_ADD'
+            (m) => m.type === 'SERVER_EVENT' && m.payload?.eventType === 'OR_ADD',
           ).length >= 2,
-        5000
+        5000,
       );
 
       const addEvents = observer.messages.filter(
         (m) =>
           m.type === 'SERVER_EVENT' &&
           m.payload?.eventType === 'OR_ADD' &&
-          m.payload?.mapName === 'multi-values'
+          m.payload?.mapName === 'multi-values',
       );
       expect(addEvents.length).toBeGreaterThanOrEqual(2);
 
@@ -319,11 +307,9 @@ describe('Integration: ORMap CRDT (Rust Server)', () => {
       await waitUntil(
         () =>
           client2.messages.some(
-            (m) =>
-              m.type === 'SERVER_EVENT' &&
-              m.payload?.eventType === 'OR_ADD'
+            (m) => m.type === 'SERVER_EVENT' && m.payload?.eventType === 'OR_ADD',
           ),
-        5000
+        5000,
       );
 
       // Clear client2 messages to isolate the removal event
@@ -345,17 +331,13 @@ describe('Integration: ORMap CRDT (Rust Server)', () => {
       await waitUntil(
         () =>
           client1.messages.some(
-            (m) =>
-              m.type === 'SERVER_EVENT' &&
-              m.payload?.eventType === 'OR_REMOVE'
+            (m) => m.type === 'SERVER_EVENT' && m.payload?.eventType === 'OR_REMOVE',
           ),
-        5000
+        5000,
       );
 
       const removeEvent = client1.messages.find(
-        (m) =>
-          m.type === 'SERVER_EVENT' &&
-          m.payload?.eventType === 'OR_REMOVE'
+        (m) => m.type === 'SERVER_EVENT' && m.payload?.eventType === 'OR_REMOVE',
       );
       expect(removeEvent).toBeDefined();
       expect(removeEvent.payload.mapName).toBe('shared-or');

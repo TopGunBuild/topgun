@@ -24,9 +24,7 @@ import type { Comparator } from '../ds/types';
  *
  * K = record key type, V = record value type, A = attribute value type (must be orderable)
  */
-export class NavigableIndex<K, V, A extends string | number>
-  implements Index<K, V, A>
-{
+export class NavigableIndex<K, V, A extends string | number> implements Index<K, V, A> {
   readonly type = 'navigable' as const;
 
   /** Sorted map from attribute value to set of record keys */
@@ -58,7 +56,7 @@ export class NavigableIndex<K, V, A extends string | number>
    */
   constructor(
     readonly attribute: Attribute<V, A>,
-    comparator?: Comparator<A>
+    comparator?: Comparator<A>,
   ) {
     this.data = new SortedMap<A, Set<K>>(comparator);
   }
@@ -92,12 +90,10 @@ export class NavigableIndex<K, V, A extends string | number>
           query.from as A,
           query.to as A,
           query.fromInclusive ?? true,
-          query.toInclusive ?? false
+          query.toInclusive ?? false,
         );
       default:
-        throw new Error(
-          `NavigableIndex does not support query type: ${query.type}`
-        );
+        throw new Error(`NavigableIndex does not support query type: ${query.type}`);
     }
   }
 
@@ -105,10 +101,7 @@ export class NavigableIndex<K, V, A extends string | number>
 
   private retrieveEqual(value: A): ResultSet<K> {
     const keys = this.data.get(value);
-    return new SetResultSet(
-      keys ? new Set(keys) : new Set(),
-      NavigableIndex.RETRIEVAL_COST
-    );
+    return new SetResultSet(keys ? new Set(keys) : new Set(), NavigableIndex.RETRIEVAL_COST);
   }
 
   private retrieveIn(values: A[]): ResultSet<K> {
@@ -125,10 +118,7 @@ export class NavigableIndex<K, V, A extends string | number>
   }
 
   private retrieveHas(): ResultSet<K> {
-    return new SetResultSet(
-      new Set(this.allKeys),
-      NavigableIndex.RETRIEVAL_COST
-    );
+    return new SetResultSet(new Set(this.allKeys), NavigableIndex.RETRIEVAL_COST);
   }
 
   // ============== Range Queries ==============
@@ -137,7 +127,7 @@ export class NavigableIndex<K, V, A extends string | number>
     return new LazyResultSet(
       () => this.iterateGreaterThan(value, inclusive),
       NavigableIndex.RETRIEVAL_COST,
-      this.estimateGreaterThanSize()
+      this.estimateGreaterThanSize(),
     );
   }
 
@@ -145,7 +135,7 @@ export class NavigableIndex<K, V, A extends string | number>
     return new LazyResultSet(
       () => this.iterateLessThan(value, inclusive),
       NavigableIndex.RETRIEVAL_COST,
-      this.estimateLessThanSize()
+      this.estimateLessThanSize(),
     );
   }
 
@@ -153,12 +143,12 @@ export class NavigableIndex<K, V, A extends string | number>
     from: A,
     to: A,
     fromInclusive: boolean,
-    toInclusive: boolean
+    toInclusive: boolean,
   ): ResultSet<K> {
     return new LazyResultSet(
       () => this.iterateBetween(from, to, fromInclusive, toInclusive),
       NavigableIndex.RETRIEVAL_COST,
-      this.estimateBetweenSize()
+      this.estimateBetweenSize(),
     );
   }
 
@@ -184,7 +174,7 @@ export class NavigableIndex<K, V, A extends string | number>
     from: A,
     to: A,
     fromInclusive: boolean,
-    toInclusive: boolean
+    toInclusive: boolean,
   ): Generator<K> {
     for (const [, keys] of this.data.range(from, to, {
       fromInclusive,
@@ -283,8 +273,7 @@ export class NavigableIndex<K, V, A extends string | number>
     return {
       distinctValues: this.data.size,
       totalEntries,
-      avgEntriesPerValue:
-        this.data.size > 0 ? totalEntries / this.data.size : 0,
+      avgEntriesPerValue: this.data.size > 0 ? totalEntries / this.data.size : 0,
     };
   }
 

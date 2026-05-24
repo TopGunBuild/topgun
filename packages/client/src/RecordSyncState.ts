@@ -76,10 +76,7 @@ export interface OpLogObserver {
  * projects to `pending` (as opposed to `local-only`). Anything outside this
  * set means we cannot currently reach the server, so the entry is local-only.
  */
-const ONLINE_STATES: ReadonlySet<SyncState> = new Set([
-  SyncState.CONNECTED,
-  SyncState.SYNCING,
-]);
+const ONLINE_STATES: ReadonlySet<SyncState> = new Set([SyncState.CONNECTED, SyncState.SYNCING]);
 
 /**
  * Per-`(mapName, key)` tracker entry. Stores only the latest observed
@@ -181,7 +178,10 @@ export class RecordSyncStateTracker {
     // Only flip when this ack matches the tracker's latest observed timestamp
     // for the key. If a newer write has been pushed after this op, the slot
     // reflects that newer write — we don't downgrade it.
-    if (slot.latestOpTimestamp && compareTimestamps(entry.timestamp, slot.latestOpTimestamp) === 0) {
+    if (
+      slot.latestOpTimestamp &&
+      compareTimestamps(entry.timestamp, slot.latestOpTimestamp) === 0
+    ) {
       slot.syncedFlag = true;
       // A successful subsequent ack clears `conflicted` per spec §2:
       // "Conflicted state clears when a subsequent write for the same

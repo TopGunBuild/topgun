@@ -6,10 +6,7 @@ describe('ChangeTracker', () => {
       const tracker = new ChangeTracker<{ name: string }>();
       const timestamp = Date.now();
 
-      const changes = tracker.computeChanges(
-        new Map([['a', { name: 'Alice' }]]),
-        timestamp
-      );
+      const changes = tracker.computeChanges(new Map([['a', { name: 'Alice' }]]), timestamp);
 
       expect(changes).toHaveLength(1);
       expect(changes[0].type).toBe('add');
@@ -29,7 +26,7 @@ describe('ChangeTracker', () => {
           ['b', { name: 'Bob' }],
           ['c', { name: 'Charlie' }],
         ]),
-        timestamp
+        timestamp,
       );
 
       expect(changes).toHaveLength(3);
@@ -44,10 +41,7 @@ describe('ChangeTracker', () => {
       tracker.computeChanges(new Map([['a', { name: 'Alice' }]]), 1);
 
       // Second snapshot with update
-      const changes = tracker.computeChanges(
-        new Map([['a', { name: 'Alice Updated' }]]),
-        2
-      );
+      const changes = tracker.computeChanges(new Map([['a', { name: 'Alice Updated' }]]), 2);
 
       expect(changes).toHaveLength(1);
       expect(changes[0].type).toBe('update');
@@ -83,7 +77,7 @@ describe('ChangeTracker', () => {
           ['a', { name: 'Alice' }],
           ['b', { name: 'Bob' }],
         ]),
-        1
+        1,
       );
 
       // Second snapshot with mixed changes:
@@ -95,7 +89,7 @@ describe('ChangeTracker', () => {
           ['a', { name: 'Alice Updated' }],
           ['c', { name: 'Charlie' }],
         ]),
-        2
+        2,
       );
 
       expect(changes).toHaveLength(3);
@@ -124,10 +118,7 @@ describe('ChangeTracker', () => {
       tracker.computeChanges(new Map([['a', { name: 'Alice' }]]), 1);
 
       // Same data
-      const changes = tracker.computeChanges(
-        new Map([['a', { name: 'Alice' }]]),
-        2
-      );
+      const changes = tracker.computeChanges(new Map([['a', { name: 'Alice' }]]), 2);
 
       expect(changes).toHaveLength(0);
     });
@@ -145,15 +136,12 @@ describe('ChangeTracker', () => {
     it('should handle nested objects', () => {
       const tracker = new ChangeTracker<{ user: { name: string; age: number } }>();
 
-      tracker.computeChanges(
-        new Map([['a', { user: { name: 'Alice', age: 30 } }]]),
-        1
-      );
+      tracker.computeChanges(new Map([['a', { user: { name: 'Alice', age: 30 } }]]), 1);
 
       // Update nested property
       const changes = tracker.computeChanges(
         new Map([['a', { user: { name: 'Alice', age: 31 } }]]),
-        2
+        2,
       );
 
       expect(changes).toHaveLength(1);
@@ -168,10 +156,7 @@ describe('ChangeTracker', () => {
       tracker.computeChanges(new Map([['a', { tags: ['foo', 'bar'] }]]), 1);
 
       // Update array
-      const changes = tracker.computeChanges(
-        new Map([['a', { tags: ['foo', 'bar', 'baz'] }]]),
-        2
-      );
+      const changes = tracker.computeChanges(new Map([['a', { tags: ['foo', 'bar', 'baz'] }]]), 2);
 
       expect(changes).toHaveLength(1);
       expect(changes[0].type).toBe('update');
@@ -185,10 +170,7 @@ describe('ChangeTracker', () => {
       tracker.computeChanges(new Map([['a', { tags: ['foo', 'bar'] }]]), 1);
 
       // Same array, different order (should be considered different)
-      const changes = tracker.computeChanges(
-        new Map([['a', { tags: ['bar', 'foo'] }]]),
-        2
-      );
+      const changes = tracker.computeChanges(new Map([['a', { tags: ['bar', 'foo'] }]]), 2);
 
       expect(changes).toHaveLength(1);
       expect(changes[0].type).toBe('update');
@@ -202,7 +184,7 @@ describe('ChangeTracker', () => {
           ['a', 1],
           ['b', 2],
         ]),
-        1
+        1,
       );
 
       const changes = tracker.computeChanges(
@@ -210,7 +192,7 @@ describe('ChangeTracker', () => {
           ['a', 1],
           ['b', 3],
         ]),
-        2
+        2,
       );
 
       expect(changes).toHaveLength(1);
@@ -225,10 +207,7 @@ describe('ChangeTracker', () => {
 
       tracker.computeChanges(new Map([['a', { value: 'hello' }]]), 1);
 
-      const changes = tracker.computeChanges(
-        new Map([['a', { value: null }]]),
-        2
-      );
+      const changes = tracker.computeChanges(new Map([['a', { value: null }]]), 2);
 
       expect(changes).toHaveLength(1);
       expect(changes[0].type).toBe('update');
@@ -246,10 +225,7 @@ describe('ChangeTracker', () => {
       item.name = 'Alice Mutated';
 
       // Should still detect as update because we stored a copy
-      const changes = tracker.computeChanges(
-        new Map([['a', { name: 'Alice New' }]]),
-        2
-      );
+      const changes = tracker.computeChanges(new Map([['a', { name: 'Alice New' }]]), 2);
 
       expect(changes).toHaveLength(1);
       expect(changes[0].type).toBe('update');
@@ -267,7 +243,7 @@ describe('ChangeTracker', () => {
           ['a', { name: 'Alice' }],
           ['b', { name: 'Bob' }],
         ]),
-        1
+        1,
       );
 
       expect(tracker.size).toBe(2);
@@ -277,10 +253,7 @@ describe('ChangeTracker', () => {
       expect(tracker.size).toBe(0);
 
       // After reset, all items should be additions again
-      const changes = tracker.computeChanges(
-        new Map([['a', { name: 'Alice' }]]),
-        2
-      );
+      const changes = tracker.computeChanges(new Map([['a', { name: 'Alice' }]]), 2);
 
       expect(changes).toHaveLength(1);
       expect(changes[0].type).toBe('add');
@@ -298,7 +271,7 @@ describe('ChangeTracker', () => {
           ['a', { name: 'Alice' }],
           ['b', { name: 'Bob' }],
         ]),
-        1
+        1,
       );
 
       expect(tracker.size).toBe(2);
@@ -309,7 +282,7 @@ describe('ChangeTracker', () => {
           ['b', { name: 'Bob' }],
           ['c', { name: 'Charlie' }],
         ]),
-        2
+        2,
       );
 
       expect(tracker.size).toBe(3);
@@ -363,10 +336,7 @@ describe('deepEqual', () => {
     const tracker = new ChangeTracker<{ a: number; b: string }>();
 
     tracker.computeChanges(new Map([['x', { a: 1, b: 'test' }]]), 1);
-    const changes = tracker.computeChanges(
-      new Map([['x', { a: 1, b: 'test' }]]),
-      2
-    );
+    const changes = tracker.computeChanges(new Map([['x', { a: 1, b: 'test' }]]), 2);
 
     expect(changes).toHaveLength(0);
   });
@@ -375,10 +345,7 @@ describe('deepEqual', () => {
     const tracker = new ChangeTracker<Record<string, number>>();
 
     tracker.computeChanges(new Map([['x', { a: 1, b: 2 }]]), 1);
-    const changes = tracker.computeChanges(
-      new Map([['x', { b: 2, a: 1 }]]),
-      2
-    );
+    const changes = tracker.computeChanges(new Map([['x', { b: 2, a: 1 }]]), 2);
 
     expect(changes).toHaveLength(0);
   });
@@ -386,13 +353,10 @@ describe('deepEqual', () => {
   it('should detect difference in deeply nested objects', () => {
     const tracker = new ChangeTracker<{ level1: { level2: { value: number } } }>();
 
-    tracker.computeChanges(
-      new Map([['x', { level1: { level2: { value: 1 } } }]]),
-      1
-    );
+    tracker.computeChanges(new Map([['x', { level1: { level2: { value: 1 } } }]]), 1);
     const changes = tracker.computeChanges(
       new Map([['x', { level1: { level2: { value: 2 } } }]]),
-      2
+      2,
     );
 
     expect(changes).toHaveLength(1);

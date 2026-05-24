@@ -232,17 +232,13 @@ export class AutoConnectionProvider implements IConnectionProvider {
    * Convert a URL to WebSocket URL format.
    */
   private toWsUrl(url: string): string {
-    return url
-      .replace(/^http:\/\//, 'ws://')
-      .replace(/^https:\/\//, 'wss://');
+    return url.replace(/^http:\/\//, 'ws://').replace(/^https:\/\//, 'wss://');
   }
 
   /**
    * Convert a URL to HTTP URL format.
    */
   private toHttpUrl(url: string): string {
-    return url
-      .replace(/^ws:\/\//, 'http://')
-      .replace(/^wss:\/\//, 'https://');
+    return url.replace(/^ws:\/\//, 'http://').replace(/^wss:\/\//, 'https://');
   }
 }

@@ -45,9 +45,7 @@ function generateIndexId(): string {
  * K = record key type (must extend string for FTS)
  * V = record value type
  */
-export class LiveFTSIndex<K extends string, V>
-  implements ILiveQueryIndex<K, V, RankedResult<K>>
-{
+export class LiveFTSIndex<K extends string, V> implements ILiveQueryIndex<K, V, RankedResult<K>> {
   readonly id: string;
   readonly query: Query;
 
@@ -297,10 +295,7 @@ export class LiveFTSIndex<K extends string, V>
   /**
    * Score a single record using scoreSingleDocument (O(1)).
    */
-  private scoreRecord(
-    key: K,
-    record: V
-  ): { score: number; matchedTerms: string[] } | null {
+  private scoreRecord(key: K, record: V): { score: number; matchedTerms: string[] } | null {
     if (this.queryTerms.length === 0) {
       return null;
     }
@@ -309,7 +304,7 @@ export class LiveFTSIndex<K extends string, V>
     const result = this.ftsIndex.scoreSingleDocument(
       key,
       this.queryTerms,
-      record as Record<string, unknown>
+      record as Record<string, unknown>,
     );
 
     if (!result || result.score < this.minScore) {

@@ -231,7 +231,7 @@ describe('CRDTInvariants', () => {
       const timestamps = [
         { millis: 1000, counter: 0, nodeId: 'a' },
         { millis: 2000, counter: 0, nodeId: 'a' },
-        { millis: 3000, counter: 0, nodeId: 'a' }
+        { millis: 3000, counter: 0, nodeId: 'a' },
       ];
 
       expect(CRDTInvariants.hlcMonotonicity(timestamps)).toBe(true);
@@ -241,16 +241,14 @@ describe('CRDTInvariants', () => {
       const timestamps = [
         { millis: 1000, counter: 0, nodeId: 'a' },
         { millis: 3000, counter: 0, nodeId: 'a' },
-        { millis: 2000, counter: 0, nodeId: 'a' }
+        { millis: 2000, counter: 0, nodeId: 'a' },
       ];
 
       expect(CRDTInvariants.hlcMonotonicity(timestamps)).toBe(false);
     });
 
     test('passes for single timestamp', () => {
-      const timestamps = [
-        { millis: 1000, counter: 0, nodeId: 'a' }
-      ];
+      const timestamps = [{ millis: 1000, counter: 0, nodeId: 'a' }];
 
       expect(CRDTInvariants.hlcMonotonicity(timestamps)).toBe(true);
     });

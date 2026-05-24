@@ -107,9 +107,7 @@ describe('FullTextIndex.scoreSingleDocument', () => {
       const searchResults = index.search(query);
       const doc1SearchResult = searchResults.find((r) => r.docId === 'doc1');
 
-      expect(singleResult!.matchedTerms!.sort()).toEqual(
-        doc1SearchResult!.matchedTerms!.sort()
-      );
+      expect(singleResult!.matchedTerms!.sort()).toEqual(doc1SearchResult!.matchedTerms!.sort());
     });
 
     test('should handle partial matches correctly', () => {

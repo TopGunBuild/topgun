@@ -23,12 +23,7 @@ function ts(millis: number, counter = 0, nodeId = 'nodeA'): Timestamp {
   return { millis, counter, nodeId };
 }
 
-function makeOp(
-  mapName: string,
-  key: string,
-  timestamp: Timestamp,
-  synced = false,
-): TestOp {
+function makeOp(mapName: string, key: string, timestamp: Timestamp, synced = false): TestOp {
   return { mapName, key, timestamp, synced };
 }
 
@@ -51,9 +46,10 @@ interface MockHandleControls {
  * tracker via the same filtered-snapshot logic as QueryHandle (we re-emit on
  * tracker change with a snapshot filtered to currently-known result keys).
  */
-function buildClient(
-  tracker: RecordSyncStateTracker,
-): { client: TopGunClient; controls: Map<string, MockHandleControls> } {
+function buildClient(tracker: RecordSyncStateTracker): {
+  client: TopGunClient;
+  controls: Map<string, MockHandleControls>;
+} {
   const controls = new Map<string, MockHandleControls>();
 
   const queryFactory = (mapName: string) => {
@@ -150,9 +146,7 @@ describe('useQuery + syncState integration', () => {
     const built = buildClient(tracker);
     client = built.client;
     controls = built.controls;
-    wrapper = ({ children }) => (
-      <TopGunProvider client={client}>{children}</TopGunProvider>
-    );
+    wrapper = ({ children }) => <TopGunProvider client={client}>{children}</TopGunProvider>;
   });
 
   afterEach(() => {
@@ -166,15 +160,11 @@ describe('useQuery + syncState integration', () => {
     // Optimistic data update — the application layer pushes into the query
     // result alongside recording the local op (matches production order).
     act(() => {
-      controls.get('todos')!.emitData([
-        { _key: 'todo-1', text: 'buy milk', completed: false },
-      ]);
+      controls.get('todos')!.emitData([{ _key: 'todo-1', text: 'buy milk', completed: false }]);
       tracker.onAppend(makeOp('todos', 'todo-1', ts(100)));
     });
 
-    expect(result.current.data).toEqual([
-      { _key: 'todo-1', text: 'buy milk', completed: false },
-    ]);
+    expect(result.current.data).toEqual([{ _key: 'todo-1', text: 'buy milk', completed: false }]);
     expect(result.current.syncState.get('todo-1')).toBe('local-only');
   });
 
@@ -184,9 +174,7 @@ describe('useQuery + syncState integration', () => {
 
     const op = makeOp('todos', 'todo-1', ts(100));
     act(() => {
-      controls.get('todos')!.emitData([
-        { _key: 'todo-1', text: 'buy milk', completed: false },
-      ]);
+      controls.get('todos')!.emitData([{ _key: 'todo-1', text: 'buy milk', completed: false }]);
       tracker.onAppend(op);
     });
     expect(result.current.syncState.get('todo-1')).toBe('local-only');
@@ -207,9 +195,7 @@ describe('useQuery + syncState integration', () => {
     const { result } = renderHook(() => useQuery<Todo>('todos'), { wrapper });
 
     act(() => {
-      controls.get('todos')!.emitData([
-        { _key: 'todo-1', text: 'buy milk', completed: false },
-      ]);
+      controls.get('todos')!.emitData([{ _key: 'todo-1', text: 'buy milk', completed: false }]);
       tracker.onConnectionStateChange(SyncState.CONNECTED);
       tracker.onAppend(makeOp('todos', 'todo-1', ts(100)));
     });
@@ -234,9 +220,7 @@ describe('useQuery + syncState integration', () => {
     const { result } = renderHook(() => useQuery<Todo>('todos'), { wrapper });
 
     act(() => {
-      controls.get('todos')!.emitData([
-        { _key: 'todo-1', text: 'buy milk', completed: false },
-      ]);
+      controls.get('todos')!.emitData([{ _key: 'todo-1', text: 'buy milk', completed: false }]);
       tracker.onConnectionStateChange(SyncState.CONNECTED);
       // Initial write at t=100.
       tracker.onAppend(makeOp('todos', 'todo-1', ts(100)));
@@ -262,9 +246,7 @@ describe('useQuery + syncState integration', () => {
 
     const initialOp = makeOp('todos', 'todo-1', ts(100));
     act(() => {
-      controls.get('todos')!.emitData([
-        { _key: 'todo-1', text: 'buy milk', completed: false },
-      ]);
+      controls.get('todos')!.emitData([{ _key: 'todo-1', text: 'buy milk', completed: false }]);
       tracker.onConnectionStateChange(SyncState.CONNECTED);
       tracker.onAppend(initialOp);
       tracker.onRejection({
@@ -337,9 +319,7 @@ describe('useQuery + syncState integration', () => {
 
     // Wait for initial renders to settle.
     act(() => {
-      controls.get('todos')!.emitData([
-        { _key: 'todo-1', text: 'buy milk', completed: false },
-      ]);
+      controls.get('todos')!.emitData([{ _key: 'todo-1', text: 'buy milk', completed: false }]);
       controls.get('users')!.emitData([] as any);
     });
 
@@ -382,9 +362,7 @@ describe('useQuery + syncState integration', () => {
     );
 
     act(() => {
-      controls.get('todos')!.emitData([
-        { _key: 'todo-1', text: 'buy milk', completed: false },
-      ]);
+      controls.get('todos')!.emitData([{ _key: 'todo-1', text: 'buy milk', completed: false }]);
     });
 
     const baseline = renders;
@@ -417,9 +395,7 @@ describe('useSyncState single-key hook', () => {
       getRecordSyncStateTracker: () => tracker,
       query: jest.fn(),
     } as unknown as TopGunClient;
-    wrapper = ({ children }) => (
-      <TopGunProvider client={client}>{children}</TopGunProvider>
-    );
+    wrapper = ({ children }) => <TopGunProvider client={client}>{children}</TopGunProvider>;
   });
 
   afterEach(() => {
@@ -431,7 +407,7 @@ describe('useSyncState single-key hook', () => {
     expect(result.current).toBe('synced');
   });
 
-  it("transitions through pending -> synced on append + ack", () => {
+  it('transitions through pending -> synced on append + ack', () => {
     const { result } = renderHook(() => useSyncState('todos', 'todo-1'), { wrapper });
     expect(result.current).toBe('synced');
     const op = makeOp('todos', 'todo-1', ts(100));

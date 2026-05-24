@@ -54,7 +54,7 @@ describe('HybridSearchClient', () => {
 
       const payload = sentMsg.payload;
       expect(payload.requestId).toMatch(
-        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
       );
       expect(payload.mapName).toBe('docs');
       expect(payload.queryText).toBe('machine learning');
@@ -269,7 +269,7 @@ describe('HybridSearchClient', () => {
       // Pending entry removed from map — late response is a no-op
       const { requestId } = sendMessage.mock.calls[0][0].payload;
       expect(() =>
-        client.handleResponse({ requestId, results: [], searchTimeMs: 0 })
+        client.handleResponse({ requestId, results: [], searchTimeMs: 0 }),
       ).not.toThrow();
     });
 
@@ -298,8 +298,12 @@ describe('HybridSearchClient', () => {
       // Attach rejection handlers to detect any unintended rejection
       let p1Rejected = false;
       let p2Rejected = false;
-      p1.catch(() => { p1Rejected = true; });
-      p2.catch(() => { p2Rejected = true; });
+      p1.catch(() => {
+        p1Rejected = true;
+      });
+      p2.catch(() => {
+        p2Rejected = true;
+      });
 
       // Close without error — pending promises stay unresolved (not rejected)
       client.close();
@@ -335,7 +339,7 @@ describe('HybridSearchClient', () => {
       const { client } = createClient({ sendMessage: jest.fn().mockReturnValue(false) });
 
       await expect(client.hybridSearch('notes', 'query')).rejects.toThrow(
-        'Failed to send hybrid search request'
+        'Failed to send hybrid search request',
       );
     });
   });
@@ -349,7 +353,7 @@ describe('HybridSearchClient', () => {
       const { client } = createClient({ isAuthenticated: () => false });
 
       await expect(client.hybridSearch('notes', 'query')).rejects.toThrow(
-        'Not connected to server'
+        'Not connected to server',
       );
     });
   });
@@ -391,7 +395,7 @@ describe('HybridSearchClient', () => {
           requestId: 'unknown-id-xyz',
           results: [],
           searchTimeMs: 0,
-        })
+        }),
       ).not.toThrow();
     });
   });

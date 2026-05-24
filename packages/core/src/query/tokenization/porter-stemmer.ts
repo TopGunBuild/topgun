@@ -234,4 +234,3 @@ function endsWithCVC(str: string): boolean {
 
   return c1 && v && c2;
 }
-

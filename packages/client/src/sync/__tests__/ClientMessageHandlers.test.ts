@@ -27,15 +27,33 @@ describe('ClientMessageHandlers', () => {
         topicManager: { handleTopicMessage: jest.fn() },
         lockManager: { handleLockGranted: jest.fn(), handleLockReleased: jest.fn() },
         counterManager: { handleCounterUpdate: jest.fn() },
-        entryProcessorClient: { handleEntryProcessResponse: jest.fn(), handleEntryProcessBatchResponse: jest.fn() },
-        conflictResolverClient: { handleRegisterResponse: jest.fn(), handleUnregisterResponse: jest.fn(), handleListResponse: jest.fn(), handleMergeRejected: jest.fn() },
+        entryProcessorClient: {
+          handleEntryProcessResponse: jest.fn(),
+          handleEntryProcessBatchResponse: jest.fn(),
+        },
+        conflictResolverClient: {
+          handleRegisterResponse: jest.fn(),
+          handleUnregisterResponse: jest.fn(),
+          handleListResponse: jest.fn(),
+          handleMergeRejected: jest.fn(),
+        },
         searchClient: { handleSearchResponse: jest.fn() },
         sqlClient: { handleSqlQueryResponse: jest.fn() },
         vectorSearchClient: { handleResponse: jest.fn() },
         hybridSearchClient: { handleResponse: jest.fn() },
 
-        merkleSyncHandler: { handleSyncRespRoot: jest.fn(), handleSyncRespBuckets: jest.fn(), handleSyncRespLeaf: jest.fn(), handleSyncResetRequired: jest.fn() },
-        orMapSyncHandler: { handleORMapSyncRespRoot: jest.fn(), handleORMapSyncRespBuckets: jest.fn(), handleORMapSyncRespLeaf: jest.fn(), handleORMapDiffResponse: jest.fn() },
+        merkleSyncHandler: {
+          handleSyncRespRoot: jest.fn(),
+          handleSyncRespBuckets: jest.fn(),
+          handleSyncRespLeaf: jest.fn(),
+          handleSyncResetRequired: jest.fn(),
+        },
+        orMapSyncHandler: {
+          handleORMapSyncRespRoot: jest.fn(),
+          handleORMapSyncRespBuckets: jest.fn(),
+          handleORMapSyncRespLeaf: jest.fn(),
+          handleORMapDiffResponse: jest.fn(),
+        },
       };
 
       registerClientMessageHandlers(router, mockDelegates, mockManagers);
@@ -72,15 +90,33 @@ describe('ClientMessageHandlers', () => {
         topicManager: { handleTopicMessage: jest.fn() },
         lockManager: { handleLockGranted: jest.fn(), handleLockReleased: jest.fn() },
         counterManager: { handleCounterUpdate: jest.fn() },
-        entryProcessorClient: { handleEntryProcessResponse: jest.fn(), handleEntryProcessBatchResponse: jest.fn() },
-        conflictResolverClient: { handleRegisterResponse: jest.fn(), handleUnregisterResponse: jest.fn(), handleListResponse: jest.fn(), handleMergeRejected: jest.fn() },
+        entryProcessorClient: {
+          handleEntryProcessResponse: jest.fn(),
+          handleEntryProcessBatchResponse: jest.fn(),
+        },
+        conflictResolverClient: {
+          handleRegisterResponse: jest.fn(),
+          handleUnregisterResponse: jest.fn(),
+          handleListResponse: jest.fn(),
+          handleMergeRejected: jest.fn(),
+        },
         searchClient: { handleSearchResponse: jest.fn() },
         sqlClient: { handleSqlQueryResponse: jest.fn() },
         vectorSearchClient: { handleResponse: jest.fn() },
         hybridSearchClient: { handleResponse: jest.fn() },
 
-        merkleSyncHandler: { handleSyncRespRoot: jest.fn(), handleSyncRespBuckets: jest.fn(), handleSyncRespLeaf: jest.fn(), handleSyncResetRequired: jest.fn() },
-        orMapSyncHandler: { handleORMapSyncRespRoot: jest.fn(), handleORMapSyncRespBuckets: jest.fn(), handleORMapSyncRespLeaf: jest.fn(), handleORMapDiffResponse: jest.fn() },
+        merkleSyncHandler: {
+          handleSyncRespRoot: jest.fn(),
+          handleSyncRespBuckets: jest.fn(),
+          handleSyncRespLeaf: jest.fn(),
+          handleSyncResetRequired: jest.fn(),
+        },
+        orMapSyncHandler: {
+          handleORMapSyncRespRoot: jest.fn(),
+          handleORMapSyncRespBuckets: jest.fn(),
+          handleORMapSyncRespLeaf: jest.fn(),
+          handleORMapDiffResponse: jest.fn(),
+        },
       };
 
       registerClientMessageHandlers(router, mockDelegates, mockManagers);
@@ -112,15 +148,33 @@ describe('ClientMessageHandlers', () => {
         topicManager: { handleTopicMessage: jest.fn() },
         lockManager: { handleLockGranted: jest.fn(), handleLockReleased: jest.fn() },
         counterManager: { handleCounterUpdate: jest.fn() },
-        entryProcessorClient: { handleEntryProcessResponse: jest.fn(), handleEntryProcessBatchResponse: jest.fn() },
-        conflictResolverClient: { handleRegisterResponse: jest.fn(), handleUnregisterResponse: jest.fn(), handleListResponse: jest.fn(), handleMergeRejected: jest.fn() },
+        entryProcessorClient: {
+          handleEntryProcessResponse: jest.fn(),
+          handleEntryProcessBatchResponse: jest.fn(),
+        },
+        conflictResolverClient: {
+          handleRegisterResponse: jest.fn(),
+          handleUnregisterResponse: jest.fn(),
+          handleListResponse: jest.fn(),
+          handleMergeRejected: jest.fn(),
+        },
         searchClient: { handleSearchResponse: jest.fn() },
         sqlClient: { handleSqlQueryResponse: jest.fn() },
         vectorSearchClient: { handleResponse: jest.fn() },
         hybridSearchClient: { handleResponse: jest.fn() },
 
-        merkleSyncHandler: { handleSyncRespRoot: jest.fn(), handleSyncRespBuckets: jest.fn(), handleSyncRespLeaf: jest.fn(), handleSyncResetRequired: jest.fn() },
-        orMapSyncHandler: { handleORMapSyncRespRoot: jest.fn(), handleORMapSyncRespBuckets: jest.fn(), handleORMapSyncRespLeaf: jest.fn(), handleORMapDiffResponse: jest.fn() },
+        merkleSyncHandler: {
+          handleSyncRespRoot: jest.fn(),
+          handleSyncRespBuckets: jest.fn(),
+          handleSyncRespLeaf: jest.fn(),
+          handleSyncResetRequired: jest.fn(),
+        },
+        orMapSyncHandler: {
+          handleORMapSyncRespRoot: jest.fn(),
+          handleORMapSyncRespBuckets: jest.fn(),
+          handleORMapSyncRespLeaf: jest.fn(),
+          handleORMapDiffResponse: jest.fn(),
+        },
       };
 
       registerClientMessageHandlers(router, mockDelegates, mockManagers);
@@ -151,26 +205,47 @@ describe('ClientMessageHandlers', () => {
         topicManager: { handleTopicMessage: jest.fn() },
         lockManager: { handleLockGranted: jest.fn(), handleLockReleased: jest.fn() },
         counterManager: { handleCounterUpdate: jest.fn() },
-        entryProcessorClient: { handleEntryProcessResponse: jest.fn(), handleEntryProcessBatchResponse: jest.fn() },
-        conflictResolverClient: { handleRegisterResponse: jest.fn(), handleUnregisterResponse: jest.fn(), handleListResponse: jest.fn(), handleMergeRejected: jest.fn() },
+        entryProcessorClient: {
+          handleEntryProcessResponse: jest.fn(),
+          handleEntryProcessBatchResponse: jest.fn(),
+        },
+        conflictResolverClient: {
+          handleRegisterResponse: jest.fn(),
+          handleUnregisterResponse: jest.fn(),
+          handleListResponse: jest.fn(),
+          handleMergeRejected: jest.fn(),
+        },
         searchClient: { handleSearchResponse: jest.fn() },
         sqlClient: { handleSqlQueryResponse: jest.fn() },
         vectorSearchClient: { handleResponse: jest.fn() },
         hybridSearchClient: { handleResponse: jest.fn() },
 
-        merkleSyncHandler: { handleSyncRespRoot: jest.fn(), handleSyncRespBuckets: jest.fn(), handleSyncRespLeaf: jest.fn(), handleSyncResetRequired: jest.fn() },
-        orMapSyncHandler: { handleORMapSyncRespRoot: jest.fn(), handleORMapSyncRespBuckets: jest.fn(), handleORMapSyncRespLeaf: jest.fn(), handleORMapDiffResponse: jest.fn() },
+        merkleSyncHandler: {
+          handleSyncRespRoot: jest.fn(),
+          handleSyncRespBuckets: jest.fn(),
+          handleSyncRespLeaf: jest.fn(),
+          handleSyncResetRequired: jest.fn(),
+        },
+        orMapSyncHandler: {
+          handleORMapSyncRespRoot: jest.fn(),
+          handleORMapSyncRespBuckets: jest.fn(),
+          handleORMapSyncRespLeaf: jest.fn(),
+          handleORMapDiffResponse: jest.fn(),
+        },
       };
 
       registerClientMessageHandlers(router, mockDelegates, mockManagers);
 
       await router.route({
         type: 'TOPIC_MESSAGE',
-        payload: { topic: 'chat', data: 'hello', publisherId: 'node1', timestamp: 123 }
+        payload: { topic: 'chat', data: 'hello', publisherId: 'node1', timestamp: 123 },
       });
 
       expect(mockManagers.topicManager.handleTopicMessage).toHaveBeenCalledWith(
-        'chat', 'hello', 'node1', 123
+        'chat',
+        'hello',
+        'node1',
+        123,
       );
     });
   });

@@ -58,10 +58,12 @@ export const SyncRespLeafMessageSchema = z.object({
   payload: z.object({
     mapName: z.string(),
     path: z.string(),
-    records: z.array(z.object({
-      key: z.string(),
-      record: LWWRecordSchema,
-    })),
+    records: z.array(
+      z.object({
+        key: z.string(),
+        record: LWWRecordSchema,
+      }),
+    ),
   }),
 });
 export type SyncRespLeafMessage = z.infer<typeof SyncRespLeafMessageSchema>;

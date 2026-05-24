@@ -23,9 +23,7 @@ export function vectorToBytes(vector: Float32Array | number[]): Uint8Array {
  */
 export function bytesToVector(bytes: Uint8Array): Float32Array {
   if (bytes.byteLength % 4 !== 0) {
-    throw new Error(
-      `bytesToVector: byte length must be a multiple of 4, got ${bytes.byteLength}`
-    );
+    throw new Error(`bytesToVector: byte length must be a multiple of 4, got ${bytes.byteLength}`);
   }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const result = new Float32Array(bytes.byteLength / 4);

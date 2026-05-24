@@ -12,7 +12,7 @@ describe('Hash utilities', () => {
       test('should return positive 32-bit integer', () => {
         const hash = hashString('test');
         expect(hash).toBeGreaterThanOrEqual(0);
-        expect(hash).toBeLessThanOrEqual(0xFFFFFFFF);
+        expect(hash).toBeLessThanOrEqual(0xffffffff);
       });
 
       test('should hash different strings to different hashes', () => {
@@ -184,7 +184,7 @@ describe('Hash utilities', () => {
           hashString('b'),
           hashString('c'),
           hashString('d'),
-          hashString('e')
+          hashString('e'),
         ];
         const combined = combineHashes(hashes);
 
@@ -193,11 +193,11 @@ describe('Hash utilities', () => {
       });
 
       test('should return positive 32-bit integer', () => {
-        const hashes = [0xFFFFFFFF, 0xFFFFFFFF];
+        const hashes = [0xffffffff, 0xffffffff];
         const combined = combineHashes(hashes);
 
         expect(combined).toBeGreaterThanOrEqual(0);
-        expect(combined).toBeLessThanOrEqual(0xFFFFFFFF);
+        expect(combined).toBeLessThanOrEqual(0xffffffff);
       });
     });
 
@@ -238,12 +238,12 @@ describe('Hash utilities', () => {
       });
 
       test('should handle large numbers', () => {
-        const largeHashes = [0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF];
+        const largeHashes = [0xffffffff, 0xffffffff, 0xffffffff];
         const combined = combineHashes(largeHashes);
 
         expect(typeof combined).toBe('number');
         expect(combined).toBeGreaterThanOrEqual(0);
-        expect(combined).toBeLessThanOrEqual(0xFFFFFFFF);
+        expect(combined).toBeLessThanOrEqual(0xffffffff);
       });
 
       test('should handle many hashes', () => {
@@ -292,7 +292,7 @@ describe('Hash utilities', () => {
           hashString(JSON.stringify({ id: 1, data: 'shard1' })),
           hashString(JSON.stringify({ id: 2, data: 'shard2' })),
           hashString(JSON.stringify({ id: 3, data: 'shard3' })),
-          hashString(JSON.stringify({ id: 4, data: 'shard4' }))
+          hashString(JSON.stringify({ id: 4, data: 'shard4' })),
         ];
 
         const rootHash = combineHashes(bucketHashes);
@@ -303,7 +303,7 @@ describe('Hash utilities', () => {
           hashString(JSON.stringify({ id: 1, data: 'shard1' })),
           hashString(JSON.stringify({ id: 2, data: 'MODIFIED' })), // Changed
           hashString(JSON.stringify({ id: 3, data: 'shard3' })),
-          hashString(JSON.stringify({ id: 4, data: 'shard4' }))
+          hashString(JSON.stringify({ id: 4, data: 'shard4' })),
         ];
 
         const newRootHash = combineHashes(modifiedBucketHashes);

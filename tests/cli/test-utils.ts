@@ -90,7 +90,10 @@ export function withTempFile(filePath: string, content: string, fn: () => void):
  * Creates a temporary directory with given structure and content.
  * Returns the temp directory path for use in tests.
  */
-export function withTempDir(structure: Record<string, string | null>, fn: (tempDir: string) => void): void {
+export function withTempDir(
+  structure: Record<string, string | null>,
+  fn: (tempDir: string) => void,
+): void {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'topgun-test-'));
 
   try {

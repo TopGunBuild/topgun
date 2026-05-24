@@ -1,9 +1,20 @@
 import { LWWMap, ORMap } from '@topgunbuild/core';
-import type { ORMapRecord, LWWRecord, EntryProcessorDef, EntryProcessorResult, SearchOptions } from '@topgunbuild/core';
+import type {
+  ORMapRecord,
+  LWWRecord,
+  EntryProcessorDef,
+  EntryProcessorResult,
+  SearchOptions,
+} from '@topgunbuild/core';
 import type { IStorageAdapter } from './IStorageAdapter';
 import { SyncEngine } from './SyncEngine';
 import type { BackoffConfig, SqlQueryResult } from './SyncEngine';
-import type { VectorSearchClientOptions, VectorSearchClientResult, HybridSearchClientOptions, HybridSearchClientResult } from './sync';
+import type {
+  VectorSearchClientOptions,
+  VectorSearchClientResult,
+  HybridSearchClientOptions,
+  HybridSearchClientResult,
+} from './sync';
 import type { AuthProvider } from './auth/types';
 import { QueryHandle } from './QueryHandle';
 import type { QueryFilter } from './QueryHandle';
@@ -112,7 +123,9 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
   private readonly counters: Map<string, PNCounterHandle> = new Map();
   private readonly clusterClient?: ClusterClient;
   private readonly isClusterMode: boolean;
-  private readonly clusterConfig?: Required<Omit<TopGunClusterConfig, 'seeds'>> & { seeds: string[] };
+  private readonly clusterConfig?: Required<Omit<TopGunClusterConfig, 'seeds'>> & {
+    seeds: string[];
+  };
   private readonly authProvider?: AuthProvider;
 
   constructor(config: TopGunClientConfig) {
@@ -134,10 +147,13 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
       // Merge with defaults
       this.clusterConfig = {
         seeds: config.cluster.seeds,
-        connectionsPerNode: config.cluster.connectionsPerNode ?? DEFAULT_CLUSTER_CONFIG.connectionsPerNode,
+        connectionsPerNode:
+          config.cluster.connectionsPerNode ?? DEFAULT_CLUSTER_CONFIG.connectionsPerNode,
         smartRouting: config.cluster.smartRouting ?? DEFAULT_CLUSTER_CONFIG.smartRouting,
-        partitionMapRefreshMs: config.cluster.partitionMapRefreshMs ?? DEFAULT_CLUSTER_CONFIG.partitionMapRefreshMs,
-        connectionTimeoutMs: config.cluster.connectionTimeoutMs ?? DEFAULT_CLUSTER_CONFIG.connectionTimeoutMs,
+        partitionMapRefreshMs:
+          config.cluster.partitionMapRefreshMs ?? DEFAULT_CLUSTER_CONFIG.partitionMapRefreshMs,
+        connectionTimeoutMs:
+          config.cluster.connectionTimeoutMs ?? DEFAULT_CLUSTER_CONFIG.connectionTimeoutMs,
         retryAttempts: config.cluster.retryAttempts ?? DEFAULT_CLUSTER_CONFIG.retryAttempts,
       };
 
@@ -186,7 +202,10 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
         onAuthRequired: config.onAuthRequired,
       });
 
-      logger.info({ serverUrl: config.serverUrl }, 'TopGunClient initialized in single-server mode');
+      logger.info(
+        { serverUrl: config.serverUrl },
+        'TopGunClient initialized in single-server mode',
+      );
     } else {
       // Local-only mode: no sync target — use NullConnectionProvider so SyncEngine
       // is wired correctly but never opens a socket or enters reconnect loops
@@ -229,7 +248,10 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
    * When TSchema is concrete, passing a schema key narrows the QueryHandle
    * value type to TSchema[K]. The untyped overload preserves back-compat.
    */
-  public query<K extends keyof TSchema & string>(mapName: K, filter: QueryFilter): QueryHandle<TSchema[K]>;
+  public query<K extends keyof TSchema & string>(
+    mapName: K,
+    filter: QueryFilter,
+  ): QueryHandle<TSchema[K]>;
   public query<T = any>(mapName: string, filter: QueryFilter): QueryHandle<T>;
   public query(mapName: string, filter: QueryFilter): QueryHandle<any> {
     return new QueryHandle<any>(this.syncEngine, mapName, filter);
@@ -309,35 +331,49 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     this.syncEngine.registerMap(name, lwwMap);
 
     // Restore state from storage asynchronously
-    this.storageAdapter.getAllKeys().then(async (keys) => {
-      const mapPrefix = `${name}:`;
-      for (const fullKey of keys) {
-        if (fullKey.startsWith(mapPrefix)) {
-          const record = await this.storageAdapter.get(fullKey);
-          if (record && (record as LWWRecord<any>).timestamp && !(record as any).tag) {
-            // Strip prefix to get actual key
-            const key = fullKey.substring(mapPrefix.length) as unknown as any;
-            // Merge into in-memory map without triggering new ops
-            lwwMap.merge(key, record as LWWRecord<any>);
+    this.storageAdapter
+      .getAllKeys()
+      .then(async (keys) => {
+        const mapPrefix = `${name}:`;
+        for (const fullKey of keys) {
+          if (fullKey.startsWith(mapPrefix)) {
+            const record = await this.storageAdapter.get(fullKey);
+            if (record && (record as LWWRecord<any>).timestamp && !(record as any).tag) {
+              // Strip prefix to get actual key
+              const key = fullKey.substring(mapPrefix.length) as unknown as any;
+              // Merge into in-memory map without triggering new ops
+              lwwMap.merge(key, record as LWWRecord<any>);
+            }
           }
         }
-      }
-    }).catch(err => logger.error({ err }, 'Failed to restore keys from storage'));
+      })
+      .catch((err) => logger.error({ err }, 'Failed to restore keys from storage'));
 
     // Wrap LWWMap with IMap interface logic
     const originalSet = lwwMap.set.bind(lwwMap);
     lwwMap.set = (key: any, value: any, ttlMs?: number) => {
       const record = originalSet(key, value, ttlMs);
-      this.storageAdapter.put(`${name}:${key}`, record).catch(err => logger.error({ err }, 'Failed to put record to storage'));
-      this.syncEngine.recordOperation(name, 'PUT', String(key), { record, timestamp: record.timestamp }).catch(err => logger.error({ err }, 'Failed to record PUT op'));
+      this.storageAdapter
+        .put(`${name}:${key}`, record)
+        .catch((err) => logger.error({ err }, 'Failed to put record to storage'));
+      this.syncEngine
+        .recordOperation(name, 'PUT', String(key), { record, timestamp: record.timestamp })
+        .catch((err) => logger.error({ err }, 'Failed to record PUT op'));
       return record;
     };
 
     const originalRemove = lwwMap.remove.bind(lwwMap);
     lwwMap.remove = (key: any) => {
       const tombstone = originalRemove(key);
-      this.storageAdapter.put(`${name}:${key}`, tombstone).catch(err => logger.error({ err }, 'Failed to put tombstone to storage'));
-      this.syncEngine.recordOperation(name, 'REMOVE', String(key), { record: tombstone, timestamp: tombstone.timestamp }).catch(err => logger.error({ err }, 'Failed to record REMOVE op'));
+      this.storageAdapter
+        .put(`${name}:${key}`, tombstone)
+        .catch((err) => logger.error({ err }, 'Failed to put tombstone to storage'));
+      this.syncEngine
+        .recordOperation(name, 'REMOVE', String(key), {
+          record: tombstone,
+          timestamp: tombstone.timestamp,
+        })
+        .catch((err) => logger.error({ err }, 'Failed to record REMOVE op'));
       return tombstone;
     };
 
@@ -379,22 +415,29 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
       // Persist records
       this.persistORMapKey(name, orMap, key);
 
-      this.syncEngine.recordOperation(name, 'OR_ADD', String(key), { orRecord: record, timestamp: record.timestamp }).catch(err => logger.error({ err }, 'Failed to record OR_ADD op'));
+      this.syncEngine
+        .recordOperation(name, 'OR_ADD', String(key), {
+          orRecord: record,
+          timestamp: record.timestamp,
+        })
+        .catch((err) => logger.error({ err }, 'Failed to record OR_ADD op'));
       return record;
     };
 
     const originalRemove = orMap.remove.bind(orMap);
     orMap.remove = (key: any, value: any) => {
       const tombstones = originalRemove(key, value);
-      const timestamp = this.syncEngine.getHLC().now(); 
-      
+      const timestamp = this.syncEngine.getHLC().now();
+
       // Update storage for the key (items removed)
       this.persistORMapKey(name, orMap, key);
       // Update storage for tombstones
       this.persistORMapTombstones(name, orMap);
 
       for (const tag of tombstones) {
-          this.syncEngine.recordOperation(name, 'OR_REMOVE', String(key), { orTag: tag, timestamp }).catch(err => logger.error({ err }, 'Failed to record OR_REMOVE op'));
+        this.syncEngine
+          .recordOperation(name, 'OR_REMOVE', String(key), { orTag: tag, timestamp })
+          .catch((err) => logger.error({ err }, 'Failed to record OR_REMOVE op'));
       }
       return tombstones;
     };
@@ -403,53 +446,53 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
   }
 
   private async restoreORMap<K, V>(name: string, orMap: ORMap<K, V>) {
-      try {
-          // 1. Restore Tombstones
-          const tombstoneKey = `__sys__:${name}:tombstones`;
-          const tombstones = await this.storageAdapter.getMeta(tombstoneKey);
-          if (Array.isArray(tombstones)) {
-              for (const tag of tombstones) {
-                  orMap.applyTombstone(tag);
-              }
-          }
-
-          // 2. Restore Items
-          const keys = await this.storageAdapter.getAllKeys();
-          const mapPrefix = `${name}:`;
-          for (const fullKey of keys) {
-              if (fullKey.startsWith(mapPrefix)) {
-                  const keyPart = fullKey.substring(mapPrefix.length);
-                  
-                  const data = await this.storageAdapter.get(fullKey);
-                  if (Array.isArray(data)) {
-                      // It's likely an ORMap value list (Array of ORMapRecord)
-                      const records = data as ORMapRecord<V>[];
-                      const key = keyPart as unknown as K;
-                      
-                      for (const record of records) {
-                          orMap.apply(key, record);
-                      }
-                  }
-              }
-          }
-      } catch (e) {
-          logger.error({ mapName: name, err: e }, 'Failed to restore ORMap');
+    try {
+      // 1. Restore Tombstones
+      const tombstoneKey = `__sys__:${name}:tombstones`;
+      const tombstones = await this.storageAdapter.getMeta(tombstoneKey);
+      if (Array.isArray(tombstones)) {
+        for (const tag of tombstones) {
+          orMap.applyTombstone(tag);
+        }
       }
+
+      // 2. Restore Items
+      const keys = await this.storageAdapter.getAllKeys();
+      const mapPrefix = `${name}:`;
+      for (const fullKey of keys) {
+        if (fullKey.startsWith(mapPrefix)) {
+          const keyPart = fullKey.substring(mapPrefix.length);
+
+          const data = await this.storageAdapter.get(fullKey);
+          if (Array.isArray(data)) {
+            // It's likely an ORMap value list (Array of ORMapRecord)
+            const records = data as ORMapRecord<V>[];
+            const key = keyPart as unknown as K;
+
+            for (const record of records) {
+              orMap.apply(key, record);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      logger.error({ mapName: name, err: e }, 'Failed to restore ORMap');
+    }
   }
 
   private async persistORMapKey<K, V>(mapName: string, orMap: ORMap<K, V>, key: K) {
-      const records = orMap.getRecords(key);
-      if (records.length > 0) {
-          await this.storageAdapter.put(`${mapName}:${key}`, records);
-      } else {
-          await this.storageAdapter.remove(`${mapName}:${key}`);
-      }
+    const records = orMap.getRecords(key);
+    if (records.length > 0) {
+      await this.storageAdapter.put(`${mapName}:${key}`, records);
+    } else {
+      await this.storageAdapter.remove(`${mapName}:${key}`);
+    }
   }
-  
+
   private async persistORMapTombstones<K, V>(mapName: string, orMap: ORMap<K, V>) {
-      const tombstoneKey = `__sys__:${mapName}:tombstones`;
-      const tombstones = orMap.getTombstones();
-      await this.storageAdapter.setMeta(tombstoneKey, tombstones);
+    const tombstoneKey = `__sys__:${mapName}:tombstones`;
+    const tombstones = orMap.getTombstones();
+    await this.storageAdapter.setMeta(tombstoneKey, tombstones);
   }
 
   /**
@@ -632,8 +675,13 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
    * ```
    */
   public onBackpressure(
-    event: 'backpressure:high' | 'backpressure:low' | 'backpressure:paused' | 'backpressure:resumed' | 'operation:dropped',
-    listener: (data?: BackpressureThresholdEvent | OperationDroppedEvent) => void
+    event:
+      | 'backpressure:high'
+      | 'backpressure:low'
+      | 'backpressure:paused'
+      | 'backpressure:resumed'
+      | 'operation:dropped',
+    listener: (data?: BackpressureThresholdEvent | OperationDroppedEvent) => void,
   ): () => void {
     return this.syncEngine.onBackpressure(event, listener);
   }
@@ -673,13 +721,15 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
       limit?: number;
       minScore?: number;
       boost?: Record<string, number>;
-    }
-  ): Promise<Array<{
-    key: string;
-    value: T;
-    score: number;
-    matchedTerms: string[];
-  }>> {
+    },
+  ): Promise<
+    Array<{
+      key: string;
+      value: T;
+      score: number;
+      matchedTerms: string[];
+    }>
+  > {
     return this.syncEngine.search<T>(mapName, query, options);
   }
 
@@ -737,7 +787,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
   public async vectorSearch(
     mapName: string,
     queryVector: Float32Array | number[],
-    options?: VectorSearchClientOptions
+    options?: VectorSearchClientOptions,
   ): Promise<VectorSearchClientResult[]> {
     return this.syncEngine.vectorSearch(mapName, queryVector, options);
   }
@@ -753,7 +803,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
   public async hybridSearch(
     mapName: string,
     queryText: string,
-    options?: HybridSearchClientOptions
+    options?: HybridSearchClientOptions,
   ): Promise<HybridSearchClientResult[]> {
     return this.syncEngine.hybridSearch(mapName, queryText, options);
   }
@@ -799,7 +849,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
   public searchSubscribe<T>(
     mapName: string,
     query: string,
-    options?: SearchOptions
+    options?: SearchOptions,
   ): SearchHandle<T> {
     return new SearchHandle<T>(this.syncEngine, mapName, query, options);
   }
@@ -834,7 +884,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
   public hybridSearchSubscribe<T = unknown>(
     mapName: string,
     queryText: string,
-    options?: HybridSearchSubscribeOptions
+    options?: HybridSearchSubscribeOptions,
   ): HybridSearchHandle<T> {
     return new HybridSearchHandle<T>(this.syncEngine, mapName, queryText, options);
   }
@@ -925,7 +975,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
   ): Promise<EntryProcessorResult<R>> {
     throw new Error(
       'Entry processors require server-side WASM sandbox execution, which is on the v2.x roadmap. ' +
-        'See https://topgun.build/docs/roadmap. The SDK surface will return when the sandbox lands.'
+        'See https://topgun.build/docs/roadmap. The SDK surface will return when the sandbox lands.',
     );
   }
 
@@ -969,7 +1019,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
   ): Promise<Map<string, EntryProcessorResult<R>>> {
     throw new Error(
       'Entry processors require server-side WASM sandbox execution, which is on the v2.x roadmap. ' +
-        'See https://topgun.build/docs/roadmap. The SDK surface will return when the sandbox lands.'
+        'See https://topgun.build/docs/roadmap. The SDK surface will return when the sandbox lands.',
     );
   }
 

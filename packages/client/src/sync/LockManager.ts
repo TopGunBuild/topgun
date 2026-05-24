@@ -82,7 +82,11 @@ export class LockManager implements ILockManager {
    * @param ttl - Lock lease duration in milliseconds (server-side)
    * @returns Promise that resolves with fencing token on grant
    */
-  public requestLock(name: string, requestId: string, ttl: number): Promise<{ fencingToken: number }> {
+  public requestLock(
+    name: string,
+    requestId: string,
+    ttl: number,
+  ): Promise<{ fencingToken: number }> {
     if (!this.config.isAuthenticated()) {
       return Promise.reject(new Error('Not connected or authenticated'));
     }
@@ -91,7 +95,10 @@ export class LockManager implements ILockManager {
       // Response timeout scales with TTL so the client does not reject before
       // the server's TTL window elapses. The grace period covers network latency
       // and server processing. The floor prevents indefinite waits for ttl=0.
-      const responseTimeoutMs = Math.max(ttl + ACQUIRE_RESPONSE_GRACE_MS, MIN_ACQUIRE_RESPONSE_TIMEOUT_MS);
+      const responseTimeoutMs = Math.max(
+        ttl + ACQUIRE_RESPONSE_GRACE_MS,
+        MIN_ACQUIRE_RESPONSE_TIMEOUT_MS,
+      );
 
       const timer = setTimeout(() => {
         if (this.pendingLockRequests.has(requestId)) {
@@ -105,7 +112,7 @@ export class LockManager implements ILockManager {
       try {
         const sent = this.config.sendMessage({
           type: 'LOCK_REQUEST',
-          payload: { requestId, name, ttl }
+          payload: { requestId, name, ttl },
         });
         if (!sent) {
           clearTimeout(timer);
@@ -157,18 +164,24 @@ export class LockManager implements ILockManager {
       try {
         const sent = this.config.sendMessage({
           type: 'LOCK_RELEASE',
-          payload: { requestId, name, fencingToken }
+          payload: { requestId, name, fencingToken },
         });
         if (!sent) {
           clearTimeout(timer);
           this.pendingLockRequests.delete(requestId);
-          logger.debug({ name, requestId, reason: 'send_failed' }, 'LockManager: release send failed');
+          logger.debug(
+            { name, requestId, reason: 'send_failed' },
+            'LockManager: release send failed',
+          );
           resolve(false);
         }
       } catch (e) {
         clearTimeout(timer);
         this.pendingLockRequests.delete(requestId);
-        logger.debug({ name, requestId, reason: 'send_threw', error: (e as Error).message }, 'LockManager: release send threw');
+        logger.debug(
+          { name, requestId, reason: 'send_threw', error: (e as Error).message },
+          'LockManager: release send threw',
+        );
         resolve(false);
       }
     });
@@ -194,7 +207,10 @@ export class LockManager implements ILockManager {
    */
   public handleLockReleased(requestId: string, name: string, success: boolean): void {
     if (requestId === '') {
-      logger.debug({ name, success }, 'LockManager: LOCK_RELEASED with empty requestId (fire-and-forget ACK)');
+      logger.debug(
+        { name, success },
+        'LockManager: LOCK_RELEASED with empty requestId (fire-and-forget ACK)',
+      );
       return;
     }
     const pending = this.pendingLockRequests.get(requestId);
@@ -202,7 +218,10 @@ export class LockManager implements ILockManager {
     this.pendingLockRequests.delete(requestId);
     clearTimeout(pending.timer);
     if (!success) {
-      logger.debug({ name, requestId, reason: 'server_rejected' }, 'LockManager: release rejected by server');
+      logger.debug(
+        { name, requestId, reason: 'server_rejected' },
+        'LockManager: release rejected by server',
+      );
     }
     pending.resolve(success);
   }

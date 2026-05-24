@@ -34,7 +34,7 @@ export class FilteringResultSet<K, V> implements ResultSet<K> {
   constructor(
     private readonly source: ResultSet<K>,
     private readonly getRecord: (key: K) => V | undefined,
-    private readonly predicate: PredicateFn<V>
+    private readonly predicate: PredicateFn<V>,
   ) {}
 
   /**

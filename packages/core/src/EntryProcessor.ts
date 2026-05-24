@@ -199,10 +199,7 @@ export const BuiltInProcessors = {
    * Replace value only if it matches expected value.
    * Returns true if replaced, false otherwise.
    */
-  REPLACE_IF_EQUALS: <V>(
-    expectedValue: V,
-    newValue: V,
-  ): EntryProcessorDef<V, boolean> => ({
+  REPLACE_IF_EQUALS: <V>(expectedValue: V, newValue: V): EntryProcessorDef<V, boolean> => ({
     name: 'builtin:replace_if_equals',
     code: `
       if (JSON.stringify(value) === JSON.stringify(args.expected)) {
@@ -282,10 +279,7 @@ export const BuiltInProcessors = {
    * Update nested property using dot notation path.
    * Creates intermediate objects if they don't exist.
    */
-  SET_PROPERTY: <V>(
-    path: string,
-    propValue: unknown,
-  ): EntryProcessorDef<V, V> => ({
+  SET_PROPERTY: <V>(path: string, propValue: unknown): EntryProcessorDef<V, V> => ({
     name: 'builtin:set_property',
     code: `
       const obj = value ?? {};
@@ -372,9 +366,7 @@ export const BuiltInProcessors = {
    * Merge object properties into existing value.
    * Shallow merge only.
    */
-  MERGE: <V extends Record<string, unknown>>(
-    properties: Partial<V>,
-  ): EntryProcessorDef<V, V> => ({
+  MERGE: <V extends Record<string, unknown>>(properties: Partial<V>): EntryProcessorDef<V, V> => ({
     name: 'builtin:merge',
     code: `
       const merged = { ...(value ?? {}), ...args };

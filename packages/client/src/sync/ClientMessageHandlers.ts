@@ -62,7 +62,10 @@ export interface ManagerDelegates {
     handleLockReleased(requestId: string, name: string, success: boolean): void;
   };
   counterManager: {
-    handleCounterUpdate(name: string, state: { positive: Record<string, number>; negative: Record<string, number> }): void;
+    handleCounterUpdate(
+      name: string,
+      state: { positive: Record<string, number>; negative: Record<string, number> },
+    ): void;
   };
   entryProcessorClient: {
     handleEntryProcessResponse(message: EntryProcessResponse): void;
@@ -126,23 +129,43 @@ export interface ManagerDelegates {
  * Used for testing that all types are registered.
  */
 export const CLIENT_MESSAGE_TYPES = [
-  'AUTH_REQUIRED', 'AUTH_ACK', 'AUTH_FAIL',
+  'AUTH_REQUIRED',
+  'AUTH_ACK',
+  'AUTH_FAIL',
   'PONG',
-  'OP_ACK', 'OP_REJECTED', 'ERROR',
-  'SYNC_RESP_ROOT', 'SYNC_RESP_BUCKETS', 'SYNC_RESP_LEAF', 'SYNC_RESET_REQUIRED',
-  'ORMAP_SYNC_RESP_ROOT', 'ORMAP_SYNC_RESP_BUCKETS', 'ORMAP_SYNC_RESP_LEAF', 'ORMAP_DIFF_RESPONSE',
-  'QUERY_RESP', 'QUERY_UPDATE',
-  'SERVER_EVENT', 'SERVER_BATCH_EVENT',
+  'OP_ACK',
+  'OP_REJECTED',
+  'ERROR',
+  'SYNC_RESP_ROOT',
+  'SYNC_RESP_BUCKETS',
+  'SYNC_RESP_LEAF',
+  'SYNC_RESET_REQUIRED',
+  'ORMAP_SYNC_RESP_ROOT',
+  'ORMAP_SYNC_RESP_BUCKETS',
+  'ORMAP_SYNC_RESP_LEAF',
+  'ORMAP_DIFF_RESPONSE',
+  'QUERY_RESP',
+  'QUERY_UPDATE',
+  'SERVER_EVENT',
+  'SERVER_BATCH_EVENT',
   'TOPIC_MESSAGE',
-  'LOCK_GRANTED', 'LOCK_RELEASED',
+  'LOCK_GRANTED',
+  'LOCK_RELEASED',
   'GC_PRUNE',
-  'COUNTER_UPDATE', 'COUNTER_RESPONSE',
-  'ENTRY_PROCESS_RESPONSE', 'ENTRY_PROCESS_BATCH_RESPONSE',
-  'REGISTER_RESOLVER_RESPONSE', 'UNREGISTER_RESOLVER_RESPONSE', 'LIST_RESOLVERS_RESPONSE', 'MERGE_REJECTED',
-  'SEARCH_RESP', 'SEARCH_UPDATE',
+  'COUNTER_UPDATE',
+  'COUNTER_RESPONSE',
+  'ENTRY_PROCESS_RESPONSE',
+  'ENTRY_PROCESS_BATCH_RESPONSE',
+  'REGISTER_RESOLVER_RESPONSE',
+  'UNREGISTER_RESOLVER_RESPONSE',
+  'LIST_RESOLVERS_RESPONSE',
+  'MERGE_REJECTED',
+  'SEARCH_RESP',
+  'SEARCH_UPDATE',
   'SQL_QUERY_RESP',
   'VECTOR_SEARCH_RESP',
-  'HYBRID_SEARCH_RESP', 'HYBRID_SEARCH_UPDATE',
+  'HYBRID_SEARCH_RESP',
+  'HYBRID_SEARCH_UPDATE',
 ] as const;
 
 /**
@@ -155,114 +178,115 @@ export const CLIENT_MESSAGE_TYPES = [
 export function registerClientMessageHandlers(
   router: IMessageRouter,
   delegates: MessageHandlerDelegates,
-  managers: ManagerDelegates
+  managers: ManagerDelegates,
 ): void {
   router.registerHandlers({
     // AUTH handlers
-    'AUTH_REQUIRED': () => delegates.handleAuthRequired(),
-    'AUTH_ACK': () => delegates.handleAuthAck(),
-    'AUTH_FAIL': (msg) => delegates.handleAuthFail(msg),
+    AUTH_REQUIRED: () => delegates.handleAuthRequired(),
+    AUTH_ACK: () => delegates.handleAuthAck(),
+    AUTH_FAIL: (msg) => delegates.handleAuthFail(msg),
 
     // HEARTBEAT - handled by WebSocketManager, no-op here
-    'PONG': () => {},
+    PONG: () => {},
 
     // SYNC handlers
-    'OP_ACK': (msg) => delegates.handleOpAck(msg),
-    'OP_REJECTED': (msg) => delegates.handleOpRejected(msg),
-    'ERROR': (msg) => delegates.handleError(msg),
-    'SYNC_RESP_ROOT': (msg) => managers.merkleSyncHandler.handleSyncRespRoot(msg.payload),
-    'SYNC_RESP_BUCKETS': (msg) => managers.merkleSyncHandler.handleSyncRespBuckets(msg.payload),
-    'SYNC_RESP_LEAF': (msg) => managers.merkleSyncHandler.handleSyncRespLeaf(msg.payload),
-    'SYNC_RESET_REQUIRED': (msg) => managers.merkleSyncHandler.handleSyncResetRequired(msg.payload),
+    OP_ACK: (msg) => delegates.handleOpAck(msg),
+    OP_REJECTED: (msg) => delegates.handleOpRejected(msg),
+    ERROR: (msg) => delegates.handleError(msg),
+    SYNC_RESP_ROOT: (msg) => managers.merkleSyncHandler.handleSyncRespRoot(msg.payload),
+    SYNC_RESP_BUCKETS: (msg) => managers.merkleSyncHandler.handleSyncRespBuckets(msg.payload),
+    SYNC_RESP_LEAF: (msg) => managers.merkleSyncHandler.handleSyncRespLeaf(msg.payload),
+    SYNC_RESET_REQUIRED: (msg) => managers.merkleSyncHandler.handleSyncResetRequired(msg.payload),
 
     // ORMAP SYNC handlers
-    'ORMAP_SYNC_RESP_ROOT': (msg) => managers.orMapSyncHandler.handleORMapSyncRespRoot(msg.payload),
-    'ORMAP_SYNC_RESP_BUCKETS': (msg) => managers.orMapSyncHandler.handleORMapSyncRespBuckets(msg.payload),
-    'ORMAP_SYNC_RESP_LEAF': (msg) => managers.orMapSyncHandler.handleORMapSyncRespLeaf(msg.payload),
-    'ORMAP_DIFF_RESPONSE': (msg) => managers.orMapSyncHandler.handleORMapDiffResponse(msg.payload),
+    ORMAP_SYNC_RESP_ROOT: (msg) => managers.orMapSyncHandler.handleORMapSyncRespRoot(msg.payload),
+    ORMAP_SYNC_RESP_BUCKETS: (msg) =>
+      managers.orMapSyncHandler.handleORMapSyncRespBuckets(msg.payload),
+    ORMAP_SYNC_RESP_LEAF: (msg) => managers.orMapSyncHandler.handleORMapSyncRespLeaf(msg.payload),
+    ORMAP_DIFF_RESPONSE: (msg) => managers.orMapSyncHandler.handleORMapDiffResponse(msg.payload),
 
     // QUERY handlers
-    'QUERY_RESP': (msg) => delegates.handleQueryResp(msg),
-    'QUERY_UPDATE': (msg) => delegates.handleQueryUpdate(msg),
+    QUERY_RESP: (msg) => delegates.handleQueryResp(msg),
+    QUERY_UPDATE: (msg) => delegates.handleQueryUpdate(msg),
 
     // EVENT handlers
-    'SERVER_EVENT': (msg) => delegates.handleServerEvent(msg),
-    'SERVER_BATCH_EVENT': (msg) => delegates.handleServerBatchEvent(msg),
+    SERVER_EVENT: (msg) => delegates.handleServerEvent(msg),
+    SERVER_BATCH_EVENT: (msg) => delegates.handleServerBatchEvent(msg),
 
     // TOPIC handlers
-    'TOPIC_MESSAGE': (msg) => {
+    TOPIC_MESSAGE: (msg) => {
       const { topic, data, publisherId, timestamp } = msg.payload;
       managers.topicManager.handleTopicMessage(topic, data, publisherId, timestamp);
     },
 
     // LOCK handlers
-    'LOCK_GRANTED': (msg) => {
+    LOCK_GRANTED: (msg) => {
       const { requestId, name, fencingToken } = msg.payload;
       managers.lockManager.handleLockGranted(requestId, name, fencingToken);
     },
-    'LOCK_RELEASED': (msg) => {
+    LOCK_RELEASED: (msg) => {
       const { requestId, name, success } = msg.payload;
       managers.lockManager.handleLockReleased(requestId, name, success);
     },
 
     // GC handler
-    'GC_PRUNE': (msg) => delegates.handleGcPrune(msg),
+    GC_PRUNE: (msg) => delegates.handleGcPrune(msg),
 
     // COUNTER handlers
-    'COUNTER_UPDATE': (msg) => {
+    COUNTER_UPDATE: (msg) => {
       const { name, state } = msg.payload;
       managers.counterManager.handleCounterUpdate(name, state);
     },
-    'COUNTER_RESPONSE': (msg) => {
+    COUNTER_RESPONSE: (msg) => {
       const { name, state } = msg.payload;
       managers.counterManager.handleCounterUpdate(name, state);
     },
 
     // PROCESSOR handlers
-    'ENTRY_PROCESS_RESPONSE': (msg) => {
+    ENTRY_PROCESS_RESPONSE: (msg) => {
       managers.entryProcessorClient.handleEntryProcessResponse(msg);
     },
-    'ENTRY_PROCESS_BATCH_RESPONSE': (msg) => {
+    ENTRY_PROCESS_BATCH_RESPONSE: (msg) => {
       managers.entryProcessorClient.handleEntryProcessBatchResponse(msg);
     },
 
     // RESOLVER handlers
-    'REGISTER_RESOLVER_RESPONSE': (msg) => {
+    REGISTER_RESOLVER_RESPONSE: (msg) => {
       managers.conflictResolverClient.handleRegisterResponse(msg);
     },
-    'UNREGISTER_RESOLVER_RESPONSE': (msg) => {
+    UNREGISTER_RESOLVER_RESPONSE: (msg) => {
       managers.conflictResolverClient.handleUnregisterResponse(msg);
     },
-    'LIST_RESOLVERS_RESPONSE': (msg) => {
+    LIST_RESOLVERS_RESPONSE: (msg) => {
       managers.conflictResolverClient.handleListResponse(msg);
     },
-    'MERGE_REJECTED': (msg) => {
+    MERGE_REJECTED: (msg) => {
       managers.conflictResolverClient.handleMergeRejected(msg);
     },
 
     // SEARCH handlers
-    'SEARCH_RESP': (msg) => {
+    SEARCH_RESP: (msg) => {
       managers.searchClient.handleSearchResponse(msg.payload);
     },
-    'SEARCH_UPDATE': () => {
+    SEARCH_UPDATE: () => {
       // SEARCH_UPDATE is handled by SearchHandle via emitMessage, no-op here
     },
 
     // SQL handlers
-    'SQL_QUERY_RESP': (msg) => {
+    SQL_QUERY_RESP: (msg) => {
       managers.sqlClient.handleSqlQueryResponse(msg.payload);
     },
 
     // Vector search handlers
-    'VECTOR_SEARCH_RESP': (msg) => {
+    VECTOR_SEARCH_RESP: (msg) => {
       managers.vectorSearchClient.handleResponse(msg.payload);
     },
 
     // Hybrid search handlers
-    'HYBRID_SEARCH_RESP': (msg) => {
+    HYBRID_SEARCH_RESP: (msg) => {
       managers.hybridSearchClient.handleResponse(msg.payload);
     },
-    'HYBRID_SEARCH_UPDATE': () => {
+    HYBRID_SEARCH_UPDATE: () => {
       // HYBRID_SEARCH_UPDATE is consumed by HybridSearchHandle via emitMessage; no-op here.
     },
   });

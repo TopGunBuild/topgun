@@ -21,7 +21,12 @@ describe('IndexedORMap', () => {
 
   describe('basic operations', () => {
     it('should work as a regular ORMap', () => {
-      const product: Product = { name: 'Widget', category: 'Electronics', price: 99.99, inStock: true };
+      const product: Product = {
+        name: 'Widget',
+        category: 'Electronics',
+        price: 99.99,
+        inStock: true,
+      };
       const record = map.add('product1', product);
 
       expect(record).toBeDefined();
@@ -30,8 +35,18 @@ describe('IndexedORMap', () => {
     });
 
     it('should support multiple values per key', () => {
-      const product1: Product = { name: 'Widget A', category: 'Electronics', price: 99.99, inStock: true };
-      const product2: Product = { name: 'Widget B', category: 'Electronics', price: 149.99, inStock: true };
+      const product1: Product = {
+        name: 'Widget A',
+        category: 'Electronics',
+        price: 99.99,
+        inStock: true,
+      };
+      const product2: Product = {
+        name: 'Widget B',
+        category: 'Electronics',
+        price: 149.99,
+        inStock: true,
+      };
 
       map.add('widgets', product1);
       map.add('widgets', product2);
@@ -43,8 +58,18 @@ describe('IndexedORMap', () => {
     });
 
     it('should remove specific values', () => {
-      const product1: Product = { name: 'Widget A', category: 'Electronics', price: 99.99, inStock: true };
-      const product2: Product = { name: 'Widget B', category: 'Electronics', price: 149.99, inStock: true };
+      const product1: Product = {
+        name: 'Widget A',
+        category: 'Electronics',
+        price: 99.99,
+        inStock: true,
+      };
+      const product2: Product = {
+        name: 'Widget B',
+        category: 'Electronics',
+        price: 149.99,
+        inStock: true,
+      };
 
       map.add('widgets', product1);
       map.add('widgets', product2);
@@ -57,7 +82,12 @@ describe('IndexedORMap', () => {
 
     it('should clear all data', () => {
       map.add('product1', { name: 'Widget', category: 'Electronics', price: 99.99, inStock: true });
-      map.add('product2', { name: 'Gadget', category: 'Electronics', price: 199.99, inStock: false });
+      map.add('product2', {
+        name: 'Gadget',
+        category: 'Electronics',
+        price: 199.99,
+        inStock: false,
+      });
 
       map.clear();
 
@@ -122,10 +152,30 @@ describe('IndexedORMap', () => {
       map.addNavigableIndex(priceAttr);
 
       // Add data - multiple values per key to test ORMap behavior
-      map.add('electronics', { name: 'Laptop', category: 'Electronics', price: 999.99, inStock: true });
-      map.add('electronics', { name: 'Phone', category: 'Electronics', price: 699.99, inStock: true });
-      map.add('appliances', { name: 'Blender', category: 'Appliances', price: 49.99, inStock: true });
-      map.add('appliances', { name: 'Toaster', category: 'Appliances', price: 29.99, inStock: false });
+      map.add('electronics', {
+        name: 'Laptop',
+        category: 'Electronics',
+        price: 999.99,
+        inStock: true,
+      });
+      map.add('electronics', {
+        name: 'Phone',
+        category: 'Electronics',
+        price: 699.99,
+        inStock: true,
+      });
+      map.add('appliances', {
+        name: 'Blender',
+        category: 'Appliances',
+        price: 49.99,
+        inStock: true,
+      });
+      map.add('appliances', {
+        name: 'Toaster',
+        category: 'Appliances',
+        price: 29.99,
+        inStock: false,
+      });
       map.add('furniture', { name: 'Chair', category: 'Furniture', price: 149.99, inStock: true });
     });
 
@@ -211,7 +261,12 @@ describe('IndexedORMap', () => {
     });
 
     it('should update index on add', () => {
-      const product: Product = { name: 'Widget', category: 'Electronics', price: 99.99, inStock: true };
+      const product: Product = {
+        name: 'Widget',
+        category: 'Electronics',
+        price: 99.99,
+        inStock: true,
+      };
       map.add('product1', product);
 
       const query: Query = { type: 'eq', attribute: 'category', value: 'Electronics' };
@@ -222,7 +277,12 @@ describe('IndexedORMap', () => {
     });
 
     it('should update index on remove', () => {
-      const product: Product = { name: 'Widget', category: 'Electronics', price: 99.99, inStock: true };
+      const product: Product = {
+        name: 'Widget',
+        category: 'Electronics',
+        price: 99.99,
+        inStock: true,
+      };
       map.add('product1', product);
 
       map.remove('product1', product);
@@ -254,7 +314,7 @@ describe('IndexedORMap', () => {
         name: 'Widget',
         category: 'Electronics',
         price: 99.99,
-        inStock: true
+        inStock: true,
       });
 
       map.applyTombstone(record.tag);
@@ -272,7 +332,12 @@ describe('IndexedORMap', () => {
       map.addHashIndex(categoryAttr);
 
       // Key with colons should still work correctly
-      const product: Product = { name: 'Widget', category: 'Electronics', price: 99.99, inStock: true };
+      const product: Product = {
+        name: 'Widget',
+        category: 'Electronics',
+        price: 99.99,
+        inStock: true,
+      };
       map.add('product:v1:final', product);
 
       const query: Query = { type: 'eq', attribute: 'category', value: 'Electronics' };
@@ -312,7 +377,12 @@ describe('IndexedORMap', () => {
       map.addHashIndex(categoryAttr);
 
       map.add('product1', { name: 'Widget', category: 'Electronics', price: 99.99, inStock: true });
-      map.add('product2', { name: 'Gadget', category: 'Electronics', price: 199.99, inStock: true });
+      map.add('product2', {
+        name: 'Gadget',
+        category: 'Electronics',
+        price: 199.99,
+        inStock: true,
+      });
       map.add('product3', { name: 'Blender', category: 'Appliances', price: 49.99, inStock: true });
 
       const stats = map.getIndexStats();
@@ -567,7 +637,10 @@ describe('IndexedORMap', () => {
       });
 
       it('should handle special characters', () => {
-        articleMap.add('article1', { title: 'Test <script>alert("xss")</script>', body: 'content' });
+        articleMap.add('article1', {
+          title: 'Test <script>alert("xss")</script>',
+          body: 'content',
+        });
         expect(articleMap.search('test')).toHaveLength(1);
         expect(articleMap.search('script')).toHaveLength(1);
       });

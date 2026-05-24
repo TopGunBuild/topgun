@@ -79,7 +79,7 @@ export function QueryPlayground() {
         executeQuery();
       }
     },
-    [executeQuery]
+    [executeQuery],
   );
 
   const resultArray = Array.isArray(result) ? result : result ? [result] : [];

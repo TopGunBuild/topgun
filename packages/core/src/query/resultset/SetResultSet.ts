@@ -15,7 +15,7 @@ import type { ResultSet } from './ResultSet';
 export class SetResultSet<K> implements ResultSet<K> {
   constructor(
     private readonly keys: Set<K>,
-    private readonly retrievalCost: number
+    private readonly retrievalCost: number,
   ) {}
 
   [Symbol.iterator](): Iterator<K> {

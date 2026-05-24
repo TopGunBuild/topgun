@@ -78,16 +78,16 @@ export class IndexSerializer {
 
   private loadIntoIndex(index: BM25InvertedIndex, data: SerializedIndex): void {
     // Restore metadata
-    // We need to set private properties. 
+    // We need to set private properties.
     // We'll use a helper method on Index or 'any' cast for this serializer friend class.
     const idx = index as any;
-    
+
     idx.totalDocs = data.metadata.totalDocs;
     idx.avgDocLength = data.metadata.avgDocLength;
-    
+
     // Restore doc lengths
     idx.docLengths = new Map(Object.entries(data.docLengths));
-    
+
     // Restore terms
     for (const { term, idf, postings } of data.terms) {
       const termInfos: TermInfo[] = postings.map((p) => ({
@@ -95,10 +95,10 @@ export class IndexSerializer {
         termFrequency: p.termFrequency,
         fieldPositions: p.positions,
       }));
-      
+
       idx.index.set(term, termInfos);
       idx.idfCache.set(term, idf);
-      
+
       // We also need to restore docTerms for efficient removal
       // This is expensive to rebuild from inverted index (O(Terms * Docs)).
       // But essential for updates.
@@ -111,4 +111,3 @@ export class IndexSerializer {
     }
   }
 }
-

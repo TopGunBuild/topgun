@@ -74,7 +74,7 @@ export interface UseVectorSearchResult {
 export function useVectorSearch(
   mapName: string,
   query: Float32Array | number[] | null,
-  options?: UseVectorSearchOptions
+  options?: UseVectorSearchOptions,
 ): UseVectorSearchResult {
   const client = useClient();
   const [results, setResults] = useState<VectorSearchClientResult[]>([]);

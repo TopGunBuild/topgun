@@ -131,7 +131,10 @@ export class IndexAdvisor {
    * @param threshold - Minimum query count threshold
    * @returns True if attribute should be indexed
    */
-  shouldIndex(attribute: string, threshold: number = ADAPTIVE_INDEXING_DEFAULTS.autoIndex.threshold!): boolean {
+  shouldIndex(
+    attribute: string,
+    threshold: number = ADAPTIVE_INDEXING_DEFAULTS.autoIndex.threshold!,
+  ): boolean {
     const attrStats = this.tracker.getAttributeStats(attribute);
     if (attrStats.length === 0) return false;
 
@@ -178,7 +181,7 @@ export class IndexAdvisor {
    */
   private findBestPattern(
     stats: QueryStatistics[],
-    excludeExistingIndexes: boolean
+    excludeExistingIndexes: boolean,
   ): QueryStatistics | null {
     let best: QueryStatistics | null = null;
     let bestScore = -1;
@@ -206,7 +209,7 @@ export class IndexAdvisor {
    */
   private generateSuggestion(
     stat: QueryStatistics,
-    allAttrStats: QueryStatistics[]
+    allAttrStats: QueryStatistics[],
   ): IndexSuggestion | null {
     const indexType = this.selectIndexType(stat.queryType);
     if (!indexType) return null;
@@ -266,7 +269,7 @@ export class IndexAdvisor {
    */
   private countBenefitingPatterns(
     stats: QueryStatistics[],
-    indexType: RecommendedIndexType
+    indexType: RecommendedIndexType,
   ): number {
     let count = 0;
 
@@ -352,7 +355,7 @@ export class IndexAdvisor {
   private generateReason(
     stat: QueryStatistics,
     benefit: number,
-    benefitingPatterns: number
+    benefitingPatterns: number,
   ): string {
     const costStr = stat.averageCost.toFixed(2);
     let reason = `Queried ${stat.queryCount}× with average cost ${costStr}ms. `;
@@ -424,7 +427,7 @@ export class IndexAdvisor {
    */
   shouldCreateCompoundIndex(
     attributes: string[],
-    threshold: number = ADAPTIVE_INDEXING_DEFAULTS.autoIndex.threshold!
+    threshold: number = ADAPTIVE_INDEXING_DEFAULTS.autoIndex.threshold!,
   ): boolean {
     const stat = this.tracker.getCompoundStats(attributes);
     if (!stat) return false;
@@ -503,7 +506,7 @@ export class IndexAdvisor {
    */
   private calculateCompoundPriority(
     stat: CompoundQueryStatistics,
-    estimatedBenefit: number
+    estimatedBenefit: number,
   ): SuggestionPriority {
     // High priority: frequently queried compound patterns with high cost
     if (stat.queryCount > 100 && stat.averageCost > 10) {

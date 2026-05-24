@@ -121,7 +121,7 @@ export function CommandPalette() {
         window.open(command.url, '_blank');
       }
     },
-    [navigate]
+    [navigate],
   );
 
   const sections = ['Navigation', 'Theme', 'Help'];
@@ -129,7 +129,7 @@ export function CommandPalette() {
     (c) =>
       !search ||
       c.label.toLowerCase().includes(search.toLowerCase()) ||
-      c.section.toLowerCase().includes(search.toLowerCase())
+      c.section.toLowerCase().includes(search.toLowerCase()),
   );
 
   if (!open) return null;
@@ -137,10 +137,7 @@ export function CommandPalette() {
   return (
     <div className="fixed inset-0 z-50">
       {/* Backdrop */}
-      <div
-        className="fixed inset-0 bg-black/50 backdrop-blur-sm"
-        onClick={() => setOpen(false)}
-      />
+      <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setOpen(false)} />
 
       {/* Dialog */}
       <div className="fixed top-[20%] left-1/2 -translate-x-1/2 w-full max-w-lg">
@@ -169,9 +166,7 @@ export function CommandPalette() {
 
               return (
                 <Command.Group key={section} heading={section}>
-                  <p className="px-2 py-1.5 text-xs font-medium text-muted-foreground">
-                    {section}
-                  </p>
+                  <p className="px-2 py-1.5 text-xs font-medium text-muted-foreground">{section}</p>
                   {sectionCommands.map((command) => (
                     <Command.Item
                       key={command.id}
@@ -179,7 +174,7 @@ export function CommandPalette() {
                       onSelect={() => handleSelect(command)}
                       className={cn(
                         'flex items-center gap-2 px-2 py-2 rounded-md cursor-pointer text-sm',
-                        'aria-selected:bg-accent aria-selected:text-accent-foreground'
+                        'aria-selected:bg-accent aria-selected:text-accent-foreground',
                       )}
                     >
                       {command.icon}

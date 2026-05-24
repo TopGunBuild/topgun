@@ -635,7 +635,27 @@ describe('Tokenizer - Additional edge cases (from test report)', () => {
   describe('Query-like patterns', () => {
     test('should handle text with Lucene special chars', () => {
       const tokenizer = new BM25Tokenizer();
-      const specialChars = ['\\', '+', '-', '&&', '||', '!', '(', ')', '{', '}', '[', ']', '^', '"', '~', '*', '?', ':', '/'];
+      const specialChars = [
+        '\\',
+        '+',
+        '-',
+        '&&',
+        '||',
+        '!',
+        '(',
+        ')',
+        '{',
+        '}',
+        '[',
+        ']',
+        '^',
+        '"',
+        '~',
+        '*',
+        '?',
+        ':',
+        '/',
+      ];
 
       specialChars.forEach((char) => {
         const query = `test${char}query`;

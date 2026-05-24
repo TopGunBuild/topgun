@@ -31,10 +31,10 @@ export interface ORMapSnapshot<K, V> {
 
 /**
  * OR-Map (Observed-Remove Map) Implementation.
- * 
+ *
  * Acts as a Multimap where each Key holds a Set of Values.
  * Supports concurrent additions to the same key without data loss.
- * 
+ *
  * Logic:
  * - Add(K, V): Generates a unique tag. Stores (V, tag) under K.
  * - Remove(K, V): Finds all *currently observed* tags for V under K, and moves them to a Remove Set (Tombstones).
@@ -69,7 +69,7 @@ export class ORMap<K, V> {
   public subscribe(callback: (entries: Array<[K, V[]]>) => void): () => void {
     this.listeners.push(callback);
     return () => {
-      this.listeners = this.listeners.filter(cb => cb !== callback);
+      this.listeners = this.listeners.filter((cb) => cb !== callback);
     };
   }
 
@@ -82,7 +82,7 @@ export class ORMap<K, V> {
         snapshot.push([key, values]);
       }
     }
-    this.listeners.forEach(cb => cb(snapshot));
+    this.listeners.forEach((cb) => cb(snapshot));
   }
 
   public get size(): number {
@@ -109,7 +109,7 @@ export class ORMap<K, V> {
     const record: ORMapRecord<V> = {
       value,
       timestamp,
-      tag
+      tag,
     };
 
     if (ttlMs !== undefined) {
@@ -359,7 +359,7 @@ export class ORMap<K, V> {
   public getSnapshot(): ORMapSnapshot<K, V> {
     return {
       items: this.items,
-      tombstones: this.tombstones
+      tombstones: this.tombstones,
     };
   }
 
@@ -392,7 +392,7 @@ export class ORMap<K, V> {
   public mergeKey(
     key: K,
     remoteRecords: ORMapRecord<V>[],
-    remoteTombstones: string[] = []
+    remoteTombstones: string[] = [],
   ): MergeKeyResult {
     let added = 0;
     let updated = 0;

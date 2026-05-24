@@ -83,7 +83,7 @@ function makeOwnerWriteBatch(mapName: string, key: string, ownerId: string): obj
 async function sendAndWaitForResponse(
   client: TestClient,
   message: object,
-  context = 'send'
+  context = 'send',
 ): Promise<{ type: string; payload?: any }> {
   const baseIndex = client.messages.length;
 
@@ -116,7 +116,7 @@ async function sendAndWaitForResponse(
 async function writeAndWaitForResponse(
   client: TestClient,
   mapName: string,
-  key = 'k1'
+  key = 'k1',
 ): Promise<{ type: string; payload?: any }> {
   return sendAndWaitForResponse(client, makeWriteBatch(mapName, key), `write to map "${mapName}"`);
 }
@@ -132,7 +132,7 @@ async function createPolicy(
     action: string;
     effect: string;
     conditionExpr?: string;
-  }
+  },
 ): Promise<void> {
   const body: Record<string, string> = {
     id: policy.id,
@@ -221,7 +221,11 @@ describe('Integration: RBAC Policy Enforcement (Rust Server)', () => {
       expect(docsResp.type).toBe('OP_ACK');
 
       // Write to "restricted-map" — no policy exists, default-deny applies.
-      const restrictedResp = await writeAndWaitForResponse(client, 'restricted-map', 'key-t1-restricted');
+      const restrictedResp = await writeAndWaitForResponse(
+        client,
+        'restricted-map',
+        'key-t1-restricted',
+      );
       expect(restrictedResp.type).toBe('ERROR');
     } finally {
       client.close();
@@ -354,7 +358,7 @@ describe('Integration: RBAC Policy Enforcement (Rust Server)', () => {
       const resp = await sendAndWaitForResponse(
         client,
         makeOwnerWriteBatch('owned-docs', 'doc-owned', 'owner-user-1'),
-        'owner write (matching)'
+        'owner write (matching)',
       );
 
       expect(resp.type).toBe('OP_ACK');
@@ -366,7 +370,7 @@ describe('Integration: RBAC Policy Enforcement (Rust Server)', () => {
   // -------------------------------------------------------------------------
   // Test 7: Non-owner is denied writing another user's record
   // -------------------------------------------------------------------------
-  test('Test 7: non-owner is denied writing another user\'s record', async () => {
+  test("Test 7: non-owner is denied writing another user's record", async () => {
     // Reuses the "owned-docs" policy from Test 6 (conditionExpr: 'auth.id == data.ownerId').
     const client = await createRustTestClient(server.port, {
       userId: 'non-owner-user',
@@ -380,7 +384,7 @@ describe('Integration: RBAC Policy Enforcement (Rust Server)', () => {
       const resp = await sendAndWaitForResponse(
         client,
         makeOwnerWriteBatch('owned-docs', 'doc-stolen', 'someone-else'),
-        'owner write (mismatched)'
+        'owner write (mismatched)',
       );
 
       expect(resp.type).toBe('ERROR');
@@ -407,7 +411,7 @@ describe('Integration: RBAC Policy Enforcement (Rust Server)', () => {
       const resp = await sendAndWaitForResponse(
         adminClient,
         makeOwnerWriteBatch('owned-docs', 'admin-override', 'any-other-user'),
-        'admin write (bypassing condition)'
+        'admin write (bypassing condition)',
       );
 
       expect(resp.type).toBe('OP_ACK');

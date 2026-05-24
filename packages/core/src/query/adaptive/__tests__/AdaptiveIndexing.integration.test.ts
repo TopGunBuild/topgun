@@ -54,7 +54,7 @@ describe('Adaptive Indexing Integration', () => {
       const stats = products.getQueryStatistics();
       expect(stats.length).toBeGreaterThan(0);
 
-      const categoryStats = stats.find(s => s.attribute === 'category');
+      const categoryStats = stats.find((s) => s.attribute === 'category');
       expect(categoryStats).toBeDefined();
       expect(categoryStats?.queryCount).toBe(10);
 
@@ -62,7 +62,7 @@ describe('Adaptive Indexing Integration', () => {
       const suggestions = products.getIndexSuggestions({ minQueryCount: 5, minAverageCost: 0 });
       expect(suggestions.length).toBeGreaterThan(0);
 
-      const categorySuggestion = suggestions.find(s => s.attribute === 'category');
+      const categorySuggestion = suggestions.find((s) => s.attribute === 'category');
       expect(categorySuggestion).toBeDefined();
       expect(categorySuggestion?.indexType).toBe('hash');
     });
@@ -98,8 +98,8 @@ describe('Adaptive Indexing Integration', () => {
 
       const suggestions = products.getIndexSuggestions({ minQueryCount: 5, minAverageCost: 0 });
 
-      const categorySuggestion = suggestions.find(s => s.attribute === 'category');
-      const priceSuggestion = suggestions.find(s => s.attribute === 'price');
+      const categorySuggestion = suggestions.find((s) => s.attribute === 'category');
+      const priceSuggestion = suggestions.find((s) => s.attribute === 'price');
 
       expect(categorySuggestion?.indexType).toBe('hash');
       expect(priceSuggestion?.indexType).toBe('navigable');
@@ -125,7 +125,7 @@ describe('Adaptive Indexing Integration', () => {
       }
 
       // Manually add index for category
-      products.addHashIndex(simpleAttribute<Product, string>('category', p => p.category));
+      products.addHashIndex(simpleAttribute<Product, string>('category', (p) => p.category));
 
       // Execute queries
       for (let i = 0; i < 10; i++) {
@@ -135,7 +135,7 @@ describe('Adaptive Indexing Integration', () => {
       const suggestions = products.getIndexSuggestions();
 
       // Category should not be suggested (already indexed)
-      expect(suggestions.find(s => s.attribute === 'category')).toBeUndefined();
+      expect(suggestions.find((s) => s.attribute === 'category')).toBeUndefined();
     });
 
     it('resets statistics on demand', () => {
@@ -176,7 +176,7 @@ describe('Adaptive Indexing Integration', () => {
       });
 
       // Register attribute for auto-indexing
-      products.registerAttribute(simpleAttribute<Product, string>('category', p => p.category));
+      products.registerAttribute(simpleAttribute<Product, string>('category', (p) => p.category));
 
       // Add data
       for (let i = 0; i < 50; i++) {
@@ -211,8 +211,8 @@ describe('Adaptive Indexing Integration', () => {
       });
 
       // Register attributes
-      products.registerAttribute(simpleAttribute<Product, string>('category', p => p.category));
-      products.registerAttribute(simpleAttribute<Product, number>('price', p => p.price));
+      products.registerAttribute(simpleAttribute<Product, string>('category', (p) => p.category));
+      products.registerAttribute(simpleAttribute<Product, number>('price', (p) => p.price));
 
       // Add data
       for (let i = 0; i < 50; i++) {
@@ -241,8 +241,8 @@ describe('Adaptive Indexing Integration', () => {
 
       // Verify index types
       const indexes = products.getIndexes();
-      const categoryIndex = indexes.find(i => i.attribute.name === 'category');
-      const priceIndex = indexes.find(i => i.attribute.name === 'price');
+      const categoryIndex = indexes.find((i) => i.attribute.name === 'category');
+      const priceIndex = indexes.find((i) => i.attribute.name === 'price');
 
       expect(categoryIndex?.type).toBe('hash');
       expect(priceIndex?.type).toBe('navigable');
@@ -256,9 +256,9 @@ describe('Adaptive Indexing Integration', () => {
       });
 
       // Register multiple attributes
-      products.registerAttribute(simpleAttribute<Product, string>('category', p => p.category));
-      products.registerAttribute(simpleAttribute<Product, number>('price', p => p.price));
-      products.registerAttribute(simpleAttribute<Product, string>('name', p => p.name));
+      products.registerAttribute(simpleAttribute<Product, string>('category', (p) => p.category));
+      products.registerAttribute(simpleAttribute<Product, number>('price', (p) => p.price));
+      products.registerAttribute(simpleAttribute<Product, string>('name', (p) => p.name));
 
       // Add data
       products.set('p1', {
@@ -363,7 +363,7 @@ describe('Adaptive Indexing Integration', () => {
         },
       });
 
-      products.registerAttribute(simpleAttribute<Product, string>('category', p => p.category));
+      products.registerAttribute(simpleAttribute<Product, string>('category', (p) => p.category));
 
       // Add data
       for (let i = 0; i < 50; i++) {
@@ -383,7 +383,7 @@ describe('Adaptive Indexing Integration', () => {
       }
 
       const suggestions = products.getIndexSuggestions({ minQueryCount: 3, minAverageCost: 0 });
-      expect(suggestions.find(s => s.attribute === 'category')).toBeDefined();
+      expect(suggestions.find((s) => s.attribute === 'category')).toBeDefined();
       expect(products.hasIndexOn('category')).toBe(false);
 
       // 2 more queries: Auto-index should create
@@ -403,7 +403,7 @@ describe('Adaptive Indexing Integration', () => {
         },
       });
 
-      products.registerAttribute(simpleAttribute<Product, string>('category', p => p.category));
+      products.registerAttribute(simpleAttribute<Product, string>('category', (p) => p.category));
 
       // Add significant data
       for (let i = 0; i < 10000; i++) {

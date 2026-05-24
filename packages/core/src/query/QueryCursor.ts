@@ -169,7 +169,7 @@ export class QueryCursor {
   static fromResults(
     results: CursorableQueryResult[],
     sort: Record<string, 'asc' | 'desc'>,
-    predicate?: unknown
+    predicate?: unknown,
   ): string {
     const nodeValues: Record<string, unknown> = {};
     const nodeKeys: Record<string, string> = {};
@@ -215,7 +215,7 @@ export class QueryCursor {
   static fromLastResult(
     lastResult: CursorableQueryResult,
     sort: Record<string, 'asc' | 'desc'>,
-    predicate?: unknown
+    predicate?: unknown,
   ): string {
     return this.fromResults([lastResult], sort, predicate);
   }
@@ -238,7 +238,7 @@ export class QueryCursor {
     cursor: QueryCursorData,
     predicate: unknown,
     sort: Record<string, 'asc' | 'desc'>,
-    options?: QueryCursorOptions
+    options?: QueryCursorOptions,
   ): boolean {
     const maxAge = options?.maxAgeMs ?? DEFAULT_QUERY_CURSOR_MAX_AGE_MS;
 
@@ -269,7 +269,7 @@ export class QueryCursor {
    */
   static getNodePosition(
     cursor: QueryCursorData,
-    nodeId: string = 'local'
+    nodeId: string = 'local',
   ): { afterValue: unknown; afterKey: string } | null {
     if (!(nodeId in cursor.nodeValues)) {
       return null;
@@ -291,10 +291,7 @@ export class QueryCursor {
    * @param cursor - Decoded cursor data
    * @returns true if result should be included (is after cursor)
    */
-  static isAfterCursor(
-    result: CursorableQueryResult,
-    cursor: QueryCursorData
-  ): boolean {
+  static isAfterCursor(result: CursorableQueryResult, cursor: QueryCursorData): boolean {
     const nodeId = result.nodeId ?? 'local';
     const position = this.getNodePosition(cursor, nodeId);
 
@@ -344,7 +341,7 @@ export class QueryCursor {
   static merge(
     cursors: QueryCursorData[],
     sort: Record<string, 'asc' | 'desc'>,
-    predicate?: unknown
+    predicate?: unknown,
   ): QueryCursorData {
     const nodeValues: Record<string, unknown> = {};
     const nodeKeys: Record<string, string> = {};

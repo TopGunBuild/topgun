@@ -8,8 +8,7 @@ export interface PermissionPolicy {
 }
 
 export interface Principal {
-    userId: string;
-    roles: string[];
-    [key: string]: any;
+  userId: string;
+  roles: string[];
+  [key: string]: any;
 }
-

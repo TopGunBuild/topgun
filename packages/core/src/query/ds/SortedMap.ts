@@ -234,10 +234,7 @@ export class SortedMap<K, V> {
   /**
    * Create a new SortedMap from entries.
    */
-  static from<K, V>(
-    entries: Iterable<[K, V]>,
-    comparator?: Comparator<K>
-  ): SortedMap<K, V> {
+  static from<K, V>(entries: Iterable<[K, V]>, comparator?: Comparator<K>): SortedMap<K, V> {
     const map = new SortedMap<K, V>(comparator);
     for (const [key, value] of entries) {
       map.set(key, value);

@@ -309,7 +309,7 @@ export class FullTextIndex {
   scoreSingleDocument(
     docId: string,
     queryTerms: string[],
-    document?: Record<string, unknown>
+    document?: Record<string, unknown>,
   ): SearchResult | null {
     if (queryTerms.length === 0) {
       return null;
@@ -329,18 +329,14 @@ export class FullTextIndex {
 
     // Quick check: any query term matches document?
     const docTokenSet = new Set(docTokens);
-    const matchedTerms = queryTerms.filter(term => docTokenSet.has(term));
+    const matchedTerms = queryTerms.filter((term) => docTokenSet.has(term));
 
     if (matchedTerms.length === 0) {
       return null;
     }
 
     // Calculate BM25 score
-    const score = this.scorer.scoreSingleDocument(
-      queryTerms,
-      docTokens,
-      this.combinedIndex
-    );
+    const score = this.scorer.scoreSingleDocument(queryTerms, docTokens, this.combinedIndex);
 
     if (score <= 0) {
       return null;
@@ -398,10 +394,7 @@ export class FullTextIndex {
    * Search with field boosting.
    * Scores are computed per-field and combined with boost weights.
    */
-  private searchWithBoost(
-    queryTerms: string[],
-    boost: Record<string, number>
-  ): ScoredDocument[] {
+  private searchWithBoost(queryTerms: string[], boost: Record<string, number>): ScoredDocument[] {
     // Accumulate scores per document
     const docScores = new Map<string, { score: number; terms: Set<string> }>();
 

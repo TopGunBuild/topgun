@@ -24,7 +24,8 @@ export async function getStaticPaths() {
       params: { slug: 'whitepaper' },
       props: {
         title: 'TopGun v2 Whitepaper',
-        description: 'Architecture, design decisions, and benchmarks behind the offline-first data grid.',
+        description:
+          'Architecture, design decisions, and benchmarks behind the offline-first data grid.',
         type: 'docs' as const,
       },
     },

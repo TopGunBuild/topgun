@@ -31,7 +31,7 @@ describe('useVectorSearch', () => {
   it('should return empty results when enabled is false', () => {
     const { result } = renderHook(
       () => useVectorSearch('notes', new Float32Array([0.1, 0.2]), { enabled: false }),
-      { wrapper }
+      { wrapper },
     );
 
     expect(result.current.results).toEqual([]);
@@ -49,7 +49,7 @@ describe('useVectorSearch', () => {
 
     const { result } = renderHook(
       () => useVectorSearch('notes', new Float32Array([0.1, 0.2, 0.3]), { k: 5 }),
-      { wrapper }
+      { wrapper },
     );
 
     // Initially loading
@@ -61,20 +61,13 @@ describe('useVectorSearch', () => {
 
     expect(result.current.results).toEqual(mockResults);
     expect(result.current.error).toBeNull();
-    expect(mockVectorSearch).toHaveBeenCalledWith(
-      'notes',
-      expect.any(Float32Array),
-      { k: 5 }
-    );
+    expect(mockVectorSearch).toHaveBeenCalledWith('notes', expect.any(Float32Array), { k: 5 });
   });
 
   it('should set error state on rejection', async () => {
     mockVectorSearch.mockRejectedValue(new Error('Index not found'));
 
-    const { result } = renderHook(
-      () => useVectorSearch('notes', [0.1, 0.2]),
-      { wrapper }
-    );
+    const { result } = renderHook(() => useVectorSearch('notes', [0.1, 0.2]), { wrapper });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -87,13 +80,10 @@ describe('useVectorSearch', () => {
   it('should not re-fire when Float32Array reference changes but content is the same', async () => {
     mockVectorSearch.mockResolvedValue([{ key: 'doc-1', score: 0.9 }]);
 
-    const { result, rerender } = renderHook(
-      ({ query }) => useVectorSearch('notes', query),
-      {
-        wrapper,
-        initialProps: { query: new Float32Array([0.1, 0.2]) as Float32Array | number[] | null },
-      }
-    );
+    const { result, rerender } = renderHook(({ query }) => useVectorSearch('notes', query), {
+      wrapper,
+      initialProps: { query: new Float32Array([0.1, 0.2]) as Float32Array | number[] | null },
+    });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -111,13 +101,10 @@ describe('useVectorSearch', () => {
   it('should re-fire when vector content changes', async () => {
     mockVectorSearch.mockResolvedValue([]);
 
-    const { result, rerender } = renderHook(
-      ({ query }) => useVectorSearch('notes', query),
-      {
-        wrapper,
-        initialProps: { query: [0.1, 0.2] as Float32Array | number[] | null },
-      }
-    );
+    const { result, rerender } = renderHook(({ query }) => useVectorSearch('notes', query), {
+      wrapper,
+      initialProps: { query: [0.1, 0.2] as Float32Array | number[] | null },
+    });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -141,17 +128,12 @@ describe('useVectorSearch', () => {
 
     const secondResults = [{ key: 'doc-new', score: 0.99 }];
 
-    mockVectorSearch
-      .mockReturnValueOnce(firstPromise)
-      .mockResolvedValueOnce(secondResults);
+    mockVectorSearch.mockReturnValueOnce(firstPromise).mockResolvedValueOnce(secondResults);
 
-    const { result, rerender } = renderHook(
-      ({ query }) => useVectorSearch('notes', query),
-      {
-        wrapper,
-        initialProps: { query: [0.1] as Float32Array | number[] | null },
-      }
-    );
+    const { result, rerender } = renderHook(({ query }) => useVectorSearch('notes', query), {
+      wrapper,
+      initialProps: { query: [0.1] as Float32Array | number[] | null },
+    });
 
     // Change query before first resolves — first response becomes stale
     rerender({ query: [0.2] });
@@ -172,13 +154,10 @@ describe('useVectorSearch', () => {
   it('should reset state when query becomes null', async () => {
     mockVectorSearch.mockResolvedValue([{ key: 'doc-1', score: 0.9 }]);
 
-    const { result, rerender } = renderHook(
-      ({ query }) => useVectorSearch('notes', query),
-      {
-        wrapper,
-        initialProps: { query: [0.1, 0.2] as Float32Array | number[] | null },
-      }
-    );
+    const { result, rerender } = renderHook(({ query }) => useVectorSearch('notes', query), {
+      wrapper,
+      initialProps: { query: [0.1, 0.2] as Float32Array | number[] | null },
+    });
 
     await waitFor(() => {
       expect(result.current.results).toHaveLength(1);

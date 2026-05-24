@@ -28,23 +28,23 @@ describe('LWWMap (Last-Write-Wins CRDT)', () => {
   test('should resolve conflicts by timestamp (Last Write Wins)', () => {
     const hlc1 = new HLC('node1');
     const hlc2 = new HLC('node2');
-    
+
     const map1 = new LWWMap<string, string>(hlc1);
-    
+
     // Create two concurrent updates
     const ts1 = hlc1.now();
     const ts2 = hlc2.now();
-    
+
     // Artificially ensure ts2 > ts1
-    // In HLC, we can just update one HLC with the other to sync, 
+    // In HLC, we can just update one HLC with the other to sync,
     // but here we want to simulate concurrent disconnected writes.
     // TS2 should generally be "newer" if created later, but to be sure:
-    // let's rely on HLC.compare logic. 
+    // let's rely on HLC.compare logic.
     // Actually, let's just create records manually to control timestamps.
-    
+
     // Record 1: Earlier
     const record1 = { value: 'val1', timestamp: { millis: 100, counter: 0, nodeId: 'A' } };
-    
+
     // Record 2: Later
     const record2 = { value: 'val2', timestamp: { millis: 200, counter: 0, nodeId: 'B' } };
 
@@ -63,7 +63,7 @@ describe('LWWMap (Last-Write-Wins CRDT)', () => {
 
   test('should resolve ties using nodeId (convergence)', () => {
     const map1 = new LWWMap<string, string>(hlc);
-    
+
     // Same time, different nodes
     // Node 'B' > Node 'A' lexicographically
     const recordA = { value: 'valA', timestamp: { millis: 100, counter: 0, nodeId: 'A' } };
@@ -71,21 +71,21 @@ describe('LWWMap (Last-Write-Wins CRDT)', () => {
 
     map1.merge('key', recordA);
     map1.merge('key', recordB);
-    
+
     expect(map1.get('key')).toBe('valB'); // B wins
-    
+
     // Try reverse order
     const map2 = new LWWMap<string, string>(hlc);
     map2.merge('key', recordB);
     map2.merge('key', recordA);
-    
+
     expect(map2.get('key')).toBe('valB'); // B still wins
   });
 
   test('should prune tombstones correctly', () => {
     // 1. Set item
     map.set('key1', 'value1');
-    
+
     // 2. Remove item (create tombstone)
     const tombstoneRecord = map.remove('key1');
     expect(map.get('key1')).toBeUndefined();
@@ -94,10 +94,10 @@ describe('LWWMap (Last-Write-Wins CRDT)', () => {
 
     // 3. Create a timestamp strictly older than the tombstone
     // tombstone.timestamp is "now".
-    const olderTimestamp = { 
-      millis: tombstoneRecord.timestamp.millis - 1000, 
-      counter: 0, 
-      nodeId: 'test-node' 
+    const olderTimestamp = {
+      millis: tombstoneRecord.timestamp.millis - 1000,
+      counter: 0,
+      nodeId: 'test-node',
     };
 
     // 4. Prune with older timestamp -> Should NOT remove
@@ -106,17 +106,17 @@ describe('LWWMap (Last-Write-Wins CRDT)', () => {
     expect(map.getRecord('key1')).toBeDefined(); // Still there
 
     // 5. Create a timestamp strictly newer than the tombstone
-    const newerTimestamp = { 
-        millis: tombstoneRecord.timestamp.millis + 1000, 
-        counter: 0, 
-        nodeId: 'test-node' 
+    const newerTimestamp = {
+      millis: tombstoneRecord.timestamp.millis + 1000,
+      counter: 0,
+      nodeId: 'test-node',
     };
 
     // 6. Prune with newer timestamp -> Should remove
     const prunedKeys2 = map.prune(newerTimestamp);
     expect(prunedKeys2).toEqual(['key1']);
     expect(map.getRecord('key1')).toBeUndefined(); // GONE
-    
+
     // Merkle Tree should be updated (removed from tree)
     // We can check via internal merkleTree state if accessible, or assume it's consistent if subsequent ops work.
     // Let's just check if we can add it back.
@@ -139,7 +139,7 @@ describe('LWWMap (Last-Write-Wins CRDT)', () => {
     // 3. Advance time by 150ms (Expired)
     jest.spyOn(Date, 'now').mockImplementation(() => now + 150);
     expect(map.get('tempKey')).toBeUndefined();
-    
+
     // Restore
     jest.restoreAllMocks();
   });

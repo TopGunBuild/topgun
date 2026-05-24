@@ -140,7 +140,7 @@ export class HybridQueryHandle<T> {
    */
   public onResult(
     items: Array<{ key: string; value: T; score?: number; matchedTerms?: string[] }>,
-    source: HybridResultSource = 'server'
+    source: HybridResultSource = 'server',
   ): void {
     logger.debug(
       {
@@ -150,15 +150,12 @@ export class HybridQueryHandle<T> {
         currentResultsCount: this.currentResults.size,
         hasReceivedServerData: this.hasReceivedServerData,
       },
-      'HybridQueryHandle onResult'
+      'HybridQueryHandle onResult',
     );
 
     // Race condition protection (same as QueryHandle)
     if (source === 'server' && items.length === 0 && !this.hasReceivedServerData) {
-      logger.debug(
-        { mapName: this.mapName },
-        'HybridQueryHandle ignoring empty server response'
-      );
+      logger.debug({ mapName: this.mapName }, 'HybridQueryHandle ignoring empty server response');
       return;
     }
 
@@ -193,12 +190,7 @@ export class HybridQueryHandle<T> {
   /**
    * Called by SyncEngine on live update.
    */
-  public onUpdate(
-    key: string,
-    value: T | null,
-    score?: number,
-    matchedTerms?: string[]
-  ): void {
+  public onUpdate(key: string, value: T | null, score?: number, matchedTerms?: string[]): void {
     if (value === null) {
       this.currentResults.delete(key);
     } else {
@@ -298,7 +290,7 @@ export class HybridQueryHandle<T> {
         _key: key,
         _score: entry.score,
         _matchedTerms: entry.matchedTerms,
-      })
+      }),
     );
 
     // Sort by configured sort fields
@@ -358,7 +350,11 @@ export class HybridQueryHandle<T> {
   }
 
   private containsFTS(predicate: PredicateNode): boolean {
-    if (predicate.op === 'match' || predicate.op === 'matchPhrase' || predicate.op === 'matchPrefix') {
+    if (
+      predicate.op === 'match' ||
+      predicate.op === 'matchPhrase' ||
+      predicate.op === 'matchPrefix'
+    ) {
       return true;
     }
     if (predicate.children) {

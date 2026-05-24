@@ -79,7 +79,7 @@ export class QueryManager implements IQueryManager {
     if (this.config.isAuthenticated()) {
       this.config.sendMessage({
         type: 'QUERY_UNSUB',
-        payload: { queryId }
+        payload: { queryId },
       });
     }
   }
@@ -97,7 +97,7 @@ export class QueryManager implements IQueryManager {
         mapName: query.getMapName(),
         query: filter,
         fields: filter.fields,
-      }
+      },
     });
   }
 
@@ -149,7 +149,7 @@ export class QueryManager implements IQueryManager {
   private sendHybridQuerySubscription(
     queryId: string,
     mapName: string,
-    filter: HybridQueryFilter
+    filter: HybridQueryFilter,
   ): void {
     this.config.sendMessage({
       type: 'HYBRID_QUERY_SUBSCRIBE',
@@ -174,11 +174,11 @@ export class QueryManager implements IQueryManager {
    */
   public async runLocalQuery(
     mapName: string,
-    filter: QueryFilter
+    filter: QueryFilter,
   ): Promise<{ key: string; value: any }[]> {
     // Retrieve all keys for the map
     const keys = await this.config.storageAdapter.getAllKeys();
-    const mapKeys = keys.filter(k => k.startsWith(mapName + ':'));
+    const mapKeys = keys.filter((k) => k.startsWith(mapName + ':'));
 
     const results: { key: string; value: any }[] = [];
     for (const fullKey of mapKeys) {
@@ -221,7 +221,7 @@ export class QueryManager implements IQueryManager {
    */
   public async runLocalHybridQuery<T>(
     mapName: string,
-    filter: HybridQueryFilter
+    filter: HybridQueryFilter,
   ): Promise<Array<{ key: string; value: T; score?: number; matchedTerms?: string[] }>> {
     const results: Array<{ key: string; value: T; score?: number; matchedTerms?: string[] }> = [];
 
@@ -314,7 +314,10 @@ export class QueryManager implements IQueryManager {
    * Called by SyncEngine after AUTH_ACK.
    */
   public resubscribeAll(): void {
-    logger.debug({ queryCount: this.queries.size, hybridCount: this.hybridQueries.size }, 'QueryManager: resubscribing all queries');
+    logger.debug(
+      { queryCount: this.queries.size, hybridCount: this.hybridQueries.size },
+      'QueryManager: resubscribing all queries',
+    );
 
     // Re-subscribe standard queries
     for (const query of this.queries.values()) {
@@ -329,7 +332,7 @@ export class QueryManager implements IQueryManager {
           payload: {
             queryId: query.id,
             rootHash: query.merkleRootHash,
-          }
+          },
         });
       }
     }

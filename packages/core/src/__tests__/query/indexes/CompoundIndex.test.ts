@@ -36,7 +36,7 @@ describe('CompoundIndex', () => {
   describe('constructor', () => {
     it('should require at least 2 attributes', () => {
       expect(() => new CompoundIndex([statusAttr])).toThrow(
-        'CompoundIndex requires at least 2 attributes'
+        'CompoundIndex requires at least 2 attributes',
       );
     });
 
@@ -47,19 +47,14 @@ describe('CompoundIndex', () => {
     });
 
     it('should create index with 3+ attributes', () => {
-      const index = new CompoundIndex<string, TestProduct>([
-        statusAttr,
-        categoryAttr,
-        regionAttr,
-      ]);
+      const index = new CompoundIndex<string, TestProduct>([statusAttr, categoryAttr, regionAttr]);
       expect(index.attributes.length).toBe(3);
     });
 
     it('should use custom separator', () => {
-      const index = new CompoundIndex<string, TestProduct>(
-        [statusAttr, categoryAttr],
-        { separator: '::' }
-      );
+      const index = new CompoundIndex<string, TestProduct>([statusAttr, categoryAttr], {
+        separator: '::',
+      });
       expect(index.compoundName).toBe('status+category');
     });
   });
@@ -79,11 +74,7 @@ describe('CompoundIndex', () => {
     });
 
     it('should return compound name', () => {
-      const index = new CompoundIndex<string, TestProduct>([
-        statusAttr,
-        categoryAttr,
-        regionAttr,
-      ]);
+      const index = new CompoundIndex<string, TestProduct>([statusAttr, categoryAttr, regionAttr]);
       expect(index.compoundName).toBe('status+category+region');
     });
   });
@@ -242,21 +233,21 @@ describe('CompoundIndex', () => {
     it('should throw on non-compound query type', () => {
       const index = new CompoundIndex<string, TestProduct>([statusAttr, categoryAttr]);
 
-      expect(() =>
-        index.retrieve({ type: 'eq', value: 'active' } as any)
-      ).toThrow("CompoundIndex only supports 'compound' query type");
+      expect(() => index.retrieve({ type: 'eq', value: 'active' } as any)).toThrow(
+        "CompoundIndex only supports 'compound' query type",
+      );
     });
 
     it('should throw when values count mismatches attributes', () => {
       const index = new CompoundIndex<string, TestProduct>([statusAttr, categoryAttr]);
 
-      expect(() =>
-        index.retrieve({ type: 'compound', values: ['active'] } as any)
-      ).toThrow('CompoundIndex requires 2 values, got 1');
+      expect(() => index.retrieve({ type: 'compound', values: ['active'] } as any)).toThrow(
+        'CompoundIndex requires 2 values, got 1',
+      );
 
-      expect(() =>
-        index.retrieve({ type: 'compound', values: ['a', 'b', 'c'] } as any)
-      ).toThrow('CompoundIndex requires 2 values, got 3');
+      expect(() => index.retrieve({ type: 'compound', values: ['a', 'b', 'c'] } as any)).toThrow(
+        'CompoundIndex requires 2 values, got 3',
+      );
     });
   });
 
@@ -296,11 +287,7 @@ describe('CompoundIndex', () => {
     });
 
     it('should return extended stats', () => {
-      const index = new CompoundIndex<string, TestProduct>([
-        statusAttr,
-        categoryAttr,
-        regionAttr,
-      ]);
+      const index = new CompoundIndex<string, TestProduct>([statusAttr, categoryAttr, regionAttr]);
 
       index.add('prod-1', createProduct());
 
@@ -323,7 +310,7 @@ describe('CompoundIndex', () => {
     it('should skip records with undefined attribute values', () => {
       const optionalAttr = new SimpleAttribute<TestProduct, string | undefined>(
         'optional',
-        () => undefined
+        () => undefined,
       );
       const index = new CompoundIndex<string, TestProduct>([statusAttr, optionalAttr]);
 
@@ -337,10 +324,7 @@ describe('CompoundIndex', () => {
 
   describe('special value encoding', () => {
     it('should handle null values', () => {
-      const nullableAttr = new SimpleAttribute<TestProduct, string | null>(
-        'nullable',
-        () => null
-      );
+      const nullableAttr = new SimpleAttribute<TestProduct, string | null>('nullable', () => null);
       const index = new CompoundIndex<string, TestProduct>([statusAttr, nullableAttr]);
 
       index.add('prod-1', createProduct());

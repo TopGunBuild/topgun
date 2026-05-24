@@ -30,7 +30,7 @@ export class MerkleSyncHandler implements IMerkleSyncHandler {
     this.config.sendMessage({
       type: 'SYNC_INIT',
       mapName,
-      lastSyncTimestamp: 0
+      lastSyncTimestamp: 0,
     });
   }
 
@@ -38,7 +38,11 @@ export class MerkleSyncHandler implements IMerkleSyncHandler {
    * Handle SYNC_RESP_ROOT message from server.
    * Compares root hashes and requests buckets if mismatch detected.
    */
-  public async handleSyncRespRoot(payload: { mapName: string; rootHash: number; timestamp?: any }): Promise<void> {
+  public async handleSyncRespRoot(payload: {
+    mapName: string;
+    rootHash: number;
+    timestamp?: any;
+  }): Promise<void> {
     const { mapName, timestamp } = payload;
     // Coerce BigInt — Rust server sends u64 hashes which MsgPack decodes as BigInt
     const rootHash = Number(payload.rootHash);
@@ -46,10 +50,13 @@ export class MerkleSyncHandler implements IMerkleSyncHandler {
     if (map instanceof LWWMap) {
       const localRootHash = map.getMerkleTree().getRootHash();
       if (localRootHash !== rootHash) {
-        logger.info({ mapName, localRootHash, remoteRootHash: rootHash }, 'Root hash mismatch, requesting buckets');
+        logger.info(
+          { mapName, localRootHash, remoteRootHash: rootHash },
+          'Root hash mismatch, requesting buckets',
+        );
         this.config.sendMessage({
           type: 'MERKLE_REQ_BUCKET',
-          payload: { mapName, path: '' }
+          payload: { mapName, path: '' },
         });
       } else {
         logger.info({ mapName }, 'Map is in sync');
@@ -65,7 +72,11 @@ export class MerkleSyncHandler implements IMerkleSyncHandler {
    * Handle SYNC_RESP_BUCKETS message from server.
    * Compares bucket hashes and requests mismatched buckets.
    */
-  public handleSyncRespBuckets(payload: { mapName: string; path: string; buckets: Record<string, number> }): void {
+  public handleSyncRespBuckets(payload: {
+    mapName: string;
+    path: string;
+    buckets: Record<string, number>;
+  }): void {
     const { mapName, path, buckets } = payload;
     const map = this.config.getMap(mapName);
     if (map instanceof LWWMap) {
@@ -80,7 +91,7 @@ export class MerkleSyncHandler implements IMerkleSyncHandler {
           const newPath = path + bucketKey;
           this.config.sendMessage({
             type: 'MERKLE_REQ_BUCKET',
-            payload: { mapName, path: newPath }
+            payload: { mapName, path: newPath },
           });
         }
       }
@@ -91,7 +102,10 @@ export class MerkleSyncHandler implements IMerkleSyncHandler {
    * Handle SYNC_RESP_LEAF message from server.
    * Merges leaf records into local map and persists to storage.
    */
-  public async handleSyncRespLeaf(payload: { mapName: string; records: Array<{ key: string; record: any }> }): Promise<void> {
+  public async handleSyncRespLeaf(payload: {
+    mapName: string;
+    records: Array<{ key: string; record: any }>;
+  }): Promise<void> {
     const { mapName, records } = payload;
     const map = this.config.getMap(mapName);
     if (map instanceof LWWMap) {
@@ -132,7 +146,7 @@ export class MerkleSyncHandler implements IMerkleSyncHandler {
     this.config.sendMessage({
       type: 'SYNC_INIT',
       mapName,
-      lastSyncTimestamp
+      lastSyncTimestamp,
     });
   }
 

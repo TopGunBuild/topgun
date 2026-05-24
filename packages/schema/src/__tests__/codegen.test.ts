@@ -34,7 +34,7 @@ function withTempDir(fn: (dir: string) => void): void {
 function runCodegenWithRegistry(
   schemas: Record<string, unknown>,
   outDir: string,
-  opts: { typescript?: boolean; json?: boolean } = {}
+  opts: { typescript?: boolean; json?: boolean } = {},
 ): void {
   // Populate global registry
   resetRegistry();
@@ -60,7 +60,7 @@ describe('JSON output', () => {
       SchemaRegistry.global.register(
         defineMap('users', { strict: true, version: 1 })
           .field('name', t.string(), { required: true, maxLength: 100 })
-          .field('age', t.int(), { minValue: 0, maxValue: 150 })
+          .field('age', t.int(), { minValue: 0, maxValue: 150 }),
       );
 
       const schemaFile = path.join(dir, 'dummy.schema.js');
@@ -81,7 +81,7 @@ describe('JSON output', () => {
     withTempDir((dir) => {
       resetRegistry();
       SchemaRegistry.global.register(
-        defineMap('items').field('label', t.string(), { required: true })
+        defineMap('items').field('label', t.string(), { required: true }),
       );
 
       const schemaFile = path.join(dir, 'dummy.schema.js');
@@ -90,7 +90,7 @@ describe('JSON output', () => {
       runCodegen({ schemaPath: schemaFile, outDir: dir, typescript: false, json: true });
 
       const parsed: JsonSchemaFile = JSON.parse(
-        fs.readFileSync(path.join(dir, 'topgun.schema.json'), 'utf-8')
+        fs.readFileSync(path.join(dir, 'topgun.schema.json'), 'utf-8'),
       );
 
       const field = parsed.maps['items'].fields[0];
@@ -104,7 +104,7 @@ describe('JSON output', () => {
     withTempDir((dir) => {
       resetRegistry();
       SchemaRegistry.global.register(
-        defineMap('items').field('name', t.string(), { minLength: 3, maxLength: 50 })
+        defineMap('items').field('name', t.string(), { minLength: 3, maxLength: 50 }),
       );
 
       const schemaFile = path.join(dir, 'dummy.schema.js');
@@ -113,7 +113,7 @@ describe('JSON output', () => {
       runCodegen({ schemaPath: schemaFile, outDir: dir, typescript: false, json: true });
 
       const parsed: JsonSchemaFile = JSON.parse(
-        fs.readFileSync(path.join(dir, 'topgun.schema.json'), 'utf-8')
+        fs.readFileSync(path.join(dir, 'topgun.schema.json'), 'utf-8'),
       );
 
       const constraints = parsed.maps['items'].fields[0].constraints;
@@ -136,7 +136,7 @@ describe('JSON output', () => {
       runCodegen({ schemaPath: schemaFile, outDir: dir, typescript: false, json: true });
 
       const parsed: JsonSchemaFile = JSON.parse(
-        fs.readFileSync(path.join(dir, 'topgun.schema.json'), 'utf-8')
+        fs.readFileSync(path.join(dir, 'topgun.schema.json'), 'utf-8'),
       );
 
       const mapSchema = parsed.maps['test'];
@@ -149,9 +149,7 @@ describe('JSON output', () => {
   test('Array FieldType serializes as { Array: inner }', () => {
     withTempDir((dir) => {
       resetRegistry();
-      SchemaRegistry.global.register(
-        defineMap('test').field('tags', t.array(t.string()))
-      );
+      SchemaRegistry.global.register(defineMap('test').field('tags', t.array(t.string())));
 
       const schemaFile = path.join(dir, 'dummy.schema.js');
       fs.writeFileSync(schemaFile, '// pre-populated\n', 'utf-8');
@@ -159,7 +157,7 @@ describe('JSON output', () => {
       runCodegen({ schemaPath: schemaFile, outDir: dir, typescript: false, json: true });
 
       const parsed: JsonSchemaFile = JSON.parse(
-        fs.readFileSync(path.join(dir, 'topgun.schema.json'), 'utf-8')
+        fs.readFileSync(path.join(dir, 'topgun.schema.json'), 'utf-8'),
       );
 
       const field = parsed.maps['test'].fields[0];
@@ -177,7 +175,7 @@ describe('JSON output', () => {
       runCodegen({ schemaPath: schemaFile, outDir: dir, typescript: false, json: true });
 
       const parsed: JsonSchemaFile = JSON.parse(
-        fs.readFileSync(path.join(dir, 'topgun.schema.json'), 'utf-8')
+        fs.readFileSync(path.join(dir, 'topgun.schema.json'), 'utf-8'),
       );
 
       expect(parsed.maps).toEqual({});
@@ -190,7 +188,7 @@ describe('TypeScript output', () => {
     withTempDir((dir) => {
       resetRegistry();
       SchemaRegistry.global.register(
-        defineMap('users').field('name', t.string(), { required: true })
+        defineMap('users').field('name', t.string(), { required: true }),
       );
 
       const schemaFile = path.join(dir, 'dummy.schema.js');
@@ -207,7 +205,7 @@ describe('TypeScript output', () => {
     withTempDir((dir) => {
       resetRegistry();
       SchemaRegistry.global.register(
-        defineMap('users').field('name', t.string(), { required: true })
+        defineMap('users').field('name', t.string(), { required: true }),
       );
 
       const schemaFile = path.join(dir, 'dummy.schema.js');
@@ -224,9 +222,7 @@ describe('TypeScript output', () => {
   test('optional fields (required: false) produce "?" properties', () => {
     withTempDir((dir) => {
       resetRegistry();
-      SchemaRegistry.global.register(
-        defineMap('users').field('age', t.int())
-      );
+      SchemaRegistry.global.register(defineMap('users').field('age', t.int()));
 
       const schemaFile = path.join(dir, 'dummy.schema.js');
       fs.writeFileSync(schemaFile, '// pre-populated\n', 'utf-8');
@@ -242,7 +238,7 @@ describe('TypeScript output', () => {
     withTempDir((dir) => {
       resetRegistry();
       SchemaRegistry.global.register(
-        defineMap('blobs').field('data', t.binary(), { required: true })
+        defineMap('blobs').field('data', t.binary(), { required: true }),
       );
 
       const schemaFile = path.join(dir, 'dummy.schema.js');
@@ -259,7 +255,7 @@ describe('TypeScript output', () => {
     withTempDir((dir) => {
       resetRegistry();
       SchemaRegistry.global.register(
-        defineMap('events').field('createdAt', t.timestamp(), { required: true })
+        defineMap('events').field('createdAt', t.timestamp(), { required: true }),
       );
 
       const schemaFile = path.join(dir, 'dummy.schema.js');
@@ -275,9 +271,7 @@ describe('TypeScript output', () => {
   test('Array(String) maps to string[]', () => {
     withTempDir((dir) => {
       resetRegistry();
-      SchemaRegistry.global.register(
-        defineMap('posts').field('tags', t.array(t.string()))
-      );
+      SchemaRegistry.global.register(defineMap('posts').field('tags', t.array(t.string())));
 
       const schemaFile = path.join(dir, 'dummy.schema.js');
       fs.writeFileSync(schemaFile, '// pre-populated\n', 'utf-8');
@@ -293,7 +287,7 @@ describe('TypeScript output', () => {
     withTempDir((dir) => {
       resetRegistry();
       SchemaRegistry.global.register(
-        defineMap('matrix').field('data', t.array(t.array(t.int())), { required: true })
+        defineMap('matrix').field('data', t.array(t.array(t.int())), { required: true }),
       );
 
       const schemaFile = path.join(dir, 'dummy.schema.js');
@@ -309,9 +303,7 @@ describe('TypeScript output', () => {
   test('Map type maps to Record<string, unknown>', () => {
     withTempDir((dir) => {
       resetRegistry();
-      SchemaRegistry.global.register(
-        defineMap('items').field('metadata', t.map())
-      );
+      SchemaRegistry.global.register(defineMap('items').field('metadata', t.map()));
 
       const schemaFile = path.join(dir, 'dummy.schema.js');
       fs.writeFileSync(schemaFile, '// pre-populated\n', 'utf-8');
@@ -326,9 +318,7 @@ describe('TypeScript output', () => {
   test('Any type maps to unknown', () => {
     withTempDir((dir) => {
       resetRegistry();
-      SchemaRegistry.global.register(
-        defineMap('items').field('value', t.any())
-      );
+      SchemaRegistry.global.register(defineMap('items').field('value', t.any()));
 
       const schemaFile = path.join(dir, 'dummy.schema.js');
       fs.writeFileSync(schemaFile, '// pre-populated\n', 'utf-8');
@@ -443,7 +433,7 @@ describe('codegen round-trip fidelity', () => {
           .field('email', t.string(), { required: true, pattern: '^[^@]+@[^@]+$' })
           .field('age', t.int(), { minValue: 0, maxValue: 150 })
           .field('tags', t.array(t.string()), { maxLength: 10 })
-          .field('metadata', t.map())
+          .field('metadata', t.map()),
       );
 
       const schemaFile = path.join(dir, 'dummy.schema.js');
@@ -452,7 +442,7 @@ describe('codegen round-trip fidelity', () => {
       runCodegen({ schemaPath: schemaFile, outDir: dir, typescript: false, json: true });
 
       const parsed: JsonSchemaFile = JSON.parse(
-        fs.readFileSync(path.join(dir, 'topgun.schema.json'), 'utf-8')
+        fs.readFileSync(path.join(dir, 'topgun.schema.json'), 'utf-8'),
       );
 
       const usersSchema = parsed.maps['users'];
@@ -463,19 +453,19 @@ describe('codegen round-trip fidelity', () => {
       expect(typeof usersSchema.strict).toBe('boolean');
 
       // FieldDef uses snake_case: name, required, field_type
-      const nameField = usersSchema.fields.find(f => f.name === 'name');
+      const nameField = usersSchema.fields.find((f) => f.name === 'name');
       expect(nameField).toBeDefined();
       expect(nameField!.required).toBe(true);
       expect(nameField!.field_type).toBe('String');
       expect(nameField!.constraints?.maxLength).toBe(100);
 
       // age field with minValue/maxValue in camelCase
-      const ageField = usersSchema.fields.find(f => f.name === 'age');
+      const ageField = usersSchema.fields.find((f) => f.name === 'age');
       expect(ageField!.constraints?.minValue).toBe(0);
       expect(ageField!.constraints?.maxValue).toBe(150);
 
       // tags field: Array type
-      const tagsField = usersSchema.fields.find(f => f.name === 'tags');
+      const tagsField = usersSchema.fields.find((f) => f.name === 'tags');
       expect(tagsField!.field_type).toEqual({ Array: 'String' });
       expect(tagsField!.constraints?.maxLength).toBe(10);
     });

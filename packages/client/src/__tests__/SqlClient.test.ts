@@ -78,7 +78,7 @@ describe('Client SQL', () => {
             sql: 'SELECT * FROM users WHERE age > 21',
             queryId: expect.any(String),
           }),
-        })
+        }),
       );
 
       // Simulate response
@@ -88,14 +88,20 @@ describe('Client SQL', () => {
         payload: {
           queryId: sentMessage.payload.queryId,
           columns: ['name', 'age'],
-          rows: [['Alice', 30], ['Bob', 25]],
+          rows: [
+            ['Alice', 30],
+            ['Bob', 25],
+          ],
         },
       });
 
       const result = await sqlPromise;
 
       expect(result.columns).toEqual(['name', 'age']);
-      expect(result.rows).toEqual([['Alice', 30], ['Bob', 25]]);
+      expect(result.rows).toEqual([
+        ['Alice', 30],
+        ['Bob', 25],
+      ]);
     });
 
     it('should reject on server error', async () => {
@@ -237,7 +243,10 @@ describe('Client SQL', () => {
     it('should have correct structure', () => {
       const result: SqlQueryResult = {
         columns: ['name', 'age'],
-        rows: [['Alice', 30], ['Bob', 25]],
+        rows: [
+          ['Alice', 30],
+          ['Bob', 25],
+        ],
       };
 
       expect(result.columns).toEqual(['name', 'age']);

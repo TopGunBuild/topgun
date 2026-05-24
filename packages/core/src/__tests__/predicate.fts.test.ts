@@ -99,10 +99,7 @@ describe('FTS Predicates', () => {
 
   describe('Predicates.multiMatch()', () => {
     it('should create OR composition of match predicates', () => {
-      const predicate = Predicates.multiMatch(
-        ['title', 'body'],
-        'machine learning'
-      );
+      const predicate = Predicates.multiMatch(['title', 'body'], 'machine learning');
 
       expect(predicate.op).toBe('or');
       expect(predicate.children).toHaveLength(2);
@@ -118,11 +115,9 @@ describe('FTS Predicates', () => {
     });
 
     it('should apply per-field boost', () => {
-      const predicate = Predicates.multiMatch(
-        ['title', 'body', 'summary'],
-        'test query',
-        { boost: { title: 2.0, summary: 1.5 } }
-      );
+      const predicate = Predicates.multiMatch(['title', 'body', 'summary'], 'test query', {
+        boost: { title: 2.0, summary: 1.5 },
+      });
 
       expect(predicate.op).toBe('or');
       expect(predicate.children).toHaveLength(3);
@@ -170,7 +165,7 @@ describe('FTS Predicates', () => {
     it('should combine FTS with AND', () => {
       const combined = Predicates.and(
         Predicates.equal('status', 'published'),
-        Predicates.match('body', 'machine learning')
+        Predicates.match('body', 'machine learning'),
       );
 
       expect(combined.op).toBe('and');
@@ -182,7 +177,7 @@ describe('FTS Predicates', () => {
     it('should combine FTS with OR', () => {
       const combined = Predicates.or(
         Predicates.match('title', 'machine'),
-        Predicates.match('body', 'learning')
+        Predicates.match('body', 'learning'),
       );
 
       expect(combined.op).toBe('or');
@@ -202,8 +197,8 @@ describe('FTS Predicates', () => {
         Predicates.equal('status', 'active'),
         Predicates.or(
           Predicates.match('title', 'machine', { boost: 2.0 }),
-          Predicates.match('body', 'learning')
-        )
+          Predicates.match('body', 'learning'),
+        ),
       );
 
       expect(query.op).toBe('and');
@@ -219,8 +214,16 @@ describe('FTS Predicates', () => {
     it('should include FTS operators', () => {
       // Type check - these should compile
       const matchNode: PredicateNode = { op: 'match', attribute: 'title', query: 'test' };
-      const matchPhraseNode: PredicateNode = { op: 'matchPhrase', attribute: 'body', query: 'test phrase' };
-      const matchPrefixNode: PredicateNode = { op: 'matchPrefix', attribute: 'name', prefix: 'pre' };
+      const matchPhraseNode: PredicateNode = {
+        op: 'matchPhrase',
+        attribute: 'body',
+        query: 'test phrase',
+      };
+      const matchPrefixNode: PredicateNode = {
+        op: 'matchPrefix',
+        attribute: 'name',
+        prefix: 'pre',
+      };
 
       expect(matchNode.op).toBe('match');
       expect(matchPhraseNode.op).toBe('matchPhrase');

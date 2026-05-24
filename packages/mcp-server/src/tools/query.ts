@@ -21,7 +21,9 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
   // Validate and parse args with Zod
   const parseResult = QueryArgsSchema.safeParse(rawArgs);
   if (!parseResult.success) {
-    const errors = parseResult.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`).join(', ');
+    const errors = parseResult.error.issues
+      .map((e) => `${e.path.join('.')}: ${e.message}`)
+      .join(', ');
     return {
       content: [{ type: 'text', text: `Invalid arguments: ${errors}` }],
       isError: true,
@@ -71,11 +73,13 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
 
     // Get results via one-shot subscription, then wait for pagination metadata
     let unsubscribe: (() => void) | undefined;
-    const results = await new Promise<Array<Record<string, unknown> & { _key: string }>>((resolve) => {
-      unsubscribe = handle.subscribe((data) => {
-        resolve(data);
-      });
-    });
+    const results = await new Promise<Array<Record<string, unknown> & { _key: string }>>(
+      (resolve) => {
+        unsubscribe = handle.subscribe((data) => {
+          resolve(data);
+        });
+      },
+    );
 
     // Await pagination metadata from the server with a 500ms timeout.
     // The server sends pagination info asynchronously after the initial results,
@@ -99,7 +103,7 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
           // Clean up pagination listener when timeout wins the race
           unsubPagination?.();
           resolve(handle.getPaginationInfo());
-        }, 500)
+        }, 500),
       ),
     ]);
 

@@ -15,11 +15,7 @@
 
 import type { IndexAdvisor } from './IndexAdvisor';
 import type { QueryPatternTracker } from './QueryPatternTracker';
-import type {
-  AutoIndexConfig,
-  RecommendedIndexType,
-  TrackedQueryType,
-} from './types';
+import type { AutoIndexConfig, RecommendedIndexType, TrackedQueryType } from './types';
 import { ADAPTIVE_INDEXING_DEFAULTS } from './types';
 import type { Attribute } from '../Attribute';
 import { logger } from '../../utils/logger';
@@ -81,7 +77,7 @@ export class AutoIndexManager<K, V> {
   constructor(
     private readonly tracker: QueryPatternTracker,
     private readonly advisor: IndexAdvisor,
-    config: AutoIndexConfig
+    config: AutoIndexConfig,
   ) {
     this.config = {
       enabled: config.enabled,
@@ -110,7 +106,7 @@ export class AutoIndexManager<K, V> {
    */
   registerAttribute<A>(
     attribute: Attribute<V, A>,
-    allowedIndexTypes?: RecommendedIndexType[]
+    allowedIndexTypes?: RecommendedIndexType[],
   ): void {
     this.registeredAttributes.set(attribute.name, {
       attribute: attribute as unknown as Attribute<V, unknown>,
@@ -271,10 +267,7 @@ export class AutoIndexManager<K, V> {
     if (!indexType) return;
 
     // Check if index type is allowed for this attribute
-    if (
-      registered.allowedIndexTypes &&
-      !registered.allowedIndexTypes.includes(indexType)
-    ) {
+    if (registered.allowedIndexTypes && !registered.allowedIndexTypes.includes(indexType)) {
       return;
     }
 
@@ -288,7 +281,7 @@ export class AutoIndexManager<K, V> {
   private createIndex(
     attributeName: string,
     indexType: RecommendedIndexType,
-    attribute: Attribute<V, unknown>
+    attribute: Attribute<V, unknown>,
   ): void {
     if (!this.map) return;
 
@@ -315,7 +308,10 @@ export class AutoIndexManager<K, V> {
       this.config.onIndexCreated(attributeName, indexType);
     } catch (error) {
       // Index creation failed - log but don't throw
-      logger.error({ err: error, attributeName, indexType, context: 'index_creation' }, `AutoIndexManager: Failed to create ${indexType} index on '${attributeName}'`);
+      logger.error(
+        { err: error, attributeName, indexType, context: 'index_creation' },
+        `AutoIndexManager: Failed to create ${indexType} index on '${attributeName}'`,
+      );
     }
   }
 }

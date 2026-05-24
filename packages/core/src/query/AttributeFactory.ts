@@ -15,12 +15,7 @@ import { SimpleAttribute, MultiValueAttribute, type Attribute } from './Attribut
 /**
  * Supported attribute type definitions.
  */
-export type AttributeType =
-  | 'string'
-  | 'number'
-  | 'boolean'
-  | 'string[]'
-  | 'number[]';
+export type AttributeType = 'string' | 'number' | 'boolean' | 'string[]' | 'number[]';
 
 /**
  * Schema definition for attribute generation.
@@ -41,21 +36,26 @@ export type AttributeSchema = Record<string, AttributeType>;
 /**
  * Infer the TypeScript type from AttributeType string.
  */
-type InferType<T extends AttributeType> =
-  T extends 'string' ? string :
-  T extends 'number' ? number :
-  T extends 'boolean' ? boolean :
-  T extends 'string[]' ? string :
-  T extends 'number[]' ? number :
-  never;
+type InferType<T extends AttributeType> = T extends 'string'
+  ? string
+  : T extends 'number'
+    ? number
+    : T extends 'boolean'
+      ? boolean
+      : T extends 'string[]'
+        ? string
+        : T extends 'number[]'
+          ? number
+          : never;
 
 /**
  * Infer if the type is multi-value.
  */
-type IsMultiValue<T extends AttributeType> =
-  T extends 'string[]' ? true :
-  T extends 'number[]' ? true :
-  false;
+type IsMultiValue<T extends AttributeType> = T extends 'string[]'
+  ? true
+  : T extends 'number[]'
+    ? true
+    : false;
 
 /**
  * Generated attribute type based on schema entry.
@@ -149,36 +149,33 @@ function isMultiValueType(type: AttributeType): boolean {
  */
 export function generateAttributes<V>(): <S extends AttributeSchema>(
   schema: S,
-  options?: GenerateAttributesOptions
+  options?: GenerateAttributesOptions,
 ) => GeneratedAttributes<V, S> {
   return <S extends AttributeSchema>(
     schema: S,
-    options: GenerateAttributesOptions = {}
+    options: GenerateAttributesOptions = {},
   ): GeneratedAttributes<V, S> => {
-  const { namePrefix = '' } = options;
-  const result: Record<string, Attribute<V, unknown>> = {};
+    const { namePrefix = '' } = options;
+    const result: Record<string, Attribute<V, unknown>> = {};
 
-  for (const [path, type] of Object.entries(schema)) {
-    const attrName = namePrefix ? `${namePrefix}.${path}` : path;
+    for (const [path, type] of Object.entries(schema)) {
+      const attrName = namePrefix ? `${namePrefix}.${path}` : path;
 
-    if (isMultiValueType(type)) {
-      // Multi-value attribute (arrays)
-      result[path] = new MultiValueAttribute<V, unknown>(
-        attrName,
-        (record: V) => {
+      if (isMultiValueType(type)) {
+        // Multi-value attribute (arrays)
+        result[path] = new MultiValueAttribute<V, unknown>(attrName, (record: V) => {
           const value = getNestedValue(record, path);
           if (Array.isArray(value)) return value;
           return [];
-        }
-      );
-    } else {
-      // Simple attribute
-      result[path] = new SimpleAttribute<V, unknown>(
-        attrName,
-        (record: V) => getNestedValue(record, path) as unknown
-      );
+        });
+      } else {
+        // Simple attribute
+        result[path] = new SimpleAttribute<V, unknown>(
+          attrName,
+          (record: V) => getNestedValue(record, path) as unknown,
+        );
+      }
     }
-  }
 
     return result as GeneratedAttributes<V, S>;
   };
@@ -200,7 +197,7 @@ export function generateAttributes<V>(): <S extends AttributeSchema>(
 export function attr<V, A>(path: string): SimpleAttribute<V, A> {
   return new SimpleAttribute<V, A>(
     path,
-    (record: V) => getNestedValue(record, path) as A | undefined
+    (record: V) => getNestedValue(record, path) as A | undefined,
   );
 }
 
@@ -218,14 +215,11 @@ export function attr<V, A>(path: string): SimpleAttribute<V, A> {
  * ```
  */
 export function multiAttr<V, A>(path: string): MultiValueAttribute<V, A> {
-  return new MultiValueAttribute<V, A>(
-    path,
-    (record: V) => {
-      const value = getNestedValue(record, path);
-      if (Array.isArray(value)) return value as A[];
-      return [];
-    }
-  );
+  return new MultiValueAttribute<V, A>(path, (record: V) => {
+    const value = getNestedValue(record, path);
+    if (Array.isArray(value)) return value as A[];
+    return [];
+  });
 }
 
 /**

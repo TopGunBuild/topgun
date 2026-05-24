@@ -194,9 +194,7 @@ export class QueryOptimizer<K, V> {
     if (options.useIndex) {
       const indexes = this.indexRegistry.getIndexes(options.useIndex);
       if (indexes.length === 0) {
-        throw new Error(
-          `Index hint: no index found for attribute "${options.useIndex}"`
-        );
+        throw new Error(`Index hint: no index found for attribute "${options.useIndex}"`);
       }
       // Pick lowest-cost index for this attribute
       let best = indexes[0];
@@ -218,7 +216,7 @@ export class QueryOptimizer<K, V> {
           usesIndexes: true,
           hint: options.useIndex,
         },
-        options
+        options,
       );
     }
 
@@ -227,9 +225,7 @@ export class QueryOptimizer<K, V> {
 
     // 4. forceIndexScan: verify indexes are used
     if (options.forceIndexScan && !basePlan.usesIndexes) {
-      throw new Error(
-        'No suitable index found and forceIndexScan is enabled'
-      );
+      throw new Error('No suitable index found and forceIndexScan is enabled');
     }
 
     // 5. Apply sort/limit/cursor (existing logic)
@@ -271,10 +267,7 @@ export class QueryOptimizer<K, V> {
     return {
       ...plan,
       indexedSort,
-      sort:
-        sortField && sortDirection
-          ? { field: sortField, direction: sortDirection }
-          : undefined,
+      sort: sortField && sortDirection ? { field: sortField, direction: sortDirection } : undefined,
       limit: options.limit,
       cursor: options.cursor,
     };
@@ -424,7 +417,8 @@ export class QueryOptimizer<K, V> {
           field,
           query: query.prefix,
           ftsType: 'matchPrefix',
-          options: query.maxExpansions !== undefined ? { fuzziness: query.maxExpansions } : undefined,
+          options:
+            query.maxExpansions !== undefined ? { fuzziness: query.maxExpansions } : undefined,
           returnsScored: true,
           estimatedCost: this.estimateFTSCost(field),
         };
@@ -700,9 +694,7 @@ export class QueryOptimizer<K, V> {
     // If there are other (non-eq) queries, apply them as filters
     if (otherQueries.length > 0) {
       const filterPredicate: Query =
-        otherQueries.length === 1
-          ? otherQueries[0]
-          : { type: 'and', children: otherQueries };
+        otherQueries.length === 1 ? otherQueries[0] : { type: 'and', children: otherQueries };
 
       return { type: 'filter', source: compoundStep, predicate: filterPredicate };
     }
@@ -719,7 +711,7 @@ export class QueryOptimizer<K, V> {
    */
   private buildCompoundValues(
     compoundIndex: CompoundIndex<K, V>,
-    eqQueries: SimpleQueryNode[]
+    eqQueries: SimpleQueryNode[],
   ): unknown[] | null {
     const attributeNames = compoundIndex.attributes.map((a) => a.name);
     const values: unknown[] = [];
@@ -891,13 +883,15 @@ export class QueryOptimizer<K, V> {
 
       case 'fusion':
         // Fusion cost is sum of all child costs + fusion overhead
-        return step.steps.reduce((sum, s) => {
-          const cost = this.estimateCost(s);
-          if (cost === Number.MAX_SAFE_INTEGER) {
-            return Number.MAX_SAFE_INTEGER;
-          }
-          return Math.min(sum + cost, Number.MAX_SAFE_INTEGER);
-        }, 0) + 20; // Fusion overhead
+        return (
+          step.steps.reduce((sum, s) => {
+            const cost = this.estimateCost(s);
+            if (cost === Number.MAX_SAFE_INTEGER) {
+              return Number.MAX_SAFE_INTEGER;
+            }
+            return Math.min(sum + cost, Number.MAX_SAFE_INTEGER);
+          }, 0) + 20
+        ); // Fusion overhead
 
       default:
         return Number.MAX_SAFE_INTEGER;
@@ -978,7 +972,7 @@ export class QueryOptimizer<K, V> {
         // Sum of child step costs
         networkCost = step.steps.reduce(
           (sum, s) => sum + this.estimateDistributedCost(s, context).network,
-          0
+          0,
         );
         break;
     }

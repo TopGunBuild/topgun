@@ -334,7 +334,7 @@ describe('Client Failover', () => {
         client.sendWithRetry(new Uint8Array([1, 2, 3]), 'test-key', {
           maxRetries: 1,
           retryDelayMs: 10,
-        })
+        }),
       ).rejects.toThrow();
 
       client.close();

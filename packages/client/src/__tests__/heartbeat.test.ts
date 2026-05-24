@@ -93,7 +93,7 @@ let uuidCounter = 0;
  */
 async function setupAuthenticatedEngine(
   config: SyncEngineConfig,
-  token: string = 'test-token'
+  token: string = 'test-token',
 ): Promise<{ syncEngine: SyncEngine; ws: MockWebSocket }> {
   const syncEngine = new SyncEngine(config);
   syncEngine.setAuthToken(token);

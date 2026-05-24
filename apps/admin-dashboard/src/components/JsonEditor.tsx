@@ -22,28 +22,28 @@ export function JsonEditor({ value, onChange, className, readOnly }: JsonEditorP
     }
   }, [value]);
 
-  const handleChange = useCallback((newText: string | undefined) => {
-    if (newText === undefined) return;
-    setText(newText);
-    try {
-      const parsed = JSON.parse(newText);
-      onChange(parsed);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Invalid JSON');
-    }
-  }, [onChange]);
+  const handleChange = useCallback(
+    (newText: string | undefined) => {
+      if (newText === undefined) return;
+      setText(newText);
+      try {
+        const parsed = JSON.parse(newText);
+        onChange(parsed);
+        setError(null);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Invalid JSON');
+      }
+    },
+    [onChange],
+  );
 
   // Detect dark mode
-  const isDark = typeof document !== 'undefined' &&
-    document.documentElement.classList.contains('dark');
+  const isDark =
+    typeof document !== 'undefined' && document.documentElement.classList.contains('dark');
 
   return (
     <div className={cn('space-y-2', className)}>
-      <div className={cn(
-        'rounded-lg overflow-hidden border',
-        error && 'border-destructive'
-      )}>
+      <div className={cn('rounded-lg overflow-hidden border', error && 'border-destructive')}>
         <Editor
           height="300px"
           language="json"

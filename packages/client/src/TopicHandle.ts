@@ -3,7 +3,7 @@ import { logger } from './utils/logger';
 
 export type TopicCallback<T = unknown> = (
   data: T,
-  context: { timestamp: number; publisherId?: string }
+  context: { timestamp: number; publisherId?: string },
 ) => void;
 
 export class TopicHandle {
@@ -49,7 +49,7 @@ export class TopicHandle {
    * Called by SyncEngine when a message is received
    */
   public onMessage(data: unknown, context: { timestamp: number; publisherId?: string }): void {
-    this.listeners.forEach(cb => {
+    this.listeners.forEach((cb) => {
       try {
         cb(data, context);
       } catch (e) {
@@ -58,4 +58,3 @@ export class TopicHandle {
     });
   }
 }
-

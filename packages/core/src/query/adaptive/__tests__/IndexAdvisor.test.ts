@@ -153,7 +153,7 @@ describe('IndexAdvisor', () => {
 
       const suggestions = advisor.getSuggestions();
       // Should only have one suggestion for 'category'
-      expect(suggestions.filter(s => s.attribute === 'category')).toHaveLength(1);
+      expect(suggestions.filter((s) => s.attribute === 'category')).toHaveLength(1);
     });
   });
 

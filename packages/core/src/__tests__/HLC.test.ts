@@ -78,7 +78,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
       const remote: Timestamp = {
         millis: 1000100, // Remote is ahead
         counter: 5,
-        nodeId: 'remote-node'
+        nodeId: 'remote-node',
       };
 
       hlc.update(remote);
@@ -100,7 +100,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
       const remote: Timestamp = {
         millis: 1000000, // Same millis
         counter: 5,
-        nodeId: 'remote-node'
+        nodeId: 'remote-node',
       };
 
       hlc.update(remote);
@@ -121,7 +121,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
       const remote: Timestamp = {
         millis: 1000000, // Remote is behind
         counter: 10,
-        nodeId: 'remote-node'
+        nodeId: 'remote-node',
       };
 
       hlc.update(remote);
@@ -138,7 +138,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
       const remote: Timestamp = {
         millis: 1000100,
         counter: 5,
-        nodeId: 'remote-node'
+        nodeId: 'remote-node',
       };
 
       hlc.update(remote);
@@ -224,7 +224,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
   describe('Node ID Validation', () => {
     test('should reject node ID containing colon', () => {
       expect(() => new HLC('node:with:colons')).toThrow(
-        'Node ID must not contain ":" (used as delimiter in timestamp format)'
+        'Node ID must not contain ":" (used as delimiter in timestamp format)',
       );
     });
 
@@ -271,7 +271,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
       const remote: Timestamp = {
         millis: 1000000,
         counter: Number.MAX_SAFE_INTEGER - 10,
-        nodeId: 'remote'
+        nodeId: 'remote',
       };
 
       hlc.update(remote);
@@ -376,7 +376,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
       const remote: Timestamp = {
         millis: currentTime + 100000, // 100 seconds ahead
         counter: 0,
-        nodeId: 'drifted-node'
+        nodeId: 'drifted-node',
       };
 
       hlc.update(remote);
@@ -384,7 +384,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
       // Should have logged a warning
       expect(warnSpy).toHaveBeenCalledWith(
         expect.objectContaining({ drift: expect.any(Number) }),
-        'Clock drift detected'
+        'Clock drift detected',
       );
 
       // But should still accept the timestamp (AP system behavior)
@@ -417,7 +417,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
 
       expect(warnSpy).toHaveBeenCalledWith(
         expect.objectContaining({ remoteMillis: NaN }),
-        'HLC.update() received invalid timestamp, ignoring'
+        'HLC.update() received invalid timestamp, ignoring',
       );
       warnSpy.mockRestore();
     });
@@ -461,7 +461,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
       const remote = {
         millis: BigInt(1000050),
         counter: BigInt(3),
-        nodeId: 'remote'
+        nodeId: 'remote',
       } as unknown as Timestamp;
 
       hlc.update(remote);
@@ -481,7 +481,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
       const remote: Timestamp = {
         millis: currentTime + 10000, // 10 seconds ahead, exceeds 5s threshold
         counter: 0,
-        nodeId: 'remote-node'
+        nodeId: 'remote-node',
       };
 
       expect(() => strictHlc.update(remote)).toThrow('Clock drift detected');
@@ -497,7 +497,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
       const remote: Timestamp = {
         millis: currentTime + 5000, // 5 seconds ahead, within 10s threshold
         counter: 0,
-        nodeId: 'remote-node'
+        nodeId: 'remote-node',
       };
 
       expect(() => strictHlc.update(remote)).not.toThrow();
@@ -516,7 +516,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
       const withinThreshold: Timestamp = {
         millis: currentTime + 50000,
         counter: 0,
-        nodeId: 'remote'
+        nodeId: 'remote',
       };
       expect(() => strictHlc.update(withinThreshold)).not.toThrow();
 
@@ -524,7 +524,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
       const exceedsThreshold: Timestamp = {
         millis: currentTime + 70000,
         counter: 0,
-        nodeId: 'remote'
+        nodeId: 'remote',
       };
       expect(() => strictHlc.update(exceedsThreshold)).toThrow('Clock drift detected');
     });
@@ -538,7 +538,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
       const remote: Timestamp = {
         millis: currentTime + 100000, // 100 seconds ahead
         counter: 0,
-        nodeId: 'remote-node'
+        nodeId: 'remote-node',
       };
 
       // Should NOT throw
@@ -547,7 +547,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
       // Should have warned
       expect(warnSpy).toHaveBeenCalledWith(
         expect.objectContaining({ drift: expect.any(Number) }),
-        'Clock drift detected'
+        'Clock drift detected',
       );
 
       // Timestamp should have been accepted
@@ -575,7 +575,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
       const remote: Timestamp = {
         millis: currentTime - 100000, // 100 seconds BEHIND (not ahead)
         counter: 0,
-        nodeId: 'remote-node'
+        nodeId: 'remote-node',
       };
 
       // Negative drift should not trigger rejection (only future drift is problematic)

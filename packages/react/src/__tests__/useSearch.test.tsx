@@ -52,9 +52,12 @@ describe('useSearch', () => {
   });
 
   it('should call searchSubscribe with correct parameters', () => {
-    renderHook(() => useSearch('articles', 'machine learning', { limit: 20, boost: { title: 2.0 } }), {
-      wrapper,
-    });
+    renderHook(
+      () => useSearch('articles', 'machine learning', { limit: 20, boost: { title: 2.0 } }),
+      {
+        wrapper,
+      },
+    );
 
     expect(mockSearchSubscribe).toHaveBeenCalledWith('articles', 'machine learning', {
       limit: 20,
@@ -122,13 +125,10 @@ describe('useSearch', () => {
   });
 
   it('should use setQuery() when query changes (optimization)', () => {
-    const { rerender } = renderHook(
-      ({ query }) => useSearch('articles', query),
-      {
-        wrapper,
-        initialProps: { query: 'first query' },
-      }
-    );
+    const { rerender } = renderHook(({ query }) => useSearch('articles', query), {
+      wrapper,
+      initialProps: { query: 'first query' },
+    });
 
     // Initial subscription created
     expect(mockSearchSubscribe).toHaveBeenCalledTimes(1);
@@ -143,13 +143,10 @@ describe('useSearch', () => {
   });
 
   it('should use setOptions() when options change (optimization)', () => {
-    const { rerender } = renderHook(
-      ({ limit }) => useSearch('articles', 'test', { limit }),
-      {
-        wrapper,
-        initialProps: { limit: 10 },
-      }
-    );
+    const { rerender } = renderHook(({ limit }) => useSearch('articles', 'test', { limit }), {
+      wrapper,
+      initialProps: { limit: 10 },
+    });
 
     // Initial subscription created
     expect(mockSearchSubscribe).toHaveBeenCalledTimes(1);
@@ -164,13 +161,10 @@ describe('useSearch', () => {
   });
 
   it('should recreate handle when mapName changes', () => {
-    const { rerender } = renderHook(
-      ({ mapName }) => useSearch(mapName, 'test'),
-      {
-        wrapper,
-        initialProps: { mapName: 'articles' },
-      }
-    );
+    const { rerender } = renderHook(({ mapName }) => useSearch(mapName, 'test'), {
+      wrapper,
+      initialProps: { mapName: 'articles' },
+    });
 
     expect(mockSearchSubscribe).toHaveBeenCalledTimes(1);
     expect(mockSearchSubscribe).toHaveBeenLastCalledWith('articles', 'test', {});
@@ -190,7 +184,7 @@ describe('useSearch', () => {
         {
           wrapper,
           initialProps: { query: 'initial' },
-        }
+        },
       );
 
       // Initial query is not debounced - search starts immediately on mount
@@ -216,13 +210,10 @@ describe('useSearch', () => {
     });
 
     it('should not debounce when debounceMs is not set', () => {
-      const { rerender } = renderHook(
-        ({ query }) => useSearch('articles', query),
-        {
-          wrapper,
-          initialProps: { query: 'first' },
-        }
-      );
+      const { rerender } = renderHook(({ query }) => useSearch('articles', query), {
+        wrapper,
+        initialProps: { query: 'first' },
+      });
 
       expect(mockSearchSubscribe).toHaveBeenCalledWith('articles', 'first', {});
 
@@ -238,7 +229,7 @@ describe('useSearch', () => {
         {
           wrapper,
           initialProps: { query: 'first' },
-        }
+        },
       );
 
       expect(mockSearchSubscribe).toHaveBeenCalledWith('articles', 'first', {});
@@ -258,7 +249,7 @@ describe('useSearch', () => {
           minScore: 0.5,
           boost: { name: 2.0, description: 1.0 },
         }),
-      { wrapper }
+      { wrapper },
     );
 
     expect(mockSearchSubscribe).toHaveBeenCalledWith('products', 'laptop', {
@@ -275,7 +266,7 @@ describe('useSearch', () => {
           limit: 10,
           debounceMs: 300,
         }),
-      { wrapper }
+      { wrapper },
     );
 
     // debounceMs should not be passed to searchSubscribe
@@ -287,7 +278,7 @@ describe('useSearch', () => {
   it('should clean up debounce timeout on unmount', () => {
     const { rerender, unmount } = renderHook(
       ({ query }) => useSearch('articles', query, { debounceMs: 300 }),
-      { wrapper, initialProps: { query: 'initial' } }
+      { wrapper, initialProps: { query: 'initial' } },
     );
 
     // Initial search fires immediately

@@ -112,7 +112,7 @@ export class QueryPatternTracker {
     queryType: TrackedQueryType,
     executionTime: number,
     resultSize: number,
-    hasIndex: boolean
+    hasIndex: boolean,
   ): void {
     // Sampling: skip if not selected
     this.queryCounter++;
@@ -164,7 +164,7 @@ export class QueryPatternTracker {
     attributes: string[],
     executionTime: number,
     resultSize: number,
-    hasCompoundIndex: boolean
+    hasCompoundIndex: boolean,
   ): void {
     // Need at least 2 attributes for a compound query
     if (attributes.length < 2) return;

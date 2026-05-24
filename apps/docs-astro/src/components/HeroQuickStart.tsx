@@ -11,7 +11,11 @@ const QuickStartTabs = () => {
 
   return (
     <div className="mt-2 mb-2">
-      <div role="tablist" aria-label="Quick start path" className="inline-flex rounded-lg border border-white/10 bg-black/5 dark:bg-white/5 p-1 text-sm">
+      <div
+        role="tablist"
+        aria-label="Quick start path"
+        className="inline-flex rounded-lg border border-white/10 bg-black/5 dark:bg-white/5 p-1 text-sm"
+      >
         <button
           role="tab"
           data-tab="drop-in"
@@ -34,15 +38,36 @@ const QuickStartTabs = () => {
       <div className="mt-2 text-sm text-neutral-600 dark:text-neutral-300">
         {tab === 'drop-in' ? (
           <p>
-            Single-node backend in a separate terminal: <code className="px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-xs">{DROP_IN_CMD}</code>. Zero config — embedded storage at <code className="px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-xs">./topgun.redb</code>, no Docker, no Postgres. (Docker alternative: <code className="px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-xs">{DROP_IN_DOCKER_ALT}</code>.) No auth required — local exploration.
+            Single-node backend in a separate terminal:{' '}
+            <code className="px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-xs">
+              {DROP_IN_CMD}
+            </code>
+            . Zero config — embedded storage at{' '}
+            <code className="px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-xs">
+              ./topgun.redb
+            </code>
+            , no Docker, no Postgres. (Docker alternative:{' '}
+            <code className="px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-xs">
+              {DROP_IN_DOCKER_ALT}
+            </code>
+            .) No auth required — local exploration.
           </p>
         ) : (
           <>
             <p>
-              Postgres + JWT + single-node deployment. Multi-node clustering is on the <a href={PROD_LINK} className="underline underline-offset-2 hover:text-foreground">roadmap (Raft consensus)</a>.
+              Postgres + JWT + single-node deployment. Multi-node clustering is on the{' '}
+              <a href={PROD_LINK} className="underline underline-offset-2 hover:text-foreground">
+                roadmap (Raft consensus)
+              </a>
+              .
             </p>
             <p className="mt-1">
-              <a href="/docs/intro#production" className="hover:text-foreground hover:underline underline-offset-2">See production checklist →</a>
+              <a
+                href="/docs/intro#production"
+                className="hover:text-foreground hover:underline underline-offset-2"
+              >
+                See production checklist →
+              </a>
             </p>
           </>
         )}
@@ -86,7 +111,10 @@ const CommandBlock = () => {
         </button>
       </div>
       <p className="mt-2 text-sm text-neutral-500 dark:text-neutral-400 text-center lg:text-left">
-        <a href="/docs/intro" className="hover:text-foreground transition-colors underline underline-offset-2">
+        <a
+          href="/docs/intro"
+          className="hover:text-foreground transition-colors underline underline-offset-2"
+        >
           Or read the docs first →
         </a>
       </p>

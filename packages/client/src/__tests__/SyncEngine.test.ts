@@ -130,7 +130,14 @@ describe('SyncEngine', () => {
 
     test('should load pending ops from storage on init', async () => {
       const pendingOps = [
-        { id: '1', mapName: 'users', opType: 'PUT', key: 'user1', synced: false, timestamp: { millis: 1000, counter: 0, nodeId: 'test' } },
+        {
+          id: '1',
+          mapName: 'users',
+          opType: 'PUT',
+          key: 'user1',
+          synced: false,
+          timestamp: { millis: 1000, counter: 0, nodeId: 'test' },
+        },
       ];
       mockStorage.getPendingOps.mockResolvedValue(pendingOps as any);
 
@@ -297,13 +304,20 @@ describe('SyncEngine', () => {
           mapName: 'users',
           opType: 'PUT',
           key: 'user1',
-        })
+        }),
       );
     });
 
     test('should sync pending operations after AUTH_ACK', async () => {
       const pendingOps = [
-        { id: '1', mapName: 'users', opType: 'PUT', key: 'user1', synced: false, timestamp: { millis: 1000, counter: 0, nodeId: 'test' } },
+        {
+          id: '1',
+          mapName: 'users',
+          opType: 'PUT',
+          key: 'user1',
+          synced: false,
+          timestamp: { millis: 1000, counter: 0, nodeId: 'test' },
+        },
       ];
       mockStorage.getPendingOps.mockResolvedValue(pendingOps as any);
 
@@ -325,8 +339,22 @@ describe('SyncEngine', () => {
     test('should mark operations as synced on OP_ACK', async () => {
       // Setup pending ops so there are items in opLog to mark as synced
       const pendingOps = [
-        { id: '3', mapName: 'users', opType: 'PUT', key: 'user1', synced: false, timestamp: { millis: 1000, counter: 0, nodeId: 'test' } },
-        { id: '5', mapName: 'users', opType: 'PUT', key: 'user2', synced: false, timestamp: { millis: 1001, counter: 0, nodeId: 'test' } },
+        {
+          id: '3',
+          mapName: 'users',
+          opType: 'PUT',
+          key: 'user1',
+          synced: false,
+          timestamp: { millis: 1000, counter: 0, nodeId: 'test' },
+        },
+        {
+          id: '5',
+          mapName: 'users',
+          opType: 'PUT',
+          key: 'user2',
+          synced: false,
+          timestamp: { millis: 1001, counter: 0, nodeId: 'test' },
+        },
       ];
       mockStorage.getPendingOps.mockResolvedValue(pendingOps as any);
 
@@ -400,7 +428,7 @@ describe('SyncEngine', () => {
       expect(mockQuery.onResult).toHaveBeenCalledWith(
         [{ key: 'user1', value: { name: 'Alice' } }],
         'server',
-        undefined
+        undefined,
       );
 
       // Verify pagination info is updated
@@ -527,7 +555,7 @@ describe('SyncEngine', () => {
 
       expect(mockHandle.onMessage).toHaveBeenCalledWith(
         { text: 'Hello!' },
-        { publisherId: 'node-2', timestamp: 123456 }
+        { publisherId: 'node-2', timestamp: 123456 },
       );
     });
 
@@ -688,7 +716,7 @@ describe('SyncEngine', () => {
       ws.close();
 
       await expect(syncEngine.requestLock('my-lock', 'req-1', 5000)).rejects.toThrow(
-        'Not connected or authenticated'
+        'Not connected or authenticated',
       );
     });
   });
@@ -725,7 +753,10 @@ describe('SyncEngine', () => {
       await jest.runAllTimersAsync();
 
       expect(lwwMap.get('user1')).toEqual({ name: 'Alice' });
-      expect(mockStorage.put).toHaveBeenCalledWith('users:user1', expect.objectContaining({ value: { name: 'Alice' } }));
+      expect(mockStorage.put).toHaveBeenCalledWith(
+        'users:user1',
+        expect.objectContaining({ value: { name: 'Alice' } }),
+      );
     });
 
     test('should handle SERVER_EVENT for ORMap add', async () => {
@@ -1015,7 +1046,7 @@ describe('SyncEngine', () => {
           // Trigger connected event after microtask
           setTimeout(() => {
             const set = handlers.get('connected');
-            if (set) set.forEach(h => h('mock-node'));
+            if (set) set.forEach((h) => h('mock-node'));
           }, 0);
         }),
         getConnection: jest.fn().mockReturnValue(mockConnection),
@@ -1041,12 +1072,15 @@ describe('SyncEngine', () => {
       return provider;
     }
 
-    function simulateProviderMessage(provider: ReturnType<typeof createMockClusterProvider>, message: any) {
+    function simulateProviderMessage(
+      provider: ReturnType<typeof createMockClusterProvider>,
+      message: any,
+    ) {
       const set = provider._handlers.get('message');
       if (set) {
         const data = serialize(message);
         const buf = new Uint8Array(data).buffer;
-        set.forEach(h => h('mock-node', buf));
+        set.forEach((h) => h('mock-node', buf));
       }
     }
 
@@ -1054,8 +1088,22 @@ describe('SyncEngine', () => {
       const clusterProvider = createMockClusterProvider();
 
       const pendingOps: OpLogEntry[] = [
-        { id: '1', mapName: 'users', opType: 'PUT', key: 'user1', synced: false, timestamp: { millis: 1000, counter: 0, nodeId: 'test' } },
-        { id: '2', mapName: 'users', opType: 'PUT', key: 'user2', synced: false, timestamp: { millis: 1001, counter: 0, nodeId: 'test' } },
+        {
+          id: '1',
+          mapName: 'users',
+          opType: 'PUT',
+          key: 'user1',
+          synced: false,
+          timestamp: { millis: 1000, counter: 0, nodeId: 'test' },
+        },
+        {
+          id: '2',
+          mapName: 'users',
+          opType: 'PUT',
+          key: 'user2',
+          synced: false,
+          timestamp: { millis: 1001, counter: 0, nodeId: 'test' },
+        },
       ];
       mockStorage.getPendingOps.mockResolvedValue(pendingOps as any);
 
@@ -1084,7 +1132,14 @@ describe('SyncEngine', () => {
     test('should fall back to single OP_BATCH when provider lacks sendBatch', async () => {
       // SingleServerProvider does not implement sendBatch
       const pendingOps = [
-        { id: '1', mapName: 'users', opType: 'PUT', key: 'user1', synced: false, timestamp: { millis: 1000, counter: 0, nodeId: 'test' } },
+        {
+          id: '1',
+          mapName: 'users',
+          opType: 'PUT',
+          key: 'user1',
+          synced: false,
+          timestamp: { millis: 1000, counter: 0, nodeId: 'test' },
+        },
       ];
       mockStorage.getPendingOps.mockResolvedValue(pendingOps as any);
 
@@ -1114,8 +1169,22 @@ describe('SyncEngine', () => {
       });
 
       const pendingOps: OpLogEntry[] = [
-        { id: '1', mapName: 'users', opType: 'PUT', key: 'user1', synced: false, timestamp: { millis: 1000, counter: 0, nodeId: 'test' } },
-        { id: '2', mapName: 'users', opType: 'PUT', key: 'user2', synced: false, timestamp: { millis: 1001, counter: 0, nodeId: 'test' } },
+        {
+          id: '1',
+          mapName: 'users',
+          opType: 'PUT',
+          key: 'user1',
+          synced: false,
+          timestamp: { millis: 1000, counter: 0, nodeId: 'test' },
+        },
+        {
+          id: '2',
+          mapName: 'users',
+          opType: 'PUT',
+          key: 'user2',
+          synced: false,
+          timestamp: { millis: 1001, counter: 0, nodeId: 'test' },
+        },
       ];
       mockStorage.getPendingOps.mockResolvedValue(pendingOps as any);
 
@@ -1138,7 +1207,7 @@ describe('SyncEngine', () => {
       // Warning should include the failed key
       expect(warnSpy).toHaveBeenCalledWith(
         expect.objectContaining({ failedKeys: ['user2'], count: 1 }),
-        'Some batch operations failed to send'
+        'Some batch operations failed to send',
       );
 
       warnSpy.mockRestore();

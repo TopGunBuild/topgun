@@ -92,9 +92,7 @@ describe('Integration: LWW CRDT (Rust Server)', () => {
       expect(response.payload.results.length).toBeGreaterThanOrEqual(1);
 
       // Find the product we wrote
-      const prod = response.payload.results.find(
-        (r: any) => r.key === 'prod-1'
-      );
+      const prod = response.payload.results.find((r: any) => r.key === 'prod-1');
       expect(prod).toBeDefined();
 
       // The value should match what we wrote (the server may wrap it differently)
@@ -224,9 +222,7 @@ describe('Integration: LWW CRDT (Rust Server)', () => {
       });
 
       const response = await reader.waitForMessage('QUERY_RESP');
-      const result = response.payload.results.find(
-        (r: any) => r.key === 'contested-key'
-      );
+      const result = response.payload.results.find((r: any) => r.key === 'contested-key');
       expect(result).toBeDefined();
 
       const value = result.record?.value ?? result.value;
@@ -296,9 +292,7 @@ describe('Integration: LWW CRDT (Rust Server)', () => {
       });
 
       const response = await client.waitForMessage('QUERY_RESP');
-      const result = response.payload.results.find(
-        (r: any) => r.key === 'doomed-key'
-      );
+      const result = response.payload.results.find((r: any) => r.key === 'doomed-key');
       // Tombstoned keys should not appear in the snapshot, or if they do,
       // the value should be null/undefined
       if (result) {
@@ -365,9 +359,7 @@ describe('Integration: LWW CRDT (Rust Server)', () => {
       });
 
       const response = await client.waitForMessage('QUERY_RESP');
-      const result = response.payload.results.find(
-        (r: any) => r.key === 'order-key'
-      );
+      const result = response.payload.results.find((r: any) => r.key === 'order-key');
       expect(result).toBeDefined();
 
       const value = result.record?.value ?? result.value;
@@ -445,9 +437,7 @@ describe('Integration: LWW CRDT (Rust Server)', () => {
       });
 
       const response = await reader.waitForMessage('QUERY_RESP');
-      const result = response.payload.results.find(
-        (r: any) => r.key === 'det-key'
-      );
+      const result = response.payload.results.find((r: any) => r.key === 'det-key');
       expect(result).toBeDefined();
 
       const value = result.record?.value ?? result.value;

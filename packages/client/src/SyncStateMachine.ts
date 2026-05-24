@@ -63,7 +63,7 @@ export class SyncStateMachine {
     if (!isValidTransition(from, to)) {
       logger.warn(
         { from, to, currentHistory: this.getHistory(5) },
-        `Invalid state transition attempted: ${from} → ${to}`
+        `Invalid state transition attempted: ${from} → ${to}`,
       );
       return false;
     }

@@ -38,7 +38,7 @@ export class LimitResultSet<K> implements ResultSet<K> {
   constructor(
     private readonly source: ResultSet<K>,
     private readonly offset: number = 0,
-    private readonly limit: number = Infinity
+    private readonly limit: number = Infinity,
   ) {}
 
   /**

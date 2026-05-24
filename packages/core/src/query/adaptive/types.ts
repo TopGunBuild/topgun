@@ -173,7 +173,7 @@ export type IndexBuildProgressCallback = (
   attributeName: string,
   progress: number, // 0-100
   recordsProcessed: number,
-  totalRecords: number
+  totalRecords: number,
 ) => void;
 
 /**

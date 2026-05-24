@@ -61,10 +61,12 @@ function Toast({
 }
 
 export function Settings() {
-  const { data: settings, error, isLoading, mutate } = useSWR<SettingsResponse>(
-    '/api/admin/settings',
-    { refreshInterval: 10000 }
-  );
+  const {
+    data: settings,
+    error,
+    isLoading,
+    mutate,
+  } = useSWR<SettingsResponse>('/api/admin/settings', { refreshInterval: 10000 });
 
   const [changes, setChanges] = useState<Partial<SettingsUpdateRequest>>({});
   const [saving, setSaving] = useState(false);
@@ -113,7 +115,9 @@ export function Settings() {
     setChanges({});
   };
 
-  const getValue = <K extends keyof SettingsResponse>(field: K): SettingsResponse[K] | undefined => {
+  const getValue = <K extends keyof SettingsResponse>(
+    field: K,
+  ): SettingsResponse[K] | undefined => {
     if (field in changes) {
       return changes[field as keyof SettingsUpdateRequest] as SettingsResponse[K];
     }
@@ -151,9 +155,7 @@ export function Settings() {
 
   return (
     <div className="p-6 space-y-6 max-w-4xl mx-auto">
-      {toast && (
-        <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />
-      )}
+      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
 
       <div className="flex items-center justify-between">
         <div>
@@ -199,44 +201,64 @@ export function Settings() {
           <Card>
             <CardHeader>
               <CardTitle>Server Information</CardTitle>
-              <CardDescription>Read-only server configuration (restart required to change)</CardDescription>
+              <CardDescription>
+                Read-only server configuration (restart required to change)
+              </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="space-y-2">
                   <Label htmlFor="nodeId">Node ID</Label>
                   <Input id="nodeId" value={settings.nodeId} disabled />
-                  <Badge variant="secondary" className="text-xs">Restart required</Badge>
+                  <Badge variant="secondary" className="text-xs">
+                    Restart required
+                  </Badge>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="host">Host</Label>
                   <Input id="host" value={settings.host} disabled />
-                  <Badge variant="secondary" className="text-xs">Restart required</Badge>
+                  <Badge variant="secondary" className="text-xs">
+                    Restart required
+                  </Badge>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="port">Port</Label>
                   <Input id="port" value={settings.port} disabled />
-                  <Badge variant="secondary" className="text-xs">Restart required</Badge>
+                  <Badge variant="secondary" className="text-xs">
+                    Restart required
+                  </Badge>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="partitionCount">Partition Count</Label>
                   <Input id="partitionCount" value={settings.partitionCount} disabled />
-                  <Badge variant="secondary" className="text-xs">Restart required</Badge>
+                  <Badge variant="secondary" className="text-xs">
+                    Restart required
+                  </Badge>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="requireAuth">Require Auth</Label>
                   <Input id="requireAuth" value={settings.requireAuth ? 'Yes' : 'No'} disabled />
-                  <Badge variant="secondary" className="text-xs">Restart required</Badge>
+                  <Badge variant="secondary" className="text-xs">
+                    Restart required
+                  </Badge>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="maxValueBytes">Max Value Bytes</Label>
                   <Input id="maxValueBytes" value={settings.maxValueBytes} disabled />
-                  <Badge variant="secondary" className="text-xs">Restart required</Badge>
+                  <Badge variant="secondary" className="text-xs">
+                    Restart required
+                  </Badge>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="defaultOperationTimeoutMs">Default Operation Timeout (ms)</Label>
-                  <Input id="defaultOperationTimeoutMs" value={settings.defaultOperationTimeoutMs} disabled />
-                  <Badge variant="secondary" className="text-xs">Restart required</Badge>
+                  <Input
+                    id="defaultOperationTimeoutMs"
+                    value={settings.defaultOperationTimeoutMs}
+                    disabled
+                  />
+                  <Badge variant="secondary" className="text-xs">
+                    Restart required
+                  </Badge>
                 </div>
               </div>
             </CardContent>
@@ -264,7 +286,9 @@ export function Settings() {
                     <option value="warn">Warn</option>
                     <option value="error">Error</option>
                   </select>
-                  <Badge variant="outline" className="text-xs">Hot-reloadable</Badge>
+                  <Badge variant="outline" className="text-xs">
+                    Hot-reloadable
+                  </Badge>
                 </div>
 
                 <div className="space-y-2">
@@ -274,9 +298,13 @@ export function Settings() {
                     type="number"
                     min={1000}
                     value={(getValue('gcIntervalMs') as number) ?? 0}
-                    onChange={(e) => handleChange('gcIntervalMs', parseInt(e.target.value, 10) || 0)}
+                    onChange={(e) =>
+                      handleChange('gcIntervalMs', parseInt(e.target.value, 10) || 0)
+                    }
                   />
-                  <Badge variant="outline" className="text-xs">Hot-reloadable</Badge>
+                  <Badge variant="outline" className="text-xs">
+                    Hot-reloadable
+                  </Badge>
                 </div>
 
                 <div className="space-y-2">
@@ -286,9 +314,13 @@ export function Settings() {
                     type="number"
                     min={1}
                     value={(getValue('maxConcurrentOperations') as number) ?? 0}
-                    onChange={(e) => handleChange('maxConcurrentOperations', parseInt(e.target.value, 10) || 0)}
+                    onChange={(e) =>
+                      handleChange('maxConcurrentOperations', parseInt(e.target.value, 10) || 0)
+                    }
                   />
-                  <Badge variant="outline" className="text-xs">Hot-reloadable</Badge>
+                  <Badge variant="outline" className="text-xs">
+                    Hot-reloadable
+                  </Badge>
                 </div>
               </div>
             </CardContent>
@@ -312,16 +344,16 @@ export function Settings() {
                 </div>
                 <Switch disabled checked={false} />
               </div>
-              <Badge variant="secondary" className="text-xs mt-2">Coming soon</Badge>
+              <Badge variant="secondary" className="text-xs mt-2">
+                Coming soon
+              </Badge>
             </CardContent>
           </Card>
 
           <Card>
             <CardHeader>
               <CardTitle>Model Context Protocol (MCP)</CardTitle>
-              <CardDescription>
-                Expose data to Claude Desktop and Cursor
-              </CardDescription>
+              <CardDescription>Expose data to Claude Desktop and Cursor</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="flex items-center justify-between">
@@ -333,7 +365,9 @@ export function Settings() {
                 </div>
                 <Switch disabled checked={false} />
               </div>
-              <Badge variant="secondary" className="text-xs mt-2">Coming soon</Badge>
+              <Badge variant="secondary" className="text-xs mt-2">
+                Coming soon
+              </Badge>
             </CardContent>
           </Card>
         </TabsContent>
