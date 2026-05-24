@@ -12,12 +12,12 @@
     "astro": "astro"
   },
   "dependencies": {
-    "@fontsource-variable/inter": "^5",
-    "@fontsource-variable/jetbrains-mono": "^5",
     "@astrojs/mdx": "^4.3.12",
     "@astrojs/react": "^4.4.2",
     "@astrojs/rss": "^4.0.14",
     "@astrojs/sitemap": "^3.6.0",
+    "@fontsource-variable/inter": "^5",
+    "@fontsource-variable/jetbrains-mono": "^5",
     "@tailwindcss/vite": "^4.1.17",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
@@ -30,5 +30,8 @@
     "sharp": "^0.34.5",
     "shiki": "^3.17.0",
     "tailwindcss": "^4.1.17"
+  },
+  "devDependencies": {
+    "rehype-external-links": "^3.0.0"
   }
 }

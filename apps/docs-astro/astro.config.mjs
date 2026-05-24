@@ -5,6 +5,7 @@ import react from '@astrojs/react';
 import tailwindcss from '@tailwindcss/vite';
 import mdx from '@astrojs/mdx';
 import sitemap from '@astrojs/sitemap';
+import rehypeExternalLinks from 'rehype-external-links';
 
 // https://astro.build/config
 export default defineConfig({
@@ -49,9 +50,34 @@ export default defineConfig({
   build: {
     format: 'file',
   },
+  // rehype-external-links auto-adds target="_blank" + rel="noopener noreferrer"
+  // to every external <a> in MDX/Markdown content. This covers demo.topgun.build,
+  // npm, GitHub, Cloudflare, and anything else that escapes the site origin.
+  // Astro components (.astro / .tsx) keep their explicit attrs.
+  markdown: {
+    rehypePlugins: [
+      [
+        rehypeExternalLinks,
+        {
+          target: '_blank',
+          rel: ['noopener', 'noreferrer'],
+        },
+      ],
+    ],
+  },
   integrations: [
     react(),
-    mdx(),
+    mdx({
+      rehypePlugins: [
+        [
+          rehypeExternalLinks,
+          {
+            target: '_blank',
+            rel: ['noopener', 'noreferrer'],
+          },
+        ],
+      ],
+    }),
     sitemap({
       filter: (page) => {
         // Exclude redirect pages from sitemap
