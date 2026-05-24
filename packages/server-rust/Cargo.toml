@@ -41,7 +41,7 @@ metrics-exporter-prometheus = { version = "0.16", default-features = false, feat
 uuid = { version = "1", features = ["v4"] }
 bytes = "1"
 http = "1"
-rand = "0.9"
+rand = "0.10"
 ahash = "0.8"
 ordered-float = "4"
 regex = "1"
