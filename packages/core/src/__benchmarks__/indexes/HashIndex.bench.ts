@@ -4,9 +4,9 @@
  * Measures O(1) equality lookup performance at different scales.
  */
 
-import { bench, describe } from 'vitest';
-import { HashIndex } from '../../query/indexes/HashIndex';
-import { simpleAttribute } from '../../query/Attribute';
+import { bench, describe } from "vitest";
+import { HashIndex } from "../../query/indexes/HashIndex";
+import { simpleAttribute } from "../../query/Attribute";
 
 interface User {
   id: string;
@@ -15,12 +15,14 @@ interface User {
 }
 
 // BENCH_QUICK=true runs only smaller datasets for faster CI
-const isQuickMode = process.env.BENCH_QUICK === 'true';
+const isQuickMode = process.env.BENCH_QUICK === "true";
 
-describe('HashIndex Performance', () => {
-  const emailAttr = simpleAttribute<User, string>('email', (u) => u.email);
+describe("HashIndex Performance", () => {
+  const emailAttr = simpleAttribute<User, string>("email", (u) => u.email);
 
-  const sizes = isQuickMode ? [1_000, 10_000] : [1_000, 10_000, 100_000, 1_000_000];
+  const sizes = isQuickMode
+    ? [1_000, 10_000]
+    : [1_000, 10_000, 100_000, 1_000_000];
 
   for (const size of sizes) {
     describe(`${size.toLocaleString()} records`, () => {
@@ -32,55 +34,61 @@ describe('HashIndex Performance', () => {
         const user = {
           id: `${i}`,
           email: `user${i}@test.com`,
-          status: 'active',
+          status: "active",
         };
         users.push(user);
         index.add(`${i}`, user);
       }
 
-      bench('add (new record)', () => {
+      bench("add (new record)", () => {
         const id = `new-${Math.random()}`;
-        const user = { id, email: `${id}@test.com`, status: 'active' };
+        const user = { id, email: `${id}@test.com`, status: "active" };
         index.add(id, user);
       });
 
-      bench('retrieve equal (existing)', () => {
+      bench("retrieve equal (existing)", () => {
         const target = Math.floor(size / 2);
-        index.retrieve({ type: 'equal', value: `user${target}@test.com` });
+        index.retrieve({ type: "equal", value: `user${target}@test.com` });
       });
 
-      bench('retrieve equal (non-existing)', () => {
-        index.retrieve({ type: 'equal', value: 'nonexistent@test.com' });
+      bench("retrieve equal (non-existing)", () => {
+        index.retrieve({ type: "equal", value: "nonexistent@test.com" });
       });
 
-      bench('retrieve in (10 values)', () => {
-        const values = Array.from({ length: 10 }, (_, i) => `user${i * 100}@test.com`);
-        index.retrieve({ type: 'in', values });
+      bench("retrieve in (10 values)", () => {
+        const values = Array.from(
+          { length: 10 },
+          (_, i) => `user${i * 100}@test.com`,
+        );
+        index.retrieve({ type: "in", values });
       });
 
-      bench('retrieve in (100 values)', () => {
-        const values = Array.from({ length: 100 }, (_, i) => `user${i * 10}@test.com`);
-        index.retrieve({ type: 'in', values });
+      bench("retrieve in (100 values)", () => {
+        const values = Array.from(
+          { length: 100 },
+          (_, i) => `user${i * 10}@test.com`,
+        );
+        index.retrieve({ type: "in", values });
       });
 
-      bench('retrieve has (all keys)', () => {
-        index.retrieve({ type: 'has' });
+      bench("retrieve has (all keys)", () => {
+        index.retrieve({ type: "has" });
       });
 
-      bench('update (same value)', () => {
+      bench("update (same value)", () => {
         const target = Math.floor(size / 2);
         const user = users[target];
         index.update(`${target}`, user, user);
       });
 
-      bench('update (different value)', () => {
+      bench("update (different value)", () => {
         const target = Math.floor(size / 2);
         const oldUser = users[target];
-        const newUser = { ...oldUser, email: 'newemail@test.com' };
+        const newUser = { ...oldUser, email: "newemail@test.com" };
         index.update(`${target}`, oldUser, newUser);
       });
 
-      bench('remove', () => {
+      bench("remove", () => {
         const target = Math.floor(Math.random() * size);
         const user = users[target];
         index.remove(`${target}`, user);
@@ -89,26 +97,28 @@ describe('HashIndex Performance', () => {
   }
 
   // Collision testing (many records with same attribute value)
-  describe('Hash collisions (10,000 records with same email)', () => {
+  describe("Hash collisions (10,000 records with same email)", () => {
     const index = new HashIndex(emailAttr);
-    const email = 'shared@test.com';
+    const email = "shared@test.com";
 
     // Setup: All users share same email
     for (let i = 0; i < 10_000; i++) {
-      const user = { id: `${i}`, email, status: 'active' };
+      const user = { id: `${i}`, email, status: "active" };
       index.add(`${i}`, user);
     }
 
-    bench('retrieve equal (10K collisions)', () => {
-      const result = index.retrieve({ type: 'equal', value: email });
-      // Force iteration
-      let count = 0;
-      for (const _ of result) count++;
+    bench("retrieve equal (10K collisions)", () => {
+      const result = index.retrieve({ type: "equal", value: email });
+      // Force iteration to materialize the result set
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      for (const _ of result) {
+        // iteration side effect only
+      }
     });
 
-    bench('add to collision bucket', () => {
+    bench("add to collision bucket", () => {
       const id = `new-${Math.random()}`;
-      const user = { id, email, status: 'active' };
+      const user = { id, email, status: "active" };
       index.add(id, user);
     });
   });

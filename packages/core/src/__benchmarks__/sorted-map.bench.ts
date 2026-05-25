@@ -9,10 +9,10 @@
  * - greaterThan()/lessThan(): Bound queries
  */
 
-import { bench, describe } from 'vitest';
-import { SortedMap, numericComparator } from '../query/ds';
+import { bench, describe } from "vitest";
+import { SortedMap, numericComparator } from "../query/ds";
 
-const isQuickMode = process.env.BENCH_QUICK === 'true';
+const isQuickMode = process.env.BENCH_QUICK === "true";
 
 // Dataset sizes
 const SMALL = 1_000;
@@ -22,7 +22,9 @@ const LARGE = isQuickMode ? 10_000 : 100_000;
 // Pre-populate maps outside of benchmark
 const smallMap = new SortedMap<number, string>(numericComparator);
 const mediumMap = new SortedMap<number, string>(numericComparator);
-const largeMap = isQuickMode ? mediumMap : new SortedMap<number, string>(numericComparator);
+const largeMap = isQuickMode
+  ? mediumMap
+  : new SortedMap<number, string>(numericComparator);
 
 for (let i = 0; i < SMALL; i++) {
   smallMap.set(i, `value-${i}`);
@@ -36,7 +38,7 @@ if (!isQuickMode) {
   }
 }
 
-describe('SortedMap - get() O(log N)', () => {
+describe("SortedMap - get() O(log N)", () => {
   bench(`get() - 1K entries`, () => {
     const key = Math.floor(Math.random() * SMALL);
     smallMap.get(key);
@@ -55,13 +57,13 @@ describe('SortedMap - get() O(log N)', () => {
   }
 });
 
-describe('SortedMap - set() O(log N)', () => {
-  bench(`set() - update existing key (${isQuickMode ? '10K' : '100K'})`, () => {
+describe("SortedMap - set() O(log N)", () => {
+  bench(`set() - update existing key (${isQuickMode ? "10K" : "100K"})`, () => {
     const key = Math.floor(Math.random() * LARGE);
     largeMap.set(key, `updated-${Date.now()}`);
   });
 
-  bench('set() - new key (temporary map)', () => {
+  bench("set() - new key (temporary map)", () => {
     const tempMap = new SortedMap<number, string>(numericComparator);
     for (let i = 0; i < 100; i++) {
       tempMap.set(i, `value-${i}`);
@@ -69,8 +71,8 @@ describe('SortedMap - set() O(log N)', () => {
   });
 });
 
-describe('SortedMap - range() O(log N + K)', () => {
-  const largeLabel = isQuickMode ? '10K' : '100K';
+describe("SortedMap - range() O(log N + K)", () => {
+  const largeLabel = isQuickMode ? "10K" : "100K";
 
   bench(`range() - 10 results from ${largeLabel}`, () => {
     const start = Math.floor(Math.random() * (LARGE - 10));
@@ -91,7 +93,7 @@ describe('SortedMap - range() O(log N + K)', () => {
   });
 
   if (!isQuickMode) {
-    bench('range() - 10000 results from 100K', () => {
+    bench("range() - 10000 results from 100K", () => {
       const start = Math.floor(Math.random() * (LARGE - 10000));
       const results = [...largeMap.range(start, start + 10000)];
       void results.length;
@@ -99,12 +101,13 @@ describe('SortedMap - range() O(log N + K)', () => {
   }
 });
 
-describe('SortedMap - greaterThan/lessThan', () => {
+describe("SortedMap - greaterThan/lessThan", () => {
   const midpoint = isQuickMode ? 5000 : 50000;
-  const largeLabel = isQuickMode ? '10K' : '100K';
+  const largeLabel = isQuickMode ? "10K" : "100K";
 
   bench(`greaterThan() - first 100 from ${largeLabel}`, () => {
     let count = 0;
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     for (const entry of largeMap.greaterThan(midpoint)) {
       count++;
       if (count >= 100) break;
@@ -113,6 +116,7 @@ describe('SortedMap - greaterThan/lessThan', () => {
 
   bench(`lessThan() - first 100 from ${largeLabel}`, () => {
     let count = 0;
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     for (const entry of largeMap.lessThan(midpoint)) {
       count++;
       if (count >= 100) break;
@@ -120,31 +124,31 @@ describe('SortedMap - greaterThan/lessThan', () => {
   });
 });
 
-describe('SortedMap - iteration', () => {
-  bench('entries() - iterate 1K entries', () => {
-    let count = 0;
+describe("SortedMap - iteration", () => {
+  bench("entries() - iterate 1K entries", () => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     for (const entry of smallMap.entries()) {
-      count++;
+      // iteration side effect only
     }
   });
 
-  bench('keys() - iterate 1K keys', () => {
-    let count = 0;
+  bench("keys() - iterate 1K keys", () => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     for (const key of smallMap.keys()) {
-      count++;
+      // iteration side effect only
     }
   });
 
-  bench('entriesReversed() - iterate 1K entries', () => {
-    let count = 0;
+  bench("entriesReversed() - iterate 1K entries", () => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     for (const entry of smallMap.entriesReversed()) {
-      count++;
+      // iteration side effect only
     }
   });
 });
 
-describe('SortedMap - utility operations', () => {
-  const largeLabel = isQuickMode ? '10K' : '100K';
+describe("SortedMap - utility operations", () => {
+  const largeLabel = isQuickMode ? "10K" : "100K";
 
   bench(`minKey() - ${largeLabel} entries`, () => {
     largeMap.minKey();
@@ -174,8 +178,8 @@ describe('SortedMap - utility operations', () => {
   });
 });
 
-describe('SortedMap vs Map - comparison', () => {
-  const largeLabel = isQuickMode ? '10K' : '100K';
+describe("SortedMap vs Map - comparison", () => {
+  const largeLabel = isQuickMode ? "10K" : "100K";
 
   // Create equivalent native Map for comparison
   const nativeMap = new Map<number, string>();
@@ -193,12 +197,12 @@ describe('SortedMap vs Map - comparison', () => {
     largeMap.get(key);
   });
 
-  bench('Native Map.set() - existing key', () => {
+  bench("Native Map.set() - existing key", () => {
     const key = Math.floor(Math.random() * LARGE);
     nativeMap.set(key, `updated-${Date.now()}`);
   });
 
-  bench('SortedMap.set() - existing key', () => {
+  bench("SortedMap.set() - existing key", () => {
     const key = Math.floor(Math.random() * LARGE);
     largeMap.set(key, `updated-${Date.now()}`);
   });

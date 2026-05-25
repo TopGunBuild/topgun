@@ -4,34 +4,37 @@
  * Compares indexed vs full-scan query performance.
  */
 
-import { bench, describe } from 'vitest';
-import { IndexedLWWMap } from '../../IndexedLWWMap';
-import { HLC } from '../../HLC';
-import { simpleAttribute } from '../../query/Attribute';
+import { bench, describe } from "vitest";
+import { IndexedLWWMap } from "../../IndexedLWWMap";
+import { HLC } from "../../HLC";
+import { simpleAttribute } from "../../query/Attribute";
 
 interface User {
   id: string;
   email: string;
-  status: 'active' | 'inactive' | 'pending';
+  status: "active" | "inactive" | "pending";
   age: number;
   score: number;
 }
 
 // BENCH_QUICK=true runs only smaller datasets for faster CI
-const isQuickMode = process.env.BENCH_QUICK === 'true';
+const isQuickMode = process.env.BENCH_QUICK === "true";
 
-describe('IndexedLWWMap Query Performance', () => {
+describe("IndexedLWWMap Query Performance", () => {
   const sizes = isQuickMode ? [10_000] : [10_000, 100_000];
 
   for (const size of sizes) {
     describe(`${size.toLocaleString()} records`, () => {
       // Setup: Create map with indexes
-      const hlc = new HLC('bench-node');
+      const hlc = new HLC("bench-node");
       const indexedMap = new IndexedLWWMap<string, User>(hlc);
 
-      const emailAttr = simpleAttribute<User, string>('email', (u) => u.email);
-      const statusAttr = simpleAttribute<User, string>('status', (u) => u.status);
-      const ageAttr = simpleAttribute<User, number>('age', (u) => u.age);
+      const emailAttr = simpleAttribute<User, string>("email", (u) => u.email);
+      const statusAttr = simpleAttribute<User, string>(
+        "status",
+        (u) => u.status,
+      );
+      const ageAttr = simpleAttribute<User, number>("age", (u) => u.age);
 
       indexedMap.addHashIndex(emailAttr);
       indexedMap.addHashIndex(statusAttr);
@@ -45,7 +48,7 @@ describe('IndexedLWWMap Query Performance', () => {
         const user: User = {
           id: `${i}`,
           email: `user${i}@test.com`,
-          status: (['active', 'inactive', 'pending'] as const)[i % 3],
+          status: (["active", "inactive", "pending"] as const)[i % 3],
           age: 18 + (i % 50),
           score: Math.random() * 100,
         };
@@ -55,17 +58,17 @@ describe('IndexedLWWMap Query Performance', () => {
 
       // ============ Equality Query ============
 
-      bench('[INDEXED] equality query (email)', () => {
+      bench("[INDEXED] equality query (email)", () => {
         const query = {
-          type: 'eq' as const,
-          attribute: 'email',
+          type: "eq" as const,
+          attribute: "email",
           value: `user${Math.floor(size / 2)}@test.com`,
         };
         const results = indexedMap.query(query);
         results.toArray();
       });
 
-      bench('[FULL SCAN] equality query (email)', () => {
+      bench("[FULL SCAN] equality query (email)", () => {
         const target = `user${Math.floor(size / 2)}@test.com`;
         const results: User[] = [];
         for (const user of regularMap.values()) {
@@ -75,19 +78,19 @@ describe('IndexedLWWMap Query Performance', () => {
 
       // ============ Range Query ============
 
-      bench('[INDEXED] range query (age 25-35)', () => {
+      bench("[INDEXED] range query (age 25-35)", () => {
         const query = {
-          type: 'and' as const,
+          type: "and" as const,
           children: [
-            { type: 'gte' as const, attribute: 'age', value: 25 },
-            { type: 'lte' as const, attribute: 'age', value: 35 },
+            { type: "gte" as const, attribute: "age", value: 25 },
+            { type: "lte" as const, attribute: "age", value: 35 },
           ],
         };
         const results = indexedMap.query(query);
         results.toArray();
       });
 
-      bench('[FULL SCAN] range query (age 25-35)', () => {
+      bench("[FULL SCAN] range query (age 25-35)", () => {
         const results: User[] = [];
         for (const user of regularMap.values()) {
           if (user.age >= 25 && user.age <= 35) results.push(user);
@@ -96,43 +99,43 @@ describe('IndexedLWWMap Query Performance', () => {
 
       // ============ Compound Query ============
 
-      bench('[INDEXED] compound query (status=active AND age>30)', () => {
+      bench("[INDEXED] compound query (status=active AND age>30)", () => {
         const query = {
-          type: 'and' as const,
+          type: "and" as const,
           children: [
-            { type: 'eq' as const, attribute: 'status', value: 'active' },
-            { type: 'gt' as const, attribute: 'age', value: 30 },
+            { type: "eq" as const, attribute: "status", value: "active" },
+            { type: "gt" as const, attribute: "age", value: 30 },
           ],
         };
         const results = indexedMap.query(query);
         results.toArray();
       });
 
-      bench('[FULL SCAN] compound query (status=active AND age>30)', () => {
+      bench("[FULL SCAN] compound query (status=active AND age>30)", () => {
         const results: User[] = [];
         for (const user of regularMap.values()) {
-          if (user.status === 'active' && user.age > 30) results.push(user);
+          if (user.status === "active" && user.age > 30) results.push(user);
         }
       });
 
       // ============ OR Query ============
 
-      bench('[INDEXED] OR query (status=active OR status=pending)', () => {
+      bench("[INDEXED] OR query (status=active OR status=pending)", () => {
         const query = {
-          type: 'or' as const,
+          type: "or" as const,
           children: [
-            { type: 'eq' as const, attribute: 'status', value: 'active' },
-            { type: 'eq' as const, attribute: 'status', value: 'pending' },
+            { type: "eq" as const, attribute: "status", value: "active" },
+            { type: "eq" as const, attribute: "status", value: "pending" },
           ],
         };
         const results = indexedMap.query(query);
         results.toArray();
       });
 
-      bench('[FULL SCAN] OR query (status=active OR status=pending)', () => {
+      bench("[FULL SCAN] OR query (status=active OR status=pending)", () => {
         const results: User[] = [];
         for (const user of regularMap.values()) {
-          if (user.status === 'active' || user.status === 'pending') {
+          if (user.status === "active" || user.status === "pending") {
             results.push(user);
           }
         }
@@ -140,42 +143,48 @@ describe('IndexedLWWMap Query Performance', () => {
 
       // ============ Complex Query ============
 
-      bench('[INDEXED] complex query ((status=active AND age>25) OR age<20)', () => {
-        const query = {
-          type: 'or' as const,
-          children: [
-            {
-              type: 'and' as const,
-              children: [
-                { type: 'eq' as const, attribute: 'status', value: 'active' },
-                { type: 'gt' as const, attribute: 'age', value: 25 },
-              ],
-            },
-            { type: 'lt' as const, attribute: 'age', value: 20 },
-          ],
-        };
-        const results = indexedMap.query(query);
-        results.toArray();
-      });
+      bench(
+        "[INDEXED] complex query ((status=active AND age>25) OR age<20)",
+        () => {
+          const query = {
+            type: "or" as const,
+            children: [
+              {
+                type: "and" as const,
+                children: [
+                  { type: "eq" as const, attribute: "status", value: "active" },
+                  { type: "gt" as const, attribute: "age", value: 25 },
+                ],
+              },
+              { type: "lt" as const, attribute: "age", value: 20 },
+            ],
+          };
+          const results = indexedMap.query(query);
+          results.toArray();
+        },
+      );
 
-      bench('[FULL SCAN] complex query ((status=active AND age>25) OR age<20)', () => {
-        const results: User[] = [];
-        for (const user of regularMap.values()) {
-          if ((user.status === 'active' && user.age > 25) || user.age < 20) {
-            results.push(user);
+      bench(
+        "[FULL SCAN] complex query ((status=active AND age>25) OR age<20)",
+        () => {
+          const results: User[] = [];
+          for (const user of regularMap.values()) {
+            if ((user.status === "active" && user.age > 25) || user.age < 20) {
+              results.push(user);
+            }
           }
-        }
-      });
+        },
+      );
 
       // ============ Non-indexed field ============
 
-      bench('[INDEXED] non-indexed field (score > 50)', () => {
-        const query = { type: 'gt' as const, attribute: 'score', value: 50 };
+      bench("[INDEXED] non-indexed field (score > 50)", () => {
+        const query = { type: "gt" as const, attribute: "score", value: 50 };
         const results = indexedMap.query(query);
         results.toArray();
       });
 
-      bench('[FULL SCAN] non-indexed field (score > 50)', () => {
+      bench("[FULL SCAN] non-indexed field (score > 50)", () => {
         const results: User[] = [];
         for (const user of regularMap.values()) {
           if (user.score > 50) results.push(user);
@@ -184,30 +193,31 @@ describe('IndexedLWWMap Query Performance', () => {
 
       // ============ Count operation ============
 
-      bench('[INDEXED] count query (status=active)', () => {
+      bench("[INDEXED] count query (status=active)", () => {
         const query = {
-          type: 'eq' as const,
-          attribute: 'status',
-          value: 'active',
+          type: "eq" as const,
+          attribute: "status",
+          value: "active",
         };
         indexedMap.count(query);
       });
 
-      bench('[FULL SCAN] count query (status=active)', () => {
-        let count = 0;
+      bench("[FULL SCAN] count query (status=active)", () => {
+        // Full-scan counting: iterate all values and apply predicate.
+        // The result is not stored because the benchmark measures iteration cost, not the final count.
         for (const user of regularMap.values()) {
-          if (user.status === 'active') count++;
+          void (user.status === "active");
         }
       });
 
       // ============ Query explain ============
 
-      bench('explain query plan', () => {
+      bench("explain query plan", () => {
         const query = {
-          type: 'and' as const,
+          type: "and" as const,
           children: [
-            { type: 'eq' as const, attribute: 'status', value: 'active' },
-            { type: 'gt' as const, attribute: 'age', value: 30 },
+            { type: "eq" as const, attribute: "status", value: "active" },
+            { type: "gt" as const, attribute: "age", value: 30 },
           ],
         };
         indexedMap.explainQuery(query);
@@ -217,19 +227,19 @@ describe('IndexedLWWMap Query Performance', () => {
 
   // Selective query benchmarks (different selectivity levels)
   // Skip in quick mode as it uses 100K records
-  describe.skipIf(isQuickMode)('Selectivity impact (100K records)', () => {
-    const hlc = new HLC('bench-node');
+  describe.skipIf(isQuickMode)("Selectivity impact (100K records)", () => {
+    const hlc = new HLC("bench-node");
     const map = new IndexedLWWMap<string, User>(hlc);
 
-    const statusAttr = simpleAttribute<User, string>('status', (u) => u.status);
+    const statusAttr = simpleAttribute<User, string>("status", (u) => u.status);
     map.addHashIndex(statusAttr);
 
     // Setup: 90% active, 9% inactive, 1% pending
     for (let i = 0; i < 100_000; i++) {
-      let status: 'active' | 'inactive' | 'pending';
-      if (i < 90_000) status = 'active';
-      else if (i < 99_000) status = 'inactive';
-      else status = 'pending';
+      let status: "active" | "inactive" | "pending";
+      if (i < 90_000) status = "active";
+      else if (i < 99_000) status = "inactive";
+      else status = "pending";
 
       map.set(`${i}`, {
         id: `${i}`,
@@ -240,20 +250,32 @@ describe('IndexedLWWMap Query Performance', () => {
       });
     }
 
-    bench('query high selectivity (90% match - active)', () => {
-      const query = { type: 'eq' as const, attribute: 'status', value: 'active' };
+    bench("query high selectivity (90% match - active)", () => {
+      const query = {
+        type: "eq" as const,
+        attribute: "status",
+        value: "active",
+      };
       const results = map.query(query);
       results.toArray();
     });
 
-    bench('query medium selectivity (9% match - inactive)', () => {
-      const query = { type: 'eq' as const, attribute: 'status', value: 'inactive' };
+    bench("query medium selectivity (9% match - inactive)", () => {
+      const query = {
+        type: "eq" as const,
+        attribute: "status",
+        value: "inactive",
+      };
       const results = map.query(query);
       results.toArray();
     });
 
-    bench('query low selectivity (1% match - pending)', () => {
-      const query = { type: 'eq' as const, attribute: 'status', value: 'pending' };
+    bench("query low selectivity (1% match - pending)", () => {
+      const query = {
+        type: "eq" as const,
+        attribute: "status",
+        value: "pending",
+      };
       const results = map.query(query);
       results.toArray();
     });
