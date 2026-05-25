@@ -11,7 +11,7 @@ const createMockJournalReader = () => {
   let subscriptionCounter = 0;
 
   return {
-    subscribe: jest.fn((callback: (event: JournalEvent) => void, options?: any) => {
+    subscribe: jest.fn((callback: (event: JournalEvent) => void, _options?: any) => {
       const id = `sub_${subscriptionCounter++}`;
       listeners.set(id, callback);
       return () => {

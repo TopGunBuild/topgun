@@ -121,7 +121,8 @@ export function useHybridSearchSubscribe<T = unknown>(
   // Memoize search options (excluding debounceMs and enabled) for stable identity
   const searchOptions = useMemo<HybridSearchSubscribeOptions>(() => {
     if (!options) return {};
-    const { debounceMs: _d, enabled: _e, ...rest } = options;
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { debounceMs: _d, enabled: _e, ...rest } = options; // destructure-to-exclude: _d and _e are intentionally discarded so rest omits those flags
     return rest;
   }, [
     options?.k,
@@ -222,7 +223,6 @@ export function useHybridSearchSubscribe<T = unknown>(
         setLoading(false);
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, mapName, debouncedQueryText, searchOptions, enabled]);
 
   return useMemo(() => ({ results, loading, error }), [results, loading, error]);

@@ -118,7 +118,8 @@ export function useSearch<T = unknown>(
   // Memoize search options (without debounceMs) to avoid unnecessary re-renders
   const searchOptions = useMemo<SearchOptions>(() => {
     if (!options) return {};
-    const { debounceMs: _, ...opts } = options;
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { debounceMs: _, ...opts } = options; // destructure-to-exclude: _ is intentionally discarded so opts omits debounceMs
     return opts;
   }, [options?.limit, options?.minScore, options?.boost]);
 

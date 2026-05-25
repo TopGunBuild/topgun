@@ -1,4 +1,4 @@
-import { renderHook, act, waitFor } from '@testing-library/react';
+import { renderHook, act } from '@testing-library/react';
 import { useQuery } from '../hooks/useQuery';
 import { TopGunProvider } from '../TopGunProvider';
 import { TopGunClient, ChangeEvent } from '@topgunbuild/client';
@@ -221,7 +221,7 @@ describe('useQuery with change tracking', () => {
     it('should call onChange callback for all changes', async () => {
       const onChange = jest.fn();
 
-      const { result } = renderHook(() => useQuery('testMap', {}, { onChange }), { wrapper });
+      renderHook(() => useQuery('testMap', {}, { onChange }), { wrapper });
 
       const changes: ChangeEvent<any>[] = [
         { type: 'add', key: 'item-1', value: { title: 'Added' }, timestamp: 1 },

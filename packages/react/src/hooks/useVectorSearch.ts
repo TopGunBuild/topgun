@@ -103,7 +103,8 @@ export function useVectorSearch(
   // Build stable search options without enabled flag to pass to vectorSearch
   const searchOptions = useMemo<VectorSearchClientOptions | undefined>(() => {
     if (!options) return undefined;
-    const { enabled: _enabled, ...rest } = options;
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { enabled: _enabled, ...rest } = options; // destructure-to-exclude: _enabled is intentionally discarded so rest omits the enabled flag
     // Return undefined when the rest is effectively empty to keep message payloads lean
     return Object.keys(rest).length > 0 ? rest : undefined;
   }, [

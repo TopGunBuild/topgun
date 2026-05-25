@@ -1,10 +1,4 @@
-import { useClient } from '../TopGunProvider';
-
-// Re-export useClient from hooks for consistency if preferred,
-// or just keep it in provider file. The prompt listed `useClient()` separately
-// in requirements, but usually it lives with the Context.
-// I'll create a simple re-export here if I decide to separate it,
-// but for now I implemented it in TopGunProvider.tsx.
-// I will create this file to export it from hooks folder as well.
-
+// Re-export useClient from hooks folder for API consistency (useClient lives
+// in TopGunProvider.tsx but is surfaced here so consumers can import from
+// '@topgunbuild/react' without knowing the provider file layout).
 export { useClient } from '../TopGunProvider';

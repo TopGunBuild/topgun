@@ -206,7 +206,7 @@ describe('useMergeRejections', () => {
 
   describe('Cleanup', () => {
     it('should unsubscribe on unmount', () => {
-      const { unmount } = renderHook(() => useMergeRejections(), { wrapper });
+      renderHook(() => useMergeRejections(), { wrapper });
 
       const unsubscribeSpy = jest.fn();
       mockConflictResolvers.onRejection.mockReturnValue(unsubscribeSpy);

@@ -98,7 +98,7 @@ describe('useMap', () => {
 
   it('should trigger re-render on map changes', () => {
     let renderCount = 0;
-    const { result } = renderHook(
+    renderHook(
       () => {
         renderCount++;
         return useMap('test-map');

@@ -118,7 +118,8 @@ export function useHybridSearch(
   // Build stable search options without the enabled flag to pass to hybridSearch
   const searchOptions = useMemo<HybridSearchClientOptions | undefined>(() => {
     if (!options) return undefined;
-    const { enabled: _enabled, ...rest } = options;
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { enabled: _enabled, ...rest } = options; // destructure-to-exclude: _enabled is intentionally discarded so rest omits the enabled flag
     return Object.keys(rest).length > 0 ? rest : undefined;
   }, [
     methodsKey,
@@ -166,7 +167,6 @@ export function useHybridSearch(
     // searchOptions is NOT in deps because its referential identity changes on every render
     // (it depends on queryVector which may have new identity). The semantically meaningful
     // deps below (methodsKey, queryVectorKey, etc.) already capture when to re-run.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     client,
     mapName,

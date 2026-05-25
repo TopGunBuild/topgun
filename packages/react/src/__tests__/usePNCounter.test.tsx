@@ -220,7 +220,7 @@ describe('usePNCounter', () => {
 
   describe('cleanup', () => {
     it('should unsubscribe on unmount', () => {
-      const { unmount } = renderHook(() => usePNCounter('testCounter'), { wrapper });
+      renderHook(() => usePNCounter('testCounter'), { wrapper });
 
       // Get the unsubscribe function that was returned
       const unsubscribe = mockCounterHandle.subscribe.mock.results[0].value;
