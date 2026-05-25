@@ -1,10 +1,5 @@
 import WebSocket from 'ws';
-import {
-  createRustTestClient,
-  spawnRustServer,
-  waitForSync,
-  TestClient,
-} from './helpers';
+import { createRustTestClient, spawnRustServer, waitForSync, TestClient } from './helpers';
 
 describe('Integration: Connection & Auth (Rust Server)', () => {
   // ========================================
