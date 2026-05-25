@@ -1,8 +1,8 @@
-import { VirtualNetwork } from "../VirtualNetwork";
-import { VirtualClock } from "../VirtualClock";
-import { SeededRNG } from "../SeededRNG";
+import { VirtualNetwork } from '../VirtualNetwork';
+import { VirtualClock } from '../VirtualClock';
+import { SeededRNG } from '../SeededRNG';
 
-describe("VirtualNetwork", () => {
+describe('VirtualNetwork', () => {
   let clock: VirtualClock;
   let rng: SeededRNG;
   let network: VirtualNetwork;
@@ -13,81 +13,81 @@ describe("VirtualNetwork", () => {
     network = new VirtualNetwork(rng, clock);
   });
 
-  describe("configure()", () => {
-    test("sets latency configuration", () => {
+  describe('configure()', () => {
+    test('sets latency configuration', () => {
       network.configure({ latencyMs: { min: 10, max: 50 } });
-      network.send("a", "b", { data: "test" });
+      network.send('a', 'b', { data: 'test' });
 
       const messages = network.getPendingMessages();
       expect(messages[0].scheduledTime).toBeGreaterThanOrEqual(1010);
       expect(messages[0].scheduledTime).toBeLessThanOrEqual(1050);
     });
 
-    test("sets packet loss rate", () => {
+    test('sets packet loss rate', () => {
       network.configure({ packetLossRate: 1.0 });
-      network.send("a", "b", { data: "test" });
+      network.send('a', 'b', { data: 'test' });
 
       expect(network.getPendingCount()).toBe(0);
     });
 
-    test("sets partitions", () => {
-      network.configure({ partitions: [["a"], ["b"]] });
-      network.send("a", "b", { data: "test" });
+    test('sets partitions', () => {
+      network.configure({ partitions: [['a'], ['b']] });
+      network.send('a', 'b', { data: 'test' });
 
       expect(network.getPendingCount()).toBe(0);
     });
 
-    test("rejects invalid latency range", () => {
+    test('rejects invalid latency range', () => {
       expect(() => {
         network.configure({ latencyMs: { min: -10, max: 50 } });
-      }).toThrow("Invalid latency range");
+      }).toThrow('Invalid latency range');
 
       expect(() => {
         network.configure({ latencyMs: { min: 50, max: 10 } });
-      }).toThrow("Invalid latency range");
+      }).toThrow('Invalid latency range');
     });
 
-    test("rejects invalid packet loss rate", () => {
+    test('rejects invalid packet loss rate', () => {
       expect(() => {
         network.configure({ packetLossRate: -0.1 });
-      }).toThrow("must be between 0 and 1");
+      }).toThrow('must be between 0 and 1');
 
       expect(() => {
         network.configure({ packetLossRate: 1.5 });
-      }).toThrow("must be between 0 and 1");
+      }).toThrow('must be between 0 and 1');
     });
   });
 
-  describe("send()", () => {
-    test("queues message with zero latency", () => {
+  describe('send()', () => {
+    test('queues message with zero latency', () => {
       network.configure({ latencyMs: { min: 0, max: 0 } });
-      network.send("a", "b", { data: "test" });
+      network.send('a', 'b', { data: 'test' });
 
       expect(network.getPendingCount()).toBe(1);
       const messages = network.getPendingMessages();
       expect(messages[0]).toMatchObject({
-        from: "a",
-        to: "b",
-        payload: { data: "test" },
+        from: 'a',
+        to: 'b',
+        payload: { data: 'test' },
         scheduledTime: 1000,
       });
     });
 
-    test("queues message with latency", () => {
+    test('queues message with latency', () => {
       network.configure({ latencyMs: { min: 100, max: 100 } });
-      network.send("a", "b", { data: "test" });
+      network.send('a', 'b', { data: 'test' });
 
       const messages = network.getPendingMessages();
       expect(messages[0].scheduledTime).toBe(1100);
     });
 
-    test("drops message based on packet loss", () => {
+    test('drops message based on packet loss', () => {
       network.configure({ packetLossRate: 0.5 });
 
       let delivered = 0;
 
       for (let i = 0; i < 100; i++) {
-        network.send("a", "b", { data: i });
+        network.send('a', 'b', { data: i });
       }
 
       delivered = network.getPendingCount();
@@ -98,71 +98,71 @@ describe("VirtualNetwork", () => {
       expect(delivered).toBeLessThan(70);
     });
 
-    test("blocks partitioned messages", () => {
-      network.configure({ partitions: [["a"], ["b"]] });
-      network.send("a", "b", { data: "test" });
+    test('blocks partitioned messages', () => {
+      network.configure({ partitions: [['a'], ['b']] });
+      network.send('a', 'b', { data: 'test' });
 
       expect(network.getPendingCount()).toBe(0);
     });
 
-    test("allows non-partitioned messages", () => {
-      network.configure({ partitions: [["a"], ["b"]] });
-      network.send("a", "c", { data: "test" });
+    test('allows non-partitioned messages', () => {
+      network.configure({ partitions: [['a'], ['b']] });
+      network.send('a', 'c', { data: 'test' });
 
       expect(network.getPendingCount()).toBe(1);
     });
   });
 
-  describe("partition()", () => {
-    test("creates bidirectional partition", () => {
-      network.partition(["a"], ["b"]);
+  describe('partition()', () => {
+    test('creates bidirectional partition', () => {
+      network.partition(['a'], ['b']);
 
-      network.send("a", "b", { data: "test1" });
-      network.send("b", "a", { data: "test2" });
+      network.send('a', 'b', { data: 'test1' });
+      network.send('b', 'a', { data: 'test2' });
 
       expect(network.getPendingCount()).toBe(0);
     });
 
-    test("allows messages within same partition group", () => {
-      network.partition(["a", "c"], ["b"]);
+    test('allows messages within same partition group', () => {
+      network.partition(['a', 'c'], ['b']);
 
-      network.send("a", "c", { data: "test" });
+      network.send('a', 'c', { data: 'test' });
 
       expect(network.getPendingCount()).toBe(1);
     });
   });
 
-  describe("heal()", () => {
-    test("removes all partitions", () => {
-      network.partition(["a"], ["b"]);
-      network.send("a", "b", { data: "test1" });
+  describe('heal()', () => {
+    test('removes all partitions', () => {
+      network.partition(['a'], ['b']);
+      network.send('a', 'b', { data: 'test1' });
       expect(network.getPendingCount()).toBe(0);
 
       network.heal();
-      network.send("a", "b", { data: "test2" });
+      network.send('a', 'b', { data: 'test2' });
       expect(network.getPendingCount()).toBe(1);
     });
   });
 
-  describe("tick()", () => {
-    test("delivers messages at current time", () => {
+  describe('tick()', () => {
+    test('delivers messages at current time', () => {
       network.configure({ latencyMs: { min: 100, max: 100 } });
-      network.send("a", "b", { data: "test" });
+      network.send('a', 'b', { data: 'test' });
 
       clock.advance(100);
       const delivered = network.tick();
 
       expect(delivered).toHaveLength(1);
       expect(delivered[0]).toMatchObject({
-        from: "a",
-        to: "b",
-        payload: { data: "test" },
+        from: 'a',
+        to: 'b',
+        payload: { data: 'test' },
       });
     });
 
-    test("does not deliver future messages", () => {
+    test('does not deliver future messages', () => {
       network.configure({ latencyMs: { min: 100, max: 100 } });
-      network.send("a", "b", { data: "test" });
+      network.send('a', 'b', { data: 'test' });
 
       clock.advance(50);
       const delivered = network.tick();
@@ -171,10 +171,10 @@ describe("VirtualNetwork", () => {
       expect(network.getPendingCount()).toBe(1);
     });
 
-    test("delivers multiple messages", () => {
+    test('delivers multiple messages', () => {
       network.configure({ latencyMs: { min: 100, max: 100 } });
-      network.send("a", "b", { data: "test1" });
-      network.send("c", "d", { data: "test2" });
+      network.send('a', 'b', { data: 'test1' });
+      network.send('c', 'd', { data: 'test2' });
 
       clock.advance(100);
       const delivered = network.tick();
@@ -182,7 +182,7 @@ describe("VirtualNetwork", () => {
       expect(delivered).toHaveLength(2);
     });
 
-    test("delivers messages in batches as time advances", () => {
+    test('delivers messages in batches as time advances', () => {
       network.configure({
         latencyMs: { min: 50, max: 150 },
         packetLossRate: 0,
@@ -190,7 +190,7 @@ describe("VirtualNetwork", () => {
 
       // Send messages with various latencies
       for (let i = 0; i < 10; i++) {
-        network.send("a", "b", { data: i });
+        network.send('a', 'b', { data: i });
       }
 
       const allDelivered: any[] = [];
@@ -205,9 +205,9 @@ describe("VirtualNetwork", () => {
       expect(allDelivered.length).toBe(10);
     });
 
-    test("removes delivered messages from pending", () => {
+    test('removes delivered messages from pending', () => {
       network.configure({ latencyMs: { min: 100, max: 100 } });
-      network.send("a", "b", { data: "test" });
+      network.send('a', 'b', { data: 'test' });
 
       expect(network.getPendingCount()).toBe(1);
 
@@ -218,24 +218,24 @@ describe("VirtualNetwork", () => {
     });
   });
 
-  describe("getPendingCount()", () => {
-    test("returns zero initially", () => {
+  describe('getPendingCount()', () => {
+    test('returns zero initially', () => {
       expect(network.getPendingCount()).toBe(0);
     });
 
-    test("increments with sent messages", () => {
-      network.send("a", "b", { data: "test1" });
+    test('increments with sent messages', () => {
+      network.send('a', 'b', { data: 'test1' });
       expect(network.getPendingCount()).toBe(1);
 
-      network.send("c", "d", { data: "test2" });
+      network.send('c', 'd', { data: 'test2' });
       expect(network.getPendingCount()).toBe(2);
     });
   });
 
-  describe("clear()", () => {
-    test("removes all pending messages", () => {
-      network.send("a", "b", { data: "test1" });
-      network.send("c", "d", { data: "test2" });
+  describe('clear()', () => {
+    test('removes all pending messages', () => {
+      network.send('a', 'b', { data: 'test1' });
+      network.send('c', 'd', { data: 'test2' });
       expect(network.getPendingCount()).toBe(2);
 
       network.clear();
@@ -243,8 +243,8 @@ describe("VirtualNetwork", () => {
     });
   });
 
-  describe("determinism", () => {
-    test("produces identical message delivery with same seed", () => {
+  describe('determinism', () => {
+    test('produces identical message delivery with same seed', () => {
       const rng1 = new SeededRNG(42);
       const clock1 = new VirtualClock(1000);
       const network1 = new VirtualNetwork(rng1, clock1);
@@ -254,7 +254,7 @@ describe("VirtualNetwork", () => {
       });
 
       for (let i = 0; i < 20; i++) {
-        network1.send("a", "b", { data: i });
+        network1.send('a', 'b', { data: i });
       }
 
       const rng2 = new SeededRNG(42);
@@ -266,7 +266,7 @@ describe("VirtualNetwork", () => {
       });
 
       for (let i = 0; i < 20; i++) {
-        network2.send("a", "b", { data: i });
+        network2.send('a', 'b', { data: i });
       }
 
       expect(network2.getPendingCount()).toBe(network1.getPendingCount());

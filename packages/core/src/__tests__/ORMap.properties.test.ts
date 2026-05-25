@@ -13,9 +13,9 @@
  *    (OR-Map uses "Observed-Remove" which means only removes what was observed)
  */
 
-import * as fc from "fast-check";
-import { ORMap, ORMapRecord } from "../ORMap";
-import { HLC, Timestamp } from "../HLC";
+import * as fc from 'fast-check';
+import { ORMap, ORMapRecord } from '../ORMap';
+import { HLC, Timestamp } from '../HLC';
 
 // Arbitrary generators
 
@@ -55,7 +55,7 @@ const arbKey: fc.Arbitrary<string> = fc
   .filter((s) => /^[a-z]+$/.test(s));
 
 // Helper to create a fresh ORMap
-function createMap(nodeId: string = "test-node"): ORMap<string, any> {
+function createMap(nodeId: string = 'test-node'): ORMap<string, any> {
   return new ORMap(new HLC(nodeId));
 }
 
@@ -79,10 +79,7 @@ function mapsEqual(a: ORMap<string, any>, b: ORMap<string, any>): boolean {
     for (const [tag, recA] of recordsA) {
       const recB = recordsB.get(tag);
       if (!recB) return false;
-      if (
-        recA.value !== recB.value &&
-        JSON.stringify(recA.value) !== JSON.stringify(recB.value)
-      ) {
+      if (recA.value !== recB.value && JSON.stringify(recA.value) !== JSON.stringify(recB.value)) {
         return false;
       }
     }
@@ -100,12 +97,12 @@ function mapsEqual(a: ORMap<string, any>, b: ORMap<string, any>): boolean {
   return true;
 }
 
-describe("ORMap Property-Based Tests", () => {
-  describe("Idempotence", () => {
-    it("applying the same record twice should be idempotent", () => {
+describe('ORMap Property-Based Tests', () => {
+  describe('Idempotence', () => {
+    it('applying the same record twice should be idempotent', () => {
       fc.assert(
         fc.property(arbKey, arbRecord(arbValue), (key, record) => {
-          const map = createMap("node-1");
+          const map = createMap('node-1');
 
           // First apply
           map.apply(key, record);
@@ -122,10 +119,10 @@ describe("ORMap Property-Based Tests", () => {
       );
     });
 
-    it("applying the same tombstone twice should be idempotent", () => {
+    it('applying the same tombstone twice should be idempotent', () => {
       fc.assert(
         fc.property(arbKey, arbRecord(arbValue), (key, record) => {
-          const map = createMap("node-1");
+          const map = createMap('node-1');
           map.apply(key, record);
 
           // First tombstone
@@ -146,8 +143,8 @@ describe("ORMap Property-Based Tests", () => {
     });
   });
 
-  describe("Commutativity", () => {
-    it("merge order should not affect final state", () => {
+  describe('Commutativity', () => {
+    it('merge order should not affect final state', () => {
       fc.assert(
         fc.property(
           fc.array(fc.tuple(arbKey, arbRecord(arbValue)), {
@@ -156,13 +153,13 @@ describe("ORMap Property-Based Tests", () => {
           }),
           (operations) => {
             // Map 1: apply in order
-            const map1 = createMap("node-1");
+            const map1 = createMap('node-1');
             for (const [key, record] of operations) {
               map1.apply(key, record);
             }
 
             // Map 2: apply in reverse order
-            const map2 = createMap("node-2");
+            const map2 = createMap('node-2');
             for (const [key, record] of [...operations].reverse()) {
               map2.apply(key, record);
             }
@@ -175,7 +172,7 @@ describe("ORMap Property-Based Tests", () => {
       );
     });
 
-    it("tombstone order should not affect final state", () => {
+    it('tombstone order should not affect final state', () => {
       fc.assert(
         fc.property(
           fc.array(fc.tuple(arbKey, arbRecord(arbValue)), {
@@ -186,8 +183,8 @@ describe("ORMap Property-Based Tests", () => {
             // Apply all records first, then tombstones in different orders
             const tags = operations.map(([, r]) => r.tag);
 
-            const map1 = createMap("node-1");
-            const map2 = createMap("node-2");
+            const map1 = createMap('node-1');
+            const map2 = createMap('node-2');
 
             // Apply records to both
             for (const [key, record] of operations) {
@@ -204,9 +201,7 @@ describe("ORMap Property-Based Tests", () => {
             }
 
             // Both should have same tombstones
-            expect(new Set(map1.getTombstones())).toEqual(
-              new Set(map2.getTombstones()),
-            );
+            expect(new Set(map1.getTombstones())).toEqual(new Set(map2.getTombstones()));
           },
         ),
         { numRuns: 50 },
@@ -214,8 +209,8 @@ describe("ORMap Property-Based Tests", () => {
     });
   });
 
-  describe("Associativity", () => {
-    it("nested merges should produce same result regardless of grouping", () => {
+  describe('Associativity', () => {
+    it('nested merges should produce same result regardless of grouping', () => {
       fc.assert(
         fc.property(
           arbKey,
@@ -224,22 +219,22 @@ describe("ORMap Property-Based Tests", () => {
           arbRecord(arbValue),
           (key, recordA, recordB, recordC) => {
             // Ensure unique tags
-            const tsA = { millis: 1000, counter: 0, nodeId: "a" };
-            const tsB = { millis: 2000, counter: 0, nodeId: "b" };
-            const tsC = { millis: 3000, counter: 0, nodeId: "c" };
+            const tsA = { millis: 1000, counter: 0, nodeId: 'a' };
+            const tsB = { millis: 2000, counter: 0, nodeId: 'b' };
+            const tsC = { millis: 3000, counter: 0, nodeId: 'c' };
 
             recordA = { ...recordA, tag: HLC.toString(tsA), timestamp: tsA };
             recordB = { ...recordB, tag: HLC.toString(tsB), timestamp: tsB };
             recordC = { ...recordC, tag: HLC.toString(tsC), timestamp: tsC };
 
             // Left: ((A, B), C)
-            const mapLeft = createMap("node-left");
+            const mapLeft = createMap('node-left');
             mapLeft.apply(key, recordA);
             mapLeft.apply(key, recordB);
             mapLeft.apply(key, recordC);
 
             // Right: (A, (B, C))
-            const mapRight = createMap("node-right");
+            const mapRight = createMap('node-right');
             mapRight.apply(key, recordA);
             mapRight.apply(key, recordB);
             mapRight.apply(key, recordC);
@@ -252,8 +247,8 @@ describe("ORMap Property-Based Tests", () => {
     });
   });
 
-  describe("Convergence", () => {
-    it("all replicas should converge after exchanging all operations", () => {
+  describe('Convergence', () => {
+    it('all replicas should converge after exchanging all operations', () => {
       fc.assert(
         fc.property(
           fc.array(fc.tuple(arbKey, arbRecord(arbValue)), {
@@ -269,10 +264,10 @@ describe("ORMap Property-Based Tests", () => {
                 counter: 0,
                 nodeId: `n${i}`,
               };
-              return [
-                key,
-                { ...record, tag: HLC.toString(ts), timestamp: ts },
-              ] as [string, ORMapRecord<any>];
+              return [key, { ...record, tag: HLC.toString(ts), timestamp: ts }] as [
+                string,
+                ORMapRecord<any>,
+              ];
             });
 
             // Create replicas that receive operations in different orders
@@ -298,62 +293,59 @@ describe("ORMap Property-Based Tests", () => {
       );
     });
 
-    it("replicas should converge with mixed adds and removes", () => {
+    it('replicas should converge with mixed adds and removes', () => {
       fc.assert(
-        fc.property(
-          fc.array(arbValue, { minLength: 3, maxLength: 6 }),
-          (values) => {
-            const key = "test-key";
+        fc.property(fc.array(arbValue, { minLength: 3, maxLength: 6 }), (values) => {
+          const key = 'test-key';
 
-            // Create records with unique tags
-            const records = values.map((value, i) => {
-              const ts: Timestamp = {
-                millis: 1000 + i,
-                counter: 0,
-                nodeId: `node-${i}`,
-              };
-              return {
-                value,
-                timestamp: ts,
-                tag: HLC.toString(ts),
-              };
-            });
+          // Create records with unique tags
+          const records = values.map((value, i) => {
+            const ts: Timestamp = {
+              millis: 1000 + i,
+              counter: 0,
+              nodeId: `node-${i}`,
+            };
+            return {
+              value,
+              timestamp: ts,
+              tag: HLC.toString(ts),
+            };
+          });
 
-            // Replica 1: add all, then remove first half
-            const replica1 = createMap("replica-1");
-            for (const record of records) {
-              replica1.apply(key, record);
-            }
-            for (let i = 0; i < Math.floor(records.length / 2); i++) {
-              replica1.applyTombstone(records[i].tag);
-            }
+          // Replica 1: add all, then remove first half
+          const replica1 = createMap('replica-1');
+          for (const record of records) {
+            replica1.apply(key, record);
+          }
+          for (let i = 0; i < Math.floor(records.length / 2); i++) {
+            replica1.applyTombstone(records[i].tag);
+          }
 
-            // Replica 2: add all, then remove same first half (but in reverse)
-            const replica2 = createMap("replica-2");
-            for (const record of [...records].reverse()) {
-              replica2.apply(key, record);
-            }
-            for (let i = Math.floor(records.length / 2) - 1; i >= 0; i--) {
-              replica2.applyTombstone(records[i].tag);
-            }
+          // Replica 2: add all, then remove same first half (but in reverse)
+          const replica2 = createMap('replica-2');
+          for (const record of [...records].reverse()) {
+            replica2.apply(key, record);
+          }
+          for (let i = Math.floor(records.length / 2) - 1; i >= 0; i--) {
+            replica2.applyTombstone(records[i].tag);
+          }
 
-            // Should converge
-            expect(mapsEqual(replica1, replica2)).toBe(true);
-          },
-        ),
+          // Should converge
+          expect(mapsEqual(replica1, replica2)).toBe(true);
+        }),
         { numRuns: 30 },
       );
     });
   });
 
-  describe("Observed-Remove Semantics", () => {
-    it("tombstone should only remove records with matching tag", () => {
+  describe('Observed-Remove Semantics', () => {
+    it('tombstone should only remove records with matching tag', () => {
       fc.assert(
         fc.property(arbKey, arbValue, arbValue, (key, value1, value2) => {
-          const map = createMap("node-1");
+          const map = createMap('node-1');
 
-          const ts1: Timestamp = { millis: 1000, counter: 0, nodeId: "a" };
-          const ts2: Timestamp = { millis: 2000, counter: 0, nodeId: "b" };
+          const ts1: Timestamp = { millis: 1000, counter: 0, nodeId: 'a' };
+          const ts2: Timestamp = { millis: 2000, counter: 0, nodeId: 'b' };
 
           const record1: ORMapRecord<any> = {
             value: value1,
@@ -384,13 +376,13 @@ describe("ORMap Property-Based Tests", () => {
       );
     });
 
-    it("add after remove should succeed (add-wins for new tag)", () => {
+    it('add after remove should succeed (add-wins for new tag)', () => {
       fc.assert(
         fc.property(arbKey, arbValue, arbValue, (key, value1, value2) => {
-          const map = createMap("node-1");
+          const map = createMap('node-1');
 
-          const ts1: Timestamp = { millis: 1000, counter: 0, nodeId: "a" };
-          const ts2: Timestamp = { millis: 2000, counter: 0, nodeId: "a" };
+          const ts1: Timestamp = { millis: 1000, counter: 0, nodeId: 'a' };
+          const ts2: Timestamp = { millis: 2000, counter: 0, nodeId: 'a' };
 
           const record1: ORMapRecord<any> = {
             value: value1,
@@ -419,10 +411,10 @@ describe("ORMap Property-Based Tests", () => {
       );
     });
 
-    it("tombstoned record cannot be re-added with same tag", () => {
+    it('tombstoned record cannot be re-added with same tag', () => {
       fc.assert(
         fc.property(arbKey, arbRecord(arbValue), (key, record) => {
-          const map = createMap("node-1");
+          const map = createMap('node-1');
 
           // Add record
           map.apply(key, record);
@@ -442,44 +434,40 @@ describe("ORMap Property-Based Tests", () => {
     });
   });
 
-  describe("Multi-Value Semantics", () => {
-    it("same key can hold multiple values with different tags", () => {
+  describe('Multi-Value Semantics', () => {
+    it('same key can hold multiple values with different tags', () => {
       fc.assert(
-        fc.property(
-          arbKey,
-          fc.array(arbValue, { minLength: 2, maxLength: 5 }),
-          (key, values) => {
-            const map = createMap("node-1");
+        fc.property(arbKey, fc.array(arbValue, { minLength: 2, maxLength: 5 }), (key, values) => {
+          const map = createMap('node-1');
 
-            // Add all values with unique tags
-            const records = values.map((value, i) => {
-              const ts: Timestamp = {
-                millis: 1000 + i,
-                counter: 0,
-                nodeId: `n${i}`,
-              };
-              return {
-                value,
-                timestamp: ts,
-                tag: HLC.toString(ts),
-              };
-            });
+          // Add all values with unique tags
+          const records = values.map((value, i) => {
+            const ts: Timestamp = {
+              millis: 1000 + i,
+              counter: 0,
+              nodeId: `n${i}`,
+            };
+            return {
+              value,
+              timestamp: ts,
+              tag: HLC.toString(ts),
+            };
+          });
 
-            for (const record of records) {
-              map.apply(key, record);
-            }
+          for (const record of records) {
+            map.apply(key, record);
+          }
 
-            // All values should be present
-            expect(map.getRecords(key).length).toBe(values.length);
-          },
-        ),
+          // All values should be present
+          expect(map.getRecords(key).length).toBe(values.length);
+        }),
         { numRuns: 50 },
       );
     });
   });
 
-  describe("MergeKey Operation", () => {
-    it("mergeKey should correctly merge remote records", () => {
+  describe('MergeKey Operation', () => {
+    it('mergeKey should correctly merge remote records', () => {
       fc.assert(
         fc.property(
           arbKey,
@@ -495,8 +483,8 @@ describe("ORMap Property-Based Tests", () => {
               return { ...record, tag: HLC.toString(ts), timestamp: ts };
             });
 
-            const map1 = createMap("node-1");
-            const map2 = createMap("node-2");
+            const map1 = createMap('node-1');
+            const map2 = createMap('node-2');
 
             // Add records to map1 using apply
             for (const record of uniqueRecords) {
@@ -514,7 +502,7 @@ describe("ORMap Property-Based Tests", () => {
       );
     });
 
-    it("mergeKey should respect tombstones from remote", () => {
+    it('mergeKey should respect tombstones from remote', () => {
       fc.assert(
         fc.property(
           arbKey,
@@ -530,7 +518,7 @@ describe("ORMap Property-Based Tests", () => {
               return { ...record, tag: HLC.toString(ts), timestamp: ts };
             });
 
-            const map = createMap("node-1");
+            const map = createMap('node-1');
 
             // Add some records first
             for (const record of uniqueRecords) {
@@ -541,9 +529,7 @@ describe("ORMap Property-Based Tests", () => {
             const tombstones = uniqueRecords
               .slice(0, Math.floor(uniqueRecords.length / 2))
               .map((r) => r.tag);
-            const remainingRecords = uniqueRecords.slice(
-              Math.floor(uniqueRecords.length / 2),
-            );
+            const remainingRecords = uniqueRecords.slice(Math.floor(uniqueRecords.length / 2));
 
             map.mergeKey(key, remainingRecords, tombstones);
 

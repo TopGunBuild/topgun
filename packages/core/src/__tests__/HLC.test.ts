@@ -1,31 +1,31 @@
-import { HLC, Timestamp } from "../HLC";
-import { logger } from "../utils/logger";
+import { HLC, Timestamp } from '../HLC';
+import { logger } from '../utils/logger';
 
-describe("HLC (Hybrid Logical Clock)", () => {
+describe('HLC (Hybrid Logical Clock)', () => {
   let hlc: HLC;
 
   beforeEach(() => {
-    hlc = new HLC("test-node");
+    hlc = new HLC('test-node');
     jest.restoreAllMocks();
   });
 
-  describe("Timestamp Creation", () => {
-    test("should create a new HLC timestamp with correct structure", () => {
+  describe('Timestamp Creation', () => {
+    test('should create a new HLC timestamp with correct structure', () => {
       const ts = hlc.now();
 
-      expect(ts).toHaveProperty("millis");
-      expect(ts).toHaveProperty("counter");
-      expect(ts).toHaveProperty("nodeId");
-      expect(typeof ts.millis).toBe("number");
-      expect(typeof ts.counter).toBe("number");
-      expect(ts.nodeId).toBe("test-node");
+      expect(ts).toHaveProperty('millis');
+      expect(ts).toHaveProperty('counter');
+      expect(ts).toHaveProperty('nodeId');
+      expect(typeof ts.millis).toBe('number');
+      expect(typeof ts.counter).toBe('number');
+      expect(ts.nodeId).toBe('test-node');
     });
 
-    test("should return nodeId via getter", () => {
-      expect(hlc.getNodeId).toBe("test-node");
+    test('should return nodeId via getter', () => {
+      expect(hlc.getNodeId).toBe('test-node');
     });
 
-    test("should generate monotonically increasing timestamps", () => {
+    test('should generate monotonically increasing timestamps', () => {
       const ts1 = hlc.now();
       const ts2 = hlc.now();
       const ts3 = hlc.now();
@@ -36,10 +36,10 @@ describe("HLC (Hybrid Logical Clock)", () => {
     });
   });
 
-  describe("Tick (Increment)", () => {
-    test("should increment counter when wall-clock time does not advance", () => {
+  describe('Tick (Increment)', () => {
+    test('should increment counter when wall-clock time does not advance', () => {
       const fixedTime = 1000000;
-      jest.spyOn(Date, "now").mockImplementation(() => fixedTime);
+      jest.spyOn(Date, 'now').mockImplementation(() => fixedTime);
 
       const ts1 = hlc.now();
       const ts2 = hlc.now();
@@ -54,9 +54,9 @@ describe("HLC (Hybrid Logical Clock)", () => {
       expect(ts3.counter).toBe(2);
     });
 
-    test("should reset counter when wall-clock advances", () => {
+    test('should reset counter when wall-clock advances', () => {
       let currentTime = 1000000;
-      jest.spyOn(Date, "now").mockImplementation(() => currentTime);
+      jest.spyOn(Date, 'now').mockImplementation(() => currentTime);
 
       const ts1 = hlc.now();
       expect(ts1.millis).toBe(1000000);
@@ -70,15 +70,15 @@ describe("HLC (Hybrid Logical Clock)", () => {
     });
   });
 
-  describe("Update (Receive/Merge)", () => {
-    test("should update clock when receiving a newer remote timestamp", () => {
+  describe('Update (Receive/Merge)', () => {
+    test('should update clock when receiving a newer remote timestamp', () => {
       const fixedTime = 1000000;
-      jest.spyOn(Date, "now").mockImplementation(() => fixedTime);
+      jest.spyOn(Date, 'now').mockImplementation(() => fixedTime);
 
       const remote: Timestamp = {
         millis: 1000100, // Remote is ahead
         counter: 5,
-        nodeId: "remote-node",
+        nodeId: 'remote-node',
       };
 
       hlc.update(remote);
@@ -90,9 +90,9 @@ describe("HLC (Hybrid Logical Clock)", () => {
       expect(ts.counter).toBe(7);
     });
 
-    test("should increment counter when remote has same millis", () => {
+    test('should increment counter when remote has same millis', () => {
       const fixedTime = 1000000;
-      jest.spyOn(Date, "now").mockImplementation(() => fixedTime);
+      jest.spyOn(Date, 'now').mockImplementation(() => fixedTime);
 
       // Generate a local timestamp first
       hlc.now(); // millis: 1000000, counter: 0
@@ -100,7 +100,7 @@ describe("HLC (Hybrid Logical Clock)", () => {
       const remote: Timestamp = {
         millis: 1000000, // Same millis
         counter: 5,
-        nodeId: "remote-node",
+        nodeId: 'remote-node',
       };
 
       hlc.update(remote);
@@ -111,9 +111,9 @@ describe("HLC (Hybrid Logical Clock)", () => {
       expect(ts.counter).toBe(7);
     });
 
-    test("should handle update when local clock is ahead", () => {
+    test('should handle update when local clock is ahead', () => {
       const currentTime = 1000100;
-      jest.spyOn(Date, "now").mockImplementation(() => currentTime);
+      jest.spyOn(Date, 'now').mockImplementation(() => currentTime);
 
       // Generate a local timestamp first
       hlc.now(); // millis: 1000100, counter: 0
@@ -121,7 +121,7 @@ describe("HLC (Hybrid Logical Clock)", () => {
       const remote: Timestamp = {
         millis: 1000000, // Remote is behind
         counter: 10,
-        nodeId: "remote-node",
+        nodeId: 'remote-node',
       };
 
       hlc.update(remote);
@@ -131,14 +131,14 @@ describe("HLC (Hybrid Logical Clock)", () => {
       expect(ts.millis).toBe(1000100);
     });
 
-    test("should reset counter when system time is ahead of both", () => {
+    test('should reset counter when system time is ahead of both', () => {
       const fixedTime = 1000200; // System time ahead of both
-      jest.spyOn(Date, "now").mockImplementation(() => fixedTime);
+      jest.spyOn(Date, 'now').mockImplementation(() => fixedTime);
 
       const remote: Timestamp = {
         millis: 1000100,
         counter: 5,
-        nodeId: "remote-node",
+        nodeId: 'remote-node',
       };
 
       hlc.update(remote);
@@ -150,71 +150,71 @@ describe("HLC (Hybrid Logical Clock)", () => {
     });
   });
 
-  describe("Compare", () => {
-    test("should return negative when first timestamp is earlier (by millis)", () => {
-      const ts1: Timestamp = { millis: 100, counter: 0, nodeId: "A" };
-      const ts2: Timestamp = { millis: 200, counter: 0, nodeId: "A" };
+  describe('Compare', () => {
+    test('should return negative when first timestamp is earlier (by millis)', () => {
+      const ts1: Timestamp = { millis: 100, counter: 0, nodeId: 'A' };
+      const ts2: Timestamp = { millis: 200, counter: 0, nodeId: 'A' };
 
       expect(HLC.compare(ts1, ts2)).toBeLessThan(0);
     });
 
-    test("should return positive when first timestamp is later (by millis)", () => {
-      const ts1: Timestamp = { millis: 200, counter: 0, nodeId: "A" };
-      const ts2: Timestamp = { millis: 100, counter: 0, nodeId: "A" };
+    test('should return positive when first timestamp is later (by millis)', () => {
+      const ts1: Timestamp = { millis: 200, counter: 0, nodeId: 'A' };
+      const ts2: Timestamp = { millis: 100, counter: 0, nodeId: 'A' };
 
       expect(HLC.compare(ts1, ts2)).toBeGreaterThan(0);
     });
 
-    test("should compare by counter when millis are equal", () => {
-      const ts1: Timestamp = { millis: 100, counter: 1, nodeId: "A" };
-      const ts2: Timestamp = { millis: 100, counter: 5, nodeId: "A" };
+    test('should compare by counter when millis are equal', () => {
+      const ts1: Timestamp = { millis: 100, counter: 1, nodeId: 'A' };
+      const ts2: Timestamp = { millis: 100, counter: 5, nodeId: 'A' };
 
       expect(HLC.compare(ts1, ts2)).toBeLessThan(0);
       expect(HLC.compare(ts2, ts1)).toBeGreaterThan(0);
     });
 
-    test("should compare by nodeId when millis and counter are equal", () => {
-      const ts1: Timestamp = { millis: 100, counter: 0, nodeId: "A" };
-      const ts2: Timestamp = { millis: 100, counter: 0, nodeId: "B" };
+    test('should compare by nodeId when millis and counter are equal', () => {
+      const ts1: Timestamp = { millis: 100, counter: 0, nodeId: 'A' };
+      const ts2: Timestamp = { millis: 100, counter: 0, nodeId: 'B' };
 
       expect(HLC.compare(ts1, ts2)).toBeLessThan(0); // 'A' < 'B'
       expect(HLC.compare(ts2, ts1)).toBeGreaterThan(0); // 'B' > 'A'
     });
 
-    test("should return 0 for identical timestamps", () => {
-      const ts1: Timestamp = { millis: 100, counter: 5, nodeId: "node1" };
-      const ts2: Timestamp = { millis: 100, counter: 5, nodeId: "node1" };
+    test('should return 0 for identical timestamps', () => {
+      const ts1: Timestamp = { millis: 100, counter: 5, nodeId: 'node1' };
+      const ts2: Timestamp = { millis: 100, counter: 5, nodeId: 'node1' };
 
       expect(HLC.compare(ts1, ts2)).toBe(0);
     });
   });
 
-  describe("Serialization/Deserialization", () => {
-    test("should serialize timestamp to string format", () => {
+  describe('Serialization/Deserialization', () => {
+    test('should serialize timestamp to string format', () => {
       const ts: Timestamp = {
         millis: 1234567890,
         counter: 42,
-        nodeId: "my-node",
+        nodeId: 'my-node',
       };
       const str = HLC.toString(ts);
 
-      expect(str).toBe("1234567890:42:my-node");
+      expect(str).toBe('1234567890:42:my-node');
     });
 
-    test("should parse string back to timestamp", () => {
-      const str = "1234567890:42:my-node";
+    test('should parse string back to timestamp', () => {
+      const str = '1234567890:42:my-node';
       const ts = HLC.parse(str);
 
       expect(ts.millis).toBe(1234567890);
       expect(ts.counter).toBe(42);
-      expect(ts.nodeId).toBe("my-node");
+      expect(ts.nodeId).toBe('my-node');
     });
 
-    test("should roundtrip serialize/deserialize correctly", () => {
+    test('should roundtrip serialize/deserialize correctly', () => {
       const original: Timestamp = {
         millis: 9999999999999,
         counter: 1000,
-        nodeId: "test-node-123",
+        nodeId: 'test-node-123',
       };
       const serialized = HLC.toString(original);
       const parsed = HLC.parse(serialized);
@@ -222,43 +222,37 @@ describe("HLC (Hybrid Logical Clock)", () => {
       expect(parsed).toEqual(original);
     });
 
-    test("should throw error for invalid format", () => {
-      expect(() => HLC.parse("invalid")).toThrow(
-        "Invalid timestamp format: invalid",
-      );
-      expect(() => HLC.parse("123:456")).toThrow(
-        "Invalid timestamp format: 123:456",
-      );
-      expect(() => HLC.parse("")).toThrow("Invalid timestamp format: ");
+    test('should throw error for invalid format', () => {
+      expect(() => HLC.parse('invalid')).toThrow('Invalid timestamp format: invalid');
+      expect(() => HLC.parse('123:456')).toThrow('Invalid timestamp format: 123:456');
+      expect(() => HLC.parse('')).toThrow('Invalid timestamp format: ');
     });
   });
 
-  describe("Node ID Validation", () => {
-    test("should reject node ID containing colon", () => {
-      expect(() => new HLC("node:with:colons")).toThrow(
+  describe('Node ID Validation', () => {
+    test('should reject node ID containing colon', () => {
+      expect(() => new HLC('node:with:colons')).toThrow(
         'Node ID must not contain ":" (used as delimiter in timestamp format)',
       );
     });
 
-    test("should reject node ID with single colon", () => {
-      expect(() => new HLC("bad:id")).toThrow('Node ID must not contain ":"');
+    test('should reject node ID with single colon', () => {
+      expect(() => new HLC('bad:id')).toThrow('Node ID must not contain ":"');
     });
 
-    test("should accept node ID with dashes and underscores", () => {
-      expect(() => new HLC("valid-node_id")).not.toThrow();
+    test('should accept node ID with dashes and underscores', () => {
+      expect(() => new HLC('valid-node_id')).not.toThrow();
     });
 
-    test("should accept UUID-style node ID", () => {
-      expect(
-        () => new HLC("550e8400-e29b-41d4-a716-446655440000"),
-      ).not.toThrow();
+    test('should accept UUID-style node ID', () => {
+      expect(() => new HLC('550e8400-e29b-41d4-a716-446655440000')).not.toThrow();
     });
   });
 
-  describe("Edge Cases", () => {
-    test("should handle same wall-clock time across multiple calls", () => {
+  describe('Edge Cases', () => {
+    test('should handle same wall-clock time across multiple calls', () => {
       const fixedTime = 1000000;
-      jest.spyOn(Date, "now").mockImplementation(() => fixedTime);
+      jest.spyOn(Date, 'now').mockImplementation(() => fixedTime);
 
       const timestamps: Timestamp[] = [];
       for (let i = 0; i < 100; i++) {
@@ -277,15 +271,15 @@ describe("HLC (Hybrid Logical Clock)", () => {
       }
     });
 
-    test("should handle high counter values", () => {
+    test('should handle high counter values', () => {
       const fixedTime = 1000000;
-      jest.spyOn(Date, "now").mockImplementation(() => fixedTime);
+      jest.spyOn(Date, 'now').mockImplementation(() => fixedTime);
 
       // Simulate high counter by receiving remote with high counter
       const remote: Timestamp = {
         millis: 1000000,
         counter: Number.MAX_SAFE_INTEGER - 10,
-        nodeId: "remote",
+        nodeId: 'remote',
       };
 
       hlc.update(remote);
@@ -294,30 +288,30 @@ describe("HLC (Hybrid Logical Clock)", () => {
       expect(ts.counter).toBeGreaterThan(Number.MAX_SAFE_INTEGER - 10);
     });
 
-    test("should handle nodeId with special characters in serialization", () => {
+    test('should handle nodeId with special characters in serialization', () => {
       const ts: Timestamp = {
         millis: 100,
         counter: 0,
-        nodeId: "node-with-dashes",
+        nodeId: 'node-with-dashes',
       };
       const serialized = HLC.toString(ts);
 
       // Note: nodeId with colons would break parsing, but dashes are fine
-      expect(serialized).toBe("100:0:node-with-dashes");
+      expect(serialized).toBe('100:0:node-with-dashes');
 
       const parsed = HLC.parse(serialized);
-      expect(parsed.nodeId).toBe("node-with-dashes");
+      expect(parsed.nodeId).toBe('node-with-dashes');
     });
   });
 
-  describe("Concurrent Operations from Different Nodes", () => {
-    test("should maintain total ordering across concurrent operations from different nodes", () => {
-      const hlc1 = new HLC("node-A");
-      const hlc2 = new HLC("node-B");
-      const hlc3 = new HLC("node-C");
+  describe('Concurrent Operations from Different Nodes', () => {
+    test('should maintain total ordering across concurrent operations from different nodes', () => {
+      const hlc1 = new HLC('node-A');
+      const hlc2 = new HLC('node-B');
+      const hlc3 = new HLC('node-C');
 
       const fixedTime = 1000000;
-      jest.spyOn(Date, "now").mockImplementation(() => fixedTime);
+      jest.spyOn(Date, 'now').mockImplementation(() => fixedTime);
 
       // Simulate concurrent operations
       const ts1 = hlc1.now();
@@ -333,17 +327,17 @@ describe("HLC (Hybrid Logical Clock)", () => {
       // Compare should still provide total ordering via nodeId
       const sortedTimestamps = [ts1, ts2, ts3].sort(HLC.compare);
 
-      expect(sortedTimestamps[0].nodeId).toBe("node-A");
-      expect(sortedTimestamps[1].nodeId).toBe("node-B");
-      expect(sortedTimestamps[2].nodeId).toBe("node-C");
+      expect(sortedTimestamps[0].nodeId).toBe('node-A');
+      expect(sortedTimestamps[1].nodeId).toBe('node-B');
+      expect(sortedTimestamps[2].nodeId).toBe('node-C');
     });
 
-    test("should synchronize clocks when nodes communicate", () => {
-      const hlc1 = new HLC("node-1");
-      const hlc2 = new HLC("node-2");
+    test('should synchronize clocks when nodes communicate', () => {
+      const hlc1 = new HLC('node-1');
+      const hlc2 = new HLC('node-2');
 
       const currentTime = 1000000;
-      jest.spyOn(Date, "now").mockImplementation(() => currentTime);
+      jest.spyOn(Date, 'now').mockImplementation(() => currentTime);
 
       // Node 1 generates some timestamps
       hlc1.now();
@@ -360,12 +354,12 @@ describe("HLC (Hybrid Logical Clock)", () => {
       expect(ts2.counter).toBeGreaterThan(ts1.counter);
     });
 
-    test("should handle bidirectional communication between nodes", () => {
-      const hlc1 = new HLC("node-1");
-      const hlc2 = new HLC("node-2");
+    test('should handle bidirectional communication between nodes', () => {
+      const hlc1 = new HLC('node-1');
+      const hlc2 = new HLC('node-2');
 
       const fixedTime = 1000000;
-      jest.spyOn(Date, "now").mockImplementation(() => fixedTime);
+      jest.spyOn(Date, 'now').mockImplementation(() => fixedTime);
 
       // Node 1 sends to Node 2
       const msg1 = hlc1.now();
@@ -384,17 +378,17 @@ describe("HLC (Hybrid Logical Clock)", () => {
     });
   });
 
-  describe("Clock Drift Detection", () => {
-    test("should warn but accept timestamps with significant drift", () => {
-      const warnSpy = jest.spyOn(logger, "warn").mockImplementation();
+  describe('Clock Drift Detection', () => {
+    test('should warn but accept timestamps with significant drift', () => {
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation();
       const currentTime = 1000000;
-      jest.spyOn(Date, "now").mockImplementation(() => currentTime);
+      jest.spyOn(Date, 'now').mockImplementation(() => currentTime);
 
       // Remote clock is way ahead (more than default maxDriftMs of 60000ms)
       const remote: Timestamp = {
         millis: currentTime + 100000, // 100 seconds ahead
         counter: 0,
-        nodeId: "drifted-node",
+        nodeId: 'drifted-node',
       };
 
       hlc.update(remote);
@@ -402,7 +396,7 @@ describe("HLC (Hybrid Logical Clock)", () => {
       // Should have logged a warning
       expect(warnSpy).toHaveBeenCalledWith(
         expect.objectContaining({ drift: expect.any(Number) }),
-        "Clock drift detected",
+        'Clock drift detected',
       );
 
       // But should still accept the timestamp (AP system behavior)
@@ -413,11 +407,11 @@ describe("HLC (Hybrid Logical Clock)", () => {
     });
   });
 
-  describe("Invalid Timestamp Guard", () => {
-    test("should ignore timestamp with NaN millis and not poison the clock", () => {
-      const warnSpy = jest.spyOn(logger, "warn").mockImplementation();
+  describe('Invalid Timestamp Guard', () => {
+    test('should ignore timestamp with NaN millis and not poison the clock', () => {
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation();
       const fixedTime = 1000000;
-      jest.spyOn(Date, "now").mockImplementation(() => fixedTime);
+      jest.spyOn(Date, 'now').mockImplementation(() => fixedTime);
 
       // Generate a valid timestamp first
       const before = hlc.now();
@@ -425,7 +419,7 @@ describe("HLC (Hybrid Logical Clock)", () => {
 
       // Pass a timestamp with undefined millis (simulates PONG message's raw u64
       // being treated as a Timestamp struct: Number(undefined) → NaN)
-      hlc.update({ millis: NaN, counter: 0, nodeId: "bad" });
+      hlc.update({ millis: NaN, counter: 0, nodeId: 'bad' });
 
       // Clock must NOT be poisoned — next timestamp should still be valid
       const after = hlc.now();
@@ -435,18 +429,18 @@ describe("HLC (Hybrid Logical Clock)", () => {
 
       expect(warnSpy).toHaveBeenCalledWith(
         expect.objectContaining({ remoteMillis: NaN }),
-        "HLC.update() received invalid timestamp, ignoring",
+        'HLC.update() received invalid timestamp, ignoring',
       );
       warnSpy.mockRestore();
     });
 
-    test("should ignore timestamp with NaN counter", () => {
-      const warnSpy = jest.spyOn(logger, "warn").mockImplementation();
+    test('should ignore timestamp with NaN counter', () => {
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation();
       const fixedTime = 1000000;
-      jest.spyOn(Date, "now").mockImplementation(() => fixedTime);
+      jest.spyOn(Date, 'now').mockImplementation(() => fixedTime);
 
       hlc.now();
-      hlc.update({ millis: 1000000, counter: NaN, nodeId: "bad" });
+      hlc.update({ millis: 1000000, counter: NaN, nodeId: 'bad' });
 
       const after = hlc.now();
       expect(Number.isFinite(after.millis)).toBe(true);
@@ -456,13 +450,13 @@ describe("HLC (Hybrid Logical Clock)", () => {
       warnSpy.mockRestore();
     });
 
-    test("should ignore timestamp with Infinity millis", () => {
-      const warnSpy = jest.spyOn(logger, "warn").mockImplementation();
+    test('should ignore timestamp with Infinity millis', () => {
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation();
       const fixedTime = 1000000;
-      jest.spyOn(Date, "now").mockImplementation(() => fixedTime);
+      jest.spyOn(Date, 'now').mockImplementation(() => fixedTime);
 
       hlc.now();
-      hlc.update({ millis: Infinity, counter: 0, nodeId: "bad" });
+      hlc.update({ millis: Infinity, counter: 0, nodeId: 'bad' });
 
       const after = hlc.now();
       expect(Number.isFinite(after.millis)).toBe(true);
@@ -471,15 +465,15 @@ describe("HLC (Hybrid Logical Clock)", () => {
       warnSpy.mockRestore();
     });
 
-    test("should coerce BigInt millis and counter without error", () => {
+    test('should coerce BigInt millis and counter without error', () => {
       const fixedTime = 1000000;
-      jest.spyOn(Date, "now").mockImplementation(() => fixedTime);
+      jest.spyOn(Date, 'now').mockImplementation(() => fixedTime);
 
       // Simulate browser MsgPack BigInt decoding
       const remote = {
         millis: BigInt(1000050),
         counter: BigInt(3),
-        nodeId: "remote",
+        nodeId: 'remote',
       } as unknown as Timestamp;
 
       hlc.update(remote);
@@ -490,38 +484,38 @@ describe("HLC (Hybrid Logical Clock)", () => {
     });
   });
 
-  describe("Strict Mode", () => {
-    test("should throw error in strict mode when drift exceeds threshold", () => {
-      const strictHlc = new HLC("strict-node", {
+  describe('Strict Mode', () => {
+    test('should throw error in strict mode when drift exceeds threshold', () => {
+      const strictHlc = new HLC('strict-node', {
         strictMode: true,
         maxDriftMs: 5000,
       });
       const currentTime = 1000000;
-      jest.spyOn(Date, "now").mockImplementation(() => currentTime);
+      jest.spyOn(Date, 'now').mockImplementation(() => currentTime);
 
       const remote: Timestamp = {
         millis: currentTime + 10000, // 10 seconds ahead, exceeds 5s threshold
         counter: 0,
-        nodeId: "remote-node",
+        nodeId: 'remote-node',
       };
 
-      expect(() => strictHlc.update(remote)).toThrow("Clock drift detected");
-      expect(() => strictHlc.update(remote)).toThrow("10000ms ahead");
-      expect(() => strictHlc.update(remote)).toThrow("threshold: 5000ms");
+      expect(() => strictHlc.update(remote)).toThrow('Clock drift detected');
+      expect(() => strictHlc.update(remote)).toThrow('10000ms ahead');
+      expect(() => strictHlc.update(remote)).toThrow('threshold: 5000ms');
     });
 
-    test("should accept timestamps within threshold in strict mode", () => {
-      const strictHlc = new HLC("strict-node", {
+    test('should accept timestamps within threshold in strict mode', () => {
+      const strictHlc = new HLC('strict-node', {
         strictMode: true,
         maxDriftMs: 10000,
       });
       const currentTime = 1000000;
-      jest.spyOn(Date, "now").mockImplementation(() => currentTime);
+      jest.spyOn(Date, 'now').mockImplementation(() => currentTime);
 
       const remote: Timestamp = {
         millis: currentTime + 5000, // 5 seconds ahead, within 10s threshold
         counter: 0,
-        nodeId: "remote-node",
+        nodeId: 'remote-node',
       };
 
       expect(() => strictHlc.update(remote)).not.toThrow();
@@ -531,16 +525,16 @@ describe("HLC (Hybrid Logical Clock)", () => {
       expect(ts.millis).toBe(currentTime + 5000);
     });
 
-    test("should use default maxDriftMs of 60000 when not specified", () => {
-      const strictHlc = new HLC("strict-node", { strictMode: true });
+    test('should use default maxDriftMs of 60000 when not specified', () => {
+      const strictHlc = new HLC('strict-node', { strictMode: true });
       const currentTime = 1000000;
-      jest.spyOn(Date, "now").mockImplementation(() => currentTime);
+      jest.spyOn(Date, 'now').mockImplementation(() => currentTime);
 
       // 50 seconds ahead - within default 60s threshold
       const withinThreshold: Timestamp = {
         millis: currentTime + 50000,
         counter: 0,
-        nodeId: "remote",
+        nodeId: 'remote',
       };
       expect(() => strictHlc.update(withinThreshold)).not.toThrow();
 
@@ -548,23 +542,21 @@ describe("HLC (Hybrid Logical Clock)", () => {
       const exceedsThreshold: Timestamp = {
         millis: currentTime + 70000,
         counter: 0,
-        nodeId: "remote",
+        nodeId: 'remote',
       };
-      expect(() => strictHlc.update(exceedsThreshold)).toThrow(
-        "Clock drift detected",
-      );
+      expect(() => strictHlc.update(exceedsThreshold)).toThrow('Clock drift detected');
     });
 
-    test("should warn but accept in non-strict mode (default)", () => {
-      const warnSpy = jest.spyOn(logger, "warn").mockImplementation();
-      const permissiveHlc = new HLC("permissive-node"); // strictMode defaults to false
+    test('should warn but accept in non-strict mode (default)', () => {
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation();
+      const permissiveHlc = new HLC('permissive-node'); // strictMode defaults to false
       const currentTime = 1000000;
-      jest.spyOn(Date, "now").mockImplementation(() => currentTime);
+      jest.spyOn(Date, 'now').mockImplementation(() => currentTime);
 
       const remote: Timestamp = {
         millis: currentTime + 100000, // 100 seconds ahead
         counter: 0,
-        nodeId: "remote-node",
+        nodeId: 'remote-node',
       };
 
       // Should NOT throw
@@ -573,7 +565,7 @@ describe("HLC (Hybrid Logical Clock)", () => {
       // Should have warned
       expect(warnSpy).toHaveBeenCalledWith(
         expect.objectContaining({ drift: expect.any(Number) }),
-        "Clock drift detected",
+        'Clock drift detected',
       );
 
       // Timestamp should have been accepted
@@ -583,28 +575,28 @@ describe("HLC (Hybrid Logical Clock)", () => {
       warnSpy.mockRestore();
     });
 
-    test("should expose configuration via getters", () => {
-      const hlc1 = new HLC("node-1", { strictMode: true, maxDriftMs: 30000 });
+    test('should expose configuration via getters', () => {
+      const hlc1 = new HLC('node-1', { strictMode: true, maxDriftMs: 30000 });
       expect(hlc1.getStrictMode).toBe(true);
       expect(hlc1.getMaxDriftMs).toBe(30000);
 
-      const hlc2 = new HLC("node-2"); // defaults
+      const hlc2 = new HLC('node-2'); // defaults
       expect(hlc2.getStrictMode).toBe(false);
       expect(hlc2.getMaxDriftMs).toBe(60000);
     });
 
-    test("should handle negative drift (remote behind local) without strict mode issues", () => {
-      const strictHlc = new HLC("strict-node", {
+    test('should handle negative drift (remote behind local) without strict mode issues', () => {
+      const strictHlc = new HLC('strict-node', {
         strictMode: true,
         maxDriftMs: 5000,
       });
       const currentTime = 1000000;
-      jest.spyOn(Date, "now").mockImplementation(() => currentTime);
+      jest.spyOn(Date, 'now').mockImplementation(() => currentTime);
 
       const remote: Timestamp = {
         millis: currentTime - 100000, // 100 seconds BEHIND (not ahead)
         counter: 0,
-        nodeId: "remote-node",
+        nodeId: 'remote-node',
       };
 
       // Negative drift should not trigger rejection (only future drift is problematic)
