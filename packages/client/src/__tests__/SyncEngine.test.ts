@@ -95,7 +95,7 @@ let uuidCounter = 0;
 };
 
 describe('SyncEngine', () => {
-  let syncEngine: SyncEngine;
+  let syncEngine: SyncEngine | undefined;
   let mockStorage: jest.Mocked<IStorageAdapter>;
   let config: SyncEngineConfig;
 
@@ -116,6 +116,17 @@ describe('SyncEngine', () => {
   });
 
   afterEach(() => {
+    // Dispose the engine before switching back to real timers so that the
+    // synchronous portion of teardown (clearTimeout on SingleServerProvider's
+    // reconnectTimer, removeEventListener on online/offline) runs while the
+    // fake-timer scheduler is still active. Otherwise the timer scheduled in
+    // scheduleReconnect() (called from the WebSocket onclose handler) leaks
+    // into the real event loop and keeps Jest's worker alive past the last
+    // expect(), which historically forced --forceExit as a bandaid.
+    if (syncEngine) {
+      syncEngine.close();
+      syncEngine = undefined;
+    }
     jest.useRealTimers();
     jest.clearAllMocks();
   });

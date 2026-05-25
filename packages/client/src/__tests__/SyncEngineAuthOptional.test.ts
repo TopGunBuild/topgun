@@ -99,6 +99,7 @@ let uuidCounter = 0;
 };
 
 describe('SyncEngine — auth-optional fast path', () => {
+  let engine: SyncEngine | undefined;
   let mockStorage: jest.Mocked<IStorageAdapter>;
   let config: SyncEngineConfig;
 
@@ -118,6 +119,14 @@ describe('SyncEngine — auth-optional fast path', () => {
   });
 
   afterEach(() => {
+    // Dispose the engine before switching back to real timers. SingleServerProvider's
+    // reconnectTimer (scheduled from WebSocket onclose handler) is cleared synchronously
+    // inside close(); doing it under fake timers ensures any pending fake-timer callbacks
+    // are flushed in fake-timer mode rather than leaking into the real event loop.
+    if (engine) {
+      engine.close();
+      engine = undefined;
+    }
     jest.useRealTimers();
     jest.clearAllMocks();
   });
@@ -126,7 +135,7 @@ describe('SyncEngine — auth-optional fast path', () => {
   // Case 1: No token, no AUTH_REQUIRED
   // ────────────────────────────────────────────
   it('case 1: reaches CONNECTED within grace window when server sends no AUTH_REQUIRED and no token is configured', async () => {
-    const engine = new SyncEngine(config);
+    engine = new SyncEngine(config);
 
     // Flush the setTimeout(..., 0) that fires onopen, triggering handleConnectionEstablished.
     // This sets up the 500ms grace timer but does NOT fire it yet.
@@ -166,7 +175,7 @@ describe('SyncEngine — auth-optional fast path', () => {
   // Case 2: No token, AUTH_REQUIRED arrives before grace expiry
   // ────────────────────────────────────────────
   it('case 2: parks in AUTHENTICATING when AUTH_REQUIRED arrives before grace expires and no token is configured', async () => {
-    const engine = new SyncEngine(config);
+    engine = new SyncEngine(config);
 
     // Flush onopen (0ms timer), which sets the 500ms grace timer.
     // Flush 0ms timers (onopen) without advancing the 500ms grace timer.
@@ -199,7 +208,7 @@ describe('SyncEngine — auth-optional fast path', () => {
   // Case 3: No token → AUTH_REQUIRED → setAuthToken → AUTH_ACK → CONNECTED
   // ────────────────────────────────────────────
   it('case 3: transitions to CONNECTED after AUTH_REQUIRED + setAuthToken + AUTH_ACK, with no spurious intermediate states', async () => {
-    const engine = new SyncEngine(config);
+    engine = new SyncEngine(config);
 
     // Flush 0ms timers (onopen) without advancing the 500ms grace timer.
     jest.advanceTimersByTime(0);
@@ -254,7 +263,7 @@ describe('SyncEngine — auth-optional fast path', () => {
   // Case 4: Token configured — sends AUTH immediately, no grace-timer wait
   // ────────────────────────────────────────────
   it('case 4: sends AUTH immediately on WS open when authToken is configured, then reaches CONNECTED on AUTH_ACK', async () => {
-    const engine = new SyncEngine({
+    engine = new SyncEngine({
       ...config,
       connectionProvider: new SingleServerProvider({ url: 'ws://localhost:8080' }),
     });
@@ -298,7 +307,7 @@ describe('SyncEngine — auth-optional fast path', () => {
   // Case 5: tokenProvider configured — sends AUTH immediately
   // ────────────────────────────────────────────
   it('case 5: sends AUTH immediately when tokenProvider is configured, then reaches CONNECTED on AUTH_ACK', async () => {
-    const engine = new SyncEngine(config);
+    engine = new SyncEngine(config);
 
     // Set tokenProvider before onopen fires.
     engine.setTokenProvider(async () => 'provider-token');
@@ -333,7 +342,7 @@ describe('SyncEngine — auth-optional fast path', () => {
   // Case 6: Disconnect during grace window clears timer
   // ────────────────────────────────────────────
   it('case 6: clears grace timer when WS disconnects during the grace window', async () => {
-    const engine = new SyncEngine(config);
+    engine = new SyncEngine(config);
 
     // Flush onopen — grace timer is now set (but hasn't fired yet).
     // Flush 0ms timers (onopen) without advancing the 500ms grace timer.
@@ -362,7 +371,7 @@ describe('SyncEngine — auth-optional fast path', () => {
   // Case 7: Full connect → disconnect → reconnect cycle without token
   // ────────────────────────────────────────────
   it('case 7: reaches CONNECTED after reconnect on an auth-optional server (full cycle without token)', async () => {
-    const engine = new SyncEngine(config);
+    engine = new SyncEngine(config);
 
     // First connection: run all timers (0ms onopen + 500ms grace window).
     await jest.runAllTimersAsync();
@@ -394,7 +403,7 @@ describe('SyncEngine — auth-optional fast path', () => {
 
     // Construct with token configured — handleConnectionEstablished will
     // transition to AUTHENTICATING and call sendAuth() immediately.
-    const engine = new SyncEngine({
+    engine = new SyncEngine({
       ...config,
       connectionProvider: new SingleServerProvider({ url: 'ws://localhost:8080' }),
     });

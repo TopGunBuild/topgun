@@ -19,10 +19,18 @@ class MockWebSocket {
   onerror: ((error: any) => void) | null = null;
 
   constructor(public url: string) {
-    // Simulate connection
-    setTimeout(() => {
+    // Simulate async connection via queueMicrotask rather than setTimeout(0).
+    // Microtasks have no associated timer handle, so they do not appear in
+    // Jest's --detectOpenHandles snapshot. They also run before the next
+    // macrotask, so the chain SingleServerProvider.connect → MockWebSocket
+    // ctor → onopen → SingleServerProvider's onopen wrapper (which clears
+    // its 5s connection-timeout at line 100) completes within the same tick
+    // as the first awaited operation in the test body. This eliminates both
+    // the 0ms-timer leak and the 5s connection-timeout leak in a single move
+    // without modifying production source.
+    queueMicrotask(() => {
       this.onopen?.();
-    }, 0);
+    });
   }
 
   send = jest.fn();
@@ -57,13 +65,33 @@ function createMockStorage(): IStorageAdapter {
 
 describe('Backpressure', () => {
   let originalWebSocket: typeof WebSocket;
+  const enginesToClean: SyncEngine[] = [];
 
   beforeEach(() => {
     originalWebSocket = (globalThis as any).WebSocket;
     (globalThis as any).WebSocket = MockWebSocket;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    // Dispose every engine constructed via createSyncEngine() in this test. Each
+    // engine wraps a SingleServerProvider whose reconnectTimer (scheduled from
+    // the WebSocket onclose handler) would otherwise leak past the test and keep
+    // Jest's worker alive past the last expect(). The synchronous clearTimeout
+    // inside SingleServerProvider.close() is what actually clears that handle.
+    for (const engine of enginesToClean) {
+      engine.close();
+    }
+    // Drain pending real timers so any setTimeout(0) scheduled by MockWebSocket's
+    // constructor (which fires onopen on the next tick, in turn clearing
+    // SingleServerProvider's 5s connection-timeout timer at line 100) has a
+    // chance to run on the real event loop before Jest's open-handle detector
+    // takes its snapshot. We chain a setImmediate + setTimeout drain so both
+    // microtask + macrotask phases get an opportunity to flush. This file does
+    // NOT call jest.useFakeTimers() in beforeEach, so the drain runs on the real
+    // event loop as intended.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    enginesToClean.length = 0;
     (globalThis as any).WebSocket = originalWebSocket;
   });
 
@@ -74,7 +102,9 @@ describe('Backpressure', () => {
       storageAdapter: createMockStorage(),
       backpressure,
     };
-    return new SyncEngine(config);
+    const engine = new SyncEngine(config);
+    enginesToClean.push(engine);
+    return engine;
   }
 
   function createTimestamp() {
