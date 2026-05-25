@@ -70,8 +70,8 @@ describe('Client Search', () => {
     });
 
     afterEach(() => {
-      jest.useRealTimers();
       syncEngine.close();
+      jest.useRealTimers();
     });
 
     it('should throw error when not authenticated', async () => {
@@ -282,8 +282,8 @@ describe('Client Search', () => {
     });
 
     afterEach(() => {
-      jest.useRealTimers();
       syncEngine.close();
+      jest.useRealTimers();
     });
 
     it('should send SEARCH_SUB on creation', () => {

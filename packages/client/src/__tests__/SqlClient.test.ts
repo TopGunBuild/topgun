@@ -70,8 +70,8 @@ describe('Client SQL', () => {
     });
 
     afterEach(() => {
-      jest.useRealTimers();
       syncEngine.close();
+      jest.useRealTimers();
     });
 
     it('should throw error when not authenticated', async () => {
