@@ -1,5 +1,5 @@
 import { IDBAdapter } from '../IDBAdapter';
-import { IStorageAdapter, OpLogEntry } from '@topgunbuild/client';
+import { OpLogEntry } from '@topgunbuild/client';
 
 describe('IDBAdapter', () => {
   let adapter: IDBAdapter;
@@ -304,7 +304,7 @@ describe('IDBAdapter', () => {
     });
 
     it('should mark operations as synced', async () => {
-      const id1 = await adapter.appendOpLog({
+      await adapter.appendOpLog({
         key: 'key1',
         op: 'PUT',
         value: 'value1',
@@ -318,7 +318,7 @@ describe('IDBAdapter', () => {
         synced: 0,
         mapName: 'test',
       });
-      const id3 = await adapter.appendOpLog({
+      await adapter.appendOpLog({
         key: 'key3',
         op: 'PUT',
         value: 'value3',
