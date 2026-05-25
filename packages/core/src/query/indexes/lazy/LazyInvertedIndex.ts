@@ -12,13 +12,13 @@
  * @module query/indexes/lazy/LazyInvertedIndex
  */
 
-import type { Attribute } from '../../Attribute';
-import type { Index, IndexQuery, IndexStats } from '../types';
-import type { ResultSet } from '../../resultset/ResultSet';
-import { InvertedIndex, type InvertedIndexStats } from '../InvertedIndex';
-import { TokenizationPipeline } from '../../tokenization';
-import type { LazyIndex, LazyIndexOptions } from './types';
-import type { IndexBuildProgressCallback } from '../../adaptive/types';
+import type { Attribute } from "../../Attribute";
+import type { IndexQuery, IndexStats } from "../types";
+import type { ResultSet } from "../../resultset/ResultSet";
+import { InvertedIndex, type InvertedIndexStats } from "../InvertedIndex";
+import { TokenizationPipeline } from "../../tokenization";
+import type { LazyIndex, LazyIndexOptions } from "./types";
+import type { IndexBuildProgressCallback } from "../../adaptive/types";
 
 /**
  * Lazy inverted index for full-text search.
@@ -26,8 +26,12 @@ import type { IndexBuildProgressCallback } from '../../adaptive/types';
  *
  * K = record key type, V = record value type, A = attribute value type (should be string)
  */
-export class LazyInvertedIndex<K, V, A extends string = string> implements LazyIndex<K, V, A> {
-  readonly type = 'inverted' as const;
+export class LazyInvertedIndex<
+  K,
+  V,
+  A extends string = string,
+> implements LazyIndex<K, V, A> {
+  readonly type = "inverted" as const;
   readonly isLazy = true as const;
 
   /** Underlying inverted index (created on first query) */
@@ -72,7 +76,9 @@ export class LazyInvertedIndex<K, V, A extends string = string> implements LazyI
   }
 
   supportsQuery(queryType: string): boolean {
-    return ['contains', 'containsAll', 'containsAny', 'has'].includes(queryType);
+    return ["contains", "containsAll", "containsAny", "has"].includes(
+      queryType,
+    );
   }
 
   retrieve(query: IndexQuery<A>): ResultSet<K> {

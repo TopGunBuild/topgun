@@ -15,12 +15,15 @@
  * @module query/UnifiedLiveQueryRegistry
  */
 
-import { StandingQueryIndex, type StandingQueryChange } from './indexes/StandingQueryIndex';
-import { LiveFTSIndex } from './indexes/LiveFTSIndex';
-import type { LiveQueryDelta, ILiveQueryIndex, RankedResult } from './indexes/ILiveQueryIndex';
-import type { FullTextIndex } from '../fts';
-import type { Query, LogicalQueryNode, MatchQueryNode } from './QueryTypes';
-import { isFTSQuery, isLogicalQuery, isMatchQuery } from './QueryTypes';
+import {
+  StandingQueryIndex,
+  type StandingQueryChange,
+} from "./indexes/StandingQueryIndex";
+import { LiveFTSIndex } from "./indexes/LiveFTSIndex";
+import type { LiveQueryDelta, RankedResult } from "./indexes/ILiveQueryIndex";
+import type { FullTextIndex } from "../fts";
+import type { Query, LogicalQueryNode, MatchQueryNode } from "./QueryTypes";
+import { isFTSQuery, isLogicalQuery, isMatchQuery } from "./QueryTypes";
 
 /**
  * Unified delta type that covers both binary and scored indexes.
@@ -188,7 +191,9 @@ export class UnifiedLiveQueryRegistry<K extends string, V> {
    * @param query - Query to look up
    * @returns Index or undefined if not registered
    */
-  getIndex(query: Query): StandingQueryIndex<K, V> | LiveFTSIndex<K, V> | undefined {
+  getIndex(
+    query: Query,
+  ): StandingQueryIndex<K, V> | LiveFTSIndex<K, V> | undefined {
     const hash = this.hashQuery(query);
     return this.indexes.get(hash)?.index;
   }
@@ -199,7 +204,9 @@ export class UnifiedLiveQueryRegistry<K extends string, V> {
    * @param hash - Query hash
    * @returns Index or undefined if not registered
    */
-  getIndexByHash(hash: string): StandingQueryIndex<K, V> | LiveFTSIndex<K, V> | undefined {
+  getIndexByHash(
+    hash: string,
+  ): StandingQueryIndex<K, V> | LiveFTSIndex<K, V> | undefined {
     return this.indexes.get(hash)?.index;
   }
 
@@ -264,7 +271,7 @@ export class UnifiedLiveQueryRegistry<K extends string, V> {
         // Standing query index
         const sqIndex = entry.index as StandingQueryIndex<K, V>;
         const change = sqIndex.determineChange(key, undefined, record);
-        if (change !== 'unchanged') {
+        if (change !== "unchanged") {
           sqIndex.add(key, record);
           deltas.push({
             queryHash: hash,
@@ -308,7 +315,7 @@ export class UnifiedLiveQueryRegistry<K extends string, V> {
         // Standing query index
         const sqIndex = entry.index as StandingQueryIndex<K, V>;
         const change = sqIndex.determineChange(key, oldRecord, newRecord);
-        if (change !== 'unchanged') {
+        if (change !== "unchanged") {
           sqIndex.update(key, oldRecord, newRecord);
           deltas.push({
             queryHash: hash,
@@ -351,7 +358,7 @@ export class UnifiedLiveQueryRegistry<K extends string, V> {
         // Standing query index
         const sqIndex = entry.index as StandingQueryIndex<K, V>;
         const change = sqIndex.determineChange(key, record, undefined);
-        if (change !== 'unchanged') {
+        if (change !== "unchanged") {
           sqIndex.remove(key, record);
           deltas.push({
             queryHash: hash,
@@ -419,7 +426,9 @@ export class UnifiedLiveQueryRegistry<K extends string, V> {
         totalResults += (entry.index as LiveFTSIndex<K, V>).getResultCount();
       } else {
         standingCount++;
-        totalResults += (entry.index as StandingQueryIndex<K, V>).getResultCount();
+        totalResults += (
+          entry.index as StandingQueryIndex<K, V>
+        ).getResultCount();
       }
     }
 
@@ -427,7 +436,10 @@ export class UnifiedLiveQueryRegistry<K extends string, V> {
       indexCount: this.indexes.size,
       ftsIndexCount: ftsCount,
       standingIndexCount: standingCount,
-      totalRefCount: Array.from(this.refCounts.values()).reduce((a, b) => a + b, 0),
+      totalRefCount: Array.from(this.refCounts.values()).reduce(
+        (a, b) => a + b,
+        0,
+      ),
       totalResults,
     };
   }
@@ -472,7 +484,9 @@ export class UnifiedLiveQueryRegistry<K extends string, V> {
     if (isLogicalQuery(query)) {
       const logicalQuery = query as LogicalQueryNode;
       if (logicalQuery.children) {
-        return logicalQuery.children.some((child) => this.containsFTSPredicate(child));
+        return logicalQuery.children.some((child) =>
+          this.containsFTSPredicate(child),
+        );
       }
       if (logicalQuery.child) {
         return this.containsFTSPredicate(logicalQuery.child);
@@ -492,7 +506,12 @@ export class UnifiedLiveQueryRegistry<K extends string, V> {
    */
   private extractFTSInfo(
     query: Query,
-  ): { field: string; query: string; minScore?: number; maxResults?: number } | null {
+  ): {
+    field: string;
+    query: string;
+    minScore?: number;
+    maxResults?: number;
+  } | null {
     // Only handle simple match queries at root level for now
     // Hybrid queries (FTS + filter) will need QueryExecutor
     if (isMatchQuery(query)) {

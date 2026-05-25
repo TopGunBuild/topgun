@@ -12,12 +12,12 @@
  * @module query/indexes/lazy/LazyHashIndex
  */
 
-import type { Attribute } from '../../Attribute';
-import type { Index, IndexQuery, IndexStats } from '../types';
-import type { ResultSet } from '../../resultset/ResultSet';
-import { HashIndex } from '../HashIndex';
-import type { LazyIndex, LazyIndexOptions } from './types';
-import type { IndexBuildProgressCallback } from '../../adaptive/types';
+import type { Attribute } from "../../Attribute";
+import type { IndexQuery, IndexStats } from "../types";
+import type { ResultSet } from "../../resultset/ResultSet";
+import { HashIndex } from "../HashIndex";
+import type { LazyIndex, LazyIndexOptions } from "./types";
+import type { IndexBuildProgressCallback } from "../../adaptive/types";
 
 /**
  * Lazy hash-based index for O(1) equality lookups.
@@ -26,7 +26,7 @@ import type { IndexBuildProgressCallback } from '../../adaptive/types';
  * K = record key type, V = record value type, A = attribute value type
  */
 export class LazyHashIndex<K, V, A> implements LazyIndex<K, V, A> {
-  readonly type = 'hash' as const;
+  readonly type = "hash" as const;
   readonly isLazy = true as const;
 
   /** Underlying hash index (created on first query) */
@@ -66,7 +66,7 @@ export class LazyHashIndex<K, V, A> implements LazyIndex<K, V, A> {
   }
 
   supportsQuery(queryType: string): boolean {
-    return ['equal', 'in', 'has'].includes(queryType);
+    return ["equal", "in", "has"].includes(queryType);
   }
 
   retrieve(query: IndexQuery<A>): ResultSet<K> {

@@ -14,28 +14,37 @@
  * @module IndexedLWWMap
  */
 
-import { LWWMap, LWWRecord } from './LWWMap';
-import { HLC } from './HLC';
-import { IndexRegistry, IndexRegistryStats } from './query/IndexRegistry';
-import { QueryOptimizer } from './query/QueryOptimizer';
-import { StandingQueryRegistry } from './query/StandingQueryRegistry';
-import { LiveQueryManager, LiveQueryCallback, LiveQueryEvent } from './query/LiveQueryManager';
-import type { Index, IndexStats, IndexQuery } from './query/indexes/types';
-import { HashIndex } from './query/indexes/HashIndex';
-import { NavigableIndex } from './query/indexes/NavigableIndex';
-import { FallbackIndex } from './query/indexes/FallbackIndex';
-import { InvertedIndex } from './query/indexes/InvertedIndex';
-import { TokenizationPipeline } from './query/tokenization';
-import { LazyHashIndex, LazyNavigableIndex, LazyInvertedIndex } from './query/indexes/lazy';
-import { Attribute, simpleAttribute } from './query/Attribute';
-import type { Query, QueryPlan, PlanStep, SimpleQueryNode } from './query/QueryTypes';
-import { isSimpleQuery } from './query/QueryTypes';
-import type { ResultSet } from './query/resultset/ResultSet';
-import { SetResultSet } from './query/resultset/SetResultSet';
-import { IntersectionResultSet } from './query/resultset/IntersectionResultSet';
-import { UnionResultSet } from './query/resultset/UnionResultSet';
-import { FilteringResultSet } from './query/resultset/FilteringResultSet';
-import { evaluatePredicate, PredicateNode } from './predicate';
+import { LWWMap, LWWRecord } from "./LWWMap";
+import { HLC } from "./HLC";
+import { IndexRegistry, IndexRegistryStats } from "./query/IndexRegistry";
+import { QueryOptimizer } from "./query/QueryOptimizer";
+import { StandingQueryRegistry } from "./query/StandingQueryRegistry";
+import { LiveQueryManager, LiveQueryCallback } from "./query/LiveQueryManager";
+import type { Index, IndexStats, IndexQuery } from "./query/indexes/types";
+import { HashIndex } from "./query/indexes/HashIndex";
+import { NavigableIndex } from "./query/indexes/NavigableIndex";
+import { FallbackIndex } from "./query/indexes/FallbackIndex";
+import { InvertedIndex } from "./query/indexes/InvertedIndex";
+import { TokenizationPipeline } from "./query/tokenization";
+import {
+  LazyHashIndex,
+  LazyNavigableIndex,
+  LazyInvertedIndex,
+} from "./query/indexes/lazy";
+import type { Attribute } from "./query/Attribute";
+import type {
+  Query,
+  QueryPlan,
+  PlanStep,
+  SimpleQueryNode,
+} from "./query/QueryTypes";
+import { isSimpleQuery } from "./query/QueryTypes";
+import type { ResultSet } from "./query/resultset/ResultSet";
+import { SetResultSet } from "./query/resultset/SetResultSet";
+import { IntersectionResultSet } from "./query/resultset/IntersectionResultSet";
+import { UnionResultSet } from "./query/resultset/UnionResultSet";
+import { FilteringResultSet } from "./query/resultset/FilteringResultSet";
+import { evaluatePredicate, PredicateNode } from "./predicate";
 
 // Adaptive indexing imports
 import {
@@ -43,7 +52,7 @@ import {
   IndexAdvisor,
   AutoIndexManager,
   DefaultIndexingStrategy,
-} from './query/adaptive';
+} from "./query/adaptive";
 import type {
   IndexedMapOptions,
   IndexSuggestion,
@@ -52,9 +61,9 @@ import type {
   TrackedQueryType,
   RecommendedIndexType,
   IndexBuildProgressCallback,
-} from './query/adaptive/types';
-import { ADAPTIVE_INDEXING_DEFAULTS } from './query/adaptive/types';
-import type { LazyIndex } from './query/indexes/lazy';
+} from "./query/adaptive/types";
+import { ADAPTIVE_INDEXING_DEFAULTS } from "./query/adaptive/types";
+import type { LazyIndex } from "./query/indexes/lazy";
 
 /**
  * LWWMap with index support for O(1) to O(log N) queries.
@@ -119,8 +128,10 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
     }
 
     // Initialize default indexing strategy
-    if (options.defaultIndexing && options.defaultIndexing !== 'none') {
-      this.defaultIndexingStrategy = new DefaultIndexingStrategy<V>(options.defaultIndexing);
+    if (options.defaultIndexing && options.defaultIndexing !== "none") {
+      this.defaultIndexingStrategy = new DefaultIndexingStrategy<V>(
+        options.defaultIndexing,
+      );
     } else {
       this.defaultIndexingStrategy = null;
     }
@@ -135,7 +146,9 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
    * @param attribute - Attribute to index
    * @returns Created HashIndex (or LazyHashIndex)
    */
-  addHashIndex<A>(attribute: Attribute<V, A>): HashIndex<K, V, A> | LazyHashIndex<K, V, A> {
+  addHashIndex<A>(
+    attribute: Attribute<V, A>,
+  ): HashIndex<K, V, A> | LazyHashIndex<K, V, A> {
     if (this.options.lazyIndexBuilding) {
       const index = new LazyHashIndex<K, V, A>(attribute, {
         onProgress: this.options.onIndexBuilding,
@@ -348,7 +361,7 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
    */
   private executePlan(step: PlanStep): ResultSet<K> {
     switch (step.type) {
-      case 'point-lookup': {
+      case "point-lookup": {
         const key = step.key as K;
         const result = new Set<K>();
         if (this.get(key) !== undefined) {
@@ -357,7 +370,7 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
         return new SetResultSet(result, 1);
       }
 
-      case 'multi-point-lookup': {
+      case "multi-point-lookup": {
         const result = new Set<K>();
         for (const key of step.keys) {
           const k = key as K;
@@ -368,10 +381,10 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
         return new SetResultSet(result, step.keys.length);
       }
 
-      case 'index-scan':
+      case "index-scan":
         return step.index.retrieve(step.query) as ResultSet<K>;
 
-      case 'full-scan': {
+      case "full-scan": {
         const fallback = this.indexRegistry.getFallbackIndex();
         if (fallback) {
           // FallbackIndex uses predicate internally - cast through unknown for compatibility
@@ -383,13 +396,15 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
         return this.fullScan(step.predicate as Query);
       }
 
-      case 'intersection':
-        return new IntersectionResultSet(step.steps.map((s) => this.executePlan(s)));
+      case "intersection":
+        return new IntersectionResultSet(
+          step.steps.map((s) => this.executePlan(s)),
+        );
 
-      case 'union':
+      case "union":
         return new UnionResultSet(step.steps.map((s) => this.executePlan(s)));
 
-      case 'filter':
+      case "filter":
         return new FilteringResultSet(
           this.executePlan(step.source),
           (key) => this.get(key),
@@ -399,7 +414,7 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
           },
         );
 
-      case 'not': {
+      case "not": {
         const matching = new Set(this.executePlan(step.source).toArray());
         const allKeysSet = new Set(this.keys());
         for (const key of matching) {
@@ -446,7 +461,7 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
   private matchesIndexQuery(record: V, query: IndexQuery<unknown>): boolean {
     // Full scan matcher - evaluates the stored predicate
     // FallbackIndex passes the original query predicate
-    if ('attribute' in (query as unknown as Record<string, unknown>)) {
+    if ("attribute" in (query as unknown as Record<string, unknown>)) {
       // This is a Query-like object passed through
       return this.matchesPredicate(record, query as unknown as Query);
     }
@@ -458,86 +473,88 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
    * Convert Query to PredicateNode format.
    */
   private queryToPredicate(query: Query): PredicateNode {
-    if ('type' in query) {
+    if ("type" in query) {
       switch (query.type) {
-        case 'eq':
+        case "eq":
           return {
-            op: 'eq',
+            op: "eq",
             attribute: (query as { attribute: string }).attribute,
             value: (query as { value: unknown }).value,
           };
-        case 'neq':
+        case "neq":
           return {
-            op: 'neq',
+            op: "neq",
             attribute: (query as { attribute: string }).attribute,
             value: (query as { value: unknown }).value,
           };
-        case 'gt':
+        case "gt":
           return {
-            op: 'gt',
+            op: "gt",
             attribute: (query as { attribute: string }).attribute,
             value: (query as { value: unknown }).value,
           };
-        case 'gte':
+        case "gte":
           return {
-            op: 'gte',
+            op: "gte",
             attribute: (query as { attribute: string }).attribute,
             value: (query as { value: unknown }).value,
           };
-        case 'lt':
+        case "lt":
           return {
-            op: 'lt',
+            op: "lt",
             attribute: (query as { attribute: string }).attribute,
             value: (query as { value: unknown }).value,
           };
-        case 'lte':
+        case "lte":
           return {
-            op: 'lte',
+            op: "lte",
             attribute: (query as { attribute: string }).attribute,
             value: (query as { value: unknown }).value,
           };
-        case 'and':
+        case "and":
           return {
-            op: 'and',
-            children: ((query as { children: Query[] }).children || []).map((c) =>
-              this.queryToPredicate(c),
+            op: "and",
+            children: ((query as { children: Query[] }).children || []).map(
+              (c) => this.queryToPredicate(c),
             ),
           };
-        case 'or':
+        case "or":
           return {
-            op: 'or',
-            children: ((query as { children: Query[] }).children || []).map((c) =>
-              this.queryToPredicate(c),
+            op: "or",
+            children: ((query as { children: Query[] }).children || []).map(
+              (c) => this.queryToPredicate(c),
             ),
           };
-        case 'not':
+        case "not":
           return {
-            op: 'not',
-            children: [this.queryToPredicate((query as { child: Query }).child)],
+            op: "not",
+            children: [
+              this.queryToPredicate((query as { child: Query }).child),
+            ],
           };
-        case 'contains':
+        case "contains":
           return {
-            op: 'contains',
+            op: "contains",
             attribute: (query as { attribute: string }).attribute,
             value: (query as { value: unknown }).value,
           };
-        case 'containsAll':
+        case "containsAll":
           return {
-            op: 'containsAll',
+            op: "containsAll",
             attribute: (query as { attribute: string }).attribute,
             value: (query as { values: unknown[] }).values,
           };
-        case 'containsAny':
+        case "containsAny":
           return {
-            op: 'containsAny',
+            op: "containsAny",
             attribute: (query as { attribute: string }).attribute,
             value: (query as { values: unknown[] }).values,
           };
         default:
-          return { op: 'eq', value: null };
+          return { op: "eq", value: null };
       }
     }
-    return { op: 'eq', value: null };
+    return { op: "eq", value: null };
   }
 
   // ==================== Live Queries ====================
@@ -550,7 +567,10 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
    * @param callback - Callback for query events
    * @returns Unsubscribe function
    */
-  subscribeLiveQuery(query: Query, callback: LiveQueryCallback<K, V>): () => void {
+  subscribeLiveQuery(
+    query: Query,
+    callback: LiveQueryCallback<K, V>,
+  ): () => void {
     return this.liveQueryManager.subscribe(query, callback);
   }
 
@@ -584,7 +604,10 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
     const result = super.set(key, value, ttlMs);
 
     // Apply default indexing on first record
-    if (this.defaultIndexingStrategy && !this.defaultIndexingStrategy.isApplied()) {
+    if (
+      this.defaultIndexingStrategy &&
+      !this.defaultIndexingStrategy.isApplied()
+    ) {
       this.defaultIndexingStrategy.applyToMap(this, value);
     }
 
@@ -657,6 +680,9 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
    * Returns all keys (non-tombstoned, non-expired).
    */
   public keys(): Iterable<K> {
+    // Generator functions inside object literals get their own `this` binding,
+    // so we capture the outer `this` reference before entering the generator.
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
     return {
       *[Symbol.iterator]() {
@@ -832,7 +858,7 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
     const callback = progressCallback ?? this.options.onIndexBuilding;
 
     for (const index of this.indexRegistry.getAllIndexes()) {
-      if ('isLazy' in index && (index as LazyIndex<K, V, unknown>).isLazy) {
+      if ("isLazy" in index && (index as LazyIndex<K, V, unknown>).isLazy) {
         const lazyIndex = index as LazyIndex<K, V, unknown>;
         if (!lazyIndex.isBuilt) {
           lazyIndex.materialize(callback);
@@ -848,7 +874,7 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
   getPendingIndexCount(): number {
     let total = 0;
     for (const index of this.indexRegistry.getAllIndexes()) {
-      if ('isLazy' in index && (index as LazyIndex<K, V, unknown>).isLazy) {
+      if ("isLazy" in index && (index as LazyIndex<K, V, unknown>).isLazy) {
         const lazyIndex = index as LazyIndex<K, V, unknown>;
         total += lazyIndex.pendingCount;
       }
@@ -861,7 +887,7 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
    */
   hasUnbuiltIndexes(): boolean {
     for (const index of this.indexRegistry.getAllIndexes()) {
-      if ('isLazy' in index && (index as LazyIndex<K, V, unknown>).isLazy) {
+      if ("isLazy" in index && (index as LazyIndex<K, V, unknown>).isLazy) {
         const lazyIndex = index as LazyIndex<K, V, unknown>;
         if (!lazyIndex.isBuilt) {
           return true;
@@ -878,11 +904,12 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
     query: Query,
     duration: number,
     resultSize: number,
-    usedIndex: boolean,
+    _usedIndex: boolean,
   ): void {
     // Only track if advisor is enabled (default: true)
     const advisorEnabled =
-      this.options.adaptiveIndexing?.advisor?.enabled ?? ADAPTIVE_INDEXING_DEFAULTS.advisor.enabled;
+      this.options.adaptiveIndexing?.advisor?.enabled ??
+      ADAPTIVE_INDEXING_DEFAULTS.advisor.enabled;
 
     if (!advisorEnabled && !this.autoIndexManager) {
       return;
@@ -900,7 +927,13 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
     const hasIndex = this.indexRegistry.hasIndex(attribute);
 
     // Record query in tracker
-    this.queryTracker.recordQuery(attribute, queryType, duration, resultSize, hasIndex);
+    this.queryTracker.recordQuery(
+      attribute,
+      queryType,
+      duration,
+      resultSize,
+      hasIndex,
+    );
 
     // Notify auto-index manager if enabled
     if (this.autoIndexManager) {
@@ -917,14 +950,14 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
     }
 
     // For compound queries, extract from first child
-    if (query.type === 'and' || query.type === 'or') {
+    if (query.type === "and" || query.type === "or") {
       const children = (query as { children?: Query[] }).children;
       if (children && children.length > 0) {
         return this.extractAttribute(children[0]);
       }
     }
 
-    if (query.type === 'not') {
+    if (query.type === "not") {
       const child = (query as { child?: Query }).child;
       if (child) {
         return this.extractAttribute(child);
@@ -942,18 +975,18 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
       const type = query.type;
       // Only track types that can be indexed
       const indexableTypes: TrackedQueryType[] = [
-        'eq',
-        'neq',
-        'gt',
-        'gte',
-        'lt',
-        'lte',
-        'between',
-        'in',
-        'has',
-        'contains',
-        'containsAll',
-        'containsAny',
+        "eq",
+        "neq",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "between",
+        "in",
+        "has",
+        "contains",
+        "containsAll",
+        "containsAny",
       ];
       if (indexableTypes.includes(type as TrackedQueryType)) {
         return type as TrackedQueryType;
@@ -961,14 +994,14 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
     }
 
     // For compound queries, extract from first child
-    if (query.type === 'and' || query.type === 'or') {
+    if (query.type === "and" || query.type === "or") {
       const children = (query as { children?: Query[] }).children;
       if (children && children.length > 0) {
         return this.extractQueryType(children[0]);
       }
     }
 
-    if (query.type === 'not') {
+    if (query.type === "not") {
       const child = (query as { child?: Query }).child;
       if (child) {
         return this.extractQueryType(child);

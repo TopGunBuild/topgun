@@ -12,15 +12,13 @@ import type {
   FullTextIndexConfig,
   SearchOptions,
   ScoredDocument,
-  TokenizerOptions,
-  BM25Options,
   SearchResult,
   SerializedIndex,
-} from './types';
-import { BM25Tokenizer } from './Tokenizer';
-import { BM25InvertedIndex } from './BM25InvertedIndex';
-import { BM25Scorer } from './BM25Scorer';
-import { IndexSerializer } from './IndexSerializer';
+} from "./types";
+import { BM25Tokenizer } from "./Tokenizer";
+import { BM25InvertedIndex } from "./BM25InvertedIndex";
+import { BM25Scorer } from "./BM25Scorer";
+import { IndexSerializer } from "./IndexSerializer";
 
 /**
  * Full-Text Index for TopGun
@@ -97,9 +95,12 @@ export class FullTextIndex {
    * @param docId - Document identifier
    * @param document - Document data containing fields to index
    */
-  onSet(docId: string, document: Record<string, unknown> | null | undefined): void {
+  onSet(
+    docId: string,
+    document: Record<string, unknown> | null | undefined,
+  ): void {
     // Handle null/undefined documents
-    if (!document || typeof document !== 'object') {
+    if (!document || typeof document !== "object") {
       // Clear cache for null/undefined document
       this.documentTokensCache.delete(docId);
       return;
@@ -118,7 +119,7 @@ export class FullTextIndex {
       const value = document[field];
 
       // Only index string values
-      if (typeof value !== 'string') {
+      if (typeof value !== "string") {
         continue;
       }
 
@@ -206,7 +207,7 @@ export class FullTextIndex {
       docId: r.docId,
       score: r.score,
       matchedTerms: r.matchedTerms,
-      source: 'fulltext' as const,
+      source: "fulltext" as const,
     }));
   }
 
@@ -256,7 +257,9 @@ export class FullTextIndex {
    *
    * @param entries - Array of [docId, document] tuples
    */
-  buildFromEntries(entries: Array<[string, Record<string, unknown> | null]>): void {
+  buildFromEntries(
+    entries: Array<[string, Record<string, unknown> | null]>,
+  ): void {
     for (const [docId, document] of entries) {
       this.onSet(docId, document);
     }
@@ -336,7 +339,11 @@ export class FullTextIndex {
     }
 
     // Calculate BM25 score
-    const score = this.scorer.scoreSingleDocument(queryTerms, docTokens, this.combinedIndex);
+    const score = this.scorer.scoreSingleDocument(
+      queryTerms,
+      docTokens,
+      this.combinedIndex,
+    );
 
     if (score <= 0) {
       return null;
@@ -346,7 +353,7 @@ export class FullTextIndex {
       docId,
       score,
       matchedTerms,
-      source: 'fulltext' as const,
+      source: "fulltext" as const,
     };
   }
 
@@ -362,7 +369,7 @@ export class FullTextIndex {
 
     for (const field of this.fields) {
       const value = document[field];
-      if (typeof value === 'string') {
+      if (typeof value === "string") {
         const tokens = this.tokenizer.tokenize(value);
         allTokens.push(...tokens);
       }
@@ -377,7 +384,7 @@ export class FullTextIndex {
    * @returns Descriptive name including indexed fields
    */
   get name(): string {
-    return `FullTextIndex(${this.fields.join(', ')})`;
+    return `FullTextIndex(${this.fields.join(", ")})`;
   }
 
   /**
@@ -394,7 +401,10 @@ export class FullTextIndex {
    * Search with field boosting.
    * Scores are computed per-field and combined with boost weights.
    */
-  private searchWithBoost(queryTerms: string[], boost: Record<string, number>): ScoredDocument[] {
+  private searchWithBoost(
+    queryTerms: string[],
+    boost: Record<string, number>,
+  ): ScoredDocument[] {
     // Accumulate scores per document
     const docScores = new Map<string, { score: number; terms: Set<string> }>();
 

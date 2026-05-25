@@ -1,6 +1,6 @@
-import { HLC, Timestamp } from './HLC';
-import { ORMapMerkleTree } from './ORMapMerkleTree';
-import { compareTimestamps } from './ORMapMerkle';
+import { HLC, Timestamp } from "./HLC";
+import { ORMapMerkleTree } from "./ORMapMerkleTree";
+import { compareTimestamps } from "./ORMapMerkle";
 
 /**
  * A record in the OR-Map (Observed-Remove Map).
@@ -113,8 +113,8 @@ export class ORMap<K, V> {
     };
 
     if (ttlMs !== undefined) {
-      if (typeof ttlMs !== 'number' || ttlMs <= 0 || !Number.isFinite(ttlMs)) {
-        throw new Error('TTL must be a positive finite number');
+      if (typeof ttlMs !== "number" || ttlMs <= 0 || !Number.isFinite(ttlMs)) {
+        throw new Error("TTL must be a positive finite number");
       }
       record.ttlMs = ttlMs;
     }
@@ -334,7 +334,7 @@ export class ORMap<K, V> {
           this.tombstones.delete(tag);
           removedTags.push(tag);
         }
-      } catch (e) {
+      } catch {
         // Ignore invalid tags
       }
     }
@@ -431,7 +431,9 @@ export class ORMap<K, V> {
         // New record - add it
         localKeyMap.set(remoteRecord.tag, remoteRecord);
         added++;
-      } else if (compareTimestamps(remoteRecord.timestamp, localRecord.timestamp) > 0) {
+      } else if (
+        compareTimestamps(remoteRecord.timestamp, localRecord.timestamp) > 0
+      ) {
         // Remote is newer - update
         localKeyMap.set(remoteRecord.tag, remoteRecord);
         updated++;

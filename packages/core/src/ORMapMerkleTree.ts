@@ -1,6 +1,6 @@
-import { ORMap, ORMapRecord } from './ORMap';
-import { hashString, combineHashes } from './utils/hash';
-import { hashORMapEntry } from './ORMapMerkle';
+import { ORMap, ORMapRecord } from "./ORMap";
+import { hashString } from "./utils/hash";
+import { hashORMapEntry } from "./ORMapMerkle";
 
 /**
  * Merkle Node for ORMap.
@@ -48,7 +48,7 @@ export class ORMapMerkleTree {
       if (records.size > 0) {
         const keyStr = String(key);
         const entryHash = hashORMapEntry(keyStr, records);
-        const pathHash = hashString(keyStr).toString(16).padStart(8, '0');
+        const pathHash = hashString(keyStr).toString(16).padStart(8, "0");
         this.updateNode(this.root, keyStr, entryHash, pathHash, 0);
       }
     }
@@ -59,7 +59,7 @@ export class ORMapMerkleTree {
    * Call this when records for a key change.
    */
   update<V>(key: string, records: Map<string, ORMapRecord<V>>): void {
-    const pathHash = hashString(key).toString(16).padStart(8, '0');
+    const pathHash = hashString(key).toString(16).padStart(8, "0");
 
     if (records.size === 0) {
       // Key has no records, remove from tree
@@ -75,7 +75,7 @@ export class ORMapMerkleTree {
    * Called when all records for a key are removed.
    */
   remove(key: string): void {
-    const pathHash = hashString(key).toString(16).padStart(8, '0');
+    const pathHash = hashString(key).toString(16).padStart(8, "0");
     this.removeNode(this.root, key, pathHash, 0);
   }
 
@@ -108,7 +108,13 @@ export class ORMapMerkleTree {
       node.children[bucketChar] = { hash: 0 };
     }
 
-    this.updateNode(node.children[bucketChar], key, entryHash, pathHash, level + 1);
+    this.updateNode(
+      node.children[bucketChar],
+      key,
+      entryHash,
+      pathHash,
+      level + 1,
+    );
 
     // Recalculate this node's hash from children
     let h = 0;
@@ -119,7 +125,12 @@ export class ORMapMerkleTree {
     return node.hash;
   }
 
-  private removeNode(node: ORMapMerkleNode, key: string, pathHash: string, level: number): number {
+  private removeNode(
+    node: ORMapMerkleNode,
+    key: string,
+    pathHash: string,
+    level: number,
+  ): number {
     // Leaf Node Logic
     if (level >= this.depth) {
       if (node.entries) {
@@ -242,6 +253,8 @@ export class ORMapMerkleTree {
    */
   isLeaf(path: string): boolean {
     const node = this.getNode(path);
-    return node !== undefined && node.entries !== undefined && node.entries.size > 0;
+    return (
+      node !== undefined && node.entries !== undefined && node.entries.size > 0
+    );
   }
 }

@@ -13,7 +13,7 @@
  * @module query/adaptive/IndexAdvisor
  */
 
-import type { QueryPatternTracker } from './QueryPatternTracker';
+import type { QueryPatternTracker } from "./QueryPatternTracker";
 import type {
   CompoundQueryStatistics,
   IndexSuggestion,
@@ -22,8 +22,8 @@ import type {
   RecommendedIndexType,
   SuggestionPriority,
   TrackedQueryType,
-} from './types';
-import { ADAPTIVE_INDEXING_DEFAULTS, MEMORY_OVERHEAD_ESTIMATES } from './types';
+} from "./types";
+import { ADAPTIVE_INDEXING_DEFAULTS, MEMORY_OVERHEAD_ESTIMATES } from "./types";
 
 /**
  * IndexAdvisor analyzes query patterns and generates index suggestions.
@@ -68,6 +68,8 @@ export class IndexAdvisor {
     // Group stats by attribute to avoid duplicate suggestions
     const attributeStats = this.groupByAttribute(stats);
 
+    // Destructuring to discard the attribute key; only attrStats is needed.
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     for (const [attribute, attrStats] of attributeStats.entries()) {
       // Find the best (most queried) pattern for this attribute
       const bestStat = this.findBestPattern(attrStats, excludeExistingIndexes);
@@ -95,7 +97,8 @@ export class IndexAdvisor {
     // Sort by priority and benefit
     suggestions.sort((a, b) => {
       const priorityOrder = { high: 3, medium: 2, low: 1 };
-      const priorityDiff = priorityOrder[b.priority] - priorityOrder[a.priority];
+      const priorityDiff =
+        priorityOrder[b.priority] - priorityOrder[a.priority];
       if (priorityDiff !== 0) return priorityDiff;
       return b.estimatedBenefit - a.estimatedBenefit;
     });
@@ -154,14 +157,18 @@ export class IndexAdvisor {
    * @param queryType - The query type
    * @returns Recommended index type or null if not indexable
    */
-  getRecommendedIndexType(queryType: TrackedQueryType): RecommendedIndexType | null {
+  getRecommendedIndexType(
+    queryType: TrackedQueryType,
+  ): RecommendedIndexType | null {
     return this.selectIndexType(queryType);
   }
 
   /**
    * Group statistics by attribute.
    */
-  private groupByAttribute(stats: QueryStatistics[]): Map<string, QueryStatistics[]> {
+  private groupByAttribute(
+    stats: QueryStatistics[],
+  ): Map<string, QueryStatistics[]> {
     const grouped = new Map<string, QueryStatistics[]>();
 
     for (const stat of stats) {
@@ -215,14 +222,20 @@ export class IndexAdvisor {
     if (!indexType) return null;
 
     // Check if this index type would help other query patterns too
-    const benefitingPatterns = this.countBenefitingPatterns(allAttrStats, indexType);
+    const benefitingPatterns = this.countBenefitingPatterns(
+      allAttrStats,
+      indexType,
+    );
 
     const estimatedBenefit = this.estimateBenefit(stat, benefitingPatterns);
     const estimatedCost = this.estimateMemoryCost(stat, indexType);
     const priority = this.calculatePriority(stat, estimatedBenefit);
 
     // Calculate total query count across all patterns for this attribute
-    const totalQueryCount = allAttrStats.reduce((sum, s) => sum + s.queryCount, 0);
+    const totalQueryCount = allAttrStats.reduce(
+      (sum, s) => sum + s.queryCount,
+      0,
+    );
 
     return {
       attribute: stat.attribute,
@@ -239,25 +252,27 @@ export class IndexAdvisor {
   /**
    * Select appropriate index type based on query type.
    */
-  private selectIndexType(queryType: TrackedQueryType): RecommendedIndexType | null {
+  private selectIndexType(
+    queryType: TrackedQueryType,
+  ): RecommendedIndexType | null {
     switch (queryType) {
-      case 'eq':
-      case 'neq':
-      case 'in':
-      case 'has':
-        return 'hash';
+      case "eq":
+      case "neq":
+      case "in":
+      case "has":
+        return "hash";
 
-      case 'gt':
-      case 'gte':
-      case 'lt':
-      case 'lte':
-      case 'between':
-        return 'navigable';
+      case "gt":
+      case "gte":
+      case "lt":
+      case "lte":
+      case "between":
+        return "navigable";
 
-      case 'contains':
-      case 'containsAll':
-      case 'containsAny':
-        return 'inverted';
+      case "contains":
+      case "containsAll":
+      case "containsAny":
+        return "inverted";
 
       default:
         return null;
@@ -291,7 +306,10 @@ export class IndexAdvisor {
    * - Full scan vs indexed: typically 100-1000× speedup
    * - Query frequency amplifies benefit
    */
-  private estimateBenefit(stat: QueryStatistics, benefitingPatterns: number): number {
+  private estimateBenefit(
+    stat: QueryStatistics,
+    benefitingPatterns: number,
+  ): number {
     // Base benefit depends on query cost (higher cost = more benefit)
     let baseBenefit: number;
     if (stat.averageCost > 10) {
@@ -314,7 +332,10 @@ export class IndexAdvisor {
   /**
    * Estimate memory cost of adding an index.
    */
-  private estimateMemoryCost(stat: QueryStatistics, indexType: RecommendedIndexType): number {
+  private estimateMemoryCost(
+    stat: QueryStatistics,
+    indexType: RecommendedIndexType,
+  ): number {
     const bytesPerRecord = MEMORY_OVERHEAD_ESTIMATES[indexType];
 
     // Use estimated cardinality as record count estimate
@@ -325,28 +346,31 @@ export class IndexAdvisor {
   /**
    * Calculate priority based on query patterns and benefit.
    */
-  private calculatePriority(stat: QueryStatistics, estimatedBenefit: number): SuggestionPriority {
+  private calculatePriority(
+    stat: QueryStatistics,
+    estimatedBenefit: number,
+  ): SuggestionPriority {
     // High priority: frequently queried AND expensive
     if (stat.queryCount > 100 && stat.averageCost > 10) {
-      return 'high';
+      return "high";
     }
 
     // High priority: very frequently queried
     if (stat.queryCount > 500) {
-      return 'high';
+      return "high";
     }
 
     // Medium priority: moderate frequency OR cost
     if (stat.queryCount > 50 || stat.averageCost > 5) {
-      return 'medium';
+      return "medium";
     }
 
     // Medium priority: high estimated benefit
     if (estimatedBenefit > 1000) {
-      return 'medium';
+      return "medium";
     }
 
-    return 'low';
+    return "low";
   }
 
   /**
@@ -378,7 +402,9 @@ export class IndexAdvisor {
    * @param options - Suggestion options
    * @returns Array of compound index suggestions
    */
-  getCompoundSuggestions(options: IndexSuggestionOptions = {}): IndexSuggestion[] {
+  getCompoundSuggestions(
+    options: IndexSuggestionOptions = {},
+  ): IndexSuggestion[] {
     const {
       minQueryCount = ADAPTIVE_INDEXING_DEFAULTS.advisor.minQueryCount,
       minAverageCost = ADAPTIVE_INDEXING_DEFAULTS.advisor.minAverageCost,
@@ -438,14 +464,16 @@ export class IndexAdvisor {
   /**
    * Generate a suggestion for a compound query pattern.
    */
-  private generateCompoundSuggestion(stat: CompoundQueryStatistics): IndexSuggestion | null {
+  private generateCompoundSuggestion(
+    stat: CompoundQueryStatistics,
+  ): IndexSuggestion | null {
     const estimatedBenefit = this.estimateCompoundBenefit(stat);
     const estimatedCost = this.estimateCompoundMemoryCost(stat);
     const priority = this.calculateCompoundPriority(stat, estimatedBenefit);
 
     return {
       attribute: stat.compoundKey,
-      indexType: 'compound',
+      indexType: "compound",
       reason: this.generateCompoundReason(stat, estimatedBenefit),
       estimatedBenefit,
       estimatedCost,
@@ -498,7 +526,9 @@ export class IndexAdvisor {
     // Assume ~1000 records as baseline estimate
     const estimatedRecords = 1000;
 
-    return Math.floor(estimatedRecords * (bytesPerRecord + attributeOverhead) * 1.5);
+    return Math.floor(
+      estimatedRecords * (bytesPerRecord + attributeOverhead) * 1.5,
+    );
   }
 
   /**
@@ -510,33 +540,36 @@ export class IndexAdvisor {
   ): SuggestionPriority {
     // High priority: frequently queried compound patterns with high cost
     if (stat.queryCount > 100 && stat.averageCost > 10) {
-      return 'high';
+      return "high";
     }
 
     // High priority: very frequently queried
     if (stat.queryCount > 500) {
-      return 'high';
+      return "high";
     }
 
     // Medium priority: moderate frequency or cost
     if (stat.queryCount > 50 || stat.averageCost > 5) {
-      return 'medium';
+      return "medium";
     }
 
     // Medium priority: high estimated benefit
     if (estimatedBenefit > 2000) {
-      return 'medium';
+      return "medium";
     }
 
-    return 'low';
+    return "low";
   }
 
   /**
    * Generate human-readable reason for compound index suggestion.
    */
-  private generateCompoundReason(stat: CompoundQueryStatistics, benefit: number): string {
+  private generateCompoundReason(
+    stat: CompoundQueryStatistics,
+    benefit: number,
+  ): string {
     const costStr = stat.averageCost.toFixed(2);
-    const attrList = stat.attributes.join(', ');
+    const attrList = stat.attributes.join(", ");
     let reason = `Compound AND query on [${attrList}] executed ${stat.queryCount}× with average cost ${costStr}ms. `;
     reason += `Expected ~${benefit}× cumulative speedup with compound index. `;
     reason += `Eliminates ${stat.attributes.length - 1} ResultSet intersection(s).`;

@@ -12,13 +12,13 @@
  * @module query/indexes/lazy/LazyNavigableIndex
  */
 
-import type { Attribute } from '../../Attribute';
-import type { Index, IndexQuery, IndexStats } from '../types';
-import type { ResultSet } from '../../resultset/ResultSet';
-import type { Comparator } from '../../ds/types';
-import { NavigableIndex } from '../NavigableIndex';
-import type { LazyIndex, LazyIndexOptions } from './types';
-import type { IndexBuildProgressCallback } from '../../adaptive/types';
+import type { Attribute } from "../../Attribute";
+import type { IndexQuery, IndexStats } from "../types";
+import type { ResultSet } from "../../resultset/ResultSet";
+import type { Comparator } from "../../ds/types";
+import { NavigableIndex } from "../NavigableIndex";
+import type { LazyIndex, LazyIndexOptions } from "./types";
+import type { IndexBuildProgressCallback } from "../../adaptive/types";
 
 /**
  * Lazy sorted index for O(log N) range queries.
@@ -26,8 +26,12 @@ import type { IndexBuildProgressCallback } from '../../adaptive/types';
  *
  * K = record key type, V = record value type, A = attribute value type (must be orderable)
  */
-export class LazyNavigableIndex<K, V, A extends string | number> implements LazyIndex<K, V, A> {
-  readonly type = 'navigable' as const;
+export class LazyNavigableIndex<
+  K,
+  V,
+  A extends string | number,
+> implements LazyIndex<K, V, A> {
+  readonly type = "navigable" as const;
   readonly isLazy = true as const;
 
   /** Underlying navigable index (created on first query) */
@@ -72,7 +76,9 @@ export class LazyNavigableIndex<K, V, A extends string | number> implements Lazy
   }
 
   supportsQuery(queryType: string): boolean {
-    return ['equal', 'in', 'has', 'gt', 'gte', 'lt', 'lte', 'between'].includes(queryType);
+    return ["equal", "in", "has", "gt", "gte", "lt", "lte", "between"].includes(
+      queryType,
+    );
   }
 
   retrieve(query: IndexQuery<A>): ResultSet<K> {
@@ -138,7 +144,10 @@ export class LazyNavigableIndex<K, V, A extends string | number> implements Lazy
     const total = this.pendingRecords.size;
 
     // Create inner index with comparator
-    this.innerIndex = new NavigableIndex<K, V, A>(this.attribute, this.comparator);
+    this.innerIndex = new NavigableIndex<K, V, A>(
+      this.attribute,
+      this.comparator,
+    );
 
     // Build from pending records
     let processed = 0;

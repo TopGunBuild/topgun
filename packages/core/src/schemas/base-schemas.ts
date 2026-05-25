@@ -1,5 +1,5 @@
 // packages/core/src/schemas/base-schemas.ts
-import { z } from 'zod';
+import { z } from "zod";
 
 // --- Write Concern Types ---
 
@@ -7,11 +7,11 @@ import { z } from 'zod';
  * Write Concern schema - defines when an operation is considered acknowledged.
  */
 export const WriteConcernSchema = z.enum([
-  'FIRE_AND_FORGET',
-  'MEMORY',
-  'APPLIED',
-  'REPLICATED',
-  'PERSISTED',
+  "FIRE_AND_FORGET",
+  "MEMORY",
+  "APPLIED",
+  "REPLICATED",
+  "PERSISTED",
 ]);
 export type WriteConcernValue = z.infer<typeof WriteConcernSchema>;
 
@@ -28,6 +28,9 @@ export const LWWRecordSchema = z.object({
   timestamp: TimestampSchema,
   ttlMs: z.number().optional(),
 });
+// V is a phantom type parameter preserved for call-site type safety (e.g. LWWRecord<string>);
+// the Zod schema infers the runtime shape, so V cannot be threaded through z.infer.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export type LWWRecord<V = any> = z.infer<typeof LWWRecordSchema>;
 
 export const ORMapRecordSchema = z.object({
@@ -36,6 +39,9 @@ export const ORMapRecordSchema = z.object({
   tag: z.string(),
   ttlMs: z.number().optional(),
 });
+// V is a phantom type parameter preserved for call-site type safety (e.g. ORMapRecord<string>);
+// the Zod schema infers the runtime shape, so V cannot be threaded through z.infer.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export type ORMapRecord<V = any> = z.infer<typeof ORMapRecordSchema>;
 
 // --- Change Event Types ---
@@ -44,26 +50,26 @@ export type ORMapRecord<V = any> = z.infer<typeof ORMapRecordSchema>;
  * Unified change event type used across query updates, search updates,
  * and cluster subscription updates.
  */
-export const ChangeEventTypeSchema = z.enum(['ENTER', 'UPDATE', 'LEAVE']);
+export const ChangeEventTypeSchema = z.enum(["ENTER", "UPDATE", "LEAVE"]);
 export type ChangeEventType = z.infer<typeof ChangeEventTypeSchema>;
 
 // --- Predicate Types ---
 export const PredicateOpSchema = z.enum([
-  'eq',
-  'neq',
-  'gt',
-  'gte',
-  'lt',
-  'lte',
-  'like',
-  'regex',
-  'and',
-  'or',
-  'not',
-  'in',
-  'between',
-  'isNull',
-  'isNotNull',
+  "eq",
+  "neq",
+  "gt",
+  "gte",
+  "lt",
+  "lte",
+  "like",
+  "regex",
+  "and",
+  "or",
+  "not",
+  "in",
+  "between",
+  "isNull",
+  "isNotNull",
 ]);
 // Type export omitted: PredicateOp is already exported from predicate.ts
 
@@ -82,7 +88,7 @@ export const PredicateNodeSchema: z.ZodType<any> = z.lazy(() =>
 export const QuerySchema = z.object({
   where: z.record(z.string(), z.any()).optional(),
   predicate: PredicateNodeSchema.optional(),
-  sort: z.record(z.string(), z.enum(['asc', 'desc'])).optional(),
+  sort: z.record(z.string(), z.enum(["asc", "desc"])).optional(),
   limit: z.number().optional(),
   cursor: z.string().optional(), // Replaces offset for pagination
 });
@@ -104,7 +110,7 @@ export type ClientOp = z.infer<typeof ClientOpSchema>;
 
 // --- Auth Message ---
 export const AuthMessageSchema = z.object({
-  type: z.literal('AUTH'),
+  type: z.literal("AUTH"),
   token: z.string(),
   protocolVersion: z.number().optional(),
 });
@@ -114,6 +120,6 @@ export type AuthMessage = z.infer<typeof AuthMessageSchema>;
  * AUTH_REQUIRED: Server tells client that authentication is needed.
  */
 export const AuthRequiredMessageSchema = z.object({
-  type: z.literal('AUTH_REQUIRED'),
+  type: z.literal("AUTH_REQUIRED"),
 });
 export type AuthRequiredMessage = z.infer<typeof AuthRequiredMessageSchema>;

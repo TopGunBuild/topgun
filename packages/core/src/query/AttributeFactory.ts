@@ -10,12 +10,21 @@
  * @module query/AttributeFactory
  */
 
-import { SimpleAttribute, MultiValueAttribute, type Attribute } from './Attribute';
+import {
+  SimpleAttribute,
+  MultiValueAttribute,
+  type Attribute,
+} from "./Attribute";
 
 /**
  * Supported attribute type definitions.
  */
-export type AttributeType = 'string' | 'number' | 'boolean' | 'string[]' | 'number[]';
+export type AttributeType =
+  | "string"
+  | "number"
+  | "boolean"
+  | "string[]"
+  | "number[]";
 
 /**
  * Schema definition for attribute generation.
@@ -36,24 +45,24 @@ export type AttributeSchema = Record<string, AttributeType>;
 /**
  * Infer the TypeScript type from AttributeType string.
  */
-type InferType<T extends AttributeType> = T extends 'string'
+type InferType<T extends AttributeType> = T extends "string"
   ? string
-  : T extends 'number'
+  : T extends "number"
     ? number
-    : T extends 'boolean'
+    : T extends "boolean"
       ? boolean
-      : T extends 'string[]'
+      : T extends "string[]"
         ? string
-        : T extends 'number[]'
+        : T extends "number[]"
           ? number
           : never;
 
 /**
  * Infer if the type is multi-value.
  */
-type IsMultiValue<T extends AttributeType> = T extends 'string[]'
+type IsMultiValue<T extends AttributeType> = T extends "string[]"
   ? true
-  : T extends 'number[]'
+  : T extends "number[]"
     ? true
     : false;
 
@@ -95,12 +104,12 @@ export interface GenerateAttributesOptions {
 function getNestedValue(obj: unknown, path: string): unknown {
   if (obj === null || obj === undefined) return undefined;
 
-  const keys = path.split('.');
+  const keys = path.split(".");
   let current: unknown = obj;
 
   for (const key of keys) {
     if (current === null || current === undefined) return undefined;
-    if (typeof current !== 'object') return undefined;
+    if (typeof current !== "object") return undefined;
     current = (current as Record<string, unknown>)[key];
   }
 
@@ -111,7 +120,7 @@ function getNestedValue(obj: unknown, path: string): unknown {
  * Check if a type string represents a multi-value (array) type.
  */
 function isMultiValueType(type: AttributeType): boolean {
-  return type.endsWith('[]');
+  return type.endsWith("[]");
 }
 
 /**
@@ -155,7 +164,7 @@ export function generateAttributes<V>(): <S extends AttributeSchema>(
     schema: S,
     options: GenerateAttributesOptions = {},
   ): GeneratedAttributes<V, S> => {
-    const { namePrefix = '' } = options;
+    const { namePrefix = "" } = options;
     const result: Record<string, Attribute<V, unknown>> = {};
 
     for (const [path, type] of Object.entries(schema)) {
@@ -163,11 +172,14 @@ export function generateAttributes<V>(): <S extends AttributeSchema>(
 
       if (isMultiValueType(type)) {
         // Multi-value attribute (arrays)
-        result[path] = new MultiValueAttribute<V, unknown>(attrName, (record: V) => {
-          const value = getNestedValue(record, path);
-          if (Array.isArray(value)) return value;
-          return [];
-        });
+        result[path] = new MultiValueAttribute<V, unknown>(
+          attrName,
+          (record: V) => {
+            const value = getNestedValue(record, path);
+            if (Array.isArray(value)) return value;
+            return [];
+          },
+        );
       } else {
         // Simple attribute
         result[path] = new SimpleAttribute<V, unknown>(
@@ -239,7 +251,11 @@ export function multiAttr<V, A>(path: string): MultiValueAttribute<V, A> {
  * const attrs = generateAttributes<Product>(schema);
  * ```
  */
+// `{}` is the correct initial type for the fluent builder accumulator — the schema
+// starts empty and grows structurally as attr() calls are chained.
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
 export function createSchema<V>(): SchemaBuilder<V, {}> {
+  // eslint-disable-next-line @typescript-eslint/no-empty-object-type
   return new SchemaBuilder<V, {}>({});
 }
 
@@ -252,36 +268,47 @@ class SchemaBuilder<V, S extends AttributeSchema> {
   /**
    * Add a string attribute.
    */
-  string<P extends string>(path: P): SchemaBuilder<V, S & Record<P, 'string'>> {
-    return new SchemaBuilder({ ...this.schema, [path]: 'string' } as S & Record<P, 'string'>);
+  string<P extends string>(path: P): SchemaBuilder<V, S & Record<P, "string">> {
+    return new SchemaBuilder({ ...this.schema, [path]: "string" } as S &
+      Record<P, "string">);
   }
 
   /**
    * Add a number attribute.
    */
-  number<P extends string>(path: P): SchemaBuilder<V, S & Record<P, 'number'>> {
-    return new SchemaBuilder({ ...this.schema, [path]: 'number' } as S & Record<P, 'number'>);
+  number<P extends string>(path: P): SchemaBuilder<V, S & Record<P, "number">> {
+    return new SchemaBuilder({ ...this.schema, [path]: "number" } as S &
+      Record<P, "number">);
   }
 
   /**
    * Add a boolean attribute.
    */
-  boolean<P extends string>(path: P): SchemaBuilder<V, S & Record<P, 'boolean'>> {
-    return new SchemaBuilder({ ...this.schema, [path]: 'boolean' } as S & Record<P, 'boolean'>);
+  boolean<P extends string>(
+    path: P,
+  ): SchemaBuilder<V, S & Record<P, "boolean">> {
+    return new SchemaBuilder({ ...this.schema, [path]: "boolean" } as S &
+      Record<P, "boolean">);
   }
 
   /**
    * Add a string array (multi-value) attribute.
    */
-  stringArray<P extends string>(path: P): SchemaBuilder<V, S & Record<P, 'string[]'>> {
-    return new SchemaBuilder({ ...this.schema, [path]: 'string[]' } as S & Record<P, 'string[]'>);
+  stringArray<P extends string>(
+    path: P,
+  ): SchemaBuilder<V, S & Record<P, "string[]">> {
+    return new SchemaBuilder({ ...this.schema, [path]: "string[]" } as S &
+      Record<P, "string[]">);
   }
 
   /**
    * Add a number array (multi-value) attribute.
    */
-  numberArray<P extends string>(path: P): SchemaBuilder<V, S & Record<P, 'number[]'>> {
-    return new SchemaBuilder({ ...this.schema, [path]: 'number[]' } as S & Record<P, 'number[]'>);
+  numberArray<P extends string>(
+    path: P,
+  ): SchemaBuilder<V, S & Record<P, "number[]">> {
+    return new SchemaBuilder({ ...this.schema, [path]: "number[]" } as S &
+      Record<P, "number[]">);
   }
 
   /**

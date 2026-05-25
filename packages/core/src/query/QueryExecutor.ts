@@ -8,10 +8,9 @@
  * @module query/QueryExecutor
  */
 
-import { QueryOptimizer } from './QueryOptimizer';
+import { QueryOptimizer } from "./QueryOptimizer";
 import type {
   Query,
-  QueryPlan,
   PlanStep,
   IndexScanStep,
   FullScanStep,
@@ -23,18 +22,15 @@ import type {
   FusionStep,
   FusionStrategy,
   SimpleQueryNode,
-} from './QueryTypes';
-import { isSimpleQuery, isLogicalQuery, isFTSQuery } from './QueryTypes';
+} from "./QueryTypes";
+import { isSimpleQuery, isLogicalQuery, isFTSQuery } from "./QueryTypes";
 import {
   ReciprocalRankFusion,
   type RankedResult,
-  type MergedResult,
-} from '../search/ReciprocalRankFusion';
-import type { FullTextIndex } from '../fts';
-import { SetResultSet } from './resultset/SetResultSet';
-import type { ResultSet } from './resultset/ResultSet';
-import { QueryCursor, type QueryCursorData } from './QueryCursor';
-import { compareValues } from '../utils/compare';
+} from "../search/ReciprocalRankFusion";
+import type { ResultSet } from "./resultset/ResultSet";
+import { QueryCursor } from "./QueryCursor";
+import { compareValues } from "../utils/compare";
 
 /**
  * Result of executing a query step.
@@ -48,7 +44,7 @@ export interface StepResult<K = string> {
   /** Optional matched terms for FTS results (key -> terms) */
   matchedTerms?: Map<K, string[]>;
   /** Source type of this result */
-  source: 'exact' | 'range' | 'fulltext' | 'standing';
+  source: "exact" | "range" | "fulltext" | "standing";
 }
 
 /**
@@ -72,7 +68,7 @@ export interface OrderBy {
   /** Field to sort by (use '_score' for relevance sorting) */
   field: string;
   /** Sort direction */
-  direction: 'asc' | 'desc';
+  direction: "asc" | "desc";
 }
 
 /**
@@ -92,7 +88,7 @@ export interface ExecuteOptions {
 /**
  * Cursor status for debugging.
  */
-export type CursorStatus = 'valid' | 'expired' | 'invalid' | 'none';
+export type CursorStatus = "valid" | "expired" | "invalid" | "none";
 
 /**
  * Extended query result with cursor info.
@@ -145,7 +141,11 @@ export class QueryExecutor<K extends string, V> {
    * @param options - Execution options (orderBy, limit, cursor)
    * @returns Query results
    */
-  execute(query: Query, data: Map<K, V>, options?: ExecuteOptions): QueryResult<K, V>[] {
+  execute(
+    query: Query,
+    data: Map<K, V>,
+    options?: ExecuteOptions,
+  ): QueryResult<K, V>[] {
     const result = this.executeWithCursor(query, data, options);
     return result.results;
   }
@@ -174,8 +174,8 @@ export class QueryExecutor<K extends string, V> {
     let results = this.stepResultToQueryResults(stepResult, data);
 
     // Determine sort configuration
-    let sortField = '_score';
-    let sortDirection: 'asc' | 'desc' = 'desc';
+    let sortField = "_score";
+    let sortDirection: "asc" | "desc" = "desc";
 
     if (options?.orderBy && options.orderBy.length > 0) {
       sortField = options.orderBy[0].field;
@@ -183,31 +183,38 @@ export class QueryExecutor<K extends string, V> {
       results = this.applyOrdering(results, options.orderBy, data);
     } else if (stepResult.scores && stepResult.scores.size > 0) {
       // Default: sort by score descending if we have scores
-      results = this.applyOrdering(results, [{ field: '_score', direction: 'desc' }], data);
+      results = this.applyOrdering(
+        results,
+        [{ field: "_score", direction: "desc" }],
+        data,
+      );
     }
 
     // Create sort config for cursor
-    const sort: Record<string, 'asc' | 'desc'> = { [sortField]: sortDirection };
+    const sort: Record<string, "asc" | "desc"> = { [sortField]: sortDirection };
 
     // Apply cursor filtering and track status
-    let cursorStatus: CursorStatus = 'none';
+    let cursorStatus: CursorStatus = "none";
     if (options?.cursor) {
       const cursorData = QueryCursor.decode(options.cursor);
       if (!cursorData) {
-        cursorStatus = 'invalid';
+        cursorStatus = "invalid";
       } else if (!QueryCursor.isValid(cursorData, options.predicate, sort)) {
         // Check if it's specifically expired vs hash mismatch
         const maxAge = 10 * 60 * 1000; // DEFAULT_QUERY_CURSOR_MAX_AGE_MS
         if (Date.now() - cursorData.timestamp > maxAge) {
-          cursorStatus = 'expired';
+          cursorStatus = "expired";
         } else {
-          cursorStatus = 'invalid';
+          cursorStatus = "invalid";
         }
       } else {
-        cursorStatus = 'valid';
+        cursorStatus = "valid";
         results = results.filter((result) => {
           const sortValue = this.extractSortValue(result, sortField);
-          return QueryCursor.isAfterCursor({ key: result.key, sortValue }, cursorData);
+          return QueryCursor.isAfterCursor(
+            { key: result.key, sortValue },
+            cursorData,
+          );
         });
       }
     }
@@ -246,8 +253,11 @@ export class QueryExecutor<K extends string, V> {
   /**
    * Extract sort value from a query result.
    */
-  private extractSortValue(result: QueryResult<K, V>, sortField: string): unknown {
-    if (sortField === '_score') {
+  private extractSortValue(
+    result: QueryResult<K, V>,
+    sortField: string,
+  ): unknown {
+    if (sortField === "_score") {
       return result.score ?? 0;
     }
     return (result.value as Record<string, unknown>)[sortField];
@@ -258,34 +268,34 @@ export class QueryExecutor<K extends string, V> {
    */
   private executeStep(step: PlanStep, data: Map<K, V>): StepResult<K> {
     switch (step.type) {
-      case 'point-lookup':
+      case "point-lookup":
         return this.executePointLookup(step, data);
 
-      case 'multi-point-lookup':
+      case "multi-point-lookup":
         return this.executeMultiPointLookup(step, data);
 
-      case 'index-scan':
+      case "index-scan":
         return this.executeIndexScan(step, data);
 
-      case 'full-scan':
+      case "full-scan":
         return this.executeFullScan(step, data);
 
-      case 'intersection':
+      case "intersection":
         return this.executeIntersection(step, data);
 
-      case 'union':
+      case "union":
         return this.executeUnion(step, data);
 
-      case 'filter':
+      case "filter":
         return this.executeFilter(step, data);
 
-      case 'not':
+      case "not":
         return this.executeNot(step, data);
 
-      case 'fts-scan':
+      case "fts-scan":
         return this.executeFTSStep(step, data);
 
-      case 'fusion':
+      case "fusion":
         return this.executeFusion(step, data);
 
       default:
@@ -297,7 +307,7 @@ export class QueryExecutor<K extends string, V> {
    * Execute a point lookup step - O(1) direct key access.
    */
   private executePointLookup(
-    step: import('./QueryTypes').PointLookupStep,
+    step: import("./QueryTypes").PointLookupStep,
     data: Map<K, V>,
   ): StepResult<K> {
     const key = step.key as K;
@@ -309,7 +319,7 @@ export class QueryExecutor<K extends string, V> {
 
     return {
       keys,
-      source: 'exact',
+      source: "exact",
     };
   }
 
@@ -317,7 +327,7 @@ export class QueryExecutor<K extends string, V> {
    * Execute a multi-point lookup step - O(k) batch key access.
    */
   private executeMultiPointLookup(
-    step: import('./QueryTypes').MultiPointLookupStep,
+    step: import("./QueryTypes").MultiPointLookupStep,
     data: Map<K, V>,
   ): StepResult<K> {
     const keys = new Set<K>();
@@ -331,20 +341,23 @@ export class QueryExecutor<K extends string, V> {
 
     return {
       keys,
-      source: 'exact',
+      source: "exact",
     };
   }
 
   /**
    * Execute an index scan step.
    */
-  private executeIndexScan(step: IndexScanStep, _data: Map<K, V>): StepResult<K> {
+  private executeIndexScan(
+    step: IndexScanStep,
+    _data: Map<K, V>,
+  ): StepResult<K> {
     const resultSet = step.index.retrieve(step.query) as ResultSet<K>;
     const keys = new Set(resultSet.toArray());
 
     return {
       keys,
-      source: 'exact',
+      source: "exact",
     };
   }
 
@@ -362,7 +375,7 @@ export class QueryExecutor<K extends string, V> {
 
     return {
       keys,
-      source: 'exact',
+      source: "exact",
     };
   }
 
@@ -376,14 +389,16 @@ export class QueryExecutor<K extends string, V> {
       // No FTS index - return empty result
       return {
         keys: new Set(),
-        source: 'fulltext',
+        source: "fulltext",
       };
     }
 
     // Execute search based on FTS type
     const searchResults = ftsIndex.search(step.query, {
       minScore: step.options?.minScore,
-      boost: step.options?.boost ? { [step.field]: step.options.boost } : undefined,
+      boost: step.options?.boost
+        ? { [step.field]: step.options.boost }
+        : undefined,
     });
 
     // Convert search results to StepResult
@@ -404,16 +419,19 @@ export class QueryExecutor<K extends string, V> {
       keys,
       scores,
       matchedTerms,
-      source: 'fulltext',
+      source: "fulltext",
     };
   }
 
   /**
    * Execute an intersection step.
    */
-  private executeIntersection(step: IntersectionStep, data: Map<K, V>): StepResult<K> {
+  private executeIntersection(
+    step: IntersectionStep,
+    data: Map<K, V>,
+  ): StepResult<K> {
     if (step.steps.length === 0) {
-      return { keys: new Set(), source: 'exact' };
+      return { keys: new Set(), source: "exact" };
     }
 
     // Execute all child steps
@@ -437,7 +455,7 @@ export class QueryExecutor<K extends string, V> {
 
     return {
       keys: result,
-      source: 'exact',
+      source: "exact",
     };
   }
 
@@ -456,7 +474,7 @@ export class QueryExecutor<K extends string, V> {
 
     return {
       keys: result,
-      source: 'exact',
+      source: "exact",
     };
   }
 
@@ -467,7 +485,9 @@ export class QueryExecutor<K extends string, V> {
     const sourceResult = this.executeStep(step.source, data);
     const filtered = new Set<K>();
     const scores = sourceResult.scores ? new Map<K, number>() : undefined;
-    const matchedTerms = sourceResult.matchedTerms ? new Map<K, string[]>() : undefined;
+    const matchedTerms = sourceResult.matchedTerms
+      ? new Map<K, string[]>()
+      : undefined;
 
     for (const key of sourceResult.keys) {
       const value = data.get(key);
@@ -506,7 +526,7 @@ export class QueryExecutor<K extends string, V> {
 
     return {
       keys: result,
-      source: 'exact',
+      source: "exact",
     };
   }
 
@@ -527,15 +547,18 @@ export class QueryExecutor<K extends string, V> {
    * @param strategy - Fusion strategy
    * @returns Fused result
    */
-  fuseResults(stepResults: StepResult<K>[], strategy: FusionStrategy): StepResult<K> {
+  fuseResults(
+    stepResults: StepResult<K>[],
+    strategy: FusionStrategy,
+  ): StepResult<K> {
     switch (strategy) {
-      case 'intersection':
+      case "intersection":
         return this.intersectResults(stepResults);
 
-      case 'rrf':
+      case "rrf":
         return this.rrfFusion(stepResults);
 
-      case 'score-filter':
+      case "score-filter":
         return this.scoreSumFusion(stepResults);
 
       default:
@@ -548,7 +571,7 @@ export class QueryExecutor<K extends string, V> {
    */
   private intersectResults(stepResults: StepResult<K>[]): StepResult<K> {
     if (stepResults.length === 0) {
-      return { keys: new Set(), source: 'exact' };
+      return { keys: new Set(), source: "exact" };
     }
 
     // Sort by size for efficient intersection
@@ -567,7 +590,7 @@ export class QueryExecutor<K extends string, V> {
 
     return {
       keys: result,
-      source: 'exact',
+      source: "exact",
     };
   }
 
@@ -583,7 +606,9 @@ export class QueryExecutor<K extends string, V> {
 
       if (stepResult.scores && stepResult.scores.size > 0) {
         // Scored results - sort by score
-        const sorted = Array.from(stepResult.scores.entries()).sort((a, b) => b[1] - a[1]);
+        const sorted = Array.from(stepResult.scores.entries()).sort(
+          (a, b) => b[1] - a[1],
+        );
 
         for (const [key, score] of sorted) {
           rankedResults.push({
@@ -639,7 +664,7 @@ export class QueryExecutor<K extends string, V> {
       keys,
       scores,
       matchedTerms: matchedTerms.size > 0 ? matchedTerms : undefined,
-      source: 'fulltext',
+      source: "fulltext",
     };
   }
 
@@ -687,7 +712,7 @@ export class QueryExecutor<K extends string, V> {
       keys,
       scores: scoreAccumulator,
       matchedTerms: matchedTerms.size > 0 ? matchedTerms : undefined,
-      source: 'fulltext',
+      source: "fulltext",
     };
   }
 
@@ -697,7 +722,7 @@ export class QueryExecutor<K extends string, V> {
   applyOrdering(
     results: QueryResult<K, V>[],
     orderBy: OrderBy[],
-    data: Map<K, V>,
+    _data: Map<K, V>,
   ): QueryResult<K, V>[] {
     if (orderBy.length === 0) {
       return results;
@@ -707,7 +732,7 @@ export class QueryExecutor<K extends string, V> {
       for (const order of orderBy) {
         let comparison = 0;
 
-        if (order.field === '_score') {
+        if (order.field === "_score") {
           // Sort by score
           const scoreA = a.score ?? 0;
           const scoreB = b.score ?? 0;
@@ -720,7 +745,7 @@ export class QueryExecutor<K extends string, V> {
         }
 
         if (comparison !== 0) {
-          return order.direction === 'desc' ? -comparison : comparison;
+          return order.direction === "desc" ? -comparison : comparison;
         }
       }
       return 0;
@@ -779,12 +804,22 @@ export class QueryExecutor<K extends string, V> {
 
     if (isLogicalQuery(predicate)) {
       switch (predicate.type) {
-        case 'and':
-          return predicate.children?.every((c) => this.evaluatePredicate(c, record)) ?? true;
-        case 'or':
-          return predicate.children?.some((c) => this.evaluatePredicate(c, record)) ?? false;
-        case 'not':
-          return predicate.child ? !this.evaluatePredicate(predicate.child, record) : true;
+        case "and":
+          return (
+            predicate.children?.every((c) =>
+              this.evaluatePredicate(c, record),
+            ) ?? true
+          );
+        case "or":
+          return (
+            predicate.children?.some((c) =>
+              this.evaluatePredicate(c, record),
+            ) ?? false
+          );
+        case "not":
+          return predicate.child
+            ? !this.evaluatePredicate(predicate.child, record)
+            : true;
       }
     }
 
@@ -794,11 +829,12 @@ export class QueryExecutor<K extends string, V> {
       const field = predicate.attribute;
       const fieldValue = rec[field];
 
-      if (typeof fieldValue !== 'string') {
+      if (typeof fieldValue !== "string") {
         return false;
       }
 
-      const searchText = predicate.type === 'matchPrefix' ? predicate.prefix : predicate.query;
+      const searchText =
+        predicate.type === "matchPrefix" ? predicate.prefix : predicate.query;
 
       // Simple case-insensitive substring match as fallback
       return fieldValue.toLowerCase().includes(searchText.toLowerCase());
@@ -817,28 +853,28 @@ export class QueryExecutor<K extends string, V> {
     const fieldValue = record[predicate.attribute];
 
     switch (predicate.type) {
-      case 'eq':
+      case "eq":
         return fieldValue === predicate.value;
 
-      case 'neq':
+      case "neq":
         return fieldValue !== predicate.value;
 
-      case 'gt':
+      case "gt":
         return (fieldValue as number) > (predicate.value as number);
 
-      case 'gte':
+      case "gte":
         return (fieldValue as number) >= (predicate.value as number);
 
-      case 'lt':
+      case "lt":
         return (fieldValue as number) < (predicate.value as number);
 
-      case 'lte':
+      case "lte":
         return (fieldValue as number) <= (predicate.value as number);
 
-      case 'in':
+      case "in":
         return predicate.values?.includes(fieldValue) ?? false;
 
-      case 'between': {
+      case "between": {
         const val = fieldValue as number;
         const from = predicate.from as number;
         const to = predicate.to as number;
@@ -850,42 +886,47 @@ export class QueryExecutor<K extends string, V> {
         return passesFrom && passesTo;
       }
 
-      case 'like': {
-        if (typeof fieldValue !== 'string' || typeof predicate.value !== 'string') {
+      case "like": {
+        if (
+          typeof fieldValue !== "string" ||
+          typeof predicate.value !== "string"
+        ) {
           return false;
         }
         // Simple LIKE implementation: % = any, _ = single char
-        const pattern = (predicate.value as string).replace(/%/g, '.*').replace(/_/g, '.');
-        const regex = new RegExp(`^${pattern}$`, 'i');
+        const pattern = (predicate.value as string)
+          .replace(/%/g, ".*")
+          .replace(/_/g, ".");
+        const regex = new RegExp(`^${pattern}$`, "i");
         return regex.test(fieldValue);
       }
 
-      case 'regex': {
-        if (typeof fieldValue !== 'string') {
+      case "regex": {
+        if (typeof fieldValue !== "string") {
           return false;
         }
         const regex = new RegExp(predicate.value as string);
         return regex.test(fieldValue);
       }
 
-      case 'has':
+      case "has":
         return fieldValue !== undefined && fieldValue !== null;
 
-      case 'contains': {
+      case "contains": {
         if (Array.isArray(fieldValue)) {
           return fieldValue.includes(predicate.value);
         }
         return false;
       }
 
-      case 'containsAll': {
+      case "containsAll": {
         if (!Array.isArray(fieldValue) || !predicate.values) {
           return false;
         }
         return predicate.values.every((v) => fieldValue.includes(v));
       }
 
-      case 'containsAny': {
+      case "containsAny": {
         if (!Array.isArray(fieldValue) || !predicate.values) {
           return false;
         }

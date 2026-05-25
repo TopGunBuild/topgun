@@ -1,4 +1,4 @@
-import { serialize, deserialize } from './serializer';
+import { serialize, deserialize } from "./serializer";
 
 /**
  * State of a PN Counter CRDT.
@@ -197,7 +197,7 @@ export class PNCounterImpl implements PNCounter {
     for (const listener of this.listeners) {
       try {
         listener(value);
-      } catch (e) {
+      } catch {
         // Silently catch listener errors to prevent breaking other listeners
       }
     }

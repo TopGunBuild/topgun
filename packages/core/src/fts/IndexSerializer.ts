@@ -1,5 +1,5 @@
-import { BM25InvertedIndex } from './BM25InvertedIndex';
-import type { SerializedIndex, TermInfo } from './types';
+import { BM25InvertedIndex } from "./BM25InvertedIndex";
+import type { SerializedIndex, TermInfo } from "./types";
 
 /**
  * Serializer for BM25InvertedIndex
@@ -43,15 +43,10 @@ export class IndexSerializer {
     return index;
   }
 
-  private serializeTerms(index: BM25InvertedIndex): SerializedIndex['terms'] {
-    const terms: SerializedIndex['terms'] = [];
-    const indexMap = (index as any).index as Map<string, TermInfo[]>; // Access private map
+  private serializeTerms(index: BM25InvertedIndex): SerializedIndex["terms"] {
+    const terms: SerializedIndex["terms"] = [];
 
-    // We need access to internal map.
-    // Since we can't easily access private 'index' property without 'any' cast or getter,
-    // we rely on iteration if available, or 'any' cast for this system component.
-    // The public API getTerms() only returns keys.
-
+    // Public API getTerms() returns keys; getDocumentsForTerm() retrieves postings.
     for (const term of index.getTerms()) {
       const termInfos = index.getDocumentsForTerm(term);
       terms.push({
@@ -68,7 +63,9 @@ export class IndexSerializer {
     return terms;
   }
 
-  private serializeDocLengths(index: BM25InvertedIndex): Record<string, number> {
+  private serializeDocLengths(
+    index: BM25InvertedIndex,
+  ): Record<string, number> {
     const lengths: Record<string, number> = {};
     for (const [docId, length] of index.getDocLengths()) {
       lengths[docId] = length;

@@ -13,17 +13,24 @@
  * @module query/adaptive/AutoIndexManager
  */
 
-import type { IndexAdvisor } from './IndexAdvisor';
-import type { QueryPatternTracker } from './QueryPatternTracker';
-import type { AutoIndexConfig, RecommendedIndexType, TrackedQueryType } from './types';
-import { ADAPTIVE_INDEXING_DEFAULTS } from './types';
-import type { Attribute } from '../Attribute';
-import { logger } from '../../utils/logger';
+import type { IndexAdvisor } from "./IndexAdvisor";
+import type { QueryPatternTracker } from "./QueryPatternTracker";
+import type {
+  AutoIndexConfig,
+  RecommendedIndexType,
+  TrackedQueryType,
+} from "./types";
+import { ADAPTIVE_INDEXING_DEFAULTS } from "./types";
+import type { Attribute } from "../Attribute";
+import { logger } from "../../utils/logger";
 
 /**
  * Interface for indexed map operations.
  * Used to decouple AutoIndexManager from IndexedLWWMap/IndexedORMap.
  */
+// K is included for structural symmetry with IndexedLWWMap<K, V> and IndexedORMap<K, V>
+// so callers can pass typed maps without casting; only V is used in the interface methods.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export interface IndexableMap<K, V> {
   /** Get all current indexes */
   getIndexes(): { attribute: { name: string }; type: string }[];
@@ -35,7 +42,9 @@ export interface IndexableMap<K, V> {
   addHashIndex<A>(attribute: Attribute<V, A>): void;
 
   /** Add a navigable index */
-  addNavigableIndex<A extends string | number>(attribute: Attribute<V, A>): void;
+  addNavigableIndex<A extends string | number>(
+    attribute: Attribute<V, A>,
+  ): void;
 
   /** Add an inverted index */
   addInvertedIndex<A extends string>(attribute: Attribute<V, A>): void;
@@ -70,7 +79,10 @@ interface RegisteredAttribute<V, A> {
 export class AutoIndexManager<K, V> {
   private readonly config: Required<AutoIndexConfig>;
   private readonly attributeQueryCounts = new Map<string, number>();
-  private readonly registeredAttributes = new Map<string, RegisteredAttribute<V, unknown>>();
+  private readonly registeredAttributes = new Map<
+    string,
+    RegisteredAttribute<V, unknown>
+  >();
   private readonly createdIndexes = new Set<string>();
   private map: IndexableMap<K, V> | null = null;
 
@@ -81,8 +93,10 @@ export class AutoIndexManager<K, V> {
   ) {
     this.config = {
       enabled: config.enabled,
-      threshold: config.threshold ?? ADAPTIVE_INDEXING_DEFAULTS.autoIndex.threshold!,
-      maxIndexes: config.maxIndexes ?? ADAPTIVE_INDEXING_DEFAULTS.autoIndex.maxIndexes!,
+      threshold:
+        config.threshold ?? ADAPTIVE_INDEXING_DEFAULTS.autoIndex.threshold!,
+      maxIndexes:
+        config.maxIndexes ?? ADAPTIVE_INDEXING_DEFAULTS.autoIndex.maxIndexes!,
       onIndexCreated: config.onIndexCreated ?? (() => {}),
     };
   }
@@ -267,7 +281,10 @@ export class AutoIndexManager<K, V> {
     if (!indexType) return;
 
     // Check if index type is allowed for this attribute
-    if (registered.allowedIndexTypes && !registered.allowedIndexTypes.includes(indexType)) {
+    if (
+      registered.allowedIndexTypes &&
+      !registered.allowedIndexTypes.includes(indexType)
+    ) {
       return;
     }
 
@@ -287,13 +304,15 @@ export class AutoIndexManager<K, V> {
 
     try {
       switch (indexType) {
-        case 'hash':
+        case "hash":
           this.map.addHashIndex(attribute);
           break;
-        case 'navigable':
-          this.map.addNavigableIndex(attribute as Attribute<V, string | number>);
+        case "navigable":
+          this.map.addNavigableIndex(
+            attribute as Attribute<V, string | number>,
+          );
           break;
-        case 'inverted':
+        case "inverted":
           this.map.addInvertedIndex(attribute as Attribute<V, string>);
           break;
       }
@@ -309,7 +328,7 @@ export class AutoIndexManager<K, V> {
     } catch (error) {
       // Index creation failed - log but don't throw
       logger.error(
-        { err: error, attributeName, indexType, context: 'index_creation' },
+        { err: error, attributeName, indexType, context: "index_creation" },
         `AutoIndexManager: Failed to create ${indexType} index on '${attributeName}'`,
       );
     }
