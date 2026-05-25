@@ -191,9 +191,7 @@ export interface ExplainToolArgs {
 /**
  * List maps tool arguments (no args required)
  */
-export interface ListMapsToolArgs {
-  // No arguments needed
-}
+export type ListMapsToolArgs = Record<never, never>;
 
 /**
  * Tool execution context

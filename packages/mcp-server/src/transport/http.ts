@@ -4,7 +4,6 @@
  * Provides HTTP-based transport for web MCP clients
  */
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createServer, type Server as HTTPServer } from 'node:http';

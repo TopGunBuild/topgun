@@ -8,7 +8,6 @@
  */
 
 import { TopGunMCPServer } from '../TopGunMCPServer';
-import type { MCPServerConfig, MCPToolResult } from '../types';
 
 describe('MCP Integration', () => {
   let server: TopGunMCPServer;
