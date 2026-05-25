@@ -13,8 +13,8 @@
  * @module query/QueryOptimizer
  */
 
-import { IndexRegistry } from "./IndexRegistry";
-import { StandingQueryRegistry } from "./StandingQueryRegistry";
+import { IndexRegistry } from './IndexRegistry';
+import { StandingQueryRegistry } from './StandingQueryRegistry';
 import type {
   Query,
   SimpleQueryNode,
@@ -27,16 +27,11 @@ import type {
   FusionStrategy,
   QueryContext,
   DistributedCost,
-} from "./QueryTypes";
-import {
-  isLogicalQuery,
-  isSimpleQuery,
-  isFTSQuery,
-  calculateTotalCost,
-} from "./QueryTypes";
-import type { FullTextIndex } from "../fts";
-import type { IndexQuery } from "./indexes/types";
-import type { CompoundIndex } from "./indexes/CompoundIndex";
+} from './QueryTypes';
+import { isLogicalQuery, isSimpleQuery, isFTSQuery, calculateTotalCost } from './QueryTypes';
+import type { FullTextIndex } from '../fts';
+import type { IndexQuery } from './indexes/types';
+import type { CompoundIndex } from './indexes/CompoundIndex';
 
 /**
  * Options for creating a QueryOptimizer.
@@ -153,9 +148,9 @@ export class QueryOptimizer<K, V> {
       if (standingIndex) {
         return {
           root: {
-            type: "index-scan",
+            type: 'index-scan',
             index: standingIndex,
-            query: { type: "equal", value: null }, // Dummy query, index returns pre-computed results
+            query: { type: 'equal', value: null }, // Dummy query, index returns pre-computed results
           },
           estimatedCost: standingIndex.getRetrievalCost(),
           usesIndexes: true,
@@ -185,7 +180,7 @@ export class QueryOptimizer<K, V> {
     // 1. disableOptimization: skip everything, return raw full-scan
     if (options.disableOptimization) {
       return {
-        root: { type: "full-scan", predicate: query },
+        root: { type: 'full-scan', predicate: query },
         estimatedCost: Number.MAX_SAFE_INTEGER,
         usesIndexes: false,
       };
@@ -195,9 +190,7 @@ export class QueryOptimizer<K, V> {
     if (options.useIndex) {
       const indexes = this.indexRegistry.getIndexes(options.useIndex);
       if (indexes.length === 0) {
-        throw new Error(
-          `Index hint: no index found for attribute "${options.useIndex}"`,
-        );
+        throw new Error(`Index hint: no index found for attribute "${options.useIndex}"`);
       }
       // Pick lowest-cost index for this attribute
       let best = indexes[0];
@@ -207,7 +200,7 @@ export class QueryOptimizer<K, V> {
         }
       }
       const step: PlanStep = {
-        type: "index-scan",
+        type: 'index-scan',
         index: best,
         query: this.buildHintedIndexQuery(query, options.useIndex),
       };
@@ -228,7 +221,7 @@ export class QueryOptimizer<K, V> {
 
     // 4. forceIndexScan: verify indexes are used
     if (options.forceIndexScan && !basePlan.usesIndexes) {
-      throw new Error("No suitable index found and forceIndexScan is enabled");
+      throw new Error('No suitable index found and forceIndexScan is enabled');
     }
 
     // 5. Apply sort/limit/cursor (existing logic)
@@ -244,17 +237,13 @@ export class QueryOptimizer<K, V> {
    */
   private applyPlanOptions(plan: QueryPlan, options: QueryOptions): QueryPlan {
     // If no sort/limit/cursor specified, return plan as-is
-    if (
-      !options.sort &&
-      options.limit === undefined &&
-      options.cursor === undefined
-    ) {
+    if (!options.sort && options.limit === undefined && options.cursor === undefined) {
       return plan;
     }
 
     let indexedSort = false;
     let sortField: string | undefined;
-    let sortDirection: "asc" | "desc" | undefined;
+    let sortDirection: 'asc' | 'desc' | undefined;
 
     // Check if sort can use NavigableIndex
     if (options.sort) {
@@ -264,8 +253,8 @@ export class QueryOptimizer<K, V> {
         sortDirection = options.sort[sortField];
 
         // Look for a NavigableIndex on the sort field
-        const sortIndex = this.indexRegistry.findBestIndex(sortField, "gte");
-        if (sortIndex?.type === "navigable") {
+        const sortIndex = this.indexRegistry.findBestIndex(sortField, 'gte');
+        if (sortIndex?.type === 'navigable') {
           indexedSort = true;
         }
       }
@@ -274,10 +263,7 @@ export class QueryOptimizer<K, V> {
     return {
       ...plan,
       indexedSort,
-      sort:
-        sortField && sortDirection
-          ? { field: sortField, direction: sortDirection }
-          : undefined,
+      sort: sortField && sortDirection ? { field: sortField, direction: sortDirection } : undefined,
       limit: options.limit,
       cursor: options.cursor,
     };
@@ -296,10 +282,7 @@ export class QueryOptimizer<K, V> {
    * @param attributeName - Hinted attribute name
    * @returns Index query for the hinted attribute
    */
-  private buildHintedIndexQuery(
-    query: Query,
-    attributeName: string,
-  ): IndexQuery<unknown> {
+  private buildHintedIndexQuery(query: Query, attributeName: string): IndexQuery<unknown> {
     // Simple query matching the hinted attribute
     if (isSimpleQuery(query) && query.attribute === attributeName) {
       return this.buildIndexQuery(query);
@@ -307,7 +290,7 @@ export class QueryOptimizer<K, V> {
 
     // FTS queries are not compatible with regular index lookups
     if (isFTSQuery(query)) {
-      return { type: "has" };
+      return { type: 'has' };
     }
 
     // Logical queries: search children for a matching simple predicate
@@ -320,7 +303,7 @@ export class QueryOptimizer<K, V> {
     }
 
     // No matching predicate found; retrieve all from index, filter later
-    return { type: "has" };
+    return { type: 'has' };
   }
 
   /**
@@ -337,24 +320,24 @@ export class QueryOptimizer<K, V> {
     }
 
     // Check if attribute is a primary key field
-    const primaryKeyFields = ["_key", "key", "id"];
+    const primaryKeyFields = ['_key', 'key', 'id'];
     if (!primaryKeyFields.includes(query.attribute)) {
       return null;
     }
 
     // Handle 'eq' type - single point lookup
-    if (query.type === "eq") {
+    if (query.type === 'eq') {
       return {
-        type: "point-lookup",
+        type: 'point-lookup',
         key: query.value,
         cost: 1,
       };
     }
 
     // Handle 'in' type - multi-point lookup
-    if (query.type === "in" && query.values) {
+    if (query.type === 'in' && query.values) {
       return {
-        type: "multi-point-lookup",
+        type: 'multi-point-lookup',
         keys: query.values,
         cost: query.values.length,
       };
@@ -375,7 +358,7 @@ export class QueryOptimizer<K, V> {
       return this.optimizeSimple(query);
     } else {
       // Unknown query type - fall back to full scan
-      return { type: "full-scan", predicate: query };
+      return { type: 'full-scan', predicate: query };
     }
   }
 
@@ -388,7 +371,7 @@ export class QueryOptimizer<K, V> {
     // Check if we have a FTS index for this field
     if (!this.hasFullTextIndex(field)) {
       // No FTS index - fall back to full scan
-      return { type: "full-scan", predicate: query };
+      return { type: 'full-scan', predicate: query };
     }
 
     // Create FTS scan step
@@ -402,47 +385,42 @@ export class QueryOptimizer<K, V> {
     const field = query.attribute;
 
     switch (query.type) {
-      case "match":
+      case 'match':
         return {
-          type: "fts-scan",
+          type: 'fts-scan',
           field,
           query: query.query,
-          ftsType: "match",
+          ftsType: 'match',
           options: query.options,
           returnsScored: true,
           estimatedCost: this.estimateFTSCost(field),
         };
 
-      case "matchPhrase":
+      case 'matchPhrase':
         return {
-          type: "fts-scan",
+          type: 'fts-scan',
           field,
           query: query.query,
-          ftsType: "matchPhrase",
-          options:
-            query.slop !== undefined ? { fuzziness: query.slop } : undefined,
+          ftsType: 'matchPhrase',
+          options: query.slop !== undefined ? { fuzziness: query.slop } : undefined,
           returnsScored: true,
           estimatedCost: this.estimateFTSCost(field),
         };
 
-      case "matchPrefix":
+      case 'matchPrefix':
         return {
-          type: "fts-scan",
+          type: 'fts-scan',
           field,
           query: query.prefix,
-          ftsType: "matchPrefix",
+          ftsType: 'matchPrefix',
           options:
-            query.maxExpansions !== undefined
-              ? { fuzziness: query.maxExpansions }
-              : undefined,
+            query.maxExpansions !== undefined ? { fuzziness: query.maxExpansions } : undefined,
           returnsScored: true,
           estimatedCost: this.estimateFTSCost(field),
         };
 
       default:
-        throw new Error(
-          `Unknown FTS query type: ${(query as FTSQueryNode).type}`,
-        );
+        throw new Error(`Unknown FTS query type: ${(query as FTSQueryNode).type}`);
     }
   }
 
@@ -482,16 +460,16 @@ export class QueryOptimizer<K, V> {
         result.ftsPredicates.push(pred);
       } else if (isSimpleQuery(pred)) {
         switch (pred.type) {
-          case "eq":
-          case "neq":
-          case "in":
+          case 'eq':
+          case 'neq':
+          case 'in':
             result.exactPredicates.push(pred);
             break;
-          case "gt":
-          case "gte":
-          case "lt":
-          case "lte":
-          case "between":
+          case 'gt':
+          case 'gte':
+          case 'lt':
+          case 'lte':
+          case 'between':
             result.rangePredicates.push(pred);
             break;
           default:
@@ -525,13 +503,13 @@ export class QueryOptimizer<K, V> {
 
     if (hasScored && hasBinary) {
       // Mixed: use RRF to combine ranked and unranked results
-      return "rrf";
+      return 'rrf';
     } else if (hasScored) {
       // All scored: filter by score, combine scores
-      return "score-filter";
+      return 'score-filter';
     } else {
       // All binary: simple intersection
-      return "intersection";
+      return 'intersection';
     }
   }
 
@@ -540,9 +518,9 @@ export class QueryOptimizer<K, V> {
    */
   private stepReturnsScored(step: PlanStep): boolean {
     switch (step.type) {
-      case "fts-scan":
+      case 'fts-scan':
         return true;
-      case "fusion":
+      case 'fusion':
         return step.returnsScored;
       default:
         return false;
@@ -557,19 +535,16 @@ export class QueryOptimizer<K, V> {
     const indexQueryType = this.mapQueryType(query.type);
 
     // Find best index for this attribute and query type
-    const index = this.indexRegistry.findBestIndex(
-      query.attribute,
-      indexQueryType,
-    );
+    const index = this.indexRegistry.findBestIndex(query.attribute, indexQueryType);
 
     if (index) {
       // Use index scan
       const indexQuery = this.buildIndexQuery(query);
-      return { type: "index-scan", index, query: indexQuery };
+      return { type: 'index-scan', index, query: indexQuery };
     }
 
     // No suitable index - fall back to full scan
-    return { type: "full-scan", predicate: query };
+    return { type: 'full-scan', predicate: query };
   }
 
   /**
@@ -577,11 +552,11 @@ export class QueryOptimizer<K, V> {
    */
   private optimizeLogical(query: LogicalQueryNode): PlanStep {
     switch (query.type) {
-      case "and":
+      case 'and':
         return this.optimizeAnd(query);
-      case "or":
+      case 'or':
         return this.optimizeOr(query);
-      case "not":
+      case 'not':
         return this.optimizeNot(query);
       default:
         throw new Error(`Unknown logical query type: ${query.type}`);
@@ -600,7 +575,7 @@ export class QueryOptimizer<K, V> {
    */
   private optimizeAnd(query: LogicalQueryNode): PlanStep {
     if (!query.children || query.children.length === 0) {
-      throw new Error("AND query must have children");
+      throw new Error('AND query must have children');
     }
 
     // Single child - just optimize it directly
@@ -625,12 +600,12 @@ export class QueryOptimizer<K, V> {
     const sortedSteps = sortedWithIndex.map((s) => s.step);
 
     // Separate indexed steps from full scan steps
-    const indexedSteps = sortedSteps.filter((s) => s.type === "index-scan");
-    const fullScanSteps = sortedSteps.filter((s) => s.type === "full-scan");
+    const indexedSteps = sortedSteps.filter((s) => s.type === 'index-scan');
+    const fullScanSteps = sortedSteps.filter((s) => s.type === 'full-scan');
 
     // No indexes available - fall back to single full scan
     if (indexedSteps.length === 0) {
-      return { type: "full-scan", predicate: query };
+      return { type: 'full-scan', predicate: query };
     }
 
     // One index available - use it as base, filter with remaining predicates
@@ -643,23 +618,23 @@ export class QueryOptimizer<K, V> {
 
       // Build filter predicate from remaining conditions
       const remainingPredicates = fullScanSteps.map((s) => {
-        if (s.type === "full-scan") {
+        if (s.type === 'full-scan') {
           return s.predicate;
         }
-        throw new Error("Unexpected step type in remaining predicates");
+        throw new Error('Unexpected step type in remaining predicates');
       });
 
       const filterPredicate: Query =
         remainingPredicates.length === 1
           ? remainingPredicates[0]
-          : { type: "and", children: remainingPredicates };
+          : { type: 'and', children: remainingPredicates };
 
-      return { type: "filter", source: indexStep, predicate: filterPredicate };
+      return { type: 'filter', source: indexStep, predicate: filterPredicate };
     }
 
     // Multiple indexes available - use intersection
     // CQEngine strategy: iterate smallest, check membership in others
-    return { type: "intersection", steps: indexedSteps };
+    return { type: 'intersection', steps: indexedSteps };
   }
 
   /**
@@ -678,7 +653,7 @@ export class QueryOptimizer<K, V> {
     const otherQueries: Query[] = [];
 
     for (const child of children) {
-      if (isSimpleQuery(child) && child.type === "eq") {
+      if (isSimpleQuery(child) && child.type === 'eq') {
         eqQueries.push(child);
       } else {
         otherQueries.push(child);
@@ -707,24 +682,18 @@ export class QueryOptimizer<K, V> {
 
     // Create compound index scan step
     const compoundStep: PlanStep = {
-      type: "index-scan",
-      index: compoundIndex as unknown as import("./indexes/types").Index<
-        unknown,
-        unknown,
-        unknown
-      >,
-      query: { type: "compound", values },
+      type: 'index-scan',
+      index: compoundIndex as unknown as import('./indexes/types').Index<unknown, unknown, unknown>,
+      query: { type: 'compound', values },
     };
 
     // If there are other (non-eq) queries, apply them as filters
     if (otherQueries.length > 0) {
       const filterPredicate: Query =
-        otherQueries.length === 1
-          ? otherQueries[0]
-          : { type: "and", children: otherQueries };
+        otherQueries.length === 1 ? otherQueries[0] : { type: 'and', children: otherQueries };
 
       return {
-        type: "filter",
+        type: 'filter',
         source: compoundStep,
         predicate: filterPredicate,
       };
@@ -770,7 +739,7 @@ export class QueryOptimizer<K, V> {
    */
   private optimizeOr(query: LogicalQueryNode): PlanStep {
     if (!query.children || query.children.length === 0) {
-      throw new Error("OR query must have children");
+      throw new Error('OR query must have children');
     }
 
     // Single child - just optimize it directly
@@ -781,12 +750,12 @@ export class QueryOptimizer<K, V> {
     const childSteps = query.children.map((child) => this.optimizeNode(child));
 
     // If all children are full scans, do a single full scan
-    if (childSteps.every((s) => s.type === "full-scan")) {
-      return { type: "full-scan", predicate: query };
+    if (childSteps.every((s) => s.type === 'full-scan')) {
+      return { type: 'full-scan', predicate: query };
     }
 
     // Create union of all results
-    return { type: "union", steps: childSteps };
+    return { type: 'union', steps: childSteps };
   }
 
   /**
@@ -795,13 +764,13 @@ export class QueryOptimizer<K, V> {
    */
   private optimizeNot(query: LogicalQueryNode): PlanStep {
     if (!query.child) {
-      throw new Error("NOT query must have a child");
+      throw new Error('NOT query must have a child');
     }
 
     const childStep = this.optimizeNode(query.child);
 
     return {
-      type: "not",
+      type: 'not',
       source: childStep,
       allKeys: () => new Set(), // Will be provided by executor at runtime
     };
@@ -813,20 +782,20 @@ export class QueryOptimizer<K, V> {
    */
   private mapQueryType(type: string): string {
     const mapping: Record<string, string> = {
-      eq: "equal",
-      neq: "equal", // Will negate in execution
-      gt: "gt",
-      gte: "gte",
-      lt: "lt",
-      lte: "lte",
-      in: "in",
-      has: "has",
-      like: "like",
-      regex: "regex",
-      between: "between",
-      contains: "contains",
-      containsAll: "containsAll",
-      containsAny: "containsAny",
+      eq: 'equal',
+      neq: 'equal', // Will negate in execution
+      gt: 'gt',
+      gte: 'gte',
+      lt: 'lt',
+      lte: 'lte',
+      in: 'in',
+      has: 'has',
+      like: 'like',
+      regex: 'regex',
+      between: 'between',
+      contains: 'contains',
+      containsAll: 'containsAll',
+      containsAny: 'containsAny',
     };
     return mapping[type] ?? type;
   }
@@ -836,35 +805,35 @@ export class QueryOptimizer<K, V> {
    */
   private buildIndexQuery(query: SimpleQueryNode): IndexQuery<unknown> {
     switch (query.type) {
-      case "eq":
-      case "neq":
-        return { type: "equal", value: query.value };
-      case "gt":
-        return { type: "gt", value: query.value };
-      case "gte":
-        return { type: "gte", value: query.value };
-      case "lt":
-        return { type: "lt", value: query.value };
-      case "lte":
-        return { type: "lte", value: query.value };
-      case "in":
-        return { type: "in", values: query.values };
-      case "has":
-        return { type: "has" };
-      case "between":
+      case 'eq':
+      case 'neq':
+        return { type: 'equal', value: query.value };
+      case 'gt':
+        return { type: 'gt', value: query.value };
+      case 'gte':
+        return { type: 'gte', value: query.value };
+      case 'lt':
+        return { type: 'lt', value: query.value };
+      case 'lte':
+        return { type: 'lte', value: query.value };
+      case 'in':
+        return { type: 'in', values: query.values };
+      case 'has':
+        return { type: 'has' };
+      case 'between':
         return {
-          type: "between",
+          type: 'between',
           from: query.from,
           to: query.to,
           fromInclusive: query.fromInclusive,
           toInclusive: query.toInclusive,
         };
-      case "contains":
-        return { type: "contains", value: query.value };
-      case "containsAll":
-        return { type: "containsAll", values: query.values };
-      case "containsAny":
-        return { type: "containsAny", values: query.values };
+      case 'contains':
+        return { type: 'contains', value: query.value };
+      case 'containsAll':
+        return { type: 'containsAll', values: query.values };
+      case 'containsAny':
+        return { type: 'containsAny', values: query.values };
       default:
         throw new Error(`Cannot build index query for type: ${query.type}`);
     }
@@ -875,21 +844,21 @@ export class QueryOptimizer<K, V> {
    */
   private estimateCost(step: PlanStep): number {
     switch (step.type) {
-      case "point-lookup":
-      case "multi-point-lookup":
+      case 'point-lookup':
+      case 'multi-point-lookup':
         return step.cost;
 
-      case "index-scan":
+      case 'index-scan':
         return step.index.getRetrievalCost();
 
-      case "full-scan":
+      case 'full-scan':
         return Number.MAX_SAFE_INTEGER;
 
-      case "intersection":
+      case 'intersection':
         // Cost is minimum of all (we only iterate smallest)
         return Math.min(...step.steps.map((s) => this.estimateCost(s)));
 
-      case "union":
+      case 'union':
         // Cost is sum of all
         return step.steps.reduce((sum, s) => {
           const cost = this.estimateCost(s);
@@ -900,19 +869,19 @@ export class QueryOptimizer<K, V> {
           return Math.min(sum + cost, Number.MAX_SAFE_INTEGER);
         }, 0);
 
-      case "filter":
+      case 'filter':
         // Filter adds overhead to source cost
         return this.estimateCost(step.source) + 10;
 
-      case "not":
+      case 'not':
         // NOT is expensive (needs all keys)
         return this.estimateCost(step.source) + 100;
 
       // FTS step types
-      case "fts-scan":
+      case 'fts-scan':
         return step.estimatedCost;
 
-      case "fusion":
+      case 'fusion':
         // Fusion cost is sum of all child costs + fusion overhead
         return (
           step.steps.reduce((sum, s) => {
@@ -942,10 +911,7 @@ export class QueryOptimizer<K, V> {
    * @param context - Distributed query context (optional)
    * @returns Distributed cost breakdown
    */
-  estimateDistributedCost(
-    step: PlanStep,
-    context?: QueryContext,
-  ): DistributedCost {
+  estimateDistributedCost(step: PlanStep, context?: QueryContext): DistributedCost {
     const baseCost = this.estimateCost(step);
 
     // If no context or single node, no network cost
@@ -962,47 +928,47 @@ export class QueryOptimizer<K, V> {
     let networkCost = 0;
 
     switch (step.type) {
-      case "full-scan":
+      case 'full-scan':
         // Full scan requires broadcasting query to all nodes
         networkCost = context.nodeCount * 10;
         break;
 
-      case "index-scan":
+      case 'index-scan':
         // Index scan may be local or require network hop
         networkCost = 5; // Assume remote by default
         break;
 
-      case "point-lookup":
+      case 'point-lookup':
         // Point lookup: one network hop if remote
         networkCost = 5; // Assume remote by default
         break;
 
-      case "multi-point-lookup":
+      case 'multi-point-lookup':
         // Multiple point lookups may hit multiple partitions
         networkCost = Math.min(step.keys.length, context.nodeCount) * 5;
         break;
 
-      case "intersection":
-      case "union":
+      case 'intersection':
+      case 'union':
         // Aggregating results from multiple sources
         networkCost = step.steps.length * 5;
         break;
 
-      case "filter":
+      case 'filter':
         // Filter inherits source network cost
         return this.estimateDistributedCost(step.source, context);
 
-      case "not":
+      case 'not':
         // NOT needs all keys plus source
         networkCost = context.nodeCount * 5;
         break;
 
-      case "fts-scan":
+      case 'fts-scan':
         // FTS typically broadcasts to nodes with index shards
         networkCost = Math.ceil(context.nodeCount / 2) * 5;
         break;
 
-      case "fusion":
+      case 'fusion':
         // Sum of child step costs
         networkCost = step.steps.reduce(
           (sum, s) => sum + this.estimateDistributedCost(s, context).network,
@@ -1037,31 +1003,31 @@ export class QueryOptimizer<K, V> {
    */
   private usesIndexes(step: PlanStep): boolean {
     switch (step.type) {
-      case "point-lookup":
-      case "multi-point-lookup":
+      case 'point-lookup':
+      case 'multi-point-lookup':
         return true;
 
-      case "index-scan":
+      case 'index-scan':
         return true;
 
-      case "full-scan":
+      case 'full-scan':
         return false;
 
-      case "intersection":
-      case "union":
+      case 'intersection':
+      case 'union':
         return step.steps.some((s) => this.usesIndexes(s));
 
-      case "filter":
+      case 'filter':
         return this.usesIndexes(step.source);
 
-      case "not":
+      case 'not':
         return this.usesIndexes(step.source);
 
       // FTS step types
-      case "fts-scan":
+      case 'fts-scan':
         return true; // FTS uses FullTextIndex
 
-      case "fusion":
+      case 'fusion':
         return step.steps.some((s) => this.usesIndexes(s));
 
       default:

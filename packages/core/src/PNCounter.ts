@@ -1,4 +1,4 @@
-import { serialize, deserialize } from "./serializer";
+import { serialize, deserialize } from './serializer';
 
 /**
  * State of a PN Counter CRDT.

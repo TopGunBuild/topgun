@@ -7,8 +7,8 @@
  * @module query/IndexRegistry
  */
 
-import type { Index } from "./indexes/types";
-import { isCompoundIndex, type CompoundIndex } from "./indexes/CompoundIndex";
+import type { Index } from './indexes/types';
+import { isCompoundIndex, type CompoundIndex } from './indexes/CompoundIndex';
 
 /**
  * Registry for managing indexes on a collection.
@@ -159,19 +159,13 @@ export class IndexRegistry<K, V> {
    * @param queryType - Query type (e.g., 'equal', 'gt', 'between')
    * @returns Best matching index or null if none found
    */
-  findBestIndex(
-    attributeName: string,
-    queryType: string,
-  ): Index<K, V, unknown> | null {
+  findBestIndex(attributeName: string, queryType: string): Index<K, V, unknown> | null {
     const indexes = this.getIndexes(attributeName);
     let best: Index<K, V, unknown> | null = null;
     let bestCost = Infinity;
 
     for (const index of indexes) {
-      if (
-        index.supportsQuery(queryType) &&
-        index.getRetrievalCost() < bestCost
-      ) {
+      if (index.supportsQuery(queryType) && index.getRetrievalCost() < bestCost) {
         best = index;
         bestCost = index.getRetrievalCost();
       }
@@ -187,10 +181,7 @@ export class IndexRegistry<K, V> {
    * @param queryType - Query type
    * @returns Array of matching indexes sorted by retrieval cost
    */
-  findIndexes(
-    attributeName: string,
-    queryType: string,
-  ): Index<K, V, unknown>[] {
+  findIndexes(attributeName: string, queryType: string): Index<K, V, unknown>[] {
     const indexes = this.getIndexes(attributeName);
     return indexes
       .filter((index) => index.supportsQuery(queryType))
@@ -248,7 +239,7 @@ export class IndexRegistry<K, V> {
    * Create a compound key from attribute names (sorted for consistency).
    */
   private makeCompoundKey(attributeNames: string[]): string {
-    return [...attributeNames].sort().join("+");
+    return [...attributeNames].sort().join('+');
   }
 
   /**
@@ -372,7 +363,7 @@ export class IndexRegistry<K, V> {
     for (const compoundIndex of this.compoundIndexes.values()) {
       indexStats.push({
         attribute: compoundIndex.compoundName,
-        type: "compound",
+        type: 'compound',
         stats: compoundIndex.getStats(),
       });
     }

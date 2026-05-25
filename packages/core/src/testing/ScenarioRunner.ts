@@ -1,7 +1,7 @@
-import { VirtualClock } from "./VirtualClock";
-import { SeededRNG } from "./SeededRNG";
-import { VirtualNetwork } from "./VirtualNetwork";
-import { InvariantChecker } from "./InvariantChecker";
+import { VirtualClock } from './VirtualClock';
+import { SeededRNG } from './SeededRNG';
+import { VirtualNetwork } from './VirtualNetwork';
+import { InvariantChecker } from './InvariantChecker';
 
 /**
  * Configuration for a simulation scenario.
@@ -72,10 +72,10 @@ export class ScenarioRunner {
   constructor(config: ScenarioConfig) {
     // Validate config
     if (!config.nodes || config.nodes.length === 0) {
-      throw new Error("Scenario must have at least one node");
+      throw new Error('Scenario must have at least one node');
     }
     if (config.duration <= 0) {
-      throw new Error("Duration must be positive");
+      throw new Error('Duration must be positive');
     }
 
     // Generate seed if not provided

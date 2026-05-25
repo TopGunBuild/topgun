@@ -1,5 +1,5 @@
-import { LWWRecord } from "./LWWMap";
-import { hashString } from "./utils/hash";
+import { LWWRecord } from './LWWMap';
+import { hashString } from './utils/hash';
 
 export interface MerkleNode {
   hash: number;
@@ -21,10 +21,7 @@ export class MerkleTree {
   private root: MerkleNode;
   private readonly depth: number;
 
-  constructor(
-    records: Map<string, LWWRecord<any>> = new Map(),
-    depth: number = 3,
-  ) {
+  constructor(records: Map<string, LWWRecord<any>> = new Map(), depth: number = 3) {
     this.depth = depth;
     this.root = { hash: 0, children: {} };
     // Build initial tree
@@ -44,7 +41,7 @@ export class MerkleTree {
     );
     // We use the hash of the KEY for routing, so the record stays in the same bucket
     // regardless of timestamp changes.
-    const pathHash = hashString(key).toString(16).padStart(8, "0");
+    const pathHash = hashString(key).toString(16).padStart(8, '0');
 
     this.updateNode(this.root, key, itemHash, pathHash, 0);
   }
@@ -54,16 +51,11 @@ export class MerkleTree {
    * Necessary for Garbage Collection of tombstones.
    */
   public remove(key: string) {
-    const pathHash = hashString(key).toString(16).padStart(8, "0");
+    const pathHash = hashString(key).toString(16).padStart(8, '0');
     this.removeNode(this.root, key, pathHash, 0);
   }
 
-  private removeNode(
-    node: MerkleNode,
-    key: string,
-    pathHash: string,
-    level: number,
-  ): number {
+  private removeNode(node: MerkleNode, key: string, pathHash: string, level: number): number {
     // Leaf Node Logic
     if (level >= this.depth) {
       if (node.entries) {
@@ -85,12 +77,7 @@ export class MerkleTree {
       // removeNode has a side effect of updating the child node's hash in-place;
       // the returned hash is unused here because we recalculate from children below.
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      const childHash = this.removeNode(
-        node.children[bucketChar],
-        key,
-        pathHash,
-        level + 1,
-      );
+      const childHash = this.removeNode(node.children[bucketChar], key, pathHash, level + 1);
 
       // Optimization: if child is empty/zero, we might want to remove it, but for now just recalc.
     }
@@ -135,13 +122,7 @@ export class MerkleTree {
       node.children[bucketChar] = { hash: 0 };
     }
 
-    this.updateNode(
-      node.children[bucketChar],
-      key,
-      itemHash,
-      pathHash,
-      level + 1,
-    );
+    this.updateNode(node.children[bucketChar], key, itemHash, pathHash, level + 1);
 
     // Recalculate this node's hash from children
     let h = 0;
