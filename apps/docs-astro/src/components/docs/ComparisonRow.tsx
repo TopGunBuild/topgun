@@ -11,7 +11,13 @@ interface ComparisonRowProps {
   rx: CellValue;
 }
 
-const CellContent = ({ value, isTopGun: _isTopGun = false }: { value: CellValue; isTopGun?: boolean }) => {
+const CellContent = ({
+  value,
+  isTopGun: _isTopGun = false,
+}: {
+  value: CellValue;
+  isTopGun?: boolean;
+}) => {
   if (typeof value === 'string') {
     return <>{value}</>;
   }
