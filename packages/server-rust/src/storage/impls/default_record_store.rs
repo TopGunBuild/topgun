@@ -1284,7 +1284,9 @@ mod tests {
         let store = make_store();
         // Insert 3 dirty + 2 clean records.
         for i in 0..3_u32 {
-            store.storage().put(&format!("dirty_{i}"), make_dirty_record());
+            store
+                .storage()
+                .put(&format!("dirty_{i}"), make_dirty_record());
         }
         for i in 0..2_u32 {
             store
@@ -1317,9 +1319,10 @@ mod tests {
 
         // Insert 4 clean records.
         for i in 0..4_u32 {
-            store
-                .storage()
-                .put(&format!("k{i}"), make_clean_record(i64::from(i) * 100 + 100));
+            store.storage().put(
+                &format!("k{i}"),
+                make_clean_record(i64::from(i) * 100 + 100),
+            );
         }
 
         // Evict 3 of the 4 clean records.

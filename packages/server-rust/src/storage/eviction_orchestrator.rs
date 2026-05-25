@@ -49,7 +49,11 @@ impl EvictionOrchestrator {
         factory: Arc<RecordStoreFactory>,
         shutdown: watch::Receiver<bool>,
     ) -> Self {
-        Self { config, factory, shutdown }
+        Self {
+            config,
+            factory,
+            shutdown,
+        }
     }
 
     /// Run the eviction loop until a shutdown signal is received.
@@ -109,8 +113,7 @@ impl EvictionOrchestrator {
         }
 
         // Step 5: Evict proportionally per store down toward the low water mark.
-        let low_threshold =
-            self.config.max_ram_bytes * u64::from(self.config.low_water_pct) / 100;
+        let low_threshold = self.config.max_ram_bytes * u64::from(self.config.low_water_pct) / 100;
         let to_free = current_ram.saturating_sub(low_threshold);
 
         // avg_record_cost is safe: total_record_count > 0 guaranteed by step 4.
@@ -206,9 +209,7 @@ mod tests {
     use crate::storage::impls::StorageConfig;
     use crate::storage::map_data_store::MapDataStore;
     use crate::storage::record::Record;
-    use crate::storage::record_store::{
-        CallerProvenance, ExpiryPolicy, ExpiryReason, RecordStore,
-    };
+    use crate::storage::record_store::{CallerProvenance, ExpiryPolicy, ExpiryReason, RecordStore};
 
     // ---------------------------------------------------------------------------
     // Mock RecordStore implementation for orchestrator tests
@@ -328,21 +329,17 @@ mod tests {
             Ok(())
         }
 
-        async fn get_all(
-            &self,
-            _keys: &[String],
-        ) -> anyhow::Result<Vec<(String, Record)>> {
+        async fn get_all(&self, _keys: &[String]) -> anyhow::Result<Vec<(String, Record)>> {
             Ok(vec![])
         }
 
-        fn fetch_keys(
-            &self,
-            _cursor: &IterationCursor,
-            _size: usize,
-        ) -> FetchResult<String> {
+        fn fetch_keys(&self, _cursor: &IterationCursor, _size: usize) -> FetchResult<String> {
             FetchResult {
                 items: vec![],
-                next_cursor: IterationCursor { state: vec![], finished: true },
+                next_cursor: IterationCursor {
+                    state: vec![],
+                    finished: true,
+                },
             }
         }
 
@@ -353,16 +350,14 @@ mod tests {
         ) -> FetchResult<(String, Record)> {
             FetchResult {
                 items: vec![],
-                next_cursor: IterationCursor { state: vec![], finished: true },
+                next_cursor: IterationCursor {
+                    state: vec![],
+                    finished: true,
+                },
             }
         }
 
-        fn for_each_boxed(
-            &self,
-            _consumer: &mut dyn FnMut(&str, &Record),
-            _is_backup: bool,
-        ) {
-        }
+        fn for_each_boxed(&self, _consumer: &mut dyn FnMut(&str, &Record), _is_backup: bool) {}
 
         fn has_expired(&self, _key: &str, _now: i64, _is_backup: bool) -> ExpiryReason {
             ExpiryReason::NotExpired
@@ -374,7 +369,11 @@ mod tests {
             false
         }
 
-        fn evict(&self, _key: &str, _is_backup: bool) -> Option<crate::storage::record::RecordValue> {
+        fn evict(
+            &self,
+            _key: &str,
+            _is_backup: bool,
+        ) -> Option<crate::storage::record::RecordValue> {
             None
         }
 
@@ -624,8 +623,7 @@ mod tests {
         // Advance past one interval to unblock any pending sleep.
         tokio::time::advance(Duration::from_millis(config.interval_ms + 100)).await;
 
-        let result =
-            tokio::time::timeout(Duration::from_millis(200), handle).await;
+        let result = tokio::time::timeout(Duration::from_millis(200), handle).await;
 
         assert!(
             result.is_ok(),
@@ -656,11 +654,7 @@ mod tests {
                 }
             }
 
-            fn record_debug(
-                &mut self,
-                field: &tracing::field::Field,
-                value: &dyn std::fmt::Debug,
-            ) {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
                 if field.name() == "message" {
                     self.0 = format!("{value:?}");
                 }
@@ -689,7 +683,9 @@ mod tests {
         }
 
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let layer = WarnCapture { messages: Arc::clone(&captured) };
+        let layer = WarnCapture {
+            messages: Arc::clone(&captured),
+        };
         let subscriber = tracing_subscriber::registry().with(layer);
 
         tracing::subscriber::with_default(subscriber, || {

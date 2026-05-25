@@ -241,9 +241,7 @@ fn delete_one(db: &redb::Database, map: &str, key: &str, is_backup: bool) -> any
 /// the table has never been written to.
 fn table_exists(read_txn: &redb::ReadTransaction, table_name: &str) -> bool {
     match read_txn.list_tables() {
-        Ok(iter) => iter
-            .into_iter()
-            .any(|h| h.name() == table_name),
+        Ok(iter) => iter.into_iter().any(|h| h.name() == table_name),
         Err(_) => false,
     }
 }
@@ -425,33 +423,65 @@ mod tests {
     #[tokio::test]
     async fn add_then_load_returns_value() {
         let (store, _dir) = fresh_store();
-        store.add("users", "alice", &dummy_value("v1"), 0, 1000).await.unwrap();
-        let got = store.load("users", "alice").await.unwrap().expect("present");
+        store
+            .add("users", "alice", &dummy_value("v1"), 0, 1000)
+            .await
+            .unwrap();
+        let got = store
+            .load("users", "alice")
+            .await
+            .unwrap()
+            .expect("present");
         assert!(matches!(got, RecordValue::Lww { value: Value::String(ref s), .. } if s == "v1"));
     }
 
     #[tokio::test]
     async fn add_overwrites_previous_value() {
         let (store, _dir) = fresh_store();
-        store.add("users", "alice", &dummy_value("v1"), 0, 1000).await.unwrap();
-        store.add("users", "alice", &dummy_value("v2"), 0, 1001).await.unwrap();
-        let got = store.load("users", "alice").await.unwrap().expect("present");
+        store
+            .add("users", "alice", &dummy_value("v1"), 0, 1000)
+            .await
+            .unwrap();
+        store
+            .add("users", "alice", &dummy_value("v2"), 0, 1001)
+            .await
+            .unwrap();
+        let got = store
+            .load("users", "alice")
+            .await
+            .unwrap()
+            .expect("present");
         assert!(matches!(got, RecordValue::Lww { value: Value::String(ref s), .. } if s == "v2"));
     }
 
     #[tokio::test]
     async fn add_backup_is_isolated_from_primary() {
         let (store, _dir) = fresh_store();
-        store.add("users", "alice", &dummy_value("primary"), 0, 1000).await.unwrap();
-        store.add_backup("users", "alice", &dummy_value("backup"), 0, 1000).await.unwrap();
-        let got = store.load("users", "alice").await.unwrap().expect("primary");
-        assert!(matches!(got, RecordValue::Lww { value: Value::String(ref s), .. } if s == "primary"));
+        store
+            .add("users", "alice", &dummy_value("primary"), 0, 1000)
+            .await
+            .unwrap();
+        store
+            .add_backup("users", "alice", &dummy_value("backup"), 0, 1000)
+            .await
+            .unwrap();
+        let got = store
+            .load("users", "alice")
+            .await
+            .unwrap()
+            .expect("primary");
+        assert!(
+            matches!(got, RecordValue::Lww { value: Value::String(ref s), .. } if s == "primary")
+        );
     }
 
     #[tokio::test]
     async fn remove_deletes_value() {
         let (store, _dir) = fresh_store();
-        store.add("users", "alice", &dummy_value("v1"), 0, 1000).await.unwrap();
+        store
+            .add("users", "alice", &dummy_value("v1"), 0, 1000)
+            .await
+            .unwrap();
         store.remove("users", "alice", 1001).await.unwrap();
         assert!(store.load("users", "alice").await.unwrap().is_none());
     }
@@ -461,15 +491,27 @@ mod tests {
         let (store, _dir) = fresh_store();
         // Both nonexistent table and nonexistent key paths must be no-op.
         store.remove("never_written", "k", 1000).await.unwrap();
-        store.add("users", "bob", &dummy_value("v"), 0, 1000).await.unwrap();
-        store.remove("users", "alice_not_present", 1000).await.unwrap();
+        store
+            .add("users", "bob", &dummy_value("v"), 0, 1000)
+            .await
+            .unwrap();
+        store
+            .remove("users", "alice_not_present", 1000)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn remove_backup_only_affects_backup() {
         let (store, _dir) = fresh_store();
-        store.add("users", "alice", &dummy_value("primary"), 0, 1000).await.unwrap();
-        store.add_backup("users", "alice", &dummy_value("backup"), 0, 1000).await.unwrap();
+        store
+            .add("users", "alice", &dummy_value("primary"), 0, 1000)
+            .await
+            .unwrap();
+        store
+            .add_backup("users", "alice", &dummy_value("backup"), 0, 1000)
+            .await
+            .unwrap();
         store.remove_backup("users", "alice", 1001).await.unwrap();
         // Primary survives.
         assert!(store.load("users", "alice").await.unwrap().is_some());
@@ -481,17 +523,29 @@ mod tests {
         // Table never created path:
         assert!(store.load("never", "k").await.unwrap().is_none());
         // Table exists but key missing path:
-        store.add("users", "alice", &dummy_value("v"), 0, 1000).await.unwrap();
+        store
+            .add("users", "alice", &dummy_value("v"), 0, 1000)
+            .await
+            .unwrap();
         assert!(store.load("users", "ghost").await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn load_all_returns_subset() {
         let (store, _dir) = fresh_store();
-        store.add("m", "a", &dummy_value("a"), 0, 1000).await.unwrap();
-        store.add("m", "b", &dummy_value("b"), 0, 1000).await.unwrap();
+        store
+            .add("m", "a", &dummy_value("a"), 0, 1000)
+            .await
+            .unwrap();
+        store
+            .add("m", "b", &dummy_value("b"), 0, 1000)
+            .await
+            .unwrap();
         let got = store
-            .load_all("m", &["a".to_string(), "b".to_string(), "missing".to_string()])
+            .load_all(
+                "m",
+                &["a".to_string(), "b".to_string(), "missing".to_string()],
+            )
             .await
             .unwrap();
         assert_eq!(got.len(), 2, "missing key silently absent");
@@ -500,10 +554,7 @@ mod tests {
     #[tokio::test]
     async fn load_all_on_missing_table_returns_empty() {
         let (store, _dir) = fresh_store();
-        let got = store
-            .load_all("never", &["a".to_string()])
-            .await
-            .unwrap();
+        let got = store.load_all("never", &["a".to_string()]).await.unwrap();
         assert!(got.is_empty());
     }
 
@@ -549,7 +600,10 @@ mod tests {
     #[tokio::test]
     async fn flush_key_writes_through() {
         let (store, _dir) = fresh_store();
-        store.flush_key("m", "k", &dummy_value("v"), false).await.unwrap();
+        store
+            .flush_key("m", "k", &dummy_value("v"), false)
+            .await
+            .unwrap();
         let got = store.load("m", "k").await.unwrap().expect("present");
         assert!(matches!(got, RecordValue::Lww { value: Value::String(ref s), .. } if s == "v"));
     }
@@ -574,14 +628,23 @@ mod tests {
         let path = dir.path().join("durable.redb");
         {
             let store = RedbDataStore::new(&path).unwrap();
-            store.add("m", "k", &dummy_value("persisted"), 0, 1000).await.unwrap();
+            store
+                .add("m", "k", &dummy_value("persisted"), 0, 1000)
+                .await
+                .unwrap();
             store.close().await.unwrap();
             // Drop releases the redb lockfile.
         }
         // Reopen on the same path -- value must survive.
         let store = RedbDataStore::new(&path).unwrap();
-        let got = store.load("m", "k").await.unwrap().expect("survives reopen");
-        assert!(matches!(got, RecordValue::Lww { value: Value::String(ref s), .. } if s == "persisted"));
+        let got = store
+            .load("m", "k")
+            .await
+            .unwrap()
+            .expect("survives reopen");
+        assert!(
+            matches!(got, RecordValue::Lww { value: Value::String(ref s), .. } if s == "persisted")
+        );
     }
 
     #[tokio::test]
@@ -591,7 +654,10 @@ mod tests {
         let err = store.add(bad, "k", &dummy_value("v"), 0, 1000).await;
         assert!(err.is_err(), "metacharacter map name must be rejected");
         let msg = format!("{}", err.unwrap_err());
-        assert!(msg.contains("Invalid map name"), "error message names the violation");
+        assert!(
+            msg.contains("Invalid map name"),
+            "error message names the violation"
+        );
     }
 
     #[tokio::test]
@@ -615,12 +681,16 @@ mod tests {
         let s2 = Arc::clone(&store);
         let h1 = tokio::spawn(async move {
             for i in 0..10 {
-                s1.add("m", &format!("a{i}"), &dummy_value("A"), 0, 1000).await.unwrap();
+                s1.add("m", &format!("a{i}"), &dummy_value("A"), 0, 1000)
+                    .await
+                    .unwrap();
             }
         });
         let h2 = tokio::spawn(async move {
             for i in 0..10 {
-                s2.add("m", &format!("b{i}"), &dummy_value("B"), 0, 1000).await.unwrap();
+                s2.add("m", &format!("b{i}"), &dummy_value("B"), 0, 1000)
+                    .await
+                    .unwrap();
             }
         });
         h1.await.unwrap();

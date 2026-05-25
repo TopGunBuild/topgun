@@ -18,8 +18,8 @@ use uuid::Uuid;
 
 use super::assignment::compute_assignment;
 use super::messages::{
-    ClusterMessage, JoinRejectReason, JoinRequestPayload, JoinResponsePayload, MasterElectedPayload,
-    MembersUpdatePayload,
+    ClusterMessage, JoinRejectReason, JoinRequestPayload, JoinResponsePayload,
+    MasterElectedPayload, MembersUpdatePayload,
 };
 use super::peer_connection::PeerConnectionMap;
 use super::state::{ClusterChange, ClusterState, InboundClusterMessage};
@@ -330,7 +330,8 @@ impl ClusterFormationService {
             self.local_member.host, self.local_member.cluster_port
         );
 
-        let total_deadline = Instant::now() + Duration::from_millis(MASTER_ELECTION_TOTAL_BUDGET_MS);
+        let total_deadline =
+            Instant::now() + Duration::from_millis(MASTER_ELECTION_TOTAL_BUDGET_MS);
 
         // Tiebreak set always contains self; grows as NotMasterYet rejections arrive.
         let mut tiebreak_set: HashSet<String> = HashSet::new();
@@ -369,7 +370,10 @@ impl ClusterFormationService {
                         Ok(stream) => {
                             info!(seed = %seed_addr, "Connected to seed node");
                             match self.send_join_request(stream, seed_addr).await {
-                                SeedAttemptOutcome::Accepted { stream, master_node_id } => {
+                                SeedAttemptOutcome::Accepted {
+                                    stream,
+                                    master_node_id,
+                                } => {
                                     // Hand off the TCP connection to per-peer handler
                                     let this = Arc::clone(self);
                                     tokio::spawn(async move {
@@ -449,8 +453,12 @@ impl ClusterFormationService {
 
                 match TcpStream::connect(&payload.master_address).await {
                     Ok(stream) => {
-                        if let SeedAttemptOutcome::Accepted { stream, master_node_id } =
-                            self.send_join_request(stream, &payload.master_address).await
+                        if let SeedAttemptOutcome::Accepted {
+                            stream,
+                            master_node_id,
+                        } = self
+                            .send_join_request(stream, &payload.master_address)
+                            .await
                         {
                             let this = Arc::clone(self);
                             tokio::spawn(async move {
@@ -505,14 +513,14 @@ impl ClusterFormationService {
                             // Wrap in a Framed codec to write the length-prefixed frame,
                             // then recover the stream for the persistent read/write loop.
                             let stream = if let Some(bytes) = bytes_opt {
-                                let mut framed =
-                                    Framed::new(stream, LengthDelimitedCodec::new());
+                                let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
                                 let _ = framed.send(bytes.into()).await;
                                 framed.into_inner()
                             } else {
                                 stream
                             };
-                            this.handle_peer_connection(stream, Some(responder_id)).await;
+                            this.handle_peer_connection(stream, Some(responder_id))
+                                .await;
                         });
                     }
                     return;
@@ -541,7 +549,6 @@ impl ClusterFormationService {
         self.self_promote_as_master();
         self.broadcast_master_elected(); // best-effort; peers may be empty
     }
-
 
     /// Sends `ClusterMessage::MasterElected` to all currently-connected peers.
     ///
@@ -579,11 +586,7 @@ impl ClusterFormationService {
     /// The stream is consumed ONLY on `PermanentRejection` and `ConnectionError`.
     /// On `Accepted` and `RetryableRejection` the stream is returned inside the
     /// variant so the caller can keep the TCP connection alive.
-    async fn send_join_request(
-        &self,
-        stream: TcpStream,
-        seed_addr: &str,
-    ) -> SeedAttemptOutcome {
+    async fn send_join_request(&self, stream: TcpStream, seed_addr: &str) -> SeedAttemptOutcome {
         let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
 
         let join_req = ClusterMessage::JoinRequest(JoinRequestPayload {
@@ -856,7 +859,10 @@ impl ClusterFormationService {
         let mut active_member = new_member;
         active_member.join_version = new_version;
 
-        if let Some(pos) = members.iter().position(|m| m.node_id == active_member.node_id) {
+        if let Some(pos) = members
+            .iter()
+            .position(|m| m.node_id == active_member.node_id)
+        {
             // Node already exists (e.g., rejoining after failure) — update in-place.
             members[pos] = active_member.clone();
         } else {

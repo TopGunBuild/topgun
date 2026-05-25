@@ -323,13 +323,13 @@ impl NetworkModule {
                 let specs: Vec<crate::service::domain::index::scalar_rebuild::ScalarRebuildSpec> =
                     descriptors
                         .into_iter()
-                        .map(|d| {
-                            crate::service::domain::index::scalar_rebuild::ScalarRebuildSpec {
+                        .map(
+                            |d| crate::service::domain::index::scalar_rebuild::ScalarRebuildSpec {
                                 map_name: d.map_name,
                                 attribute: d.attribute,
                                 index_type: d.index_type,
-                            }
-                        })
+                            },
+                        )
                         .collect();
                 crate::service::domain::index::scalar_rebuild::rebuild_scalar_from_store(
                     index_factory,

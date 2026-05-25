@@ -95,8 +95,7 @@ pub async fn rebuild_scalar_from_store(
             let progress_for_iter = Arc::clone(&progress);
             store.for_each_boxed(
                 &mut |key, record| {
-                    if let crate::storage::record::RecordValue::Lww { ref value, .. } =
-                        record.value
+                    if let crate::storage::record::RecordValue::Lww { ref value, .. } = record.value
                     {
                         let rmpv_val = crate::service::domain::predicate::value_to_rmpv(value);
                         if let Some(idx) = registry_for_iter.get_index(&attr) {
@@ -165,7 +164,10 @@ mod tests {
 
         // Vector specs are skipped before any index registration or progress
         // entry is created; the registry must remain empty for this map.
-        assert!(progress.is_empty(), "no progress entry should be inserted for a Vector spec");
+        assert!(
+            progress.is_empty(),
+            "no progress entry should be inserted for a Vector spec"
+        );
         let registry = index_factory.register_map("users");
         assert!(
             !registry.has_index("embedding"),
@@ -216,15 +218,9 @@ mod tests {
         }
 
         // All three indexes must be registered after rebuild.
-        assert!(index_factory
-            .register_map("users")
-            .has_index("email"));
-        assert!(index_factory
-            .register_map("events")
-            .has_index("kind"));
-        assert!(index_factory
-            .register_map("logs")
-            .has_index("level"));
+        assert!(index_factory.register_map("users").has_index("email"));
+        assert!(index_factory.register_map("events").has_index("kind"));
+        assert!(index_factory.register_map("logs").has_index("level"));
     }
 
     /// Verifies an unknown map name does not abort the loop. The factory's

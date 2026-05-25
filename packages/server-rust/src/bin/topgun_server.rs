@@ -66,14 +66,14 @@ use topgun_server::service::policy::{InMemoryPolicyStore, PolicyEvaluator, Polic
 use topgun_server::service::router::OperationRouter;
 use topgun_server::service::security::{SecurityConfig, WriteValidator};
 use topgun_server::service::OperationService;
-use topgun_server::storage::datastores::{NullDataStore, WriteBehindConfig, WriteBehindDataStore};
 #[cfg(feature = "redb")]
 use topgun_server::storage::datastores::RedbDataStore;
+use topgun_server::storage::datastores::{NullDataStore, WriteBehindConfig, WriteBehindDataStore};
 use topgun_server::storage::eviction_config::EvictionConfig;
 use topgun_server::storage::eviction_orchestrator::EvictionOrchestrator;
-use topgun_server::storage::map_data_store::MapDataStore;
 use topgun_server::storage::factory::{ObserverFactory, RecordStoreFactory};
 use topgun_server::storage::impls::StorageConfig;
+use topgun_server::storage::map_data_store::MapDataStore;
 use topgun_server::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
 use topgun_server::storage::mutation_observer::MutationObserver;
 
@@ -481,7 +481,12 @@ async fn main() -> anyhow::Result<()> {
     // until this is set. Operators set TOPGUN_CORS_ORIGINS to enable.
     let cors_origins = std::env::var("TOPGUN_CORS_ORIGINS")
         .ok()
-        .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect::<Vec<_>>())
+        .map(|v| {
+            v.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
 
     // When set to 1 or true, omit the JWT secret so templates and QA harness
@@ -548,8 +553,7 @@ async fn main() -> anyhow::Result<()> {
     // to GET /api/admin/indexes/{map}/{attr}/status after set_ready. Must run
     // BEFORE `.with_state(state)` consumes the AppState.
     let scalar_path = std::path::PathBuf::from(
-        std::env::var("TOPGUN_INDEX_PATH")
-            .unwrap_or_else(|_| "./scalar_indexes.json".to_string()),
+        std::env::var("TOPGUN_INDEX_PATH").unwrap_or_else(|_| "./scalar_indexes.json".to_string()),
     );
     let descriptors =
         topgun_server::network::handlers::admin::load_scalar_descriptors(&scalar_path);
@@ -558,13 +562,13 @@ async fn main() -> anyhow::Result<()> {
         let specs: Vec<topgun_server::service::domain::index::scalar_rebuild::ScalarRebuildSpec> =
             descriptors
                 .into_iter()
-                .map(|d| {
-                    topgun_server::service::domain::index::scalar_rebuild::ScalarRebuildSpec {
+                .map(
+                    |d| topgun_server::service::domain::index::scalar_rebuild::ScalarRebuildSpec {
                         map_name: d.map_name,
                         attribute: d.attribute,
                         index_type: d.index_type,
-                    }
-                })
+                    },
+                )
                 .collect();
         topgun_server::service::domain::index::scalar_rebuild::rebuild_scalar_from_store(
             &index_observer_factory,

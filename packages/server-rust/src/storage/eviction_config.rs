@@ -250,10 +250,14 @@ mod tests {
         std::env::remove_var("TOPGUN_EVICTION_LOW_PCT");
 
         let defaults = EvictionConfig::default();
-        assert_eq!(cfg.high_water_pct, defaults.high_water_pct,
-            "high_water_pct must revert to default on water-mark inversion");
-        assert_eq!(cfg.low_water_pct, defaults.low_water_pct,
-            "low_water_pct must revert to default on water-mark inversion");
+        assert_eq!(
+            cfg.high_water_pct, defaults.high_water_pct,
+            "high_water_pct must revert to default on water-mark inversion"
+        );
+        assert_eq!(
+            cfg.low_water_pct, defaults.low_water_pct,
+            "low_water_pct must revert to default on water-mark inversion"
+        );
     }
 
     #[test]

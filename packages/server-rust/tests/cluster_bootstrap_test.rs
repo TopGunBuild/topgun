@@ -15,18 +15,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::Rng as _;
+use rand::SeedableRng;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
-use topgun_server::cluster::{
-    ClusterConfig, MemberInfo, NodeState,
-};
 use topgun_server::cluster::formation::ClusterFormationService;
 use topgun_server::cluster::peer_connection::PeerConnectionMap;
 use topgun_server::cluster::state::{ClusterState, InboundClusterMessage};
+use topgun_server::cluster::{ClusterConfig, MemberInfo, NodeState};
 
 // ---------------------------------------------------------------------------
 // Test constants
@@ -77,7 +75,11 @@ async fn wait_for_convergence(nodes: &[Arc<ClusterFormationService>], budget_ms:
 
         let all_ready = nodes.iter().all(|n| {
             let view = n.cluster_state.current_view();
-            view.members.iter().filter(|m| m.state == NodeState::Active).count() == nodes.len()
+            view.members
+                .iter()
+                .filter(|m| m.state == NodeState::Active)
+                .count()
+                == nodes.len()
         });
 
         if all_ready {
@@ -104,18 +106,9 @@ async fn parallel_boot_elects_single_master() {
     let (l2, p2) = bind_listener().await;
 
     // Step 2: construct nodes with full peer seed lists (excluding self)
-    let seeds0 = vec![
-        format!("127.0.0.1:{p1}"),
-        format!("127.0.0.1:{p2}"),
-    ];
-    let seeds1 = vec![
-        format!("127.0.0.1:{p0}"),
-        format!("127.0.0.1:{p2}"),
-    ];
-    let seeds2 = vec![
-        format!("127.0.0.1:{p0}"),
-        format!("127.0.0.1:{p1}"),
-    ];
+    let seeds0 = vec![format!("127.0.0.1:{p1}"), format!("127.0.0.1:{p2}")];
+    let seeds1 = vec![format!("127.0.0.1:{p0}"), format!("127.0.0.1:{p2}")];
+    let seeds2 = vec![format!("127.0.0.1:{p0}"), format!("127.0.0.1:{p1}")];
 
     let config0 = Arc::new(ClusterConfig {
         cluster_id: "test-cluster".to_string(),
@@ -166,11 +159,8 @@ async fn parallel_boot_elects_single_master() {
     Arc::clone(&svc2).start(l2);
 
     // Step 4: wait for convergence
-    let nodes: Vec<Arc<ClusterFormationService>> = vec![
-        Arc::clone(&svc0),
-        Arc::clone(&svc1),
-        Arc::clone(&svc2),
-    ];
+    let nodes: Vec<Arc<ClusterFormationService>> =
+        vec![Arc::clone(&svc0), Arc::clone(&svc1), Arc::clone(&svc2)];
     wait_for_convergence(&nodes, CONVERGENCE_BUDGET_MS).await;
 
     // Step 5: assert exactly one master, correct identity, consistent views
@@ -185,19 +175,17 @@ async fn parallel_boot_elects_single_master() {
         svc0.cluster_state.is_master(),
         "node-0 (lowest node_id) must be the elected master"
     );
-    assert!(
-        !svc1.cluster_state.is_master(),
-        "node-1 must not be master"
-    );
-    assert!(
-        !svc2.cluster_state.is_master(),
-        "node-2 must not be master"
-    );
+    assert!(!svc1.cluster_state.is_master(), "node-1 must not be master");
+    assert!(!svc2.cluster_state.is_master(), "node-2 must not be master");
 
     // All views must report 3 active members
     for (i, node) in nodes.iter().enumerate() {
         let view = node.cluster_state.current_view();
-        let active = view.members.iter().filter(|m| m.state == NodeState::Active).count();
+        let active = view
+            .members
+            .iter()
+            .filter(|m| m.state == NodeState::Active)
+            .count();
         assert_eq!(
             active, 3,
             "Node {i} should see 3 active members; saw {active}"
@@ -300,11 +288,8 @@ async fn parallel_boot_with_loopback_delays() {
         svc2_c.start(l2);
     });
 
-    let nodes: Vec<Arc<ClusterFormationService>> = vec![
-        Arc::clone(&svc0),
-        Arc::clone(&svc1),
-        Arc::clone(&svc2),
-    ];
+    let nodes: Vec<Arc<ClusterFormationService>> =
+        vec![Arc::clone(&svc0), Arc::clone(&svc1), Arc::clone(&svc2)];
 
     // Allow extra time for the jitter + election budget
     wait_for_convergence(&nodes, CONVERGENCE_BUDGET_MS + 500).await;
@@ -365,10 +350,7 @@ async fn deterministic_tiebreak_property() {
                 let mk_config_for = |others: &[u16]| {
                     Arc::new(ClusterConfig {
                         cluster_id: "prop-cluster".to_string(),
-                        seed_addresses: others
-                            .iter()
-                            .map(|p| format!("127.0.0.1:{p}"))
-                            .collect(),
+                        seed_addresses: others.iter().map(|p| format!("127.0.0.1:{p}")).collect(),
                         ..ClusterConfig::default()
                     })
                 };
@@ -388,7 +370,11 @@ async fn deterministic_tiebreak_property() {
                     let peers = Arc::new(PeerConnectionMap::new());
                     let (tx, _rx2) = mpsc::unbounded_channel::<InboundClusterMessage>();
                     Arc::new(ClusterFormationService::new(
-                        cs, peers, config, mk_member(nid, cp), tx,
+                        cs,
+                        peers,
+                        config,
+                        mk_member(nid, cp),
+                        tx,
                     ))
                 };
 
@@ -408,8 +394,7 @@ async fn deterministic_tiebreak_property() {
 
                 // Wait for convergence (shorter budget per iteration to keep total time bounded)
                 let iter_budget_ms = 12_000u64;
-                let deadline = std::time::Instant::now()
-                    + Duration::from_millis(iter_budget_ms);
+                let deadline = std::time::Instant::now() + Duration::from_millis(iter_budget_ms);
                 loop {
                     if std::time::Instant::now() >= deadline {
                         break;
@@ -429,15 +414,13 @@ async fn deterministic_tiebreak_property() {
                 }
 
                 // Tiebreak assertion: lowest-id must be master
-                let master_count =
-                    nodes.iter().filter(|n| n.cluster_state.is_master()).count();
+                let master_count = nodes.iter().filter(|n| n.cluster_state.is_master()).count();
 
                 // Find the actual master
-                let actual_master: Option<&str> =
-                    [(&sva, &id_a), (&svb, &id_b), (&svc, &id_c)]
-                        .iter()
-                        .find(|(svc, _)| svc.cluster_state.is_master())
-                        .map(|(_, id)| id.as_str());
+                let actual_master: Option<&str> = [(&sva, &id_a), (&svb, &id_b), (&svc, &id_c)]
+                    .iter()
+                    .find(|(svc, _)| svc.cluster_state.is_master())
+                    .map(|(_, id)| id.as_str());
 
                 prop_assert_eq!(
                     master_count,
@@ -569,12 +552,20 @@ async fn permanent_rejection_does_not_trigger_election() {
     let view0 = svc0.cluster_state.current_view();
     let view1 = svc1.cluster_state.current_view();
     assert_eq!(
-        view0.members.iter().filter(|m| m.state == NodeState::Active).count(),
+        view0
+            .members
+            .iter()
+            .filter(|m| m.state == NodeState::Active)
+            .count(),
         1,
         "node-0 should see only itself"
     );
     assert_eq!(
-        view1.members.iter().filter(|m| m.state == NodeState::Active).count(),
+        view1
+            .members
+            .iter()
+            .filter(|m| m.state == NodeState::Active)
+            .count(),
         1,
         "node-1 should see only itself (isolated cluster)"
     );

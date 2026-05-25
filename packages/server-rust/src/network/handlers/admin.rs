@@ -1075,8 +1075,7 @@ pub async fn index_backfill_status(
 /// race each other.
 fn scalar_descriptor_path() -> std::path::PathBuf {
     std::path::PathBuf::from(
-        std::env::var("TOPGUN_INDEX_PATH")
-            .unwrap_or_else(|_| "./scalar_indexes.json".to_string()),
+        std::env::var("TOPGUN_INDEX_PATH").unwrap_or_else(|_| "./scalar_indexes.json".to_string()),
     )
 }
 
