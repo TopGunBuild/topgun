@@ -1,5 +1,5 @@
 import React from 'react';
-import { Server, Database, Smartphone, Laptop, Cloud, ArrowLeftRight } from 'lucide-react';
+import { Server, Database, Smartphone, Laptop, ArrowLeftRight } from 'lucide-react';
 
 const Node = ({ icon: Icon, label, sub }: { icon: any; label: string; sub?: string }) => (
   <div className="flex flex-col items-center justify-center p-4 rounded-xl border border-card-border bg-white/50 dark:bg-white/5 backdrop-blur-sm z-10 w-32 h-32 text-center transition-all hover:border-brand-subtle/50 hover:shadow-[0_0_30px_-10px_rgba(59,130,246,0.3)] shadow-sm dark:shadow-none">

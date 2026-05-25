@@ -136,7 +136,7 @@ export const TacticalDemo: React.FC = () => {
       const syncInterval = setInterval(() => {
         setLocalDrones((currentLocal) => {
           const currentServer = serverDronesRef.current;
-          const { merged, conflicts } = mergeDrones(currentLocal, currentServer);
+          const { merged } = mergeDrones(currentLocal, currentServer);
 
           if (pendingOps > 0) {
             addLog('SYNC_ENGINE', 'SYNC', `Flushed ${pendingOps} pending OpLog entries.`);

@@ -11,13 +11,10 @@ interface ComparisonRowProps {
   rx: CellValue;
 }
 
-const CellContent = ({ value, isTopGun = false }: { value: CellValue; isTopGun?: boolean }) => {
+const CellContent = ({ value, isTopGun: _isTopGun = false }: { value: CellValue; isTopGun?: boolean }) => {
   if (typeof value === 'string') {
     return <>{value}</>;
   }
-
-  const iconClass =
-    value.variant === 'error' ? 'text-red-500 dark:text-red-400' : isTopGun ? '' : '';
 
   return (
     <span
