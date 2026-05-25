@@ -660,13 +660,13 @@ async fn main() -> anyhow::Result<()> {
     let drained = shutdown
         .wait_for_drain(std::time::Duration::from_secs(30))
         .await;
-    if !drained {
+    if drained {
+        tracing::info!("graceful shutdown complete");
+    } else {
         tracing::warn!(
             "shutdown drain timed out after 30s — exiting with in-flight \
              requests still running. Investigate stuck handlers if persistent."
         );
-    } else {
-        tracing::info!("graceful shutdown complete");
     }
 
     // KNOWN GAP (TODO-339): WriteBehindDataStore does not yet flush its
