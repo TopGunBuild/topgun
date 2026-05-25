@@ -28,31 +28,6 @@ function withTempDir(fn: (dir: string) => void): void {
   }
 }
 
-/**
- * Run codegen against a pre-populated registry (bypasses file loading).
- */
-function runCodegenWithRegistry(
-  schemas: Record<string, unknown>,
-  outDir: string,
-  opts: { typescript?: boolean; json?: boolean } = {},
-): void {
-  // Populate global registry
-  resetRegistry();
-  const registry = SchemaRegistry.global as unknown as { _schemas: Record<string, unknown> };
-  Object.assign(registry._schemas, schemas);
-
-  // Write a minimal JS schema file that does nothing (registry already populated)
-  const schemaFile = path.join(outDir, 'dummy.schema.js');
-  fs.writeFileSync(schemaFile, '// pre-populated\n', 'utf-8');
-
-  runCodegen({
-    schemaPath: schemaFile,
-    outDir,
-    typescript: opts.typescript ?? true,
-    json: opts.json ?? true,
-  });
-}
-
 describe('JSON output', () => {
   test('produces topgun.schema.json with correct JsonSchemaFile structure', () => {
     withTempDir((dir) => {
