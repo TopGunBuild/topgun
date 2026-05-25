@@ -4,8 +4,6 @@ import {
   spawnRustServer,
   createLWWRecord,
   waitForSync,
-  waitUntil,
-  TestClient,
   RustTestContext,
 } from './helpers';
 

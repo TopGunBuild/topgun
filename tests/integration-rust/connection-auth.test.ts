@@ -1,9 +1,7 @@
 import WebSocket from 'ws';
 import {
-  createRustTestContext,
   createRustTestClient,
   spawnRustServer,
-  createTestToken,
   waitForSync,
   TestClient,
 } from './helpers';

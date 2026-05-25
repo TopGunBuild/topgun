@@ -4,7 +4,6 @@ import {
   createLWWRecord,
   waitForSync,
   waitUntil,
-  TestClient,
 } from './helpers';
 
 describe('Integration: Search (Rust Server)', () => {
