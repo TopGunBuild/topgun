@@ -2,7 +2,7 @@
  * Tests for IConnectionProvider abstraction
  */
 import { SingleServerProvider } from '../connection/SingleServerProvider';
-import type { IConnectionProvider, ConnectionProviderEvent } from '../types';
+import type { IConnectionProvider } from '../types';
 
 describe('IConnectionProvider', () => {
   describe('SingleServerProvider', () => {
@@ -81,7 +81,8 @@ describe('IConnectionProvider', () => {
   });
 
   describe('SyncEngine with IConnectionProvider', () => {
-    // Import SyncEngine only for this test block
+    // require() loads SyncEngine lazily for this describe block only, after mock setup is complete
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { SyncEngine } = require('../SyncEngine');
 
     // Install a MockWebSocket for this block. The test doesn't exercise real

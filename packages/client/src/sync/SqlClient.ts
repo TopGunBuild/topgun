@@ -126,7 +126,7 @@ export class SqlClient implements ISqlClient {
    * Clean up resources.
    * Clears pending timeouts without rejecting promises to match SearchClient behavior.
    */
-  public close(error?: Error): void {
+  public close(_error?: Error): void {
     // Only clear timeouts, don't reject promises to avoid unhandled rejections in tests
     for (const [, pending] of this.pendingSqlRequests.entries()) {
       clearTimeout(pending.timeout);

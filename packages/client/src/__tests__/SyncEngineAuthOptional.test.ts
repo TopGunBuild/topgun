@@ -398,6 +398,8 @@ describe('SyncEngine — auth-optional fast path', () => {
   // Case 8: AUTH_REQUIRED arrives while already in AUTHENTICATING (token-configured path)
   // ────────────────────────────────────────────
   it('case 8: handleAuthRequired does not re-transition to AUTHENTICATING when already in AUTHENTICATING (token-configured path)', async () => {
+    // require() accesses the Jest-mocked logger module to spy on the warn method
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const loggerModule = require('../utils/logger');
     const warnSpy = jest.spyOn(loggerModule.logger, 'warn');
 

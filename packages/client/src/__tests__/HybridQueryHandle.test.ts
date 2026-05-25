@@ -5,7 +5,7 @@
  */
 
 import { HybridQueryHandle } from '../HybridQueryHandle';
-import type { HybridQueryFilter, HybridResultItem } from '../HybridQueryHandle';
+import type { HybridQueryFilter } from '../HybridQueryHandle';
 import { SyncEngine } from '../SyncEngine';
 
 // Mock SyncEngine

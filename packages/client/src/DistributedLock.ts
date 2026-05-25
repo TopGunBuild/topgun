@@ -36,7 +36,9 @@ export class DistributedLock implements ILock {
       this.fencingToken = result.fencingToken;
       this._isLocked = true;
       return true;
-    } catch (e) {
+      // Catch clause binding required by syntax; error details not needed here (lock attempt failed)
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    } catch (_e) {
       return false;
     }
   }

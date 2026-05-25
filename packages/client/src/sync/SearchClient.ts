@@ -9,7 +9,6 @@
  */
 
 import type { SearchOptions } from '@topgunbuild/core';
-import { logger } from '../utils/logger';
 import type { ISearchClient, SearchClientConfig, SearchResult } from './types';
 
 /**
@@ -134,9 +133,11 @@ export class SearchClient implements ISearchClient {
    * Clears pending timeouts without rejecting promises to match original SyncEngine behavior.
    * Note: This may leave promises hanging, but maintains backward compatibility with tests.
    */
-  public close(error?: Error): void {
+  public close(_error?: Error): void {
     // Only clear timeouts, don't reject promises to avoid unhandled rejections in tests
-    for (const [requestId, pending] of this.pendingSearchRequests.entries()) {
+    // Destructure to access only `pending`; the Map key is not needed in the loop body
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    for (const [_requestId, pending] of this.pendingSearchRequests.entries()) {
       clearTimeout(pending.timeout);
     }
     this.pendingSearchRequests.clear();

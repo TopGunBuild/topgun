@@ -85,7 +85,9 @@ export class WriteConcernManager implements IWriteConcernManager {
    * Cancel all pending Write Concern promises (e.g., on disconnect).
    */
   public cancelAllWriteConcernPromises(error: Error): void {
-    for (const [opId, pending] of this.pendingWriteConcernPromises.entries()) {
+    // Destructure to access only `pending`; the Map key is not needed in the loop body
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    for (const [_opId, pending] of this.pendingWriteConcernPromises.entries()) {
       if (pending.timeoutHandle) {
         clearTimeout(pending.timeoutHandle);
       }

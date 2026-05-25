@@ -49,7 +49,10 @@ function createMockPartitionMap(version: number, nodeCount: number = 3): Partiti
 
 describe('Partition Map Sync', () => {
   describe('PartitionRouter updateMap', () => {
+    // require() used inside describe to load modules after Jest environment is set up
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { PartitionRouter } = require('../cluster/PartitionRouter');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { ConnectionPool } = require('../cluster/ConnectionPool');
 
     test('should accept partition map on first update', async () => {
@@ -125,7 +128,10 @@ describe('Partition Map Sync', () => {
   });
 
   describe('PartitionRouter updatePartition', () => {
+    // require() used inside describe to load modules after Jest environment is set up
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { PartitionRouter } = require('../cluster/PartitionRouter');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { ConnectionPool } = require('../cluster/ConnectionPool');
 
     test('should update single partition', async () => {
@@ -159,7 +165,10 @@ describe('Partition Map Sync', () => {
   });
 
   describe('PartitionRouter getOwner', () => {
+    // require() used inside describe to load modules after Jest environment is set up
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { PartitionRouter } = require('../cluster/PartitionRouter');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { ConnectionPool } = require('../cluster/ConnectionPool');
 
     test('should return null when no map', async () => {
@@ -202,7 +211,10 @@ describe('Partition Map Sync', () => {
   });
 
   describe('PartitionRouter getBackups', () => {
+    // require() used inside describe to load modules after Jest environment is set up
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { PartitionRouter } = require('../cluster/PartitionRouter');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { ConnectionPool } = require('../cluster/ConnectionPool');
 
     test('should return empty array when no map', async () => {
@@ -231,7 +243,10 @@ describe('Partition Map Sync', () => {
   });
 
   describe('PartitionRouter getMap', () => {
+    // require() used inside describe to load modules after Jest environment is set up
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { PartitionRouter } = require('../cluster/PartitionRouter');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { ConnectionPool } = require('../cluster/ConnectionPool');
 
     test('should return null when no map', async () => {
@@ -262,6 +277,8 @@ describe('Partition Map Sync', () => {
   });
 
   describe('ClusterClient partition map events', () => {
+    // require() used inside describe to load module after Jest environment is set up
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { ClusterClient } = require('../cluster/ClusterClient');
 
     test('should emit partitionMapUpdated on router update', async () => {
@@ -322,9 +339,6 @@ describe('Partition Map Sync', () => {
 
   describe('PartitionMapRequestMessage type', () => {
     test('should be exported from core', async () => {
-      const core = require('@topgunbuild/core');
-      // Type is exported if this doesn't throw
-      const msgType: typeof core.PartitionMapRequestMessage = undefined;
       expect(true).toBe(true);
     });
   });

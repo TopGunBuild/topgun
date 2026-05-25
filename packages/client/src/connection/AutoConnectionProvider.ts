@@ -7,7 +7,6 @@ import type {
 } from '../types';
 import { SingleServerProvider } from './SingleServerProvider';
 import { HttpSyncProvider } from './HttpSyncProvider';
-import type { HttpSyncProviderConfig } from './HttpSyncProvider';
 import { logger } from '../utils/logger';
 
 /**
@@ -70,7 +69,6 @@ export class AutoConnectionProvider implements IConnectionProvider {
 
     // Try WebSocket first
     const wsUrl = this.toWsUrl(this.config.url);
-    let lastError: Error | null = null;
 
     for (let attempt = 0; attempt < this.maxWsAttempts; attempt++) {
       try {
@@ -88,7 +86,6 @@ export class AutoConnectionProvider implements IConnectionProvider {
         logger.info({ url: wsUrl }, 'AutoConnectionProvider: WebSocket connected');
         return;
       } catch (err: any) {
-        lastError = err;
         logger.debug(
           { attempt: attempt + 1, maxAttempts: this.maxWsAttempts, err: err.message },
           'AutoConnectionProvider: WebSocket attempt failed',

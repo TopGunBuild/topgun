@@ -13,7 +13,7 @@ import { SyncEngine } from './SyncEngine';
 import { ChangeTracker, ChangeEvent } from './ChangeTracker';
 import { logger } from './utils/logger';
 import type { PredicateNode } from '@topgunbuild/core';
-import type { CursorStatus, PaginationInfo } from './QueryHandle';
+import type { PaginationInfo } from './QueryHandle';
 
 /**
  * Filter options for hybrid queries.

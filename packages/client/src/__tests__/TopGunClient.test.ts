@@ -24,7 +24,7 @@ class MockWebSocket {
     }, 0);
   }
 
-  send(data: any) {}
+  send(_data: any) {}
   close() {
     this.readyState = MockWebSocket.CLOSED;
     if (this.onclose) this.onclose();

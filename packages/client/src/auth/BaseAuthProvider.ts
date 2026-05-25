@@ -1,10 +1,4 @@
-import type {
-  AuthProvider,
-  AuthEvent,
-  AuthEventType,
-  TokenExchangeConfig,
-  TokenExchangeResponse,
-} from './types';
+import type { AuthProvider, AuthEvent, TokenExchangeConfig, TokenExchangeResponse } from './types';
 import type { IStorageAdapter } from '../IStorageAdapter';
 
 export interface BaseAuthProviderConfig {

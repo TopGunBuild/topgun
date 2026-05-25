@@ -1,4 +1,4 @@
-import { ChangeTracker, ChangeEvent } from '../ChangeTracker';
+import { ChangeTracker } from '../ChangeTracker';
 
 describe('ChangeTracker', () => {
   describe('computeChanges', () => {

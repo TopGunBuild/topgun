@@ -10,6 +10,8 @@
 
 describe('Client Failover', () => {
   describe('Circuit Breaker Pattern', () => {
+    // require() used inside describe to load module after Jest environment is set up
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { ClusterClient } = require('../cluster/ClusterClient');
 
     test('should initialize circuit in closed state', () => {
@@ -231,6 +233,8 @@ describe('Client Failover', () => {
   });
 
   describe('Retry Error Classification', () => {
+    // require() used inside describe to load module after Jest environment is set up
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { ClusterClient } = require('../cluster/ClusterClient');
 
     // Note: isRetryableError is private, so we test it indirectly through sendWithRetry behavior
@@ -262,7 +266,10 @@ describe('Client Failover', () => {
   });
 
   describe('Default Configuration', () => {
+    // require() used inside describe to load modules after Jest environment is set up
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { ClusterClient } = require('../cluster/ClusterClient');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { DEFAULT_CIRCUIT_BREAKER_CONFIG } = require('@topgunbuild/core');
 
     test('should use default circuit breaker config', () => {
@@ -309,6 +316,8 @@ describe('Client Failover', () => {
   });
 
   describe('ClusterClient sendWithRetry', () => {
+    // require() used inside describe to load module after Jest environment is set up
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { ClusterClient } = require('../cluster/ClusterClient');
 
     test('should export sendWithRetry method', () => {
@@ -342,6 +351,8 @@ describe('Client Failover', () => {
   });
 
   describe('Circuit Breaker Events', () => {
+    // require() used inside describe to load module after Jest environment is set up
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { ClusterClient } = require('../cluster/ClusterClient');
 
     test('should emit circuit:open event', () => {

@@ -1,6 +1,5 @@
 import { HLC, serialize } from '@topgunbuild/core';
 import { AutoConnectionProvider } from '../connection/AutoConnectionProvider';
-import type { AutoConnectionProviderConfig } from '../connection/AutoConnectionProvider';
 
 // Mock SingleServerProvider to control WebSocket connection success/failure
 jest.mock('../connection/SingleServerProvider', () => {
@@ -48,6 +47,8 @@ describe('AutoConnectionProvider', () => {
   });
 
   it('uses WebSocket when available', async () => {
+    // require() accesses the Jest-mocked module to override the mock implementation in this test
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { SingleServerProvider } = require('../connection/SingleServerProvider');
 
     // Override mock so connect() succeeds for this test
@@ -105,8 +106,6 @@ describe('AutoConnectionProvider', () => {
   });
 
   it('httpOnly mode skips WebSocket entirely', async () => {
-    const { SingleServerProvider } = require('../connection/SingleServerProvider');
-
     const provider = new AutoConnectionProvider({
       url: 'http://localhost:8080',
       clientId: 'c1',
@@ -118,8 +117,6 @@ describe('AutoConnectionProvider', () => {
 
     await provider.connect();
 
-    // SingleServerProvider should NOT have been instantiated
-    const instanceCallsAfterConnect = SingleServerProvider.mock.calls.length;
     // In httpOnly mode, no WS attempts should be made
     expect(provider.isUsingHttp()).toBe(true);
     expect(provider.isConnected()).toBe(true);

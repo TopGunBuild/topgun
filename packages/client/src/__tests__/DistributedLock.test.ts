@@ -23,6 +23,8 @@ describe('DistributedLock', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    // require() accesses the Jest-mocked logger module to spy on the debug method
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     mockLoggerDebug = require('../utils/logger').logger.debug;
     lock = new DistributedLock(mockSyncEngine, 'test-lock');
   });

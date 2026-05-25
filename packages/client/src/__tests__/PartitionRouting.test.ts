@@ -55,7 +55,8 @@ describe('Partition Routing', () => {
   });
 
   describe('ClusterClient Routing Metrics', () => {
-    // Import ClusterClient for metrics testing
+    // require() used inside describe to load module after Jest environment is set up
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { ClusterClient } = require('../cluster/ClusterClient');
 
     test('should initialize with zero metrics', async () => {
@@ -78,9 +79,6 @@ describe('Partition Routing', () => {
         seedNodes: ['ws://localhost:9001'],
         routingMode: 'direct',
       });
-
-      // Manually modify metrics for testing
-      const metrics = client.getRoutingMetrics();
 
       client.resetRoutingMetrics();
 
@@ -110,6 +108,8 @@ describe('Partition Routing', () => {
   });
 
   describe('ConnectionPool isConnected', () => {
+    // require() used inside describe to load module after Jest environment is set up
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { ConnectionPool } = require('../cluster/ConnectionPool');
 
     test('should return false for unknown node', async () => {
@@ -128,7 +128,10 @@ describe('Partition Routing', () => {
   });
 
   describe('PartitionRouter', () => {
+    // require() used inside describe to load modules after Jest environment is set up
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { PartitionRouter } = require('../cluster/PartitionRouter');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { ConnectionPool } = require('../cluster/ConnectionPool');
 
     test('should return null when no partition map', async () => {
@@ -170,6 +173,8 @@ describe('Partition Routing', () => {
   });
 
   describe('ClusterClient getConnection behavior', () => {
+    // require() used inside describe to load module after Jest environment is set up
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { ClusterClient } = require('../cluster/ClusterClient');
 
     test('should throw when not connected', async () => {
@@ -219,6 +224,8 @@ describe('Partition Routing', () => {
   });
 
   describe('Routing Mode Configuration', () => {
+    // require() used inside describe to load module after Jest environment is set up
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { ClusterClient } = require('../cluster/ClusterClient');
 
     test('should accept forward routing mode', async () => {

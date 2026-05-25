@@ -1199,7 +1199,8 @@ describe('SyncEngine', () => {
       ];
       mockStorage.getPendingOps.mockResolvedValue(pendingOps as any);
 
-      // Spy on logger.warn before creating the engine
+      // require() accesses the Jest-mocked logger module to spy on the warn method
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const loggerModule = require('../utils/logger');
       const warnSpy = jest.spyOn(loggerModule.logger, 'warn');
 

@@ -21,12 +21,7 @@ import {
 import { ConnectionPool } from './ConnectionPool';
 import { PartitionRouter } from './PartitionRouter';
 import { logger } from '../utils/logger';
-import type {
-  IConnectionProvider,
-  IConnection,
-  ConnectionProviderEvent,
-  ConnectionEventHandler,
-} from '../types';
+import type { IConnectionProvider, IConnection } from '../types';
 
 export interface ClusterClientEvents {
   connected: () => void;
@@ -864,7 +859,7 @@ export class ClusterClient implements IConnectionProvider {
     });
 
     // Partition router events
-    this.partitionRouter.on('partitionMap:updated', (version: number, changesCount: number) => {
+    this.partitionRouter.on('partitionMap:updated', (version: number, _changesCount: number) => {
       if (!this.routingActive && this.partitionRouter.hasPartitionMap()) {
         this.routingActive = true;
         logger.info({ version }, 'Direct routing activated');

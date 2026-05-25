@@ -1,4 +1,4 @@
-import { HLC, LWWMap, ORMap, deserialize, evaluatePredicate } from '@topgunbuild/core';
+import { HLC, LWWMap, ORMap, deserialize } from '@topgunbuild/core';
 import type { EntryProcessorDef, EntryProcessorResult, SearchOptions } from '@topgunbuild/core';
 import type { LWWRecord, ORMapRecord, Timestamp } from '@topgunbuild/core';
 import type {

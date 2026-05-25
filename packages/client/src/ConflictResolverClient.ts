@@ -208,7 +208,9 @@ export class ConflictResolverClient {
    * Clear all pending requests (e.g., on disconnect).
    */
   clearPending(): void {
-    for (const [requestId, pending] of this.pendingRequests) {
+    // Destructure to access only `pending`; the Map key is unused in the loop body
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    for (const [_requestId, pending] of this.pendingRequests) {
       clearTimeout(pending.timeout);
       pending.reject(new Error('Connection lost'));
     }

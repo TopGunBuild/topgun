@@ -287,6 +287,8 @@ describe('Client Search', () => {
     });
 
     it('should send SEARCH_SUB on creation', () => {
+      // require() avoids TypeScript generic constraint mismatch for SearchHandle<T = unknown> in test context
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { SearchHandle } = require('../SearchHandle');
       const handle = new SearchHandle(syncEngine, 'articles', 'machine learning', { limit: 10 });
 
@@ -305,6 +307,8 @@ describe('Client Search', () => {
     });
 
     it('should populate results on SEARCH_RESP', () => {
+      // require() avoids TypeScript generic constraint mismatch for SearchHandle<T = unknown> in test context
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { SearchHandle } = require('../SearchHandle');
       const handle = new SearchHandle(syncEngine, 'articles', 'test');
 
@@ -332,6 +336,8 @@ describe('Client Search', () => {
     });
 
     it('should notify subscribers on SEARCH_RESP', () => {
+      // require() avoids TypeScript generic constraint mismatch for SearchHandle<T = unknown> in test context
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { SearchHandle } = require('../SearchHandle');
       const handle = new SearchHandle(syncEngine, 'articles', 'test');
 
@@ -355,6 +361,8 @@ describe('Client Search', () => {
     });
 
     it('should handle SEARCH_UPDATE ENTER', () => {
+      // require() avoids TypeScript generic constraint mismatch for SearchHandle<T = unknown> in test context
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { SearchHandle } = require('../SearchHandle');
       const handle = new SearchHandle(syncEngine, 'articles', 'test');
 
@@ -382,6 +390,8 @@ describe('Client Search', () => {
     });
 
     it('should handle SEARCH_UPDATE UPDATE', () => {
+      // require() avoids TypeScript generic constraint mismatch for SearchHandle<T = unknown> in test context
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { SearchHandle } = require('../SearchHandle');
       const handle = new SearchHandle(syncEngine, 'articles', 'test');
 
@@ -423,6 +433,8 @@ describe('Client Search', () => {
     });
 
     it('should handle SEARCH_UPDATE LEAVE', () => {
+      // require() avoids TypeScript generic constraint mismatch for SearchHandle<T = unknown> in test context
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { SearchHandle } = require('../SearchHandle');
       const handle = new SearchHandle(syncEngine, 'articles', 'test');
 
@@ -463,6 +475,8 @@ describe('Client Search', () => {
     });
 
     it('should send SEARCH_UNSUB on dispose', () => {
+      // require() avoids TypeScript generic constraint mismatch for SearchHandle<T = unknown> in test context
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { SearchHandle } = require('../SearchHandle');
       const handle = new SearchHandle(syncEngine, 'articles', 'test');
 
@@ -481,6 +495,8 @@ describe('Client Search', () => {
     });
 
     it('should update query with setQuery', () => {
+      // require() avoids TypeScript generic constraint mismatch for SearchHandle<T = unknown> in test context
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { SearchHandle } = require('../SearchHandle');
       const handle = new SearchHandle(syncEngine, 'articles', 'original');
 
@@ -513,6 +529,8 @@ describe('Client Search', () => {
     });
 
     it('should not process updates for wrong subscription', () => {
+      // require() avoids TypeScript generic constraint mismatch for SearchHandle<T = unknown> in test context
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { SearchHandle } = require('../SearchHandle');
       const handle = new SearchHandle(syncEngine, 'articles', 'test');
 
@@ -535,6 +553,8 @@ describe('Client Search', () => {
     });
 
     it('should throw when using disposed handle', () => {
+      // require() avoids TypeScript generic constraint mismatch for SearchHandle<T = unknown> in test context
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { SearchHandle } = require('../SearchHandle');
       const handle = new SearchHandle(syncEngine, 'articles', 'test');
       handle.dispose();
@@ -545,6 +565,8 @@ describe('Client Search', () => {
     });
 
     it('should return unsubscribe function from subscribe', () => {
+      // require() avoids TypeScript generic constraint mismatch for SearchHandle<T = unknown> in test context
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { SearchHandle } = require('../SearchHandle');
       const handle = new SearchHandle(syncEngine, 'articles', 'test');
 
@@ -593,6 +615,8 @@ describe('Client Search', () => {
     });
 
     it('should sort results by score descending', () => {
+      // require() avoids TypeScript generic constraint mismatch for SearchHandle<T = unknown> in test context
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { SearchHandle } = require('../SearchHandle');
       const handle = new SearchHandle(syncEngine, 'articles', 'test');
 

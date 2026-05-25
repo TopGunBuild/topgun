@@ -34,6 +34,8 @@ describe('LockManager', () => {
   beforeEach(() => {
     jest.useFakeTimers();
     jest.clearAllMocks();
+    // require() accesses the Jest-mocked logger module to capture the debug spy reference
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     mockDebug = require('../../utils/logger').logger.debug;
   });
 

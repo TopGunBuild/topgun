@@ -9,7 +9,7 @@ class MemoryStorageAdapter implements IStorageAdapter {
   private opLog: OpLogEntry[] = [];
   private _pendingOps: OpLogEntry[] = [];
 
-  async initialize(dbName: string): Promise<void> {}
+  async initialize(_dbName: string): Promise<void> {}
   async close(): Promise<void> {}
 
   async get<V>(key: string): Promise<LWWRecord<V> | ORMapRecord<V>[] | any | undefined> {

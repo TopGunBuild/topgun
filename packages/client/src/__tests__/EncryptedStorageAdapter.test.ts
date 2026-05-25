@@ -7,9 +7,11 @@ class MockStorageAdapter implements IStorageAdapter {
   meta = new Map<string, any>();
   opLog: OpLogEntry[] = [];
 
-  async initialize(dbName: string): Promise<void> {}
+  async initialize(_dbName: string): Promise<void> {}
   async close(): Promise<void> {}
 
+  // Generic type param V required by IStorageAdapter interface contract but not used in mock return
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   async get<V>(key: string): Promise<any> {
     return this.store.get(key);
   }

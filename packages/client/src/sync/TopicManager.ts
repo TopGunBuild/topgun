@@ -9,7 +9,6 @@
  * - Handling incoming topic messages from server
  */
 
-import type { TopicQueueConfig } from '../SyncEngine';
 import { TopicHandle } from '../TopicHandle';
 import { logger } from '../utils/logger';
 import type { ITopicManager, TopicManagerConfig } from './types';

@@ -1,7 +1,5 @@
 import { HLC, serialize, deserialize } from '@topgunbuild/core';
 import { HttpSyncProvider } from '../connection/HttpSyncProvider';
-import type { HttpSyncProviderConfig } from '../connection/HttpSyncProvider';
-
 describe('HttpSyncProvider', () => {
   let hlc: HLC;
   let mockFetch: jest.Mock;

@@ -14,7 +14,6 @@ import type {
   EntryProcessorResult,
   EntryProcessKeyResult,
 } from '@topgunbuild/core';
-import { logger } from '../utils/logger';
 import type { IEntryProcessorClient, EntryProcessorClientConfig } from './types';
 
 /**
@@ -250,14 +249,18 @@ export class EntryProcessorClient implements IEntryProcessorClient {
    * Clears pending timeouts without rejecting promises to match original SyncEngine behavior.
    * Note: This may leave promises hanging, but maintains backward compatibility with tests.
    */
-  public close(error?: Error): void {
+  public close(_error?: Error): void {
     // Only clear timeouts, don't reject promises to avoid unhandled rejections in tests
-    for (const [requestId, pending] of this.pendingProcessorRequests.entries()) {
+    // Destructure to access only `pending`; the Map key is not needed in the loop body
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    for (const [_requestId, pending] of this.pendingProcessorRequests.entries()) {
       clearTimeout(pending.timeout);
     }
     this.pendingProcessorRequests.clear();
 
-    for (const [requestId, pending] of this.pendingBatchProcessorRequests.entries()) {
+    // Destructure to access only `pending`; the Map key is not needed in the loop body
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    for (const [_requestId, pending] of this.pendingBatchProcessorRequests.entries()) {
       clearTimeout(pending.timeout);
     }
     this.pendingBatchProcessorRequests.clear();
