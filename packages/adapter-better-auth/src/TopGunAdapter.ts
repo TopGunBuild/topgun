@@ -68,7 +68,7 @@ export type TopGunDBAdapter = DBAdapter & {
 export const topGunAdapter = (
   adapterOptions: TopGunAdapterOptions,
 ): ((options: BetterAuthOptions) => TopGunDBAdapter) => {
-  return (options: BetterAuthOptions): TopGunDBAdapter => {
+  return (_options: BetterAuthOptions): TopGunDBAdapter => {
     const { client, modelMap = {} } = adapterOptions;
 
     const getMapName = (model: string) => {
