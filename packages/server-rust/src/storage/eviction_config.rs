@@ -188,6 +188,7 @@ impl EvictionConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn default_values_are_sane() {
@@ -201,6 +202,7 @@ mod tests {
         assert!(cfg.high_water_pct <= 100);
     }
 
+    #[serial]
     #[test]
     fn from_env_without_env_vars_returns_defaults() {
         // Ensure no TOPGUN_ eviction vars leak from test environment
@@ -217,6 +219,7 @@ mod tests {
         assert_eq!(cfg.interval_ms, defaults.interval_ms);
     }
 
+    #[serial]
     #[test]
     fn from_env_parses_valid_values() {
         // Use a serial test to avoid env-var races in parallel test runs
@@ -238,6 +241,7 @@ mod tests {
         assert_eq!(cfg.interval_ms, 500);
     }
 
+    #[serial]
     #[test]
     fn watermark_inversion_reverts_both_to_defaults() {
         // low >= high should trigger atomic revert of BOTH fields
@@ -260,6 +264,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[test]
     fn watermark_equal_reverts_both_to_defaults() {
         // low == high is also invalid (requires strict ordering)
