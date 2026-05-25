@@ -39,6 +39,18 @@ const createMockStorage = () => ({
   onerror: ((error: Error) => void) | null = null;
   send = jest.fn();
   close = jest.fn();
+  constructor(public url: string) {
+    // Fire onopen via queueMicrotask so SingleServerProvider's onopen wrapper
+    // (which clears its 5s connection-timeout at SingleServerProvider.ts:100)
+    // runs within the same tick as the first awaited operation. Microtasks
+    // have no associated timer handle, so they do not appear in jest
+    // --detectOpenHandles. Without this, the 5s connection-timeout leaks past
+    // the end of each test that constructs a TopGunClient, and Jest's worker
+    // is kept alive past the last expect() — historically masked by --forceExit.
+    queueMicrotask(() => {
+      if (this.onopen) this.onopen();
+    });
+  }
 };
 
 describe('VectorSearchClient', () => {

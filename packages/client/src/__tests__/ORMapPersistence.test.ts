@@ -62,6 +62,41 @@ class MemoryStorageAdapter implements IStorageAdapter {
   }
 }
 
+// Install a MockWebSocket for this file. These tests exercise local persistence
+// only — they don't need real network behavior. Without a mock, the real undici
+// WebSocket dials out and leaves SingleServerProvider's 5s connection-timeout
+// (SingleServerProvider.ts:100) pending past each test, keeping Jest's worker
+// alive without --forceExit.
+const originalWebSocket = (globalThis as any).WebSocket;
+(globalThis as any).WebSocket = class MockWebSocket {
+  static CONNECTING = 0;
+  static OPEN = 1;
+  static CLOSING = 2;
+  static CLOSED = 3;
+  readyState = 1;
+  binaryType = 'arraybuffer';
+  onopen: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  onmessage: ((event: { data: any }) => void) | null = null;
+  onerror: ((error: any) => void) | null = null;
+  send = jest.fn();
+  close = jest.fn();
+  constructor(public url: string) {
+    // queueMicrotask, not setTimeout(0): microtasks have no associated timer
+    // handle (so they don't appear in jest --detectOpenHandles), and they run
+    // before the next macrotask so SingleServerProvider's onopen wrapper
+    // (which clears its 5s connection-timeout) runs same-tick as the first
+    // awaited operation.
+    queueMicrotask(() => {
+      if (this.onopen) this.onopen();
+    });
+  }
+};
+
+afterAll(() => {
+  (globalThis as any).WebSocket = originalWebSocket;
+});
+
 describe('ORMap Integration & Persistence', () => {
   let storage: MemoryStorageAdapter;
   let client: TopGunClient;
@@ -72,6 +107,14 @@ describe('ORMap Integration & Persistence', () => {
       serverUrl: 'ws://localhost:1234',
       storage,
     });
+  });
+
+  afterEach(async () => {
+    // Dispose the client so its wrapped SyncEngine → SingleServerProvider tears
+    // down both the reconnect timer and (via the queueMicrotask onopen path
+    // installed above) the 5s connection-timeout. Without this, each test
+    // leaks resources that keep Jest's worker alive past the last expect().
+    await client.close();
   });
 
   test('should persist added items to storage', async () => {

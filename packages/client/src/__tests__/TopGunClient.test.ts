@@ -108,6 +108,11 @@ class MemoryStorageAdapter implements IStorageAdapter {
 describe('TopGunClient', () => {
   let storage: MemoryStorageAdapter;
   let client: TopGunClient;
+  // Track every TopGunClient constructed inside individual tests so afterEach
+  // can dispose them all — otherwise their wrapped SingleServerProvider keeps
+  // a live reconnectTimer + connection-timeout that leak past the test and
+  // keep Jest's worker alive without --forceExit.
+  const extraClients: TopGunClient[] = [];
 
   beforeEach(() => {
     mockUUID.mockClear();
@@ -118,6 +123,21 @@ describe('TopGunClient', () => {
     });
   });
 
+  afterEach(async () => {
+    // Drain pending setTimeout(0)s before closing — the MockWebSocket fires
+    // onopen via setTimeout(0) (kept setTimeout, not queueMicrotask, because
+    // some cluster-mode tests depend on connections NOT being established
+    // synchronously). Letting that timer fire here triggers
+    // SingleServerProvider's onopen wrapper which clears its own 5s
+    // connection-timeout, so close() below can complete a clean teardown.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await client.close();
+    for (const c of extraClients) {
+      await c.close();
+    }
+    extraClients.length = 0;
+  });
+
   describe('Initialization', () => {
     test('should create client with configuration', () => {
       const customClient = new TopGunClient({
@@ -125,6 +145,7 @@ describe('TopGunClient', () => {
         serverUrl: 'ws://localhost:5678',
         storage,
       });
+      extraClients.push(customClient);
 
       expect(customClient).toBeInstanceOf(TopGunClient);
     });
@@ -143,6 +164,7 @@ describe('TopGunClient', () => {
         serverUrl: 'ws://localhost:1234',
         storage,
       });
+      extraClients.push(customClient);
 
       // When nodeId is provided, randomUUID should not be called for nodeId
       // (it might still be called for SyncEngine internals, but we check that
@@ -360,6 +382,7 @@ describe('TopGunClient', () => {
       const localClient = new TopGunClient({
         storage,
       });
+      extraClients.push(localClient);
 
       expect(localClient).toBeInstanceOf(TopGunClient);
       expect(localClient.isCluster()).toBe(false);
@@ -380,6 +403,7 @@ describe('TopGunClient', () => {
         cluster: { seeds: ['ws://node1:8080', 'ws://node2:8080'] },
         storage,
       });
+      extraClients.push(clusterClient);
 
       expect(clusterClient).toBeInstanceOf(TopGunClient);
       expect(clusterClient.isCluster()).toBe(true);
@@ -390,6 +414,7 @@ describe('TopGunClient', () => {
         serverUrl: 'ws://localhost:8080',
         storage,
       });
+      extraClients.push(singleClient);
 
       expect(singleClient).toBeInstanceOf(TopGunClient);
       expect(singleClient.isCluster()).toBe(false);
@@ -415,6 +440,7 @@ describe('TopGunClient', () => {
         },
         storage,
       });
+      extraClients.push(clusterClient);
 
       expect(clusterClient.isCluster()).toBe(true);
     });
@@ -437,6 +463,11 @@ describe('TopGunClient', () => {
     });
 
     afterEach(async () => {
+      // Drain MockWebSocket's setTimeout(0)-fire-onopen first so
+      // SingleServerProvider's onopen wrapper can clear the 5s connection
+      // timeout before close() tears down. See top-level afterEach for the
+      // full rationale.
+      await new Promise((resolve) => setTimeout(resolve, 0));
       await clusterClient.close();
       await singleClient.close();
     });
@@ -513,6 +544,11 @@ describe('TopGunClient', () => {
         storage,
       });
 
+      // Drain MockWebSocket's setTimeout(0)-fire-onopen before close so the
+      // SUT's onopen wrapper clears its 5s connection-timeout — otherwise
+      // tempClient.close() returns before the timer is cleared and Jest's
+      // --detectOpenHandles flags it.
+      await new Promise((resolve) => setTimeout(resolve, 0));
       await expect(tempClient.close()).resolves.not.toThrow();
     });
   });

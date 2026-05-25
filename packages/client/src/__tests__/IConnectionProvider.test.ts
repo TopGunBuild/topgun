@@ -84,7 +84,42 @@ describe('IConnectionProvider', () => {
     // Import SyncEngine only for this test block
     const { SyncEngine } = require('../SyncEngine');
 
-    test('should accept connectionProvider in config', () => {
+    // Install a MockWebSocket for this block. The test doesn't exercise real
+    // network behavior — it just verifies SyncEngine accepts the provider
+    // config. Without a mock, the real undici WebSocket would dial out and
+    // leave SingleServerProvider's 5s connection-timeout pending past the
+    // test, keeping Jest's worker alive without --forceExit.
+    const originalWebSocket = (globalThis as any).WebSocket;
+    beforeAll(() => {
+      (globalThis as any).WebSocket = class MockWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        static CLOSING = 2;
+        static CLOSED = 3;
+        readyState = 1;
+        binaryType = 'arraybuffer';
+        onopen: (() => void) | null = null;
+        onclose: (() => void) | null = null;
+        onmessage: ((event: { data: any }) => void) | null = null;
+        onerror: ((error: any) => void) | null = null;
+        send = jest.fn();
+        close = jest.fn();
+        constructor(public url: string) {
+          // queueMicrotask, not setTimeout(0) — see backpressure.test.ts
+          // for the rationale: avoids a timer-handle leak and lets the SUT's
+          // onopen wrapper clear its 5s connection-timeout same-tick.
+          queueMicrotask(() => {
+            if (this.onopen) this.onopen();
+          });
+        }
+      };
+    });
+
+    afterAll(() => {
+      (globalThis as any).WebSocket = originalWebSocket;
+    });
+
+    test('should accept connectionProvider in config', async () => {
       const mockStorage = {
         put: jest.fn(),
         get: jest.fn(),
@@ -106,8 +141,13 @@ describe('IConnectionProvider', () => {
       });
 
       expect(engine).toBeDefined();
+      // Flush the queueMicrotask that MockWebSocket schedules — it triggers
+      // SingleServerProvider's onopen wrapper which clears the 5s connection
+      // timeout (SingleServerProvider.ts:100). Without this flush the timeout
+      // leaks past the end of this sync test as an open handle.
+      await Promise.resolve();
       engine.close();
-      provider.close();
+      await provider.close();
     });
 
     test('should throw if connectionProvider not provided', () => {
