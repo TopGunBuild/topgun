@@ -46,6 +46,57 @@ pnpm build
 
 This builds all packages in the monorepo in the correct order.
 
+## Rust Toolchain
+
+### Pin mechanism
+
+The Rust toolchain is pinned at the repo root via [`rust-toolchain.toml`](rust-toolchain.toml) to the exact patch-level version `1.93.1`. When you `cd` into the repository, [`rustup`](https://rustup.rs) reads the file and automatically installs the pinned `rustc`, `cargo`, `rustfmt`, and `clippy` for you on first use — no manual `rustup install` step is required.
+
+CI honors the same pin. Every job in [`.github/workflows/rust.yml`](.github/workflows/rust.yml) — namely:
+
+- `check`
+- `cross-lang`
+- `perf-gate`
+- `vector-perf-gate`
+- `simulation`
+- `audit`
+
+— installs the toolchain via `dtolnay/rust-toolchain@stable` (or via the default `rustup` already present on `ubuntu-latest` in the case of `audit`). The `@stable` suffix on the dtolnay action refers to the **action's own** release tag, not to the Rust release channel. With `rust-toolchain.toml` present, both the dtolnay action and the system `rustup` defer to the pin and install `1.93.1` regardless of what the latest stable rust release happens to be that day.
+
+### Why this is pinned
+
+The channel was previously set to `"stable"` (a floating channel that resolves to whatever the latest stable rust release is at install time). Between minor versions, `clippy` rotates default-warn lints in and out of its base ruleset — and across several silent bumps, **54 `clippy` violations accumulated undetected** in the workspace's test code until SPEC-202 surfaced and cleared them in a single mechanical sweep.
+
+Pinning to a specific patch-level version closes that gap: the `clippy` ruleset is now identical across every developer machine, every CI job, and every release artifact. A new lint can only land via an explicit pin bump that goes through the review gate described below.
+
+### Upgrade cadence policy
+
+| Field | Value |
+|-------|-------|
+| **Trigger** | Bump on a **quarterly** cadence (target: first PR after each calendar quarter rolls over) **OR** when a **security advisory** affecting the toolchain (`rustc` / `cargo` / `rustfmt` / `clippy`) lands, whichever comes first. |
+| **Owner** | Whoever opens the next Rust-touching PR after the cadence trigger fires owns the bump. If no Rust-touching PR is pending when the trigger fires, the bump is filed as a standalone `TODO-*` entry and picked up by the maintainer rotation. |
+| **Pin format** | New pin MUST be a **patch-level** version string (e.g. `"1.94.2"`). Never `"stable"`, never minor-level (`"1.94"`), never `nightly`. Patch-level precision prevents the `1.NN.x → 1.NN.x+1` failure mode where a patch release silently re-enables a lint that was disabled in the previous patch. |
+| **Validation gate** | The PR that bumps the pin MUST be green on **all four** of the commands below. |
+
+The four validation-gate commands the bump PR must pass:
+
+```bash
+# 1. Zero clippy warnings across all targets and feature combinations.
+cargo clippy --all-targets --all-features -- -D warnings
+
+# 2. Zero rustfmt format drift.
+cargo fmt --all -- --check
+
+# 3. Full server lib test suite passes (floor: 1254 tests per current baseline).
+cargo test --release -p topgun-server --lib
+
+# 4. Load harness fire-and-wait scenario within 20% of the baseline in
+#    packages/server-rust/benches/load_harness/baseline.json.
+cargo bench --bench load_harness -- --connections 50 --duration 10
+```
+
+If any of the four fails, the pin bump is blocked — investigate (new lint? new test break? perf regression?), open follow-up issues, and only land the pin once all four are green.
+
 ## Project Structure
 
 ```
