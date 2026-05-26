@@ -117,6 +117,7 @@ export interface UseQueryResult<T> {
  * }
  * ```
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- T defaults to any so callers without a schema type receive untyped records; narrowed via generic at call site
 export function useQuery<T = any>(
   mapName: string,
   query: QueryFilter = {},

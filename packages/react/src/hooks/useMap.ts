@@ -3,6 +3,7 @@ import { LWWMap } from '@topgunbuild/core';
 import type { RecordSyncState } from '@topgunbuild/client';
 import { useClient } from './useClient';
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- V defaults to any so callers without a schema type still get a usable map; narrowed via generic at call site
 export function useMap<K = string, V = any>(mapName: string): LWWMap<K, V> {
   const client = useClient();
   // Get the map instance. This is stable for the same mapName.
@@ -49,6 +50,7 @@ const EMPTY_SYNC_STATE: ReadonlyMap<string, RecordSyncState> = new Map();
  * }
  * ```
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- V defaults to any so callers without a schema type still get a usable map; narrowed via generic at call site
 export function useMapWithSyncState<K = string, V = any>(
   mapName: string,
 ): { map: LWWMap<K, V>; syncState: ReadonlyMap<string, RecordSyncState> } {

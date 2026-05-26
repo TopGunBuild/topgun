@@ -3,6 +3,7 @@ import { ORMap } from '@topgunbuild/core';
 import type { RecordSyncState } from '@topgunbuild/client';
 import { useClient } from './useClient';
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- V defaults to any so callers without a schema type still get a usable ORMap; narrowed via generic at call site
 export function useORMap<K = string, V = any>(mapName: string): ORMap<K, V> {
   const client = useClient();
   const map = client.getORMap<K, V>(mapName);
@@ -36,6 +37,7 @@ const EMPTY_OR_SYNC_STATE: ReadonlyMap<string, RecordSyncState> = new Map();
  * bare `useORMap` signature is preserved so existing code that does not
  * need sync state requires no changes.
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- V defaults to any so callers without a schema type still get a usable ORMap; narrowed via generic at call site
 export function useORMapWithSyncState<K = string, V = any>(
   mapName: string,
 ): { map: ORMap<K, V>; syncState: ReadonlyMap<string, RecordSyncState> } {
