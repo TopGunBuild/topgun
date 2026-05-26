@@ -1530,7 +1530,9 @@ describe('StandingQueryIndex', () => {
 
       // Query should be O(1): retrieve hits the precomputed match set, never evaluates predicates
       let retrieveEvals = 0;
-      index._onPredicateEval = () => { retrieveEvals++; };
+      index._onPredicateEval = () => {
+        retrieveEvals++;
+      };
       const result = index.retrieve({ type: 'equal', value: null });
       expect(retrieveEvals).toBe(0); // retrieve is O(1): hits precomputed match set, never evaluates predicates
       expect(result.size()).toBeGreaterThan(0);

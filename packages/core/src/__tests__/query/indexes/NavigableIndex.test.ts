@@ -880,13 +880,17 @@ describe('NavigableIndex', () => {
       ];
 
       let lookups = 0;
-      index._onLookup = () => { lookups++; };
+      index._onLookup = () => {
+        lookups++;
+      };
 
       for (const query of queries) {
         const result = index.retrieve(query);
         let materialized = 0;
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        for (const _ of result) { materialized++; }
+        for (const _ of result) {
+          materialized++;
+        }
         expect(materialized).toBeGreaterThan(0); // retrieval correctness preserved
       }
 
