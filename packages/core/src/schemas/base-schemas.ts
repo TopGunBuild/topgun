@@ -30,8 +30,7 @@ export const LWWRecordSchema = z.object({
 });
 // V is a phantom type parameter preserved for call-site type safety (e.g. LWWRecord<string>);
 // the Zod schema infers the runtime shape, so V cannot be threaded through z.infer.
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- V is a phantom generic; Zod schema infers `any` for the value field since record values can be any primitive
+// eslint-disable-next-line @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any -- V is a phantom generic; Zod schema infers `any` for the value field since record values can be any primitive
 export type LWWRecord<V = any> = z.infer<typeof LWWRecordSchema>;
 
 export const ORMapRecordSchema = z.object({
@@ -42,8 +41,7 @@ export const ORMapRecordSchema = z.object({
 });
 // V is a phantom type parameter preserved for call-site type safety (e.g. ORMapRecord<string>);
 // the Zod schema infers the runtime shape, so V cannot be threaded through z.infer.
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- V is a phantom generic; Zod schema infers `any` for the value field since record values can be any primitive
+// eslint-disable-next-line @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any -- V is a phantom generic; Zod schema infers `any` for the value field since record values can be any primitive
 export type ORMapRecord<V = any> = z.infer<typeof ORMapRecordSchema>;
 
 // --- Change Event Types ---
