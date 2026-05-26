@@ -5,6 +5,7 @@ export interface FirebaseAuth {
   currentUser?: {
     getIdToken: (forceRefresh?: boolean) => Promise<string>;
   } | null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Firebase Auth user object is imported from the firebase-auth package at runtime; any avoids adding firebase as a peer dependency
   onIdTokenChanged?: (callback: (user: any) => void) => () => void;
 }
 

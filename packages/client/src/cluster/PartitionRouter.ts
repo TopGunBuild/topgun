@@ -36,6 +36,7 @@ export interface PartitionRouterEvents {
 }
 
 export class PartitionRouter {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- event listeners accept heterogeneous args depending on event type; a discriminated union per event would require one handler type per event name
   private readonly listeners: Map<string, Set<(...args: any[]) => void>> = new Map();
   private readonly config: PartitionRouterConfig;
   private readonly connectionPool: ConnectionPool;
@@ -52,6 +53,7 @@ export class PartitionRouter {
     };
 
     // Listen for partition map updates and routing errors from any connection
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- WebSocket message is a raw msgpack-decoded object; type is narrowed by checking message.type in the handler body
     this.connectionPool.on('message', (nodeId: string, message: any) => {
       if (message.type === 'PARTITION_MAP') {
         this.handlePartitionMap(message as PartitionMapMessage);
@@ -68,6 +70,7 @@ export class PartitionRouter {
   // Event Emitter Methods (browser-compatible)
   // ============================================
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- listener args are heterogeneous per event type; a generic per-event discriminated union would require one overload per event name
   public on(event: string, listener: (...args: any[]) => void): this {
     if (!this.listeners.has(event)) {
       this.listeners.set(event, new Set());
@@ -76,12 +79,15 @@ export class PartitionRouter {
     return this;
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- listener args are heterogeneous per event type; mirrors the on() signature to allow safe add/remove of the same reference
   public off(event: string, listener: (...args: any[]) => void): this {
     this.listeners.get(event)?.delete(listener);
     return this;
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- once wrapper accepts and forwards heterogeneous args; a per-event overload would add significant boilerplate without safety benefit here
   public once(event: string, listener: (...args: any[]) => void): this {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- wrapper captures variadic args to forward to the underlying listener; type is erased at the event emitter layer
     const wrapper = (...args: any[]) => {
       this.off(event, wrapper);
       listener(...args);
@@ -89,6 +95,7 @@ export class PartitionRouter {
     return this.on(event, wrapper);
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- emit spreads heterogeneous args per event type; rest param accepts any to allow forwarding without per-event overloads
   public emit(event: string, ...args: any[]): boolean {
     const eventListeners = this.listeners.get(event);
     if (!eventListeners || eventListeners.size === 0) {
@@ -104,6 +111,7 @@ export class PartitionRouter {
     return true;
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- listener args are heterogeneous; removeListener mirrors the on/off signature for safe reference-based removal
   public removeListener(event: string, listener: (...args: any[]) => void): this {
     return this.off(event, listener);
   }
@@ -206,6 +214,7 @@ export class PartitionRouter {
         if (!result.has(nodeId)) {
           result.set(nodeId, []);
         }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- RoutingResult spread extended with key property not in the interface; cast to any to avoid re-declaring the type for this internal accumulator
         result.get(nodeId)!.push({ ...routing, key } as any);
       }
     }

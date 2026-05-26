@@ -78,6 +78,7 @@ export class WebSocketManager implements IWebSocketManager {
       this.config.onReconnected?.();
     });
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- WebSocket message data is a raw binary/string payload; type is narrowed after msgpack decode in deserializeMessage
     this.connectionProvider.on('message', (_nodeId: string, data: any) => {
       const message = this.deserializeMessage(data);
       if (message) {
@@ -103,6 +104,7 @@ export class WebSocketManager implements IWebSocketManager {
   /**
    * Deserialize incoming message data.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- data is a raw WebSocket payload (ArrayBuffer, Uint8Array, or string); return is any because message type is narrowed by the caller per message.type
   private deserializeMessage(data: any): any {
     try {
       if (data instanceof ArrayBuffer) {
@@ -124,6 +126,7 @@ export class WebSocketManager implements IWebSocketManager {
    * Handle incoming message.
    * Routes PONG to internal handler, all others to SyncEngine.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- message is a deserialized msgpack object; type is narrowed by checking message.type before dispatch
   private handleMessage(message: any): void {
     // Handle PONG internally for heartbeat tracking
     if (message.type === 'PONG') {
@@ -136,6 +139,7 @@ export class WebSocketManager implements IWebSocketManager {
   /**
    * Send a message through the current connection.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- message shape varies by operation type; serialized to msgpack binary before sending so the type is erased at this layer
   sendMessage(message: any, key?: string): boolean {
     const data = serialize(message);
 

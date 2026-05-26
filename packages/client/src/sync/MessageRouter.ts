@@ -20,6 +20,7 @@ import type { IMessageRouter, MessageHandler, MessageRouterConfig } from './type
  */
 export class MessageRouter implements IMessageRouter {
   private readonly handlers: Map<string, MessageHandler>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- unhandled message callback receives heterogeneous message objects; type is narrowed per message.type at the handler registration layer
   private readonly onUnhandled?: (message: any) => void;
 
   constructor(config: MessageRouterConfig = {}) {
@@ -56,6 +57,7 @@ export class MessageRouter implements IMessageRouter {
    * @param message - Message to route
    * @returns Promise resolving to true if handled
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- message is a deserialized msgpack object; type is extracted as message.type and used to dispatch to the registered handler
   async route(message: any): Promise<boolean> {
     const type = message?.type;
     if (!type) {

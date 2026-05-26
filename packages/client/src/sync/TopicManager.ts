@@ -18,6 +18,7 @@ import type { ITopicManager, TopicManagerConfig } from './types';
  */
 interface QueuedTopicMessage {
   topic: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- topic payload is an application-defined message; no schema constraint is imposed at the pub/sub layer
   data: any;
   timestamp: number;
 }
@@ -76,6 +77,7 @@ export class TopicManager implements ITopicManager {
    * Publish a message to a topic.
    * Sends immediately if authenticated, otherwise queues for later.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- topic payload is an application-defined message; no schema constraint is imposed at the pub/sub layer
   public publishTopic(topic: string, data: any): void {
     if (this.config.isAuthenticated()) {
       this.config.sendMessage({
@@ -139,6 +141,7 @@ export class TopicManager implements ITopicManager {
    */
   public handleTopicMessage(
     topic: string,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- incoming topic message data is application-defined; forwarded to the TopicHandle.onMessage without inspection
     data: any,
     publisherId: string,
     timestamp: number,
@@ -156,6 +159,7 @@ export class TopicManager implements ITopicManager {
   /**
    * Queue a topic message for offline publishing.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- topic payload is application-defined; stored in the queue and forwarded without schema constraint
   private queueTopicMessage(topic: string, data: any): void {
     const message: QueuedTopicMessage = {
       topic,

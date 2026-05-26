@@ -20,7 +20,9 @@ export class EncryptedStorageAdapter implements IStorageAdapter {
 
   // --- KV Operations ---
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- return type includes any to cover non-V metadata keys; mirrors IStorageAdapter.get contract
   async get<V>(key: string): Promise<V | any | undefined> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- fetching with any because the raw value may be an encrypted blob or a typed record; decryption follows
     const raw = await this.wrapped.get<any>(key);
 
     if (!raw) {
@@ -44,6 +46,7 @@ export class EncryptedStorageAdapter implements IStorageAdapter {
     return raw;
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- IStorageAdapter.put contract accepts any serialisable value; encrypted wrapper does not know the original value type
   async put(key: string, value: any): Promise<void> {
     const encrypted = await EncryptionManager.encrypt(this.key, value);
     // Store as plain object to be compatible with structured clone algorithm of IndexedDB
@@ -60,6 +63,7 @@ export class EncryptedStorageAdapter implements IStorageAdapter {
 
   // --- Metadata ---
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- meta values have no fixed schema; mirrors IStorageAdapter.getMeta contract
   async getMeta(key: string): Promise<any> {
     const raw = await this.wrapped.getMeta(key);
     if (!raw) return undefined;
@@ -70,6 +74,7 @@ export class EncryptedStorageAdapter implements IStorageAdapter {
     return raw;
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- meta values have no fixed schema; mirrors IStorageAdapter.setMeta contract
   async setMeta(key: string, value: any): Promise<void> {
     const encrypted = await EncryptionManager.encrypt(this.key, value);
     return this.wrapped.setMeta(key, {
@@ -80,7 +85,9 @@ export class EncryptedStorageAdapter implements IStorageAdapter {
 
   // --- Batch ---
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- batch put accepts a mixed-value map; mirrors IStorageAdapter.batchPut contract
   async batchPut(entries: Map<string, any>): Promise<void> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- encrypted entries map holds blobs of varying shape before being passed to wrapped adapter
     const encryptedEntries = new Map<string, any>();
 
     for (const [key, value] of entries.entries()) {
@@ -107,11 +114,13 @@ export class EncryptedStorageAdapter implements IStorageAdapter {
 
     if (entry.record !== undefined) {
       const enc = await EncryptionManager.encrypt(this.key, entry.record);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- record field is typed as LWWRecord<any> in OpLogEntry; cast to any to replace with encrypted blob shape
       encryptedEntry.record = { iv: enc.iv, data: enc.data } as any;
     }
 
     if (entry.orRecord !== undefined) {
       const enc = await EncryptionManager.encrypt(this.key, entry.orRecord);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- orRecord field is typed as ORMapRecord<any> in OpLogEntry; cast to any to replace with encrypted blob shape
       encryptedEntry.orRecord = { iv: enc.iv, data: enc.data } as any;
     }
 
@@ -134,10 +143,12 @@ export class EncryptedStorageAdapter implements IStorageAdapter {
         }
 
         if (this.isEncryptedRecord(op.record)) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- op.record is typed as LWWRecord<any> but holds an encrypted blob; cast to any to pass to decrypt
           decryptedOp.record = await EncryptionManager.decrypt(this.key, op.record as any);
         }
 
         if (this.isEncryptedRecord(op.orRecord)) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- op.orRecord is typed as ORMapRecord<any> but holds an encrypted blob; cast to any to pass to decrypt
           decryptedOp.orRecord = await EncryptionManager.decrypt(this.key, op.orRecord as any);
         }
 
@@ -158,6 +169,7 @@ export class EncryptedStorageAdapter implements IStorageAdapter {
 
   // --- Helpers ---
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- type guard accepts unknown/any to check structural shape at runtime; narrowing produces the typed result
   private isEncryptedRecord(data: any): data is { iv: Uint8Array; data: Uint8Array } {
     return (
       data &&

@@ -83,8 +83,10 @@ export class HttpSyncProvider implements IConnectionProvider {
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 
   /** Queued operations to send on next poll */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- operation shapes vary by type (PUT, REMOVE, OR_ADD, etc.); serialized to msgpack before sending
   private pendingOperations: any[] = [];
   /** Queued one-shot queries to send on next poll */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query payload shape varies per query type; deserialized and dispatched at the handler layer
   private pendingQueries: any[] = [];
 
   /** Per-map last sync timestamps for delta tracking */
@@ -116,6 +118,7 @@ export class HttpSyncProvider implements IConnectionProvider {
       this.wasConnected = true;
       this.emit('connected', 'http');
       this.startPolling();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- caught error is typed as unknown; any is needed to access .message for re-emitting the error event
     } catch (err: any) {
       this.connected = false;
       this.emit('error', err);
@@ -183,6 +186,7 @@ export class HttpSyncProvider implements IConnectionProvider {
    */
   send(data: ArrayBuffer | Uint8Array, _key?: string): void {
     try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- msgpack-decoded WebSocket message has no fixed TS type at the receive boundary; type is narrowed per message.type in the switch below
       const message = deserialize<any>(data instanceof ArrayBuffer ? new Uint8Array(data) : data);
 
       switch (message.type) {
@@ -278,6 +282,7 @@ export class HttpSyncProvider implements IConnectionProvider {
     const operations = this.pendingOperations.splice(0);
     const queries = this.pendingQueries.splice(0);
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- request body is a dynamic object assembled from optional fields; serialized to msgpack before sending
     const requestBody: any = {
       clientId: this.clientId,
       clientHlc: this.hlc.now(),
@@ -319,6 +324,7 @@ export class HttpSyncProvider implements IConnectionProvider {
       }
 
       const responseBuffer = await response.arrayBuffer();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- HTTP sync response is a msgpack-decoded object with optional fields; type is narrowed by checking each field below
       const syncResponse = deserialize<any>(new Uint8Array(responseBuffer));
 
       // Update server HLC
@@ -440,6 +446,7 @@ export class HttpSyncProvider implements IConnectionProvider {
   /**
    * Emit an event to all listeners.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- emit spreads heterogeneous args per event type (connected/disconnected pass nodeId string; error passes Error); rest param accepts any
   private emit(event: ConnectionProviderEvent, ...args: any[]): void {
     const handlers = this.listeners.get(event);
     if (handlers) {

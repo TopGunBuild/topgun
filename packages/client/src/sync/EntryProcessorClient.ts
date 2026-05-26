@@ -52,9 +52,11 @@ export class EntryProcessorClient implements IEntryProcessorClient {
   private readonly timeoutMs: number;
 
   // Pending entry processor requests by requestId
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- R type parameter is erased when stored in the registry; the concrete R is captured in the Promise resolve/reject closures
   private pendingProcessorRequests: Map<string, PendingProcessorRequest<any>> = new Map();
 
   // Pending batch entry processor requests by requestId
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- R type parameter is erased when stored in the registry; the concrete R is captured in the Promise resolve/reject closures
   private pendingBatchProcessorRequests: Map<string, PendingBatchProcessorRequest<any>> = new Map();
 
   constructor(config: EntryProcessorClientConfig) {
@@ -230,6 +232,7 @@ export class EntryProcessorClient implements IEntryProcessorClient {
       this.pendingBatchProcessorRequests.delete(message.requestId);
 
       // Convert Record to Map
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- result type R is erased at the batch response layer; the map holds results of heterogeneous R types from a single batch
       const resultsMap = new Map<string, EntryProcessorResult<any>>();
       for (const [key, result] of Object.entries(message.results)) {
         resultsMap.set(key, {

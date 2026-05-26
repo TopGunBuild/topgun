@@ -20,6 +20,7 @@ import type { PaginationInfo } from './QueryHandle';
  */
 export interface HybridQueryFilter {
   /** Traditional where clause filters */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- where clause accepts arbitrary field values; field types are validated at the CRDT merge layer, not at the filter definition
   where?: Record<string, any>;
   /** Predicate tree (can include FTS predicates) */
   predicate?: PredicateNode;
@@ -297,7 +298,9 @@ export class HybridQueryHandle<T> {
     if (this.filter.sort) {
       results.sort((a, b) => {
         for (const [field, direction] of Object.entries(this.filter.sort!)) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- sort comparator accesses dynamic field keys on typed results; any is used to index by runtime field name
           let valA: any;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- sort comparator accesses dynamic field keys on typed results; any is used to index by runtime field name
           let valB: any;
 
           if (field === '_score') {
@@ -308,7 +311,9 @@ export class HybridQueryHandle<T> {
             valA = a._key;
             valB = b._key;
           } else {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic field access on typed value; sort field name is a runtime string
             valA = (a.value as any)[field];
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic field access on typed value; sort field name is a runtime string
             valB = (b.value as any)[field];
           }
 

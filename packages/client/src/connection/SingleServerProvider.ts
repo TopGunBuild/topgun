@@ -210,6 +210,7 @@ export class SingleServerProvider implements IConnectionProvider {
   /**
    * Emit an event to all listeners.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- emit spreads heterogeneous args per event type (connected/disconnected pass nodeId; error passes Error); rest param accepts any
   private emit(event: ConnectionProviderEvent, ...args: any[]): void {
     const handlers = this.listeners.get(event);
     if (handlers) {

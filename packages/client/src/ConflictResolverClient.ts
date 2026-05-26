@@ -35,6 +35,7 @@ export class ConflictResolverClient {
   private readonly pendingRequests: Map<
     string,
     {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- resolver response shapes vary (register/unregister/list); typed as any to hold all response variants in a single pending-requests map
       resolve: (result: any) => void;
       reject: (error: Error) => void;
       timeout: NodeJS.Timeout;

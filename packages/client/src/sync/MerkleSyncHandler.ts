@@ -41,6 +41,7 @@ export class MerkleSyncHandler implements IMerkleSyncHandler {
   public async handleSyncRespRoot(payload: {
     mapName: string;
     rootHash: number;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- server timestamp shape is implementation-defined (HLC or raw ms); passed through to onTimestampUpdate without inspection
     timestamp?: any;
   }): Promise<void> {
     const { mapName, timestamp } = payload;
@@ -101,6 +102,7 @@ export class MerkleSyncHandler implements IMerkleSyncHandler {
    */
   public async handleSyncRespLeaf(payload: {
     mapName: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- LWWRecord value type is erased at the sync protocol layer; record is passed directly to map.merge() and storageAdapter.put() without inspection
     records: Array<{ key: string; record: any }>;
   }): Promise<void> {
     const { mapName, records } = payload;
@@ -123,6 +125,7 @@ export class MerkleSyncHandler implements IMerkleSyncHandler {
           existing.count += updateCount;
           clearTimeout(existing.timer);
         }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- timer field is set immediately after this line; undefined cast to any avoids requiring a non-null assertion on the optional timer field
         const stats = existing ?? { count: updateCount, timer: undefined as any };
         if (!existing) this.syncStats.set(mapName, stats);
         stats.timer = setTimeout(() => {

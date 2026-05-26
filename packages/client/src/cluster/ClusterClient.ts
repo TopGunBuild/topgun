@@ -67,6 +67,7 @@ export type ClusterRoutingMode = 'direct' | 'forward';
  * It provides partition-aware routing and connection management.
  */
 export class ClusterClient implements IConnectionProvider {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- event listeners accept heterogeneous args depending on event type; a discriminated union per event would require one handler type per event
   private readonly listeners: Map<string, Set<(...args: any[]) => void>> = new Map();
   private readonly connectionPool: ConnectionPool;
   private readonly partitionRouter: PartitionRouter;
@@ -119,6 +120,7 @@ export class ClusterClient implements IConnectionProvider {
   // Event Emitter Methods (browser-compatible)
   // ============================================
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- listener args are heterogeneous per event type; a generic per-event discriminated union would require one overload per event name
   public on(event: string, listener: (...args: any[]) => void): this {
     if (!this.listeners.has(event)) {
       this.listeners.set(event, new Set());
@@ -127,11 +129,13 @@ export class ClusterClient implements IConnectionProvider {
     return this;
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- listener args are heterogeneous per event type; mirrors the on() signature to allow safe add/remove of the same reference
   public off(event: string, listener: (...args: any[]) => void): this {
     this.listeners.get(event)?.delete(listener);
     return this;
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- emit spreads heterogeneous args per event type; rest param accepts any to allow forwarding without per-event overloads
   public emit(event: string, ...args: any[]): boolean {
     const eventListeners = this.listeners.get(event);
     if (!eventListeners || eventListeners.size === 0) {
@@ -354,6 +358,7 @@ export class ClusterClient implements IConnectionProvider {
           this.recordFailure(nodeId);
         }
 
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- error is caught as unknown; cast to any to access non-standard .code property present on network errors
         const errorCode = (error as any)?.code;
 
         // Check if error is retryable
@@ -385,6 +390,7 @@ export class ClusterClient implements IConnectionProvider {
   /**
    * Check if an error is retryable.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- error is caught as unknown in catch blocks; any is required to access .code and .message for retryability classification
   private isRetryableError(error: any): boolean {
     const code = error?.code;
     const message = error?.message || '';
@@ -490,6 +496,7 @@ export class ClusterClient implements IConnectionProvider {
   /**
    * Send directly to partition owner
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- message shape varies by operation type; msgpack serialization happens after routing so the message is still an untyped object here
   public sendDirect(key: string, message: any): boolean {
     const route = this.partitionRouter.routeToConnection(key);
     if (!route) {
@@ -513,6 +520,7 @@ export class ClusterClient implements IConnectionProvider {
   /**
    * Send to primary node for server-side forwarding
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- message shape varies by operation type; forwarded as-is to primary node before serialization
   public sendForward(message: any): boolean {
     return this.connectionPool.sendToPrimary(message);
   }
@@ -520,15 +528,15 @@ export class ClusterClient implements IConnectionProvider {
   /**
    * Send batch of operations with routing
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- batch message shape varies by operation type; msgpack serialization happens after routing so each message is still an untyped object
   public sendBatch(operations: Array<{ key: string; message: any }>): Map<string, boolean> {
     const results = new Map<string, boolean>();
 
     if (this.config.routingMode === 'direct' && this.routingActive) {
       // Group by target node, tracking per-key routing decisions for metrics.
-      const nodeMessages = new Map<
-        string,
-        Array<{ key: string; message: any; isDirect: boolean }>
-      >();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- message shape varies by operation type; grouped before serialization so element type is untyped at this layer
+      type NodeMessageEntry = { key: string; message: any; isDirect: boolean };
+      const nodeMessages = new Map<string, NodeMessageEntry[]>();
 
       for (const { key, message } of operations) {
         this.routingMetrics.totalRoutes++;
@@ -854,6 +862,7 @@ export class ClusterClient implements IConnectionProvider {
     });
 
     // Forward messages from connection pool
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- WebSocket message data is a raw binary/string payload; type is narrowed after msgpack decode in the message handler
     this.connectionPool.on('message', (nodeId: string, data: any) => {
       this.emit('message', nodeId, data);
     });

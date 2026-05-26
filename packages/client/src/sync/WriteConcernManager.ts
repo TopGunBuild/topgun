@@ -14,6 +14,7 @@ import type { IWriteConcernManager, WriteConcernManagerConfig } from './types';
  * Pending write concern promise state.
  */
 interface PendingWriteConcernPromise {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- write concern result shape is determined by the server ACK payload; the pending promise is typed as any to avoid coupling to specific operation result shapes
   resolve: (result: any) => void;
   reject: (error: Error) => void;
   timeoutHandle?: ReturnType<typeof setTimeout>;
@@ -47,6 +48,7 @@ export class WriteConcernManager implements IWriteConcernManager {
    * @param timeout - Timeout in ms (default: 5000)
    * @returns Promise that resolves with the Write Concern result
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- write concern result type is determined by the server ACK; Promise<any> matches the resolveWriteConcernPromise(result: any) contract
   public registerWriteConcernPromise(opId: string, timeout: number = 5000): Promise<any> {
     const actualTimeout = timeout ?? this.config.defaultTimeout ?? 5000;
 
@@ -70,6 +72,7 @@ export class WriteConcernManager implements IWriteConcernManager {
    * @param opId - Operation ID
    * @param result - Result from server ACK
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- result is the server ACK payload; shape varies by operation type and is not known at the write concern layer
   public resolveWriteConcernPromise(opId: string, result: any): void {
     const pending = this.pendingWriteConcernPromises.get(opId);
     if (pending) {

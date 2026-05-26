@@ -25,6 +25,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
   public async handleORMapSyncRespRoot(payload: {
     mapName: string;
     rootHash: number;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- server timestamp shape is implementation-defined (HLC or raw ms); passed through to onTimestampUpdate without inspection
     timestamp?: any;
   }): Promise<void> {
     const { mapName, rootHash, timestamp } = payload;
@@ -99,6 +100,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
    */
   public async handleORMapSyncRespLeaf(payload: {
     mapName: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- records in the leaf entries are raw ORMapRecord objects decoded from msgpack; value type is erased at the sync protocol layer
     entries: Array<{ key: string; records: any[]; tombstones: string[] }>;
   }): Promise<void> {
     const { mapName, entries } = payload;
@@ -133,6 +135,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
    */
   public async handleORMapDiffResponse(payload: {
     mapName: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- records in the diff response are raw ORMapRecord objects decoded from msgpack; value type is erased at the sync protocol layer
     entries: Array<{ key: string; records: any[]; tombstones: string[] }>;
   }): Promise<void> {
     const { mapName, entries } = payload;
@@ -161,9 +164,11 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
    * Push local ORMap diff to server for the given keys.
    * Sends local records and tombstones that the server might not have.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ORMap value type is erased at the sync handler layer; actual V type lives in the map instance generic at TopGunClient level
   public async pushORMapDiff(mapName: string, keys: string[], map: ORMap<any, any>): Promise<void> {
     const entries: Array<{
       key: string;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ORMapRecord value type is erased at the diff protocol layer; records are passed through to the server without inspection
       records: ORMapRecord<any>[];
       tombstones: string[];
     }> = [];

@@ -103,6 +103,7 @@ export class HybridSearchHandle<T = unknown> {
   private syncEngine: SyncEngine;
 
   /** Bound message handler (retained for off() symmetry) */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SyncEngine message bus broadcasts heterogeneous message types; narrowed by message.type in handleMessage
   private messageHandler: (message: any) => void;
 
   constructor(
@@ -136,6 +137,7 @@ export class HybridSearchHandle<T = unknown> {
    * Handles HYBRID_SEARCH_RESP (initial snapshot) and HYBRID_SEARCH_UPDATE (deltas).
    * Silently ignores all other message types — other handles share the same channel.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- message is a deserialized msgpack object from SyncEngine broadcast; type is narrowed by message.type before dispatch
   private handleMessage(message: any): void {
     if (message.type === 'HYBRID_SEARCH_RESP') {
       this.handleSearchResponse(message);
@@ -151,6 +153,7 @@ export class HybridSearchHandle<T = unknown> {
    * The server sets requestId equal to the subscriptionId from the HYBRID_SEARCH_SUB
    * payload — this is how the handle identifies its own initial snapshot.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- message is a deserialized msgpack object; payload fields are accessed after type guard on message.type
   private handleSearchResponse(message: any): void {
     if (message.type !== 'HYBRID_SEARCH_RESP') return;
     if (message.payload?.requestId !== this.subscriptionId) return;
@@ -175,6 +178,7 @@ export class HybridSearchHandle<T = unknown> {
    * Handle HYBRID_SEARCH_UPDATE (live delta).
    * ENTER adds a new key, UPDATE mutates score/methodScores/value, LEAVE removes the key.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- message is a deserialized msgpack object; payload fields are accessed after type guard on message.type
   private handleSearchUpdate(message: any): void {
     if (message.type !== 'HYBRID_SEARCH_UPDATE') return;
     if (message.payload?.subscriptionId !== this.subscriptionId) return;

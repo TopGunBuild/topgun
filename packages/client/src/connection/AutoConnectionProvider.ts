@@ -85,6 +85,7 @@ export class AutoConnectionProvider implements IConnectionProvider {
         this.proxyEvents(wsProvider);
         logger.info({ url: wsUrl }, 'AutoConnectionProvider: WebSocket connected');
         return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- caught error is typed as unknown; any is needed to access .message for the debug log during WS retry loop
       } catch (err: any) {
         logger.debug(
           { attempt: attempt + 1, maxAttempts: this.maxWsAttempts, err: err.message },

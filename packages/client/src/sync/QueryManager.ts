@@ -21,9 +21,11 @@ export class QueryManager implements IQueryManager {
   private readonly config: QueryManagerConfig;
 
   /** Standard queries (single source of truth) */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query type parameter erased in the manager registry; typed handles are created in TopGunClient
   private queries: Map<string, QueryHandle<any>> = new Map();
 
   /** Hybrid queries with FTS support (single source of truth) */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query type parameter erased in the manager registry
   private hybridQueries: Map<string, HybridQueryHandle<any>> = new Map();
 
   constructor(config: QueryManagerConfig) {
@@ -37,6 +39,7 @@ export class QueryManager implements IQueryManager {
   /**
    * Get all queries (read-only access).
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query type parameter erased at the manager interface; individual handles are typed at creation
   public getQueries(): Map<string, QueryHandle<any>> {
     return this.queries;
   }
@@ -44,6 +47,7 @@ export class QueryManager implements IQueryManager {
   /**
    * Get all hybrid queries.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query type parameter erased at the manager interface
   public getHybridQueries(): Map<string, HybridQueryHandle<any>> {
     return this.hybridQueries;
   }
@@ -51,6 +55,7 @@ export class QueryManager implements IQueryManager {
   /**
    * Get a hybrid query by ID.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- hybrid query type parameter erased at lookup time; caller narrows the result
   public getHybridQuery(queryId: string): HybridQueryHandle<any> | undefined {
     return this.hybridQueries.get(queryId);
   }
@@ -63,6 +68,7 @@ export class QueryManager implements IQueryManager {
    * Subscribe to a standard query.
    * Adds to queries Map and sends subscription to server if authenticated.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query type parameter erased at subscription time; actual type lives in the handle's internal state
   public subscribeToQuery(query: QueryHandle<any>): void {
     this.queries.set(query.id, query);
     if (this.config.isAuthenticated()) {
@@ -88,6 +94,7 @@ export class QueryManager implements IQueryManager {
    * Send query subscription message to server.
    * Includes field projection when specified in the query filter.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query type parameter erased at the routing layer; only the filter and map name are needed for the subscription message
   private sendQuerySubscription(query: QueryHandle<any>): void {
     const filter = query.getFilter();
     this.config.sendMessage({
@@ -175,11 +182,13 @@ export class QueryManager implements IQueryManager {
   public async runLocalQuery(
     mapName: string,
     filter: QueryFilter,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- local query returns raw record values whose type is unknown at the query manager level; callers cast to T
   ): Promise<{ key: string; value: any }[]> {
     // Retrieve all keys for the map
     const keys = await this.config.storageAdapter.getAllKeys();
     const mapKeys = keys.filter((k) => k.startsWith(mapName + ':'));
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- accumulator for untyped local records; typed after return by the caller
     const results: { key: string; value: any }[] = [];
     for (const fullKey of mapKeys) {
       const record = await this.config.storageAdapter.get(fullKey);
@@ -228,6 +237,7 @@ export class QueryManager implements IQueryManager {
     // Get all entries from the map using storage adapter
     const allKeys = await this.config.storageAdapter.getAllKeys();
     const mapPrefix = `${mapName}:`;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- raw storage entries before type narrowing; value type determined per-record after deserialization
     const entries: Array<[string, any]> = [];
 
     for (const fullKey of allKeys) {
@@ -255,6 +265,7 @@ export class QueryManager implements IQueryManager {
       if (filter.where) {
         let whereMatches = true;
         for (const [field, expected] of Object.entries(filter.where)) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- value is cast to any for dynamic field access by string key in the where clause
           if ((value as any)[field] !== expected) {
             whereMatches = false;
             break;
@@ -275,7 +286,9 @@ export class QueryManager implements IQueryManager {
     if (filter.sort) {
       results.sort((a, b) => {
         for (const [field, direction] of Object.entries(filter.sort!)) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- sort comparator accesses dynamic field keys on typed results; any is used to index by runtime field name
           let valA: any;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- sort comparator accesses dynamic field keys on typed results
           let valB: any;
 
           if (field === '_score') {
@@ -285,7 +298,9 @@ export class QueryManager implements IQueryManager {
             valA = a.key;
             valB = b.key;
           } else {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic field access on typed value; sort field name is a runtime string
             valA = (a.value as any)[field];
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic field access on typed value; sort field name is a runtime string
             valB = (b.value as any)[field];
           }
 

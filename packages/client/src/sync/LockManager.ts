@@ -41,6 +41,7 @@ const RELEASE_RESPONSE_TIMEOUT_MS = 5000;
  * kept here.
  */
 interface PendingLockRequest {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- lock grant result shape varies (granted with fencing token vs. rejected with reason); typed as any to hold all variants in the pending-requests map
   resolve: (res: any) => void;
   timer: ReturnType<typeof setTimeout>;
 }

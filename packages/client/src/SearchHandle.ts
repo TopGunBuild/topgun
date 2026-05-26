@@ -72,6 +72,7 @@ export class SearchHandle<T = unknown> {
   private syncEngine: SyncEngine;
 
   /** Handler for all messages (SEARCH_RESP and SEARCH_UPDATE) */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SyncEngine message bus broadcasts heterogeneous message types; narrowed by message.type in handleMessage
   private messageHandler: (message: any) => void;
 
   constructor(syncEngine: SyncEngine, mapName: string, query: string, options?: SearchOptions) {
@@ -94,6 +95,7 @@ export class SearchHandle<T = unknown> {
   /**
    * Handle incoming messages (both SEARCH_RESP and SEARCH_UPDATE).
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- message is a deserialized msgpack object from SyncEngine broadcast; narrowed by message.type before dispatch
   private handleMessage(message: any): void {
     if (message.type === 'SEARCH_RESP') {
       this.handleSearchResponse(message);
@@ -265,6 +267,7 @@ export class SearchHandle<T = unknown> {
   /**
    * Handle SEARCH_RESP message (initial results).
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- message is a deserialized msgpack object; payload fields are accessed after type guard on message.type
   private handleSearchResponse(message: any): void {
     if (message.type !== 'SEARCH_RESP') return;
     if (message.payload?.requestId !== this.subscriptionId) return;
@@ -289,6 +292,7 @@ export class SearchHandle<T = unknown> {
   /**
    * Handle SEARCH_UPDATE message (delta updates).
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- message is a deserialized msgpack object; payload fields are accessed after type guard on message.type
   private handleSearchUpdate(message: any): void {
     if (message.type !== 'SEARCH_UPDATE') return;
     if (message.payload?.subscriptionId !== this.subscriptionId) return;

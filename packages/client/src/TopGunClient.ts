@@ -114,9 +114,11 @@ export interface TopGunClientConfig {
   onAuthRequired?: (error: import('./errors/AuthRequiredError').AuthRequiredError) => void;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSchema defaults to any so untyped callers work without a schema; narrowed via generic at instantiation
 export class TopGunClient<TSchema extends Record<string, any> = any> {
   private readonly nodeId: string;
   private readonly syncEngine: SyncEngine;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- maps registry holds heterogeneous LWWMap and ORMap instances; value types differ per map name and are narrowed at getMap/getORMap call sites
   private readonly maps: Map<string, LWWMap<any, any> | ORMap<any, any>> = new Map();
   private readonly storageAdapter: IStorageAdapter;
   private readonly topicHandles: Map<string, TopicHandle> = new Map();
@@ -252,8 +254,11 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     mapName: K,
     filter: QueryFilter,
   ): QueryHandle<TSchema[K]>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped overload for back-compat callers that do not supply a schema type parameter
   public query<T = any>(mapName: string, filter: QueryFilter): QueryHandle<T>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- implementation signature uses any to satisfy both overloads; return type is narrowed by the overload the caller selects
   public query(mapName: string, filter: QueryFilter): QueryHandle<any> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- QueryHandle constructed for untyped internal storage; actual type flows from the selected overload
     return new QueryHandle<any>(this.syncEngine, mapName, filter);
   }
 
@@ -316,16 +321,20 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
    * @returns An LWWMap instance.
    */
   public getMap<K extends keyof TSchema & string>(name: K): LWWMap<string, TSchema[K]>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped overload for back-compat callers that do not supply a schema type parameter
   public getMap<K = string, V = any>(name: string): LWWMap<K, V>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- implementation signature uses any to satisfy both overloads; actual type flows from the selected overload
   public getMap(name: string): LWWMap<any, any> {
     if (this.maps.has(name)) {
       const map = this.maps.get(name);
       if (map instanceof LWWMap) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- cast to satisfy overload; actual type narrowed by caller
         return map as LWWMap<any, any>;
       }
       throw new Error(`Map ${name} exists but is not an LWWMap`);
     }
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- LWWMap generic params erased at the registry level; actual type provided by the caller's overload
     const lwwMap = new LWWMap<any, any>(this.syncEngine.getHLC());
     this.maps.set(name, lwwMap);
     this.syncEngine.registerMap(name, lwwMap);
@@ -338,10 +347,13 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
         for (const fullKey of keys) {
           if (fullKey.startsWith(mapPrefix)) {
             const record = await this.storageAdapter.get(fullKey);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any -- record shape is unknown at restore time; timestamp check distinguishes LWWRecord from ORMapRecord without importing the schema
             if (record && (record as LWWRecord<any>).timestamp && !(record as any).tag) {
               // Strip prefix to get actual key
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any -- key is a string that needs to be cast back to the map's K type; the caller's overload constrains K at the public API
               const key = fullKey.substring(mapPrefix.length) as unknown as any;
               // Merge into in-memory map without triggering new ops
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any -- LWWRecord<any> used for the merge; actual value type erased at restore time and re-typed by the public overload
               lwwMap.merge(key, record as LWWRecord<any>);
             }
           }
@@ -351,6 +363,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
 
     // Wrap LWWMap with IMap interface logic
     const originalSet = lwwMap.set.bind(lwwMap);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- key and value types are erased at the wrapper level; actual types flow from the caller's overload
     lwwMap.set = (key: any, value: any, ttlMs?: number) => {
       const record = originalSet(key, value, ttlMs);
       this.storageAdapter
@@ -363,6 +376,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     };
 
     const originalRemove = lwwMap.remove.bind(lwwMap);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- key type is erased at the wrapper level; actual type flows from the caller's overload
     lwwMap.remove = (key: any) => {
       const tombstone = originalRemove(key);
       this.storageAdapter
@@ -390,16 +404,20 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
    * @returns An ORMap instance.
    */
   public getORMap<K extends keyof TSchema & string>(name: K): ORMap<string, TSchema[K]>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped overload for back-compat callers that do not supply a schema type parameter
   public getORMap<K = string, V = any>(name: string): ORMap<K, V>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- implementation signature uses any to satisfy both overloads; actual type flows from the selected overload
   public getORMap(name: string): ORMap<any, any> {
     if (this.maps.has(name)) {
       const map = this.maps.get(name);
       if (map instanceof ORMap) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- cast to satisfy overload; actual type narrowed by caller
         return map as ORMap<any, any>;
       }
       throw new Error(`Map ${name} exists but is not an ORMap`);
     }
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ORMap generic params erased at the registry level; actual type provided by the caller's overload
     const orMap = new ORMap<any, any>(this.syncEngine.getHLC());
     this.maps.set(name, orMap);
     this.syncEngine.registerMap(name, orMap);
@@ -409,6 +427,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
 
     // Wrap ORMap methods to record operations
     const originalAdd = orMap.add.bind(orMap);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- key and value types are erased at the wrapper level; actual types flow from the caller's overload
     orMap.add = (key: any, value: any, ttlMs?: number) => {
       const record = originalAdd(key, value, ttlMs);
 
@@ -425,6 +444,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     };
 
     const originalRemove = orMap.remove.bind(orMap);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- key and value types are erased at the wrapper level; actual types flow from the caller's overload
     orMap.remove = (key: any, value: any) => {
       const tombstones = originalRemove(key, value);
       const timestamp = this.syncEngine.getHLC().now();

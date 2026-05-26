@@ -23,6 +23,7 @@ export class CounterManager implements ICounterManager {
   private readonly config: CounterManagerConfig;
 
   // Counter update listeners by name
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- counter state shape (positive/negative Maps) is constructed at call sites; any avoids coupling the listener signature to the internal PNCounter state type
   private counterUpdateListeners: Map<string, Set<(state: any) => void>> = new Map();
 
   constructor(config: CounterManagerConfig) {
@@ -39,6 +40,7 @@ export class CounterManager implements ICounterManager {
    * @param listener Callback when counter state is updated
    * @returns Unsubscribe function
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- counter state is a { positive: Map, negative: Map } object constructed in handleCounterUpdate; typed as any to decouple listener from internal PNCounter state shape
   public onCounterUpdate(name: string, listener: (state: any) => void): () => void {
     if (!this.counterUpdateListeners.has(name)) {
       this.counterUpdateListeners.set(name, new Set());
@@ -71,6 +73,7 @@ export class CounterManager implements ICounterManager {
    * @param name Counter name
    * @param state Counter state to sync
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- counter state is a PNCounter internal object with positive/negative Maps; any avoids an import cycle with the PNCounter implementation
   public syncCounter(name: string, state: any): void {
     if (this.config.isAuthenticated()) {
       // Convert Maps to objects for serialization

@@ -34,6 +34,7 @@ export interface ConnectionPoolEvents {
   'node:healthy': (nodeId: string) => void;
   'node:unhealthy': (nodeId: string, reason: string) => void;
   'node:remapped': (oldId: string, newId: string) => void;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- WebSocket message data is a raw msgpack-decoded object; type is narrowed per message.type at the handler layer
   message: (nodeId: string, message: any) => void;
   error: (nodeId: string, error: Error) => void;
 }
@@ -52,6 +53,7 @@ interface NodeConnection {
 }
 
 export class ConnectionPool {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- event listeners accept heterogeneous args depending on event type; a discriminated union per event would require one handler type per event name
   private readonly listeners: Map<string, Set<(...args: any[]) => void>> = new Map();
   private readonly config: ConnectionPoolConfig;
   private readonly connections: Map<string, NodeConnection> = new Map();
@@ -70,6 +72,7 @@ export class ConnectionPool {
   // Event Emitter Methods (browser-compatible)
   // ============================================
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- listener args are heterogeneous per event type; a generic per-event discriminated union would require one overload per event name
   public on(event: string, listener: (...args: any[]) => void): this {
     if (!this.listeners.has(event)) {
       this.listeners.set(event, new Set());
@@ -78,11 +81,13 @@ export class ConnectionPool {
     return this;
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- listener args are heterogeneous per event type; mirrors the on() signature to allow safe add/remove of the same reference
   public off(event: string, listener: (...args: any[]) => void): this {
     this.listeners.get(event)?.delete(listener);
     return this;
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- emit spreads heterogeneous args per event type; rest param accepts any to allow forwarding without per-event overloads
   public emit(event: string, ...args: any[]): boolean {
     const eventListeners = this.listeners.get(event);
     if (!eventListeners || eventListeners.size === 0) {
@@ -263,6 +268,7 @@ export class ConnectionPool {
   /**
    * Send message to a specific node
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- message shape varies by operation type; serialized to msgpack binary before sending so the type is erased at this layer
   public send(nodeId: string, message: any): boolean {
     const connection = this.connections.get(nodeId);
     if (!connection) {
@@ -296,6 +302,7 @@ export class ConnectionPool {
   /**
    * Send message to primary node
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- message shape varies by operation type; forwarded as-is to primary node before serialization
   public sendToPrimary(message: any): boolean {
     if (!this.primaryNodeId) {
       logger.warn('No primary node available');
@@ -484,6 +491,7 @@ export class ConnectionPool {
     const connection = this.connections.get(nodeId);
     if (!connection) return;
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- message is a msgpack-decoded or JSON-parsed object; type is narrowed per message.type in the switch below
     let message: any;
     try {
       if (event.data instanceof ArrayBuffer) {

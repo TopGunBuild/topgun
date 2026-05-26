@@ -44,6 +44,7 @@ export interface IWebSocketManager {
    * @param key - Optional key for routing (cluster mode only)
    * @returns true if message was sent successfully, false otherwise
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- msgpack-decoded WebSocket messages have no fixed TS type at the send/receive boundary; structure is validated per message type at the handler layer
   sendMessage(message: any, key?: string): boolean;
 
   /**
@@ -146,6 +147,7 @@ export interface WebSocketManagerConfig {
    * Callback invoked when a message is received from the server.
    * Message is already deserialized.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- msgpack-decoded message shape varies by server message type; type narrowing happens inside the message handler
   onMessage: (message: any) => void;
 
   /**
@@ -249,17 +251,20 @@ export interface IQueryManager {
   /**
    * Get all queries (read-only access).
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query handle type parameter is erased at the manager level; individual handles are typed at creation
   getQueries(): Map<string, QueryHandle<any>>;
 
   /**
    * Get all hybrid queries.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query handle type parameter is erased at the manager level; individual handles are typed at creation
   getHybridQueries(): Map<string, HybridQueryHandle<any>>;
 
   /**
    * Subscribe to a standard query.
    * @param query - Query handle to subscribe
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query handle type parameter is erased at the manager level; callers pass typed handles, the manager stores them untyped
   subscribeToQuery(query: QueryHandle<any>): void;
 
   /**
@@ -284,6 +289,7 @@ export interface IQueryManager {
    * Get a hybrid query by ID.
    * @param queryId - ID of the hybrid query
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- hybrid query handle type parameter is erased at lookup time; the caller narrows the result
   getHybridQuery(queryId: string): HybridQueryHandle<any> | undefined;
 
   /**
@@ -291,6 +297,7 @@ export interface IQueryManager {
    * @param mapName - Name of the map to query
    * @param filter - Query filter
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- local query returns raw record values whose type is unknown at the query-manager interface level; callers cast to T
   runLocalQuery(mapName: string, filter: QueryFilter): Promise<{ key: string; value: any }[]>;
 
   /**
@@ -324,6 +331,7 @@ export interface QueryManagerConfig {
    * @param key - Optional key for routing
    * @returns true if sent successfully
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- msgpack-decoded WebSocket messages have no fixed TS type at the send boundary; structure is validated per message type at the handler layer
   sendMessage: (message: any, key?: string) => boolean;
 
   /**
@@ -359,6 +367,7 @@ export interface ITopicManager {
    * @param topic - Topic name
    * @param data - Message data
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- topic messages can be any JSON-serialisable value; the pub/sub layer is schema-agnostic
   publishTopic(topic: string, data: any): void;
 
   /**
@@ -391,6 +400,7 @@ export interface ITopicManager {
    * @param publisherId - Publisher node ID
    * @param timestamp - Message timestamp
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- incoming topic message payload is a raw deserialized value; schema validation is the subscriber's responsibility
   handleTopicMessage(topic: string, data: any, publisherId: string, timestamp: number): void;
 }
 
@@ -409,6 +419,7 @@ export interface TopicManagerConfig {
    * @param key - Optional key for routing
    * @returns true if sent successfully
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- msgpack-decoded WebSocket messages have no fixed TS type at the send boundary; structure is validated per message type at the handler layer
   sendMessage: (message: any, key?: string) => boolean;
 
   /**
@@ -480,6 +491,7 @@ export interface LockManagerConfig {
    * @param key - Optional key for routing
    * @returns true if sent successfully
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- msgpack-decoded WebSocket messages have no fixed TS type at the send boundary; structure is validated per message type at the handler layer
   sendMessage: (message: any, key?: string) => boolean;
 
   /**
@@ -508,6 +520,7 @@ export interface IWriteConcernManager {
    * @param timeout - Timeout in milliseconds
    * @returns Promise that resolves with the write concern result
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- write concern result is a raw server ACK payload; its shape depends on write concern level (MEMORY/APPLIED/REPLICATED/PERSISTED)
   registerWriteConcernPromise(opId: string, timeout?: number): Promise<any>;
 
   /**
@@ -515,6 +528,7 @@ export interface IWriteConcernManager {
    * @param opId - Operation ID
    * @param result - Result from server ACK
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- write concern ACK result is a raw server payload forwarded as-is to the registered promise
   resolveWriteConcernPromise(opId: string, result: any): void;
 
   /**
@@ -550,6 +564,7 @@ export interface ICounterManager {
    * @param listener - Callback when counter state is updated
    * @returns Unsubscribe function
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- counter state is the raw PN counter object (positive/negative maps) whose exact shape the listener interprets
   onCounterUpdate(name: string, listener: (state: any) => void): () => void;
 
   /**
@@ -563,6 +578,7 @@ export interface ICounterManager {
    * @param name - Counter name
    * @param state - Counter state to sync
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- counter state forwarded to server is the internal PN counter shape; interface stays agnostic to avoid coupling to core types
   syncCounter(name: string, state: any): void;
 
   /**
@@ -591,6 +607,7 @@ export interface CounterManagerConfig {
    * @param key - Optional key for routing
    * @returns true if sent successfully
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- msgpack-decoded WebSocket messages have no fixed TS type at the send boundary; structure is validated per message type at the handler layer
   sendMessage: (message: any, key?: string) => boolean;
 
   /**
@@ -675,6 +692,7 @@ export interface EntryProcessorClientConfig {
    * @param key - Optional key for routing
    * @returns true if sent successfully
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- msgpack-decoded WebSocket messages have no fixed TS type at the send boundary; structure is validated per message type at the handler layer
   sendMessage: (message: any, key?: string) => boolean;
 
   /**
@@ -791,6 +809,7 @@ export interface SqlClientConfig {
    * @param message - Message to send
    * @returns true if sent successfully
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- msgpack-decoded WebSocket messages have no fixed TS type at the send boundary; structure is validated per message type at the handler layer
   sendMessage: (message: any) => boolean;
 
   /**
@@ -815,6 +834,7 @@ export interface SearchClientConfig {
    * @param key - Optional key for routing
    * @returns true if sent successfully
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- msgpack-decoded WebSocket messages have no fixed TS type at the send boundary; structure is validated per message type at the handler layer
   sendMessage: (message: any, key?: string) => boolean;
 
   /**
@@ -845,6 +865,7 @@ export interface IMerkleSyncHandler {
   handleSyncRespRoot(payload: {
     mapName: string;
     rootHash: number;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- sync timestamp is an HLC-encoded value whose exact shape is validated in the sync handler, not at the interface boundary
     timestamp?: any;
   }): Promise<void>;
 
@@ -864,6 +885,7 @@ export interface IMerkleSyncHandler {
    */
   handleSyncRespLeaf(payload: {
     mapName: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- leaf records are raw LWWRecord-shaped objects deserialized from msgpack; the sync handler merges them into the typed map
     records: Array<{ key: string; record: any }>;
   }): Promise<void>;
 
@@ -896,6 +918,7 @@ export interface MerkleSyncHandlerConfig {
    * @param mapName - Map name
    * @returns LWWMap or ORMap instance, or undefined if not found
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- returns LWWMap<any,any> | ORMap<any,any> | undefined; the generic parameters are erased at the config level since the sync handler accesses the map by key, not by value type
   getMap: (mapName: string) => any; // LWWMap<any, any> | ORMap<any, any> | undefined
 
   /**
@@ -904,6 +927,7 @@ export interface MerkleSyncHandlerConfig {
    * @param key - Optional key for routing
    * @returns true if sent successfully
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- msgpack-decoded WebSocket messages have no fixed TS type at the send boundary; structure is validated per message type at the handler layer
   sendMessage: (message: any, key?: string) => boolean;
 
   /**
@@ -914,12 +938,14 @@ export interface MerkleSyncHandlerConfig {
   /**
    * HLC instance for timestamp updates.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- HLC class from @topgunbuild/core; typed as any here to avoid a hard cross-package import in this types file
   hlc: any; // HLC from @topgunbuild/core
 
   /**
    * Callback when timestamp is updated.
    * @param timestamp - New timestamp to update
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- HLC timestamp shape is opaque at the callback boundary; the callee updates the HLC directly
   onTimestampUpdate: (timestamp: any) => Promise<void>;
 
   /**
@@ -945,6 +971,7 @@ export interface IORMapSyncHandler {
   handleORMapSyncRespRoot(payload: {
     mapName: string;
     rootHash: number;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- sync timestamp is an HLC-encoded value whose exact shape is validated in the sync handler, not at the interface boundary
     timestamp?: any;
   }): Promise<void>;
 
@@ -964,6 +991,7 @@ export interface IORMapSyncHandler {
    */
   handleORMapSyncRespLeaf(payload: {
     mapName: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ORMap records are raw ORMapRecord-shaped objects from msgpack; the sync handler merges them into the typed map
     entries: Array<{ key: string; records: any[]; tombstones: string[] }>;
   }): Promise<void>;
 
@@ -973,6 +1001,7 @@ export interface IORMapSyncHandler {
    */
   handleORMapDiffResponse(payload: {
     mapName: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ORMap records are raw ORMapRecord-shaped objects from msgpack; the sync handler merges them into the typed map
     entries: Array<{ key: string; records: any[]; tombstones: string[] }>;
   }): Promise<void>;
 
@@ -982,6 +1011,7 @@ export interface IORMapSyncHandler {
    * @param keys - Keys to push
    * @param map - ORMap instance
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- map is an ORMap<any,any>; generic params are erased at the interface level since the handler accesses entries by key, not by value type
   pushORMapDiff(mapName: string, keys: string[], map: any): Promise<void>;
 
   /**
@@ -1007,6 +1037,7 @@ export interface ORMapSyncHandlerConfig {
    * @param mapName - Map name
    * @returns LWWMap or ORMap instance, or undefined if not found
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- returns LWWMap<any,any> | ORMap<any,any> | undefined; generic parameters are erased at the config level
   getMap: (mapName: string) => any; // LWWMap<any, any> | ORMap<any, any> | undefined
 
   /**
@@ -1015,17 +1046,20 @@ export interface ORMapSyncHandlerConfig {
    * @param key - Optional key for routing
    * @returns true if sent successfully
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- msgpack-decoded WebSocket messages have no fixed TS type at the send boundary; structure is validated per message type at the handler layer
   sendMessage: (message: any, key?: string) => boolean;
 
   /**
    * HLC instance for timestamp updates.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- HLC class from @topgunbuild/core; typed as any here to avoid a hard cross-package import in this types file
   hlc: any; // HLC from @topgunbuild/core
 
   /**
    * Callback when timestamp is updated.
    * @param timestamp - New timestamp to update
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- HLC timestamp shape is opaque at the callback boundary; the callee updates the HLC directly
   onTimestampUpdate: (timestamp: any) => Promise<void>;
 }
 
@@ -1042,6 +1076,7 @@ export interface VectorSearchClientConfig {
    * @param message - Message to send
    * @returns true if sent successfully
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- msgpack-decoded WebSocket messages have no fixed TS type at the send boundary; structure is validated per message type at the handler layer
   sendMessage: (message: any) => boolean;
 
   /**
@@ -1133,6 +1168,7 @@ export interface IVectorSearchClient {
  * Handler function for a message type.
  * Can be sync or async.
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- message handler receives a raw deserialized payload; each handler implementation narrows to the expected message shape
 export type MessageHandler = (message: any) => Promise<void> | void;
 
 /**
@@ -1147,6 +1183,7 @@ export interface MessageRouterConfig {
   /**
    * Fallback for unregistered message types.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- fallback for unregistered message types receives the raw deserialized payload
   onUnhandled?: (message: any) => void;
 }
 
@@ -1174,6 +1211,7 @@ export interface IMessageRouter {
    * @param message - Message to route
    * @returns Promise resolving to true if handled
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- incoming message is a raw deserialized payload; the router dispatches to typed handlers based on message.type
   route(message: any): Promise<boolean>;
 
   /**
@@ -1202,6 +1240,7 @@ export interface HybridSearchClientConfig {
    * @param message - Message to send
    * @returns true if sent successfully
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- msgpack-decoded WebSocket messages have no fixed TS type at the send boundary; structure is validated per message type at the handler layer
   sendMessage: (message: any) => boolean;
 
   /**

@@ -61,6 +61,7 @@ export class EventJournalReader {
         reject(new Error('Journal read timeout'));
       }, 10000);
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- message is a deserialized msgpack object from SyncEngine broadcast; type is narrowed by checking message.type before accessing payload fields
       const handleResponse = (message: any) => {
         if (message.type === 'JOURNAL_READ_RESPONSE' && message.requestId === requestId) {
           clearTimeout(timeout);
@@ -101,6 +102,7 @@ export class EventJournalReader {
         reject(new Error('Journal read timeout'));
       }, 10000);
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- message is a deserialized msgpack object from SyncEngine broadcast; type is narrowed by checking message.type before accessing payload fields
       const handleResponse = (message: any) => {
         if (message.type === 'JOURNAL_READ_RESPONSE' && message.requestId === requestId) {
           clearTimeout(timeout);
@@ -139,6 +141,7 @@ export class EventJournalReader {
     this.listeners.set(subscriptionId, listener);
 
     // Set up message handler for this subscription
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- message is a deserialized msgpack object; type is narrowed by checking message.type before dispatch to the journal listener
     const handleEvent = (message: any) => {
       if (message.type === 'JOURNAL_EVENT') {
         const event = this.parseEvent(message.event);

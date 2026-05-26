@@ -34,6 +34,7 @@ export class BackpressureController implements IBackpressureController {
   private backpressurePaused: boolean = false;
   private waitingForCapacity: Array<() => void> = [];
   private highWaterMarkEmitted: boolean = false;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- backpressure event listeners accept heterogeneous args depending on event type (threshold, dropped); a discriminated union per event would require one handler type per event name
   private backpressureListeners: Map<string, Set<(...args: any[]) => void>> = new Map();
 
   constructor(controllerConfig: BackpressureControllerConfig) {

@@ -29,6 +29,7 @@ export type ConnectionProviderEvent =
 /**
  * Connection event handler type.
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- connection event handlers receive heterogeneous args depending on event type (nodeId, data, error); a discriminated union would require one handler type per event
 export type ConnectionEventHandler = (...args: any[]) => void;
 
 /**
@@ -113,6 +114,7 @@ export interface IConnectionProvider {
    * @param operations - Array of { key, message } pairs where key is the routing key
    * @returns Map of key -> success boolean
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- batch message shape varies by operation type; msgpack serialization happens after routing, so the message is still an untyped object here
   sendBatch?(operations: Array<{ key: string; message: any }>): Map<string, boolean>;
 
   /**

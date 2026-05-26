@@ -5,6 +5,7 @@ import type { PredicateNode } from '@topgunbuild/core';
 import type { RecordSyncState } from './RecordSyncState';
 
 export interface QueryFilter {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- equality filters compare field values of unknown type; narrowing would require a generic on QueryFilter
   where?: Record<string, any>;
   predicate?: PredicateNode;
   sort?: Record<string, 'asc' | 'desc'>;
@@ -319,6 +320,7 @@ export class QueryHandle<T> {
     );
 
     if (this.filter.sort) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- sort comparator parameters typed as any to allow dynamic field access by runtime string key
       results.sort((a: any, b: any) => {
         for (const [field, direction] of Object.entries(this.filter.sort!)) {
           const valA = a[field];

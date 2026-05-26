@@ -68,7 +68,9 @@ export interface OpLogEntry {
   mapName: string;
   opType: 'PUT' | 'REMOVE' | 'OR_ADD' | 'OR_REMOVE';
   key: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- op log entries hold records with unknown value type; type is determined by the map the entry belongs to
   record?: LWWRecord<any>; // LWW Put/Remove (Remove has null value)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ORMapRecord value type erased in the op log; maps use their own generic at runtime
   orRecord?: ORMapRecord<any>; // ORMap Add
   orTag?: string; // ORMap Remove (Tombstone tag)
   timestamp: Timestamp; // HLC timestamp of the operation
@@ -185,6 +187,7 @@ export class SyncEngine {
   private readonly messageRouter: IMessageRouter;
 
   private opLog: OpLogEntry[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- maps registry holds heterogeneous LWWMap and ORMap instances; value types differ per map name
   private maps: Map<string, LWWMap<any, any> | ORMap<any, any>> = new Map();
   private lastSyncTimestamp: number = 0;
   private authToken: string | null = null;
@@ -650,6 +653,7 @@ export class SyncEngine {
     await this.storageAdapter.setMeta('lastSyncTimestamp', this.lastSyncTimestamp);
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- map value type is erased in the registry; callers get typed instances via TopGunClient.getMap/getORMap overloads
   public registerMap(mapName: string, map: LWWMap<any, any> | ORMap<any, any>): void {
     this.maps.set(mapName, map);
   }
@@ -659,7 +663,9 @@ export class SyncEngine {
     opType: 'PUT' | 'REMOVE' | 'OR_ADD' | 'OR_REMOVE',
     key: string,
     data: {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- op log entries hold records with unknown value type; type is determined by the map the entry belongs to
       record?: LWWRecord<any>;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ORMapRecord value type erased in the op log
       orRecord?: ORMapRecord<any>;
       orTag?: string;
       timestamp: Timestamp;
@@ -679,6 +685,7 @@ export class SyncEngine {
       synced: false,
     };
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- IStorageAdapter.appendOpLog accepts any; the op log entry is typed internally but the adapter interface is backend-agnostic
     const id = await this.storageAdapter.appendOpLog(opLogEntry as any);
     opLogEntry.id = String(id);
 
@@ -793,6 +800,7 @@ export class SyncEngine {
    * Subscribe to a standard query.
    * Delegates to QueryManager.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query type parameter is erased at the SyncEngine routing level; typed handles are created in TopGunClient overloads
   public subscribeToQuery(query: QueryHandle<any>): void {
     this.queryManager.subscribeToQuery(query);
   }
@@ -836,6 +844,7 @@ export class SyncEngine {
   public async runLocalQuery(
     mapName: string,
     filter: QueryFilter,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- local query returns raw record values whose type is unknown at the SyncEngine level; callers cast to T
   ): Promise<{ key: string; value: any }[]> {
     return this.queryManager.runLocalQuery(mapName, filter);
   }
@@ -1395,6 +1404,7 @@ export class SyncEngine {
    * @param timeout - Timeout in ms (default: 5000)
    * @returns Promise that resolves with the Write Concern result
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- write concern result is a raw server ACK payload whose shape depends on write concern level
   public registerWriteConcernPromise(opId: string, timeout: number = 5000): Promise<any> {
     return this.writeConcernManager.registerWriteConcernPromise(opId, timeout);
   }
@@ -1674,6 +1684,7 @@ export class SyncEngine {
     this.writeConcernManager.resolveWriteConcernPromise(opId, {
       opId,
       success: false,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- string literal cast to satisfy the WriteConcernValue type at a rejection code path without importing the enum
       achievedLevel: 'FIRE_AND_FORGET' as any,
       error: reason,
     });
