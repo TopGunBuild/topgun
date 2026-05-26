@@ -63,6 +63,9 @@ export class StandingQueryIndex<K, V> implements Index<K, V, unknown> {
   /** Retrieval cost - lowest of all index types */
   private static readonly RETRIEVAL_COST = 10;
 
+  // Test-only op-count instrumentation. undefined in production = zero overhead (V8 inlines no-op optional-chain call).
+  _onPredicateEval?: () => void;
+
   constructor(options: StandingQueryIndexOptions<K, V>) {
     this.query = options.query;
     this.getRecord = options.getRecord;
@@ -206,6 +209,8 @@ export class StandingQueryIndex<K, V> implements Index<K, V, unknown> {
    * @returns true if record matches the query
    */
   private evaluateRecord(record: V): boolean {
+    // Op-count hook fire — see _onPredicateEval field for invariant being tested.
+    this._onPredicateEval?.();
     try {
       return this.evaluateQuery(this.query, record);
     } catch {
