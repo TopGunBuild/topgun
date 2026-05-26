@@ -534,9 +534,11 @@ export class ClusterClient implements IConnectionProvider {
 
     if (this.config.routingMode === 'direct' && this.routingActive) {
       // Group by target node, tracking per-key routing decisions for metrics.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- message shape varies by operation type; grouped before serialization so element type is untyped at this layer
-      type NodeMessageEntry = { key: string; message: any; isDirect: boolean };
-      const nodeMessages = new Map<string, NodeMessageEntry[]>();
+      const nodeMessages = new Map<
+        string,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- message shape varies by operation type; grouped before serialization so element type is untyped at this layer
+        Array<{ key: string; message: any; isDirect: boolean }>
+      >();
 
       for (const { key, message } of operations) {
         this.routingMetrics.totalRoutes++;
