@@ -844,7 +844,7 @@ export class SyncEngine {
   public async runLocalQuery(
     mapName: string,
     filter: QueryFilter,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- local query returns raw record values whose type is unknown at the SyncEngine level; callers cast to T
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- local query returns raw record values whose type is unknown at the SyncEngine level; callers cast to T
   ): Promise<{ key: string; value: any }[]> {
     return this.queryManager.runLocalQuery(mapName, filter);
   }

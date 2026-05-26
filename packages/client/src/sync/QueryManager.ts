@@ -182,7 +182,7 @@ export class QueryManager implements IQueryManager {
   public async runLocalQuery(
     mapName: string,
     filter: QueryFilter,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- local query returns raw record values whose type is unknown at the query manager level; callers cast to T
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- local query returns raw record values whose type is unknown at the query manager level; callers cast to T
   ): Promise<{ key: string; value: any }[]> {
     // Retrieve all keys for the map
     const keys = await this.config.storageAdapter.getAllKeys();

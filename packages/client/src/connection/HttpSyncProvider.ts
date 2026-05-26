@@ -118,7 +118,7 @@ export class HttpSyncProvider implements IConnectionProvider {
       this.wasConnected = true;
       this.emit('connected', 'http');
       this.startPolling();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- caught error is typed as unknown; any is needed to access .message for re-emitting the error event
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- caught error is typed as unknown; any is needed to access .message for re-emitting the error event
     } catch (err: any) {
       this.connected = false;
       this.emit('error', err);
