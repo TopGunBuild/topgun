@@ -75,6 +75,7 @@ export class IndexSerializer {
     // Restore metadata
     // We need to set private properties.
     // We'll use a helper method on Index or 'any' cast for this serializer friend class.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- serializer must set private fields on BM25InvertedIndex; cast to any is the only alternative to making those fields public
     const idx = index as any;
 
     idx.totalDocs = data.metadata.totalDocs;

@@ -21,6 +21,7 @@ export class MerkleTree {
   private root: MerkleNode;
   private readonly depth: number;
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- LWWRecord<any> reflects that the Merkle tree tracks record keys and timestamps regardless of the stored value type
   constructor(records: Map<string, LWWRecord<any>> = new Map(), depth: number = 3) {
     this.depth = depth;
     this.root = { hash: 0, children: {} };
@@ -35,6 +36,7 @@ export class MerkleTree {
    * @param key The key of the record
    * @param record The record (value + timestamp)
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- LWWRecord<any> reflects that the Merkle tree tracks record keys and timestamps regardless of the stored value type
   public update(key: string, record: LWWRecord<any>) {
     const itemHash = hashString(
       `${key}:${record.timestamp.millis}:${record.timestamp.counter}:${record.timestamp.nodeId}`,

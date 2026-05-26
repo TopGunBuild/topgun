@@ -31,6 +31,7 @@ export const LWWRecordSchema = z.object({
 // V is a phantom type parameter preserved for call-site type safety (e.g. LWWRecord<string>);
 // the Zod schema infers the runtime shape, so V cannot be threaded through z.infer.
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- V is a phantom generic; Zod schema infers `any` for the value field since record values can be any primitive
 export type LWWRecord<V = any> = z.infer<typeof LWWRecordSchema>;
 
 export const ORMapRecordSchema = z.object({
@@ -42,6 +43,7 @@ export const ORMapRecordSchema = z.object({
 // V is a phantom type parameter preserved for call-site type safety (e.g. ORMapRecord<string>);
 // the Zod schema infers the runtime shape, so V cannot be threaded through z.infer.
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- V is a phantom generic; Zod schema infers `any` for the value field since record values can be any primitive
 export type ORMapRecord<V = any> = z.infer<typeof ORMapRecordSchema>;
 
 // --- Change Event Types ---
@@ -73,6 +75,7 @@ export const PredicateOpSchema = z.enum([
 ]);
 // Type export omitted: PredicateOp is already exported from predicate.ts
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- recursive Zod schema requires ZodType<any> because the recursive type cannot be expressed more narrowly before the schema is fully defined
 export const PredicateNodeSchema: z.ZodType<any> = z.lazy(() =>
   z.object({
     op: PredicateOpSchema,

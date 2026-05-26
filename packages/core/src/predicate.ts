@@ -39,6 +39,7 @@ export interface MatchOptions {
 export interface PredicateNode {
   op: PredicateOp;
   attribute?: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- predicate values can be string, number, boolean, or array — heterogeneous field type erases to any
   value?: any;
   children?: PredicateNode[];
   /** FTS-specific: search query string */
@@ -54,26 +55,32 @@ export interface PredicateNode {
 }
 
 export class Predicates {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- comparison predicates accept any field value type; narrowing to a union would require generic params on all callers
   static equal(attribute: string, value: any): PredicateNode {
     return { op: 'eq', attribute, value };
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- comparison predicates accept any field value type; narrowing to a union would require generic params on all callers
   static notEqual(attribute: string, value: any): PredicateNode {
     return { op: 'neq', attribute, value };
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- comparison predicates accept any field value type; narrowing to a union would require generic params on all callers
   static greaterThan(attribute: string, value: any): PredicateNode {
     return { op: 'gt', attribute, value };
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- comparison predicates accept any field value type; narrowing to a union would require generic params on all callers
   static greaterThanOrEqual(attribute: string, value: any): PredicateNode {
     return { op: 'gte', attribute, value };
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- comparison predicates accept any field value type; narrowing to a union would require generic params on all callers
   static lessThan(attribute: string, value: any): PredicateNode {
     return { op: 'lt', attribute, value };
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- comparison predicates accept any field value type; narrowing to a union would require generic params on all callers
   static lessThanOrEqual(attribute: string, value: any): PredicateNode {
     return { op: 'lte', attribute, value };
   }
@@ -86,6 +93,7 @@ export class Predicates {
     return { op: 'regex', attribute, value: pattern };
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- range boundary values can be any orderable primitive; generic typing would require callers to specify field type
   static between(attribute: string, from: any, to: any): PredicateNode {
     return {
       op: 'and',
@@ -100,6 +108,7 @@ export class Predicates {
    * Create an 'in' predicate. Matches when the field value is in the provided list.
    * Note: method named `isIn` because `in` is a reserved keyword in JavaScript.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- membership test accepts any value type matching the field; narrowing would require a generic on Predicates
   static isIn(attribute: string, values: any[]): PredicateNode {
     return { op: 'in', attribute, value: values };
   }
@@ -262,6 +271,7 @@ export class Predicates {
   }
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- data is a raw record object from LWWMap; shape is unknown until the predicate's attribute is accessed
 export function evaluatePredicate(predicate: PredicateNode, data: any): boolean {
   if (!data) return false;
 

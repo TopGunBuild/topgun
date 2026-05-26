@@ -10,5 +10,6 @@ export interface PermissionPolicy {
 export interface Principal {
   userId: string;
   roles: string[];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- index signature allows additional JWT claim fields (e.g. email, metadata) whose shape varies by auth provider
   [key: string]: any;
 }
