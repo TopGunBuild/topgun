@@ -89,6 +89,14 @@ export class FullTextIndex {
   }
 
   /**
+   * Test-only op-count instrumentation. undefined in production = zero overhead (V8 inlines no-op optional-chain call).
+   * Returns the internal BM25Scorer instance so tests can install _onDocScanned without reaching into private internals.
+   */
+  get _scorer(): BM25Scorer {
+    return this.scorer;
+  }
+
+  /**
    * Index a document (add or update).
    * Called when a document is set in the CRDT map.
    *

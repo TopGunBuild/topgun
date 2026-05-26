@@ -55,6 +55,9 @@ export class BM25Scorer {
    */
   private readonly b: number;
 
+  // Test-only op-count instrumentation. undefined in production = zero overhead (V8 inlines no-op optional-chain call).
+  _onDocScanned?: () => void;
+
   /**
    * Create a new BM25 scorer.
    *
@@ -92,6 +95,8 @@ export class BM25Scorer {
       const termInfos = index.getDocumentsForTerm(term);
 
       for (const { docId, termFrequency } of termInfos) {
+        // Op-count hook fire — see _onDocScanned field for invariant being tested.
+        this._onDocScanned?.();
         const docLength = index.getDocLength(docId);
 
         // BM25 term score calculation
