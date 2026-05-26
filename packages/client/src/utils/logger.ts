@@ -5,7 +5,12 @@ const isBrowser = typeof window !== 'undefined';
 const logLevel = (typeof process !== 'undefined' && process.env && process.env.LOG_LEVEL) || 'info';
 
 function createNodeLogger() {
-  const wantPretty = typeof process !== 'undefined' && process.env.NODE_ENV !== 'production';
+  // Jest workers (JEST_WORKER_ID is auto-set by the Jest runner) keep the pino-pretty
+  // thread-stream worker alive after all tests pass, preventing clean exit without --forceExit.
+  // Fall through to plain stderr pino in tests; pretty-print stays active in dev/prod runtime.
+  const isJestWorker = typeof process !== 'undefined' && Boolean(process.env.JEST_WORKER_ID);
+  const wantPretty =
+    typeof process !== 'undefined' && process.env.NODE_ENV !== 'production' && !isJestWorker;
 
   if (wantPretty) {
     try {
