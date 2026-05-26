@@ -15,6 +15,18 @@ export default tseslint.config(
         },
       ],
       '@typescript-eslint/explicit-function-return-type': 'off',
+      '@typescript-eslint/no-explicit-any': 'error',
+    },
+  },
+  {
+    name: 'topgun/no-explicit-any-overrides-tests-and-mcp',
+    files: [
+      '**/__tests__/**/*.{ts,tsx}',
+      '**/*.test.{ts,tsx}',
+      'tests/**/*.{ts,tsx}',
+      'packages/mcp-server/**/*.{ts,tsx}',
+    ],
+    rules: {
       '@typescript-eslint/no-explicit-any': 'warn',
     },
   },
