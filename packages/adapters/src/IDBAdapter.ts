@@ -8,8 +8,11 @@ import type { IDBPDatabase } from 'idb';
  */
 interface QueuedOperation {
   type: 'put' | 'remove' | 'setMeta' | 'appendOpLog' | 'markOpsSynced' | 'batchPut';
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- queued operation args are heterogeneous across operation types; a discriminated union would require one args type per op type
   args: any[];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- resolve/reject carry the result of the eventual async operation whose type varies by op type
   resolve: (value: any) => void;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- error can be any thrown value from IDB transactions
   reject: (error: any) => void;
 }
 
@@ -88,6 +91,7 @@ export class IDBAdapter implements IStorageAdapter {
 
     for (const op of queue) {
       try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- result type varies across the switch cases; collecting into a common typed variable requires a union
         let result: any;
         switch (op.type) {
           case 'put':
@@ -121,6 +125,7 @@ export class IDBAdapter implements IStorageAdapter {
    */
   private queueOrExecute<T>(
     type: QueuedOperation['type'],
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- args are forwarded to the queued operation and replayed; their types vary by operation
     args: any[],
     executor: () => Promise<T>,
   ): Promise<T> {
@@ -143,6 +148,7 @@ export class IDBAdapter implements IStorageAdapter {
   // Read Operations - Wait for ready
   // ============================================
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- return type includes `any` to cover metadata keys that are not LWWRecord or ORMapRecord (e.g. raw meta values)
   async get<V>(key: string): Promise<LWWRecord<V> | ORMapRecord<V>[] | any | undefined> {
     // Read operations must wait for DB to be ready
     await this.waitForReady();
@@ -150,6 +156,7 @@ export class IDBAdapter implements IStorageAdapter {
     return result?.value;
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- meta values have no fixed schema; callers store arbitrary primitives (strings, numbers, booleans) under meta keys
   async getMeta(key: string): Promise<any> {
     await this.waitForReady();
     const result = await this.db?.get('meta_store', key);
@@ -159,6 +166,7 @@ export class IDBAdapter implements IStorageAdapter {
   async getPendingOps(): Promise<OpLogEntry[]> {
     await this.waitForReady();
     const all = await this.db?.getAll('op_log');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- IDB getAll returns untyped IDBValue; op_log entries are cast to OpLogEntry by the caller after this filter
     return all?.filter((op: any) => op.synced === 0) || [];
   }
 
@@ -171,10 +179,12 @@ export class IDBAdapter implements IStorageAdapter {
   // Write Operations - Queue if not ready
   // ============================================
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- IStorageAdapter.put accepts any serialisable value; the adapter is storage-layer agnostic about value schema
   async put(key: string, value: any): Promise<void> {
     return this.queueOrExecute('put', [key, value], () => this.putInternal(key, value));
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- internal put mirrors the public signature; IDB structured clone accepts any serialisable value
   private async putInternal(key: string, value: any): Promise<void> {
     await this.db?.put('kv_store', { key, value });
   }
@@ -187,18 +197,22 @@ export class IDBAdapter implements IStorageAdapter {
     await this.db?.delete('kv_store', key);
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- meta values have no fixed schema; callers store arbitrary primitives (strings, numbers, booleans) under meta keys
   async setMeta(key: string, value: any): Promise<void> {
     return this.queueOrExecute('setMeta', [key, value], () => this.setMetaInternal(key, value));
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- internal setMeta mirrors the public signature; meta values are arbitrary primitives stored by the sync engine
   private async setMetaInternal(key: string, value: any): Promise<void> {
     await this.db?.put('meta_store', { key, value });
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- batch put accepts a mixed-value map; values are serialised by IDB structured clone regardless of shape
   async batchPut(entries: Map<string, any>): Promise<void> {
     return this.queueOrExecute('batchPut', [entries], () => this.batchPutInternal(entries));
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- internal batchPut mirrors the public signature; values are stored as-is by IDB structured clone
   private async batchPutInternal(entries: Map<string, any>): Promise<void> {
     const tx = this.db?.transaction('kv_store', 'readwrite');
     if (!tx) return;
@@ -209,10 +223,12 @@ export class IDBAdapter implements IStorageAdapter {
     await tx.done;
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- op log entries arrive as OpLogEntry but IStorageAdapter.appendOpLog signature uses any to stay storage-backend agnostic
   async appendOpLog(entry: any): Promise<number> {
     return this.queueOrExecute('appendOpLog', [entry], () => this.appendOpLogInternal(entry));
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- internal appendOpLog mirrors public signature; IDB add returns the auto-incremented key
   private async appendOpLogInternal(entry: any): Promise<number> {
     const entryToSave = { ...entry, synced: 0 };
     return (await this.db?.add('op_log', entryToSave)) as number;
