@@ -7,6 +7,7 @@ const FeatureCard = ({
   description,
   colSpan = 1,
 }: {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- lucide-react icon components are typed as LucideIcon (a React component) but the exact generic is verbose; any is the conventional shorthand for icon prop in JSX component props
   icon: any;
   title: string;
   description: string;

@@ -176,11 +176,13 @@ export const TacticalDemo: React.FC = () => {
     }
   };
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Drone fields have different types (string, number, DroneStatus, Coordinates); value type is determined by the field key at the call site
   const updateDrone = (field: keyof Drone, value: any) => {
     if (!selectedDroneId) return;
     updateDroneById(selectedDroneId, field, value);
   };
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Drone fields have different types (string, number, DroneStatus, Coordinates); value type is determined by the field key at the call site
   const updateDroneById = (id: string, field: keyof Drone, value: any) => {
     setLocalDrones((prev) => {
       const newDrones = prev.map((d) => {

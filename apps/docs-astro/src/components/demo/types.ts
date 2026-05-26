@@ -32,6 +32,7 @@ export interface LogEntry {
   source: 'CLIENT_A' | 'SERVER' | 'SYNC_ENGINE';
   type: 'WRITE' | 'SYNC' | 'CONFLICT' | 'INFO';
   message: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- log entry data is a diagnostic payload whose shape varies by log type (write op, sync delta, conflict resolution result)
   data?: any;
 }
 

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Server, Database, Smartphone, Laptop, ArrowLeftRight } from 'lucide-react';
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- lucide-react icon components are typed as LucideIcon (a React component) but the exact generic is verbose; any is the conventional shorthand for icon prop in JSX component props
 const Node = ({ icon: Icon, label, sub }: { icon: any; label: string; sub?: string }) => (
   <div className="flex flex-col items-center justify-center p-4 rounded-xl border border-card-border bg-white/50 dark:bg-white/5 backdrop-blur-sm z-10 w-32 h-32 text-center transition-all hover:border-brand-subtle/50 hover:shadow-[0_0_30px_-10px_rgba(59,130,246,0.3)] shadow-sm dark:shadow-none">
     <Icon className="w-8 h-8 text-neutral-600 dark:text-neutral-300 mb-2" />
