@@ -1528,12 +1528,11 @@ describe('StandingQueryIndex', () => {
 
       expect(buildElapsed).toBeLessThan(100); // Should complete in under 100ms
 
-      // Query should be O(1)
-      const queryStart = performance.now();
+      // Query should be O(1): retrieve hits the precomputed match set, never evaluates predicates
+      let retrieveEvals = 0;
+      index._onPredicateEval = () => { retrieveEvals++; };
       const result = index.retrieve({ type: 'equal', value: null });
-      const queryElapsed = performance.now() - queryStart;
-
-      expect(queryElapsed).toBeLessThan(1); // Should be sub-millisecond
+      expect(retrieveEvals).toBe(0); // retrieve is O(1): hits precomputed match set, never evaluates predicates
       expect(result.size()).toBeGreaterThan(0);
     });
   });
