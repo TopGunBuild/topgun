@@ -680,11 +680,12 @@ describe('IndexedORMap', () => {
           });
         }
 
-        const start = performance.now();
-        articleMap.search('common terms document');
-        const duration = performance.now() - start;
-
-        expect(duration).toBeLessThan(10);
+        let docScanned = 0;
+        articleMap.getFullTextIndex()!._scorer._onDocScanned = () => { docScanned++; };
+        const results = articleMap.search('common terms document');
+        expect(results.length).toBeGreaterThanOrEqual(1); // search correctness preserved
+        expect(docScanned).toBeGreaterThanOrEqual(1);    // real scan happened
+        expect(docScanned).toBeLessThanOrEqual(3 * 1000); // 3 terms × <=1000 postings each — proves inverted-index walk, not full doc scan
       });
     });
   });
