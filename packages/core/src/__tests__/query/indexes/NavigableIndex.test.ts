@@ -873,29 +873,24 @@ describe('NavigableIndex', () => {
         });
       }
 
-      // Multiple range queries should all be fast
-      const times: number[] = [];
       const queries = [
         { type: 'gte' as const, value: 10000 },
         { type: 'lt' as const, value: 20000 },
         { type: 'between' as const, from: 25000, to: 30000 },
       ];
 
+      let lookups = 0;
+      index._onLookup = () => { lookups++; };
+
       for (const query of queries) {
-        const start = performance.now();
         const result = index.retrieve(query);
-        // Iterate to materialize the result set and exercise the iterator path.
+        let materialized = 0;
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        for (const _ of result) {
-          // iteration side effect only
-        }
-        times.push(performance.now() - start);
+        for (const _ of result) { materialized++; }
+        expect(materialized).toBeGreaterThan(0); // retrieval correctness preserved
       }
 
-      // All queries should complete in reasonable time
-      for (const time of times) {
-        expect(time).toBeLessThan(50);
-      }
+      expect(lookups).toBe(queries.length); // exactly 1 lookup per query — proves dispatch to sorted-btree, not per-record scan of 50k
     });
   });
 
