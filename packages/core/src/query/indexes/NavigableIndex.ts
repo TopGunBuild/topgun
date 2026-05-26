@@ -48,6 +48,9 @@ export class NavigableIndex<K, V, A extends string | number> implements Index<K,
     'between',
   ];
 
+  // Test-only op-count instrumentation. undefined in production = zero overhead (V8 inlines no-op optional-chain call).
+  _onLookup?: () => void;
+
   /**
    * Create a NavigableIndex.
    *
@@ -70,6 +73,8 @@ export class NavigableIndex<K, V, A extends string | number> implements Index<K,
   }
 
   retrieve(query: IndexQuery<A>): ResultSet<K> {
+    // Op-count hook fire — see _onLookup field for invariant being tested.
+    this._onLookup?.();
     switch (query.type) {
       case 'equal':
         return this.retrieveEqual(query.value as A);
