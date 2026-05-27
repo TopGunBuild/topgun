@@ -305,22 +305,26 @@ describe('BM25Scorer.scoreSingleDocument', () => {
       const queryTerms = ['common', 'word'];
       const docTokens = ['common', 'term2500', 'word'];
 
-      // Measure single document scoring
-      const singleStart = performance.now();
+      // Count posting-walk ops via existing _onDocScanned hook: scoreSingleDocument calculates TF
+      // locally on input tokens and never walks the inverted index, so it fires zero times.
+      let singleDocScanned = 0;
+      scorer._onDocScanned = () => {
+        singleDocScanned++;
+      };
       for (let i = 0; i < 50; i++) {
         scorer.scoreSingleDocument(queryTerms, docTokens, index);
       }
-      const singleDuration = performance.now() - singleStart;
 
-      // Measure full search
-      const fullStart = performance.now();
+      let fullDocScanned = 0;
+      scorer._onDocScanned = () => {
+        fullDocScanned++;
+      };
       for (let i = 0; i < 50; i++) {
         scorer.score(queryTerms, index);
       }
-      const fullDuration = performance.now() - fullStart;
 
-      // Single document should be much faster
-      expect(singleDuration).toBeLessThan(fullDuration / 10);
+      expect(singleDocScanned).toBe(0);
+      expect(fullDocScanned).toBeGreaterThan(singleDocScanned);
     });
   });
 });

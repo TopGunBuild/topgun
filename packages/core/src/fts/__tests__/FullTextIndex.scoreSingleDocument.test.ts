@@ -420,22 +420,27 @@ describe('FullTextIndex.scoreSingleDocument', () => {
       const query = 'product features';
       const queryTerms = index.tokenizeQuery(query);
 
-      // Measure single document scoring
-      const singleStart = performance.now();
+      // Count posting-walk ops via existing _onDocScanned hook on the internal scorer:
+      // scoreSingleDocument calculates TF locally on cached tokens and never walks postings,
+      // so it fires zero times. search() walks the inverted index per query term.
+      let singleDocScanned = 0;
+      index._scorer._onDocScanned = () => {
+        singleDocScanned++;
+      };
       for (let i = 0; i < 100; i++) {
         index.scoreSingleDocument('doc2500', queryTerms);
       }
-      const singleDuration = performance.now() - singleStart;
 
-      // Measure full search
-      const fullStart = performance.now();
+      let fullDocScanned = 0;
+      index._scorer._onDocScanned = () => {
+        fullDocScanned++;
+      };
       for (let i = 0; i < 100; i++) {
         index.search(query);
       }
-      const fullDuration = performance.now() - fullStart;
 
-      // Single document should be much faster
-      expect(singleDuration).toBeLessThan(fullDuration / 10);
+      expect(singleDocScanned).toBe(0);
+      expect(fullDocScanned).toBeGreaterThan(singleDocScanned);
     });
   });
 });
