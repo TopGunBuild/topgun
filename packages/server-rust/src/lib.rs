@@ -1,5 +1,11 @@
 //! `TopGun` Server — `WebSocket` server with clustering, partitioning, and `PostgreSQL` storage.
 
+// Relax `clippy::unimplemented` under `#[cfg(test)]` so that mock implementations
+// of production traits can stub out methods the orchestrator under test does
+// not call. The production strictness from `[workspace.lints.clippy]` remains
+// active for non-test code paths.
+#![cfg_attr(test, allow(clippy::unimplemented))]
+
 pub mod cluster;
 pub mod dag;
 pub mod network;
