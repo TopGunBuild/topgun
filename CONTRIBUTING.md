@@ -97,6 +97,38 @@ cargo bench --bench load_harness -- --connections 50 --duration 10
 
 If any of the four fails, the pin bump is blocked — investigate (new lint? new test break? perf regression?), open follow-up issues, and only land the pin once all four are green.
 
+### Lint strictness policy (clippy)
+
+The Rust workspace runs `clippy::all` and `clippy::pedantic` at `warn` for every crate in `members = ["packages/core-rust", "packages/server-rust"]` via the `[workspace.lints.clippy]` block in the root [`Cargo.toml`](Cargo.toml). On top of that baseline, the following additional rules from `clippy::restriction` are adopted at `warn` level:
+
+- `clippy::dbg_macro` — ban `dbg!()` in production code; `dbg!()` is a debug-time helper and shipping it leaks to stderr in production. Zero existing fires at adoption time.
+- `clippy::todo` — ban `todo!()` in production code; placeholder panics must not reach a release artifact. Zero existing fires at adoption time.
+- `clippy::unimplemented` — ban `unimplemented!()` in production code; same intent as `todo!`. Two test-only fires in `eviction_orchestrator.rs`'s `MockStore` are relaxed via the per-target override below.
+
+**CI enforcement:** every rule in `[workspace.lints.clippy]` is enforced by the CI `check` job at `cargo clippy --all-targets --all-features -- -D warnings` (see [`.github/workflows/rust.yml`](.github/workflows/rust.yml)). A new `dbg!()`, `todo!()`, or `unimplemented!()` in a non-test path will fail the PR — `warn` is upgraded to `error` by the `-D warnings` flag in CI.
+
+**Test-scope override mechanism.** Test code legitimately uses `unimplemented!()` (mock-trait stubs that the test path never calls) and other production-targeted constructs. Relax these once per crate at the top of `lib.rs` via the inner `#![cfg_attr(test, allow(...))]` attribute, NOT call-site `#[allow]` annotations:
+
+```rust
+// In packages/server-rust/src/lib.rs (top of file, after the crate doc-comment):
+#![cfg_attr(test, allow(clippy::unimplemented))]
+```
+
+The attribute MUST list only rules that actually fire in test code under that crate. Adding a rule that does not fire is dead config. A pattern of call-site `#[allow(clippy::X)]` sprinkled across test files is a signal that the rule is the wrong fit — either downgrade the rule or remove it from `[workspace.lints.clippy]`.
+
+**Rules evaluated but rejected** (each was probed via `cargo clippy --all-targets --all-features --message-format=json -- -A clippy::all -A clippy::pedantic -W clippy::<rule>` with awk-driven classification of unique `file:line` fire sites; numbers below are deduplicated across `--all-targets`):
+
+| Rule | Production fires | Test fires (inline + integration) | Rejection rationale |
+|------|------------------|-----------------------------------|---------------------|
+| `clippy::unwrap_used` | 25 | 910 | `>3` production fires exceed the per-spec sweep ceiling. A focused cleanup spec (`?` propagation, `.expect("WHY")` annotation) is the right scope for adoption; re-evaluate when that cleanup lands. |
+| `clippy::expect_used` | 30 | 776 | `.expect("WHY")` with a WHY-comment is the canonical escape hatch in the codebase when `?` propagation is not available. Banning it fights the existing convention rather than complementing it. |
+| `clippy::panic` | 0 | 170 | Zero production fires, but 16 integration-test fires across 7 separate test crates under `packages/{core-rust,server-rust}/tests/`. Each integration test is its own crate, so a single `lib.rs` `#![cfg_attr(test, allow(...))]` does not reach them — adoption would require a 7-file sweep that exceeds the 5-file ceiling per Rust spec. Defer to a future per-integration-test relaxation spec. |
+| `clippy::string_slice` | 9 | 8 | `>3` production fires across 3 files (`expr_parser.rs`, `sync.rs`, `predicate.rs`). The fix shape is parser/sync-protocol rewrites — out of scope for a strictness-policy spec. |
+
+**Nursery rules** (`clippy::nursery`) were enumerated as a category and rejected wholesale at this round. The top five by frequency: `use_self` (187), `missing_const_for_fn` (160), `derive_partial_eq_without_eq` (114), `option_if_let_else` (92), `significant_drop_tightening` (65). None fit cleanly under the `<3` production-fire ceiling, and nursery rules are explicitly experimental — re-evaluate on the next quarterly toolchain bump.
+
+The validation-gate commands above (`cargo clippy --all-targets --all-features -- -D warnings`, `cargo fmt --all -- --check`, `cargo test --release -p topgun-server --lib`, `cargo bench --bench load_harness ...`) double as the validation gate for any future rule adoption. Re-run them after editing `[workspace.lints.clippy]`.
+
 ## Project Structure
 
 ```
