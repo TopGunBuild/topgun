@@ -33,6 +33,9 @@ export { ENGLISH_STOPWORDS, porterStem };
 export class BM25Tokenizer implements ITokenizer {
   private readonly options: Required<TokenizerOptions>;
 
+  // Test-only op-count instrumentation. undefined in production = zero overhead (V8 inlines no-op optional-chain call).
+  _onTokenize?: () => void;
+
   /**
    * Create a new BM25Tokenizer.
    *
@@ -60,6 +63,9 @@ export class BM25Tokenizer implements ITokenizer {
     if (!text || typeof text !== 'string') {
       return [];
     }
+
+    // Op-count hook fire — counts each tokenize invocation for hardware-independent perf assertion.
+    this._onTokenize?.();
 
     // 1. Lowercase if enabled
     const processed = this.options.lowercase ? text.toLowerCase() : text;
