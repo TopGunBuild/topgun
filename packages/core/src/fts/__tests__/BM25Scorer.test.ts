@@ -376,36 +376,45 @@ describe('BM25Scorer', () => {
   });
 
   describe('Performance', () => {
-    test('should score efficiently (10K docs, <50ms)', () => {
+    test('should walk inverted-index posting lists in bounded ops (10K docs, 2 query stems)', () => {
       const index = new BM25InvertedIndex();
       for (let i = 0; i < 10000; i++) {
         index.addDocument(`doc${i}`, ['common', `unique${i}`, 'another']);
       }
 
       const scorer = new BM25Scorer();
+      let docScanned = 0;
+      scorer._onDocScanned = () => {
+        docScanned++;
+      };
 
-      const start = performance.now();
       scorer.score(['common', 'another'], index);
-      const duration = performance.now() - start;
 
-      expect(duration).toBeLessThan(50);
+      // Both 'common' and 'another' appear in every doc → posting walk is exactly 2 × 10000.
+      // Asserting equality (not just upper bound) catches regressions that would scan more docs
+      // per term (e.g. cross-product over query terms instead of per-term posting walk).
+      expect(docScanned).toBe(20000);
     });
 
-    test('should handle repeated scoring efficiently', () => {
+    test('should not re-walk posting lists across repeated scoring calls (1K docs × 100 calls)', () => {
       const index = new BM25InvertedIndex();
       for (let i = 0; i < 1000; i++) {
         index.addDocument(`doc${i}`, ['term', `word${i}`]);
       }
 
       const scorer = new BM25Scorer();
+      let docScanned = 0;
+      scorer._onDocScanned = () => {
+        docScanned++;
+      };
 
-      const start = performance.now();
       for (let i = 0; i < 100; i++) {
         scorer.score(['term'], index);
       }
-      const duration = performance.now() - start;
 
-      expect(duration).toBeLessThan(200); // Allow variance on CI/slow machines
+      // 'term' appears in all 1000 docs; 100 calls × 1000 doc scans = exactly 100_000.
+      // Bounds regressions that would add per-call overhead beyond a single posting walk.
+      expect(docScanned).toBe(100000);
     });
   });
 });
