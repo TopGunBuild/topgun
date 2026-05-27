@@ -846,7 +846,9 @@ describe('NavigableIndex', () => {
 
       // One retrieve call dispatches to the sorted-btree range walker — not per-record
       let lookups = 0;
-      index._onLookup = () => { lookups++; };
+      index._onLookup = () => {
+        lookups++;
+      };
 
       const result = index.retrieve({
         type: 'between',

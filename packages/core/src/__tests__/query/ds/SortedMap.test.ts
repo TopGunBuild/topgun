@@ -453,7 +453,9 @@ describe('SortedMap', () => {
       }
 
       let lookups = 0;
-      map._onLookup = () => { lookups++; };
+      map._onLookup = () => {
+        lookups++;
+      };
 
       for (let i = 0; i < 10000; i++) {
         const key = Math.floor(Math.random() * 100000);

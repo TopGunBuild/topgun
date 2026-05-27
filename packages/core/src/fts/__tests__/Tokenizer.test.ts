@@ -742,7 +742,9 @@ describe('Tokenizer - Additional edge cases (from test report)', () => {
         .join(' ');
 
       let tokenizeCalls = 0;
-      tokenizer._onTokenize = () => { tokenizeCalls++; };
+      tokenizer._onTokenize = () => {
+        tokenizeCalls++;
+      };
 
       const tokens = tokenizer.tokenize(text);
 
@@ -755,7 +757,9 @@ describe('Tokenizer - Additional edge cases (from test report)', () => {
       const text = 'the quick brown fox jumps over the lazy dog';
 
       let tokenizeCalls = 0;
-      tokenizer._onTokenize = () => { tokenizeCalls++; };
+      tokenizer._onTokenize = () => {
+        tokenizeCalls++;
+      };
 
       for (let i = 0; i < 1000; i++) {
         tokenizer.tokenize(text);

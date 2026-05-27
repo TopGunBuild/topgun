@@ -362,7 +362,9 @@ describe('HashIndex', () => {
 
       // One retrieve call dispatches directly to the hash map — no per-record scan
       let lookups = 0;
-      index._onLookup = () => { lookups++; };
+      index._onLookup = () => {
+        lookups++;
+      };
 
       const result = index.retrieve({ type: 'equal', value: 'active' });
 

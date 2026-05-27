@@ -381,7 +381,9 @@ describe('BM25InvertedIndex', () => {
       const index = new BM25InvertedIndex();
 
       let addCalls = 0;
-      index._onAddDocument = () => { addCalls++; };
+      index._onAddDocument = () => {
+        addCalls++;
+      };
 
       for (let i = 0; i < 1000; i++) {
         index.addDocument(`doc${i}`, ['common', `unique${i}`, 'another', 'word']);
@@ -398,7 +400,9 @@ describe('BM25InvertedIndex', () => {
       }
 
       let lookups = 0;
-      index._onTermLookup = () => { lookups++; };
+      index._onTermLookup = () => {
+        lookups++;
+      };
 
       for (let i = 0; i < 1000; i++) {
         index.getDocumentsForTerm('common');
@@ -416,7 +420,9 @@ describe('BM25InvertedIndex', () => {
       }
 
       let idfCalculateCount = 0;
-      index._onIDFCalculate = () => { idfCalculateCount++; };
+      index._onIDFCalculate = () => {
+        idfCalculateCount++;
+      };
 
       // First call — cache miss, fires the hook
       index.getIDF('term');
