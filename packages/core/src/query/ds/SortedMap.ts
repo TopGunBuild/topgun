@@ -21,6 +21,9 @@ export class SortedMap<K, V> {
   private readonly tree: BTree<K, V>;
   private readonly comparator: Comparator<K>;
 
+  // Test-only op-count instrumentation. undefined in production = zero overhead (V8 inlines no-op optional-chain call).
+  _onLookup?: () => void;
+
   constructor(comparator?: Comparator<K>) {
     this.comparator = comparator ?? (defaultComparator as Comparator<K>);
     this.tree = new BTree<K, V>(undefined, this.comparator);
@@ -40,6 +43,8 @@ export class SortedMap<K, V> {
    * Time complexity: O(log N)
    */
   get(key: K): V | undefined {
+    // Op-count hook fire — counts each get invocation for hardware-independent perf assertion.
+    this._onLookup?.();
     return this.tree.get(key);
   }
 
