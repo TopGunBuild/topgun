@@ -45,6 +45,15 @@ export class BM25InvertedIndex {
   /** Average document length */
   private avgDocLength: number;
 
+  // Test-only op-count instrumentation. undefined in production = zero overhead (V8 inlines no-op optional-chain call).
+  _onAddDocument?: () => void;
+
+  // Test-only op-count instrumentation. undefined in production = zero overhead (V8 inlines no-op optional-chain call).
+  _onTermLookup?: () => void;
+
+  // Test-only op-count instrumentation. undefined in production = zero overhead (V8 inlines no-op optional-chain call).
+  _onIDFCalculate?: () => void;
+
   constructor() {
     this.index = new Map();
     this.docLengths = new Map();
@@ -61,6 +70,9 @@ export class BM25InvertedIndex {
    * @param tokens - Array of tokens (already tokenized/stemmed)
    */
   addDocument(docId: string, tokens: string[]): void {
+    // Op-count hook fire — counts each addDocument invocation for hardware-independent perf assertion.
+    this._onAddDocument?.();
+
     // Count term frequencies
     const termFreqs = new Map<string, number>();
     const uniqueTerms = new Set<string>();
@@ -136,6 +148,8 @@ export class BM25InvertedIndex {
    * @returns Array of TermInfo objects
    */
   getDocumentsForTerm(term: string): TermInfo[] {
+    // Op-count hook fire — counts each term lookup invocation for hardware-independent perf assertion.
+    this._onTermLookup?.();
     return this.index.get(term) || [];
   }
 
@@ -164,6 +178,9 @@ export class BM25InvertedIndex {
     }
 
     const docFreq = termInfos.length;
+
+    // Op-count hook fire — counts IDF cache-miss calculations; cached hits skip this branch entirely.
+    this._onIDFCalculate?.();
 
     // BM25 IDF formula
     const idf = Math.log((this.totalDocs - docFreq + 0.5) / (docFreq + 0.5) + 1);
