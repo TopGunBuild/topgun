@@ -33,6 +33,9 @@ export class HashIndex<K, V, A> implements Index<K, V, A> {
   private static readonly RETRIEVAL_COST = 30;
   private static readonly SUPPORTED_QUERIES = ['equal', 'in', 'has'];
 
+  // Test-only op-count instrumentation. undefined in production = zero overhead (V8 inlines no-op optional-chain call).
+  _onLookup?: () => void;
+
   constructor(readonly attribute: Attribute<V, A>) {}
 
   getRetrievalCost(): number {
@@ -44,6 +47,8 @@ export class HashIndex<K, V, A> implements Index<K, V, A> {
   }
 
   retrieve(query: IndexQuery<A>): ResultSet<K> {
+    // Op-count hook fire — counts each retrieve invocation for hardware-independent perf assertion.
+    this._onLookup?.();
     switch (query.type) {
       case 'equal':
         return this.retrieveEqual(query.value as A);
