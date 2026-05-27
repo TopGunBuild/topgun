@@ -844,18 +844,19 @@ describe('NavigableIndex', () => {
       // Verify stats
       expect(index.getStats().totalEntries).toBe(100000);
 
-      // Range query should be fast
-      const start = performance.now();
+      // One retrieve call dispatches to the sorted-btree range walker — not per-record
+      let lookups = 0;
+      index._onLookup = () => { lookups++; };
+
       const result = index.retrieve({
         type: 'between',
         from: 50000,
         to: 60000,
       });
-      const elapsed = performance.now() - start;
 
+      expect(lookups).toBe(1);
       // Should return 10000 records (50000-59999)
       expect(result.size()).toBe(10000);
-      expect(elapsed).toBeLessThan(100); // Should be fast (< 100ms including materialization)
     });
 
     it('should maintain O(log N) retrieval time', () => {
