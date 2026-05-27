@@ -390,8 +390,10 @@ describe('FullTextIndex.scoreSingleDocument', () => {
 
       const queryTerms = index.tokenizeQuery('technology document');
 
-      // Verify relevance-anchor: scoring a known document returns a positive score
-      expect(index.scoreSingleDocument('doc5000', queryTerms)).toBeGreaterThan(0);
+      // Verify relevance-anchor: scoring a known document returns a non-null result with positive score
+      const anchor = index.scoreSingleDocument('doc5000', queryTerms);
+      expect(anchor).not.toBeNull();
+      expect(anchor!.score).toBeGreaterThan(0);
 
       let scoreCalls = 0;
       const wrappedScore = (docId: string, qt: string[]) => {
