@@ -360,13 +360,14 @@ describe('HashIndex', () => {
       expect(index.getStats().distinctValues).toBe(3);
       expect(index.getStats().totalEntries).toBe(10000);
 
-      // Query should be fast
-      const start = performance.now();
-      const result = index.retrieve({ type: 'equal', value: 'active' });
-      const elapsed = performance.now() - start;
+      // One retrieve call dispatches directly to the hash map — no per-record scan
+      let lookups = 0;
+      index._onLookup = () => { lookups++; };
 
+      const result = index.retrieve({ type: 'equal', value: 'active' });
+
+      expect(lookups).toBe(1);
       expect(result.size()).toBeGreaterThan(3000);
-      expect(elapsed).toBeLessThan(10); // Should be sub-millisecond
     });
 
     it('should handle concurrent adds and retrieves', () => {
