@@ -102,7 +102,9 @@ const checks: Check[] = [
         if (process.platform === 'win32') {
           execSync(`netstat -ano | findstr :${port}`, { encoding: 'utf8' });
         } else {
-          execSync(`lsof -i :${port} 2>/dev/null || netstat -tln 2>/dev/null | grep :${port}`, { encoding: 'utf8' });
+          execSync(`lsof -i :${port} 2>/dev/null || netstat -tln 2>/dev/null | grep :${port}`, {
+            encoding: 'utf8',
+          });
         }
         return {
           pass: false,
@@ -198,4 +200,3 @@ export default async function doctor() {
     console.log(chalk.green('\n All checks passed! Ready to run.\n'));
   }
 }
-

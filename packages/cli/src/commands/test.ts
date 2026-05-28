@@ -37,7 +37,9 @@ async function test(scope: string | undefined, options: TestOptions) {
     } else if (scope === 'server') {
       console.log(chalk.cyan('Running Rust server tests...\n'));
       if (process.platform === 'darwin') {
-        const sdkRoot = execSync('/usr/bin/xcrun --sdk macosx --show-sdk-path', { encoding: 'utf8' }).trim();
+        const sdkRoot = execSync('/usr/bin/xcrun --sdk macosx --show-sdk-path', {
+          encoding: 'utf8',
+        }).trim();
         execSync(`SDKROOT=${sdkRoot} cargo test --release -p topgun-server`, { stdio: 'inherit' });
       } else {
         execSync('cargo test --release -p topgun-server', { stdio: 'inherit' });

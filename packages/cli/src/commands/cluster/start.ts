@@ -19,7 +19,11 @@ async function clusterStart() {
     console.log(chalk.gray('  To view status: npx @topgunbuild/cli cluster:status\n'));
   } catch {
     console.error(chalk.red('\n  Failed to start cluster\n'));
-    console.log(chalk.yellow('  Hint: Make sure Docker is running and docker-compose.yml has the cluster profile'));
+    console.log(
+      chalk.yellow(
+        '  Hint: Make sure Docker is running and docker-compose.yml has the cluster profile',
+      ),
+    );
     process.exit(1);
   }
 }

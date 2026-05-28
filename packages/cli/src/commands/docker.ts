@@ -97,4 +97,3 @@ export async function logs(options: LogsOptions) {
   const follow = options.follow ? '-f' : '';
   execSync(`docker compose logs ${follow} ${service}`, { stdio: 'inherit' });
 }
-

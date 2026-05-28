@@ -77,9 +77,13 @@ async function config(options: ConfigOptions) {
     console.log(chalk.bold('\n TopGun Config\n'));
     console.log(chalk.gray('  Usage:'));
     console.log(chalk.gray('    topgun config --show              Show current configuration'));
-    console.log(chalk.gray('    topgun config --storage redb      Set storage to embedded redb (default)'));
+    console.log(
+      chalk.gray('    topgun config --storage redb      Set storage to embedded redb (default)'),
+    );
     console.log(chalk.gray('    topgun config --storage postgres  Set storage to PostgreSQL'));
-    console.log(chalk.gray('    topgun config --storage null      Set storage to ephemeral (no persistence)'));
+    console.log(
+      chalk.gray('    topgun config --storage null      Set storage to ephemeral (no persistence)'),
+    );
     console.log('');
     return;
   }

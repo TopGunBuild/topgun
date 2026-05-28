@@ -22,7 +22,12 @@ function codegen(options: CodegenOptions) {
 
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { runCodegen } = require('@topgunbuild/schema') as {
-    runCodegen: (opts: { schemaPath: string; outDir: string; typescript: boolean; json: boolean }) => void;
+    runCodegen: (opts: {
+      schemaPath: string;
+      outDir: string;
+      typescript: boolean;
+      json: boolean;
+    }) => void;
   };
 
   const schemaPath = options.schema || './topgun.schema.ts';

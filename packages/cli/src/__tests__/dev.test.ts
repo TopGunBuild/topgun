@@ -21,7 +21,11 @@ describe('topgun dev', () => {
           stdio: 'pipe',
         });
       } catch (error: unknown) {
-        const err = error as NodeJS.ErrnoException & { stderr?: Buffer; stdout?: Buffer; status?: number };
+        const err = error as NodeJS.ErrnoException & {
+          stderr?: Buffer;
+          stdout?: Buffer;
+          status?: number;
+        };
         output = err.stderr?.toString() || err.stdout?.toString() || '';
         exitCode = err.status || 1;
       }

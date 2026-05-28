@@ -35,7 +35,10 @@ async function setup(options: SetupOptions) {
             name: 'redb (recommended — embedded, zero dependencies, boots instantly)',
             value: 'redb',
           },
-          { name: 'PostgreSQL (production use, requires Docker or external DB)', value: 'postgres' },
+          {
+            name: 'PostgreSQL (production use, requires Docker or external DB)',
+            value: 'postgres',
+          },
           { name: 'null (ephemeral, data lost on restart — for testing)', value: 'null' },
         ],
         default: 'redb',
@@ -95,7 +98,9 @@ async function setup(options: SetupOptions) {
       console.log(chalk.green('  ✓ Server binary built'));
     } catch {
       console.error(chalk.red('  ✗ Failed to build server binary'));
-      console.log(chalk.yellow('  Hint: Make sure Rust toolchain is installed (https://rustup.rs)'));
+      console.log(
+        chalk.yellow('  Hint: Make sure Rust toolchain is installed (https://rustup.rs)'),
+      );
       process.exit(1);
     }
   } else {
@@ -120,7 +125,11 @@ async function setup(options: SetupOptions) {
   } else {
     const storageLabel = config.storage === 'null' ? 'ephemeral in-memory' : 'embedded redb';
     console.log(chalk.cyan(`\n[4/4] Skipping database (${storageLabel} mode)`));
-    console.log(chalk.green(`  ✓ ${storageLabel.charAt(0).toUpperCase() + storageLabel.slice(1)} storage will be used`));
+    console.log(
+      chalk.green(
+        `  ✓ ${storageLabel.charAt(0).toUpperCase() + storageLabel.slice(1)} storage will be used`,
+      ),
+    );
   }
 
   // Done!
