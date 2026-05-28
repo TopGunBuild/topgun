@@ -159,11 +159,34 @@ Use when outside React — service workers, Node scripts, non-component utilitie
 By default the app runs in local-only mode — data persists in IndexedDB and works offline without a server. To add real-time sync across browsers and devices:
 
 1. Uncomment the `serverUrl` line in the client init above.
-2. Start the TopGun server in a second terminal:
+2. Start the TopGun server. Two paths:
+
+**Using the CLI (recommended — works from any directory once the server binary is present):**
+
+```bash
+# Install the unified TopGun developer CLI
+npm install -g @topgunbuild/cli
+
+# Check your environment
+topgun doctor
+
+# Interactive project setup — writes .env with zero-config defaults
+# (TOPGUN_NO_AUTH=1 for local dev, STORAGE_BACKEND=redb for embedded storage)
+topgun setup
+
+# Start the development server
+topgun dev
+```
+
+The setup→dev flow is cohesive: `topgun setup` writes a `.env` that `topgun dev` reads to start the server without any JWT or database configuration. Run `topgun setup --yes` to skip prompts and accept all defaults.
+
+**Inside the TopGun monorepo (requires Rust toolchain + `cargo build`):**
 
 ```bash
 pnpm start:server
 ```
+
+> **Note on `topgun dev`:** the `dev` command starts a prebuilt `target/release/topgun-server` binary from the current working directory. The CLI is available standalone (`doctor`, `setup`, `config`, `codegen`, `docker:*`, `cluster:*`), but `dev` itself requires a prebuilt server binary. A future release will ship prebuilt binaries (see [TODO-365](https://github.com/TopGunBuild/topgun)).
 
 The server boots in seconds with embedded storage (`./topgun.redb`) — no Postgres, no Docker required.
 
