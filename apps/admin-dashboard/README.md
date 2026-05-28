@@ -36,7 +36,7 @@ The `Dockerfile` does a two-stage build (Node → nginx) and serves the bundle a
 ```
 src/
 ├── App.tsx                # Top-level shell + Server-Unavailable overlay
-├── features/              # Feature folders (maps, cluster, metrics, setup wizard)
+├── features/              # Feature folders (explorer, cluster, query, settings)
 ├── components/            # Reusable UI
 └── lib/                   # Client wiring + helpers
 ```
