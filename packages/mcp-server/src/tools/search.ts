@@ -63,13 +63,23 @@ export async function handleSearch(rawArgs: unknown, ctx: ToolContext): Promise<
       };
     }
 
+    // Obtain a single map handle before the loop — same accessor topgun_mutate uses —
+    // so each hit's body is read from the local CRDT replica without a network round-trip.
+    const lwwMap = ctx.client.getMap<string, Record<string, unknown>>(map);
+
     const formatted = results
-      .map(
-        (result, idx) =>
+      .map((result, idx) => {
+        const body = lwwMap.get(result.key);
+        const dataLine =
+          body !== undefined
+            ? `Data: ${JSON.stringify(body, null, 2).split('\n').join('\n   ')}`
+            : `Data: (record body not available locally)`;
+        return (
           `${idx + 1}. [Score: ${result.score.toFixed(3)}] [${result.key}]\n` +
           `   Matched: ${result.matchedTerms.join(', ')}\n` +
-          `   Data: ${JSON.stringify(result.value, null, 2).split('\n').join('\n   ')}`,
-      )
+          `   ${dataLine}`
+        );
+      })
       .join('\n\n');
 
     return {
