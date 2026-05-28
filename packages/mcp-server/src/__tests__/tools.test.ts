@@ -9,6 +9,7 @@ import { handleSchema } from '../tools/schema';
 import { handleStats } from '../tools/stats';
 import { handleExplain } from '../tools/explain';
 import { handleListMaps } from '../tools/listMaps';
+import { handleSearch } from '../tools/search';
 
 // Mock TopGunClient
 class MockLWWMap {
@@ -33,8 +34,17 @@ class MockLWWMap {
   }
 }
 
+interface MockSearchHit {
+  key: string;
+  value: null;
+  score: number;
+  matchedTerms: string[];
+}
+
 class MockTopGunClient {
   private maps = new Map<string, MockLWWMap>();
+  // Configurable search results so individual tests can inject non-empty hit lists.
+  searchResults: MockSearchHit[] = [];
 
   getMap(name: string): MockLWWMap {
     if (!this.maps.has(name)) {
@@ -72,7 +82,7 @@ class MockTopGunClient {
   }
 
   async search(_map: string, _query: string, _options?: unknown) {
-    return [];
+    return this.searchResults;
   }
 
   query(mapName: string, filter: { where?: Record<string, unknown>; limit?: number } = {}) {
@@ -441,6 +451,76 @@ describe('MCP Tools', () => {
 
       expect(result.isError).toBeUndefined();
       expect(result.content[0].text).toContain('Recommendations');
+    });
+  });
+
+  describe('handleSearch', () => {
+    it('should return hydrated record body for a matched hit', async () => {
+      const ctx = createTestContext();
+      const mockClient = ctx.client as unknown as MockTopGunClient;
+      // Pre-populate the map so the local read-by-key finds the body.
+      mockClient.getMap('tasks').set('task1', { title: 'Test Task', status: 'todo' });
+      // Wire search() to return a hit mirroring the server's wire shape (value: null).
+      mockClient.searchResults = [
+        { key: 'task1', value: null, score: 0.42, matchedTerms: ['test'] },
+      ];
+
+      const result = await handleSearch({ map: 'tasks', query: 'test' }, ctx);
+
+      expect(result.isError).toBeUndefined();
+      // Body fields must be present in the output.
+      expect(result.content[0].text).toContain('Test Task');
+      expect(result.content[0].text).toContain('todo');
+      // The old null placeholder must not appear.
+      expect(result.content[0].text).not.toContain('Data: null');
+    });
+
+    it('should preserve score with fixed-precision rendering and matched-term metadata', async () => {
+      const ctx = createTestContext();
+      const mockClient = ctx.client as unknown as MockTopGunClient;
+      mockClient.getMap('tasks').set('task1', { title: 'Test Task', status: 'todo' });
+      mockClient.getMap('tasks').set('task2', { title: 'Smoke Task', status: 'done' });
+      // Two hits: one plain three-decimal score, one rounding-sensitive score matching
+      // the real smoke output (0.2876 → "0.288") to guard toFixed(3) against digit-dropping.
+      mockClient.searchResults = [
+        { key: 'task1', value: null, score: 0.42, matchedTerms: ['test'] },
+        { key: 'task2', value: null, score: 0.2876, matchedTerms: ['smoke'] },
+      ];
+
+      const result = await handleSearch({ map: 'tasks', query: 'test smoke' }, ctx);
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('[Score: 0.420]');
+      expect(result.content[0].text).toContain('Matched: test');
+      // Rounding-sensitive assertion: 0.2876 must render as 0.288, not 0.287.
+      expect(result.content[0].text).toContain('[Score: 0.288]');
+      expect(result.content[0].text).toContain('Matched: smoke');
+    });
+
+    it('should emit the not-available-locally marker when the key is absent from the local replica', async () => {
+      const ctx = createTestContext();
+      const mockClient = ctx.client as unknown as MockTopGunClient;
+      // Intentionally do NOT pre-populate the map — simulates an evicted or
+      // partially-replicated record where lwwMap.get() returns undefined.
+      mockClient.searchResults = [
+        { key: 'missing-key', value: null, score: 0.9, matchedTerms: ['term'] },
+      ];
+
+      // Handler must not throw; the hit must still appear with the pinned fallback marker.
+      const result = await handleSearch({ map: 'tasks', query: 'term' }, ctx);
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('Data: (record body not available locally)');
+    });
+
+    it('should return the empty-results message when search returns no hits', async () => {
+      const ctx = createTestContext();
+      // searchResults defaults to [] — no configuration needed.
+
+      const result = await handleSearch({ map: 'tasks', query: 'nothing' }, ctx);
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('No results found');
     });
   });
 });
