@@ -72,32 +72,8 @@ async function config(options: ConfigOptions) {
     return;
   }
 
-  // Update configuration
-  let updated = false;
-
-  if (!fs.existsSync(envPath)) {
-    console.log(chalk.yellow('No .env file found. Run: npx @topgunbuild/cli setup'));
-    process.exit(1);
-  }
-
-  let envContent = fs.readFileSync(envPath, 'utf8');
-
-  if (options.storage) {
-    if (!VALID_STORAGES.includes(options.storage)) {
-      console.error(chalk.red(`Invalid storage type: ${options.storage}`));
-      console.log(chalk.gray(`Valid options: ${VALID_STORAGES.join(', ')}`));
-      process.exit(1);
-    }
-
-    envContent = updateEnvValue(envContent, 'STORAGE_BACKEND', options.storage);
-    console.log(chalk.green(`  ✓ Storage backend set to: ${options.storage}`));
-    updated = true;
-  }
-
-  if (updated) {
-    fs.writeFileSync(envPath, envContent);
-    console.log(chalk.green('\n Configuration updated.\n'));
-  } else {
+  // No actionable option — show help and exit without requiring a .env
+  if (!options.storage) {
     console.log(chalk.bold('\n TopGun Config\n'));
     console.log(chalk.gray('  Usage:'));
     console.log(chalk.gray('    topgun config --show              Show current configuration'));
@@ -105,7 +81,28 @@ async function config(options: ConfigOptions) {
     console.log(chalk.gray('    topgun config --storage postgres  Set storage to PostgreSQL'));
     console.log(chalk.gray('    topgun config --storage null      Set storage to ephemeral (no persistence)'));
     console.log('');
+    return;
   }
+
+  // Update configuration
+  if (!fs.existsSync(envPath)) {
+    console.log(chalk.yellow('No .env file found. Run: npx @topgunbuild/cli setup'));
+    process.exit(1);
+  }
+
+  let envContent = fs.readFileSync(envPath, 'utf8');
+
+  if (!VALID_STORAGES.includes(options.storage)) {
+    console.error(chalk.red(`Invalid storage type: ${options.storage}`));
+    console.log(chalk.gray(`Valid options: ${VALID_STORAGES.join(', ')}`));
+    process.exit(1);
+  }
+
+  envContent = updateEnvValue(envContent, 'STORAGE_BACKEND', options.storage);
+  console.log(chalk.green(`  ✓ Storage backend set to: ${options.storage}`));
+
+  fs.writeFileSync(envPath, envContent);
+  console.log(chalk.green('\n Configuration updated.\n'));
 }
 
 function parseEnvFile(content: string): EnvConfig {
