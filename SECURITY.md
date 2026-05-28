@@ -43,7 +43,7 @@ In scope:
 
 - Server: `packages/server-rust/` (axum WS handler, clustering, redb/Postgres backends, eviction, write-behind, auth, ACL).
 - Clients: `packages/client/`, `packages/react/`, `packages/adapters/`.
-- Tooling: `packages/mcp-server/`, `packages/create-topgun-app/`, root `bin/topgun.js` CLI.
+- Tooling: `packages/mcp-server/`, `packages/create-topgun-app/`, `packages/cli/`.
 - Deployment: `deploy/Dockerfile.*`, `deploy/k8s/`, root `docker-compose.yml`.
 - The `topgun.build` documentation site (apps/docs-astro).
 

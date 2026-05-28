@@ -4,15 +4,12 @@
   "description": "Offline-First In-Memory Data Grid",
   "private": true,
   "packageManager": "pnpm@10.13.1",
-  "bin": {
-    "topgun": "./bin/topgun.js"
-  },
   "scripts": {
-    "topgun": "node ./bin/topgun.js",
+    "topgun": "node packages/cli/dist/topgun.js",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "test:sim": "cargo test --profile ci-sim --features simulation -p topgun-server -- sim",
-    "test:cli": "jest --config tests/cli/jest.config.js",
+    "test:cli": "pnpm --filter @topgunbuild/cli test",
     "test:integration-rust": "jest --config tests/integration-rust/jest.config.js",
     "test:coverage": "pnpm -r test:coverage",
     "test:coverage:core": "pnpm --filter @topgunbuild/core test:coverage",
@@ -33,9 +30,9 @@
     "test:k6:cluster:throughput": "JWT_TOKEN=$(node scripts/generate-k6-token.js) ./bin/k6 run tests/k6/scenarios/cluster-throughput.js",
     "test:k6:cluster:failover": "JWT_TOKEN=$(node scripts/generate-k6-token.js) ./bin/k6 run tests/k6/scenarios/cluster-failover.js",
     "test:k6:cluster:rebalance": "JWT_TOKEN=$(node scripts/generate-k6-token.js) ./bin/k6 run tests/k6/scenarios/cluster-rebalance.js",
-    "docker:start": "node bin/topgun.js docker:start",
-    "docker:stop": "node bin/topgun.js docker:stop",
-    "docker:status": "node bin/topgun.js docker:status",
+    "docker:start": "node packages/cli/dist/topgun.js docker:start",
+    "docker:stop": "node packages/cli/dist/topgun.js docker:stop",
+    "docker:status": "node packages/cli/dist/topgun.js docker:status",
     "cluster:up": "docker-compose -f tests/k6/docker-compose.cluster.yml up -d",
     "cluster:down": "docker-compose -f tests/k6/docker-compose.cluster.yml down",
     "cluster:logs": "docker-compose -f tests/k6/docker-compose.cluster.yml logs -f",
@@ -47,12 +44,6 @@
     "lint:fix": "eslint 'packages/*/src/**/*.{ts,tsx}' 'apps/*/src/**/*.{ts,tsx}' 'tests/**/*.{ts,tsx}' --fix",
     "format": "prettier --write 'packages/*/src/**/*.{ts,tsx}' 'apps/*/src/**/*.{ts,tsx}' 'tests/**/*.{ts,tsx}'",
     "format:check": "prettier --check 'packages/*/src/**/*.{ts,tsx}' 'apps/*/src/**/*.{ts,tsx}' 'tests/**/*.{ts,tsx}'"
-  },
-  "dependencies": {
-    "chalk": "^4.1.2",
-    "commander": "^12.1.0",
-    "dotenv": "^16.4.5",
-    "inquirer": "^8.2.6"
   },
   "devDependencies": {
     "@jest/test-sequencer": "^29.7.0",
