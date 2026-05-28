@@ -65,8 +65,15 @@ async function setup(options: SetupOptions) {
   fs.writeFileSync(path.join(process.cwd(), '.env'), envContent);
   console.log(chalk.green('  ✓ .env created'));
 
-  // Inform the user which auth mode was written and how to switch
-  if (config.storage !== 'postgres') {
+  // Inform the user which auth mode was written and how to switch.
+  // The postgres path is production-leaning, so make the no-auth notice a visible warning there.
+  if (config.storage === 'postgres') {
+    console.log(
+      chalk.yellow(
+        '  Auth: TOPGUN_NO_AUTH=1 written for local dev — set JWT_SECRET before any production/networked deployment',
+      ),
+    );
+  } else {
     console.log(
       chalk.gray(
         '  Auth: TOPGUN_NO_AUTH=1 (local dev mode — set JWT_SECRET for any networked/production deployment)',
