@@ -28,8 +28,9 @@
 #   packages/server-dist/npm/linux-x64/bin/topgun-server     (linux x64)
 #   pnpm publish --dry-run for each per-platform package + the meta-package
 #
-# This script does NOT run pnpm publish (no --dry-run omitted). The real publish
-# is a manual operator step. See packages/server-dist/README.md for publish workflow.
+# This script runs `pnpm publish --dry-run` only — it never runs the real publish.
+# The real publish (without --dry-run) is a manual operator step. See
+# packages/server-dist/README.md for the publish workflow.
 
 set -euo pipefail
 

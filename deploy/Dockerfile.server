@@ -38,6 +38,13 @@ WORKDIR /data
 VOLUME ["/data"]
 ENV TOPGUN_REDB_PATH=/data/topgun.redb
 
+# Containers publish ports (docker -p / compose ports), which requires binding
+# all interfaces inside the container. The binary otherwise defaults to
+# loopback-only when auth is disabled (TOPGUN_NO_AUTH=1) so a bare local run is
+# never inadvertently exposed; in a container that isolation is the runtime's
+# job, so bind all interfaces here. Compose and the CI smoke image inherit this.
+ENV TOPGUN_BIND_ADDR=0.0.0.0
+
 # Health check on default port 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
   CMD wget -q --spider http://localhost:${TOPGUN_PORT:-8080}/health || exit 1

@@ -54,9 +54,37 @@ function resolveBinaryPath() {
 const binaryPath = resolveBinaryPath();
 const { spawnSync } = require('child_process');
 
+// Ensure the binary is executable. We cannot rely on the postinstall chmod:
+// pnpm v10+ ignores dependency build scripts by default (requires
+// `pnpm approve-builds`), and tarball extraction does not reliably preserve the
+// executable bit across package managers. The shim runs on every invocation, so
+// chmod here is the robust guarantee that `npx @topgunbuild/server` works under
+// npm, pnpm, and yarn alike. Best-effort: a failure here is surfaced by the spawn.
+if (process.platform !== 'win32') {
+  try {
+    require('fs').chmodSync(binaryPath, 0o755);
+  } catch (_) {
+    /* fall through — spawn will report the real error if the binary is unusable */
+  }
+}
+
+// Zero-config convenience: if the operator has configured neither a JWT secret
+// nor an explicit auth posture, default to local-dev mode (auth disabled). The
+// server, in turn, binds loopback-only when auth is disabled, so this never
+// exposes an unauthenticated server to the network. Setting JWT_SECRET or
+// TOPGUN_NO_AUTH explicitly overrides this default.
+const env = { ...process.env };
+if (!env.JWT_SECRET && env.TOPGUN_NO_AUTH === undefined) {
+  env.TOPGUN_NO_AUTH = '1';
+  process.stderr.write(
+    '\n  @topgunbuild/server: starting in local-dev mode (auth disabled, bound to 127.0.0.1).\n' +
+    '  To enforce auth, set JWT_SECRET=<secret>. To silence this notice, set TOPGUN_NO_AUTH explicitly.\n\n'
+  );
+}
+
 const result = spawnSync(binaryPath, process.argv.slice(2), {
   stdio: 'inherit',
-  env: process.env,
+  env,
 });
 
 if (result.error) {

@@ -6,7 +6,7 @@
 //   2. @topgunbuild/server bin shim           — installed npm package (out-of-monorepo / prebuilt)
 //   3. cargo run --bin topgun-server --release — fallback build-on-demand for contributors
 
-const { execFileSync, spawnSync } = require('child_process');
+const { spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 

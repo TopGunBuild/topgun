@@ -200,11 +200,20 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let node_id = args.node_id.clone();
 
+    // When set to 1 or true, omit the JWT secret so templates and QA harness
+    // can connect without auth tokens.
+    let no_auth = std::env::var("TOPGUN_NO_AUTH")
+        .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"))
+        .unwrap_or(false);
+
     // Bind the client WebSocket listener first so we know the actual port.
-    // Bind to all interfaces so inter-container traffic (Docker networking) reaches
-    // the server. TOPGUN_BIND_ADDR overrides the default for environments that
-    // require loopback-only binding.
-    let bind_addr = std::env::var("TOPGUN_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0".to_string());
+    // The default interface depends on auth posture: with auth disabled
+    // (TOPGUN_NO_AUTH=1) we bind loopback-only so a zero-config local server is
+    // never inadvertently exposed to the network. With auth enforced we bind all
+    // interfaces so inter-container traffic (Docker networking) reaches the server.
+    // TOPGUN_BIND_ADDR always overrides this default.
+    let default_bind = if no_auth { "127.0.0.1" } else { "0.0.0.0" };
+    let bind_addr = std::env::var("TOPGUN_BIND_ADDR").unwrap_or_else(|_| default_bind.to_string());
     let listener = TcpListener::bind(format!("{bind_addr}:{}", args.port)).await?;
     let bound_port = listener.local_addr()?.port();
 
@@ -488,12 +497,6 @@ async fn main() -> anyhow::Result<()> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-
-    // When set to 1 or true, omit the JWT secret so templates and QA harness
-    // can connect without auth tokens.
-    let no_auth = std::env::var("TOPGUN_NO_AUTH")
-        .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"))
-        .unwrap_or(false);
 
     // Read the JWT signing secret from env. We refuse to start with a baked-in
     // secret because earlier revisions of this binary defaulted to a publicly-

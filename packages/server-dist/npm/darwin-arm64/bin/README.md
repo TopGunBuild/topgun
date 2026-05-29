@@ -15,5 +15,5 @@ To use a prebuilt binary without building from source:
 
 ```bash
 npm install @topgunbuild/server
-npx topgun-server
+npx @topgunbuild/server
 ```
