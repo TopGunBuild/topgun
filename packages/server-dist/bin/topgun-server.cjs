@@ -2,8 +2,8 @@
 'use strict';
 
 // Platform → per-platform package name map.
-// Only darwin-arm64 and linux-x64 are shipped in v1.
-// Additional platforms (darwin-x64, linux-arm64, win32-x64) are tracked in TODO-424.
+// Only darwin-arm64 and linux-x64 are shipped in the initial release.
+// Additional platforms (darwin-x64, linux-arm64, win32-x64) are planned for a future release.
 const PLATFORM_PACKAGES = {
   'darwin-arm64': '@topgunbuild/server-darwin-arm64',
   'linux-x64':    '@topgunbuild/server-linux-x64',
