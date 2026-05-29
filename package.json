@@ -38,7 +38,7 @@
     "cluster:logs": "docker-compose -f tests/k6/docker-compose.cluster.yml logs -f",
     "cluster:scale": "docker-compose -f tests/k6/docker-compose.cluster.yml up -d node-4",
     "clean": "rm -rf node_modules packages/*/node_modules examples/*/node_modules apps/*/node_modules packages/*/dist",
-    "start:server": "cargo run --bin topgun-server --release",
+    "start:server": "node scripts/start-server.cjs",
     "start:docs": "pnpm --filter apps-docs-astro dev",
     "lint": "eslint 'packages/*/src/**/*.{ts,tsx}' 'apps/*/src/**/*.{ts,tsx}' 'tests/**/*.{ts,tsx}'",
     "lint:fix": "eslint 'packages/*/src/**/*.{ts,tsx}' 'apps/*/src/**/*.{ts,tsx}' 'tests/**/*.{ts,tsx}' --fix",

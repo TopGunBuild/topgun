@@ -27,15 +27,40 @@ async function dev(options: DevOptions) {
   }
   console.log('');
 
-  // The server binary lives at <cwd>/target/release/topgun-server.
-  // This is a monorepo-internal path; out-of-monorepo usage requires a
-  // prebuilt binary placed there (see TODO-365 for prebuilt distribution).
-  const rustBinaryPath = path.join(process.cwd(), 'target/release/topgun-server');
+  // Binary resolution (Key Link L3 — monorepo path is always first):
+  //   1. <cwd>/target/release/topgun-server — local cargo build (monorepo / contributors)
+  //   2. @topgunbuild/server bin shim        — installed npm package (out-of-monorepo)
+  // If neither is found, the error message names both remedies.
+  const cwdBinaryPath = path.join(process.cwd(), 'target/release/topgun-server');
 
-  if (!fs.existsSync(rustBinaryPath)) {
+  let serverBinary: string | null = null;
+  let isNodeShim = false;
+
+  if (fs.existsSync(cwdBinaryPath)) {
+    serverBinary = cwdBinaryPath;
+  } else {
+    // Fallback: resolve the bin shim from an installed @topgunbuild/server package.
+    // Wrapped in try/catch — package resolution is best-effort (out-of-monorepo).
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const pkgJsonPath = require.resolve('@topgunbuild/server/package.json');
+      const pkgRoot = path.dirname(pkgJsonPath);
+      const shimPath = path.join(pkgRoot, 'bin', 'topgun-server.cjs');
+      if (fs.existsSync(shimPath)) {
+        serverBinary = shimPath;
+        isNodeShim = true;
+      }
+    } catch (_) {
+      // @topgunbuild/server not installed — fall through to error below
+    }
+  }
+
+  if (!serverBinary) {
     console.error(chalk.red('  Error: Rust server binary not found.'));
-    console.log(chalk.yellow(`  Expected: ${rustBinaryPath}`));
-    console.log(chalk.yellow('  Run: cargo build --release -p topgun-server --bin topgun-server'));
+    console.log(chalk.yellow(`  Expected: ${cwdBinaryPath}`));
+    console.log(chalk.yellow('  Options:'));
+    console.log(chalk.yellow('    Build from source: cargo build --release -p topgun-server --bin topgun-server'));
+    console.log(chalk.yellow('    Or install prebuilt: npm install @topgunbuild/server'));
     process.exit(1);
   }
 
@@ -54,7 +79,13 @@ async function dev(options: DevOptions) {
     env.TOPGUN_LOG_FORMAT = 'json';
   }
 
-  const server = spawn(rustBinaryPath, [], {
+  // When using the @topgunbuild/server bin shim, invoke it via Node.js.
+  // When using the direct binary, invoke it directly.
+  const [execCmd, execArgs]: [string, string[]] = isNodeShim
+    ? [process.execPath, [serverBinary]]
+    : [serverBinary, []];
+
+  const server = spawn(execCmd, execArgs, {
     stdio: 'inherit',
     env,
   });

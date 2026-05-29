@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Terminal, Copy, Check } from 'lucide-react';
 
 const CLI_COMMAND = 'npx create-topgun-app';
-const DROP_IN_CMD = 'pnpm start:server';
+const DROP_IN_CMD = 'npx @topgunbuild/server';
 const DROP_IN_DOCKER_ALT = 'docker compose up server';
 const PROD_LINK = '/docs/roadmap';
 

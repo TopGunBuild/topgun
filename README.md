@@ -34,10 +34,18 @@ cd my-app && pnpm install && pnpm dev
 This boots a Vite app with a working LWW-Map todo demo. For the backend, in a separate terminal:
 
 ```bash
+npx @topgunbuild/server
+```
+
+No Rust toolchain required — this downloads a prebuilt binary for your platform and starts the server instantly. The server runs on `ws://localhost:8080` with embedded storage at `./topgun.redb` — writes survive restart, no Postgres required. Stop with `Ctrl-C`, restart, and your data is still there. Backup is a single-file copy.
+
+**Contributor / monorepo path:**
+
+```bash
 pnpm start:server
 ```
 
-The server runs on `ws://localhost:8080` with embedded storage at `./topgun.redb` — writes survive restart, no Postgres required. You do need a Rust toolchain installed; `pnpm start:server` wraps `cargo run --bin topgun-server --release` and compiles on first run. Pre-built binaries are on the roadmap. Stop with `Ctrl-C`, restart, and your data is still there. Backup is a single-file copy.
+`pnpm start:server` uses a prebuilt binary when present and falls back to `cargo run --bin topgun-server --release` for contributors with the Rust toolchain.
 
 For users who prefer containers, `docker compose up server` works too — it spins up Postgres alongside the server in one command.
 
@@ -80,8 +88,10 @@ Single-node is fully consistent and production-ready for workloads that fit one 
 
 ```bash
 docker compose up --build
-# Or run the Rust server directly
-cargo run --bin topgun-server --release
+# Or start the server directly (no Rust toolchain required)
+npx @topgunbuild/server
+# Contributor / monorepo path (has cargo):
+# cargo run --bin topgun-server --release
 ```
 
 **4. Multi-node cluster** *(on roadmap — Raft consensus)*
@@ -174,11 +184,14 @@ Full docs: [topgun.build/docs](https://topgun.build/docs)
 ## Running locally
 
 ```bash
-# Start server with Postgres
+# Start the server — no Rust toolchain required
+npx @topgunbuild/server
+
+# Or start with Docker (includes Postgres)
 docker compose up --build
 
-# Or run the Rust server directly
-cargo run --bin topgun-server --release
+# Contributor / monorepo path (has cargo):
+# cargo run --bin topgun-server --release
 
 # Or run the example app
 cd examples/notes-app

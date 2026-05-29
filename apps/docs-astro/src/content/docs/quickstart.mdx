@@ -180,13 +180,21 @@ topgun dev
 
 The setup→dev flow is cohesive: `topgun setup` writes a `.env` that `topgun dev` reads to start the server without any JWT or database configuration. Run `topgun setup --yes` to skip prompts and accept all defaults.
 
-**Inside the TopGun monorepo (requires Rust toolchain + `cargo build`):**
+**Zero-install path (no Rust toolchain required):**
+
+```bash
+npx @topgunbuild/server
+```
+
+This downloads a prebuilt binary for your platform and starts the server immediately. No compiler, no Docker.
+
+**Inside the TopGun monorepo (contributor path):**
 
 ```bash
 pnpm start:server
 ```
 
-> **Note on `topgun dev`:** the `dev` command starts a prebuilt `target/release/topgun-server` binary from the current working directory. The CLI is available standalone (`doctor`, `setup`, `config`, `codegen`, `docker:*`, `cluster:*`), but `dev` itself requires a prebuilt server binary. A future release will ship prebuilt binaries (see [TODO-365](https://github.com/TopGunBuild/topgun)).
+`pnpm start:server` uses a prebuilt binary when present and falls back to `cargo run --bin topgun-server --release` for contributors who have the Rust toolchain.
 
 The server boots in seconds with embedded storage (`./topgun.redb`) — no Postgres, no Docker required.
 
