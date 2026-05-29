@@ -1,0 +1,20 @@
+{
+  "name": "@topgunbuild/server-darwin-arm64",
+  "version": "2.0.0",
+  "description": "TopGun server prebuilt binary for darwin arm64 (Apple Silicon).",
+  "private": false,
+  "license": "Apache-2.0",
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "files": [
+    "bin"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TopGunBuild/topgun.git",
+    "directory": "packages/server-dist/npm/darwin-arm64"
+  }
+}

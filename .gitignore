@@ -118,3 +118,7 @@ topgun.redb
 # Local scratch directories (not part of the release)
 my-test-review/
 .gstack/
+
+# Per-platform prebuilt server binaries (build artifacts; produced by scripts/build-server-binaries.sh)
+# The !bin/*.js un-ignore (line 85) only un-ignores .js files; the extension-less binary is NOT re-included.
+packages/server-dist/npm/*/bin/topgun-server

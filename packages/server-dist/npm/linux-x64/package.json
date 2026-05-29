@@ -1,0 +1,20 @@
+{
+  "name": "@topgunbuild/server-linux-x64",
+  "version": "2.0.0",
+  "description": "TopGun server prebuilt binary for linux x64.",
+  "private": false,
+  "license": "Apache-2.0",
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "files": [
+    "bin"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TopGunBuild/topgun.git",
+    "directory": "packages/server-dist/npm/linux-x64"
+  }
+}
