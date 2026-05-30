@@ -20,7 +20,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::routing::{delete, get, post};
+use arc_swap::ArcSwap;
+use axum::routing::get;
 use clap::Parser;
 use dashmap::DashMap;
 use parking_lot::RwLock;
@@ -535,8 +536,11 @@ async fn main() -> anyhow::Result<()> {
         dispatcher: Some(Arc::new(dispatcher)),
         jwt_secret,
         cluster_state: cluster_state_for_app,
-        store_factory: None,
-        server_config: None,
+        store_factory: Some(Arc::clone(&record_store_factory)),
+        server_config: Some(Arc::new(ArcSwap::from_pointee(ServerConfig {
+            node_id: node_id.clone(),
+            ..ServerConfig::default()
+        }))),
         policy_store: Some(policy_store),
         auth_providers: Arc::new(vec![]),
         refresh_grant_store: None,
@@ -588,66 +592,22 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Build the axum router with state.
-    // Serve WebSocket on both /ws (integration tests) and / (browser clients).
-    // Include /health so Docker Compose healthchecks and inter-container probes succeed.
-    // Mount admin policy routes so integration tests can create policies via HTTP.
-    let ws_handler = get(topgun_server::network::handlers::ws_upgrade_handler);
-    let health_handler = get(topgun_server::network::handlers::health_handler);
-    let app = axum::Router::new()
-        .route("/ws", ws_handler.clone())
-        .route("/", ws_handler)
-        .route("/health", health_handler)
-        .route(
-            "/api/admin/policies",
-            get(topgun_server::network::handlers::admin::list_policies)
-                .post(topgun_server::network::handlers::admin::create_policy),
-        )
-        .route(
-            "/api/admin/policies/{id}",
-            delete(topgun_server::network::handlers::admin::delete_policy),
-        )
-        // Auth login + scalar index admin endpoints. Mounting here mirrors the
-        // route set NetworkModule::serve registers in production. Without this,
-        // `pnpm start:server` hits the topgun_server binary's hand-built router
-        // which previously omitted login + /api/admin/indexes/*, leaving the
-        // persistence path unreachable end-to-end.
-        .route(
-            "/api/auth/login",
-            post(topgun_server::network::handlers::admin::login),
-        )
-        // Auth posture probe — the admin SPA calls this without a token to decide
-        // whether to show Login. Must be on this hand-built router too, not only
-        // the NetworkModule router, or `topgun dev --admin` serves a 404 and the
-        // dashboard never gets past "Server Unavailable".
-        .route(
-            "/api/auth/status",
-            get(topgun_server::network::handlers::admin::auth_status),
-        )
-        // Server status probe — the admin SPA's connectivity check hits this; a
-        // 404 here makes the dashboard render "Server Unavailable" forever. Same
-        // dual-router gap as /api/auth/status above.
-        .route(
-            "/api/status",
-            get(topgun_server::network::handlers::admin::server_status),
-        )
-        .route(
-            "/api/admin/indexes",
-            get(topgun_server::network::handlers::admin::list_indexes)
-                .post(topgun_server::network::handlers::admin::create_index),
-        )
-        .route(
-            "/api/admin/indexes/{map}/{attr}",
-            delete(topgun_server::network::handlers::admin::remove_index_handler),
-        )
-        .route(
-            "/api/admin/indexes/{map}/{attr}/status",
-            get(topgun_server::network::handlers::admin::index_backfill_status),
-        )
-        .route(
-            "/sync",
-            post(topgun_server::network::handlers::http_sync_handler),
-        )
-        .with_state(state);
+    // Build the router from the single source of truth shared with NetworkModule.
+    // admin_routes() provides every production route; the only binary-specific
+    // extra is mounting the WebSocket handler on / for browser clients (browsers
+    // default to the root path when building the ws:// URL without a path).
+    // All routes that admin_routes() already provides (/ws, /health, /sync,
+    // /api/admin/*, /api/auth/*, /api/status) MUST NOT be re-declared here —
+    // axum panics at startup on duplicate paths.
+    let app = topgun_server::network::module::admin_routes(
+        state.config.rate_limit_per_ip,
+        state.config.rate_limit_burst,
+    )
+    // Browser WS dual-mount: /ws is already in admin_routes(); / is the
+    // binary-only extra for clients that connect to the root path.
+    .route("/", get(topgun_server::network::handlers::ws_upgrade_handler))
+    .layer(topgun_server::network::middleware::build_http_layers(&state.config))
+    .with_state(state);
 
     // Print port to stdout so the TS test harness can read it
     println!("PORT={bound_port}");
