@@ -6,6 +6,7 @@
 //! - `GET /api/admin/maps` -- map enumeration with entry counts (admin only)
 //! - `GET /api/admin/settings` -- current server configuration (admin only)
 //! - `PUT /api/admin/settings` -- update hot-reloadable settings (admin only)
+//! - `GET /api/auth/status` -- auth posture probe (public, no token required)
 //! - `POST /api/auth/login` -- admin login (returns JWT)
 //! - `POST /api/admin/indexes` -- create a secondary index (admin only)
 //! - `GET /api/admin/indexes` -- list all indexes across all maps (admin only)
@@ -54,6 +55,16 @@ struct AdminJwtClaims {
     sub: String,
     roles: Vec<String>,
     exp: u64,
+}
+
+/// Response body for `GET /api/auth/status`.
+///
+/// Tells the admin frontend whether authentication is required so it can
+/// skip the Login screen when the server runs without a JWT secret.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthStatusResponse {
+    pub auth_required: bool,
 }
 
 // ── Public endpoints (no auth required) ──────────────────────────────
