@@ -39,6 +39,7 @@ program
   .option('--no-db', 'Skip database startup')
   .option('-p, --port <port>', 'Server port', '8080')
   .option('--debug', 'Enable debug logging (RUST_LOG=debug, TOPGUN_LOG_FORMAT=json)')
+  .option('--admin', 'Also start the admin dashboard (monorepo only)')
   .action(devCmd);
 
 program

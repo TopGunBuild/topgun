@@ -1,5 +1,5 @@
 import chalk from 'chalk';
-import { spawn } from 'child_process';
+import { spawn, ChildProcess } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 
@@ -14,6 +14,7 @@ interface DevOptions {
   port?: string;
   debug?: boolean;
   db?: boolean;
+  admin?: boolean;
 }
 
 async function dev(options: DevOptions) {
@@ -24,6 +25,9 @@ async function dev(options: DevOptions) {
   console.log(chalk.gray(`  Port: ${serverPort}`));
   if (options.debug) {
     console.log(chalk.gray('  Debug: enabled (RUST_LOG=debug, TOPGUN_LOG_FORMAT=json)'));
+  }
+  if (options.admin) {
+    console.log(chalk.gray('  Admin: enabled'));
   }
   console.log('');
 
@@ -90,8 +94,56 @@ async function dev(options: DevOptions) {
     env,
   });
 
+  // Track admin dashboard child process so the shutdown handler can stop both.
+  let adminProcess: ChildProcess | null = null;
+
+  // When --admin is requested, check if the admin dashboard source is present
+  // (monorepo check). If absent, print a caveat and continue server-only so
+  // the server still starts rather than exiting with an error.
+  if (options.admin) {
+    const adminDashboardDir = path.join(process.cwd(), 'apps/admin-dashboard');
+    const adminDashboardExists = fs.existsSync(adminDashboardDir);
+
+    if (!adminDashboardExists) {
+      console.log(chalk.yellow('\n  Admin dashboard source not found at apps/admin-dashboard.'));
+      console.log(chalk.yellow('  The --admin flag requires the TopGun monorepo to be checked out.'));
+      console.log(chalk.gray(''));
+      console.log(chalk.gray('  Alternatives:'));
+      console.log(chalk.gray('    Hosted demo:   https://demo.topgun.build (TODO-420)'));
+      console.log(chalk.gray('    Self-host:     docker compose --profile admin up  →  http://localhost:3001'));
+      console.log(chalk.gray(''));
+      console.log(chalk.gray('  Continuing with server only...\n'));
+    } else {
+      // Inject the server WebSocket URL so the admin dashboard connects to the
+      // same server that dev.ts just spawned. API_BASE is also relative to the
+      // same origin (the Vite dev server proxies /api/* to the Rust server), so
+      // both the HTTP auth-status probe and the WS client resolve to port serverPort.
+      const adminEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        VITE_WS_URL: `ws://localhost:${serverPort}`,
+      };
+
+      console.log(chalk.cyan('[admin] Starting admin dashboard...\n'));
+
+      adminProcess = spawn('pnpm', ['--filter', 'admin-dashboard', 'dev'], {
+        stdio: 'inherit',
+        env: adminEnv,
+        cwd: process.cwd(),
+      });
+
+      adminProcess.on('error', (err) => {
+        console.error(chalk.red(`[admin] Error: ${err.message}`));
+      });
+
+      console.log(chalk.green('\n  Admin dashboard: http://localhost:5173/admin/\n'));
+    }
+  }
+
   const shutdown = () => {
     console.log(chalk.yellow('\n\nShutting down...'));
+    if (adminProcess) {
+      adminProcess.kill('SIGINT');
+    }
     server.kill('SIGINT');
     process.exit(0);
   };
@@ -100,11 +152,17 @@ async function dev(options: DevOptions) {
   process.on('SIGTERM', shutdown);
 
   server.on('close', (code) => {
+    if (adminProcess) {
+      adminProcess.kill('SIGINT');
+    }
     process.exit(code || 0);
   });
 
   server.on('error', (err) => {
     console.error(chalk.red(`[server] Error: ${err.message}`));
+    if (adminProcess) {
+      adminProcess.kill('SIGINT');
+    }
     process.exit(1);
   });
 }
