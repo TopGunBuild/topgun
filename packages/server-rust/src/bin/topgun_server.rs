@@ -623,6 +623,13 @@ async fn main() -> anyhow::Result<()> {
             "/api/auth/status",
             get(topgun_server::network::handlers::admin::auth_status),
         )
+        // Server status probe — the admin SPA's connectivity check hits this; a
+        // 404 here makes the dashboard render "Server Unavailable" forever. Same
+        // dual-router gap as /api/auth/status above.
+        .route(
+            "/api/status",
+            get(topgun_server::network::handlers::admin::server_status),
+        )
         .route(
             "/api/admin/indexes",
             get(topgun_server::network::handlers::admin::list_indexes)
