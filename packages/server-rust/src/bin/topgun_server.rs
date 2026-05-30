@@ -605,8 +605,13 @@ async fn main() -> anyhow::Result<()> {
     )
     // Browser WS dual-mount: /ws is already in admin_routes(); / is the
     // binary-only extra for clients that connect to the root path.
-    .route("/", get(topgun_server::network::handlers::ws_upgrade_handler))
-    .layer(topgun_server::network::middleware::build_http_layers(&state.config))
+    .route(
+        "/",
+        get(topgun_server::network::handlers::ws_upgrade_handler),
+    )
+    .layer(topgun_server::network::middleware::build_http_layers(
+        &state.config,
+    ))
     .with_state(state);
 
     // Print port to stdout so the TS test harness can read it

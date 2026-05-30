@@ -9,9 +9,9 @@
 //! the binary's router and fails the test.
 
 use http::{Method, Request, StatusCode};
-use tower::ServiceExt;
 use topgun_server::network::handlers::AppState;
 use topgun_server::network::module::admin_routes;
+use tower::ServiceExt;
 
 /// Single edit-point for the binary↔SPA route contract.
 ///
@@ -34,7 +34,7 @@ const REQUIRED_ROUTES: &[(Method, &str)] = &[
 ];
 
 /// Build the binary's composed router the same way the binary does:
-/// admin_routes() + the browser WS dual-mount on /.
+/// `admin_routes()` + the browser WS dual-mount on `/`.
 /// Using the same construction path ensures the test exercises exactly the
 /// router the binary serves, not a hypothetical variant.
 fn build_binary_router() -> axum::Router {

@@ -445,6 +445,12 @@ struct AppServices {
 /// Neither parameter has an internal default: callers pass the values they read
 /// from their own `NetworkConfig` so the production rate-limit policy is always
 /// explicit and cannot silently drift.
+///
+/// # Panics
+///
+/// Panics if the governor configuration fails to build (requires non-zero
+/// `rate_limit_burst`; `rate_limit_per_ip` of 0 is clamped to 1 internally).
+/// In practice this cannot happen when values come from a valid `NetworkConfig`.
 pub fn admin_routes(rate_limit_per_ip: u32, rate_limit_burst: u32) -> Router<AppState> {
     // Build a per-IP rate limiter for admin and login endpoints.
     // Replenishment interval derived from rate_limit_per_ip: for 100 req/s the
