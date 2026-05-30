@@ -45,7 +45,7 @@ async fn start_test_server(
     (port, shutdown_tx, handle)
 }
 
-/// When no JWT_SECRET is set the server runs in no-auth mode.
+/// When no `JWT_SECRET` is set the server runs in no-auth mode.
 /// The status endpoint must return 200 with authRequired=false without a token.
 #[tokio::test]
 #[serial]
@@ -53,8 +53,7 @@ async fn auth_status_returns_false_when_no_jwt_secret() {
     // Ensure JWT_SECRET is absent for this test.
     std::env::remove_var("JWT_SECRET");
 
-    let (port, shutdown_tx, _handle) =
-        start_test_server(NetworkConfig::default()).await;
+    let (port, shutdown_tx, _handle) = start_test_server(NetworkConfig::default()).await;
 
     let client = reqwest::Client::new();
     let resp = client
@@ -75,15 +74,14 @@ async fn auth_status_returns_false_when_no_jwt_secret() {
     let _ = shutdown_tx.send(());
 }
 
-/// When JWT_SECRET is set the server requires authentication.
+/// When `JWT_SECRET` is set the server requires authentication.
 /// The status endpoint must return 200 with authRequired=true without a token.
 #[tokio::test]
 #[serial]
 async fn auth_status_returns_true_when_jwt_secret_is_set() {
     std::env::set_var("JWT_SECRET", "test-secret-for-auth-status-test");
 
-    let (port, shutdown_tx, _handle) =
-        start_test_server(NetworkConfig::default()).await;
+    let (port, shutdown_tx, _handle) = start_test_server(NetworkConfig::default()).await;
 
     let client = reqwest::Client::new();
     let resp = client

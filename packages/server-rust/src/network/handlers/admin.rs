@@ -23,10 +23,10 @@ use axum::response::IntoResponse;
 use axum::Json;
 use jsonwebtoken::{EncodingKey, Header};
 use serde::Serialize;
-use utoipa::ToSchema;
 use subtle::ConstantTimeEq;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+use utoipa::ToSchema;
 
 use super::admin_auth::AdminClaims;
 use super::admin_types::{
@@ -97,7 +97,7 @@ pub async fn server_status(State(state): State<AppState>) -> impl IntoResponse {
 /// Reports whether authentication is configured on this server.
 ///
 /// The admin frontend calls this on load to decide whether to show the Login
-/// screen. When no JWT secret is configured (TOPGUN_NO_AUTH=1), auth is not
+/// screen. When no JWT secret is configured (`TOPGUN_NO_AUTH=1`), auth is not
 /// required and the Dashboard is accessible without a token. Always returns
 /// HTTP 200 — never 500 — so the frontend can safely fail-open to showing
 /// the Login form on any unexpected error.
