@@ -98,3 +98,22 @@ export async function adminFetchJson<T>(url: string, options: RequestInit = {}):
   const res = await adminFetch(url, options);
   return res.json();
 }
+
+/**
+ * Query the server to determine whether authentication is required.
+ *
+ * This endpoint is public — no Authorization header is sent. On any
+ * network error the function defaults to authRequired: true so the Login
+ * screen is shown rather than silently bypassed (fail-safe).
+ */
+export async function getAuthStatus(): Promise<{ authRequired: boolean }> {
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/status`);
+    if (!res.ok) {
+      return { authRequired: true };
+    }
+    return res.json();
+  } catch {
+    return { authRequired: true };
+  }
+}

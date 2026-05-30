@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useContext, useState } from 'react';
+import { useNavigate, Navigate } from 'react-router-dom';
 import { login } from '../lib/api';
+import { AuthStatusContext } from '../App';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -13,6 +14,23 @@ export function Login() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
+  const { authRequired, loading: authLoading } = useContext(AuthStatusContext);
+
+  // While auth posture is still loading, show a spinner to avoid a flash of
+  // the credential form before a redirect fires.
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+      </div>
+    );
+  }
+
+  // When the server does not require authentication, skip the credential form
+  // and go straight to the Dashboard. No token is generated or stored.
+  if (!authRequired) {
+    return <Navigate to="/" replace />;
+  }
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();

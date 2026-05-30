@@ -11,6 +11,10 @@ export default {
             'ts-jest',
             {
                 useESM: true,
+                // Disable ts-jest type-checking diagnostics in tests — type correctness
+                // is validated by tsc on the app build; the test suite cares about
+                // runtime behavior, not TS compilation of Vite-specific constructs.
+                diagnostics: false,
             },
         ],
     },

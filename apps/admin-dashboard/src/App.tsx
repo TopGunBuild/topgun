@@ -4,6 +4,7 @@ import { SWRConfig } from 'swr';
 import { TopGunProvider } from '@topgunbuild/react';
 import { client } from './lib/client';
 import { swrConfig } from './lib/swr-config';
+import { getAuthStatus } from './lib/api';
 import { Login } from './pages/Login';
 import { Dashboard } from './pages/Dashboard';
 import { Maps } from './pages/Maps';
@@ -18,8 +19,36 @@ import { useServerStatus } from './hooks/useServerStatus';
 import { ServerOff, RefreshCw } from 'lucide-react';
 import { Button } from './components/ui/button';
 
+// Auth status is fetched once at app start and shared via context so every
+// ProtectedRoute and the Login page can act on it without re-fetching.
+interface AuthStatusContextValue {
+  authRequired: boolean;
+  loading: boolean;
+}
+
+export const AuthStatusContext = React.createContext<AuthStatusContextValue>({
+  authRequired: true,
+  loading: true,
+});
+
 // Protected Route Wrapper
 const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
+  const { authRequired, loading } = React.useContext(AuthStatusContext);
+
+  // Wait until auth posture is known to avoid a flash of the login form.
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+      </div>
+    );
+  }
+
+  // When auth is not required, allow through without a token.
+  if (!authRequired) {
+    return <>{children}</>;
+  }
+
   const token = localStorage.getItem('topgun_admin_token');
 
   // Check that token exists and has basic JWT format (3 dot-separated parts)
@@ -161,13 +190,28 @@ function AppContent() {
 }
 
 function App() {
+  const [authStatus, setAuthStatus] = useState<AuthStatusContextValue>({
+    authRequired: true,
+    loading: true,
+  });
+
+  // Fetch auth posture once on mount. Default is authRequired:true (fail-safe)
+  // so that a network error shows the Login form rather than bypassing it.
+  useEffect(() => {
+    getAuthStatus().then((result) => {
+      setAuthStatus({ authRequired: result.authRequired, loading: false });
+    });
+  }, []);
+
   return (
     <ErrorBoundary>
-      <SWRConfig value={swrConfig}>
-        <TopGunProvider client={client}>
-          <AppContent />
-        </TopGunProvider>
-      </SWRConfig>
+      <AuthStatusContext.Provider value={authStatus}>
+        <SWRConfig value={swrConfig}>
+          <TopGunProvider client={client}>
+            <AppContent />
+          </TopGunProvider>
+        </SWRConfig>
+      </AuthStatusContext.Provider>
     </ErrorBoundary>
   );
 }
