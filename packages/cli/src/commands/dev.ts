@@ -109,7 +109,7 @@ async function dev(options: DevOptions) {
       console.log(chalk.yellow('  The --admin flag requires the TopGun monorepo to be checked out.'));
       console.log(chalk.gray(''));
       console.log(chalk.gray('  Alternatives:'));
-      console.log(chalk.gray('    Hosted demo:   https://demo.topgun.build (TODO-420)'));
+      console.log(chalk.gray('    Hosted demo:   https://demo.topgun.build'));
       console.log(chalk.gray('    Self-host:     docker compose --profile admin up  →  http://localhost:3001'));
       console.log(chalk.gray(''));
       console.log(chalk.gray('  Continuing with server only...\n'));
