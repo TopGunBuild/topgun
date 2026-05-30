@@ -122,7 +122,7 @@ function AppContent() {
   }
 
   return (
-    <BrowserRouter>
+    <BrowserRouter basename="/admin">
       <CommandPalette />
       <Routes>
         <Route path="/login" element={<Login />} />
