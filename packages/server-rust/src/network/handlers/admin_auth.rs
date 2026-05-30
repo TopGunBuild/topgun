@@ -441,4 +441,72 @@ CQIDAQAB
         );
         assert_eq!(result.unwrap().user_id, "admin-user");
     }
+
+    // -----------------------------------------------------------------------
+    // AC1: No-auth bypass (jwt_secret: None)
+    // -----------------------------------------------------------------------
+
+    /// AC1: With no JWT secret configured (no-auth posture), the extractor
+    /// synthesizes a local-admin identity without requiring any token.
+    #[tokio::test]
+    async fn no_auth_state_synthesizes_local_admin() {
+        let state = AppState {
+            jwt_secret: None,
+            ..AppState::for_test()
+        };
+        // No Authorization header — should still succeed because jwt_secret is None.
+        let req = axum::http::Request::builder()
+            .body(())
+            .expect("request construction should not fail");
+        let (mut parts, ()) = req.into_parts();
+        let result = AdminClaims::from_request_parts(&mut parts, &state).await;
+        assert!(
+            result.is_ok(),
+            "no-auth state should synthesize local-admin, got {result:?}"
+        );
+        let claims = result.unwrap();
+        assert_eq!(
+            claims.user_id, "local-admin",
+            "synthesized user_id should be 'local-admin'"
+        );
+        assert!(
+            claims.roles.contains(&"admin".to_string()),
+            "synthesized roles should contain 'admin'"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AC2: Auth-enabled no-regression tests
+    // -----------------------------------------------------------------------
+
+    /// AC2a: With jwt_secret configured but no Authorization header, the extractor
+    /// returns MissingToken (401 — no regression from the bypass change).
+    #[tokio::test]
+    async fn auth_enabled_no_header_returns_missing_token() {
+        let state = test_state(60);
+        let req = axum::http::Request::builder()
+            .body(())
+            .expect("request construction should not fail");
+        let (mut parts, ()) = req.into_parts();
+        let result = AdminClaims::from_request_parts(&mut parts, &state).await;
+        assert!(result.is_err(), "expected Err when no Authorization header");
+        assert!(
+            matches!(result.unwrap_err(), AdminAuthError::MissingToken),
+            "should be MissingToken"
+        );
+    }
+
+    /// AC2b: With jwt_secret configured and an invalid/expired token, the extractor
+    /// returns InvalidToken (no regression from the bypass change).
+    #[tokio::test]
+    async fn auth_enabled_invalid_token_returns_invalid_token() {
+        let state = test_state(0);
+        let mut parts = parts_with_bearer("not.a.valid.jwt");
+        let result = AdminClaims::from_request_parts(&mut parts, &state).await;
+        assert!(result.is_err(), "expected Err for invalid token");
+        assert!(
+            matches!(result.unwrap_err(), AdminAuthError::InvalidToken(_)),
+            "should be InvalidToken"
+        );
+    }
 }
