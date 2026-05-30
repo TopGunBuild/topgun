@@ -17,6 +17,7 @@
   "files": [
     "bin",
     "scripts",
+    "admin-dist",
     "README.md"
   ],
   "engines": {

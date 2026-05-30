@@ -2,8 +2,9 @@
 # build-server-binaries.sh
 #
 # Cross-compile topgun-server for darwin-arm64 and linux-x64, strip each binary,
-# assert size < 20 MB, place into the per-platform npm package, and run
-# pnpm publish --dry-run for all three packages to verify publish-readiness.
+# assert size < 20 MB, place into the per-platform npm package, build the admin
+# SPA and bundle it ONCE into the meta package, and run pnpm publish --dry-run
+# for all three packages to verify publish-readiness.
 #
 # Build tool: cargo-zigbuild (preferred — clean cross-compile from macOS M1
 # without Docker). If zigbuild is unavailable, install with:
@@ -71,14 +72,14 @@ rustup target add aarch64-apple-darwin x86_64-unknown-linux-gnu
 # ── Compile ────────────────────────────────────────────────────────────────────
 
 echo ""
-echo "[1/4] Building darwin-arm64 (aarch64-apple-darwin)..."
+echo "[1/5] Building darwin-arm64 (aarch64-apple-darwin)..."
 cd "${REPO_ROOT}"
 cargo zigbuild --release --bin "${BIN}" --target aarch64-apple-darwin
 
 DARWIN_ARM64_SRC="${REPO_ROOT}/target/aarch64-apple-darwin/release/${BIN}"
 
 echo ""
-echo "[2/4] Building linux-x64 (x86_64-unknown-linux-gnu)..."
+echo "[2/5] Building linux-x64 (x86_64-unknown-linux-gnu)..."
 cargo zigbuild --release --bin "${BIN}" --target x86_64-unknown-linux-gnu
 
 LINUX_X64_SRC="${REPO_ROOT}/target/x86_64-unknown-linux-gnu/release/${BIN}"
@@ -86,7 +87,7 @@ LINUX_X64_SRC="${REPO_ROOT}/target/x86_64-unknown-linux-gnu/release/${BIN}"
 # ── Strip ──────────────────────────────────────────────────────────────────────
 
 echo ""
-echo "[3/4] Stripping binaries..."
+echo "[3/5] Stripping binaries..."
 
 DARWIN_ARM64_OUT="${REPO_ROOT}/packages/server-dist/npm/darwin-arm64/bin/${BIN}"
 LINUX_X64_OUT="${REPO_ROOT}/packages/server-dist/npm/linux-x64/bin/${BIN}"
@@ -129,10 +130,48 @@ check_size "${DARWIN_ARM64_OUT}" "darwin-arm64"
 check_size "${LINUX_X64_OUT}"    "linux-x64"
 echo "  All binaries within 20 MB ceiling."
 
+# ── Build + bundle admin SPA into the meta package ──────────────────────────────
+#
+# The admin SPA ships ONCE, in the platform-independent meta package, NOT in the
+# per-platform binary packages (those stay binary-only and < 20 MB). The bin shim
+# resolves admin-dist/ relative to its own __dirname and injects TOPGUN_ADMIN_DIR
+# so an `npx @topgunbuild/server` user outside the monorepo gets a working admin.
+
+echo ""
+echo "[4/5] Building admin SPA and bundling into the meta package..."
+
+ADMIN_SRC_DIST="${REPO_ROOT}/apps/admin-dashboard/dist"
+ADMIN_META_DIST="${REPO_ROOT}/packages/server-dist/admin-dist"
+
+pnpm --filter admin-dashboard build
+
+if [ ! -f "${ADMIN_SRC_DIST}/index.html" ]; then
+  echo "ERROR: admin SPA build did not produce ${ADMIN_SRC_DIST}/index.html"
+  echo "  Check: pnpm --filter admin-dashboard build"
+  exit 1
+fi
+
+# Replace any prior copy so a stale bundle can never be published.
+rm -rf "${ADMIN_META_DIST}"
+mkdir -p "${ADMIN_META_DIST}"
+cp -R "${ADMIN_SRC_DIST}/." "${ADMIN_META_DIST}/"
+
+# Fail-closed: the published meta package MUST carry the SPA entrypoint, mirroring
+# the < 20 MB binary assertion above. A missing admin-dist/index.html means npm
+# would publish an empty admin again (the exact bug this pipeline step prevents).
+if [ ! -f "${ADMIN_META_DIST}/index.html" ]; then
+  echo "ERROR: admin SPA was not copied into the meta package (${ADMIN_META_DIST}/index.html missing)."
+  echo "  The meta package would publish without a working admin — aborting before publish."
+  exit 1
+fi
+
+ADMIN_SIZE=$(du -sh "${ADMIN_META_DIST}" | cut -f1)
+echo "  admin-dist bundled into meta package (${ADMIN_SIZE}); index.html present."
+
 # ── Publish dry-run ────────────────────────────────────────────────────────────
 
 echo ""
-echo "[4/4] Publish dry-run for all three packages..."
+echo "[5/5] Publish dry-run for all three packages..."
 echo ""
 
 run_dry_run() {

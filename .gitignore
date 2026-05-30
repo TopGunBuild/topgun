@@ -122,3 +122,8 @@ my-test-review/
 # Per-platform prebuilt server binaries (build artifacts; produced by scripts/build-server-binaries.sh)
 # The !bin/*.js un-ignore (line 85) only un-ignores .js files; the extension-less binary is NOT re-included.
 packages/server-dist/npm/*/bin/topgun-server
+
+# Bundled admin SPA copied into the meta package at publish time (build artifact;
+# produced by scripts/build-server-binaries.sh). Not the same path as the global
+# `dist/` rule (this dir is named admin-dist), so it needs its own entry.
+packages/server-dist/admin-dist/
