@@ -473,7 +473,15 @@ pub fn admin_routes(rate_limit_per_ip: u32, rate_limit_burst: u32) -> Router<App
     let swagger_ui = utoipa_swagger_ui::SwaggerUi::new("/api/docs")
         .url("/api/openapi.json", AdminApiDoc::openapi());
 
-    // Static SPA serving for admin dashboard
+    // Static SPA serving for admin dashboard.
+    //
+    // The unset default stays the monorepo-relative ./admin-dashboard/dist so
+    // `topgun dev` / `cargo run` from a checkout keeps working. For the prebuilt
+    // npm distribution the SPA lives inside the meta package, whose path the
+    // binary cannot know on its own — so the Node bin shim resolves the bundled
+    // SPA from its own __dirname and injects TOPGUN_ADMIN_DIR before exec'ing
+    // this binary. Layout resolution therefore lives entirely in the shim (one
+    // language, cross-layout-stable); no Rust-side path probing is added.
     let admin_spa_dir =
         std::env::var("TOPGUN_ADMIN_DIR").unwrap_or_else(|_| "./admin-dashboard/dist".to_string());
     let index_html = format!("{admin_spa_dir}/index.html");

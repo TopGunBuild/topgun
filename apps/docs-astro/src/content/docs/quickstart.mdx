@@ -202,23 +202,31 @@ The server boots in seconds with embedded storage (`./topgun.redb`) — no Postg
 
 In production, always use `wss://` instead of `ws://` to encrypt data in transit. See the [Security Guide](/docs/guides/security) for TLS configuration.
 
-## 7. Explore your data visually (monorepo only)
+## 7. Explore your data visually
 
 The admin dashboard gives you a live visual map of your data — Maps, Explorer, Cluster topology, Query Playground, and Prometheus metrics — all connected to your local server over WebSocket.
 
-**Inside the TopGun monorepo**, launch the server and the dashboard together with one command:
+**Zero-install path (no monorepo, no Rust toolchain required):**
+
+```bash
+npx @topgunbuild/server
+```
+
+The prebuilt server ships with the admin dashboard bundled in. Open **http://localhost:8080/admin/** in your browser — the SPA is served directly by the server, no extra process or build step. When the server is running in zero-config mode (`TOPGUN_NO_AUTH=1`, the `npx` default), the dashboard opens straight to the Dashboard screen — no login credentials required.
+
+**Inside the TopGun monorepo (contributor path with live reload):**
 
 ```bash
 topgun dev --admin
 ```
 
-Then open **http://localhost:5173/admin/** in your browser. When the server is running in zero-config mode (`TOPGUN_NO_AUTH=1`), the dashboard opens straight to the Dashboard screen — no login credentials required.
+This launches the Vite dev server alongside the Rust server for hot-reload while you work on the dashboard. Open **http://localhost:5173/admin/**.
 
-> **Monorepo only.** The `--admin` flag requires `apps/admin-dashboard` to be present (i.e. you have the repository checked out). Out-of-monorepo users should use one of the alternatives below.
+> **Custom build?** Point `TOPGUN_ADMIN_DIR` at your own admin build directory to override the bundled SPA. Leave it unset to serve the bundled dashboard (npm) or the monorepo build (`./admin-dashboard/dist`).
 
-**Alternatives for out-of-monorepo / self-host setups:**
+**Other ways to reach the admin:**
 
-- **Hosted demo:** [https://demo.topgun.build](https://demo.topgun.build) — connects to a shared demo server (a dedicated hosted admin is coming).
+- **Hosted demo:** [https://demo.topgun.build](https://demo.topgun.build) — connects to a shared demo server.
 - **Docker Compose:** `docker compose --profile admin up` — starts the server and the admin dashboard at **http://localhost:3001**.
 
 <div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">

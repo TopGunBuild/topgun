@@ -77,7 +77,7 @@ All variables below correspond to direct `std::env::var(...)` reads or `tracing-
 | `INSECURE_FORWARD_AUTH_ERRORS` | truthy | unset | `bin/topgun_server.rs:470` | If set, forwards upstream auth errors verbatim in responses. Insecure; do not enable in production. |
 | `TOPGUN_ADMIN_USERNAME` | string | `"admin"` | `network/handlers/admin.rs:111` | Username for the admin dashboard login. |
 | `TOPGUN_ADMIN_PASSWORD` | string | required if admin enabled | `network/handlers/admin.rs:112` | Password for the admin dashboard login. |
-| `TOPGUN_ADMIN_DIR` | path | `./admin-dashboard/dist` | `network/module.rs:582` | Static-file directory served at `/admin/*`. |
+| `TOPGUN_ADMIN_DIR` | path | bundled SPA (npm) / `./admin-dashboard/dist` (monorepo) | `network/module.rs:478` | Static-file directory served at `/admin/*`. When unset, the `npx @topgunbuild/server` distribution auto-resolves the admin SPA bundled inside the package (the bin shim injects this path), and the monorepo falls back to `./admin-dashboard/dist`. Set an explicit path to override — the shim never overwrites an operator-provided value. |
 
 ### Search indexes
 
