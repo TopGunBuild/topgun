@@ -43,6 +43,23 @@ topgun-server
 
 The server listens on `ws://localhost:8080` by default. Set the `PORT` environment variable to change the port.
 
+## Admin Dashboard
+
+This package bundles the prebuilt admin dashboard SPA. With the server running, open
+**http://localhost:8080/admin/** — the dashboard is served directly by the binary, with
+no extra process, build step, or monorepo checkout required. On a zero-config no-auth
+server (the `npx` default) it opens straight to the Dashboard, no login needed.
+
+The bin shim resolves the bundled SPA relative to its own location and sets
+`TOPGUN_ADMIN_DIR` automatically when you have not set it. Point `TOPGUN_ADMIN_DIR` at a
+custom build directory to override; an explicit value is never overwritten.
+
+> **Package size note.** Bundling the SPA grows this meta package from ~9 kB to roughly
+> **316 kB packed / 1.1 MB unpacked** (v2.1.0). The increase is the Monaco-editor-heavy
+> admin SPA (~991 kB JS + ~40 kB CSS, gzipping to ~298 kB). The SPA ships **only** here in
+> the platform-independent meta package — the per-platform binary packages stay
+> binary-only and well under 20 MB.
+
 ## Storage
 
 The server uses embedded redb storage by default. Data is written to `./topgun.redb` in the current directory. No external database is required.
