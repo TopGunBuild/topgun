@@ -479,8 +479,8 @@ CQIDAQAB
     // AC2: Auth-enabled no-regression tests
     // -----------------------------------------------------------------------
 
-    /// AC2a: With jwt_secret configured but no Authorization header, the extractor
-    /// returns MissingToken (401 — no regression from the bypass change).
+    /// With `jwt_secret` configured but no Authorization header, the extractor
+    /// returns `MissingToken` (401 — no regression from the bypass change).
     #[tokio::test]
     async fn auth_enabled_no_header_returns_missing_token() {
         let state = test_state(60);
@@ -496,8 +496,8 @@ CQIDAQAB
         );
     }
 
-    /// AC2b: With jwt_secret configured and an invalid/expired token, the extractor
-    /// returns InvalidToken (no regression from the bypass change).
+    /// With `jwt_secret` configured and an invalid/expired token, the extractor
+    /// returns `InvalidToken` (no regression from the bypass change).
     #[tokio::test]
     async fn auth_enabled_invalid_token_returns_invalid_token() {
         let state = test_state(0);

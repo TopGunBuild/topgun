@@ -660,18 +660,18 @@ async fn main() -> anyhow::Result<()> {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-        .with_graceful_shutdown(async move {
-            shutdown_signal().await;
-            // Flip /health to 503 before the HTTP server starts closing so
-            // any load balancer in front of us drains traffic away first.
-            // Without this, /health stays "ready" until the process dies
-            // and the LB happily forwards new requests into a dying server.
-            shutdown_for_drain.trigger_shutdown();
-            // Signal cluster services (HeartbeatService, EvictionOrchestrator,
-            // WriteBehindDataStore flush loop, etc.) to exit their loops.
-            let _ = shutdown_tx.send(true);
-        })
-        .await?;
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        // Flip /health to 503 before the HTTP server starts closing so
+        // any load balancer in front of us drains traffic away first.
+        // Without this, /health stays "ready" until the process dies
+        // and the LB happily forwards new requests into a dying server.
+        shutdown_for_drain.trigger_shutdown();
+        // Signal cluster services (HeartbeatService, EvictionOrchestrator,
+        // WriteBehindDataStore flush loop, etc.) to exit their loops.
+        let _ = shutdown_tx.send(true);
+    })
+    .await?;
 
     // After Hyper graceful shutdown returns, wait for any still-running
     // request handlers (tracked via ShutdownController::in_flight_guard) to
