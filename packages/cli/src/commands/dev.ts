@@ -114,13 +114,15 @@ async function dev(options: DevOptions) {
       console.log(chalk.gray(''));
       console.log(chalk.gray('  Continuing with server only...\n'));
     } else {
-      // Inject the server WebSocket URL so the admin dashboard connects to the
-      // same server that dev.ts just spawned. API_BASE is also relative to the
-      // same origin (the Vite dev server proxies /api/* to the Rust server), so
-      // both the HTTP auth-status probe and the WS client resolve to port serverPort.
+      // Inject the server URLs so the admin dashboard targets the same server
+      // dev.ts just spawned. VITE_WS_URL is the direct WebSocket target; the
+      // admin's HTTP API uses a relative base proxied by the Vite dev server, so
+      // VITE_PROXY_TARGET points that /api proxy at the same port. Both resolve
+      // to serverPort even when --port overrides the default.
       const adminEnv: NodeJS.ProcessEnv = {
         ...process.env,
         VITE_WS_URL: `ws://localhost:${serverPort}`,
+        VITE_PROXY_TARGET: `http://localhost:${serverPort}`,
       };
 
       console.log(chalk.cyan('[admin] Starting admin dashboard...\n'));

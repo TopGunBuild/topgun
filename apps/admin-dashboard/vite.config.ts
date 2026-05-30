@@ -16,7 +16,10 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'http://localhost:8080',
+        // Proxy target is configurable so `topgun dev --admin --port <p>` can
+        // point the admin's HTTP API (auth-status probe, login) at the same
+        // server the WebSocket client connects to. Defaults to the standard port.
+        target: process.env.VITE_PROXY_TARGET || 'http://localhost:8080',
         changeOrigin: true,
       },
     },
