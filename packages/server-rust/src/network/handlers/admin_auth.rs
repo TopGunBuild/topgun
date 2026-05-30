@@ -70,11 +70,17 @@ impl FromRequestParts<AppState> for AdminClaims {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        // Extract JWT secret from app state
-        let jwt_secret = state
-            .jwt_secret
-            .as_deref()
-            .ok_or(AdminAuthError::NotConfigured)?;
+        // When no JWT secret is configured the server runs in no-auth posture
+        // (TOPGUN_NO_AUTH=1). The loopback-only bind means the admin control
+        // plane is reachable only from localhost, so synthesizing a local-admin
+        // identity here is safe and allows the zero-config dashboard panels to
+        // return real data without requiring a token-minting path.
+        let Some(jwt_secret) = state.jwt_secret.as_deref() else {
+            return Ok(AdminClaims {
+                user_id: "local-admin".to_string(),
+                roles: vec!["admin".to_string()],
+            });
+        };
 
         // Extract Bearer token from Authorization header
         let auth_header = parts
