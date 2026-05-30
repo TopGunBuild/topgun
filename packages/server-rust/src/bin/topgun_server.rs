@@ -626,7 +626,13 @@ async fn main() -> anyhow::Result<()> {
     let shutdown_for_drain = Arc::clone(&shutdown);
 
     // Serve until SIGTERM or SIGINT.
-    axum::serve(listener, app)
+    // into_make_service_with_connect_info threads the peer SocketAddr into each
+    // request so the governor's PeerIpKeyExtractor can identify the client IP.
+    // Without it, every rate-limited admin route 500s with "Unable To Extract Key".
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
             // Flip /health to 503 before the HTTP server starts closing so
