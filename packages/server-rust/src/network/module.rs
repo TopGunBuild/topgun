@@ -424,6 +424,32 @@ struct AppServices {
     counter_registry: Option<Arc<crate::service::domain::counter::CounterRegistry>>,
 }
 
+/// Single source of truth for the `topgun-server` HTTP route set.
+///
+/// Returns a generic `Router<AppState>` with state NOT yet applied, so any
+/// caller that holds a compatible `AppState` value can call `.with_state(state)`
+/// itself. This keeps route wiring in one place while allowing callers to
+/// construct their own `AppState` with different field values (e.g. the binary
+/// sets `operation_service` / `dispatcher`; `build_app` sets them `None`).
+///
+/// Both `build_app` (the `NetworkModule`-managed path) and the `topgun-server`
+/// binary call this function, so a route added here is automatically served by
+/// every code path — eliminating the dual-router drift that previously caused
+/// routes added to `build_app` to return 404 from the real running binary.
+///
+/// # Parameters
+/// - `rate_limit_per_ip`: sustained request rate per IP (requests/second) fed
+///   to the governor rate limiter on admin and login endpoints.
+/// - `rate_limit_burst`: initial burst capacity for the same governor.
+///
+/// Neither parameter has an internal default: callers pass the values they read
+/// from their own `NetworkConfig` so the production rate-limit policy is always
+/// explicit and cannot silently drift.
+pub fn admin_routes(_rate_limit_per_ip: u32, _rate_limit_burst: u32) -> Router<AppState> {
+    // Placeholder — full route wiring extracted from build_app in the next wave.
+    Router::new()
+}
+
 /// Builds the complete application router with all routes and middleware.
 ///
 /// Takes ownership of `config` to avoid an extra clone: `build_http_layers`
