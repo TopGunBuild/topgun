@@ -184,6 +184,19 @@ struct Args {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Returns true when `addr` is a loopback address.
+///
+/// Treats `127.0.0.1`, `::1`, and any value starting with `localhost` as
+/// loopback. All other values (including `0.0.0.0`) are considered non-loopback
+/// and will trigger the no-auth + exposed-bind warning.
+fn is_loopback(addr: &str) -> bool {
+    addr == "127.0.0.1" || addr == "::1" || addr.starts_with("localhost")
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -215,6 +228,20 @@ async fn main() -> anyhow::Result<()> {
     // TOPGUN_BIND_ADDR always overrides this default.
     let default_bind = if no_auth { "127.0.0.1" } else { "0.0.0.0" };
     let bind_addr = std::env::var("TOPGUN_BIND_ADDR").unwrap_or_else(|_| default_bind.to_string());
+
+    // When no-auth is active but the operator has overridden the bind address to
+    // a non-loopback interface, the admin control plane (/api/admin/*) becomes
+    // reachable unauthenticated from the network. Warn loudly so the operator
+    // can take corrective action; the bind itself is not altered here.
+    if no_auth && !is_loopback(&bind_addr) {
+        tracing::warn!(
+            bind_addr = %bind_addr,
+            "TOPGUN_NO_AUTH=1 with a non-loopback bind address: /api/admin/* endpoints \
+             are reachable unauthenticated on a network interface. Set TOPGUN_BIND_ADDR=127.0.0.1 \
+             or enable JWT authentication to restrict access."
+        );
+    }
+
     let listener = TcpListener::bind(format!("{bind_addr}:{}", args.port)).await?;
     let bound_port = listener.local_addr()?.port();
 
