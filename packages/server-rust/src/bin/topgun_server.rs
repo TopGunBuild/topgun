@@ -615,6 +615,14 @@ async fn main() -> anyhow::Result<()> {
             "/api/auth/login",
             post(topgun_server::network::handlers::admin::login),
         )
+        // Auth posture probe — the admin SPA calls this without a token to decide
+        // whether to show Login. Must be on this hand-built router too, not only
+        // the NetworkModule router, or `topgun dev --admin` serves a 404 and the
+        // dashboard never gets past "Server Unavailable".
+        .route(
+            "/api/auth/status",
+            get(topgun_server::network::handlers::admin::auth_status),
+        )
         .route(
             "/api/admin/indexes",
             get(topgun_server::network::handlers::admin::list_indexes)
