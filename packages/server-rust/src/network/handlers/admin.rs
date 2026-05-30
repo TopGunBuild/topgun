@@ -23,6 +23,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use jsonwebtoken::{EncodingKey, Header};
 use serde::Serialize;
+use utoipa::ToSchema;
 use subtle::ConstantTimeEq;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -61,7 +62,7 @@ struct AdminJwtClaims {
 ///
 /// Tells the admin frontend whether authentication is required so it can
 /// skip the Login screen when the server runs without a JWT secret.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthStatusResponse {
     pub auth_required: bool,
@@ -90,6 +91,27 @@ pub async fn server_status(State(state): State<AppState>) -> impl IntoResponse {
         connections: state.registry.count() as u32,
         uptime_seconds: state.start_time.elapsed().as_secs(),
         total_operations: total_operations(),
+    })
+}
+
+/// Reports whether authentication is configured on this server.
+///
+/// The admin frontend calls this on load to decide whether to show the Login
+/// screen. When no JWT secret is configured (TOPGUN_NO_AUTH=1), auth is not
+/// required and the Dashboard is accessible without a token. Always returns
+/// HTTP 200 — never 500 — so the frontend can safely fail-open to showing
+/// the Login form on any unexpected error.
+#[utoipa::path(
+    get,
+    path = "/api/auth/status",
+    responses(
+        (status = 200, description = "Auth posture", body = AuthStatusResponse)
+    ),
+    tag = "Auth"
+)]
+pub async fn auth_status(State(state): State<AppState>) -> impl IntoResponse {
+    Json(AuthStatusResponse {
+        auth_required: state.jwt_secret.is_some(),
     })
 }
 

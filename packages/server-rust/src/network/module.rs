@@ -25,9 +25,9 @@ use utoipa::OpenApi;
 use super::config::NetworkConfig;
 use super::connection::{ConnectionRegistry, OutboundMessage};
 use super::handlers::admin::{
-    cancel_vector_index_optimize_handler, cluster_status, create_index, create_policy,
-    create_vector_index, delete_policy, get_settings, index_backfill_status, list_indexes,
-    list_maps, list_policies, list_vector_indexes, load_vector_descriptors, login,
+    auth_status, cancel_vector_index_optimize_handler, cluster_status, create_index,
+    create_policy, create_vector_index, delete_policy, get_settings, index_backfill_status,
+    list_indexes, list_maps, list_policies, list_vector_indexes, load_vector_descriptors, login,
     optimize_vector_index_handler, remove_index_handler, remove_vector_index_handler,
     server_status, update_settings, vector_index_status,
 };
@@ -647,6 +647,9 @@ fn build_app(
         // Metrics and status -- internal observability endpoints
         .route("/metrics", get(metrics_handler))
         .route("/api/status", get(server_status))
+        // Auth posture probe -- must be on the public router so the admin
+        // frontend can call it without a token before deciding to show Login
+        .route("/api/auth/status", get(auth_status))
         // Rate-limited admin and login routes
         .merge(rate_limited_routes)
         // Swagger UI serves both the JSON spec at /api/openapi.json and the UI at /api/docs
