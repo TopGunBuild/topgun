@@ -202,6 +202,25 @@ The server boots in seconds with embedded storage (`./topgun.redb`) — no Postg
 
 In production, always use `wss://` instead of `ws://` to encrypt data in transit. See the [Security Guide](/docs/guides/security) for TLS configuration.
 
+## 7. Explore your data visually (monorepo only)
+
+The admin dashboard gives you a live visual map of your data — Maps, Explorer, Cluster topology, Query Playground, and Prometheus metrics — all connected to your local server over WebSocket.
+
+**Inside the TopGun monorepo**, launch the server and the dashboard together with one command:
+
+```bash
+topgun dev --admin
+```
+
+Then open **http://localhost:5173/admin/** in your browser. When the server is running in zero-config mode (`TOPGUN_NO_AUTH=1`), the dashboard opens straight to the Dashboard screen — no login credentials required.
+
+> **Monorepo only.** The `--admin` flag requires `apps/admin-dashboard` to be present (i.e. you have the repository checked out). Out-of-monorepo users should use one of the alternatives below.
+
+**Alternatives for out-of-monorepo / self-host setups:**
+
+- **Hosted demo:** [https://demo.topgun.build](https://demo.topgun.build) — connects to a shared demo server (TODO-420: a personal hosted admin is coming).
+- **Docker Compose:** `docker compose --profile admin up` — starts the server and the admin dashboard at **http://localhost:3001**.
+
 <div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
   <a href="/docs/intro" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-400 dark:text-neutral-400">Previous</span>
