@@ -445,9 +445,107 @@ struct AppServices {
 /// Neither parameter has an internal default: callers pass the values they read
 /// from their own `NetworkConfig` so the production rate-limit policy is always
 /// explicit and cannot silently drift.
-pub fn admin_routes(_rate_limit_per_ip: u32, _rate_limit_burst: u32) -> Router<AppState> {
-    // Placeholder — full route wiring extracted from build_app in the next wave.
+pub fn admin_routes(rate_limit_per_ip: u32, rate_limit_burst: u32) -> Router<AppState> {
+    // Build a per-IP rate limiter for admin and login endpoints.
+    // Replenishment interval derived from rate_limit_per_ip: for 100 req/s the
+    // governor refills 1 token every 10 ms. burst_size controls the initial
+    // burst window. /ws and /sync are excluded because those have
+    // operation-level load shedding instead of HTTP-layer rate limiting.
+    let replenish_interval_ms = (1000 / u64::from(rate_limit_per_ip).max(1)).max(1);
+    let governor_config = GovernorConfigBuilder::default()
+        .key_extractor(PeerIpKeyExtractor)
+        .per_millisecond(replenish_interval_ms)
+        .burst_size(rate_limit_burst)
+        .finish()
+        .expect("GovernorConfig should build with non-zero burst and period");
+
+    let governor_layer = GovernorLayer {
+        config: Arc::new(governor_config),
+    };
+
+    // Swagger UI served at /api/docs
+    let swagger_ui = utoipa_swagger_ui::SwaggerUi::new("/api/docs")
+        .url("/api/openapi.json", AdminApiDoc::openapi());
+
+    // Static SPA serving for admin dashboard
+    let admin_spa_dir =
+        std::env::var("TOPGUN_ADMIN_DIR").unwrap_or_else(|_| "./admin-dashboard/dist".to_string());
+    let index_html = format!("{admin_spa_dir}/index.html");
+    let serve_dir = ServeDir::new(&admin_spa_dir)
+        .append_index_html_on_directories(true)
+        .fallback(ServeFile::new(index_html));
+
+    // Rate-limited routes: admin API and login are brute-force targets and
+    // get per-IP throttling. All other routes (health, ws, sync, metrics,
+    // docs, status, admin SPA) bypass the governor.
+    let rate_limited_routes = Router::new()
+        .route("/api/auth/login", post(login))
+        .route("/api/auth/token", post(token_exchange_handler))
+        .route("/api/auth/refresh", post(refresh_handler))
+        .route("/api/admin/cluster/status", get(cluster_status))
+        .route("/api/admin/maps", get(list_maps))
+        .route(
+            "/api/admin/settings",
+            get(get_settings).put(update_settings),
+        )
+        .route(
+            "/api/admin/policies",
+            get(list_policies).post(create_policy),
+        )
+        .route("/api/admin/policies/{id}", delete(delete_policy))
+        .route("/api/admin/indexes", get(list_indexes).post(create_index))
+        .route(
+            "/api/admin/indexes/{map}/{attr}",
+            delete(remove_index_handler),
+        )
+        .route(
+            "/api/admin/indexes/{map}/{attr}/status",
+            get(index_backfill_status),
+        )
+        // Vector index admin endpoints — nested under /api/admin/indexes/vector
+        // to avoid collision with the existing /api/admin/indexes/{map}/{attr} routes.
+        .route(
+            "/api/admin/indexes/vector",
+            get(list_vector_indexes).post(create_vector_index),
+        )
+        .route(
+            "/api/admin/indexes/vector/{map}/{name}",
+            delete(remove_vector_index_handler),
+        )
+        .route(
+            "/api/admin/indexes/vector/{map}/{name}/optimize",
+            post(optimize_vector_index_handler),
+        )
+        .route(
+            "/api/admin/indexes/vector/{map}/{name}/optimize/{optimization_id}",
+            delete(cancel_vector_index_optimize_handler),
+        )
+        .route(
+            "/api/admin/indexes/vector/{map}/{name}/status",
+            get(vector_index_status),
+        )
+        .route_layer(governor_layer);
+
     Router::new()
+        // Health probes -- never rate-limited (Kubernetes liveness/readiness)
+        .route("/health", get(health_handler))
+        .route("/health/live", get(liveness_handler))
+        .route("/health/ready", get(readiness_handler))
+        // Real-time transport -- operation-level load shedding, not HTTP rate limiting
+        .route("/ws", get(ws_upgrade_handler))
+        .route("/sync", post(http_sync_handler))
+        // Metrics and status -- internal observability endpoints
+        .route("/metrics", get(metrics_handler))
+        .route("/api/status", get(server_status))
+        // Auth posture probe -- must be on the public router so the admin
+        // frontend can call it without a token before deciding to show Login
+        .route("/api/auth/status", get(auth_status))
+        // Rate-limited admin and login routes
+        .merge(rate_limited_routes)
+        // Swagger UI serves both the JSON spec at /api/openapi.json and the UI at /api/docs
+        .merge(swagger_ui)
+        // Static SPA for admin dashboard -- served as static files, not rate-limited
+        .nest_service("/admin", serve_dir)
 }
 
 /// Builds the complete application router with all routes and middleware.
@@ -582,106 +680,10 @@ fn build_app(
         counter_registry,
     };
 
-    // Build a per-IP rate limiter for admin and login endpoints.
-    // Replenishment interval derived from rate_limit_per_ip: for 100 req/s the
-    // governor refills 1 token every 10 ms. burst_size controls the initial
-    // burst window. /ws and /sync are excluded because those have
-    // operation-level load shedding instead of HTTP-layer rate limiting.
-    let replenish_interval_ms = (1000 / u64::from(rate_limit_per_ip).max(1)).max(1);
-    let governor_config = GovernorConfigBuilder::default()
-        .key_extractor(PeerIpKeyExtractor)
-        .per_millisecond(replenish_interval_ms)
-        .burst_size(rate_limit_burst)
-        .finish()
-        .expect("GovernorConfig should build with non-zero burst and period");
-
-    let governor_layer = GovernorLayer {
-        config: Arc::new(governor_config),
-    };
-
-    // Swagger UI served at /api/docs
-    let swagger_ui = utoipa_swagger_ui::SwaggerUi::new("/api/docs")
-        .url("/api/openapi.json", AdminApiDoc::openapi());
-
-    // Static SPA serving for admin dashboard
-    let admin_spa_dir =
-        std::env::var("TOPGUN_ADMIN_DIR").unwrap_or_else(|_| "./admin-dashboard/dist".to_string());
-    let index_html = format!("{admin_spa_dir}/index.html");
-    let serve_dir = ServeDir::new(&admin_spa_dir)
-        .append_index_html_on_directories(true)
-        .fallback(ServeFile::new(index_html));
-
-    // Rate-limited routes: admin API and login are brute-force targets and
-    // get per-IP throttling. All other routes (health, ws, sync, metrics,
-    // docs, status, admin SPA) bypass the governor.
-    let rate_limited_routes = Router::new()
-        .route("/api/auth/login", post(login))
-        .route("/api/auth/token", post(token_exchange_handler))
-        .route("/api/auth/refresh", post(refresh_handler))
-        .route("/api/admin/cluster/status", get(cluster_status))
-        .route("/api/admin/maps", get(list_maps))
-        .route(
-            "/api/admin/settings",
-            get(get_settings).put(update_settings),
-        )
-        .route(
-            "/api/admin/policies",
-            get(list_policies).post(create_policy),
-        )
-        .route("/api/admin/policies/{id}", delete(delete_policy))
-        .route("/api/admin/indexes", get(list_indexes).post(create_index))
-        .route(
-            "/api/admin/indexes/{map}/{attr}",
-            delete(remove_index_handler),
-        )
-        .route(
-            "/api/admin/indexes/{map}/{attr}/status",
-            get(index_backfill_status),
-        )
-        // Vector index admin endpoints — nested under /api/admin/indexes/vector
-        // to avoid collision with the existing /api/admin/indexes/{map}/{attr} routes.
-        .route(
-            "/api/admin/indexes/vector",
-            get(list_vector_indexes).post(create_vector_index),
-        )
-        .route(
-            "/api/admin/indexes/vector/{map}/{name}",
-            delete(remove_vector_index_handler),
-        )
-        .route(
-            "/api/admin/indexes/vector/{map}/{name}/optimize",
-            post(optimize_vector_index_handler),
-        )
-        .route(
-            "/api/admin/indexes/vector/{map}/{name}/optimize/{optimization_id}",
-            delete(cancel_vector_index_optimize_handler),
-        )
-        .route(
-            "/api/admin/indexes/vector/{map}/{name}/status",
-            get(vector_index_status),
-        )
-        .route_layer(governor_layer);
-
-    Router::new()
-        // Health probes -- never rate-limited (Kubernetes liveness/readiness)
-        .route("/health", get(health_handler))
-        .route("/health/live", get(liveness_handler))
-        .route("/health/ready", get(readiness_handler))
-        // Real-time transport -- operation-level load shedding, not HTTP rate limiting
-        .route("/ws", get(ws_upgrade_handler))
-        .route("/sync", post(http_sync_handler))
-        // Metrics and status -- internal observability endpoints
-        .route("/metrics", get(metrics_handler))
-        .route("/api/status", get(server_status))
-        // Auth posture probe -- must be on the public router so the admin
-        // frontend can call it without a token before deciding to show Login
-        .route("/api/auth/status", get(auth_status))
-        // Rate-limited admin and login routes
-        .merge(rate_limited_routes)
-        // Swagger UI serves both the JSON spec at /api/openapi.json and the UI at /api/docs
-        .merge(swagger_ui)
-        // Static SPA for admin dashboard -- served as static files, not rate-limited
-        .nest_service("/admin", serve_dir)
+    // Delegate all route wiring to admin_routes() — the single source of truth
+    // for the route set both build_app and the binary serve. This ensures the
+    // production server and the binary can never drift apart.
+    admin_routes(rate_limit_per_ip, rate_limit_burst)
         .layer(layers)
         .with_state(state)
 }
