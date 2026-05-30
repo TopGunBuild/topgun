@@ -82,6 +82,24 @@ if (!env.JWT_SECRET && env.TOPGUN_NO_AUTH === undefined) {
   );
 }
 
+// Point the server at the admin SPA bundled inside this meta package, so an
+// `npx @topgunbuild/server` user outside the monorepo gets a working admin UI.
+// The SPA ships once here (sibling of this bin/ dir), not in the per-platform
+// binary packages. Resolving from __dirname is layout-stable under both npm-flat
+// and pnpm-symlinked installs because the SPA lives in the same package as this
+// shim — no cross-package require.resolve needed. We only set the var when the
+// operator left it unset AND the bundled SPA actually exists, so an explicit
+// TOPGUN_ADMIN_DIR always wins and a shim without the bundle falls through to
+// the Rust default (./admin-dashboard/dist, the monorepo path).
+if (env.TOPGUN_ADMIN_DIR === undefined) {
+  const path = require('path');
+  const fs = require('fs');
+  const bundledAdminDir = path.join(__dirname, '..', 'admin-dist');
+  if (fs.existsSync(path.join(bundledAdminDir, 'index.html'))) {
+    env.TOPGUN_ADMIN_DIR = bundledAdminDir;
+  }
+}
+
 const result = spawnSync(binaryPath, process.argv.slice(2), {
   stdio: 'inherit',
   env,
