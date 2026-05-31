@@ -1,6 +1,6 @@
 {
   "name": "@topgunbuild/server",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "TopGun server — prebuilt binary distribution. Zero Rust toolchain required.",
   "private": false,
   "license": "Apache-2.0",

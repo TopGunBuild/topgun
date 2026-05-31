@@ -12,6 +12,11 @@ export default defineConfig({
       '@topgunbuild/react': path.resolve(__dirname, '../../packages/react/dist/index.mjs'),
       '@': path.resolve(__dirname, './src'),
     },
+    // Force a single React instance. @topgunbuild/react's prebuilt dist resolves
+    // its external `react` import against its own node_modules (React 18), while
+    // this app pins React 19 — without dedupe both land in the bundle and the SPA
+    // crashes at runtime with React #525 (element from an older React version).
+    dedupe: ['react', 'react-dom'],
   },
   server: {
     proxy: {
