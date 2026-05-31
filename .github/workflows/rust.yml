@@ -43,9 +43,16 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+        # rustup ships preinstalled on ubuntu-latest. `rustup show` honors the
+        # pinned channel in rust-toolchain.toml; component add ensures fmt/clippy
+        # are present for the fmt-check and clippy steps below.
+        # Uses a run: step rather than a third-party toolchain action because the
+        # repo's allowed_actions=selected policy permits only first-party actions/*
+        # and verified Marketplace creators — same fix applied to node.yml for
+        # pnpm/action-setup (corepack run: step).
+        run: |
+          rustup show
+          rustup component add rustfmt clippy
 
       - name: Cache Cargo registry and build
         uses: actions/cache@v4
@@ -75,7 +82,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        # rustup ships preinstalled on ubuntu-latest; `rustup show` honors the
+        # pinned channel in rust-toolchain.toml. Uses a run: step rather than
+        # a third-party toolchain action (see check job comment for rationale).
+        run: rustup show
 
       - name: Cache Cargo registry and build
         uses: actions/cache@v4
@@ -120,7 +130,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        # rustup ships preinstalled on ubuntu-latest; `rustup show` honors the
+        # pinned channel in rust-toolchain.toml. Uses a run: step rather than
+        # a third-party toolchain action (see check job comment for rationale).
+        run: rustup show
 
       - name: Cache Cargo registry and build
         uses: actions/cache@v4
@@ -217,7 +230,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        # rustup ships preinstalled on ubuntu-latest; `rustup show` honors the
+        # pinned channel in rust-toolchain.toml. Uses a run: step rather than
+        # a third-party toolchain action (see check job comment for rationale).
+        run: rustup show
 
       - name: Cache Cargo registry and build
         uses: actions/cache@v4
@@ -318,7 +334,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        # rustup ships preinstalled on ubuntu-latest; `rustup show` honors the
+        # pinned channel in rust-toolchain.toml. Uses a run: step rather than
+        # a third-party toolchain action (see check job comment for rationale).
+        run: rustup show
 
       - name: Cache Cargo registry and build
         uses: actions/cache@v4
