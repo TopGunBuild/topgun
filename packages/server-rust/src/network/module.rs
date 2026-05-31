@@ -37,6 +37,10 @@ use super::handlers::{
     refresh_handler, token_exchange_handler, ws_upgrade_handler, AppState,
 };
 use super::middleware::build_http_layers;
+// Only the non-swagger build mounts the standalone /api/openapi.json route; the
+// swagger build serves that path through SwaggerUi instead (gating avoids an
+// unused-import warning when the feature is on).
+#[cfg(not(feature = "swagger"))]
 use super::openapi::openapi_json;
 #[cfg(feature = "swagger")]
 use super::openapi::AdminApiDoc;
@@ -559,12 +563,19 @@ pub fn admin_routes(rate_limit_per_ip: u32, rate_limit_burst: u32) -> Router<App
         .route("/api/auth/status", get(auth_status))
         // Rate-limited admin and login routes
         .merge(rate_limited_routes)
-        // Always serve the machine-readable OpenAPI JSON spec, even when the Swagger UI is not built in
-        .route("/api/openapi.json", get(|| async { openapi_json() }))
         // Static SPA for admin dashboard -- served as static files, not rate-limited
         .nest_service("/admin", serve_dir);
 
-    // Swagger UI at /api/docs -- only present in swagger-feature builds (e.g. cargo run --features swagger)
+    // Serve the machine-readable OpenAPI JSON spec. In swagger-feature builds the
+    // SwaggerUi merge below already registers `/api/openapi.json` (via `.url(...)`),
+    // so mounting it here too would panic at router build with an overlapping-route
+    // error. Only mount the standalone route when the Swagger UI is NOT built in --
+    // this is what keeps the JSON available in the default (prebuilt) binary.
+    #[cfg(not(feature = "swagger"))]
+    let router = router.route("/api/openapi.json", get(|| async { openapi_json() }));
+
+    // Swagger UI at /api/docs (which also serves /api/openapi.json) -- only present
+    // in swagger-feature builds (e.g. cargo run --features swagger)
     #[cfg(feature = "swagger")]
     let router = router.merge(swagger_ui);
 
