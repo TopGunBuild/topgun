@@ -732,6 +732,15 @@ importers:
         specifier: ^5.0.0
         version: 5.9.3
 
+  packages/server-dist:
+    optionalDependencies:
+      '@topgunbuild/server-darwin-arm64':
+        specifier: 2.2.0
+        version: 2.2.0
+      '@topgunbuild/server-linux-x64':
+        specifier: 2.2.0
+        version: 2.2.0
+
 packages:
 
   '@alloc/quick-lru@5.2.0':
@@ -3290,6 +3299,16 @@ packages:
   '@tootallnate/once@2.0.0':
     resolution: {integrity: sha512-XCuKFP5PS55gnMVu3dty8KPatLqUoy/ZYzDzAGCQ8JNFCkLXzmI7vNHCR+XpbZaMWQK/vQubr7PkYq8g470J/A==}
     engines: {node: '>= 10'}
+
+  '@topgunbuild/server-darwin-arm64@2.2.0':
+    resolution: {integrity: sha512-MnqBE3c0d6Osz/0Pr4j3tozY5E4HU9plshtTIurilqTfs3Ou9Wc8iKeb2TGKnAlXF4u4unYnF6acVj304BgYUA==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@topgunbuild/server-linux-x64@2.2.0':
+    resolution: {integrity: sha512-zElFCDGcMn020AWzlzt8Hkr6OcXefz58paX/22lG2tI8S9OtRaxH0jyXw/JdZs4EQAOMhBzPR/eT4Edp0blEpw==}
+    cpu: [x64]
+    os: [linux]
 
   '@tsconfig/node10@1.0.12':
     resolution: {integrity: sha512-UCYBaeFvM11aU2y3YPZ//O5Rhj+xKyzy7mvcIoAjASbigy8mHMryP5cK7dgjlz2hWxh1g5pLw084E0a/wlUSFQ==}
@@ -10714,6 +10733,12 @@ snapshots:
       - '@types/react'
 
   '@tootallnate/once@2.0.0': {}
+
+  '@topgunbuild/server-darwin-arm64@2.2.0':
+    optional: true
+
+  '@topgunbuild/server-linux-x64@2.2.0':
+    optional: true
 
   '@tsconfig/node10@1.0.12': {}
 
