@@ -179,17 +179,75 @@ Use when outside React — service workers, Node scripts, non-component utilitie
 By default the app runs in local-only mode — data persists in IndexedDB and works offline without a server. To add real-time sync across browsers and devices:
 
 1. Uncomment the `serverUrl` line in the client init above.
-2. Start the TopGun server in a second terminal:
+2. Start the TopGun server. Two paths:
+
+**Using the CLI (recommended — works from any directory once the server binary is present):**
+
+```bash
+# Install the unified TopGun developer CLI
+npm install -g @topgunbuild/cli
+
+# Check your environment
+topgun doctor
+
+# Interactive project setup — writes .env with zero-config defaults
+# (TOPGUN_NO_AUTH=1 for local dev, STORAGE_BACKEND=redb for embedded storage)
+topgun setup
+
+# Start the development server
+topgun dev
+```
+
+The setup→dev flow is cohesive: `topgun setup` writes a `.env` that `topgun dev` reads to start the server without any JWT or database configuration. Run `topgun setup --yes` to skip prompts and accept all defaults.
+
+**Zero-install path (no Rust toolchain required):**
+
+```bash
+npx @topgunbuild/server
+```
+
+This downloads a prebuilt binary for your platform and starts the server immediately. No compiler, no Docker.
+
+**Inside the TopGun monorepo (contributor path):**
 
 ```bash
 pnpm start:server
 ```
+
+`pnpm start:server` uses a prebuilt binary when present and falls back to `cargo run --bin topgun-server --release` for contributors who have the Rust toolchain.
 
 The server boots in seconds with embedded storage (`./topgun.redb`) — no Postgres, no Docker required.
 
 3. Open your app in two browser tabs and watch changes sync in real time.
 
 In production, always use `wss://` instead of `ws://` to encrypt data in transit. See the [Security Guide](/docs/guides/security) for TLS configuration.
+
+## 7. Explore your data visually
+
+The admin dashboard gives you a live visual map of your data — Maps, Explorer, Cluster topology, Query Playground, and Prometheus metrics — all connected to your local server over WebSocket.
+
+**Zero-install path (no monorepo, no Rust toolchain required):**
+
+```bash
+npx @topgunbuild/server
+```
+
+The prebuilt server ships with the admin dashboard bundled in. Open **http://localhost:8080/admin/** in your browser — the SPA is served directly by the server, no extra process or build step. When the server is running in zero-config mode (`TOPGUN_NO_AUTH=1`, the `npx` default), the dashboard opens straight to the Dashboard screen — no login credentials required.
+
+**Inside the TopGun monorepo (contributor path with live reload):**
+
+```bash
+topgun dev --admin
+```
+
+This launches the Vite dev server alongside the Rust server for hot-reload while you work on the dashboard. Open **http://localhost:5173/admin/**.
+
+> **Custom build?** Point `TOPGUN_ADMIN_DIR` at your own admin build directory to override the bundled SPA. Leave it unset to serve the bundled dashboard (npm) or the monorepo build (`./admin-dashboard/dist`).
+
+**Other ways to reach the admin:**
+
+- **Hosted demo:** [https://demo.topgun.build](https://demo.topgun.build) — connects to a shared demo server.
+- **Docker Compose:** `docker compose --profile admin up` — starts the server and the admin dashboard at **http://localhost:3001**.
 
   <a href="/docs/intro" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-400 dark:text-neutral-400">Previous</span>
