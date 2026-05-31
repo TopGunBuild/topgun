@@ -1,6 +1,6 @@
 {
   "name": "@topgunbuild/server",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "TopGun server — prebuilt binary distribution. Zero Rust toolchain required.",
   "private": false,
   "license": "Apache-2.0",
@@ -8,8 +8,8 @@
     "topgun-server": "./bin/topgun-server.cjs"
   },
   "optionalDependencies": {
-    "@topgunbuild/server-darwin-arm64": "2.0.0",
-    "@topgunbuild/server-linux-x64": "2.0.0"
+    "@topgunbuild/server-darwin-arm64": "2.2.0",
+    "@topgunbuild/server-linux-x64": "2.2.0"
   },
   "scripts": {
     "postinstall": "node scripts/postinstall.cjs"
