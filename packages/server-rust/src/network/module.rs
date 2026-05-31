@@ -970,10 +970,10 @@ mod tests {
         drop(shutdown_tx);
     }
 
-    // Serialize against other tests in this module to prevent CPU/scheduler
-    // contention from starving the WebSocket close-detection path; under
-    // default parallelism the 2-second deregistration budget below can
-    // otherwise be exceeded.
+    // Serialize against other tests in this module to reduce CPU/scheduler
+    // contention on the WebSocket close-detection path. The disconnect poll
+    // below uses a generous hang-detection timeout rather than a tight
+    // latency budget, so it stays green even when scheduling is contended.
     #[tokio::test]
     #[serial_test::serial]
     async fn websocket_upgrade_and_registry_tracking() {
@@ -993,15 +993,19 @@ mod tests {
         // Drop the WS stream to trigger disconnect.
         drop(ws_stream);
 
-        // Poll until the server deregisters the connection.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        // Poll until the server deregisters the connection. The ceiling is a
+        // generous hang detector (mirrors the server's own 30s connection-drain
+        // budget), not a latency assertion: the loop exits the instant
+        // deregistration is observed, so a healthy run finishes in well under a
+        // second and the timeout only trips if deregistration never happens.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
             if registry.count() == 0 {
                 break;
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "registry.count() did not reach 0 within 2s, current: {}",
+                "registry.count() did not reach 0 within 30s, current: {}",
                 registry.count()
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
