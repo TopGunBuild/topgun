@@ -20,8 +20,6 @@ use tower_governor::key_extractor::PeerIpKeyExtractor;
 use tower_governor::GovernorLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{info, warn};
-use utoipa::OpenApi;
-
 use super::config::NetworkConfig;
 use super::connection::{ConnectionRegistry, OutboundMessage};
 use super::handlers::admin::{
@@ -39,7 +37,11 @@ use super::handlers::{
     refresh_handler, token_exchange_handler, ws_upgrade_handler, AppState,
 };
 use super::middleware::build_http_layers;
+use super::openapi::openapi_json;
+#[cfg(feature = "swagger")]
 use super::openapi::AdminApiDoc;
+#[cfg(feature = "swagger")]
+use utoipa::OpenApi;
 use super::shutdown::ShutdownController;
 use crate::cluster::state::ClusterState;
 use crate::service::config::ServerConfig;
@@ -469,7 +471,8 @@ pub fn admin_routes(rate_limit_per_ip: u32, rate_limit_burst: u32) -> Router<App
         config: Arc::new(governor_config),
     };
 
-    // Swagger UI served at /api/docs
+    // Swagger UI served at /api/docs (only when the `swagger` feature is enabled)
+    #[cfg(feature = "swagger")]
     let swagger_ui = utoipa_swagger_ui::SwaggerUi::new("/api/docs")
         .url("/api/openapi.json", AdminApiDoc::openapi());
 
@@ -540,7 +543,7 @@ pub fn admin_routes(rate_limit_per_ip: u32, rate_limit_burst: u32) -> Router<App
         )
         .route_layer(governor_layer);
 
-    Router::new()
+    let router = Router::new()
         // Health probes -- never rate-limited (Kubernetes liveness/readiness)
         .route("/health", get(health_handler))
         .route("/health/live", get(liveness_handler))
@@ -556,10 +559,16 @@ pub fn admin_routes(rate_limit_per_ip: u32, rate_limit_burst: u32) -> Router<App
         .route("/api/auth/status", get(auth_status))
         // Rate-limited admin and login routes
         .merge(rate_limited_routes)
-        // Swagger UI serves both the JSON spec at /api/openapi.json and the UI at /api/docs
-        .merge(swagger_ui)
+        // Always serve the machine-readable OpenAPI JSON spec, even when the Swagger UI is not built in
+        .route("/api/openapi.json", get(|| async { openapi_json() }))
         // Static SPA for admin dashboard -- served as static files, not rate-limited
-        .nest_service("/admin", serve_dir)
+        .nest_service("/admin", serve_dir);
+
+    // Swagger UI at /api/docs -- only present in swagger-feature builds (e.g. cargo run --features swagger)
+    #[cfg(feature = "swagger")]
+    let router = router.merge(swagger_ui);
+
+    router
 }
 
 /// Builds the complete application router with all routes and middleware.
