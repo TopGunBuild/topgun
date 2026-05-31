@@ -92,20 +92,22 @@ echo "[3/5] Stripping binaries..."
 DARWIN_ARM64_OUT="${REPO_ROOT}/packages/server-dist/npm/darwin-arm64/bin/${BIN}"
 LINUX_X64_OUT="${REPO_ROOT}/packages/server-dist/npm/linux-x64/bin/${BIN}"
 
-# Darwin: use system strip with minimal flags (cross-strip via zig is not reliable
-# for Mach-O; strip the native arm64 binary directly on macOS).
+# Darwin: copy the already-stripped binary (cargo strip = true in [profile.release]
+# handles Mach-O stripping at build time via the native toolchain). Apply host
+# strip as belt-and-suspenders only; a failure is non-fatal because cargo already
+# stripped the binary.
 cp "${DARWIN_ARM64_SRC}" "${DARWIN_ARM64_OUT}"
-strip "${DARWIN_ARM64_OUT}" || echo "  Warning: strip failed for darwin-arm64 (binary may be larger)"
+strip "${DARWIN_ARM64_OUT}" 2>/dev/null || echo "  Note: host strip skipped for darwin-arm64 (cargo strip already applied)"
 chmod 0755 "${DARWIN_ARM64_OUT}"
 
-# Linux: strip --strip-all if available, else basic strip.
+# Linux: the binary is already stripped by cargo ([profile.release] strip = true
+# uses the cross-toolchain, which correctly processes ELF regardless of macOS host).
+# Do NOT run host strip --strip-all here — it is a no-op on macOS BSD strip when
+# targeting ELF and would silently leave a 30 MB unstripped binary if cargo strip
+# were ever disabled. The check_size assertion below is the hard gate.
 cp "${LINUX_X64_SRC}" "${LINUX_X64_OUT}"
-if strip --strip-all "${LINUX_X64_OUT}" 2>/dev/null; then
-  echo "  linux-x64: stripped (--strip-all)"
-else
-  strip "${LINUX_X64_OUT}" 2>/dev/null || echo "  Warning: strip failed for linux-x64 (binary may be larger)"
-fi
 chmod 0755 "${LINUX_X64_OUT}"
+echo "  linux-x64: stripped by cargo [profile.release] strip = true (ELF, cross-toolchain)"
 
 # ── Size assertion ─────────────────────────────────────────────────────────────
 

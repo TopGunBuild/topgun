@@ -28,9 +28,20 @@ unsafe_code = "forbid"
 [workspace.dependencies]
 madsim = "0.2.34"
 
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+# opt-level defaults to 3 for release — kept explicit-by-omission to protect
+# the load-harness perf gates (p99 < 500 ms, ops/sec baselines). Do NOT switch
+# to opt-level "z"/"s" or panic = "abort".
+
 [profile.release-with-debug]
 inherits = "release"
 debug = true
+# Inherit release LTO/codegen settings but keep debug symbols for flamegraph
+# profiling; strip = false ensures debug info is not stripped away.
+strip = false
 
 # Faster builds for simulation runs: opt-level=1 reduces compile time vs release
 # while still being fast enough for large test suites. debug-assertions=true
