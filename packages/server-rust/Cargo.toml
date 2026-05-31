@@ -14,6 +14,7 @@ postgres = ["dep:sqlx"]
 redb = ["dep:redb"]
 simulation = ["dep:madsim"]
 datafusion = ["dep:datafusion", "dep:arrow"]
+swagger = ["dep:utoipa-swagger-ui"]
 
 [dependencies]
 topgun-core = { path = "../core-rust", features = ["arrow"] }
@@ -56,7 +57,7 @@ jsonwebtoken = "9"
 subtle = "2"
 utoipa = { version = "5", features = ["axum_extras"] }
 utoipa-axum = "0.2"
-utoipa-swagger-ui = { version = "9", features = ["axum"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"], optional = true }
 tower_governor = "0.6"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 base64 = "0.22"
