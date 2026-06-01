@@ -105,15 +105,10 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Browser gate — admin SPA zero-console-error check
-        # Optional gate, runs only when run_browser_gate is true. The
-        # smoke-admin-render.mjs script is a follow-on deliverable; this
-        # step is a stub that will be wired up when the script lands.
+        # Optional gate: headless Chromium navigates to /admin/, waits for the
+        # React SPA to mount, and asserts zero console.error entries and zero
+        # failed first-party asset requests. Catches bundling defects (e.g. a
+        # duplicate-React error) that return 200 on curl but crash on mount.
         if: ${{ inputs.run_browser_gate == true }}
         shell: bash
-        run: |
-          if [ -f "scripts/smoke-admin-render.mjs" ]; then
-            node scripts/smoke-admin-render.mjs
-          else
-            echo "scripts/smoke-admin-render.mjs not yet implemented — browser gate skipped"
-            echo "The headless-Chrome admin-SPA zero-console-error gate is a follow-on enhancement."
-          fi
+        run: node scripts/smoke-admin-render.mjs "${{ steps.versions.outputs.server_version }}"
