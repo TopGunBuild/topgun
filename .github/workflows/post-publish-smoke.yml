@@ -1,0 +1,114 @@
+name: Post-Publish Smoke
+
+# Verifies that the two npx-facing packages on the live npm registry actually
+# boot and serve correctly after a publish. Every distribution defect this
+# project has hit was caught by a live run, never a unit test; this workflow
+# moves that live-run gate from a manual post-publish step into CI.
+#
+# Triggers:
+#   - workflow_dispatch: operator triggers after the manual publish, passing
+#     the exact version. Defaults to "latest" so ad-hoc smoke runs work
+#     without knowing the version string.
+#   - release/published: auto-runs when a GitHub Release is published;
+#     resolves the version to smoke from the release tag.
+#
+# After a manual publish:
+#   1. Trigger this workflow via Actions → Post-Publish Smoke → Run workflow
+#   2. Green on both ubuntu and macos = smoke passed; supersedes the manual
+#      "npx @topgunbuild/server --help from a clean directory" step.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mcp_version:
+        description: 'Version of @topgunbuild/mcp-server to smoke (default: latest)'
+        required: false
+        default: 'latest'
+      server_version:
+        description: 'Version of @topgunbuild/server to smoke (default: latest)'
+        required: false
+        default: 'latest'
+      run_browser_gate:
+        description: 'Run optional headless-Chrome admin-SPA gate'
+        type: boolean
+        required: false
+        default: false
+
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  npx-smoke:
+    name: npx smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+
+    # Both platform legs must run even if one fails, because a failure on
+    # ubuntu does not tell us anything about macos and vice versa.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Resolve versions from release tag or dispatch inputs
+        id: versions
+        # On a release event, strip the leading "v" from the tag (e.g. v2.2.1
+        # → 2.2.1) and use that as the version to smoke for both packages.
+        # On workflow_dispatch, honour the explicit inputs; default is "latest".
+        # If the release tag is not a semver (e.g. a blog-post tag), fall back
+        # to "latest" so the smoke still runs against the current published state.
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            RAW_TAG="${{ github.event.release.tag_name }}"
+            # Strip leading "v" and validate basic semver shape (digits and dots).
+            VERSION="${RAW_TAG#v}"
+            if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]'; then
+              echo "Tag '${RAW_TAG}' is not a semver — falling back to latest"
+              VERSION="latest"
+            fi
+            echo "mcp_version=${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "server_version=${VERSION}" >> "$GITHUB_OUTPUT"
+          else
+            echo "mcp_version=${{ inputs.mcp_version }}" >> "$GITHUB_OUTPUT"
+            echo "server_version=${{ inputs.server_version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Smoke — @topgunbuild/mcp-server
+        shell: bash
+        run: bash scripts/smoke-npx-mcp.sh "${{ steps.versions.outputs.mcp_version }}"
+
+      - name: Smoke — @topgunbuild/server
+        shell: bash
+        run: bash scripts/smoke-npx-published.sh "${{ steps.versions.outputs.server_version }}"
+
+      - name: Install Playwright for browser gate
+        # Playwright is installed via a run: step rather than a Marketplace
+        # action to comply with the repo's allowed_actions: selected policy,
+        # which blocks non-verified third-party actions.
+        if: ${{ inputs.run_browser_gate == true }}
+        shell: bash
+        run: npx playwright install --with-deps chromium
+
+      - name: Browser gate — admin SPA zero-console-error check
+        # Optional gate: headless Chromium navigates to /admin/, waits for the
+        # React SPA to mount, and asserts zero console.error entries and zero
+        # failed first-party asset requests. Catches bundling defects (e.g. a
+        # duplicate-React error) that return 200 on curl but crash on mount.
+        if: ${{ inputs.run_browser_gate == true }}
+        shell: bash
+        run: node scripts/smoke-admin-render.mjs "${{ steps.versions.outputs.server_version }}"

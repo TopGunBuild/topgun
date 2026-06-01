@@ -1,0 +1,19 @@
+# cargo-audit configuration (read by `cargo audit` in .github/workflows/rust.yml).
+#
+# Policy: vulnerabilities are FIXED via dependency bumps wherever a patched version
+# exists. Only advisories with NO available fix AND no reachable exposure are ignored
+# here, each with an explicit justification. Re-review on every dependency bump.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — RSA "Marvin Attack" timing side-channel (rsa 0.9.x).
+    # No fixed upgrade is available (the crate has no patched release).
+    # Reachability: `rsa` is pulled ONLY by `sqlx-mysql`, a transitive dependency
+    # in the lockfile feature graph. TopGun's server uses the POSTGRES backend
+    # (`sqlx` features = ["runtime-tokio", "tls-rustls", "postgres"]); the MySQL
+    # driver and its RSA auth path are never compiled into or exercised by the
+    # server. The timing side-channel requires an attacker to observe RSA private-key
+    # operations, which do not occur on the postgres path. Acknowledged, not exposed.
+    # Revisit if a MySQL backend is ever added or if `rsa` ships a fix.
+    "RUSTSEC-2023-0071",
+]
