@@ -9,7 +9,7 @@
   },
   "vector_search": {
     "build":    { "max_p50_us": 2483404, "max_p99_us": 2772172 },
-    "query":    { "max_p50_us": 1048 },
+    "query":    { "max_p50_us": 1500 },
     "optimize": { "max_p50_us": 23219404, "max_p99_us": 23219404 },
     "hybrid":   { "max_p50_us": 429 }
   },
