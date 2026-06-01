@@ -126,9 +126,15 @@ jobs:
   perf-gate:
     name: Performance Gate
     needs: [check]
-    # Perf gates are informational + slow; run off the PR critical path so timeout-induced
-    # cancellations never redden a PR run. Coverage retained on push-to-main/develop + nightly schedule.
-    if: github.event_name != 'pull_request'
+    # Perf gate is informational + slow; run on the nightly schedule only so a push-to-main
+    # never triggers a timeout-induced cancellation that reddens the badge. Perf coverage is
+    # retained via the existing cron: '0 6 * * *' above.
+    #
+    # Trade-off (schedule-only): narrowing from != 'pull_request' to == 'schedule' also removes
+    # per-merge perf signal on push-to-main/develop. A regression merged after the 06:00 cron
+    # stays invisible until the next nightly tick (~23h). Acceptable for an informational gate,
+    # but documented here so the lost push-time signal is explicit, not silent.
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Informational only — does not block merges while baseline stability is validated
