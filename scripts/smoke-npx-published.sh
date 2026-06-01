@@ -26,6 +26,7 @@ PASS_COUNT=0
 FAIL_COUNT=0
 TMPDIR_BASE="/tmp/smoke-server-$$"
 SERVER_PID=""
+RUST_CHILD_PID=""
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -46,9 +47,24 @@ fail_exit() {
 }
 
 cleanup() {
-  if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
-    kill "$SERVER_PID" 2>/dev/null || true
-    wait "$SERVER_PID" 2>/dev/null || true
+  # Reap the Rust binary child before the node shim so the smoke port is freed
+  # promptly. The shim uses spawnSync (blocking), so the Rust binary is a direct
+  # child of the shim's PID — pgrep -P reaches it in one level. pgrep is available
+  # on both macOS and Linux runners.
+  #
+  # Limitation: if the parent shell receives SIGKILL (not caught by any trap), the
+  # node shim is killed without forwarding; pgrep -P then cannot find the Rust child
+  # because we never ran. The ephemeral port (chosen below) makes any such orphan
+  # harmless — the next run picks a different free port, so no squatter can intercept.
+  if [ -n "$SERVER_PID" ]; then
+    RUST_CHILD_PID=$(pgrep -P "$SERVER_PID" 2>/dev/null || true)
+    if [ -n "$RUST_CHILD_PID" ]; then
+      kill "$RUST_CHILD_PID" 2>/dev/null || true
+    fi
+    if kill -0 "$SERVER_PID" 2>/dev/null; then
+      kill "$SERVER_PID" 2>/dev/null || true
+      wait "$SERVER_PID" 2>/dev/null || true
+    fi
   fi
   rm -rf "$TMPDIR_BASE"
 }
@@ -173,8 +189,13 @@ cd "$BOOT_DIR"
 
 npm install "@topgunbuild/server@${EXACT_VERSION}" --omit=dev --no-audit --no-fund --silent
 
-# Use a fixed port unlikely to conflict; if occupied the server will fail to bind and we catch it.
-PORT=18765
+# Pick a free ephemeral port at runtime so a stale squatter on any fixed port cannot
+# intercept the smoke and produce a false result. Python3's socket.bind('',0) asks the
+# OS to assign a free port, then we release it immediately. There is a small TOCTOU
+# window between releasing the socket and the server binding it — acceptable for a
+# smoke test (another process would have to bind that exact port in that gap).
+# python3 is present on both ubuntu-latest and macos-latest GitHub runners.
+PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
 
 # Boot the server; shim sets TOPGUN_NO_AUTH=1 + loopback bind automatically.
 PORT="$PORT" node node_modules/@topgunbuild/server/bin/topgun-server.cjs > server.log 2>&1 &
