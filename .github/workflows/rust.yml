@@ -23,6 +23,10 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - '.github/workflows/rust.yml'
+  # Perf gates are informational and slow; run them nightly off the PR critical path
+  # so PRs never time out waiting for multi-minute harness builds + benchmark scenarios.
+  schedule:
+    - cron: '0 6 * * *'
 
 env:
   CARGO_TERM_COLOR: always
@@ -122,6 +126,9 @@ jobs:
   perf-gate:
     name: Performance Gate
     needs: [check]
+    # Perf gates are informational + slow; run off the PR critical path so timeout-induced
+    # cancellations never redden a PR run. Coverage retained on push-to-main/develop + nightly schedule.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Informational only — does not block merges while baseline stability is validated
@@ -222,6 +229,9 @@ jobs:
   vector-perf-gate:
     name: Vector Performance Gate
     needs: [check]
+    # Perf gates are informational + slow; run off the PR critical path so timeout-induced
+    # cancellations never redden a PR run. Coverage retained on push-to-main/develop + nightly schedule.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Informational only — baselines measured on M1 Max; Ubuntu runners may differ
