@@ -107,6 +107,10 @@ jobs:
         run: docker rm -f topgun-smoke || true
 
       - name: Build and push multi-arch image
+        # QEMU multi-arch emulation is slow (~30 min) and pushes nothing on a PR anyway
+        # (GHCR login is already PR-skipped above). Skip this step on PRs entirely so
+        # the PR run never times out waiting for a no-op multi-arch build.
+        if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v5
         with:
           context: .
