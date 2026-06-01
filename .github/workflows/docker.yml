@@ -38,7 +38,7 @@ concurrency:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -107,9 +107,11 @@ jobs:
         run: docker rm -f topgun-smoke || true
 
       - name: Build and push multi-arch image
-        # QEMU multi-arch emulation is slow (~30 min) and pushes nothing on a PR anyway
+        # QEMU multi-arch emulation is slow (~45 min) and pushes nothing on a PR
         # (GHCR login is already PR-skipped above). Skip this step on PRs entirely so
         # the PR run never times out waiting for a no-op multi-arch build.
+        # On push-to-main this step genuinely runs and pushes linux/amd64+linux/arm64
+        # to GHCR; timeout-minutes raised to 45 to fit within budget.
         if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v5
         with:
