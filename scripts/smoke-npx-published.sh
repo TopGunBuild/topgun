@@ -60,7 +60,7 @@ echo ""
 
 # ── Check 1: npm view poll ────────────────────────────────────────────────────
 
-echo "[1/7] Polling npm view @topgunbuild/server@${VERSION}..."
+echo "[1/6] Polling npm view @topgunbuild/server@${VERSION}..."
 ELAPSED=0
 RESOLVED_VERSION=""
 while [ "$ELAPSED" -lt "$SMOKE_NPM_POLL_TIMEOUT" ]; do
@@ -84,7 +84,7 @@ EXACT_VERSION="$RESOLVED_VERSION"
 
 # ── Check 2: clean-dir --help ─────────────────────────────────────────────────
 
-echo "[2/7] Running npx --help in clean dir..."
+echo "[2/6] Running npx --help in clean dir..."
 HELP_DIR="$TMPDIR_BASE/help"
 mkdir -p "$HELP_DIR"
 cd "$HELP_DIR"
@@ -104,7 +104,7 @@ fi
 
 # ── Check 3: single-platform pull assertion ───────────────────────────────────
 
-echo "[3/7] Installing and asserting single-platform package pull..."
+echo "[3/6] Installing and asserting single-platform package pull..."
 INSTALL_DIR="$TMPDIR_BASE/install"
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
@@ -143,7 +143,7 @@ fi
 
 # ── Check 4: binary invariants ────────────────────────────────────────────────
 
-echo "[4/7] Checking binary size and exec bit..."
+echo "[4/6] Checking binary size and exec bit..."
 BINARY=$(find "node_modules/@topgunbuild" -name 'topgun-server' -type f 2>/dev/null | head -1)
 
 if [ -z "$BINARY" ]; then
@@ -166,7 +166,7 @@ fi
 
 # ── Check 5: zero-config boot + endpoint curls ────────────────────────────────
 
-echo "[5/7] Zero-config server boot + endpoint checks..."
+echo "[5/6] Zero-config server boot + endpoint checks..."
 BOOT_DIR="$TMPDIR_BASE/boot"
 mkdir -p "$BOOT_DIR"
 cd "$BOOT_DIR"
@@ -210,7 +210,7 @@ fi
 
 # ── Check 6: loopback-only bind assertion ─────────────────────────────────────
 
-echo "[6/7] Asserting loopback-only bind (non-loopback address must be unreachable)..."
+echo "[6/6] Asserting loopback-only bind (non-loopback address must be unreachable)..."
 
 # Discover the host's primary non-loopback IPv4 in an OS-conditional way.
 # macOS and Linux use different network utility commands.
