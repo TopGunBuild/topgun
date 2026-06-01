@@ -365,6 +365,12 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: Run cargo audit
-        # Fails on any known advisory. RUSTSEC-2020-0071 etc. should be
-        # acknowledged via deny.toml or fixed via dep bump.
-        run: cargo audit
+        # Fails on any known advisory. Vulnerabilities are FIXED via dep bumps
+        # wherever a patched release exists. The single --ignore below is an
+        # advisory with NO available fix AND no reachable exposure; its full
+        # justification lives in audit.toml at the repo root. Re-review on every
+        # dependency bump.
+        #   RUSTSEC-2023-0071 (rsa Marvin Attack): no fixed upgrade; rsa is pulled
+        #   only by sqlx-mysql, but the server uses the postgres backend, so the
+        #   vulnerable RSA path is never compiled or exercised.
+        run: cargo audit --ignore RUSTSEC-2023-0071
