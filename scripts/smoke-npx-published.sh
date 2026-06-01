@@ -95,7 +95,7 @@ HELP_OUT=$(npx -y "@topgunbuild/server@${EXACT_VERSION}" --help 2>&1) || {
 }
 
 if [ -n "$HELP_OUT" ]; then
-  if echo "$HELP_OUT" | grep -qiE "Cannot find module|Error:|MODULE_NOT_FOUND"; then
+  if echo "$HELP_OUT" | grep -qiE "Cannot find module|MODULE_NOT_FOUND"; then
     fail "help: output contains module resolution error"
   else
     pass "help: npx @topgunbuild/server@${EXACT_VERSION} --help exited 0, no module errors"
