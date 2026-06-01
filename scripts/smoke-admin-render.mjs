@@ -148,6 +148,15 @@ async function main() {
     { cwd: tmpDir },
   );
 
+  // Fetch the chromium binary that matches THIS playwright version. The
+  // workflow's separate "npx playwright install" may resolve a different
+  // playwright version than the one just installed here; installing from the
+  // temp-dir playwright keeps the JS package and browser binary in lockstep
+  // (a no-op cache hit when the workflow already fetched the same version).
+  // OS-level deps are handled by the workflow's earlier "--with-deps" run, so
+  // only the browser binary is fetched here.
+  runCmd('npx playwright install chromium', { cwd: tmpDir });
+
   log('  packages installed');
 
   // ── Step 3: Boot the server ─────────────────────────────────────────────────
@@ -224,9 +233,13 @@ async function main() {
 
   // Collect first-party (same-origin) asset failures. Cross-origin requests
   // (CDN fonts, analytics) are ignored — only the SPA's own assets are gated.
+  // /favicon.ico is excluded everywhere: browsers auto-request it and the admin
+  // bundle may not ship one, so a 404 there is not a SPA-mount defect.
+  const isGatedAsset = (url) => url.startsWith(BASE_URL) && !url.endsWith('/favicon.ico');
+
   page.on('requestfailed', (request) => {
     const url = request.url();
-    if (url.startsWith(BASE_URL)) {
+    if (isGatedAsset(url)) {
       failedAssets.push({ url, reason: request.failure()?.errorText ?? 'unknown' });
     }
   });
@@ -235,7 +248,7 @@ async function main() {
     const url = response.url();
     const status = response.status();
     // Gate only first-party requests; ignore redirects (3xx) and informational (1xx).
-    if (url.startsWith(BASE_URL) && status >= 400) {
+    if (isGatedAsset(url) && status >= 400) {
       failedAssets.push({ url, status });
     }
   });
