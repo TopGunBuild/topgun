@@ -107,18 +107,18 @@ jobs:
         run: docker rm -f topgun-smoke || true
 
       - name: Build and push multi-arch image
-        # QEMU multi-arch emulation is slow (~45 min) and pushes nothing on a PR
-        # (GHCR login is already PR-skipped above). Skip this step on PRs entirely so
-        # the PR run never times out waiting for a no-op multi-arch build.
-        # On push-to-main this step genuinely runs and pushes linux/amd64+linux/arm64
-        # to GHCR; timeout-minutes raised to 45 to fit within budget.
-        if: github.event_name != 'pull_request'
+        # QEMU emulation of linux/arm64 on an amd64 runner is 5-10x slower than native and
+        # routinely blows past the job timeout on push-to-main (cancelled at 45 min), reddening
+        # the badge while pushing nothing useful for a normal merge. Gate the multi-arch publish
+        # to release tags (v*), where the images are actually consumed. push-to-main and PRs keep
+        # the fast amd64 smoke-test above as the real validation; multi-arch publish runs on tags.
+        if: startsWith(github.ref, 'refs/tags/')
         uses: docker/build-push-action@v5
         with:
           context: .
           file: deploy/Dockerfile.server
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
+          push: ${{ startsWith(github.ref, 'refs/tags/') }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
