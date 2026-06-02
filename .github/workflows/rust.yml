@@ -27,6 +27,8 @@ on:
   # so PRs never time out waiting for multi-minute harness builds + benchmark scenarios.
   schedule:
     - cron: '0 6 * * *'
+  # Manual trigger for on-demand perf runs (the perf gates gate on schedule || workflow_dispatch).
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -134,7 +136,8 @@ jobs:
     # per-merge perf signal on push-to-main/develop. A regression merged after the 06:00 cron
     # stays invisible until the next nightly tick (~23h). Acceptable for an informational gate,
     # but documented here so the lost push-time signal is explicit, not silent.
-    if: github.event_name == 'schedule'
+    # workflow_dispatch added so an on-demand manual run exercises this gate too.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Informational only — does not block merges while baseline stability is validated
@@ -235,9 +238,12 @@ jobs:
   vector-perf-gate:
     name: Vector Performance Gate
     needs: [check]
-    # Perf gates are informational + slow; run off the PR critical path so timeout-induced
-    # cancellations never redden a PR run. Coverage retained on push-to-main/develop + nightly schedule.
-    if: github.event_name != 'pull_request'
+    # Perf gates are informational + slow + non-deterministic on shared runners (baselines were
+    # measured on M1 Max; Ubuntu runners drift 15-20% run-to-run, so a push-time gate just plays
+    # baseline whack-a-mole and reddens the badge). Run nightly-only (cron schedule) — mirrors
+    # the Performance Gate job. Perf coverage is retained via the nightly schedule + manual
+    # workflow_dispatch, off the push-to-main critical path.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Informational only — baselines measured on M1 Max; Ubuntu runners may differ
