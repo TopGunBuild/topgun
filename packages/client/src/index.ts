@@ -32,6 +32,8 @@ import type {
   QueryResultSource,
   CursorStatus,
   PaginationInfo,
+  SubscribeMeta,
+  SubscribeCallback,
 } from './QueryHandle';
 import type { TopicCallback } from './TopicHandle';
 import type { BackoffConfig, HeartbeatConfig, SyncEngineConfig } from './SyncEngine';
@@ -167,6 +169,9 @@ export type {
   QueryFilter,
   QueryResultItem,
   QueryResultSource,
+  // Subscribe per-emission metadata
+  SubscribeMeta,
+  SubscribeCallback,
   // Pagination types
   CursorStatus,
   PaginationInfo,
