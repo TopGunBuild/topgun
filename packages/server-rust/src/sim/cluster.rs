@@ -14,12 +14,9 @@ use tokio::sync::{mpsc, oneshot};
 use tower::Service;
 
 use topgun_core::messages::base::Query;
-use topgun_core::messages::query::{QueryResultEntry, QuerySubMessage, QuerySubPayload};
+use topgun_core::messages::query::QueryResultEntry;
 use topgun_core::messages::sync::{ClientOpMessage, OpBatchMessage, OpBatchPayload};
 use topgun_core::{ClientOp, LWWRecord, ORMapRecord, SystemClock, Timestamp, HLC};
-
-use crate::network::config::ConnectionConfig;
-use crate::network::connection::ConnectionKind;
 
 use async_trait::async_trait;
 
@@ -967,15 +964,14 @@ impl SimCluster {
     }
 
     /// Drives a structured query against a specific node through the SAME
-    /// `classify → DAG` path a real WebSocket client hits, returning the
+    /// DAG execution path a real WebSocket client hits, returning the
     /// result rows.
     ///
-    /// Rather than relying on the pre-SPEC-298b `classify` routing branch
-    /// (which sends non-GROUP-BY queries to the PredicateBackend path, not
-    /// the DAG), this method drives `coordinator.execute_distributed` directly
-    /// after building the query operation — the EXACT call that
-    /// `query.rs::handle_dag_query` makes. This is faithful to the DAG path
-    /// and remains correct once SPEC-298b routes all structured queries there.
+    /// The current `classify` routing branch sends non-GROUP-BY queries to the
+    /// `PredicateBackend` path rather than the DAG, so this method drives
+    /// `coordinator.execute_distributed` directly — the EXACT call that
+    /// `query.rs::handle_dag_query` makes. This is faithful to the DAG path and
+    /// stays correct once `classify` routes all structured queries through it.
     ///
     /// # Row-key note
     /// For non-GROUP-BY queries, the DAG result rows do not carry a `__key`
@@ -1002,46 +998,14 @@ impl SimCluster {
             return Err(anyhow::anyhow!("node {node_idx} is dead"));
         }
 
-        // Register a sim client connection so the OperationContext carries a
-        // non-None connection_id, which handle_dag_query requires.
-        // This mirrors the connection-registration approach already used by
-        // the existing coordinator-driven GROUP-BY sim tests.
-        let config = ConnectionConfig::default();
-        let (handle, _rx) = node
-            .connection_registry
-            .register(ConnectionKind::Client, &config);
-        let connection_id = handle.id;
-
-        let ts = Timestamp {
-            millis: 0,
-            counter: 0,
-            node_id: node.node_id.clone(),
-        };
-        let mut ctx = OperationContext::new(0, service_names::QUERY, ts, 30_000);
-        ctx.caller_origin = CallerOrigin::System;
-        ctx.connection_id = Some(connection_id);
-
-        let query_sub = QuerySubMessage {
-            payload: QuerySubPayload {
-                query_id: "sim-query".to_string(),
-                map_name: map_name.to_string(),
-                query,
-                fields: None,
-            },
-        };
-
         // Drive coordinator.execute_distributed directly — the EXACT call
         // handle_dag_query makes. The coordinator's single-node bypass
         // (coordinator.rs:124-128) routes this through execute_local →
-        // DagExecutor without needing cluster fan-out.
-        let _ = Operation::DagQuery {
-            ctx,
-            payload: query_sub.clone(),
-        };
-
+        // DagExecutor without needing cluster fan-out or a connection context
+        // (execute_distributed takes only the query + map name, no auth ctx).
         let raw_results = node
             .coordinator
-            .execute_distributed(&query_sub.payload.query, map_name)
+            .execute_distributed(&query, map_name)
             .await?;
 
         // Map raw rows to QueryResultEntry. Non-GROUP-BY DAG rows do not carry
@@ -1082,7 +1046,8 @@ impl SimCluster {
     clippy::doc_markdown,
     clippy::cast_possible_truncation,
     clippy::too_many_lines,
-    clippy::manual_is_multiple_of
+    clippy::manual_is_multiple_of,
+    clippy::items_after_statements
 )]
 mod tests {
     use std::time::Duration;
