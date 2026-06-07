@@ -35,7 +35,10 @@ function makeRequest(options: {
         method: options.method,
         path: options.path,
         headers: options.headers || {},
-        timeout: 5000,
+        // Must exceed the queryOnce settle timeout (DEFAULT_QUERY_ONCE_TIMEOUT_MS,
+        // 5000ms): offline read tools resolve a not-settled message only after that
+        // settle wait, so a shorter HTTP timeout would race and flake.
+        timeout: 12000,
       },
       (res) => {
         let body = '';
@@ -382,9 +385,12 @@ describe('HTTP Transport', () => {
       expect(response.statusCode).toBe(200);
 
       const data = JSON.parse(response.body);
-      expect(data.result.content[0].text).toContain('key1');
-      expect(data.result.content[0].text).toContain('hello');
-    });
+      // No reachable server in this harness: server-truth queryOnce cannot settle,
+      // so the tool returns an explicit not-settled message over HTTP, never a
+      // silent empty or stale local data.
+      expect(data.result.content[0].text).toContain('not settled');
+      expect(data.result.content[0].text).not.toContain('No results found');
+    }, 20000);
 
     it('should execute list_maps tool via HTTP POST', async () => {
       // Create server with allowed maps
