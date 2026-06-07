@@ -5,6 +5,7 @@
  */
 
 import type { QueryFilter } from '@topgunbuild/client';
+import { QueryOnceUnsettledError } from '@topgunbuild/client';
 import type { MCPTool, MCPToolResult, ToolContext } from '../types';
 import { QueryArgsSchema, toolSchemas } from '../schemas';
 
@@ -68,49 +69,38 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
       queryFilter.fields = fields;
     }
 
-    // Use QueryHandle for proper server-side query execution
-    const handle = ctx.client.query<Record<string, unknown>>(map, queryFilter);
+    // queryOnce returns settled, authoritative server data on a normal resolve.
+    // Using the default (no allowLocal) is the strict server-truth contract: it
+    // never silently returns stale local data — on offline/timeout it rejects
+    // with QueryOnceUnsettledError, which we surface explicitly below so an
+    // unreachable server is never confused with a genuinely empty result.
+    let results: Array<Record<string, unknown> & { _key: string }>;
+    try {
+      results = await ctx.client.queryOnce<Record<string, unknown>>(map, queryFilter);
+    } catch (error) {
+      if (error instanceof QueryOnceUnsettledError) {
+        const why =
+          error.reason === 'offline'
+            ? 'the server could not be reached (client is offline)'
+            : 'the query did not settle in time (timed out waiting for the server)';
+        return {
+          content: [
+            {
+              type: 'text',
+              text:
+                `Could not query map '${map}': results not settled — ${why}. ` +
+                `No authoritative server data was returned, so this is NOT an empty result. ` +
+                `Check connectivity and retry.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+      throw error;
+    }
 
-    // Get results via one-shot subscription, then wait for pagination metadata
-    let unsubscribe: (() => void) | undefined;
-    const results = await new Promise<Array<Record<string, unknown> & { _key: string }>>(
-      (resolve) => {
-        unsubscribe = handle.subscribe((data) => {
-          resolve(data);
-        });
-      },
-    );
-
-    // Await pagination metadata from the server with a 500ms timeout.
-    // The server sends pagination info asynchronously after the initial results,
-    // so we race against a timeout to avoid hanging if no metadata arrives.
-    // Note: onPaginationChange fires immediately with the current value (cursorStatus 'none'
-    // means not yet received), so we only resolve once the server has responded.
-    let unsubPagination: (() => void) | undefined;
-    const paginationInfo = await Promise.race([
-      new Promise<ReturnType<typeof handle.getPaginationInfo>>((resolve) => {
-        // unsubPagination may not be assigned yet when the callback fires synchronously,
-        // so we defer the unsubscribe call to the next tick.
-        unsubPagination = handle.onPaginationChange((info) => {
-          if (info.cursorStatus !== 'none' || info.hasMore) {
-            Promise.resolve().then(() => unsubPagination?.());
-            resolve(info);
-          }
-        });
-      }),
-      new Promise<ReturnType<typeof handle.getPaginationInfo>>((resolve) =>
-        setTimeout(() => {
-          // Clean up pagination listener when timeout wins the race
-          unsubPagination?.();
-          resolve(handle.getPaginationInfo());
-        }, 500),
-      ),
-    ]);
-
-    // Clean up the subscribe handle to prevent memory leaks
-    unsubscribe?.();
-
-    // Format results
+    // A settled-but-empty result is a legitimate "no matching records" answer,
+    // distinct from the offline/not-settled branch handled above.
     if (results.length === 0) {
       return {
         content: [
@@ -129,17 +119,11 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
       })
       .join('\n\n');
 
-    // Build pagination info for response
-    let paginationText = '';
-    if (paginationInfo.hasMore && paginationInfo.nextCursor) {
-      paginationText = `\n\n---\nMore results available. Use cursor: "${paginationInfo.nextCursor}" to fetch next page.`;
-    }
-
     return {
       content: [
         {
           type: 'text',
-          text: `Found ${results.length} result(s) in map '${map}':\n\n${formatted}${paginationText}`,
+          text: `Found ${results.length} result(s) in map '${map}':\n\n${formatted}`,
         },
       ],
     };
