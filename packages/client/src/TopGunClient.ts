@@ -17,7 +17,12 @@ import type {
 } from './sync';
 import type { AuthProvider } from './auth/types';
 import { QueryHandle } from './QueryHandle';
-import type { QueryFilter } from './QueryHandle';
+import type { QueryFilter, QueryResultItem } from './QueryHandle';
+import {
+  QueryOnceUnsettledError,
+  QueryOnceLocalError,
+  type QueryOnceUnsettledReason,
+} from './errors/QueryOnceError';
 import { DistributedLock } from './DistributedLock';
 import { TopicHandle } from './TopicHandle';
 import { PNCounterHandle } from './PNCounterHandle';
@@ -79,6 +84,35 @@ export const DEFAULT_CLUSTER_CONFIG: Required<Omit<TopGunClusterConfig, 'seeds'>
   connectionTimeoutMs: 5000,
   retryAttempts: 3,
 };
+
+/** Default settle-wait timeout for queryOnce, in milliseconds. Non-infinite so a
+ * stuck/silent server can never hang the caller indefinitely. */
+export const DEFAULT_QUERY_ONCE_TIMEOUT_MS = 5000;
+
+/**
+ * Options for {@link TopGunClient.queryOnce}, a one-shot read that resolves with
+ * authoritative server data (or rejects rather than returning stale local data).
+ */
+export interface QueryOnceOptions {
+  /**
+   * Maximum time to wait for the first authoritative server QUERY_RESP, in
+   * milliseconds. Defaults to {@link DEFAULT_QUERY_ONCE_TIMEOUT_MS} (5000). There
+   * is no infinite default — a silent server can never hang the caller.
+   */
+  timeoutMs?: number;
+
+  /**
+   * When false/unset (default), queryOnce REJECTS (throws QueryOnceUnsettledError)
+   * if the client is offline or the settle wait times out — it NEVER silently
+   * returns local/stale data.
+   *
+   * When true, on offline/timeout queryOnce instead throws a typed
+   * QueryOnceLocalError carrying the non-settled local snapshot on `.localData`,
+   * so the caller can ALWAYS distinguish settled server data (normal resolve)
+   * from non-settled local data (typed-error catch).
+   */
+  allowLocal?: boolean;
+}
 
 /**
  * TopGunClient configuration options
@@ -260,6 +294,142 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
   public query(mapName: string, filter: QueryFilter): QueryHandle<any> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- QueryHandle constructed for untyped internal storage; actual type flows from the selected overload
     return new QueryHandle<any>(this.syncEngine, mapName, filter);
+  }
+
+  /**
+   * One-shot read: resolves with the AUTHORITATIVE server result for a query,
+   * then auto-unsubscribes (no live subscription leaks). This is the InstantDB-
+   * style "give me the truth once" primitive that AI agents and request/response
+   * handlers want — unlike {@link query}, it never leaves a live QueryHandle open.
+   *
+   * Offline policy (explicit, never silently stale):
+   * - Default ({@link QueryOnceOptions.allowLocal} unset/false): if the client is
+   *   offline OR the settle wait times out, REJECTS with {@link QueryOnceUnsettledError}.
+   * - `{ allowLocal: true }`: on offline/timeout, throws a typed
+   *   {@link QueryOnceLocalError} carrying the non-settled local snapshot on
+   *   `.localData`. We chose a typed-error fallback (not a `{ settled, data }`
+   *   wrapper return) so the happy path stays a plain `Promise<items[]>` and a
+   *   normal resolve is ALWAYS settled server data while a caught QueryOnceLocalError
+   *   is ALWAYS non-settled local data — there is no in-band ambiguity to inspect.
+   */
+  public queryOnce<K extends keyof TSchema & string>(
+    mapName: K,
+    filter: QueryFilter,
+    opts?: QueryOnceOptions,
+  ): Promise<QueryResultItem<TSchema[K]>[]>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped overload for back-compat callers that do not supply a schema type parameter
+  public queryOnce<T = any>(
+    mapName: string,
+    filter: QueryFilter,
+    opts?: QueryOnceOptions,
+  ): Promise<QueryResultItem<T>[]>;
+  public async queryOnce(
+    mapName: string,
+    filter: QueryFilter,
+    opts?: QueryOnceOptions,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- implementation signature uses any to satisfy both overloads; return type is narrowed by the overload the caller selects
+  ): Promise<QueryResultItem<any>[]> {
+    const timeoutMs = opts?.timeoutMs ?? DEFAULT_QUERY_ONCE_TIMEOUT_MS;
+    const allowLocal = opts?.allowLocal ?? false;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- handle storage is untyped internally; result type flows from the selected overload
+    const handle = new QueryHandle<any>(this.syncEngine, mapName, filter);
+
+    // subscribe() both activates the server subscription (first listener triggers
+    // subscribeToQuery) and feeds us the latest sorted results; we keep the most
+    // recent snapshot so we can read it after settlement without a private accessor.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- latest sorted snapshot for the active query; element type narrowed by the selected overload
+    let latest: QueryResultItem<any>[] = [];
+    const unsubscribe = handle.subscribe((results) => {
+      latest = results;
+    });
+
+    const cleanup = (): void => {
+      // Auto-unsubscribe so queryOnce never leaks a live subscription.
+      unsubscribe();
+    };
+
+    try {
+      // Reject up front when offline (unless allowing local) — no point waiting for
+      // a server response that cannot arrive. Use the PUBLIC connection state.
+      if (!this.isClientOnline()) {
+        // When allowing local, let the handle's async local pre-load settle into
+        // `latest` first so the returned snapshot is populated, not empty.
+        if (allowLocal) {
+          await this.flushLocalPreload();
+        }
+        return this.handleUnsettled('offline', mapName, latest, allowLocal);
+      }
+
+      const settled = await this.raceSettle(handle, timeoutMs);
+      if (!settled) {
+        return this.handleUnsettled('timeout', mapName, latest, allowLocal);
+      }
+
+      // Settled: `latest` reflects the authoritative server result (even if empty).
+      return latest;
+    } finally {
+      cleanup();
+    }
+  }
+
+  /**
+   * Resolves true when the query settles (first server QUERY_RESP), false when the
+   * timeout fires first. Clears the timer on settlement so it never dangles.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- handle is the untyped internal QueryHandle; settlement is value-agnostic
+  private raceSettle(handle: QueryHandle<any>, timeoutMs: number): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+    });
+    const settled = handle.whenSettled().then(() => true);
+    return Promise.race([settled, timeout]).finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+    });
+  }
+
+  /**
+   * Build the offline/timeout outcome: throw the hard-reject error by default, or
+   * throw the typed local-fallback error carrying the snapshot when allowLocal.
+   */
+  private handleUnsettled(
+    reason: QueryOnceUnsettledReason,
+    mapName: string,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- local snapshot element type flows from the selected overload at the call site
+    localData: QueryResultItem<any>[],
+    allowLocal: boolean,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- never actually returns; typed to satisfy the queryOnce return contract
+  ): Promise<QueryResultItem<any>[]> {
+    if (allowLocal) {
+      throw new QueryOnceLocalError(reason, mapName, localData);
+    }
+    throw new QueryOnceUnsettledError(reason, mapName);
+  }
+
+  /**
+   * Yield the microtask queue so the QueryHandle's async local pre-load
+   * (loadInitialLocalData → onResult('local')) lands in our captured snapshot
+   * before we build an allowLocal fallback. Two yields cover the promise + its
+   * .then continuation. Bounded and deterministic — no timers.
+   */
+  private async flushLocalPreload(): Promise<void> {
+    await Promise.resolve();
+    await Promise.resolve();
+  }
+
+  /**
+   * Whether the client currently has (or is establishing) a live server connection.
+   * Reads the PUBLIC SyncEngine connection state — does not widen any private flag.
+   */
+  private isClientOnline(): boolean {
+    const state = this.syncEngine.getConnectionState();
+    return (
+      state === SyncState.CONNECTING ||
+      state === SyncState.AUTHENTICATING ||
+      state === SyncState.SYNCING ||
+      state === SyncState.CONNECTED
+    );
   }
 
   /**

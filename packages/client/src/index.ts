@@ -141,7 +141,15 @@ export type { HttpSyncProviderConfig } from './connection/HttpSyncProvider';
 export type { AutoConnectionProviderConfig } from './connection/AutoConnectionProvider';
 
 // TopGunClient cluster config types
-export type { TopGunClusterConfig, TopGunClientConfig } from './TopGunClient';
+export type { TopGunClusterConfig, TopGunClientConfig, QueryOnceOptions } from './TopGunClient';
+export { DEFAULT_QUERY_ONCE_TIMEOUT_MS } from './TopGunClient';
+
+// queryOnce one-shot read errors
+export {
+  QueryOnceUnsettledError,
+  QueryOnceLocalError,
+} from './errors/QueryOnceError';
+export type { QueryOnceUnsettledReason } from './errors/QueryOnceError';
 
 // Auth provider exports
 export { ClerkAuthProvider } from './auth/ClerkAuthProvider';
