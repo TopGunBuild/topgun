@@ -79,4 +79,33 @@ describe('useQuery', () => {
     expect(result.current.lastChange).toBeNull();
     expect(typeof result.current.clearChanges).toBe('function');
   });
+
+  // Locks in back-compat with the additive subscribe signature: the client
+  // callback is `(results, meta?) => void`, and useQuery still subscribes with a
+  // single-arg `(results) => void` callback. Delivering results without `meta`
+  // (legacy path) and with `meta` (new path) must both update data, proving the
+  // single-arg consumer ignores the extra argument gracefully.
+  it('should receive results through the single-arg subscribe path regardless of the optional meta arg', () => {
+    let callback: (results: any[], meta?: { settled: boolean }) => void;
+    mockSubscribe.mockImplementation((cb) => {
+      callback = cb;
+      return () => {};
+    });
+
+    const { result } = renderHook(() => useQuery('testMap', {}), { wrapper });
+
+    // Legacy single-arg invocation: no meta passed.
+    act(() => {
+      callback([{ _key: 'item-1', id: '1', text: 'legacy' }]);
+    });
+    expect(result.current.loading).toBe(false);
+    expect(result.current.data).toEqual([{ _key: 'item-1', id: '1', text: 'legacy' }]);
+
+    // New additive invocation: client passes a settled meta object. The single-arg
+    // callback must ignore it and still apply results unchanged.
+    act(() => {
+      callback([{ _key: 'item-2', id: '2', text: 'with-meta' }], { settled: true });
+    });
+    expect(result.current.data).toEqual([{ _key: 'item-2', id: '2', text: 'with-meta' }]);
+  });
 });
