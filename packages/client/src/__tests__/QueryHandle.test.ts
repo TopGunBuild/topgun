@@ -87,13 +87,13 @@ describe('QueryHandle', () => {
     expect(lastCall[1].name).toBe('Node 2');
   });
 
-  describe('Race condition protection', () => {
-    test('should ignore empty server response before receiving authoritative data', () => {
+  describe('Settled latch', () => {
+    test('should preserve local pre-load data until the first server response', () => {
       const handle = new QueryHandle<any>(mockSyncEngine, 'items', {});
       const callback = jest.fn();
       handle.subscribe(callback);
 
-      // First: local data loads
+      // Local pre-load data (loadInitialLocalData artifact, never settles)
       handle.onResult(
         [
           { key: 'A', value: { name: 'Local Item A' } },
@@ -102,14 +102,97 @@ describe('QueryHandle', () => {
         'local',
       );
 
-      // Server sends empty response (race condition - server hasn't loaded from storage yet)
-      handle.onResult([], 'server');
-
-      // Local data should be preserved
+      // No server response yet — query is NOT settled, local data stays visible
+      expect(handle.isSettled).toBe(false);
       const lastCall = callback.mock.calls[callback.mock.calls.length - 1][0];
       expect(lastCall).toHaveLength(2);
       expect(lastCall[0]._key).toBe('A');
       expect(lastCall[1]._key).toBe('B');
+    });
+
+    test('settles on the FIRST server QUERY_RESP even when empty', () => {
+      const handle = new QueryHandle<any>(mockSyncEngine, 'items', {});
+      handle.subscribe(jest.fn());
+
+      expect(handle.isSettled).toBe(false);
+
+      // Empty authoritative server response — settled = "a QUERY_RESP arrived",
+      // not "rows arrived".
+      handle.onResult([], 'server');
+
+      expect(handle.isSettled).toBe(true);
+    });
+
+    test('settles on the FIRST server QUERY_RESP when non-empty', () => {
+      const handle = new QueryHandle<any>(mockSyncEngine, 'items', {});
+      handle.subscribe(jest.fn());
+
+      handle.onResult([{ key: 'A', value: { name: 'A' } }], 'server');
+
+      expect(handle.isSettled).toBe(true);
+    });
+
+    test('local pre-load does NOT settle the query', () => {
+      const handle = new QueryHandle<any>(mockSyncEngine, 'items', {});
+      handle.subscribe(jest.fn());
+
+      handle.onResult([{ key: 'A', value: { name: 'A' } }], 'local');
+
+      expect(handle.isSettled).toBe(false);
+    });
+
+    test('whenSettled() resolves when the first server QUERY_RESP arrives', async () => {
+      const handle = new QueryHandle<any>(mockSyncEngine, 'items', {});
+      handle.subscribe(jest.fn());
+
+      let resolved = false;
+      const settledPromise = handle.whenSettled().then(() => {
+        resolved = true;
+      });
+
+      // Not settled yet
+      await Promise.resolve();
+      expect(resolved).toBe(false);
+
+      handle.onResult([], 'server');
+
+      await settledPromise;
+      expect(resolved).toBe(true);
+    });
+
+    test('whenSettled() resolves immediately if already settled', async () => {
+      const handle = new QueryHandle<any>(mockSyncEngine, 'items', {});
+      handle.subscribe(jest.fn());
+
+      handle.onResult([{ key: 'A', value: { name: 'A' } }], 'server');
+
+      // Already settled — promise must resolve without further input
+      await expect(handle.whenSettled()).resolves.toBeUndefined();
+    });
+
+    test('clears stale local-only rows on an empty server result once settled', () => {
+      // AC3: offline/local writes, then an EMPTY authoritative server response.
+      const handle = new QueryHandle<any>(mockSyncEngine, 'items', {});
+      const callback = jest.fn();
+      handle.subscribe(callback);
+
+      // Local-only rows (offline writes seeded into the cache)
+      handle.onResult(
+        [
+          { key: 'local-1', value: { name: 'Local 1' } },
+          { key: 'local-2', value: { name: 'Local 2' } },
+        ],
+        'local',
+      );
+
+      // Server authoritatively reports no rows for this query
+      handle.onResult([], 'server');
+
+      // Stale local-only rows are cleared and the latch is set even for the
+      // empty set.
+      expect(handle.isSettled).toBe(true);
+      const lastCall = callback.mock.calls[callback.mock.calls.length - 1][0];
+      expect(lastCall).toHaveLength(0);
     });
 
     test('should accept empty server response after receiving non-empty server data', () => {
@@ -145,8 +228,10 @@ describe('QueryHandle', () => {
       expect(lastCall[0]._key).toBe('server-item');
     });
 
-    test('should handle In-Memory adapter scenario correctly', () => {
-      // Simulates: In-Memory server has no data, but client has local IndexedDB data
+    test('server is authoritative: empty QUERY_RESP clears local-only rows', () => {
+      // Client seeds a local row, then the server authoritatively reports none.
+      // The server wins — local-only rows that the server does not return are
+      // stale and get cleared.
       const handle = new QueryHandle<any>(mockSyncEngine, 'notes:user123', {});
       const callback = jest.fn();
       handle.subscribe(callback);
@@ -154,13 +239,57 @@ describe('QueryHandle', () => {
       // Client loads from IndexedDB
       handle.onResult([{ key: 'note1', value: { title: 'My Note', content: 'Content' } }], 'local');
 
-      // In-Memory server responds empty (it has no persistent data)
+      // Server responds empty (authoritative — no persisted rows for this query)
       handle.onResult([], 'server');
 
-      // Local data should be preserved (not cleared!)
       const lastCall = callback.mock.calls[callback.mock.calls.length - 1][0];
+      expect(lastCall).toHaveLength(0);
+      expect(handle.isSettled).toBe(true);
+    });
+  });
+
+  describe('Subscriber isolation in notify()', () => {
+    test('AC4: a throwing subscriber does not block later subscribers or propagate', () => {
+      const handle = new QueryHandle<any>(mockSyncEngine, 'items', {});
+
+      const throwingSubscriber = jest.fn(() => {
+        throw new Error('subscriber boom');
+      });
+      const normalSubscriber = jest.fn();
+
+      handle.subscribe(throwingSubscriber);
+      handle.subscribe(normalSubscriber);
+
+      // Deliver a result emission — must not throw out of onResult.
+      expect(() => {
+        handle.onResult([{ key: 'a', value: { name: 'Alice' } }], 'server');
+      }).not.toThrow();
+
+      expect(throwingSubscriber).toHaveBeenCalled();
+      // Normal subscriber still receives the result despite the earlier throw.
+      expect(normalSubscriber).toHaveBeenCalled();
+      const lastCall =
+        normalSubscriber.mock.calls[normalSubscriber.mock.calls.length - 1][0];
       expect(lastCall).toHaveLength(1);
-      expect(lastCall[0].title).toBe('My Note');
+      expect(lastCall[0]._key).toBe('a');
+    });
+
+    test('a throwing subscriber does not propagate out of onUpdate', () => {
+      const handle = new QueryHandle<any>(mockSyncEngine, 'items', {});
+
+      // First subscriber throws; subscribing it first avoids the immediate
+      // cached-result invocation (only later subscribers get that), so the
+      // throw is exercised exclusively through the notify() path on onUpdate.
+      const throwingSubscriber = jest.fn(() => {
+        throw new Error('subscriber boom');
+      });
+      handle.subscribe(throwingSubscriber);
+      handle.onResult([{ key: 'a', value: { name: 'Alice' } }], 'server');
+
+      expect(() => {
+        handle.onUpdate('a', { name: 'Alice Updated' });
+      }).not.toThrow();
+      expect(throwingSubscriber).toHaveBeenCalled();
     });
   });
 
