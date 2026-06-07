@@ -248,6 +248,91 @@ describe('QueryHandle', () => {
     });
   });
 
+  describe('subscribe { settled } meta argument', () => {
+    test('AC5: local frame reports settled:false, server snapshot reports settled:true', () => {
+      const handle = new QueryHandle<any>(mockSyncEngine, 'items', {});
+
+      const seen: Array<{ keys: string[]; settled: boolean | undefined }> = [];
+      handle.subscribe((results, meta) => {
+        seen.push({ keys: results.map((r) => r._key), settled: meta?.settled });
+      });
+
+      // Local/optimistic frame — the server has NOT spoken yet.
+      handle.onResult([{ key: 'A', value: { name: 'Local A' } }], 'local');
+
+      // Server authoritative snapshot — settles the query.
+      handle.onResult([{ key: 'A', value: { name: 'Server A' } }], 'server');
+
+      // First emission is the local frame, unsettled.
+      const localFrame = seen.find((s) => s.keys.length === 1 && s.settled === false);
+      expect(localFrame).toBeDefined();
+
+      // A later emission carries settled:true after the server responds.
+      const settledFrame = seen.find((s) => s.settled === true);
+      expect(settledFrame).toBeDefined();
+
+      // The terminal emission must be settled.
+      expect(seen[seen.length - 1].settled).toBe(true);
+    });
+
+    test('settled stays false across multiple local-only frames', () => {
+      const handle = new QueryHandle<any>(mockSyncEngine, 'items', {});
+
+      const settledValues: Array<boolean | undefined> = [];
+      handle.subscribe((_results, meta) => settledValues.push(meta?.settled));
+
+      handle.onResult([{ key: 'A', value: { name: 'A' } }], 'local');
+      handle.onUpdate('A', { name: 'A2' });
+
+      expect(settledValues.every((v) => v === false)).toBe(true);
+    });
+
+    test('an empty server response still flips meta.settled to true', () => {
+      const handle = new QueryHandle<any>(mockSyncEngine, 'items', {});
+
+      let lastSettled: boolean | undefined;
+      handle.subscribe((_results, meta) => {
+        lastSettled = meta?.settled;
+      });
+
+      handle.onResult([], 'server');
+
+      expect(lastSettled).toBe(true);
+    });
+
+    test('back-compat: a single-arg (results) => void subscriber still receives results', () => {
+      const handle = new QueryHandle<any>(mockSyncEngine, 'items', {});
+
+      // Deliberately single-arg, exactly as React useQuery calls it.
+      const singleArg = jest.fn((results: any) => results);
+      handle.subscribe(singleArg);
+
+      handle.onResult([{ key: 'A', value: { name: 'Alice' } }], 'server');
+
+      expect(singleArg).toHaveBeenCalled();
+      const lastCall = singleArg.mock.calls[singleArg.mock.calls.length - 1][0];
+      expect(lastCall).toHaveLength(1);
+      expect(lastCall[0]._key).toBe('A');
+    });
+
+    test('a late subscriber receives cached results with the current settled state', () => {
+      const handle = new QueryHandle<any>(mockSyncEngine, 'items', {});
+
+      // First subscriber activates the query.
+      handle.subscribe(jest.fn());
+      handle.onResult([{ key: 'A', value: { name: 'Alice' } }], 'server');
+
+      // A second subscriber gets the immediate cached invocation.
+      const late = jest.fn();
+      handle.subscribe(late);
+
+      expect(late).toHaveBeenCalledTimes(1);
+      const [results, meta] = late.mock.calls[0];
+      expect(results).toHaveLength(1);
+      expect(meta).toEqual({ settled: true });
+    });
+  });
+
   describe('Subscriber isolation in notify()', () => {
     test('AC4: a throwing subscriber does not block later subscribers or propagate', () => {
       const handle = new QueryHandle<any>(mockSyncEngine, 'items', {});
