@@ -1,7 +1,7 @@
 /**
  * topgun_query - Query data from a TopGun map with filters
  *
- * Uses cursor-based pagination via QueryHandle.
+ * Resolves on the first settled server snapshot via client.queryOnce().
  */
 
 import type { QueryFilter } from '@topgunbuild/client';
@@ -14,7 +14,7 @@ export const queryTool: MCPTool = {
   description:
     'Query data from a TopGun map with filters and sorting. ' +
     'Use this to read data from the database. ' +
-    'Supports filtering by field values, sorting, and cursor-based pagination.',
+    'Supports filtering by field values, sorting, and pagination via limit.',
   inputSchema: toolSchemas.query as MCPTool['inputSchema'],
 };
 

@@ -30,7 +30,7 @@ export const QueryArgsSchema = z.object({
   cursor: z
     .string()
     .optional()
-    .describe('Opaque cursor for pagination (from previous response nextCursor)'),
+    .describe('Opaque cursor for filtering results from a known position.'),
   fields: z
     .array(z.string())
     .optional()
@@ -166,7 +166,7 @@ export const toolSchemas = {
       limit: { type: 'number', description: 'Maximum number of results to return', default: 10 },
       cursor: {
         type: 'string',
-        description: 'Opaque cursor for pagination (from previous response nextCursor)',
+        description: 'Opaque cursor for filtering results from a known position.',
       },
       fields: {
         type: 'array',
