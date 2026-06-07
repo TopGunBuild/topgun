@@ -147,7 +147,7 @@ A settled result with no matching records renders as `No results found in map '<
 
 **Offline / not-settled behavior.** `topgun_query` never silently returns stale local data and never conflates "offline" with "empty". If the server cannot be reached, or the query does not settle within the default 5000 ms window, the tool returns an error (`isError: true`) explaining that no authoritative data was returned — so the assistant knows to retry rather than reporting an empty list. The message distinguishes the two causes (server unreachable / client offline, vs. timed out waiting for the server).
 
-**No cursor pagination.** `topgun_query` returns a plain settled array; the previous `nextCursor` / `hasMore` continuation hint and `cursor` parameter have been removed. Narrow results with `filter`, `sort`, and `limit` instead.
+**No cursor pagination, but truncation is never silent.** `topgun_query` returns a plain settled array; the previous `nextCursor` / `hasMore` continuation hint and `cursor` parameter have been removed (continuation cursors are an anti-pattern for an LLM caller). It does **not** drop the one signal that matters: when more rows match than the returned `limit`, the response appends a `More rows match than were returned…` note so the assistant knows the view was capped and can narrow `filter` / `sort` (or raise `limit` up to `maxLimit`) — rather than reporting a truncated list as the whole answer.
 
 ### topgun_mutate
 

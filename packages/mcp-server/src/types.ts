@@ -134,7 +134,7 @@ export interface QueryToolArgs {
     order: 'asc' | 'desc';
   };
   limit?: number;
-  cursor?: string;
+  fields?: string[];
 }
 
 /**

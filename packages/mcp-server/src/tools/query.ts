@@ -31,7 +31,7 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
     };
   }
 
-  const { map, filter, sort, limit, cursor, fields } = parseResult.data;
+  const { map, filter, sort, limit, fields } = parseResult.data;
 
   // Validate map access
   if (ctx.config.allowedMaps && !ctx.config.allowedMaps.includes(map)) {
@@ -50,19 +50,20 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
   const effectiveLimit = Math.min(limit ?? ctx.config.defaultLimit, ctx.config.maxLimit);
 
   try {
-    // Build query filter for QueryHandle
+    // Build query filter for QueryHandle. Fetch ONE extra row beyond the
+    // effective limit so we can detect (and signal) that results were truncated.
+    // queryOnce returns a plain array with no hasMore metadata, so without this
+    // probe an agent that asks for `limit` rows and gets exactly `limit` back
+    // cannot tell a complete result from a capped one — and would silently report
+    // a truncated view as the whole answer.
     const queryFilter: QueryFilter = {
       where: filter,
-      limit: effectiveLimit,
+      limit: effectiveLimit + 1,
     };
 
     // Add sort if provided
     if (sort?.field) {
       queryFilter.sort = { [sort.field]: sort.order };
-    }
-
-    if (cursor) {
-      queryFilter.cursor = cursor;
     }
 
     if (fields && fields.length > 0) {
@@ -99,6 +100,13 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
       throw error;
     }
 
+    // We requested effectiveLimit + 1 rows; if the server had more, drop the
+    // probe row and remember to tell the caller the result was capped.
+    const truncated = results.length > effectiveLimit;
+    if (truncated) {
+      results = results.slice(0, effectiveLimit);
+    }
+
     // A settled-but-empty result is a legitimate "no matching records" answer,
     // distinct from the offline/not-settled branch handled above.
     if (results.length === 0) {
@@ -119,11 +127,24 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
       })
       .join('\n\n');
 
+    // Honest truncation signal: there is intentionally no cursor to page through
+    // (continuation cursors are an anti-pattern for LLM callers), so point the
+    // agent at narrowing the query instead — and at raising `limit` only when it
+    // is still below the server's maxLimit cap.
+    const truncationNote = truncated
+      ? `\n\n---\nMore rows match than were returned; showing the first ${effectiveLimit}. ` +
+        `Narrow with \`filter\`/\`sort\`` +
+        (effectiveLimit < ctx.config.maxLimit
+          ? ` or raise \`limit\` (up to ${ctx.config.maxLimit})`
+          : '') +
+        ` to see the rest. There is no cursor to page through.`
+      : '';
+
     return {
       content: [
         {
           type: 'text',
-          text: `Found ${results.length} result(s) in map '${map}':\n\n${formatted}`,
+          text: `Found ${results.length} result(s) in map '${map}':\n\n${formatted}${truncationNote}`,
         },
       ],
     };

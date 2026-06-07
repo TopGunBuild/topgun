@@ -27,10 +27,6 @@ export const QueryArgsSchema = z.object({
     .optional()
     .describe('Sort configuration'),
   limit: z.number().optional().default(10).describe('Maximum number of results to return'),
-  cursor: z
-    .string()
-    .optional()
-    .describe('Opaque cursor for filtering results from a known position.'),
   fields: z
     .array(z.string())
     .optional()
@@ -164,10 +160,6 @@ export const toolSchemas = {
         description: 'Sort configuration',
       },
       limit: { type: 'number', description: 'Maximum number of results to return', default: 10 },
-      cursor: {
-        type: 'string',
-        description: 'Opaque cursor for filtering results from a known position.',
-      },
       fields: {
         type: 'array',
         items: { type: 'string' },

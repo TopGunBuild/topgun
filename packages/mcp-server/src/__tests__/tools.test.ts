@@ -218,6 +218,47 @@ describe('MCP Tools', () => {
       expect(result.content[0].text).toContain('5 result');
     });
 
+    it('should signal truncation when more rows match than the limit', async () => {
+      const ctx = createTestContext();
+      const map = (ctx.client as unknown as MockTopGunClient).getMap('tasks');
+      for (let i = 0; i < 20; i++) {
+        map.set(`task${i}`, { title: `Task ${i}`, index: i });
+      }
+
+      const result = await handleQuery({ map: 'tasks', limit: 5 }, ctx);
+
+      expect(result.isError).toBeUndefined();
+      // The capped count is the requested limit, NOT the probe row.
+      expect(result.content[0].text).toContain('5 result');
+      // The agent must be told the view was capped — never a silent truncation.
+      expect(result.content[0].text).toContain('More rows match than were returned');
+    });
+
+    it('should NOT signal truncation when results fit within the limit', async () => {
+      const ctx = createTestContext();
+      const map = (ctx.client as unknown as MockTopGunClient).getMap('tasks');
+      map.set('task1', { title: 'Only Task', status: 'todo' });
+
+      const result = await handleQuery({ map: 'tasks', limit: 10 }, ctx);
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('1 result');
+      expect(result.content[0].text).not.toContain('More rows match');
+    });
+
+    it('should ignore a now-removed cursor argument without erroring', async () => {
+      const ctx = createTestContext();
+      const map = (ctx.client as unknown as MockTopGunClient).getMap('tasks');
+      map.set('task1', { title: 'Only Task', status: 'todo' });
+
+      // `cursor` is no longer part of the schema; Zod strips unknown keys, so the
+      // call must still succeed (not reject) and return normally.
+      const result = await handleQuery({ map: 'tasks', cursor: 'stale-cursor' }, ctx);
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('1 result');
+    });
+
     it('should deny access to restricted maps', async () => {
       const ctx = createTestContext({
         allowedMaps: ['users'],
