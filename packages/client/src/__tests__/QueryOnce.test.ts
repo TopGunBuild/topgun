@@ -1,10 +1,7 @@
 import { TopGunClient } from '../TopGunClient';
 import { QueryHandle } from '../QueryHandle';
 import { SyncState } from '../SyncState';
-import {
-  QueryOnceUnsettledError,
-  QueryOnceLocalError,
-} from '../errors/QueryOnceError';
+import { QueryOnceUnsettledError, QueryOnceLocalError } from '../errors/QueryOnceError';
 import type { IStorageAdapter, OpLogEntry } from '../IStorageAdapter';
 
 // crypto.randomUUID is needed by the TopGunClient constructor in Node test envs.
@@ -144,9 +141,7 @@ describe('TopGunClient.queryOnce', () => {
 
       const promise = client.queryOnce('users', {});
 
-      await settleServer(engine, [
-        { key: 'u1', value: { id: 'u1', name: 'Ada' } },
-      ]);
+      await settleServer(engine, [{ key: 'u1', value: { id: 'u1', name: 'Ada' } }]);
 
       const results = await promise;
       expect(results).toHaveLength(1);
@@ -179,9 +174,7 @@ describe('TopGunClient.queryOnce', () => {
     test('default offline → REJECTS with QueryOnceUnsettledError (offline)', async () => {
       const { client } = makeClient(SyncState.DISCONNECTED);
 
-      await expect(client.queryOnce('users', {})).rejects.toBeInstanceOf(
-        QueryOnceUnsettledError,
-      );
+      await expect(client.queryOnce('users', {})).rejects.toBeInstanceOf(QueryOnceUnsettledError);
       await expect(client.queryOnce('users', {})).rejects.toMatchObject({
         code: 'QUERY_ONCE_UNSETTLED',
         reason: 'offline',
@@ -195,17 +188,13 @@ describe('TopGunClient.queryOnce', () => {
         { key: 'u1', value: { id: 'u1', name: 'StaleLocal' } },
       ]);
 
-      await expect(client.queryOnce('users', {})).rejects.toBeInstanceOf(
-        QueryOnceUnsettledError,
-      );
+      await expect(client.queryOnce('users', {})).rejects.toBeInstanceOf(QueryOnceUnsettledError);
     });
 
     test('default timeout → REJECTS with QueryOnceUnsettledError (timeout)', async () => {
       const { client } = makeClient(SyncState.CONNECTED);
       // Online but server never settles within the window.
-      await expect(
-        client.queryOnce('users', {}, { timeoutMs: 20 }),
-      ).rejects.toMatchObject({
+      await expect(client.queryOnce('users', {}, { timeoutMs: 20 })).rejects.toMatchObject({
         code: 'QUERY_ONCE_UNSETTLED',
         reason: 'timeout',
       });
@@ -247,9 +236,7 @@ describe('TopGunClient.queryOnce', () => {
 
     test('allowLocal timeout → throws QueryOnceLocalError with reason "timeout"', async () => {
       const { client, engine } = makeClient(SyncState.CONNECTED);
-      engine.runLocalQuery.mockResolvedValue([
-        { key: 'u1', value: { id: 'u1' } },
-      ]);
+      engine.runLocalQuery.mockResolvedValue([{ key: 'u1', value: { id: 'u1' } }]);
 
       await expect(
         client.queryOnce('users', {}, { allowLocal: true, timeoutMs: 20 }),

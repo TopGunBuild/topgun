@@ -353,8 +353,7 @@ describe('QueryHandle', () => {
       expect(throwingSubscriber).toHaveBeenCalled();
       // Normal subscriber still receives the result despite the earlier throw.
       expect(normalSubscriber).toHaveBeenCalled();
-      const lastCall =
-        normalSubscriber.mock.calls[normalSubscriber.mock.calls.length - 1][0];
+      const lastCall = normalSubscriber.mock.calls[normalSubscriber.mock.calls.length - 1][0];
       expect(lastCall).toHaveLength(1);
       expect(lastCall[0]._key).toBe('a');
     });

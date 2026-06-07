@@ -246,8 +246,10 @@ describe('MCP Tools', () => {
 
     it('should surface an explicit not-settled message when offline', async () => {
       const ctx = createTestContext();
-      (ctx.client as unknown as MockTopGunClient).queryOnceRejection =
-        new QueryOnceUnsettledError('offline', 'tasks');
+      (ctx.client as unknown as MockTopGunClient).queryOnceRejection = new QueryOnceUnsettledError(
+        'offline',
+        'tasks',
+      );
 
       const result = await handleQuery({ map: 'tasks' }, ctx);
 
@@ -260,8 +262,10 @@ describe('MCP Tools', () => {
 
     it('should surface an explicit not-settled message on timeout', async () => {
       const ctx = createTestContext();
-      (ctx.client as unknown as MockTopGunClient).queryOnceRejection =
-        new QueryOnceUnsettledError('timeout', 'tasks');
+      (ctx.client as unknown as MockTopGunClient).queryOnceRejection = new QueryOnceUnsettledError(
+        'timeout',
+        'tasks',
+      );
 
       const result = await handleQuery({ map: 'tasks' }, ctx);
 

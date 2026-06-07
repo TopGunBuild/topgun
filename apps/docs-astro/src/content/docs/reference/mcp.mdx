@@ -132,16 +132,22 @@ List every map the server knows about.
 
 ### topgun_query
 
-Read records from a map with filters, sorting, and cursor pagination.
+Read records from a map with filters and sorting. Returns **authoritative server data** — the assistant gets the live, server-confirmed answer, not a stale local guess.
 
-- **Parameters:** `{ map, filter?, sort?, limit?, cursor?, fields? }`
-- **Response:** `[{ _key, ...fields }]` plus optional `nextCursor` for pagination
+- **Parameters:** `{ map, filter?, sort?, limit?, fields? }`
+- **Response:** `[{ _key, ...fields }]` (a plain settled array)
 - **Security:** rejects maps outside `allowedMaps`; clamps `limit` to `maxLimit`
 
 ```text
 > Show me unfinished tasks created this week
 [runs topgun_query with where: { done: false, createdAt: { gt: ... } }]
 ```
+
+A settled result with no matching records renders as `No results found in map '<map>'...` — that means the server genuinely has no such rows, not that the query failed.
+
+**Offline / not-settled behavior.** `topgun_query` never silently returns stale local data and never conflates "offline" with "empty". If the server cannot be reached, or the query does not settle within the default 5000 ms window, the tool returns an error (`isError: true`) explaining that no authoritative data was returned — so the assistant knows to retry rather than reporting an empty list. The message distinguishes the two causes (server unreachable / client offline, vs. timed out waiting for the server).
+
+**No cursor pagination.** `topgun_query` returns a plain settled array; the previous `nextCursor` / `hasMore` continuation hint and `cursor` parameter have been removed. Narrow results with `filter`, `sort`, and `limit` instead.
 
 ### topgun_mutate
 

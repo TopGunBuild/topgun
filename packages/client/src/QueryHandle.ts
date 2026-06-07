@@ -51,10 +51,7 @@ export type SubscribeMeta = { settled: boolean };
  * Subscribe callback. The 2nd `meta` argument is optional so existing
  * single-arg `(results) => void` callbacks continue to type-check unchanged.
  */
-export type SubscribeCallback<T> = (
-  results: QueryResultItem<T>[],
-  meta?: SubscribeMeta,
-) => void;
+export type SubscribeCallback<T> = (results: QueryResultItem<T>[], meta?: SubscribeMeta) => void;
 
 export class QueryHandle<T> {
   public readonly id: string;

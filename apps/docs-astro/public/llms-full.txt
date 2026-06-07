@@ -1557,6 +1557,105 @@ if (hasMore && nextCursor) {
 
 `QueryHandle<T>` methods: `subscribe(cb)`, `onDelta(listener)`, `consumeChanges()`, `getLastChange()`, `getPendingChanges()`, `clearChanges()`, `resetChangeTracker()`, `getFilter()`, `getMapName()`, `getPaginationInfo()`, `onPaginationChange(listener)`, `updatePaginationInfo(info)`, `syncState` (getter), `onSyncStateChange(listener)`.
 
+#### Knowing when a result is authoritative — `subscribe` `{ settled }`
+
+A live query fires immediately with whatever is in the local cache, then fires again once the server answers. Most UIs don't care about the difference — but if you need to tell "the server confirmed this" apart from "this is just my optimistic local view" (for example, to hide a spinner only once data is real), `subscribe` passes an optional second argument:
+
+```typescript
+const unsubscribe = handle.subscribe((results, meta) => {
+  // meta.settled is false on the first local/optimistic frame,
+  // and true once an authoritative server response has arrived
+  // (including an empty result set — settled true with zero rows
+  // means the server genuinely has no matching records).
+  if (meta?.settled) {
+    hideSpinner();
+  }
+  render(results);
+});
+```
+
+`SubscribeMeta` is `{ settled: boolean }`. The second argument is **optional and additive** — existing `(results) => void` callbacks keep working unchanged. Exported types: `SubscribeCallback`, `SubscribeMeta`.
+
+### `queryOnce(mapName, filter, opts?)`
+
+Fetch a result set **once** and get back authoritative server data — no live subscription, no stale local guesses. Use this when you need a definitive answer at a single point in time (an export, a server-validated check, an AI/agent read) rather than a feed that keeps updating.
+
+```typescript
+queryOnce<K extends keyof TSchema & string>(
+  mapName: K,
+  filter: QueryFilter,
+  opts?: QueryOnceOptions,
+): Promise<QueryResultItem<TSchema[K]>[]>;
+queryOnce<T = any>(
+  mapName: string,
+  filter: QueryFilter,
+  opts?: QueryOnceOptions,
+): Promise<QueryResultItem<T>[]>;
+```
+
+```typescript
+interface QueryOnceOptions {
+  timeoutMs?: number; // default: DEFAULT_QUERY_ONCE_TIMEOUT_MS (5000)
+  allowLocal?: boolean; // default: false
+}
+```
+
+A normal resolve **always** returns settled, authoritative server data. An empty array means the server genuinely has no matching rows — never "we couldn't reach the server". `queryOnce` never silently hands you stale local data.
+
+```typescript
+const todos = await client.queryOnce<Todo>('todos', {
+  where: { completed: false },
+  sort: { createdAt: 'desc' },
+});
+// todos is the server's authoritative answer ([] = server has no matching rows)
+```
+
+**Offline / timeout policy.** If the client is offline or the settle wait times out (5000 ms by default), the behavior depends on `allowLocal`:
+
+- **Default (`allowLocal` unset/false):** rejects with `QueryOnceUnsettledError`. There is no authoritative data, and `queryOnce` refuses to invent one.
+
+  ```typescript
+  import { QueryOnceUnsettledError } from '@topgunbuild/client';
+
+  try {
+    const rows = await client.queryOnce<Todo>('todos', { where: { completed: false } });
+  } catch (err) {
+    if (err instanceof QueryOnceUnsettledError) {
+      // err.code === 'QUERY_ONCE_UNSETTLED'
+      // err.reason is 'offline' or 'timeout'
+      // No authoritative server data — do NOT treat as empty.
+    }
+  }
+  ```
+
+- **`{ allowLocal: true }`:** still does not resolve with local data on the happy path — instead it throws a typed `QueryOnceLocalError` carrying the non-settled local snapshot on `.localData`. This keeps the distinction explicit: a normal resolve is **always** settled server data, while a caught `QueryOnceLocalError` is **always** non-settled local data. You opt in by catching it.
+
+  ```typescript
+  import { QueryOnceLocalError } from '@topgunbuild/client';
+
+  try {
+    const rows = await client.queryOnce<Todo>(
+      'todos',
+      { where: { completed: false } },
+      { allowLocal: true },
+    );
+    // rows: settled server data
+  } catch (err) {
+    if (err instanceof QueryOnceLocalError) {
+      // err.code === 'QUERY_ONCE_LOCAL_FALLBACK'
+      // err.reason is 'offline' or 'timeout'
+      // err.localData: QueryResultItem<Todo>[] — the non-settled local snapshot
+    }
+  }
+  ```
+
+The default timeout is exported as `DEFAULT_QUERY_ONCE_TIMEOUT_MS` (`5000`). Override per call with `opts.timeoutMs`.
+
+#### One-shot (`queryOnce`) vs live (`query` / `useQuery`)
+
+- **Reach for `queryOnce`** when you need a single authoritative snapshot and want to know for certain whether the server answered: data exports, validation/decision logic, AI-agent reads, server-confirmed checks. You handle offline/timeout explicitly via the typed errors above.
+- **Reach for the live `query` handle (or React `useQuery`)** when you want a continuously-updating view that should render instantly from the local cache and reconcile as the server responds — lists, feeds, dashboards, anything the user watches. Use the `subscribe` `{ settled }` flag if a particular frame needs to distinguish local-optimistic from server-confirmed.
+
 ### `topic(name)`
 
 ```typescript
