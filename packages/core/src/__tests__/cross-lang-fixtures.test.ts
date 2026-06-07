@@ -204,7 +204,9 @@ describe('Cross-language fixture generation', () => {
         mapName: 'users',
         query: {
           where: { age: { $gt: 18 } },
-          sort: { createdAt: 'desc' },
+          // Ordered array preserves caller-specified sort field order on the wire.
+          // Rust side deserializes as Vec<SortField> { field, direction }.
+          sort: [{ field: 'createdAt', direction: 'desc' }],
           limit: 50,
         },
       },

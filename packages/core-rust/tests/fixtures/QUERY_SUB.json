@@ -9,9 +9,12 @@
           "$gt": 18
         }
       },
-      "sort": {
-        "createdAt": "desc"
-      },
+      "sort": [
+        {
+          "field": "createdAt",
+          "direction": "desc"
+        }
+      ],
       "limit": 50
     }
   }
