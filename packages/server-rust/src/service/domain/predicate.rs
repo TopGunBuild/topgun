@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::hash::BuildHasher;
 
 use regex::Regex;
-use topgun_core::messages::base::{PredicateNode, PredicateOp, Query, SortDirection};
+use topgun_core::messages::base::{PredicateNode, PredicateOp, Query, SortDirection, SortField};
 use topgun_core::messages::query::QueryResultEntry;
 use topgun_core::types::Value;
 
@@ -145,10 +145,10 @@ pub fn execute_query(entries: Vec<(String, rmpv::Value)>, query: &Query) -> Vec<
 
     // 2. Sort
     let mut sorted = filtered;
-    if let Some(sort_map) = &query.sort {
-        // Use first entry only (HashMap iteration order is non-deterministic;
-        // consistent with TS behavior using only primary sort field)
-        if let Some((field, direction)) = sort_map.iter().next() {
+    if let Some(sort_fields) = &query.sort {
+        // Use first entry only; full multi-field sort application is owned by SPEC-298b
+        // which replaces PredicateBackend with the canonical DAG engine.
+        if let Some(SortField { field, direction }) = sort_fields.first() {
             let field = field.clone();
             let desc = *direction == SortDirection::Desc;
             sorted.sort_by(|(_, a), (_, b)| {
@@ -1306,9 +1306,6 @@ mod tests {
             ),
         ];
 
-        let mut sort = HashMap::new();
-        sort.insert("name".to_string(), SortDirection::Asc);
-
         let query = Query {
             predicate: Some(leaf(
                 PredicateOp::Gte,
@@ -1316,7 +1313,10 @@ mod tests {
                 rmpv::Value::Integer(20.into()),
             )),
             r#where: None,
-            sort: Some(sort),
+            sort: Some(vec![SortField {
+                field: "name".to_string(),
+                direction: SortDirection::Asc,
+            }]),
             limit: Some(2),
             cursor: None,
             group_by: None,
@@ -1388,12 +1388,13 @@ mod tests {
                 make_map(vec![("score", rmpv::Value::Integer(20.into()))]),
             ),
         ];
-        let mut sort = HashMap::new();
-        sort.insert("score".to_string(), SortDirection::Desc);
         let query = Query {
             predicate: None,
             r#where: None,
-            sort: Some(sort),
+            sort: Some(vec![SortField {
+                field: "score".to_string(),
+                direction: SortDirection::Desc,
+            }]),
             limit: None,
             cursor: None,
             group_by: None,
@@ -1476,12 +1477,13 @@ mod tests {
                 make_map(vec![("score", rmpv::Value::Integer(5.into()))]),
             ),
         ];
-        let mut sort = HashMap::new();
-        sort.insert("score".to_string(), SortDirection::Asc);
         let query = Query {
             predicate: None,
             r#where: None,
-            sort: Some(sort),
+            sort: Some(vec![SortField {
+                field: "score".to_string(),
+                direction: SortDirection::Asc,
+            }]),
             limit: None,
             cursor: None,
             group_by: None,

@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use topgun_core::messages::base::{PredicateNode, PredicateOp, Query, SortDirection};
+use topgun_core::messages::base::{PredicateNode, PredicateOp, Query, SortDirection, SortField};
 
 use crate::dag::types::{DagPlanDescriptor, Edge, ProcessorType, RoutingPolicy, VertexDescriptor};
 
@@ -302,21 +302,15 @@ impl QueryToDagConverter {
         }
 
         // --- Step 4: Sort vertex (optional) ---
-        if let Some(ref sort_map) = query.sort {
-            if !sort_map.is_empty() {
-                // HashMap iteration order is non-deterministic; fields are sorted
-                // alphabetically to ensure deterministic multi-field sort behavior.
-                let mut sort_fields: Vec<(String, SortDirection)> = sort_map
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                sort_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
-
+        if let Some(ref sort_fields) = query.sort {
+            if !sort_fields.is_empty() {
+                // Caller-specified order is preserved: the Vec<SortField> wire type
+                // carries insertion order end-to-end, so no re-ordering is applied here.
                 let sort_config = rmpv::Value::Array(
                     sort_fields
                         .iter()
-                        .map(|(field, dir)| {
-                            let dir_str = match dir {
+                        .map(|SortField { field, direction }| {
+                            let dir_str = match direction {
                                 SortDirection::Asc => "asc",
                                 SortDirection::Desc => "desc",
                             };
@@ -597,13 +591,13 @@ mod tests {
 
     #[test]
     fn convert_query_with_sort_inserts_sort_vertex() {
-        use topgun_core::messages::base::SortDirection;
-
-        let mut sort_map = HashMap::new();
-        sort_map.insert("age".to_string(), SortDirection::Desc);
+        use topgun_core::messages::base::{SortDirection, SortField};
 
         let q = Query {
-            sort: Some(sort_map),
+            sort: Some(vec![SortField {
+                field: "age".to_string(),
+                direction: SortDirection::Desc,
+            }]),
             ..Default::default()
         };
 
@@ -683,13 +677,13 @@ mod tests {
 
     #[test]
     fn convert_query_with_sort_and_limit_has_correct_order() {
-        use topgun_core::messages::base::SortDirection;
-
-        let mut sort_map = HashMap::new();
-        sort_map.insert("age".to_string(), SortDirection::Desc);
+        use topgun_core::messages::base::{SortDirection, SortField};
 
         let q = Query {
-            sort: Some(sort_map),
+            sort: Some(vec![SortField {
+                field: "age".to_string(),
+                direction: SortDirection::Desc,
+            }]),
             limit: Some(5),
             ..Default::default()
         };
@@ -736,14 +730,14 @@ mod tests {
 
     #[test]
     fn convert_query_with_group_by_and_sort_limit_inserts_after_combine() {
-        use topgun_core::messages::base::SortDirection;
-
-        let mut sort_map = HashMap::new();
-        sort_map.insert("__count".to_string(), SortDirection::Desc);
+        use topgun_core::messages::base::{SortDirection, SortField};
 
         let q = Query {
             group_by: Some(vec!["category".to_string()]),
-            sort: Some(sort_map),
+            sort: Some(vec![SortField {
+                field: "__count".to_string(),
+                direction: SortDirection::Desc,
+            }]),
             limit: Some(3),
             ..Default::default()
         };
@@ -771,18 +765,26 @@ mod tests {
         );
     }
 
-    // --- Multi-field sort deterministic ordering ---
+    // --- Multi-field sort: caller order preserved (not alphabetical) ---
 
     #[test]
-    fn convert_query_multi_field_sort_alphabetical_order() {
-        use topgun_core::messages::base::SortDirection;
+    fn convert_query_multi_field_sort_preserves_caller_order() {
+        use topgun_core::messages::base::{SortDirection, SortField};
 
-        let mut sort_map = HashMap::new();
-        sort_map.insert("z_field".to_string(), SortDirection::Asc);
-        sort_map.insert("a_field".to_string(), SortDirection::Desc);
-
+        // Caller specifies "a ASC, b DESC" — alphabetical order would be the same here,
+        // so we use "z_field ASC, a_field DESC" to prove caller order (z before a) wins
+        // over alphabetical order (a before z).
         let q = Query {
-            sort: Some(sort_map),
+            sort: Some(vec![
+                SortField {
+                    field: "z_field".to_string(),
+                    direction: SortDirection::Asc,
+                },
+                SortField {
+                    field: "a_field".to_string(),
+                    direction: SortDirection::Desc,
+                },
+            ]),
             ..Default::default()
         };
 
@@ -793,15 +795,27 @@ mod tests {
         let config = sort_vertex.config.as_ref().unwrap();
         if let rmpv::Value::Array(arr) = config {
             assert_eq!(arr.len(), 2);
-            // First field should be "a_field" (alphabetically first)
+            // First field must be "z_field" (caller-specified order, not alphabetical)
             if let rmpv::Value::Array(pair) = &arr[0] {
-                assert_eq!(pair[0].as_str(), Some("a_field"));
-                assert_eq!(pair[1].as_str(), Some("desc"));
-            }
-            // Second field should be "z_field"
-            if let rmpv::Value::Array(pair) = &arr[1] {
-                assert_eq!(pair[0].as_str(), Some("z_field"));
+                assert_eq!(
+                    pair[0].as_str(),
+                    Some("z_field"),
+                    "caller order: z_field first"
+                );
                 assert_eq!(pair[1].as_str(), Some("asc"));
+            } else {
+                panic!("sort config entry should be an array pair");
+            }
+            // Second field must be "a_field"
+            if let rmpv::Value::Array(pair) = &arr[1] {
+                assert_eq!(
+                    pair[0].as_str(),
+                    Some("a_field"),
+                    "caller order: a_field second"
+                );
+                assert_eq!(pair[1].as_str(), Some("desc"));
+            } else {
+                panic!("sort config entry should be an array pair");
             }
         } else {
             panic!("sort config should be an array");

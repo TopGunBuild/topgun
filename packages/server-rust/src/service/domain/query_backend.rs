@@ -165,6 +165,7 @@ pub fn create_datafusion_backend(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use topgun_core::messages::base::SortField;
     use topgun_core::messages::{PredicateNode, PredicateOp, SortDirection};
 
     #[tokio::test]
@@ -270,12 +271,13 @@ mod tests {
                 )]),
             ),
         ];
-        let mut sort = HashMap::new();
-        sort.insert("name".to_string(), SortDirection::Asc);
         let query = Query {
             predicate: None,
             r#where: None,
-            sort: Some(sort),
+            sort: Some(vec![SortField {
+                field: "name".to_string(),
+                direction: SortDirection::Asc,
+            }]),
             limit: Some(2),
             cursor: None,
             group_by: None,
