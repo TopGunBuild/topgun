@@ -965,6 +965,11 @@ impl Processor for LimitProcessor {
         outbox: &mut dyn Outbox,
     ) -> Result<bool> {
         if self.emitted >= self.limit {
+            // Drain and discard any remaining inbox items. Without this, the
+            // executor would find a non-empty inbox on a done processor and spin
+            // in a tight loop calling process() forever, never reaching
+            // ready_to_complete (which requires inbox_empty).
+            inbox.drain(&mut |_| {});
             return Ok(true);
         }
 
