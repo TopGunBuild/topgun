@@ -29,7 +29,6 @@ use topgun_server::service::domain::crdt::CrdtService;
 use topgun_server::service::domain::messaging::MessagingService;
 use topgun_server::service::domain::persistence::PersistenceService;
 use topgun_server::service::domain::query::{QueryRegistry, QueryService};
-use topgun_server::service::domain::query_backend::PredicateBackend;
 use topgun_server::service::domain::schema::SchemaService;
 use topgun_server::service::domain::search::{
     HybridSearchRegistry, SearchConfig, SearchMutationObserver, SearchRegistry, SearchService,
@@ -652,7 +651,6 @@ fn build_services() -> (
         Arc::clone(&query_registry),
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
-        Arc::new(PredicateBackend),
         Some(Arc::clone(&query_merkle_manager)),
         config.max_query_records,
         None,
