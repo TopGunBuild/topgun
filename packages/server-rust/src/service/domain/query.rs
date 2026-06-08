@@ -529,7 +529,10 @@ impl QueryService {
     ///
     /// 1. Extracts `connection_id` from context (error if missing).
     /// 2. Scans all partitions, collecting entries and Merkle key-hash pairs.
-    /// 3. Delegates to `query_backend.execute_query()` for filtering, sorting, and limiting.
+    /// 3. When a coordinator is wired, delegates to the DAG single-node path for
+    ///    filtering, sorting, and limiting. Without a coordinator, falls back to
+    ///    `query_backend.execute_query()` (constructed but not invoked on the WS
+    ///    path — its removal is SPEC-298d's job).
     /// 4. Applies `max_query_records` clamping with `has_more` flag.
     /// 5. Applies field projection if `fields` is specified.
     /// 6. Initializes per-query Merkle trees and computes aggregate root hash.
@@ -552,7 +555,7 @@ impl QueryService {
         let query = payload.payload.query.clone();
         let fields = payload.payload.fields.clone();
 
-        // Scan ALL partitions for this map to aggregate entries across the full key space.
+        // Scan ALL partitions for this map to aggregate entries and Merkle key-hash pairs.
         // Keys are deterministically mapped to partitions via hash_to_partition,
         // so there is no risk of duplicates across partitions.
         let stores = self.record_store_factory.get_all_for_map(&map_name);
@@ -592,44 +595,80 @@ impl QueryService {
             }
         }
 
-        // Narrow candidate entries using index-accelerated evaluation when an
-        // IndexObserverFactory is wired and the query has a predicate. This
-        // reduces the entries passed to execute_query without altering the
-        // query semantics — the predicate is re-evaluated inside the backend
-        // and inside index_aware_evaluate itself, so no correctness risk.
-        let entries = if let (Some(factory), Some(predicate)) = (
-            self.index_observer_factory.as_ref(),
-            query.predicate.as_ref(),
-        ) {
-            if let Some(registry) = factory.get_registry(&map_name) {
-                // Build a lookup map so the optimizer can fetch record values by key.
-                let entry_map: std::collections::HashMap<&str, &rmpv::Value> =
-                    entries.iter().map(|(k, v)| (k.as_str(), v)).collect();
-                let all_keys: Vec<String> = entries.iter().map(|(k, _)| k.clone()).collect();
+        // When the DAG coordinator is wired, use it as the canonical query engine
+        // for filtering, sorting, and limiting. The coordinator's single-node bypass
+        // reads directly from the record store and runs the full DAG pipeline.
+        //
+        // When no coordinator is present (tests, legacy call sites without coordinator
+        // attached), fall back to query_backend — it is constructed-but-uninvoked on
+        // the production WS path because classify routes all QuerySub to DagQuery.
+        let mut results: Vec<QueryResultEntry> = if let Some(coordinator) = &self.coordinator {
+            let raw = coordinator
+                .execute_distributed(&query, &map_name)
+                .await
+                .map_err(|e| OperationError::Internal(anyhow::anyhow!("{e}")))?;
 
-                let matching_keys = index_aware_evaluate(&registry, predicate, &all_keys, |key| {
-                    entry_map.get(key).map(|v| (*v).clone())
-                });
+            // Map raw DAG rows to QueryResultEntry. Non-GROUP-BY DAG rows do not
+            // carry a `__key` field (that is GROUP-BY-specific). Use synthetic row
+            // keys so callers can identify entries; callers should assert on
+            // .value content, not .key identity for non-GROUP-BY queries.
+            raw.into_iter()
+                .enumerate()
+                .map(|(i, val)| {
+                    let key = if let rmpv::Value::Map(ref pairs) = val {
+                        pairs.iter().find_map(|(k, v)| {
+                            if k.as_str() == Some("__key") {
+                                v.as_str().map(str::to_string)
+                            } else {
+                                None
+                            }
+                        })
+                    } else {
+                        None
+                    }
+                    .unwrap_or_else(|| format!("row-{i}"));
+                    QueryResultEntry { key, value: val }
+                })
+                .collect()
+        } else {
+            // Narrow candidate entries using index-accelerated evaluation when an
+            // IndexObserverFactory is wired and the query has a predicate. This
+            // reduces the entries passed to execute_query without altering the
+            // query semantics — the predicate is re-evaluated inside the backend
+            // and inside index_aware_evaluate itself, so no correctness risk.
+            let entries = if let (Some(factory), Some(predicate)) = (
+                self.index_observer_factory.as_ref(),
+                query.predicate.as_ref(),
+            ) {
+                if let Some(registry) = factory.get_registry(&map_name) {
+                    // Build a lookup map so the optimizer can fetch record values by key.
+                    let entry_map: std::collections::HashMap<&str, &rmpv::Value> =
+                        entries.iter().map(|(k, v)| (k.as_str(), v)).collect();
+                    let all_keys: Vec<String> = entries.iter().map(|(k, _)| k.clone()).collect();
 
-                let matching_set: HashSet<&str> =
-                    matching_keys.iter().map(String::as_str).collect();
-                entries
-                    .into_iter()
-                    .filter(|(k, _)| matching_set.contains(k.as_str()))
-                    .collect()
+                    let matching_keys =
+                        index_aware_evaluate(&registry, predicate, &all_keys, |key| {
+                            entry_map.get(key).map(|v| (*v).clone())
+                        });
+
+                    let matching_set: HashSet<&str> =
+                        matching_keys.iter().map(String::as_str).collect();
+                    entries
+                        .into_iter()
+                        .filter(|(k, _)| matching_set.contains(k.as_str()))
+                        .collect()
+                } else {
+                    entries
+                }
             } else {
                 entries
-            }
-        } else {
-            entries
-        };
+            };
 
-        // Delegate to query backend for filtering, sorting, and limiting
-        let mut results = self
-            .query_backend
-            .execute_query(&map_name, entries, &query)
-            .await
-            .map_err(|e| OperationError::Internal(anyhow::anyhow!("{e}")))?;
+            self.query_backend
+                .execute_query(&map_name, entries, &query)
+                .await
+                .map_err(|e| OperationError::Internal(anyhow::anyhow!("{e}")))?
+        };
 
         // Apply max_query_records clamping
         let total_count = results.len();
