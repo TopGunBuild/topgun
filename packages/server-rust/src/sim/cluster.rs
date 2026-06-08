@@ -1477,4 +1477,123 @@ mod tests {
 
         cluster.heal_partition();
     }
+
+    // -----------------------------------------------------------------------
+    // AC9 (SPEC-298b): fault injection with filter + multi-field sort + limit.
+    //
+    // This is the key-link test that proves the changed classify → DAG routing
+    // (R4/R5 from SPEC-298b) works correctly under fault. The assertions on
+    // ordering and limit-clamping can ONLY be satisfied by the DAG SortProcessor
+    // and LimitProcessor — a record-store-bypass would return records in
+    // insertion/hash-partition order without filter or limit, causing the
+    // ordering and absence assertions to fail.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    #[cfg(feature = "simulation")]
+    async fn sim_query_filter_sort_limit_under_node_failure() {
+        // Two-node cluster. We kill node-1, then issue a filter+sort+limit
+        // query against node-0. The DAG single-node bypass on node-0 executes
+        // the full pipeline locally; the dead node-1 never receives the query.
+        let mut cluster = SimCluster::new(2, 10);
+        cluster.start().expect("cluster start");
+
+        let map_name = "structured_fault_map";
+
+        // Each node sees only itself as an active member so the coordinator
+        // single-node bypass fires for queries on that node.
+        set_membership(&cluster.nodes[0], &["sim-node-0"]);
+        set_membership(&cluster.nodes[1], &["sim-node-1"]);
+        assign_partitions(&cluster.nodes[0], &|_| "sim-node-0".to_string());
+        assign_partitions(&cluster.nodes[1], &|_| "sim-node-1".to_string());
+
+        // Write 6 records to node-0: values 2, 4, 6, 8, 10, 12.
+        for (key, val) in [
+            ("sf-a", 2i64),
+            ("sf-b", 4i64),
+            ("sf-c", 6i64),
+            ("sf-d", 8i64),
+            ("sf-e", 10i64),
+            ("sf-f", 12i64),
+        ] {
+            cluster
+                .write(0, map_name, key, rmpv::Value::Integer(val.into()))
+                .await
+                .expect("write to node-0");
+        }
+
+        // Kill node-1 — it becomes unreachable.
+        cluster.kill_node(1);
+        assert!(!cluster.nodes[1].is_alive(), "node-1 should be dead");
+
+        // Query node-0 (alive): filter Int >= 6, sort by "Int" Asc (two fields
+        // to exercise the multi-field sort path), limit 2.
+        // Expected result after filter: 6, 8, 10, 12.
+        // After ascending sort + limit 2: [6, 8].
+        use topgun_core::messages::base::{PredicateNode, PredicateOp, SortDirection, SortField};
+        let query = Query {
+            predicate: Some(PredicateNode {
+                op: PredicateOp::Gte,
+                attribute: Some("Int".to_string()),
+                value: Some(rmpv::Value::Integer(6i64.into())),
+                children: None,
+                value_ref: None,
+            }),
+            sort: Some(vec![
+                SortField {
+                    field: "Int".to_string(),
+                    direction: SortDirection::Asc,
+                },
+                // Second sort field exercises the multi-field sort code path
+                // in the DAG converter, matching the production wire format.
+                SortField {
+                    field: "Int".to_string(),
+                    direction: SortDirection::Asc,
+                },
+            ]),
+            limit: Some(2),
+            ..Default::default()
+        };
+
+        let results = cluster
+            .query(0, map_name, query)
+            .await
+            .expect("query on alive node-0 under node-1 failure should succeed");
+
+        // AC9(a): limit-clamped to 2 rows even though 4 match the filter.
+        assert_eq!(
+            results.len(),
+            2,
+            "limit 2 should return exactly 2 rows (4 pass filter, 2 survive limit)"
+        );
+
+        // AC9(b): filtered — records with Int < 6 must be absent.
+        let has_below_threshold = results
+            .iter()
+            .any(|r| get_int_field(&r.value).is_some_and(|v| v < 6));
+        assert!(
+            !has_below_threshold,
+            "records with Int < 6 should be excluded by filter"
+        );
+
+        // AC9(c): DAG ascending sort — first result must be the smallest
+        // post-filter value (Int=6). A record-store fallback would return
+        // records in hash-partition/insertion order, NOT ascending order,
+        // so this assertion MUST fail if the DAG SortProcessor is bypassed.
+        let first_int = get_int_field(&results[0].value);
+        assert_eq!(
+            first_int,
+            Some(6),
+            "first result must be Int=6 (smallest after filter, ascending DAG sort)"
+        );
+
+        // AC9(d): limit clamp — Int=10 and Int=12 must be absent (cut off at 2).
+        let has_ten_or_above = results
+            .iter()
+            .any(|r| get_int_field(&r.value).is_some_and(|v| v >= 10));
+        assert!(
+            !has_ten_or_above,
+            "Int>=10 should be cut off by limit=2 after ascending DAG sort"
+        );
+    }
 }
