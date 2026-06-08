@@ -477,6 +477,10 @@ pub(crate) fn make_supplier_from_descriptor(
                 .map_err(|_| anyhow!("limit value {limit_u64} exceeds u32::MAX"))?;
             Ok(Box::new(LimitProcessorSupplier { limit }))
         }
+        // Cursor arm wired in G4 once CursorProcessorSupplier (G2) is available.
+        ProcessorType::Cursor => Err(anyhow!(
+            "CursorProcessorSupplier not yet registered"
+        )),
     }
 }
 

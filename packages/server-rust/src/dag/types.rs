@@ -40,6 +40,11 @@ pub enum ProcessorType {
     NetworkReceiver,
     Sort,
     Limit,
+    /// Keyset-cursor filter: drops entries not strictly after the cursor position.
+    /// Only present in the plan when `Query.cursor` is set; consumes the shared
+    /// `crate::query::cursor` module so there is one cursor implementation for
+    /// both HTTP and WS/DAG paths.
+    Cursor,
 }
 
 // ---------------------------------------------------------------------------
