@@ -1349,7 +1349,6 @@ mod tests {
     use super::*;
     use crate::network::config::ConnectionConfig;
     use crate::network::connection::{ConnectionId, ConnectionKind, ConnectionRegistry};
-    use crate::service::domain::query_backend::PredicateBackend;
     use crate::service::operation::{service_names, OperationContext};
     use crate::storage::datastores::NullDataStore;
     use crate::storage::impls::StorageConfig;
@@ -1837,7 +1836,6 @@ mod tests {
             registry,
             factory,
             conn_registry,
-            Arc::new(PredicateBackend),
             None,
             10_000,
             None,
@@ -1856,7 +1854,6 @@ mod tests {
             registry,
             factory,
             conn_registry,
-            Arc::new(PredicateBackend),
             None,
             10_000,
             None,
@@ -1879,7 +1876,6 @@ mod tests {
             registry,
             factory,
             conn_registry,
-            Arc::new(PredicateBackend),
             None,
             10_000,
             None,
@@ -1914,7 +1910,6 @@ mod tests {
             registry.clone(),
             factory,
             conn_registry,
-            Arc::new(PredicateBackend),
             None,
             10_000,
             None,
@@ -2019,7 +2014,6 @@ mod tests {
             registry.clone(),
             factory,
             conn_registry,
-            Arc::new(PredicateBackend),
             None,
             10_000,
             None,
@@ -2276,7 +2270,6 @@ mod tests {
             registry.clone(),
             factory,
             conn_registry,
-            Arc::new(PredicateBackend),
             Some(Arc::clone(&merkle_mgr)),
             10_000,
             None,
@@ -2342,7 +2335,6 @@ mod tests {
             registry.clone(),
             factory,
             conn_registry,
-            Arc::new(PredicateBackend),
             Some(Arc::clone(&merkle_mgr)),
             10_000,
             None,
@@ -2430,7 +2422,6 @@ mod tests {
             registry,
             factory,
             conn_registry,
-            Arc::new(PredicateBackend),
             None,
             10_000,
             None,
@@ -2568,7 +2559,6 @@ mod tests {
             registry,
             factory,
             conn_registry,
-            Arc::new(PredicateBackend),
             None,
             10_000,
             Some(observer_factory),
