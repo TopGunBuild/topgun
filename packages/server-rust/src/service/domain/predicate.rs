@@ -146,8 +146,9 @@ pub fn execute_query(entries: Vec<(String, rmpv::Value)>, query: &Query) -> Vec<
     // 2. Sort
     let mut sorted = filtered;
     if let Some(sort_fields) = &query.sort {
-        // Use first entry only; full multi-field sort application is owned by SPEC-298b
-        // which replaces PredicateBackend with the canonical DAG engine.
+        // Apply first sort field only — this function is the tests-only fallback path;
+        // the production DAG engine (ClusterQueryCoordinator) handles full multi-field
+        // sort via SortProcessor.
         if let Some(SortField { field, direction }) = sort_fields.first() {
             let field = field.clone();
             let desc = *direction == SortDirection::Desc;

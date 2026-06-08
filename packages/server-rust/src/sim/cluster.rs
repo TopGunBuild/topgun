@@ -229,7 +229,6 @@ impl SimNode {
                 query_registry,
                 Arc::clone(&record_store_factory),
                 Arc::clone(&connection_registry),
-                Arc::new(crate::service::domain::query_backend::PredicateBackend),
                 None,
                 10_000,
                 None,
@@ -967,11 +966,9 @@ impl SimCluster {
     /// DAG execution path a real WebSocket client hits, returning the
     /// result rows.
     ///
-    /// The current `classify` routing branch sends non-GROUP-BY queries to the
-    /// `PredicateBackend` path rather than the DAG, so this method drives
-    /// `coordinator.execute_distributed` directly — the EXACT call that
-    /// `query.rs::handle_dag_query` makes. This is faithful to the DAG path and
-    /// stays correct once `classify` routes all structured queries through it.
+    /// This method drives `coordinator.execute_distributed` directly — the EXACT
+    /// call that `query.rs::handle_dag_query` makes, so sim tests exercise the
+    /// same classify→DAG pipeline the production WS handler uses.
     ///
     /// # Row-key note
     /// For non-GROUP-BY queries, the DAG result rows do not carry a `__key`
