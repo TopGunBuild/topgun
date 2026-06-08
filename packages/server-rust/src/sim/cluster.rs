@@ -1479,14 +1479,14 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // AC9 (SPEC-298b): fault injection with filter + multi-field sort + limit.
+    // Fault injection with filter + multi-field sort + limit.
     //
-    // This is the key-link test that proves the changed classify → DAG routing
-    // (R4/R5 from SPEC-298b) works correctly under fault. The assertions on
-    // ordering and limit-clamping can ONLY be satisfied by the DAG SortProcessor
-    // and LimitProcessor — a record-store-bypass would return records in
-    // insertion/hash-partition order without filter or limit, causing the
-    // ordering and absence assertions to fail.
+    // Key-link test that proves the structured classify → DAG routing works
+    // correctly under fault. The assertions on ordering and limit-clamping can
+    // ONLY be satisfied by the DAG SortProcessor and LimitProcessor — a
+    // record-store-bypass would return records in insertion/hash-partition
+    // order without filter or limit, causing the ordering and absence
+    // assertions to fail.
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -1560,14 +1560,14 @@ mod tests {
             .await
             .expect("query on alive node-0 under node-1 failure should succeed");
 
-        // AC9(a): limit-clamped to 2 rows even though 4 match the filter.
+        // limit clamp: 2 rows even though 4 match the filter.
         assert_eq!(
             results.len(),
             2,
             "limit 2 should return exactly 2 rows (4 pass filter, 2 survive limit)"
         );
 
-        // AC9(b): filtered — records with Int < 6 must be absent.
+        // filter exclusion: records with Int < 6 must be absent.
         let has_below_threshold = results
             .iter()
             .any(|r| get_int_field(&r.value).is_some_and(|v| v < 6));
@@ -1576,10 +1576,10 @@ mod tests {
             "records with Int < 6 should be excluded by filter"
         );
 
-        // AC9(c): DAG ascending sort — first result must be the smallest
-        // post-filter value (Int=6). A record-store fallback would return
-        // records in hash-partition/insertion order, NOT ascending order,
-        // so this assertion MUST fail if the DAG SortProcessor is bypassed.
+        // DAG ascending sort: first result must be the smallest post-filter
+        // value (Int=6). A record-store fallback would return records in
+        // hash-partition/insertion order, NOT ascending order, so this
+        // assertion MUST fail if the DAG SortProcessor is bypassed.
         let first_int = get_int_field(&results[0].value);
         assert_eq!(
             first_int,
@@ -1587,7 +1587,7 @@ mod tests {
             "first result must be Int=6 (smallest after filter, ascending DAG sort)"
         );
 
-        // AC9(d): limit clamp — Int=10 and Int=12 must be absent (cut off at 2).
+        // limit cutoff: Int=10 and Int=12 must be absent (cut off at 2).
         let has_ten_or_above = results
             .iter()
             .any(|r| get_int_field(&r.value).is_some_and(|v| v >= 10));

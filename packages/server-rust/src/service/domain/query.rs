@@ -532,7 +532,8 @@ impl QueryService {
     /// 3. When a coordinator is wired, delegates to the DAG single-node path for
     ///    filtering, sorting, and limiting. Without a coordinator, falls back to
     ///    `query_backend.execute_query()` (constructed but not invoked on the WS
-    ///    path — its removal is SPEC-298d's job).
+    ///    path — retained as dead-but-constructed code pending a dedicated
+    ///    removal pass).
     /// 4. Applies `max_query_records` clamping with `has_more` flag.
     /// 5. Applies field projection if `fields` is specified.
     /// 6. Initializes per-query Merkle trees and computes aggregate root hash.
