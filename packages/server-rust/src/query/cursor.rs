@@ -71,6 +71,12 @@ pub struct SortValue {
 ///
 /// The encoding is URL-safe with no padding so the cursor can be passed as a URL
 /// query parameter without additional escaping.
+///
+/// # Panics
+///
+/// Panics if `serde_json` fails to serialize `CursorData`, which cannot happen for
+/// well-formed `CursorData` values (all fields are JSON-serializable primitives).
+#[must_use]
 pub fn encode_cursor(data: &CursorData) -> String {
     let json = serde_json::to_vec(data).expect("CursorData serialization is infallible");
     base64::engine::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &json)
@@ -81,6 +87,7 @@ pub fn encode_cursor(data: &CursorData) -> String {
 /// Returns `None` when the cursor is malformed, not valid base64url, or fails JSON
 /// deserialization. Callers must additionally validate the timestamp for expiry and
 /// check `predicate_hash`/`sort_hash` against the current query.
+#[must_use]
 pub fn decode_cursor(cursor: &str) -> Option<CursorData> {
     let bytes =
         base64::engine::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, cursor)
@@ -109,6 +116,7 @@ const CURSOR_TTL_MS: i64 = 10 * 60 * 1000;
 /// - After all sort fields are equal, apply the `last_key` tie-break: include only
 ///   when `key > cursor.last_key`.
 /// - When `sort_values` is empty (key-only ordering), only the tie-break applies.
+#[must_use]
 pub fn is_after_cursor(key: &str, record_value: &rmpv::Value, cursor: &CursorData) -> bool {
     for sv in &cursor.sort_values {
         // Extract field value from the rmpv map record.
@@ -154,17 +162,15 @@ pub fn is_after_cursor(key: &str, record_value: &rmpv::Value, cursor: &CursorDat
 /// Returns `false` when the `predicate_hash` or `sort_hash` in the cursor does not
 /// match the supplied values, indicating a cursor was produced by a different query
 /// shape. Callers should reject the request with a 400 when this returns `false`.
-pub fn validate_cursor_hashes(
-    cursor: &CursorData,
-    predicate_hash: u64,
-    sort_hash: u64,
-) -> bool {
+#[must_use]
+pub fn validate_cursor_hashes(cursor: &CursorData, predicate_hash: u64, sort_hash: u64) -> bool {
     cursor.predicate_hash == predicate_hash && cursor.sort_hash == sort_hash
 }
 
 /// Validates that the cursor has not expired relative to `now_ms`.
 ///
 /// Returns `false` when the cursor is older than [`CURSOR_TTL_MS`].
+#[must_use]
 pub fn validate_cursor_expiry(cursor: &CursorData, now_ms: i64) -> bool {
     now_ms - cursor.timestamp <= CURSOR_TTL_MS
 }
@@ -466,12 +472,7 @@ mod tests {
     // is_after_cursor: multi-field (ASC + DESC mixed)
     // -----------------------------------------------------------------------
 
-    fn make_two_field_record(
-        f1: &str,
-        v1: rmpv::Value,
-        f2: &str,
-        v2: rmpv::Value,
-    ) -> rmpv::Value {
+    fn make_two_field_record(f1: &str, v1: rmpv::Value, f2: &str, v2: rmpv::Value) -> rmpv::Value {
         rmpv::Value::Map(vec![
             (rmpv::Value::String(f1.into()), v1),
             (rmpv::Value::String(f2.into()), v2),
@@ -501,13 +502,21 @@ mod tests {
         };
 
         // Record with age=40 (> 30 ASC) → after cursor regardless of name
-        let rec_after =
-            make_two_field_record("age", rmpv::Value::Integer(40.into()), "name", rmpv::Value::String("Zara".into()));
+        let rec_after = make_two_field_record(
+            "age",
+            rmpv::Value::Integer(40.into()),
+            "name",
+            rmpv::Value::String("Zara".into()),
+        );
         assert!(is_after_cursor("z", &rec_after, &cursor));
 
         // Record with age=20 (< 30 ASC) → before cursor regardless of name
-        let rec_before =
-            make_two_field_record("age", rmpv::Value::Integer(20.into()), "name", rmpv::Value::String("Zara".into()));
+        let rec_before = make_two_field_record(
+            "age",
+            rmpv::Value::Integer(20.into()),
+            "name",
+            rmpv::Value::String("Zara".into()),
+        );
         assert!(!is_after_cursor("z", &rec_before, &cursor));
     }
 
@@ -534,13 +543,21 @@ mod tests {
         };
 
         // age equal (30), name "Aardvark" < "Alice" → DESC means lower value is after
-        let rec_aardvark =
-            make_two_field_record("age", rmpv::Value::Integer(30.into()), "name", rmpv::Value::String("Aardvark".into()));
+        let rec_aardvark = make_two_field_record(
+            "age",
+            rmpv::Value::Integer(30.into()),
+            "name",
+            rmpv::Value::String("Aardvark".into()),
+        );
         assert!(is_after_cursor("z", &rec_aardvark, &cursor));
 
         // age equal (30), name "Zara" > "Alice" → DESC means higher value is before
-        let rec_zara =
-            make_two_field_record("age", rmpv::Value::Integer(30.into()), "name", rmpv::Value::String("Zara".into()));
+        let rec_zara = make_two_field_record(
+            "age",
+            rmpv::Value::Integer(30.into()),
+            "name",
+            rmpv::Value::String("Zara".into()),
+        );
         assert!(!is_after_cursor("z", &rec_zara, &cursor));
     }
 
@@ -631,34 +648,18 @@ mod tests {
     fn compare_non_nil_sorts_before_null() {
         // any non-nil < null
         assert!(
-            compare_rmpv_to_json(
-                &rmpv::Value::Integer(5.into()),
-                &serde_json::Value::Null
-            ) < 0
+            compare_rmpv_to_json(&rmpv::Value::Integer(5.into()), &serde_json::Value::Null) < 0
         );
     }
 
     #[test]
     fn compare_integers() {
         assert_eq!(
-            compare_rmpv_to_json(
-                &rmpv::Value::Integer(10.into()),
-                &serde_json::json!(10)
-            ),
+            compare_rmpv_to_json(&rmpv::Value::Integer(10.into()), &serde_json::json!(10)),
             0
         );
-        assert!(
-            compare_rmpv_to_json(
-                &rmpv::Value::Integer(11.into()),
-                &serde_json::json!(10)
-            ) > 0
-        );
-        assert!(
-            compare_rmpv_to_json(
-                &rmpv::Value::Integer(9.into()),
-                &serde_json::json!(10)
-            ) < 0
-        );
+        assert!(compare_rmpv_to_json(&rmpv::Value::Integer(11.into()), &serde_json::json!(10)) > 0);
+        assert!(compare_rmpv_to_json(&rmpv::Value::Integer(9.into()), &serde_json::json!(10)) < 0);
     }
 
     #[test]
@@ -671,10 +672,7 @@ mod tests {
             0
         );
         assert!(
-            compare_rmpv_to_json(
-                &rmpv::Value::String("b".into()),
-                &serde_json::json!("a")
-            ) > 0
+            compare_rmpv_to_json(&rmpv::Value::String("b".into()), &serde_json::json!("a")) > 0
         );
     }
 }
@@ -701,10 +699,13 @@ mod proptests {
         ) {
             // Build a cursor with `num_sort_fields` fields.
             let sort_values: Vec<SortValue> = (0..num_sort_fields)
-                .map(|i| SortValue {
-                    field: format!("field{i}"),
-                    value: serde_json::Value::Number(serde_json::Number::from(i as i64)),
-                    direction: if i % 2 == 0 { SortDirection::Asc } else { SortDirection::Desc },
+                .map(|i| {
+                    let i_i64 = i64::try_from(i).unwrap_or(0);
+                    SortValue {
+                        field: format!("field{i}"),
+                        value: serde_json::Value::Number(serde_json::Number::from(i_i64)),
+                        direction: if i % 2 == 0 { SortDirection::Asc } else { SortDirection::Desc },
+                    }
                 })
                 .collect();
 
