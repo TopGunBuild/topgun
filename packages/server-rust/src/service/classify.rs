@@ -173,18 +173,9 @@ impl OperationService {
             // ----- Query domain (service_name = "query") -----
             Message::QuerySub(payload) => {
                 let ctx = self.make_ctx(service_names::QUERY, client_id, caller_origin, None);
-                // Route GROUP BY queries through DAG path
-                let has_group_by = payload
-                    .payload
-                    .query
-                    .group_by
-                    .as_ref()
-                    .is_some_and(|v| !v.is_empty());
-                if has_group_by {
-                    Ok(Operation::DagQuery { ctx, payload })
-                } else {
-                    Ok(Operation::QuerySubscribe { ctx, payload })
-                }
+                // All structured queries (filter/sort/limit/cursor/group_by) use the
+                // DAG single-node path as the canonical execution engine.
+                Ok(Operation::DagQuery { ctx, payload })
             }
             Message::QueryUnsub(payload) => {
                 let ctx = self.make_ctx(service_names::QUERY, client_id, caller_origin, None);
@@ -933,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_query_sub_routes_to_query() {
+    fn classify_query_sub_routes_to_dag_query() {
         let svc = make_service();
         let msg = Message::QuerySub(topgun_core::messages::QuerySubMessage {
             payload: topgun_core::messages::QuerySubPayload {
@@ -945,6 +936,10 @@ mod tests {
         });
         let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
         assert_eq!(op.ctx().service_name, service_names::QUERY);
+        assert!(
+            matches!(op, Operation::DagQuery { .. }),
+            "all QuerySub should route to DagQuery"
+        );
     }
 
     #[test]
@@ -984,10 +979,10 @@ mod tests {
     }
 
     #[test]
-    fn classify_query_sub_without_group_by_routes_to_query_subscribe() {
+    fn classify_query_sub_without_group_by_routes_to_dag_query() {
         let svc = make_service();
 
-        // No group_by field
+        // No group_by field — still routes to DagQuery (DAG is the canonical engine)
         let msg_none = Message::QuerySub(topgun_core::messages::QuerySubMessage {
             payload: topgun_core::messages::QuerySubPayload {
                 query_id: "q-1".to_string(),
@@ -1002,11 +997,11 @@ mod tests {
         let op = svc.classify(msg_none, None, CallerOrigin::Client).unwrap();
         assert_eq!(op.ctx().service_name, service_names::QUERY);
         assert!(
-            matches!(op, Operation::QuerySubscribe { .. }),
-            "absent group_by should route to QuerySubscribe"
+            matches!(op, Operation::DagQuery { .. }),
+            "absent group_by should route to DagQuery"
         );
 
-        // Empty group_by vec
+        // Empty group_by vec — still routes to DagQuery
         let msg_empty = Message::QuerySub(topgun_core::messages::QuerySubMessage {
             payload: topgun_core::messages::QuerySubPayload {
                 query_id: "q-2".to_string(),
@@ -1020,8 +1015,87 @@ mod tests {
         });
         let op = svc.classify(msg_empty, None, CallerOrigin::Client).unwrap();
         assert!(
-            matches!(op, Operation::QuerySubscribe { .. }),
-            "empty group_by vec should route to QuerySubscribe"
+            matches!(op, Operation::DagQuery { .. }),
+            "empty group_by vec should route to DagQuery"
+        );
+    }
+
+    #[test]
+    fn classify_query_sub_with_sort_routes_to_dag_query() {
+        use topgun_core::messages::base::{SortDirection, SortField};
+        let svc = make_service();
+
+        let msg = Message::QuerySub(topgun_core::messages::QuerySubMessage {
+            payload: topgun_core::messages::QuerySubPayload {
+                query_id: "sort-q-1".to_string(),
+                map_name: "products".to_string(),
+                query: topgun_core::messages::base::Query {
+                    sort: Some(vec![
+                        SortField {
+                            field: "price".to_string(),
+                            direction: SortDirection::Asc,
+                        },
+                        SortField {
+                            field: "name".to_string(),
+                            direction: SortDirection::Desc,
+                        },
+                    ]),
+                    ..topgun_core::messages::base::Query::default()
+                },
+                fields: None,
+            },
+        });
+        let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
+        assert_eq!(op.ctx().service_name, service_names::QUERY);
+        assert!(
+            matches!(op, Operation::DagQuery { .. }),
+            "sort-only query should route to DagQuery"
+        );
+    }
+
+    #[test]
+    fn classify_query_sub_with_limit_routes_to_dag_query() {
+        let svc = make_service();
+
+        let msg = Message::QuerySub(topgun_core::messages::QuerySubMessage {
+            payload: topgun_core::messages::QuerySubPayload {
+                query_id: "limit-q-1".to_string(),
+                map_name: "events".to_string(),
+                query: topgun_core::messages::base::Query {
+                    limit: Some(50),
+                    ..topgun_core::messages::base::Query::default()
+                },
+                fields: None,
+            },
+        });
+        let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
+        assert_eq!(op.ctx().service_name, service_names::QUERY);
+        assert!(
+            matches!(op, Operation::DagQuery { .. }),
+            "limit-only query should route to DagQuery"
+        );
+    }
+
+    #[test]
+    fn classify_query_sub_with_cursor_routes_to_dag_query() {
+        let svc = make_service();
+
+        let msg = Message::QuerySub(topgun_core::messages::QuerySubMessage {
+            payload: topgun_core::messages::QuerySubPayload {
+                query_id: "cursor-q-1".to_string(),
+                map_name: "logs".to_string(),
+                query: topgun_core::messages::base::Query {
+                    cursor: Some("cursor-token-abc".to_string()),
+                    ..topgun_core::messages::base::Query::default()
+                },
+                fields: None,
+            },
+        });
+        let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
+        assert_eq!(op.ctx().service_name, service_names::QUERY);
+        assert!(
+            matches!(op, Operation::DagQuery { .. }),
+            "cursor query should route to DagQuery"
         );
     }
 
