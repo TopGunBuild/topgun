@@ -879,4 +879,90 @@ mod tests {
             panic!("sort config should be an array");
         }
     }
+
+    // --- Cursor vertex insertion (between Filter and Sort) ---
+
+    #[test]
+    fn convert_query_with_cursor_inserts_cursor_vertex_between_filter_and_sort() {
+        use topgun_core::messages::base::{SortDirection, SortField};
+
+        let mut where_map = HashMap::new();
+        where_map.insert("status".to_string(), rmpv::Value::String("active".into()));
+
+        let q = Query {
+            r#where: Some(where_map),
+            sort: Some(vec![SortField {
+                field: "age".to_string(),
+                direction: SortDirection::Desc,
+            }]),
+            cursor: Some("opaque-cursor-token".to_string()),
+            ..Default::default()
+        };
+
+        let desc = QueryToDagConverter::convert_query(&q, "users", &single_node_assignment())
+            .expect("convert should succeed");
+
+        let names = vertex_names(&desc);
+        assert!(names.contains(&"cursor"), "cursor vertex must be emitted");
+
+        // Cursor must sit strictly between Filter and Sort: Scan→Filter→Cursor→Sort→…
+        let filter_idx = names.iter().position(|&n| n == "filter").unwrap();
+        let cursor_idx = names.iter().position(|&n| n == "cursor").unwrap();
+        let sort_idx = names.iter().position(|&n| n == "sort").unwrap();
+        assert!(filter_idx < cursor_idx, "cursor must come after filter");
+        assert!(cursor_idx < sort_idx, "cursor must come before sort");
+
+        // The cursor vertex is typed as Cursor and carries the keyset token in its config.
+        let cursor_vertex = &desc.vertices[cursor_idx];
+        assert_eq!(cursor_vertex.processor_type, ProcessorType::Cursor);
+        let config = cursor_vertex
+            .config
+            .as_ref()
+            .expect("cursor vertex should have config");
+        if let rmpv::Value::Map(entries) = config {
+            let token = entries
+                .iter()
+                .find(|(k, _)| k.as_str() == Some("cursor"))
+                .map(|(_, v)| v.as_str());
+            assert_eq!(token, Some(Some("opaque-cursor-token")));
+        } else {
+            panic!("cursor config should be a map");
+        }
+
+        // Edge chain proves the wiring: filter → cursor → sort.
+        assert!(
+            desc.edges
+                .iter()
+                .any(|e| e.source_name == "filter" && e.dest_name == "cursor"),
+            "edge from filter to cursor must exist"
+        );
+        assert!(
+            desc.edges
+                .iter()
+                .any(|e| e.source_name == "cursor" && e.dest_name == "sort"),
+            "edge from cursor to sort must exist"
+        );
+    }
+
+    #[test]
+    fn convert_query_without_cursor_emits_no_cursor_vertex() {
+        use topgun_core::messages::base::{SortDirection, SortField};
+
+        // The non-paginated path must add zero cursor overhead.
+        let q = Query {
+            sort: Some(vec![SortField {
+                field: "age".to_string(),
+                direction: SortDirection::Desc,
+            }]),
+            ..Default::default()
+        };
+
+        let desc = QueryToDagConverter::convert_query(&q, "users", &single_node_assignment())
+            .expect("convert should succeed");
+
+        assert!(
+            !vertex_names(&desc).contains(&"cursor"),
+            "no cursor vertex on the non-paginated path"
+        );
+    }
 }
