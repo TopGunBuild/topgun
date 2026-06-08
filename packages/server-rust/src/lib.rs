@@ -9,6 +9,7 @@
 pub mod cluster;
 pub mod dag;
 pub mod network;
+pub mod query;
 pub mod service;
 pub mod storage;
 pub mod traits;
