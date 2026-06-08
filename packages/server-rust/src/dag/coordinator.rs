@@ -347,8 +347,9 @@ pub(crate) fn make_supplier_from_descriptor(
     factory: Arc<RecordStoreFactory>,
 ) -> Result<Box<dyn crate::dag::types::ProcessorSupplier>> {
     use crate::dag::processors::{
-        AggregateProcessorSupplier, CollectorProcessorSupplier, FilterProcessorSupplier,
-        LimitProcessorSupplier, ScanProcessorSupplier, SortProcessorSupplier,
+        AggregateProcessorSupplier, CollectorProcessorSupplier, CursorProcessorSupplier,
+        FilterProcessorSupplier, LimitProcessorSupplier, ScanProcessorSupplier,
+        SortProcessorSupplier,
     };
     use topgun_core::messages::base::SortDirection;
 
@@ -477,10 +478,54 @@ pub(crate) fn make_supplier_from_descriptor(
                 .map_err(|_| anyhow!("limit value {limit_u64} exceeds u32::MAX"))?;
             Ok(Box::new(LimitProcessorSupplier { limit }))
         }
-        // Cursor arm wired in G4 once CursorProcessorSupplier (G2) is available.
-        ProcessorType::Cursor => Err(anyhow!(
-            "CursorProcessorSupplier not yet registered"
-        )),
+        ProcessorType::Cursor => {
+            // Extract cursor string, predicate_hash, and sort_hash from the config map.
+            // The converter packs these under the keys "cursor", "predicateHash",
+            // "sortHash" so the supplier can validate cursor authenticity at init time.
+            let (raw_cursor, predicate_hash, sort_hash) = vd
+                .config
+                .as_ref()
+                .and_then(|c| {
+                    if let rmpv::Value::Map(pairs) = c {
+                        let cursor = pairs.iter().find_map(|(k, v)| {
+                            if k.as_str() == Some("cursor") {
+                                v.as_str().map(str::to_string)
+                            } else {
+                                None
+                            }
+                        })?;
+                        let predicate_hash = pairs
+                            .iter()
+                            .find_map(|(k, v)| {
+                                if k.as_str() == Some("predicateHash") {
+                                    v.as_u64()
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or(0);
+                        let sort_hash = pairs
+                            .iter()
+                            .find_map(|(k, v)| {
+                                if k.as_str() == Some("sortHash") {
+                                    v.as_u64()
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or(0);
+                        Some((cursor, predicate_hash, sort_hash))
+                    } else {
+                        None
+                    }
+                })
+                .ok_or_else(|| anyhow!("cursor vertex missing valid cursor config"))?;
+            Ok(Box::new(CursorProcessorSupplier {
+                raw_cursor,
+                predicate_hash,
+                sort_hash,
+            }))
+        }
     }
 }
 
@@ -986,5 +1031,448 @@ mod tests {
         let bytes = rmp_serde::to_vec_named(&pt).expect("serialize");
         let decoded: ProcessorType = rmp_serde::from_slice(&bytes).expect("deserialize");
         assert_eq!(decoded, ProcessorType::Limit);
+    }
+
+    // --- ProcessorType::Cursor MsgPack roundtrip ---
+
+    #[test]
+    fn processor_type_cursor_roundtrip() {
+        // The SCREAMING_SNAKE_CASE serde attribute must serialise Cursor as "CURSOR"
+        // on the wire so the plan descriptor survives a round-trip through MsgPack.
+        let pt = ProcessorType::Cursor;
+        let bytes = rmp_serde::to_vec_named(&pt).expect("serialize");
+        let decoded: ProcessorType = rmp_serde::from_slice(&bytes).expect("deserialize");
+        assert_eq!(decoded, ProcessorType::Cursor);
+    }
+
+    // --- make_supplier_from_descriptor builds CursorProcessorSupplier correctly ---
+
+    #[test]
+    fn make_supplier_cursor_returns_valid_supplier() {
+        use crate::query::cursor::{CursorData, encode_cursor};
+        use topgun_core::messages::base::SortDirection;
+
+        // Build a valid encoded cursor to use as the config value.
+        let cursor_data = CursorData {
+            sort_values: vec![crate::query::cursor::SortValue {
+                field: "score".to_string(),
+                value: serde_json::Value::Number(serde_json::Number::from(42i64)),
+                direction: SortDirection::Asc,
+            }],
+            last_key: "rec-x".to_string(),
+            predicate_hash: 0,
+            sort_hash: 0,
+            timestamp: 0,
+        };
+        let encoded = encode_cursor(&cursor_data);
+
+        let cursor_config = rmpv::Value::Map(vec![
+            (
+                rmpv::Value::String("cursor".into()),
+                rmpv::Value::String(encoded.into()),
+            ),
+            (
+                rmpv::Value::String("predicateHash".into()),
+                rmpv::Value::Integer(rmpv::Integer::from(0u64)),
+            ),
+            (
+                rmpv::Value::String("sortHash".into()),
+                rmpv::Value::Integer(rmpv::Integer::from(0u64)),
+            ),
+        ]);
+
+        let vd = VertexDescriptor {
+            name: "cursor".to_string(),
+            local_parallelism: 1,
+            processor_type: ProcessorType::Cursor,
+            preferred_partitions: None,
+            config: Some(cursor_config),
+        };
+
+        let factory = make_record_store_factory();
+        let supplier = make_supplier_from_descriptor(&vd, factory);
+        assert!(
+            supplier.is_ok(),
+            "cursor supplier should be created successfully: {:?}",
+            supplier.err()
+        );
+
+        let processors = supplier.unwrap().get(1);
+        assert_eq!(processors.len(), 1);
+    }
+
+    // --- AC5b: multi-field sort + cursor pagination — each row exactly once ---
+
+    /// Helper to build a ClusterQueryCoordinator wired for single-node bypass using
+    /// the given pre-populated RecordStoreFactory.
+    ///
+    /// All 271 partitions are assigned to "coordinator-test" so the ScanProcessor
+    /// can find records regardless of which hash partition they land in.
+    fn make_single_node_coordinator(
+        factory: Arc<RecordStoreFactory>,
+    ) -> ClusterQueryCoordinator {
+        let cluster = Arc::new(MockClusterService::new(&["coordinator-test"]));
+
+        // Assign all 271 partitions to "coordinator-test" so ScanProcessor finds records.
+        let partition_count = cluster.partition_table().partition_count();
+        for pid in 0..partition_count {
+            cluster
+                .partition_table()
+                .set_owner(pid, "coordinator-test".to_string(), Vec::new());
+        }
+
+        let completion_registry = make_completion_registry();
+        let conn_reg = make_connection_registry();
+
+        ClusterQueryCoordinator::new(
+            cluster as Arc<dyn ClusterService>,
+            conn_reg,
+            factory,
+            "coordinator-test".to_string(),
+            make_test_config(10_000),
+            completion_registry,
+        )
+    }
+
+    #[tokio::test]
+    async fn cursor_pagination_returns_each_row_exactly_once() {
+        use crate::query::cursor::{CursorData, SortValue, encode_cursor, rmpv_to_json_value};
+        use crate::storage::record::RecordValue;
+        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+        use topgun_core::messages::base::{SortDirection, SortField};
+        use topgun_core::{Timestamp, Value};
+
+        // Build a factory and pre-populate 6 records with ascending integer scores.
+        // Using a sorted key names so the key tie-break order matches score order.
+        let factory = Arc::new(RecordStoreFactory::new(
+            crate::storage::impls::StorageConfig::default(),
+            Arc::new(NullDataStore),
+            Vec::new(),
+        ));
+
+        let map_name = "paginate_test";
+        // Records: score 10..60 step 10, keys "rec-a".."rec-f" (alphabetical = score order)
+        let records: Vec<(&str, i64)> = vec![
+            ("rec-a", 10),
+            ("rec-b", 20),
+            ("rec-c", 30),
+            ("rec-d", 40),
+            ("rec-e", 50),
+            ("rec-f", 60),
+        ];
+
+        for (key, score) in &records {
+            let partition_id = topgun_core::hash_to_partition(key);
+            let store = factory.get_or_create(map_name, partition_id);
+            let value = RecordValue::Lww {
+                value: Value::Int(*score),
+                timestamp: Timestamp {
+                    millis: 1_000_000,
+                    counter: 0,
+                    node_id: "test-node".to_string(),
+                },
+            };
+            store
+                .put(key, value, ExpiryPolicy::NONE, CallerProvenance::Client)
+                .await
+                .expect("put should succeed");
+        }
+
+        let coordinator = make_single_node_coordinator(Arc::clone(&factory));
+
+        // Query page 1: sort by "Int" ASC, limit 3 — no cursor.
+        let page1_query = Query {
+            sort: Some(vec![SortField {
+                field: "Int".to_string(),
+                direction: SortDirection::Asc,
+            }]),
+            limit: Some(3),
+            ..Default::default()
+        };
+
+        let page1_results = coordinator
+            .execute_distributed(&page1_query, map_name)
+            .await
+            .expect("page 1 query should succeed");
+
+        // Page 1 must have exactly 3 results.
+        assert_eq!(page1_results.len(), 3, "page 1 must return 3 rows");
+
+        // Extract Int values from page 1 results.
+        let page1_ints: Vec<i64> = page1_results
+            .iter()
+            .filter_map(|v| {
+                if let rmpv::Value::Map(pairs) = v {
+                    pairs.iter().find_map(|(k, val)| {
+                        if k.as_str() == Some("Int") {
+                            if let rmpv::Value::Integer(i) = val {
+                                i.as_i64()
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // VACUITY GUARD: ascending sort must put the smallest values first.
+        assert_eq!(page1_ints, vec![10, 20, 30], "page 1 must be [10, 20, 30] in ascending order");
+
+        // Build the cursor from the last record on page 1.
+        // The last record has Int=30 and _key="rec-c".
+        let last = &page1_results[2];
+        let last_key = if let rmpv::Value::Map(pairs) = last {
+            pairs.iter().find_map(|(k, v)| {
+                if k.as_str() == Some("_key") {
+                    v.as_str().map(str::to_string)
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        }
+        .expect("_key must be present in scan output");
+
+        let last_int_json = if let rmpv::Value::Map(pairs) = last {
+            pairs.iter().find_map(|(k, v)| {
+                if k.as_str() == Some("Int") {
+                    rmpv_to_json_value(v)
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        }
+        .expect("Int field must be present in last record");
+
+        // Compute the sort_hash the same way convert_query does for the page-2 query so
+        // CursorProcessor's hash-validation accepts this cursor.
+        let sort_fields_for_hash = vec![SortField {
+            field: "Int".to_string(),
+            direction: SortDirection::Asc,
+        }];
+        let sort_hash: u64 = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            format!("{sort_fields_for_hash:?}").hash(&mut h);
+            h.finish()
+        };
+
+        let cursor_data = CursorData {
+            sort_values: vec![SortValue {
+                field: "Int".to_string(),
+                value: last_int_json,
+                direction: SortDirection::Asc,
+            }],
+            last_key: last_key.clone(),
+            predicate_hash: 0, // page-2 query has no predicate → hash is 0
+            sort_hash,
+            // Set a very recent timestamp so the cursor is not expired.
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+        };
+        let encoded_cursor = encode_cursor(&cursor_data);
+
+        // Query page 2: same sort, limit 3, with the cursor.
+        let page2_query = Query {
+            sort: Some(vec![SortField {
+                field: "Int".to_string(),
+                direction: SortDirection::Asc,
+            }]),
+            limit: Some(3),
+            cursor: Some(encoded_cursor),
+            ..Default::default()
+        };
+
+        let page2_results = coordinator
+            .execute_distributed(&page2_query, map_name)
+            .await
+            .expect("page 2 query should succeed");
+
+        // Page 2 must have exactly 3 results (rec-d=40, rec-e=50, rec-f=60).
+        assert_eq!(page2_results.len(), 3, "page 2 must return 3 rows");
+
+        let page2_ints: Vec<i64> = page2_results
+            .iter()
+            .filter_map(|v| {
+                if let rmpv::Value::Map(pairs) = v {
+                    pairs.iter().find_map(|(k, val)| {
+                        if k.as_str() == Some("Int") {
+                            if let rmpv::Value::Integer(i) = val {
+                                i.as_i64()
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Page 2 must be [40, 50, 60] — strictly after the cursor at Int=30/rec-c.
+        assert_eq!(page2_ints, vec![40, 50, 60], "page 2 must be [40, 50, 60]");
+
+        // Combined: all 6 unique values appear exactly once, no gaps, no duplicates.
+        let mut all_ints: Vec<i64> = page1_ints
+            .iter()
+            .chain(page2_ints.iter())
+            .copied()
+            .collect();
+        all_ints.sort_unstable();
+        assert_eq!(
+            all_ints,
+            vec![10, 20, 30, 40, 50, 60],
+            "combined pages must contain all 6 rows exactly once"
+        );
+    }
+
+    // --- AC6: cursor validation rejection cases ---
+
+    #[tokio::test]
+    async fn cursor_rejected_when_hash_mismatches() {
+        use crate::query::cursor::{CursorData, SortValue, encode_cursor};
+        use topgun_core::messages::base::{SortDirection, SortField};
+
+        // A cursor with non-zero predicate_hash/sort_hash will not match the
+        // zero-hash query (no predicate, no sort hash). The CursorProcessor
+        // must reject it and return zero results rather than a full page.
+        let cursor_data = CursorData {
+            sort_values: vec![SortValue {
+                field: "Int".to_string(),
+                value: serde_json::Value::Number(serde_json::Number::from(0i64)),
+                direction: SortDirection::Asc,
+            }],
+            last_key: "a".to_string(),
+            predicate_hash: 9999,   // wrong — query has predicate_hash 0
+            sort_hash: 8888,         // wrong
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+        };
+        let encoded = encode_cursor(&cursor_data);
+
+        // Populate a record so there WOULD be results without cursor filtering.
+        let factory = Arc::new(RecordStoreFactory::new(
+            crate::storage::impls::StorageConfig::default(),
+            Arc::new(NullDataStore),
+            Vec::new(),
+        ));
+        use crate::storage::record::RecordValue;
+        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+        use topgun_core::{Timestamp, Value};
+        let map_name = "hash_reject_map";
+        let partition_id = topgun_core::hash_to_partition("k1");
+        let store = factory.get_or_create(map_name, partition_id);
+        store
+            .put(
+                "k1",
+                RecordValue::Lww {
+                    value: Value::Int(42),
+                    timestamp: Timestamp { millis: 0, counter: 0, node_id: "test-node".to_string() },
+                },
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
+            .await
+            .expect("put");
+
+        let coordinator = make_single_node_coordinator(factory);
+        let query = Query {
+            sort: Some(vec![SortField { field: "Int".to_string(), direction: SortDirection::Asc }]),
+            cursor: Some(encoded),
+            ..Default::default()
+        };
+
+        let results = coordinator
+            .execute_distributed(&query, map_name)
+            .await
+            .expect("query should not error");
+
+        // With a hash-mismatched cursor, the CursorProcessor rejects all items.
+        assert!(
+            results.is_empty(),
+            "hash-mismatched cursor must return no results, got: {results:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cursor_rejected_when_expired() {
+        use crate::query::cursor::{CursorData, SortValue, encode_cursor};
+        use topgun_core::messages::base::{SortDirection, SortField};
+
+        // An expired cursor (timestamp 11 minutes ago) must be rejected.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        let cursor_data = CursorData {
+            sort_values: vec![SortValue {
+                field: "Int".to_string(),
+                value: serde_json::Value::Number(serde_json::Number::from(0i64)),
+                direction: SortDirection::Asc,
+            }],
+            last_key: "a".to_string(),
+            predicate_hash: 0,
+            sort_hash: 0,
+            timestamp: now_ms - 11 * 60 * 1000, // 11 minutes ago → expired
+        };
+        let encoded = encode_cursor(&cursor_data);
+
+        let factory = Arc::new(RecordStoreFactory::new(
+            crate::storage::impls::StorageConfig::default(),
+            Arc::new(NullDataStore),
+            Vec::new(),
+        ));
+        use crate::storage::record::RecordValue;
+        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+        use topgun_core::{Timestamp, Value};
+        let map_name = "expired_cursor_map";
+        let partition_id = topgun_core::hash_to_partition("k1");
+        let store = factory.get_or_create(map_name, partition_id);
+        store
+            .put(
+                "k1",
+                RecordValue::Lww {
+                    value: Value::Int(42),
+                    timestamp: Timestamp { millis: 0, counter: 0, node_id: "test-node".to_string() },
+                },
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
+            .await
+            .expect("put");
+
+        let coordinator = make_single_node_coordinator(factory);
+        let query = Query {
+            sort: Some(vec![SortField { field: "Int".to_string(), direction: SortDirection::Asc }]),
+            cursor: Some(encoded),
+            ..Default::default()
+        };
+
+        let results = coordinator
+            .execute_distributed(&query, map_name)
+            .await
+            .expect("query should not error");
+
+        // Expired cursor: all items must be rejected.
+        assert!(
+            results.is_empty(),
+            "expired cursor must return no results, got: {results:?}"
+        );
     }
 }

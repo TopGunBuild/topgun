@@ -180,12 +180,31 @@ impl Processor for ScanProcessor {
         for &pid in &self.partition_ids {
             let store = self.factory.get_or_create(&self.map_name, pid);
             store.for_each_boxed(
-                &mut |_key, record| {
+                &mut |key, record| {
                     // Bridge topgun_core::types::Value -> rmpv::Value via MsgPack round-trip.
                     if let RecordValue::Lww { value, .. } = &record.value {
                         if let Ok(bytes) = rmp_serde::to_vec_named(value) {
                             if let Ok(rmpv_val) = rmp_serde::from_slice::<rmpv::Value>(&bytes) {
-                                self.buffer.push(rmpv_val);
+                                // Inject the record key as `_key` so downstream stages
+                                // (e.g. CursorProcessor's last_key tie-break) can access
+                                // it without a separate key channel.
+                                let row = match rmpv_val {
+                                    rmpv::Value::Map(mut pairs) => {
+                                        pairs.push((
+                                            rmpv::Value::String("_key".into()),
+                                            rmpv::Value::String(key.into()),
+                                        ));
+                                        rmpv::Value::Map(pairs)
+                                    }
+                                    other => rmpv::Value::Map(vec![
+                                        (
+                                            rmpv::Value::String("_key".into()),
+                                            rmpv::Value::String(key.into()),
+                                        ),
+                                        (rmpv::Value::String("_value".into()), other),
+                                    ]),
+                                };
+                                self.buffer.push(row);
                             }
                         }
                     }
