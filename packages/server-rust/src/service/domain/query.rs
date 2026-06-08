@@ -33,9 +33,9 @@ use crate::service::domain::index::attribute::AttributeExtractor;
 use crate::service::domain::index::query_optimizer::index_aware_evaluate;
 use crate::service::domain::index::IndexObserverFactory;
 use crate::service::domain::predicate::{
-    evaluate_predicate, evaluate_where, value_to_rmpv, EvalContext,
+    evaluate_predicate, evaluate_where, execute_query as predicate_execute_query, value_to_rmpv,
+    EvalContext,
 };
-use crate::service::domain::query_backend::QueryBackend;
 use crate::service::operation::{service_names, Operation, OperationError, OperationResponse};
 use crate::service::registry::{ManagedService, ServiceContext};
 use crate::storage::mutation_observer::MutationObserver;
@@ -373,7 +373,6 @@ pub struct QueryService {
     /// Retained for `unregister_by_connection` on client disconnect (module wiring deferred).
     #[allow(dead_code)]
     connection_registry: Arc<ConnectionRegistry>,
-    query_backend: Arc<dyn QueryBackend>,
     /// Per-query Merkle manager for delta sync init.
     /// `None` when query Merkle sync is not wired (test ergonomics).
     query_merkle_manager: Option<Arc<crate::storage::query_merkle::QueryMerkleSyncManager>>,
@@ -399,12 +398,10 @@ impl QueryService {
     /// Pass `Some(index_observer_factory)` to enable index-accelerated predicate
     /// evaluation. Pass `None` to fall back to full-scan (sim/test call sites).
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         query_registry: Arc<QueryRegistry>,
         record_store_factory: Arc<RecordStoreFactory>,
         connection_registry: Arc<ConnectionRegistry>,
-        query_backend: Arc<dyn QueryBackend>,
         query_merkle_manager: Option<Arc<crate::storage::query_merkle::QueryMerkleSyncManager>>,
         max_query_records: u32,
         index_observer_factory: Option<Arc<IndexObserverFactory>>,
@@ -416,7 +413,6 @@ impl QueryService {
             query_registry,
             record_store_factory,
             connection_registry,
-            query_backend,
             query_merkle_manager,
             max_query_records,
             index_observer_factory,
@@ -530,10 +526,8 @@ impl QueryService {
     /// 1. Extracts `connection_id` from context (error if missing).
     /// 2. Scans all partitions, collecting entries and Merkle key-hash pairs.
     /// 3. When a coordinator is wired, delegates to the DAG single-node path for
-    ///    filtering, sorting, and limiting. Without a coordinator, falls back to
-    ///    `query_backend.execute_query()` (constructed but not invoked on the WS
-    ///    path — retained as dead-but-constructed code pending a dedicated
-    ///    removal pass).
+    ///    filtering, sorting, and limiting. Without a coordinator (tests only),
+    ///    falls back to the predicate engine directly.
     /// 4. Applies `max_query_records` clamping with `has_more` flag.
     /// 5. Applies field projection if `fields` is specified.
     /// 6. Initializes per-query Merkle trees and computes aggregate root hash.
@@ -600,9 +594,9 @@ impl QueryService {
         // for filtering, sorting, and limiting. The coordinator's single-node bypass
         // reads directly from the record store and runs the full DAG pipeline.
         //
-        // When no coordinator is present (tests, legacy call sites without coordinator
-        // attached), fall back to query_backend — it is constructed-but-uninvoked on
-        // the production WS path because classify routes all QuerySub to DagQuery.
+        // When no coordinator is present (tests / call sites that don't wire the
+        // coordinator), fall back to the predicate engine directly. The production
+        // WS path always has a coordinator wired, so this branch is tests-only.
         let mut results: Vec<QueryResultEntry> = if let Some(coordinator) = &self.coordinator {
             let raw = coordinator
                 .execute_distributed(&query, &map_name)
@@ -665,10 +659,10 @@ impl QueryService {
                 entries
             };
 
-            self.query_backend
-                .execute_query(&map_name, entries, &query)
-                .await
-                .map_err(|e| OperationError::Internal(anyhow::anyhow!("{e}")))?
+            // No coordinator wired (tests / legacy call sites): fall through to
+            // the predicate engine directly. The production WS path always has a
+            // coordinator; this branch is only reachable in tests.
+            predicate_execute_query(entries, &query)
         };
 
         // Apply max_query_records clamping
