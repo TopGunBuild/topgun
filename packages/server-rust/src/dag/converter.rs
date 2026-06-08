@@ -301,6 +301,72 @@ impl QueryToDagConverter {
             last_vertex = "network-receiver".to_string();
         }
 
+        // --- Step 3b: Cursor vertex (optional, between Filter and Sort) ---
+        // A Cursor vertex is only emitted when the query carries a keyset cursor.
+        // Placing it before Sort means the sort stage operates on the already-filtered
+        // post-cursor result set, which is the correct semantics for keyset pagination.
+        if let Some(ref cursor_str) = query.cursor {
+            // Pass the predicate hash and sort hash alongside the cursor token so the
+            // CursorProcessor can validate that the cursor was produced by the same query
+            // shape. Without this check, a cursor from a different query could return
+            // incorrect results silently.
+            let predicate_hash: u64 = query
+                .predicate
+                .as_ref()
+                .map(|p| {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    format!("{p:?}").hash(&mut h);
+                    h.finish()
+                })
+                .unwrap_or(0);
+
+            let sort_hash: u64 = query
+                .sort
+                .as_ref()
+                .map(|s| {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    format!("{s:?}").hash(&mut h);
+                    h.finish()
+                })
+                .unwrap_or(0);
+
+            let cursor_config = rmpv::Value::Map(vec![
+                (
+                    rmpv::Value::String("cursor".into()),
+                    rmpv::Value::String(cursor_str.clone().into()),
+                ),
+                (
+                    rmpv::Value::String("predicateHash".into()),
+                    rmpv::Value::Integer(rmpv::Integer::from(predicate_hash)),
+                ),
+                (
+                    rmpv::Value::String("sortHash".into()),
+                    rmpv::Value::Integer(rmpv::Integer::from(sort_hash)),
+                ),
+            ]);
+
+            vertices.push(VertexDescriptor {
+                name: "cursor".to_string(),
+                local_parallelism: 1,
+                processor_type: ProcessorType::Cursor,
+                preferred_partitions: None,
+                config: Some(cursor_config),
+            });
+
+            edges.push(Edge {
+                source_name: last_vertex.clone(),
+                source_ordinal: 0,
+                dest_name: "cursor".to_string(),
+                dest_ordinal: 0,
+                routing_policy: RoutingPolicy::Isolated,
+                priority: edge_priority,
+            });
+            edge_priority += 1;
+            last_vertex = "cursor".to_string();
+        }
+
         // --- Step 4: Sort vertex (optional) ---
         if let Some(ref sort_fields) = query.sort {
             if !sort_fields.is_empty() {
