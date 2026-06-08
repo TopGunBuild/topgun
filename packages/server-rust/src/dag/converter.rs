@@ -310,27 +310,19 @@ impl QueryToDagConverter {
             // CursorProcessor can validate that the cursor was produced by the same query
             // shape. Without this check, a cursor from a different query could return
             // incorrect results silently.
-            let predicate_hash: u64 = query
-                .predicate
-                .as_ref()
-                .map(|p| {
-                    use std::hash::{Hash, Hasher};
-                    let mut h = std::collections::hash_map::DefaultHasher::new();
-                    format!("{p:?}").hash(&mut h);
-                    h.finish()
-                })
-                .unwrap_or(0);
+            let predicate_hash: u64 = query.predicate.as_ref().map_or(0, |p| {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                format!("{p:?}").hash(&mut h);
+                h.finish()
+            });
 
-            let sort_hash: u64 = query
-                .sort
-                .as_ref()
-                .map(|s| {
-                    use std::hash::{Hash, Hasher};
-                    let mut h = std::collections::hash_map::DefaultHasher::new();
-                    format!("{s:?}").hash(&mut h);
-                    h.finish()
-                })
-                .unwrap_or(0);
+            let sort_hash: u64 = query.sort.as_ref().map_or(0, |s| {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                format!("{s:?}").hash(&mut h);
+                h.finish()
+            });
 
             let cursor_config = rmpv::Value::Map(vec![
                 (

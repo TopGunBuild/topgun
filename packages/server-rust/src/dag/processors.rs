@@ -1096,10 +1096,11 @@ impl Processor for CursorProcessor {
             return Ok(());
         }
 
-        // Validate expiry using the system clock.
+        // Validate expiry using the system clock. Timestamps are i64 ms since epoch;
+        // saturate to i64::MAX on the (practically impossible) overflow rather than truncating.
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
             .unwrap_or(0);
 
         if !validate_cursor_expiry(&cursor, now_ms) {
@@ -1126,13 +1127,10 @@ impl Processor for CursorProcessor {
             return Ok(true);
         }
 
-        let cursor = match &self.cursor {
-            Some(c) => c,
-            None => {
-                // init was not called — drain and signal done to avoid a spin.
-                inbox.drain(&mut |_| {});
-                return Ok(true);
-            }
+        let Some(cursor) = &self.cursor else {
+            // init was not called — drain and signal done to avoid a spin.
+            inbox.drain(&mut |_| {});
+            return Ok(true);
         };
 
         // Forward only records that are strictly after the cursor position.

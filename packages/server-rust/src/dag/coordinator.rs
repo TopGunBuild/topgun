@@ -1049,7 +1049,7 @@ mod tests {
 
     #[test]
     fn make_supplier_cursor_returns_valid_supplier() {
-        use crate::query::cursor::{CursorData, encode_cursor};
+        use crate::query::cursor::{encode_cursor, CursorData};
         use topgun_core::messages::base::SortDirection;
 
         // Build a valid encoded cursor to use as the config value.
@@ -1103,14 +1103,12 @@ mod tests {
 
     // --- AC5b: multi-field sort + cursor pagination — each row exactly once ---
 
-    /// Helper to build a ClusterQueryCoordinator wired for single-node bypass using
-    /// the given pre-populated RecordStoreFactory.
+    /// Helper to build a `ClusterQueryCoordinator` wired for single-node bypass using
+    /// the given pre-populated `RecordStoreFactory`.
     ///
-    /// All 271 partitions are assigned to "coordinator-test" so the ScanProcessor
+    /// All 271 partitions are assigned to "coordinator-test" so the `ScanProcessor`
     /// can find records regardless of which hash partition they land in.
-    fn make_single_node_coordinator(
-        factory: Arc<RecordStoreFactory>,
-    ) -> ClusterQueryCoordinator {
+    fn make_single_node_coordinator(factory: Arc<RecordStoreFactory>) -> ClusterQueryCoordinator {
         let cluster = Arc::new(MockClusterService::new(&["coordinator-test"]));
 
         // Assign all 271 partitions to "coordinator-test" so ScanProcessor finds records.
@@ -1135,8 +1133,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn cursor_pagination_returns_each_row_exactly_once() {
-        use crate::query::cursor::{CursorData, SortValue, encode_cursor, rmpv_to_json_value};
+        use crate::query::cursor::{encode_cursor, rmpv_to_json_value, CursorData, SortValue};
         use crate::storage::record::RecordValue;
         use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
         use topgun_core::messages::base::{SortDirection, SortField};
@@ -1221,7 +1220,11 @@ mod tests {
             .collect();
 
         // VACUITY GUARD: ascending sort must put the smallest values first.
-        assert_eq!(page1_ints, vec![10, 20, 30], "page 1 must be [10, 20, 30] in ascending order");
+        assert_eq!(
+            page1_ints,
+            vec![10, 20, 30],
+            "page 1 must be [10, 20, 30] in ascending order"
+        );
 
         // Build the cursor from the last record on page 1.
         // The last record has Int=30 and _key="rec-c".
@@ -1277,7 +1280,7 @@ mod tests {
             // Set a very recent timestamp so the cursor is not expired.
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
+                .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
                 .unwrap_or(0),
         };
         let encoded_cursor = encode_cursor(&cursor_data);
@@ -1343,8 +1346,11 @@ mod tests {
 
     #[tokio::test]
     async fn cursor_rejected_when_hash_mismatches() {
-        use crate::query::cursor::{CursorData, SortValue, encode_cursor};
+        use crate::query::cursor::{encode_cursor, CursorData, SortValue};
+        use crate::storage::record::RecordValue;
+        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
         use topgun_core::messages::base::{SortDirection, SortField};
+        use topgun_core::{Timestamp, Value};
 
         // A cursor with non-zero predicate_hash/sort_hash will not match the
         // zero-hash query (no predicate, no sort hash). The CursorProcessor
@@ -1356,11 +1362,11 @@ mod tests {
                 direction: SortDirection::Asc,
             }],
             last_key: "a".to_string(),
-            predicate_hash: 9999,   // wrong — query has predicate_hash 0
-            sort_hash: 8888,         // wrong
+            predicate_hash: 9999, // wrong — query has predicate_hash 0
+            sort_hash: 8888,      // wrong
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
+                .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
                 .unwrap_or(0),
         };
         let encoded = encode_cursor(&cursor_data);
@@ -1371,9 +1377,6 @@ mod tests {
             Arc::new(NullDataStore),
             Vec::new(),
         ));
-        use crate::storage::record::RecordValue;
-        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
-        use topgun_core::{Timestamp, Value};
         let map_name = "hash_reject_map";
         let partition_id = topgun_core::hash_to_partition("k1");
         let store = factory.get_or_create(map_name, partition_id);
@@ -1382,7 +1385,11 @@ mod tests {
                 "k1",
                 RecordValue::Lww {
                     value: Value::Int(42),
-                    timestamp: Timestamp { millis: 0, counter: 0, node_id: "test-node".to_string() },
+                    timestamp: Timestamp {
+                        millis: 0,
+                        counter: 0,
+                        node_id: "test-node".to_string(),
+                    },
                 },
                 ExpiryPolicy::NONE,
                 CallerProvenance::Client,
@@ -1392,7 +1399,10 @@ mod tests {
 
         let coordinator = make_single_node_coordinator(factory);
         let query = Query {
-            sort: Some(vec![SortField { field: "Int".to_string(), direction: SortDirection::Asc }]),
+            sort: Some(vec![SortField {
+                field: "Int".to_string(),
+                direction: SortDirection::Asc,
+            }]),
             cursor: Some(encoded),
             ..Default::default()
         };
@@ -1411,13 +1421,16 @@ mod tests {
 
     #[tokio::test]
     async fn cursor_rejected_when_expired() {
-        use crate::query::cursor::{CursorData, SortValue, encode_cursor};
+        use crate::query::cursor::{encode_cursor, CursorData, SortValue};
+        use crate::storage::record::RecordValue;
+        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
         use topgun_core::messages::base::{SortDirection, SortField};
+        use topgun_core::{Timestamp, Value};
 
         // An expired cursor (timestamp 11 minutes ago) must be rejected.
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
             .unwrap_or(0);
 
         let cursor_data = CursorData {
@@ -1438,9 +1451,6 @@ mod tests {
             Arc::new(NullDataStore),
             Vec::new(),
         ));
-        use crate::storage::record::RecordValue;
-        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
-        use topgun_core::{Timestamp, Value};
         let map_name = "expired_cursor_map";
         let partition_id = topgun_core::hash_to_partition("k1");
         let store = factory.get_or_create(map_name, partition_id);
@@ -1449,7 +1459,11 @@ mod tests {
                 "k1",
                 RecordValue::Lww {
                     value: Value::Int(42),
-                    timestamp: Timestamp { millis: 0, counter: 0, node_id: "test-node".to_string() },
+                    timestamp: Timestamp {
+                        millis: 0,
+                        counter: 0,
+                        node_id: "test-node".to_string(),
+                    },
                 },
                 ExpiryPolicy::NONE,
                 CallerProvenance::Client,
@@ -1459,7 +1473,10 @@ mod tests {
 
         let coordinator = make_single_node_coordinator(factory);
         let query = Query {
-            sort: Some(vec![SortField { field: "Int".to_string(), direction: SortDirection::Asc }]),
+            sort: Some(vec![SortField {
+                field: "Int".to_string(),
+                direction: SortDirection::Asc,
+            }]),
             cursor: Some(encoded),
             ..Default::default()
         };
