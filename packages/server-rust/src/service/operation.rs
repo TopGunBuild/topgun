@@ -135,7 +135,7 @@ impl OperationContext {
 /// Grouped by domain:
 /// - **CRDT** (2): `ClientOp`, `OpBatch`
 /// - **Sync** (6): `SyncInit`, `MerkleReqBucket`, `ORMapSyncInit`, `ORMapMerkleReqBucket`, `ORMapDiffRequest`, `ORMapPushDiff`
-/// - **Query** (5): `QuerySubscribe`, `QueryUnsubscribe`, `QuerySyncInit`, `SqlQuery`, `DagQuery`
+/// - **Query** (4): `QuerySubscribe`, `QueryUnsubscribe`, `QuerySyncInit`, `SqlQuery`
 /// - **Messaging** (3): `TopicSubscribe`, `TopicUnsubscribe`, `TopicPublish`
 /// - **Coordination** (4): `LockRequest`, `LockRelease`, `PartitionMapRequest`, `Ping`
 /// - **Search** (3): `Search`, `SearchSubscribe`, `SearchUnsubscribe`
@@ -213,11 +213,6 @@ pub enum Operation {
     VectorSearch {
         ctx: OperationContext,
         payload: messages::vector::VectorSearchPayload,
-    },
-    /// Client-initiated DAG query (GROUP BY).
-    DagQuery {
-        ctx: OperationContext,
-        payload: messages::QuerySubMessage,
     },
 
     // --- Messaging domain (service_name = "messaging") ---
@@ -370,7 +365,6 @@ impl Operation {
             | Self::QuerySyncInit { ctx, .. }
             | Self::SqlQuery { ctx, .. }
             | Self::VectorSearch { ctx, .. }
-            | Self::DagQuery { ctx, .. }
             // Messaging
             | Self::TopicSubscribe { ctx, .. }
             | Self::TopicUnsubscribe { ctx, .. }
@@ -428,7 +422,6 @@ impl Operation {
             | Self::QuerySyncInit { ctx, .. }
             | Self::SqlQuery { ctx, .. }
             | Self::VectorSearch { ctx, .. }
-            | Self::DagQuery { ctx, .. }
             // Messaging
             | Self::TopicSubscribe { ctx, .. }
             | Self::TopicUnsubscribe { ctx, .. }
@@ -486,7 +479,6 @@ impl Operation {
             | Self::QuerySyncInit { ctx, .. }
             | Self::SqlQuery { ctx, .. }
             | Self::VectorSearch { ctx, .. }
-            | Self::DagQuery { ctx, .. }
             // Messaging
             | Self::TopicSubscribe { ctx, .. }
             | Self::TopicUnsubscribe { ctx, .. }
@@ -711,7 +703,6 @@ mod tests {
             | Operation::QuerySyncInit { .. }
             | Operation::SqlQuery { .. }
             | Operation::VectorSearch { .. }
-            | Operation::DagQuery { .. }
             | Operation::TopicSubscribe { .. }
             | Operation::TopicUnsubscribe { .. }
             | Operation::TopicPublish { .. }

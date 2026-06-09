@@ -173,9 +173,10 @@ impl OperationService {
             // ----- Query domain (service_name = "query") -----
             Message::QuerySub(payload) => {
                 let ctx = self.make_ctx(service_names::QUERY, client_id, caller_origin, None);
-                // All structured queries (filter/sort/limit/cursor/group_by) use the
-                // DAG single-node path as the canonical execution engine.
-                Ok(Operation::DagQuery { ctx, payload })
+                // All structured queries (filter/sort/limit/cursor/group_by) route to the
+                // single canonical handler, which runs the DAG pipeline locally for the
+                // initial result and registers the standing subscription for live updates.
+                Ok(Operation::QuerySubscribe { ctx, payload })
             }
             Message::QueryUnsub(payload) => {
                 let ctx = self.make_ctx(service_names::QUERY, client_id, caller_origin, None);
@@ -924,7 +925,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_query_sub_routes_to_dag_query() {
+    fn classify_query_sub_routes_to_query_subscribe() {
         let svc = make_service();
         let msg = Message::QuerySub(topgun_core::messages::QuerySubMessage {
             payload: topgun_core::messages::QuerySubPayload {
@@ -937,8 +938,8 @@ mod tests {
         let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
         assert_eq!(op.ctx().service_name, service_names::QUERY);
         assert!(
-            matches!(op, Operation::DagQuery { .. }),
-            "all QuerySub should route to DagQuery"
+            matches!(op, Operation::QuerySubscribe { .. }),
+            "all QuerySub should route to QuerySubscribe"
         );
     }
 
@@ -957,7 +958,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_query_sub_with_group_by_routes_to_dag_query() {
+    fn classify_query_sub_with_group_by_routes_to_query_subscribe() {
         let svc = make_service();
         let msg = Message::QuerySub(topgun_core::messages::QuerySubMessage {
             payload: topgun_core::messages::QuerySubPayload {
@@ -973,16 +974,16 @@ mod tests {
         let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
         assert_eq!(op.ctx().service_name, service_names::QUERY);
         assert!(
-            matches!(op, Operation::DagQuery { .. }),
-            "non-empty group_by should route to DagQuery"
+            matches!(op, Operation::QuerySubscribe { .. }),
+            "non-empty group_by should route to QuerySubscribe"
         );
     }
 
     #[test]
-    fn classify_query_sub_without_group_by_routes_to_dag_query() {
+    fn classify_query_sub_without_group_by_routes_to_query_subscribe() {
         let svc = make_service();
 
-        // No group_by field — still routes to DagQuery (DAG is the canonical engine)
+        // No group_by field — still routes to QuerySubscribe (canonical handler)
         let msg_none = Message::QuerySub(topgun_core::messages::QuerySubMessage {
             payload: topgun_core::messages::QuerySubPayload {
                 query_id: "q-1".to_string(),
@@ -997,11 +998,11 @@ mod tests {
         let op = svc.classify(msg_none, None, CallerOrigin::Client).unwrap();
         assert_eq!(op.ctx().service_name, service_names::QUERY);
         assert!(
-            matches!(op, Operation::DagQuery { .. }),
-            "absent group_by should route to DagQuery"
+            matches!(op, Operation::QuerySubscribe { .. }),
+            "absent group_by should route to QuerySubscribe"
         );
 
-        // Empty group_by vec — still routes to DagQuery
+        // Empty group_by vec — still routes to QuerySubscribe
         let msg_empty = Message::QuerySub(topgun_core::messages::QuerySubMessage {
             payload: topgun_core::messages::QuerySubPayload {
                 query_id: "q-2".to_string(),
@@ -1015,13 +1016,13 @@ mod tests {
         });
         let op = svc.classify(msg_empty, None, CallerOrigin::Client).unwrap();
         assert!(
-            matches!(op, Operation::DagQuery { .. }),
-            "empty group_by vec should route to DagQuery"
+            matches!(op, Operation::QuerySubscribe { .. }),
+            "empty group_by vec should route to QuerySubscribe"
         );
     }
 
     #[test]
-    fn classify_query_sub_with_sort_routes_to_dag_query() {
+    fn classify_query_sub_with_sort_routes_to_query_subscribe() {
         use topgun_core::messages::base::{SortDirection, SortField};
         let svc = make_service();
 
@@ -1048,13 +1049,13 @@ mod tests {
         let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
         assert_eq!(op.ctx().service_name, service_names::QUERY);
         assert!(
-            matches!(op, Operation::DagQuery { .. }),
-            "sort-only query should route to DagQuery"
+            matches!(op, Operation::QuerySubscribe { .. }),
+            "sort-only query should route to QuerySubscribe"
         );
     }
 
     #[test]
-    fn classify_query_sub_with_limit_routes_to_dag_query() {
+    fn classify_query_sub_with_limit_routes_to_query_subscribe() {
         let svc = make_service();
 
         let msg = Message::QuerySub(topgun_core::messages::QuerySubMessage {
@@ -1071,13 +1072,13 @@ mod tests {
         let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
         assert_eq!(op.ctx().service_name, service_names::QUERY);
         assert!(
-            matches!(op, Operation::DagQuery { .. }),
-            "limit-only query should route to DagQuery"
+            matches!(op, Operation::QuerySubscribe { .. }),
+            "limit-only query should route to QuerySubscribe"
         );
     }
 
     #[test]
-    fn classify_query_sub_with_cursor_routes_to_dag_query() {
+    fn classify_query_sub_with_cursor_routes_to_query_subscribe() {
         let svc = make_service();
 
         let msg = Message::QuerySub(topgun_core::messages::QuerySubMessage {
@@ -1094,8 +1095,8 @@ mod tests {
         let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
         assert_eq!(op.ctx().service_name, service_names::QUERY);
         assert!(
-            matches!(op, Operation::DagQuery { .. }),
-            "cursor query should route to DagQuery"
+            matches!(op, Operation::QuerySubscribe { .. }),
+            "cursor query should route to QuerySubscribe"
         );
     }
 

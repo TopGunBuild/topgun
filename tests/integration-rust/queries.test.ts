@@ -379,7 +379,7 @@ describe('Integration: Queries (Rust Server)', () => {
           queryId: 'sort-asc-q',
           mapName,
           query: {
-            sort: { price: 'asc' },
+            sort: [{ field: 'price', direction: 'asc' }],
           },
         },
       });
@@ -434,7 +434,7 @@ describe('Integration: Queries (Rust Server)', () => {
           queryId: 'sort-desc-q',
           mapName,
           query: {
-            sort: { price: 'desc' },
+            sort: [{ field: 'price', direction: 'desc' }],
           },
         },
       });
@@ -446,6 +446,77 @@ describe('Integration: Queries (Rust Server)', () => {
       // Verify descending order
       const prices = response.payload.results.map((r: any) => r.value.price);
       expect(prices).toEqual([300, 200, 100]);
+
+      client.close();
+    });
+  });
+
+  // ========================================
+  // Multi-Field Sort Tests (Phase 1: DAG SortProcessor over WS)
+  // ========================================
+  describe('QUERY_SUB with multi-field sort', () => {
+    test('sort by two fields returns lexicographic order (not single-field)', async () => {
+      const mapName = `msort-map-${Date.now()}`;
+      const client = await createRustTestClient(port, {
+        nodeId: 'msort-client-1',
+        userId: 'msort-user-1',
+        roles: ['ADMIN'],
+      });
+      await client.waitForMessage('AUTH_ACK');
+
+      // Tie in the primary field (group) is broken by the secondary (rank).
+      // Insertion order is deliberately NOT the sorted order, and a single-field
+      // sort on `group` alone would leave ranks unordered within a group — so
+      // this only passes if the DAG multi-field SortProcessor is actually used.
+      const records = [
+        { key: 'm-a2', value: { group: 'a', rank: 2 } },
+        { key: 'm-b1', value: { group: 'b', rank: 1 } },
+        { key: 'm-a1', value: { group: 'a', rank: 1 } },
+        { key: 'm-a3', value: { group: 'a', rank: 3 } },
+        { key: 'm-b0', value: { group: 'b', rank: 0 } },
+      ];
+
+      for (const rec of records) {
+        client.messages.length = 0;
+        client.send({
+          type: 'CLIENT_OP',
+          payload: {
+            id: `msort-put-${rec.key}`,
+            mapName,
+            opType: 'PUT',
+            key: rec.key,
+            record: createLWWRecord(rec.value),
+          },
+        });
+        await client.waitForMessage('OP_ACK');
+      }
+
+      await waitForSync(200);
+
+      client.messages.length = 0;
+      client.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: 'msort-q',
+          mapName,
+          query: {
+            sort: [
+              { field: 'group', direction: 'asc' },
+              { field: 'rank', direction: 'asc' },
+            ],
+          },
+        },
+      });
+
+      const response = await client.waitForMessage('QUERY_RESP');
+      expect(response.payload.results.length).toBe(5);
+
+      const order = response.payload.results.map((r: any) => `${r.value.group}/${r.value.rank}`);
+      expect(order).toEqual(['a/1', 'a/2', 'a/3', 'b/0', 'b/1']);
+
+      // Real record keys are returned, in the same multi-field order.
+      const keys = response.payload.results.map((r: any) => r.key);
+      expect(keys).toEqual(['m-a1', 'm-a2', 'm-a3', 'm-b0', 'm-b1']);
 
       client.close();
     });
