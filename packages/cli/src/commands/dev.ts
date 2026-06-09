@@ -32,6 +32,7 @@ async function dev(options: DevOptions) {
   console.log('');
 
   // Binary resolution (Key Link L3 — monorepo path is always first):
+  //   0. $TOPGUN_SERVER_BINARY                — explicit override (authoritative)
   //   1. <cwd>/target/release/topgun-server — local cargo build (monorepo / contributors)
   //   2. @topgunbuild/server bin shim        — installed npm package (out-of-monorepo)
   // If neither is found, the error message names both remedies.
@@ -40,7 +41,17 @@ async function dev(options: DevOptions) {
   let serverBinary: string | null = null;
   let isNodeShim = false;
 
-  if (fs.existsSync(cwdBinaryPath)) {
+  // An explicit override wins and is authoritative: if set, autodetection is
+  // skipped entirely (a missing override path falls through to the error below
+  // rather than silently spawning some other server). Mirrors the
+  // RUST_SERVER_BINARY convention used by the integration tests, and makes the
+  // "binary not found" path deterministic regardless of what's installed.
+  const envBinary = process.env.TOPGUN_SERVER_BINARY;
+  if (envBinary) {
+    if (fs.existsSync(envBinary)) {
+      serverBinary = envBinary;
+    }
+  } else if (fs.existsSync(cwdBinaryPath)) {
     serverBinary = cwdBinaryPath;
   } else {
     // Fallback: resolve the bin shim from an installed @topgunbuild/server package.

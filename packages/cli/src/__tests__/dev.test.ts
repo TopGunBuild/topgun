@@ -19,6 +19,16 @@ describe('topgun dev', () => {
           encoding: 'utf8',
           cwd: tempDir,
           stdio: 'pipe',
+          // Force the "binary not found" path deterministically: an explicit
+          // (nonexistent) override means dev() skips autodetect and never spawns
+          // a real server. Without this, in environments where @topgunbuild/server
+          // resolves (e.g. CI monorepo node_modules), dev() would spawn a
+          // long-running server and execSync would hang (orphaning topgun-server
+          // and stalling the whole recursive jest run). Timeout is belt-and-
+          // suspenders. See TODO-448.
+          env: { ...process.env, TOPGUN_SERVER_BINARY: '/nonexistent/topgun-server' },
+          timeout: 30000,
+          killSignal: 'SIGKILL',
         });
       } catch (error: unknown) {
         const err = error as NodeJS.ErrnoException & {
