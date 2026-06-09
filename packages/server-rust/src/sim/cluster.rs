@@ -966,9 +966,11 @@ impl SimCluster {
     /// DAG execution path a real WebSocket client hits, returning the
     /// result rows.
     ///
-    /// This method drives `coordinator.execute_distributed` directly — the EXACT
-    /// call that `query.rs::handle_dag_query` makes, so sim tests exercise the
-    /// same classify→DAG pipeline the production WS handler uses.
+    /// This method drives `coordinator.execute_distributed` directly to exercise
+    /// the DAG execution engine (and its single-node bypass) under fault injection.
+    /// Note: it does NOT go through `classify` or `QueryService::handle_query_subscribe`
+    /// — it tests the engine, not the production routing/handler wiring. End-to-end
+    /// routing is covered by the TS integration suite and the classify unit tests.
     ///
     /// # Row-key note
     /// For non-GROUP-BY queries, the DAG result rows do not carry a `__key`
@@ -995,9 +997,8 @@ impl SimCluster {
             return Err(anyhow::anyhow!("node {node_idx} is dead"));
         }
 
-        // Drive coordinator.execute_distributed directly — the EXACT call
-        // handle_dag_query makes. The coordinator's single-node bypass
-        // (coordinator.rs:124-128) routes this through execute_local →
+        // Drive coordinator.execute_distributed directly. The coordinator's
+        // single-node bypass routes this through execute_local → run_dag_local →
         // DagExecutor without needing cluster fan-out or a connection context
         // (execute_distributed takes only the query + map name, no auth ctx).
         let raw_results = node
@@ -1280,16 +1281,21 @@ mod tests {
     // directly or if the DAG were bypassed.
     // -----------------------------------------------------------------------
 
-    /// Extracts the integer value from a DAG result row.
-    ///
-    /// Records written as `rmpv::Value::Integer(n)` are stored as
-    /// `topgun_core::Value::Int(n)`, then read back by ScanProcessor via
-    /// `rmp_serde::to_vec_named` which produces `{"Int": n}` — a single-key
-    /// rmpv::Value::Map. This helper extracts `n` for assertion purposes.
+    /// Builds an object record `{ "score": n }` for query tests. Records carry a
+    /// real field so the DAG Filter/Sort stages operate on actual field names
+    /// (matching production records, which are objects).
+    fn score_record(n: i64) -> rmpv::Value {
+        rmpv::Value::Map(vec![(
+            rmpv::Value::String("score".into()),
+            rmpv::Value::Integer(n.into()),
+        )])
+    }
+
+    /// Extracts the `score` field from a DAG result row for assertion purposes.
     fn get_int_field(val: &rmpv::Value) -> Option<i64> {
         if let rmpv::Value::Map(pairs) = val {
             for (k, v) in pairs {
-                if k.as_str() == Some("Int") {
+                if k.as_str() == Some("score") {
                     return match v {
                         rmpv::Value::Integer(i) => i.as_i64(),
                         _ => None,
@@ -1317,7 +1323,7 @@ mod tests {
 
         // Write 5 records: values 3, 5, 7, 10, 15.
         // After storage round-trip via CrdtService + ScanProcessor, each
-        // record becomes rmpv::Value::Map([("Int", Integer(n))]).
+        // record becomes rmpv::Value::Map([("score", Integer(n))]).
         for (key, val) in [
             ("rec-a", 3i64),
             ("rec-b", 5i64),
@@ -1326,19 +1332,19 @@ mod tests {
             ("rec-e", 15i64),
         ] {
             cluster
-                .write(0, map_name, key, rmpv::Value::Integer(val.into()))
+                .write(0, map_name, key, score_record(val))
                 .await
                 .expect("write should succeed");
         }
 
-        // Build a query: filter Int >= 5, sort by "Int" Asc (two SortField
+        // Build a query: filter score >= 5, sort by "score" Asc (two SortField
         // entries exercise the multi-field sort wire format and the DAG
         // converter's multi-field sort plan), limit 3.
         use topgun_core::messages::base::{PredicateNode, PredicateOp, SortDirection, SortField};
         let query = Query {
             predicate: Some(PredicateNode {
                 op: PredicateOp::Gte,
-                attribute: Some("Int".to_string()),
+                attribute: Some("score".to_string()),
                 value: Some(rmpv::Value::Integer(5i64.into())),
                 children: None,
                 value_ref: None,
@@ -1347,11 +1353,11 @@ mod tests {
                 // Two sort fields exercise multi-field sort code path in the
                 // DAG converter and SortProcessor.
                 SortField {
-                    field: "Int".to_string(),
+                    field: "score".to_string(),
                     direction: SortDirection::Asc,
                 },
                 SortField {
-                    field: "Int".to_string(),
+                    field: "score".to_string(),
                     direction: SortDirection::Asc,
                 },
             ]),
@@ -1367,12 +1373,12 @@ mod tests {
         // AC1(a): limit-clamped to 3 rows.
         assert_eq!(results.len(), 3, "limit 3 should return exactly 3 rows");
 
-        // AC1(b): correctly filtered — "Int" == 3 must be absent.
+        // AC1(b): correctly filtered — "score" == 3 must be absent.
         let has_three = results.iter().any(|r| get_int_field(&r.value) == Some(3));
         assert!(!has_three, "record with Int=3 should be excluded by filter");
 
         // AC1(c): correctly sorted ascending AND limit-clamped.
-        // "Int"=15 must be absent (it would be 4th after ascending sort).
+        // "score"=15 must be absent (it would be 4th after ascending sort).
         let has_fifteen = results.iter().any(|r| get_int_field(&r.value) == Some(15));
         assert!(
             !has_fifteen,
@@ -1380,10 +1386,10 @@ mod tests {
         );
 
         // AC1(d): multi-field ordering assertion — the first result MUST be
-        // the smallest value (Int=5) after ascending sort.
+        // the smallest value (score=5) after ascending sort.
         //
         // VACUITY GUARD: Flipping the expected order here — e.g., asserting
-        // items[0] has Int=15 — MUST make this test FAIL. The ascending order
+        // items[0] has score=15 — MUST make this test FAIL. The ascending order
         // comes from the DAG SortProcessor, not a test-side sort. If the sort
         // were removed, records would arrive in insertion / hash-partition
         // order, not ascending order, and this assertion would break.
@@ -1434,7 +1440,7 @@ mod tests {
 
         // Write a record only to node-0.
         cluster
-            .write(0, map_name, "key-alive", rmpv::Value::Integer(42i64.into()))
+            .write(0, map_name, "key-alive", score_record(42))
             .await
             .expect("write to node-0");
 
@@ -1447,7 +1453,7 @@ mod tests {
         use topgun_core::messages::base::{SortDirection, SortField};
         let query = Query {
             sort: Some(vec![SortField {
-                field: "Int".to_string(),
+                field: "score".to_string(),
                 direction: SortDirection::Asc,
             }]),
             ..Default::default()
@@ -1514,7 +1520,7 @@ mod tests {
             ("sf-f", 12i64),
         ] {
             cluster
-                .write(0, map_name, key, rmpv::Value::Integer(val.into()))
+                .write(0, map_name, key, score_record(val))
                 .await
                 .expect("write to node-0");
         }
@@ -1523,7 +1529,7 @@ mod tests {
         cluster.kill_node(1);
         assert!(!cluster.nodes[1].is_alive(), "node-1 should be dead");
 
-        // Query node-0 (alive): filter Int >= 6, sort by "Int" Asc (two fields
+        // Query node-0 (alive): filter score >= 6, sort by "score" Asc (two fields
         // to exercise the multi-field sort path), limit 2.
         // Expected result after filter: 6, 8, 10, 12.
         // After ascending sort + limit 2: [6, 8].
@@ -1531,20 +1537,20 @@ mod tests {
         let query = Query {
             predicate: Some(PredicateNode {
                 op: PredicateOp::Gte,
-                attribute: Some("Int".to_string()),
+                attribute: Some("score".to_string()),
                 value: Some(rmpv::Value::Integer(6i64.into())),
                 children: None,
                 value_ref: None,
             }),
             sort: Some(vec![
                 SortField {
-                    field: "Int".to_string(),
+                    field: "score".to_string(),
                     direction: SortDirection::Asc,
                 },
                 // Second sort field exercises the multi-field sort code path
                 // in the DAG converter, matching the production wire format.
                 SortField {
-                    field: "Int".to_string(),
+                    field: "score".to_string(),
                     direction: SortDirection::Asc,
                 },
             ]),
@@ -1564,7 +1570,7 @@ mod tests {
             "limit 2 should return exactly 2 rows (4 pass filter, 2 survive limit)"
         );
 
-        // filter exclusion: records with Int < 6 must be absent.
+        // filter exclusion: records with score < 6 must be absent.
         let has_below_threshold = results
             .iter()
             .any(|r| get_int_field(&r.value).is_some_and(|v| v < 6));
@@ -1574,7 +1580,7 @@ mod tests {
         );
 
         // DAG ascending sort: first result must be the smallest post-filter
-        // value (Int=6). A record-store fallback would return records in
+        // value (score=6). A record-store fallback would return records in
         // hash-partition/insertion order, NOT ascending order, so this
         // assertion MUST fail if the DAG SortProcessor is bypassed.
         let first_int = get_int_field(&results[0].value);
@@ -1584,7 +1590,7 @@ mod tests {
             "first result must be Int=6 (smallest after filter, ascending DAG sort)"
         );
 
-        // limit cutoff: Int=10 and Int=12 must be absent (cut off at 2).
+        // limit cutoff: score=10 and score=12 must be absent (cut off at 2).
         let has_ten_or_above = results
             .iter()
             .any(|r| get_int_field(&r.value).is_some_and(|v| v >= 10));

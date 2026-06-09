@@ -233,34 +233,28 @@ impl ClusterQueryCoordinator {
     // ---------------------------------------------------------------------------
 
     /// Executes the query locally on this node using `DagExecutor`.
+    ///
+    /// Delegates to the coordinator-independent [`run_dag_local`] so the single-node
+    /// bypass and the WS query handler share exactly one local-execution path.
     async fn execute_local(
         &self,
         query: &Query,
         map_name: &str,
         partition_assignment: &HashMap<String, Vec<u32>>,
     ) -> Result<Vec<rmpv::Value>> {
-        let descriptor = QueryToDagConverter::convert_query(query, map_name, partition_assignment)?;
-
-        let factory = Arc::clone(&self.record_store_factory);
-        let local_node_id = self.local_node_id.clone();
-
         let partition_ids = partition_assignment
-            .get(&local_node_id)
+            .get(&self.local_node_id)
             .cloned()
             .unwrap_or_default();
 
-        let dag = Dag::from_descriptor(&descriptor, &|vd: &VertexDescriptor| {
-            make_supplier_from_descriptor(vd, Arc::clone(&factory))
-        })?;
-
-        let ctx = ExecutorContext {
-            node_id: local_node_id,
+        run_dag_local(
+            query,
+            map_name,
             partition_ids,
-            record_store_factory: factory,
-        };
-
-        let executor = DagExecutor::new(dag, ctx, self.config.timeout_ms);
-        executor.execute().await
+            Arc::clone(&self.record_store_factory),
+            &self.config,
+        )
+        .await
     }
 
     /// Sends pre-serialized bytes to a peer node following the `MigrationCoordinator::send_to_peer` pattern.
@@ -331,6 +325,50 @@ impl ClusterQueryCoordinator {
 
         Ok(final_outbox.drain_bucket(0).collect())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Local DAG execution (coordinator-independent)
+// ---------------------------------------------------------------------------
+
+/// Runs a query through the DAG pipeline locally over the given partitions,
+/// independent of any cluster coordinator.
+///
+/// This is the canonical single-node query engine: the WS query handler calls it
+/// directly (no coordinator needed in single-node mode), and the coordinator's
+/// single-node bypass (`ClusterQueryCoordinator::execute_local`) delegates here so
+/// there is exactly one local-execution code path.
+///
+/// A single-entry partition assignment is synthesized so `convert_query` builds the
+/// local (non-distributed) topology; the scanned partitions come from `partition_ids`
+/// via `ExecutorContext`, not from the assignment key, so the synthetic node id is
+/// irrelevant to results.
+pub(crate) async fn run_dag_local(
+    query: &Query,
+    map_name: &str,
+    partition_ids: Vec<u32>,
+    record_store_factory: Arc<RecordStoreFactory>,
+    config: &QueryConfig,
+) -> Result<Vec<rmpv::Value>> {
+    let local_node_id = String::from("local");
+    let mut partition_assignment: HashMap<String, Vec<u32>> = HashMap::new();
+    partition_assignment.insert(local_node_id.clone(), partition_ids.clone());
+
+    let descriptor = QueryToDagConverter::convert_query(query, map_name, &partition_assignment)?;
+
+    let factory = Arc::clone(&record_store_factory);
+    let dag = Dag::from_descriptor(&descriptor, &|vd: &VertexDescriptor| {
+        make_supplier_from_descriptor(vd, Arc::clone(&factory))
+    })?;
+
+    let ctx = ExecutorContext {
+        node_id: local_node_id,
+        partition_ids,
+        record_store_factory: factory,
+    };
+
+    let executor = DagExecutor::new(dag, ctx, config.timeout_ms);
+    executor.execute().await
 }
 
 // ---------------------------------------------------------------------------
@@ -1164,7 +1202,10 @@ mod tests {
             let partition_id = topgun_core::hash_to_partition(key);
             let store = factory.get_or_create(map_name, partition_id);
             let value = RecordValue::Lww {
-                value: Value::Int(*score),
+                value: Value::Map(std::collections::BTreeMap::from([(
+                    "score".to_string(),
+                    Value::Int(*score),
+                )])),
                 timestamp: Timestamp {
                     millis: 1_000_000,
                     counter: 0,
@@ -1179,10 +1220,10 @@ mod tests {
 
         let coordinator = make_single_node_coordinator(Arc::clone(&factory));
 
-        // Query page 1: sort by "Int" ASC, limit 3 — no cursor.
+        // Query page 1: sort by "score" ASC, limit 3 — no cursor.
         let page1_query = Query {
             sort: Some(vec![SortField {
-                field: "Int".to_string(),
+                field: "score".to_string(),
                 direction: SortDirection::Asc,
             }]),
             limit: Some(3),
@@ -1203,7 +1244,7 @@ mod tests {
             .filter_map(|v| {
                 if let rmpv::Value::Map(pairs) = v {
                     pairs.iter().find_map(|(k, val)| {
-                        if k.as_str() == Some("Int") {
+                        if k.as_str() == Some("score") {
                             if let rmpv::Value::Integer(i) = val {
                                 i.as_i64()
                             } else {
@@ -1244,7 +1285,7 @@ mod tests {
 
         let last_int_json = if let rmpv::Value::Map(pairs) = last {
             pairs.iter().find_map(|(k, v)| {
-                if k.as_str() == Some("Int") {
+                if k.as_str() == Some("score") {
                     rmpv_to_json_value(v)
                 } else {
                     None
@@ -1258,7 +1299,7 @@ mod tests {
         // Compute the sort_hash the same way convert_query does for the page-2 query so
         // CursorProcessor's hash-validation accepts this cursor.
         let sort_fields_for_hash = vec![SortField {
-            field: "Int".to_string(),
+            field: "score".to_string(),
             direction: SortDirection::Asc,
         }];
         let sort_hash: u64 = {
@@ -1270,7 +1311,7 @@ mod tests {
 
         let cursor_data = CursorData {
             sort_values: vec![SortValue {
-                field: "Int".to_string(),
+                field: "score".to_string(),
                 value: last_int_json,
                 direction: SortDirection::Asc,
             }],
@@ -1288,7 +1329,7 @@ mod tests {
         // Query page 2: same sort, limit 3, with the cursor.
         let page2_query = Query {
             sort: Some(vec![SortField {
-                field: "Int".to_string(),
+                field: "score".to_string(),
                 direction: SortDirection::Asc,
             }]),
             limit: Some(3),
@@ -1309,7 +1350,7 @@ mod tests {
             .filter_map(|v| {
                 if let rmpv::Value::Map(pairs) = v {
                     pairs.iter().find_map(|(k, val)| {
-                        if k.as_str() == Some("Int") {
+                        if k.as_str() == Some("score") {
                             if let rmpv::Value::Integer(i) = val {
                                 i.as_i64()
                             } else {
