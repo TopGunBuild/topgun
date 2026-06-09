@@ -244,7 +244,7 @@ fn classify_operation(op: &Operation) -> (Option<PermissionAction>, String) {
         ),
 
         // --- Read actions ---
-        Operation::QuerySubscribe { payload, .. } | Operation::DagQuery { payload, .. } => (
+        Operation::QuerySubscribe { payload, .. } => (
             Some(PermissionAction::Read),
             payload.payload.map_name.clone(),
         ),

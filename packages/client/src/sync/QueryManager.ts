@@ -97,12 +97,21 @@ export class QueryManager implements IQueryManager {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query type parameter erased at the routing layer; only the filter and map name are needed for the subscription message
   private sendQuerySubscription(query: QueryHandle<any>): void {
     const filter = query.getFilter();
+    // Serialize sort as an ordered array so the Rust server receives Vec<SortField>
+    // rather than a plain object (whose key iteration order is not guaranteed on the wire).
+    // Sort order is defined by JavaScript object key insertion order — accepted by design.
+    const wireQuery = filter.sort
+      ? {
+          ...filter,
+          sort: Object.entries(filter.sort).map(([field, direction]) => ({ field, direction })),
+        }
+      : filter;
     this.config.sendMessage({
       type: 'QUERY_SUB',
       payload: {
         queryId: query.id,
         mapName: query.getMapName(),
-        query: filter,
+        query: wireQuery,
         fields: filter.fields,
       },
     });

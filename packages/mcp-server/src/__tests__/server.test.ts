@@ -136,7 +136,12 @@ describe('TopGunMCPServer', () => {
       const result = await server.callTool('topgun_query', { map: 'tasks' });
 
       expect(result).toBeDefined();
+      // With no reachable server, queryOnce cannot settle: the tool must report
+      // an explicit not-settled message, never conflate it with an empty result.
       expect((result as { content: Array<{ text: string }> }).content[0].text).toContain(
+        'not settled',
+      );
+      expect((result as { content: Array<{ text: string }> }).content[0].text).not.toContain(
         'No results found',
       );
     });
@@ -213,7 +218,12 @@ describe('TopGunMCPServer', () => {
 
       const result = await server.callTool('topgun_query', { map: 'tasks' });
 
-      expect((result as { isError?: boolean }).isError).toBeUndefined();
+      // Access is allowed (no "not allowed" error). Offline server-truth means the
+      // query itself cannot settle, so it is a not-settled error rather than a
+      // map-access denial — assert the access path, not the connectivity outcome.
+      expect((result as { content: Array<{ text: string }> }).content[0].text).not.toContain(
+        'not allowed',
+      );
     });
 
     it('should deny access to restricted maps', async () => {

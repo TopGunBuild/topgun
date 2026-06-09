@@ -204,7 +204,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::messages::base::{PredicateNode, PredicateOp, SortDirection};
+    use crate::messages::base::{PredicateNode, PredicateOp, SortDirection, SortField};
 
     /// Helper: round-trip a value through named `MsgPack` serialization.
     fn roundtrip_named<T>(val: &T) -> T
@@ -260,11 +260,10 @@ mod tests {
                         value: Some(rmpv::Value::Integer(18.into())),
                         ..Default::default()
                     }),
-                    sort: Some({
-                        let mut s = HashMap::new();
-                        s.insert("name".to_string(), SortDirection::Asc);
-                        s
-                    }),
+                    sort: Some(vec![SortField {
+                        field: "name".to_string(),
+                        direction: SortDirection::Asc,
+                    }]),
                     limit: Some(100),
                     cursor: None,
                     group_by: None,

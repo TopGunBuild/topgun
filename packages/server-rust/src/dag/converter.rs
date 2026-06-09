@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use topgun_core::messages::base::{PredicateNode, PredicateOp, Query, SortDirection};
+use topgun_core::messages::base::{PredicateNode, PredicateOp, Query, SortDirection, SortField};
 
 use crate::dag::types::{DagPlanDescriptor, Edge, ProcessorType, RoutingPolicy, VertexDescriptor};
 
@@ -301,22 +301,74 @@ impl QueryToDagConverter {
             last_vertex = "network-receiver".to_string();
         }
 
-        // --- Step 4: Sort vertex (optional) ---
-        if let Some(ref sort_map) = query.sort {
-            if !sort_map.is_empty() {
-                // HashMap iteration order is non-deterministic; fields are sorted
-                // alphabetically to ensure deterministic multi-field sort behavior.
-                let mut sort_fields: Vec<(String, SortDirection)> = sort_map
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                sort_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
+        // --- Step 3b: Cursor vertex (optional, between Filter and Sort) ---
+        // A Cursor vertex is only emitted when the query carries a keyset cursor.
+        // Placing it before Sort means the sort stage operates on the already-filtered
+        // post-cursor result set, which is the correct semantics for keyset pagination.
+        if let Some(ref cursor_str) = query.cursor {
+            // Pass the predicate hash and sort hash alongside the cursor token so the
+            // CursorProcessor can validate that the cursor was produced by the same query
+            // shape. Without this check, a cursor from a different query could return
+            // incorrect results silently.
+            let predicate_hash: u64 = query.predicate.as_ref().map_or(0, |p| {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                format!("{p:?}").hash(&mut h);
+                h.finish()
+            });
 
+            let sort_hash: u64 = query.sort.as_ref().map_or(0, |s| {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                format!("{s:?}").hash(&mut h);
+                h.finish()
+            });
+
+            let cursor_config = rmpv::Value::Map(vec![
+                (
+                    rmpv::Value::String("cursor".into()),
+                    rmpv::Value::String(cursor_str.clone().into()),
+                ),
+                (
+                    rmpv::Value::String("predicateHash".into()),
+                    rmpv::Value::Integer(rmpv::Integer::from(predicate_hash)),
+                ),
+                (
+                    rmpv::Value::String("sortHash".into()),
+                    rmpv::Value::Integer(rmpv::Integer::from(sort_hash)),
+                ),
+            ]);
+
+            vertices.push(VertexDescriptor {
+                name: "cursor".to_string(),
+                local_parallelism: 1,
+                processor_type: ProcessorType::Cursor,
+                preferred_partitions: None,
+                config: Some(cursor_config),
+            });
+
+            edges.push(Edge {
+                source_name: last_vertex.clone(),
+                source_ordinal: 0,
+                dest_name: "cursor".to_string(),
+                dest_ordinal: 0,
+                routing_policy: RoutingPolicy::Isolated,
+                priority: edge_priority,
+            });
+            edge_priority += 1;
+            last_vertex = "cursor".to_string();
+        }
+
+        // --- Step 4: Sort vertex (optional) ---
+        if let Some(ref sort_fields) = query.sort {
+            if !sort_fields.is_empty() {
+                // Caller-specified order is preserved: the Vec<SortField> wire type
+                // carries insertion order end-to-end, so no re-ordering is applied here.
                 let sort_config = rmpv::Value::Array(
                     sort_fields
                         .iter()
-                        .map(|(field, dir)| {
-                            let dir_str = match dir {
+                        .map(|SortField { field, direction }| {
+                            let dir_str = match direction {
                                 SortDirection::Asc => "asc",
                                 SortDirection::Desc => "desc",
                             };
@@ -597,13 +649,13 @@ mod tests {
 
     #[test]
     fn convert_query_with_sort_inserts_sort_vertex() {
-        use topgun_core::messages::base::SortDirection;
-
-        let mut sort_map = HashMap::new();
-        sort_map.insert("age".to_string(), SortDirection::Desc);
+        use topgun_core::messages::base::{SortDirection, SortField};
 
         let q = Query {
-            sort: Some(sort_map),
+            sort: Some(vec![SortField {
+                field: "age".to_string(),
+                direction: SortDirection::Desc,
+            }]),
             ..Default::default()
         };
 
@@ -683,13 +735,13 @@ mod tests {
 
     #[test]
     fn convert_query_with_sort_and_limit_has_correct_order() {
-        use topgun_core::messages::base::SortDirection;
-
-        let mut sort_map = HashMap::new();
-        sort_map.insert("age".to_string(), SortDirection::Desc);
+        use topgun_core::messages::base::{SortDirection, SortField};
 
         let q = Query {
-            sort: Some(sort_map),
+            sort: Some(vec![SortField {
+                field: "age".to_string(),
+                direction: SortDirection::Desc,
+            }]),
             limit: Some(5),
             ..Default::default()
         };
@@ -736,14 +788,14 @@ mod tests {
 
     #[test]
     fn convert_query_with_group_by_and_sort_limit_inserts_after_combine() {
-        use topgun_core::messages::base::SortDirection;
-
-        let mut sort_map = HashMap::new();
-        sort_map.insert("__count".to_string(), SortDirection::Desc);
+        use topgun_core::messages::base::{SortDirection, SortField};
 
         let q = Query {
             group_by: Some(vec!["category".to_string()]),
-            sort: Some(sort_map),
+            sort: Some(vec![SortField {
+                field: "__count".to_string(),
+                direction: SortDirection::Desc,
+            }]),
             limit: Some(3),
             ..Default::default()
         };
@@ -771,18 +823,26 @@ mod tests {
         );
     }
 
-    // --- Multi-field sort deterministic ordering ---
+    // --- Multi-field sort: caller order preserved (not alphabetical) ---
 
     #[test]
-    fn convert_query_multi_field_sort_alphabetical_order() {
-        use topgun_core::messages::base::SortDirection;
+    fn convert_query_multi_field_sort_preserves_caller_order() {
+        use topgun_core::messages::base::{SortDirection, SortField};
 
-        let mut sort_map = HashMap::new();
-        sort_map.insert("z_field".to_string(), SortDirection::Asc);
-        sort_map.insert("a_field".to_string(), SortDirection::Desc);
-
+        // Caller specifies "a ASC, b DESC" — alphabetical order would be the same here,
+        // so we use "z_field ASC, a_field DESC" to prove caller order (z before a) wins
+        // over alphabetical order (a before z).
         let q = Query {
-            sort: Some(sort_map),
+            sort: Some(vec![
+                SortField {
+                    field: "z_field".to_string(),
+                    direction: SortDirection::Asc,
+                },
+                SortField {
+                    field: "a_field".to_string(),
+                    direction: SortDirection::Desc,
+                },
+            ]),
             ..Default::default()
         };
 
@@ -793,18 +853,116 @@ mod tests {
         let config = sort_vertex.config.as_ref().unwrap();
         if let rmpv::Value::Array(arr) = config {
             assert_eq!(arr.len(), 2);
-            // First field should be "a_field" (alphabetically first)
+            // First field must be "z_field" (caller-specified order, not alphabetical)
             if let rmpv::Value::Array(pair) = &arr[0] {
-                assert_eq!(pair[0].as_str(), Some("a_field"));
-                assert_eq!(pair[1].as_str(), Some("desc"));
-            }
-            // Second field should be "z_field"
-            if let rmpv::Value::Array(pair) = &arr[1] {
-                assert_eq!(pair[0].as_str(), Some("z_field"));
+                assert_eq!(
+                    pair[0].as_str(),
+                    Some("z_field"),
+                    "caller order: z_field first"
+                );
                 assert_eq!(pair[1].as_str(), Some("asc"));
+            } else {
+                panic!("sort config entry should be an array pair");
+            }
+            // Second field must be "a_field"
+            if let rmpv::Value::Array(pair) = &arr[1] {
+                assert_eq!(
+                    pair[0].as_str(),
+                    Some("a_field"),
+                    "caller order: a_field second"
+                );
+                assert_eq!(pair[1].as_str(), Some("desc"));
+            } else {
+                panic!("sort config entry should be an array pair");
             }
         } else {
             panic!("sort config should be an array");
         }
+    }
+
+    // --- Cursor vertex insertion (between Filter and Sort) ---
+
+    #[test]
+    fn convert_query_with_cursor_inserts_cursor_vertex_between_filter_and_sort() {
+        use topgun_core::messages::base::{SortDirection, SortField};
+
+        let mut where_map = HashMap::new();
+        where_map.insert("status".to_string(), rmpv::Value::String("active".into()));
+
+        let q = Query {
+            r#where: Some(where_map),
+            sort: Some(vec![SortField {
+                field: "age".to_string(),
+                direction: SortDirection::Desc,
+            }]),
+            cursor: Some("opaque-cursor-token".to_string()),
+            ..Default::default()
+        };
+
+        let desc = QueryToDagConverter::convert_query(&q, "users", &single_node_assignment())
+            .expect("convert should succeed");
+
+        let names = vertex_names(&desc);
+        assert!(names.contains(&"cursor"), "cursor vertex must be emitted");
+
+        // Cursor must sit strictly between Filter and Sort: Scan→Filter→Cursor→Sort→…
+        let filter_idx = names.iter().position(|&n| n == "filter").unwrap();
+        let cursor_idx = names.iter().position(|&n| n == "cursor").unwrap();
+        let sort_idx = names.iter().position(|&n| n == "sort").unwrap();
+        assert!(filter_idx < cursor_idx, "cursor must come after filter");
+        assert!(cursor_idx < sort_idx, "cursor must come before sort");
+
+        // The cursor vertex is typed as Cursor and carries the keyset token in its config.
+        let cursor_vertex = &desc.vertices[cursor_idx];
+        assert_eq!(cursor_vertex.processor_type, ProcessorType::Cursor);
+        let config = cursor_vertex
+            .config
+            .as_ref()
+            .expect("cursor vertex should have config");
+        if let rmpv::Value::Map(entries) = config {
+            let token = entries
+                .iter()
+                .find(|(k, _)| k.as_str() == Some("cursor"))
+                .map(|(_, v)| v.as_str());
+            assert_eq!(token, Some(Some("opaque-cursor-token")));
+        } else {
+            panic!("cursor config should be a map");
+        }
+
+        // Edge chain proves the wiring: filter → cursor → sort.
+        assert!(
+            desc.edges
+                .iter()
+                .any(|e| e.source_name == "filter" && e.dest_name == "cursor"),
+            "edge from filter to cursor must exist"
+        );
+        assert!(
+            desc.edges
+                .iter()
+                .any(|e| e.source_name == "cursor" && e.dest_name == "sort"),
+            "edge from cursor to sort must exist"
+        );
+    }
+
+    #[test]
+    fn convert_query_without_cursor_emits_no_cursor_vertex() {
+        use topgun_core::messages::base::{SortDirection, SortField};
+
+        // The non-paginated path must add zero cursor overhead.
+        let q = Query {
+            sort: Some(vec![SortField {
+                field: "age".to_string(),
+                direction: SortDirection::Desc,
+            }]),
+            ..Default::default()
+        };
+
+        let desc = QueryToDagConverter::convert_query(&q, "users", &single_node_assignment())
+            .expect("convert should succeed");
+
+        assert!(
+            !vertex_names(&desc).contains(&"cursor"),
+            "no cursor vertex on the non-paginated path"
+        );
     }
 }

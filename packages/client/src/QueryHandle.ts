@@ -35,12 +35,30 @@ export type QueryResultSource = 'local' | 'server';
 /** Result item with _key field for client-side lookups */
 export type QueryResultItem<T> = T & { _key: string };
 
+/**
+ * Per-emission metadata passed as the optional 2nd argument to a subscribe
+ * callback.
+ *
+ * `settled` reflects the query-level latch: `false` while only local/optimistic
+ * data has been delivered, `true` once the server has answered with a
+ * QUERY_RESP for this query (including an empty result set). This lets a
+ * subscriber distinguish "we're still waiting on the server" from "the server
+ * has spoken and there genuinely are no rows".
+ */
+export type SubscribeMeta = { settled: boolean };
+
+/**
+ * Subscribe callback. The 2nd `meta` argument is optional so existing
+ * single-arg `(results) => void` callbacks continue to type-check unchanged.
+ */
+export type SubscribeCallback<T> = (results: QueryResultItem<T>[], meta?: SubscribeMeta) => void;
+
 export class QueryHandle<T> {
   public readonly id: string;
   private syncEngine: SyncEngine;
   private mapName: string;
   private filter: QueryFilter;
-  private listeners: Set<(results: QueryResultItem<T>[]) => void> = new Set();
+  private listeners: Set<SubscribeCallback<T>> = new Set();
   private currentResults: Map<string, T> = new Map();
 
   // Change tracking for delta notifications
@@ -73,15 +91,17 @@ export class QueryHandle<T> {
     this.fields = filter.fields;
   }
 
-  public subscribe(callback: (results: QueryResultItem<T>[]) => void): () => void {
+  public subscribe(callback: SubscribeCallback<T>): () => void {
     this.listeners.add(callback);
 
     // If this is the first listener, activate subscription
     if (this.listeners.size === 1) {
       this.syncEngine.subscribeToQuery(this);
     } else {
-      // Immediately invoke with cached results
-      callback(this.getSortedResults());
+      // Immediately invoke with cached results, carrying the current settled
+      // state so a late subscriber sees the same { settled } it would have on
+      // the next notify().
+      callback(this.getSortedResults(), { settled: this.settled });
     }
 
     // [FIX]: Attempt to load local results immediately if available
@@ -111,8 +131,46 @@ export class QueryHandle<T> {
     return this.syncEngine.runLocalQuery(this.mapName, this.filter);
   }
 
-  // Track if we've received authoritative server response
-  private hasReceivedServerData: boolean = false;
+  // Settled latch: flips true on the FIRST server QUERY_RESP (even an empty
+  // one). "Settled" means the server has spoken authoritatively for this query
+  // — not that it returned rows. queryOnce and the { settled } subscribe option
+  // read this single internal signal.
+  private settled: boolean = false;
+  private settledResolve: (() => void) | null = null;
+  private settledPromise: Promise<void> = new Promise((resolve) => {
+    this.settledResolve = resolve;
+  });
+
+  /**
+   * True once the first server QUERY_RESP has arrived for this query (even an
+   * empty result set). Distinct from "has rows" — an empty authoritative server
+   * response still settles the query.
+   *
+   * @internal
+   */
+  public get isSettled(): boolean {
+    return this.settled;
+  }
+
+  /**
+   * Resolves when the first server QUERY_RESP arrives (settlement). If already
+   * settled, resolves immediately. One-shot — subsequent settlements re-use the
+   * already-resolved promise. Consumed by queryOnce and the { settled }
+   * subscribe option.
+   *
+   * @internal
+   */
+  public whenSettled(): Promise<void> {
+    return this.settledPromise;
+  }
+
+  /** Flip the settled latch and release any awaiters. Idempotent. */
+  private markSettled(): void {
+    if (this.settled) return;
+    this.settled = true;
+    this.settledResolve?.();
+    this.settledResolve = null;
+  }
 
   /**
    * Called by SyncEngine when server sends initial results or by local storage load.
@@ -121,10 +179,13 @@ export class QueryHandle<T> {
    * @param items - Array of key-value pairs
    * @param source - 'local' for IndexedDB data, 'server' for QUERY_RESP from server
    *
-   * Race condition protection:
-   * - Empty server responses are ignored until we receive non-empty server data
-   * - This prevents clearing local data when server hasn't loaded from storage yet
-   * - Works with any async storage adapter (PostgreSQL, SQLite, Redis, etc.)
+   * Settlement semantics:
+   * - The first 'server' QUERY_RESP settles the query, even when empty. An empty
+   *   authoritative response then clears stale local-only rows via the removed-key
+   *   diff below — the server is the source of truth once it has spoken.
+   * - 'local' results (loadInitialLocalData pre-load) NEVER settle the query and
+   *   never clear data on emptiness; they only seed the cache before the server
+   *   responds, so offline writes stay visible until a real QUERY_RESP arrives.
    */
   public onResult(
     items: { key: string; value: T }[],
@@ -137,28 +198,17 @@ export class QueryHandle<T> {
         itemCount: items.length,
         source,
         currentResultsCount: this.currentResults.size,
-        hasReceivedServerData: this.hasReceivedServerData,
+        settled: this.settled,
       },
       'QueryHandle onResult',
     );
 
-    // [FIX] Race condition protection for any async storage adapter:
-    // If server sends empty QUERY_RESP before loading data from storage,
-    // we ignore it to prevent clearing valid local data.
-    // This is safe because:
-    // 1. If server truly has no data, next non-empty response will clear local-only items
-    // 2. If server is still loading, we preserve local data until real data arrives
-    if (source === 'server' && items.length === 0 && !this.hasReceivedServerData) {
-      logger.debug(
-        { mapName: this.mapName },
-        'QueryHandle ignoring empty server response - waiting for authoritative data',
-      );
-      return;
-    }
-
-    // Mark that we've received authoritative server data (non-empty from server)
-    if (source === 'server' && items.length > 0) {
-      this.hasReceivedServerData = true;
+    // Any server response is authoritative and settles the query — including an
+    // empty result, which legitimately means "the server has no rows for this
+    // query". Driven ONLY from the server source so the local pre-load artifact
+    // (loadInitialLocalData) can never settle or clear data prematurely.
+    if (source === 'server') {
+      this.markSettled();
     }
 
     // Store Merkle root hash for delta reconnect on next connection
@@ -305,8 +355,17 @@ export class QueryHandle<T> {
 
   private notify() {
     const results = this.getSortedResults();
+    // Snapshot the latch once per emission so every subscriber in this pass
+    // observes the same settled value.
+    const meta: SubscribeMeta = { settled: this.settled };
     for (const listener of this.listeners) {
-      listener(results);
+      // Isolate each subscriber: a throwing subscriber must not block delivery
+      // to later subscribers or propagate back into onResult/onUpdate.
+      try {
+        listener(results, meta);
+      } catch (e) {
+        logger.error({ err: e }, 'QueryHandle result listener error');
+      }
     }
     // Result-set membership may have changed (keys added/removed). Re-evaluate
     // the filtered sync-state snapshot — only emits when content differs.

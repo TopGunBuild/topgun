@@ -81,6 +81,32 @@ describe('QueryManager', () => {
       });
     });
 
+    it('should serialize sort as ordered array on the wire', () => {
+      mockIsAuthenticated.mockReturnValue(true);
+      const query = new QueryHandle<any>(mockSyncEngine, 'test-map', {
+        where: { status: 'active' },
+        sort: { createdAt: 'desc', name: 'asc' },
+      });
+
+      queryManager.subscribeToQuery(query);
+
+      expect(mockSendMessage).toHaveBeenCalledWith({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: query.id,
+          mapName: 'test-map',
+          // sort is serialized as ordered array, not a plain object
+          query: {
+            where: { status: 'active' },
+            sort: [
+              { field: 'createdAt', direction: 'desc' },
+              { field: 'name', direction: 'asc' },
+            ],
+          },
+        },
+      });
+    });
+
     it('should not send subscription message when not authenticated', () => {
       mockIsAuthenticated.mockReturnValue(false);
       const query = new QueryHandle<any>(mockSyncEngine, 'test-map', {});

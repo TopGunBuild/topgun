@@ -51,7 +51,13 @@ jobs:
   build-test-lint:
     name: Build · Test · Lint
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 25m headroom over the real ~15m run. The previous 20m cancellations were NOT
+    # slowness — several packages (client, mcp-server) finish their tests but leave
+    # open handles (WebSocket reconnect timers, spawned topgun-server children), so
+    # jest never exits and the recursive run stalls until the cap. The real fix is
+    # --forceExit on the Unit tests step below. Proper per-test teardown + not running
+    # server-dependent tests in this Node-only job is tracked in TODO-448.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -75,9 +81,14 @@ jobs:
         run: pnpm -r build
 
       - name: Unit tests
-        # --runInBand keeps Jest sequential so per-package fixtures don't
-        # contend on ports/files. Matches CLAUDE.md guidance.
-        run: pnpm -r exec jest --runInBand --passWithNoTests
+        # pnpm -r runs jest in every workspace package, sequentially (--runInBand,
+        # so per-package fixtures don't contend on ports/files — CLAUDE.md guidance).
+        # --forceExit ends jest past benign open handles. Per-package marker + hard
+        # SIGKILL timeout: the marker pinpoints a stalling package in the log, and
+        # the timeout converts any hang into a fast failure instead of burning the
+        # whole job budget — a permanent safety net. See TODO-448.
+        run: |
+          pnpm -r exec sh -c 'echo ">>>> JEST ENTER: $(pwd)"; timeout -s KILL 360 jest --runInBand --forceExit --passWithNoTests'
 
       - name: Lint (eslint)
         run: pnpm lint

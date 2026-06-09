@@ -180,14 +180,34 @@ impl Processor for ScanProcessor {
         for &pid in &self.partition_ids {
             let store = self.factory.get_or_create(&self.map_name, pid);
             store.for_each_boxed(
-                &mut |_key, record| {
-                    // Bridge topgun_core::types::Value -> rmpv::Value via MsgPack round-trip.
+                &mut |key, record| {
+                    // Convert topgun_core::types::Value -> rmpv::Value using the
+                    // canonical untagged converter (the same representation used on
+                    // the wire and by the predicate engine). A serde round-trip would
+                    // produce an externally-tagged form (`Value::Int(30)` -> `{Int:30}`),
+                    // which breaks field access for Filter/Sort and the client result shape.
                     if let RecordValue::Lww { value, .. } = &record.value {
-                        if let Ok(bytes) = rmp_serde::to_vec_named(value) {
-                            if let Ok(rmpv_val) = rmp_serde::from_slice::<rmpv::Value>(&bytes) {
-                                self.buffer.push(rmpv_val);
+                        let rmpv_val = crate::service::domain::predicate::value_to_rmpv(value);
+                        // Inject the record key as `_key` so downstream stages
+                        // (e.g. CursorProcessor's last_key tie-break) can access
+                        // it without a separate key channel.
+                        let row = match rmpv_val {
+                            rmpv::Value::Map(mut pairs) => {
+                                pairs.push((
+                                    rmpv::Value::String("_key".into()),
+                                    rmpv::Value::String(key.into()),
+                                ));
+                                rmpv::Value::Map(pairs)
                             }
-                        }
+                            other => rmpv::Value::Map(vec![
+                                (
+                                    rmpv::Value::String("_key".into()),
+                                    rmpv::Value::String(key.into()),
+                                ),
+                                (rmpv::Value::String("_value".into()), other),
+                            ]),
+                        };
+                        self.buffer.push(row);
                     }
                 },
                 false,
@@ -965,6 +985,11 @@ impl Processor for LimitProcessor {
         outbox: &mut dyn Outbox,
     ) -> Result<bool> {
         if self.emitted >= self.limit {
+            // Drain and discard any remaining inbox items. Without this, the
+            // executor would find a non-empty inbox on a done processor and spin
+            // in a tight loop calling process() forever, never reaching
+            // ready_to_complete (which requires inbox_empty).
+            inbox.drain(&mut |_| {});
             return Ok(true);
         }
 
@@ -1002,6 +1027,166 @@ impl ProcessorSupplier for LimitProcessorSupplier {
 
     fn clone_supplier(&self) -> Box<dyn ProcessorSupplier> {
         Box::new(LimitProcessorSupplier { limit: self.limit })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CursorProcessor
+// ---------------------------------------------------------------------------
+
+/// Keyset-cursor filter stage: forwards only entries strictly after the cursor position.
+///
+/// Placed between Filter and Sort (`Scan→Filter→Cursor→Sort→Limit`) so that cursor
+/// filtering runs on the pre-sort result set. The cursor payload is decoded once during
+/// `init` and reused for every item in `process`.
+///
+/// Reuses `crate::query::cursor` (the shared transport-neutral cursor module) so both
+/// the HTTP sync handler and this DAG stage share one keyset cursor implementation.
+pub struct CursorProcessor {
+    /// Encoded cursor string read from the vertex config; decoded in `init`.
+    raw_cursor: String,
+    /// Predicate hash to validate cursor authenticity.
+    predicate_hash: u64,
+    /// Sort hash to validate cursor authenticity.
+    sort_hash: u64,
+    /// Decoded cursor, set during `init`.
+    cursor: Option<crate::query::cursor::CursorData>,
+    /// Whether the cursor failed validation (hash mismatch or expiry). Reject all items
+    /// when true to avoid returning a full page from a stale or mismatched cursor.
+    rejected: bool,
+}
+
+impl CursorProcessor {
+    fn new(raw_cursor: String, predicate_hash: u64, sort_hash: u64) -> Self {
+        Self {
+            raw_cursor,
+            predicate_hash,
+            sort_hash,
+            cursor: None,
+            rejected: false,
+        }
+    }
+}
+
+/// Extract a string value for the given `key` from an rmpv map value.
+fn get_rmpv_key(record: &rmpv::Value) -> Option<&str> {
+    match record {
+        rmpv::Value::Map(pairs) => pairs.iter().find_map(|(k, v)| {
+            if k.as_str() == Some("_key") || k.as_str() == Some("key") {
+                v.as_str()
+            } else {
+                None
+            }
+        }),
+        _ => None,
+    }
+}
+
+impl Processor for CursorProcessor {
+    fn init(&mut self, _context: &ProcessorContext) -> Result<()> {
+        use crate::query::cursor::{decode_cursor, validate_cursor_expiry, validate_cursor_hashes};
+
+        let cursor = decode_cursor(&self.raw_cursor)
+            .ok_or_else(|| anyhow::anyhow!("cursor vertex: failed to decode cursor"))?;
+
+        // Validate hashes against the current query so a cursor produced by a different
+        // query shape cannot page through unrelated results.
+        if !validate_cursor_hashes(&cursor, self.predicate_hash, self.sort_hash) {
+            self.rejected = true;
+            self.cursor = Some(cursor);
+            return Ok(());
+        }
+
+        // Validate expiry using the system clock. Timestamps are i64 ms since epoch;
+        // saturate to i64::MAX on the (practically impossible) overflow rather than truncating.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+            .unwrap_or(0);
+
+        if !validate_cursor_expiry(&cursor, now_ms) {
+            self.rejected = true;
+            self.cursor = Some(cursor);
+            return Ok(());
+        }
+
+        self.cursor = Some(cursor);
+        Ok(())
+    }
+
+    fn process(
+        &mut self,
+        _ordinal: u32,
+        inbox: &mut dyn Inbox,
+        outbox: &mut dyn Outbox,
+    ) -> Result<bool> {
+        use crate::query::cursor::is_after_cursor;
+
+        if self.rejected {
+            // Drain and discard: cursor was rejected (hash mismatch or expired).
+            inbox.drain(&mut |_| {});
+            return Ok(true);
+        }
+
+        let Some(cursor) = &self.cursor else {
+            // init was not called — drain and signal done to avoid a spin.
+            inbox.drain(&mut |_| {});
+            return Ok(true);
+        };
+
+        // Forward only records that are strictly after the cursor position.
+        inbox.drain(&mut |item| {
+            let key = get_rmpv_key(&item).unwrap_or("");
+            if is_after_cursor(key, &item, cursor) {
+                outbox.offer(0, item);
+            }
+        });
+
+        Ok(false)
+    }
+
+    fn complete(&mut self, _outbox: &mut dyn Outbox) -> Result<bool> {
+        Ok(true)
+    }
+
+    fn is_cooperative(&self) -> bool {
+        true
+    }
+
+    fn close(&mut self) {
+        self.cursor = None;
+    }
+}
+
+/// Supplier for `CursorProcessor`.
+pub struct CursorProcessorSupplier {
+    /// Base64url-encoded cursor string from the vertex config.
+    pub raw_cursor: String,
+    /// Predicate hash for validating cursor authenticity.
+    pub predicate_hash: u64,
+    /// Sort hash for validating cursor authenticity.
+    pub sort_hash: u64,
+}
+
+impl ProcessorSupplier for CursorProcessorSupplier {
+    fn get(&self, count: u32) -> Vec<Box<dyn Processor>> {
+        (0..count)
+            .map(|_| {
+                Box::new(CursorProcessor::new(
+                    self.raw_cursor.clone(),
+                    self.predicate_hash,
+                    self.sort_hash,
+                )) as Box<dyn Processor>
+            })
+            .collect()
+    }
+
+    fn clone_supplier(&self) -> Box<dyn ProcessorSupplier> {
+        Box::new(CursorProcessorSupplier {
+            raw_cursor: self.raw_cursor.clone(),
+            predicate_hash: self.predicate_hash,
+            sort_hash: self.sort_hash,
+        })
     }
 }
 

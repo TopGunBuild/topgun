@@ -9,6 +9,7 @@
 pub mod cluster;
 pub mod dag;
 pub mod network;
+pub mod query;
 pub mod service;
 pub mod storage;
 pub mod traits;
@@ -167,7 +168,6 @@ mod integration_tests {
                 Arc::clone(&query_registry),
                 Arc::clone(&record_store_factory),
                 Arc::clone(&connection_registry),
-                Arc::new(crate::service::domain::query_backend::PredicateBackend),
                 Some(query_merkle_manager),
                 config.max_query_records,
                 Some(Arc::clone(&index_observer_factory)),
@@ -412,7 +412,6 @@ mod integration_tests {
             query_registry,
             Arc::clone(&record_store_factory),
             Arc::new(ConnectionRegistry::new()),
-            Arc::new(crate::service::domain::query_backend::PredicateBackend),
             None,
             10_000,
             None,

@@ -32,6 +32,7 @@ async function dev(options: DevOptions) {
   console.log('');
 
   // Binary resolution (Key Link L3 — monorepo path is always first):
+  //   0. $TOPGUN_SERVER_BINARY                — explicit override (authoritative)
   //   1. <cwd>/target/release/topgun-server — local cargo build (monorepo / contributors)
   //   2. @topgunbuild/server bin shim        — installed npm package (out-of-monorepo)
   // If neither is found, the error message names both remedies.
@@ -40,7 +41,17 @@ async function dev(options: DevOptions) {
   let serverBinary: string | null = null;
   let isNodeShim = false;
 
-  if (fs.existsSync(cwdBinaryPath)) {
+  // An explicit override wins and is authoritative: if set, autodetection is
+  // skipped entirely (a missing override path falls through to the error below
+  // rather than silently spawning some other server). Mirrors the
+  // RUST_SERVER_BINARY convention used by the integration tests, and makes the
+  // "binary not found" path deterministic regardless of what's installed.
+  const envBinary = process.env.TOPGUN_SERVER_BINARY;
+  if (envBinary) {
+    if (fs.existsSync(envBinary)) {
+      serverBinary = envBinary;
+    }
+  } else if (fs.existsSync(cwdBinaryPath)) {
     serverBinary = cwdBinaryPath;
   } else {
     // Fallback: resolve the bin shim from an installed @topgunbuild/server package.
@@ -54,7 +65,7 @@ async function dev(options: DevOptions) {
         serverBinary = shimPath;
         isNodeShim = true;
       }
-    } catch (_) {
+    } catch {
       // @topgunbuild/server not installed — fall through to error below
     }
   }
@@ -63,7 +74,11 @@ async function dev(options: DevOptions) {
     console.error(chalk.red('  Error: Rust server binary not found.'));
     console.log(chalk.yellow(`  Expected: ${cwdBinaryPath}`));
     console.log(chalk.yellow('  Options:'));
-    console.log(chalk.yellow('    Build from source: cargo build --release -p topgun-server --bin topgun-server'));
+    console.log(
+      chalk.yellow(
+        '    Build from source: cargo build --release -p topgun-server --bin topgun-server',
+      ),
+    );
     console.log(chalk.yellow('    Or install prebuilt: npm install @topgunbuild/server'));
     process.exit(1);
   }
@@ -106,11 +121,17 @@ async function dev(options: DevOptions) {
 
     if (!adminDashboardExists) {
       console.log(chalk.yellow('\n  Admin dashboard source not found at apps/admin-dashboard.'));
-      console.log(chalk.yellow('  The --admin flag requires the TopGun monorepo to be checked out.'));
+      console.log(
+        chalk.yellow('  The --admin flag requires the TopGun monorepo to be checked out.'),
+      );
       console.log(chalk.gray(''));
       console.log(chalk.gray('  Alternatives:'));
       console.log(chalk.gray('    Hosted demo:   https://demo.topgun.build'));
-      console.log(chalk.gray('    Self-host:     docker compose --profile admin up  →  http://localhost:3001'));
+      console.log(
+        chalk.gray(
+          '    Self-host:     docker compose --profile admin up  →  http://localhost:3001',
+        ),
+      );
       console.log(chalk.gray(''));
       console.log(chalk.gray('  Continuing with server only...\n'));
     } else {

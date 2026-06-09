@@ -107,6 +107,20 @@ pub enum SortDirection {
     Desc,
 }
 
+/// A single sort field with direction, used in the ordered sort list.
+///
+/// Named struct chosen over bare tuple because `rmp_serde::to_vec_named` encodes named
+/// struct fields as a `MessagePack` map with string keys, which matches the
+/// `{ field, direction }` object format that `msgpackr` (TS) produces for array
+/// elements. Bare tuples serialize as `MessagePack` arrays, producing a different
+/// wire shape that msgpackr would decode as a two-element array rather than an object.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SortField {
+    pub field: String,
+    pub direction: SortDirection,
+}
+
 // ---------------------------------------------------------------------------
 // Structs
 // ---------------------------------------------------------------------------
@@ -145,8 +159,9 @@ pub struct Query {
     pub r#where: Option<HashMap<String, rmpv::Value>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub predicate: Option<PredicateNode>,
+    /// Ordered sort fields. Order is caller-specified and preserved end-to-end.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub sort: Option<HashMap<String, SortDirection>>,
+    pub sort: Option<Vec<SortField>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub limit: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -393,9 +408,6 @@ mod tests {
         let mut where_clause = HashMap::new();
         where_clause.insert("status".to_string(), rmpv::Value::String("active".into()));
 
-        let mut sort = HashMap::new();
-        sort.insert("createdAt".to_string(), SortDirection::Desc);
-
         let query = Query {
             r#where: Some(where_clause),
             predicate: Some(PredicateNode {
@@ -404,7 +416,10 @@ mod tests {
                 value: Some(rmpv::Value::String("user".into())),
                 ..Default::default()
             }),
-            sort: Some(sort),
+            sort: Some(vec![SortField {
+                field: "createdAt".to_string(),
+                direction: SortDirection::Desc,
+            }]),
             limit: Some(50),
             cursor: Some("abc123".to_string()),
             group_by: None,

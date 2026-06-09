@@ -24,7 +24,7 @@ use topgun_core::messages::vector::{
 use topgun_core::messages::{Message, SyncRespRootMessage, SyncRespRootPayload};
 use topgun_core::vector::distance::DistanceMetric;
 
-use crate::dag::coordinator::ClusterQueryCoordinator;
+use crate::dag::coordinator::{run_dag_local, ClusterQueryCoordinator};
 
 use tracing::Instrument;
 
@@ -33,9 +33,9 @@ use crate::service::domain::index::attribute::AttributeExtractor;
 use crate::service::domain::index::query_optimizer::index_aware_evaluate;
 use crate::service::domain::index::IndexObserverFactory;
 use crate::service::domain::predicate::{
-    evaluate_predicate, evaluate_where, value_to_rmpv, EvalContext,
+    evaluate_predicate, evaluate_where, execute_query as predicate_execute_query, value_to_rmpv,
+    EvalContext,
 };
-use crate::service::domain::query_backend::QueryBackend;
 use crate::service::operation::{service_names, Operation, OperationError, OperationResponse};
 use crate::service::registry::{ManagedService, ServiceContext};
 use crate::storage::mutation_observer::MutationObserver;
@@ -373,7 +373,6 @@ pub struct QueryService {
     /// Retained for `unregister_by_connection` on client disconnect (module wiring deferred).
     #[allow(dead_code)]
     connection_registry: Arc<ConnectionRegistry>,
-    query_backend: Arc<dyn QueryBackend>,
     /// Per-query Merkle manager for delta sync init.
     /// `None` when query Merkle sync is not wired (test ergonomics).
     query_merkle_manager: Option<Arc<crate::storage::query_merkle::QueryMerkleSyncManager>>,
@@ -385,9 +384,63 @@ pub struct QueryService {
     index_observer_factory: Option<Arc<IndexObserverFactory>>,
     #[cfg(feature = "datafusion")]
     sql_query_backend: Option<Arc<dyn crate::service::domain::query_backend::SqlQueryBackend>>,
-    /// Optional DAG coordinator for GROUP BY queries.
-    /// `None` preserves existing behavior for all non-GROUP-BY call sites.
+    /// Optional DAG coordinator, reserved for distributed (cluster) execution.
+    /// `None` in single-node mode; the single-node WS path runs the DAG locally
+    /// via `run_dag_local` and does not require a coordinator.
     coordinator: Option<Arc<ClusterQueryCoordinator>>,
+    /// Tests-only opt-out: when `true`, the handler uses the linear predicate
+    /// engine (single-field sort, optional index acceleration) instead of the
+    /// canonical local DAG engine. Defaults to `false` — prod and most tests run
+    /// the DAG. Set via `with_linear_engine_for_tests()` only where a unit test
+    /// must exercise the linear path.
+    linear_engine_for_tests: bool,
+}
+
+/// Maps raw DAG output rows to `QueryResultEntry` values.
+///
+/// `ScanProcessor` injects the real record key as `_key` into every row, and wraps
+/// non-Map (scalar) record values as `{_key, _value}`. GROUP BY aggregate rows instead
+/// carry `__key` (the bucket key). This recovers the entry key (preferring the real
+/// `_key`, then the group `__key`, then a synthetic `row-{i}`) and strips the internal
+/// `_key`/`_value` fields so the returned value equals the originally stored value.
+fn map_dag_rows_to_entries(raw: Vec<rmpv::Value>) -> Vec<QueryResultEntry> {
+    raw.into_iter()
+        .enumerate()
+        .map(|(i, val)| match val {
+            rmpv::Value::Map(pairs) => {
+                let mut real_key: Option<String> = None;
+                let mut group_key: Option<String> = None;
+                let mut unwrapped_value: Option<rmpv::Value> = None;
+                let mut kept: Vec<(rmpv::Value, rmpv::Value)> = Vec::with_capacity(pairs.len());
+
+                for (k, v) in pairs {
+                    // Own the field name so we can move (k, v) into `kept` without
+                    // holding a borrow of `k` across the match.
+                    let kname = k.as_str().map(std::string::ToString::to_string);
+                    match kname.as_deref() {
+                        Some("_key") => real_key = v.as_str().map(str::to_string),
+                        Some("_value") => unwrapped_value = Some(v),
+                        Some("__key") => {
+                            // Keep `__key` in the value for GROUP BY aggregate rows.
+                            group_key = v.as_str().map(str::to_string);
+                            kept.push((k, v));
+                        }
+                        _ => kept.push((k, v)),
+                    }
+                }
+
+                let key = real_key.or(group_key).unwrap_or_else(|| format!("row-{i}"));
+                // A `_value` wrapper means the original record value was a scalar;
+                // unwrap it. Otherwise the value is the row minus internal `_key`.
+                let value = unwrapped_value.unwrap_or(rmpv::Value::Map(kept));
+                QueryResultEntry { key, value }
+            }
+            other => QueryResultEntry {
+                key: format!("row-{i}"),
+                value: other,
+            },
+        })
+        .collect()
 }
 
 impl QueryService {
@@ -399,12 +452,10 @@ impl QueryService {
     /// Pass `Some(index_observer_factory)` to enable index-accelerated predicate
     /// evaluation. Pass `None` to fall back to full-scan (sim/test call sites).
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         query_registry: Arc<QueryRegistry>,
         record_store_factory: Arc<RecordStoreFactory>,
         connection_registry: Arc<ConnectionRegistry>,
-        query_backend: Arc<dyn QueryBackend>,
         query_merkle_manager: Option<Arc<crate::storage::query_merkle::QueryMerkleSyncManager>>,
         max_query_records: u32,
         index_observer_factory: Option<Arc<IndexObserverFactory>>,
@@ -416,13 +467,13 @@ impl QueryService {
             query_registry,
             record_store_factory,
             connection_registry,
-            query_backend,
             query_merkle_manager,
             max_query_records,
             index_observer_factory,
             #[cfg(feature = "datafusion")]
             sql_query_backend,
             coordinator: None,
+            linear_engine_for_tests: false,
         }
     }
 
@@ -432,6 +483,15 @@ impl QueryService {
     #[must_use]
     pub fn with_coordinator(mut self, coordinator: Arc<ClusterQueryCoordinator>) -> Self {
         self.coordinator = Some(coordinator);
+        self
+    }
+
+    /// Tests-only: forces the handler onto the linear predicate engine instead of
+    /// the canonical local DAG engine. Used by unit tests that specifically exercise
+    /// the linear path (single-field sort, index-accelerated evaluation).
+    #[must_use]
+    pub fn with_linear_engine_for_tests(mut self) -> Self {
+        self.linear_engine_for_tests = true;
         self
     }
 
@@ -509,9 +569,6 @@ impl Service<Operation> for Arc<QueryService> {
                     Operation::VectorSearch { ctx, payload } => {
                         svc.handle_vector_search(&ctx, &payload).await
                     }
-                    Operation::DagQuery { ctx, payload } => {
-                        svc.handle_dag_query(&ctx, &payload).await
-                    }
                     _ => Err(OperationError::WrongService),
                 }
             }
@@ -529,7 +586,9 @@ impl QueryService {
     ///
     /// 1. Extracts `connection_id` from context (error if missing).
     /// 2. Scans all partitions, collecting entries and Merkle key-hash pairs.
-    /// 3. Delegates to `query_backend.execute_query()` for filtering, sorting, and limiting.
+    /// 3. When a coordinator is wired, delegates to the DAG single-node path for
+    ///    filtering, sorting, and limiting. Without a coordinator (tests only),
+    ///    falls back to the predicate engine directly.
     /// 4. Applies `max_query_records` clamping with `has_more` flag.
     /// 5. Applies field projection if `fields` is specified.
     /// 6. Initializes per-query Merkle trees and computes aggregate root hash.
@@ -552,7 +611,7 @@ impl QueryService {
         let query = payload.payload.query.clone();
         let fields = payload.payload.fields.clone();
 
-        // Scan ALL partitions for this map to aggregate entries across the full key space.
+        // Scan ALL partitions for this map to aggregate entries and Merkle key-hash pairs.
         // Keys are deterministically mapped to partitions via hash_to_partition,
         // so there is no risk of duplicates across partitions.
         let stores = self.record_store_factory.get_all_for_map(&map_name);
@@ -592,44 +651,64 @@ impl QueryService {
             }
         }
 
-        // Narrow candidate entries using index-accelerated evaluation when an
-        // IndexObserverFactory is wired and the query has a predicate. This
-        // reduces the entries passed to execute_query without altering the
-        // query semantics — the predicate is re-evaluated inside the backend
-        // and inside index_aware_evaluate itself, so no correctness risk.
-        let entries = if let (Some(factory), Some(predicate)) = (
-            self.index_observer_factory.as_ref(),
-            query.predicate.as_ref(),
-        ) {
-            if let Some(registry) = factory.get_registry(&map_name) {
-                // Build a lookup map so the optimizer can fetch record values by key.
-                let entry_map: std::collections::HashMap<&str, &rmpv::Value> =
-                    entries.iter().map(|(k, v)| (k.as_str(), v)).collect();
-                let all_keys: Vec<String> = entries.iter().map(|(k, _)| k.clone()).collect();
+        // Canonical single-node engine: run the structured query through the DAG
+        // pipeline locally over this map's partitions (Scan→Filter→Cursor→Sort→Limit,
+        // or group-by aggregate). Multi-field sort, limit, and the cursor stage are
+        // all handled here. No coordinator is required for single-node execution.
+        //
+        // The linear predicate engine remains available behind an explicit
+        // tests-only opt-out (`with_linear_engine_for_tests`) — it supports only
+        // single-field sort, plus index-accelerated narrowing, and is used by unit
+        // tests that target that path directly.
+        let mut results: Vec<QueryResultEntry> = if self.linear_engine_for_tests {
+            // Narrow candidate entries using index-accelerated evaluation when an
+            // IndexObserverFactory is wired and the query has a predicate. This
+            // reduces the entries passed to execute_query without altering the
+            // query semantics — the predicate is re-evaluated inside the backend
+            // and inside index_aware_evaluate itself, so no correctness risk.
+            let entries = if let (Some(factory), Some(predicate)) = (
+                self.index_observer_factory.as_ref(),
+                query.predicate.as_ref(),
+            ) {
+                if let Some(registry) = factory.get_registry(&map_name) {
+                    // Build a lookup map so the optimizer can fetch record values by key.
+                    let entry_map: std::collections::HashMap<&str, &rmpv::Value> =
+                        entries.iter().map(|(k, v)| (k.as_str(), v)).collect();
+                    let all_keys: Vec<String> = entries.iter().map(|(k, _)| k.clone()).collect();
 
-                let matching_keys = index_aware_evaluate(&registry, predicate, &all_keys, |key| {
-                    entry_map.get(key).map(|v| (*v).clone())
-                });
+                    let matching_keys =
+                        index_aware_evaluate(&registry, predicate, &all_keys, |key| {
+                            entry_map.get(key).map(|v| (*v).clone())
+                        });
 
-                let matching_set: HashSet<&str> =
-                    matching_keys.iter().map(String::as_str).collect();
-                entries
-                    .into_iter()
-                    .filter(|(k, _)| matching_set.contains(k.as_str()))
-                    .collect()
+                    let matching_set: HashSet<&str> =
+                        matching_keys.iter().map(String::as_str).collect();
+                    entries
+                        .into_iter()
+                        .filter(|(k, _)| matching_set.contains(k.as_str()))
+                        .collect()
+                } else {
+                    entries
+                }
             } else {
                 entries
-            }
-        } else {
-            entries
-        };
+            };
 
-        // Delegate to query backend for filtering, sorting, and limiting
-        let mut results = self
-            .query_backend
-            .execute_query(&map_name, entries, &query)
+            predicate_execute_query(entries, &query)
+        } else {
+            let partition_ids: Vec<u32> = stores.iter().map(|s| s.partition_id()).collect();
+            let raw = run_dag_local(
+                &query,
+                &map_name,
+                partition_ids,
+                Arc::clone(&self.record_store_factory),
+                &crate::dag::types::QueryConfig::default(),
+            )
             .await
             .map_err(|e| OperationError::Internal(anyhow::anyhow!("{e}")))?;
+
+            map_dag_rows_to_entries(raw)
+        };
 
         // Apply max_query_records clamping
         let total_count = results.len();
@@ -826,73 +905,6 @@ impl QueryService {
         Err(OperationError::Internal(anyhow::anyhow!(
             "SQL requires datafusion feature"
         )))
-    }
-
-    /// Handles a `DagQuery` operation (GROUP BY query via DAG execution pipeline).
-    ///
-    /// Delegates to `ClusterQueryCoordinator::execute_distributed()` and maps
-    /// the raw aggregation results into `QueryResultEntry` values using the
-    /// `__key` field convention set by `AggregateProcessor`.
-    async fn handle_dag_query(
-        &self,
-        ctx: &crate::service::operation::OperationContext,
-        payload: &topgun_core::messages::query::QuerySubMessage,
-    ) -> Result<OperationResponse, OperationError> {
-        let _connection_id = ctx.connection_id.ok_or_else(|| {
-            OperationError::Internal(anyhow::anyhow!(
-                "DagQuery requires connection_id in OperationContext"
-            ))
-        })?;
-
-        let map_name = payload.payload.map_name.clone();
-        let query = payload.payload.query.clone();
-        let query_id = payload.payload.query_id.clone();
-
-        let coordinator = self.coordinator.as_ref().ok_or_else(|| {
-            OperationError::Internal(anyhow::anyhow!("DAG coordinator not configured"))
-        })?;
-
-        let raw_results = coordinator
-            .execute_distributed(&query, &map_name)
-            .await
-            .map_err(|e| OperationError::Internal(anyhow::anyhow!("{e}")))?;
-
-        // Map each aggregation result to a QueryResultEntry.
-        // AggregateProcessor sets a `__key` field identifying the GROUP BY bucket;
-        // fall back to index-based key synthesis when `__key` is absent.
-        let results: Vec<QueryResultEntry> = raw_results
-            .into_iter()
-            .enumerate()
-            .map(|(i, val)| {
-                let key = if let rmpv::Value::Map(ref pairs) = val {
-                    pairs.iter().find_map(|(k, v)| {
-                        if k.as_str() == Some("__key") {
-                            v.as_str().map(str::to_string)
-                        } else {
-                            None
-                        }
-                    })
-                } else {
-                    None
-                }
-                .unwrap_or_else(|| format!("group-{i}"));
-                QueryResultEntry { key, value: val }
-            })
-            .collect();
-
-        let resp_payload = QueryRespPayload {
-            query_id,
-            results,
-            has_more: Some(false),
-            merkle_root_hash: None,
-            ..Default::default()
-        };
-
-        Ok(OperationResponse::Message(Box::new(Message::QueryResp(
-            QueryRespMessage {
-                payload: resp_payload,
-            },
-        ))))
     }
 
     /// Handles a `VectorSearch` operation.
@@ -1315,7 +1327,6 @@ mod tests {
     use super::*;
     use crate::network::config::ConnectionConfig;
     use crate::network::connection::{ConnectionId, ConnectionKind, ConnectionRegistry};
-    use crate::service::domain::query_backend::PredicateBackend;
     use crate::service::operation::{service_names, OperationContext};
     use crate::storage::datastores::NullDataStore;
     use crate::storage::impls::StorageConfig;
@@ -1803,7 +1814,6 @@ mod tests {
             registry,
             factory,
             conn_registry,
-            Arc::new(PredicateBackend),
             None,
             10_000,
             None,
@@ -1822,7 +1832,6 @@ mod tests {
             registry,
             factory,
             conn_registry,
-            Arc::new(PredicateBackend),
             None,
             10_000,
             None,
@@ -1845,7 +1854,6 @@ mod tests {
             registry,
             factory,
             conn_registry,
-            Arc::new(PredicateBackend),
             None,
             10_000,
             None,
@@ -1880,7 +1888,6 @@ mod tests {
             registry.clone(),
             factory,
             conn_registry,
-            Arc::new(PredicateBackend),
             None,
             10_000,
             None,
@@ -1913,6 +1920,206 @@ mod tests {
 
         // Subscription should be registered
         assert_eq!(registry.subscription_count(), 1);
+    }
+
+    /// End-to-end through the handler: a multi-field sort query runs via the local
+    /// DAG engine (`run_dag_local`) and returns real record keys, clean values, and
+    /// the correct lexicographic multi-field order (group asc, then rank asc).
+    ///
+    /// This exercises the production path `Operation::QuerySubscribe` →
+    /// `handle_query_subscribe` → `run_dag_local` with NO coordinator (single-node
+    /// default) — unlike the sim test, which calls the coordinator directly. It is
+    /// the capability Phase 1 adds to the WS single-node path: multi-field sort,
+    /// which the linear predicate engine cannot do.
+    #[tokio::test]
+    async fn query_subscribe_multi_field_sort_via_dag() {
+        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+        use topgun_core::messages::base::{SortDirection, SortField};
+
+        let registry = Arc::new(QueryRegistry::new());
+        let factory = make_factory();
+        let map_name = "events";
+
+        // Tie in the primary field (group) broken by the secondary (rank).
+        // Insertion order is deliberately NOT the sorted order.
+        let rows = [
+            ("k-a2", "a", 2i64),
+            ("k-b1", "b", 1),
+            ("k-a1", "a", 1),
+            ("k-a3", "a", 3),
+            ("k-b0", "b", 0),
+        ];
+        for (key, group, rank) in rows {
+            let partition_id = topgun_core::hash_to_partition(key);
+            let value = make_value_map(vec![
+                ("group", Value::String(group.to_string())),
+                ("rank", Value::Int(rank)),
+            ]);
+            factory
+                .get_or_create(map_name, partition_id)
+                .put(
+                    key,
+                    RecordValue::Lww {
+                        value,
+                        timestamp: make_timestamp(),
+                    },
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Client,
+                )
+                .await
+                .expect("put should succeed");
+        }
+
+        let conn_registry = Arc::new(ConnectionRegistry::new());
+        let config = test_config();
+        let (handle, _rx) = conn_registry.register(ConnectionKind::Client, &config);
+        let conn_id = handle.id;
+
+        // No coordinator → single-node `run_dag_local` is the engine.
+        let svc = Arc::new(QueryService::new(
+            registry,
+            factory,
+            conn_registry,
+            None,
+            10_000,
+            None,
+            #[cfg(feature = "datafusion")]
+            None,
+        ));
+
+        let ctx = make_ctx(Some(conn_id));
+        let payload = QuerySubMessage {
+            payload: QuerySubPayload {
+                query_id: "ms-1".to_string(),
+                map_name: map_name.to_string(),
+                query: Query {
+                    sort: Some(vec![
+                        SortField {
+                            field: "group".to_string(),
+                            direction: SortDirection::Asc,
+                        },
+                        SortField {
+                            field: "rank".to_string(),
+                            direction: SortDirection::Asc,
+                        },
+                    ]),
+                    ..Query::default()
+                },
+                fields: None,
+            },
+        };
+        let op = Operation::QuerySubscribe { ctx, payload };
+        let resp = match svc.oneshot(op).await.unwrap() {
+            OperationResponse::Message(msg) => match *msg {
+                Message::QueryResp(resp) => resp,
+                _ => panic!("expected QueryResp"),
+            },
+            _ => panic!("expected Message response"),
+        };
+
+        let results = resp.payload.results;
+        assert_eq!(results.len(), 5);
+
+        // Real record keys recovered from `_key` (not synthetic `row-{i}`),
+        // ordered by group asc then rank asc.
+        let keys: Vec<&str> = results.iter().map(|e| e.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec!["k-a1", "k-a2", "k-a3", "k-b0", "k-b1"],
+            "multi-field sort (group asc, rank asc) with real record keys"
+        );
+
+        // Values are clean: the internal `_key` field must be stripped.
+        for e in &results {
+            match &e.value {
+                rmpv::Value::Map(pairs) => assert!(
+                    pairs.iter().all(|(k, _)| k.as_str() != Some("_key")),
+                    "internal _key must be stripped from the returned value"
+                ),
+                other => panic!("expected map value, got: {other:?}"),
+            }
+        }
+    }
+
+    /// The tests-only linear-engine opt-out (`with_linear_engine_for_tests`) routes
+    /// the handler through the predicate engine instead of the DAG, still returning
+    /// real keys and clean values for a simple filter query.
+    #[tokio::test]
+    async fn query_subscribe_linear_engine_opt_out_filters() {
+        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+
+        let registry = Arc::new(QueryRegistry::new());
+        let factory = make_factory();
+        let map_name = "people";
+
+        for (key, age) in [("p-young", 15i64), ("p-old", 40)] {
+            let partition_id = topgun_core::hash_to_partition(key);
+            let value = make_value_map(vec![("age", Value::Int(age))]);
+            factory
+                .get_or_create(map_name, partition_id)
+                .put(
+                    key,
+                    RecordValue::Lww {
+                        value,
+                        timestamp: make_timestamp(),
+                    },
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Client,
+                )
+                .await
+                .expect("put should succeed");
+        }
+
+        let conn_registry = Arc::new(ConnectionRegistry::new());
+        let config = test_config();
+        let (handle, _rx) = conn_registry.register(ConnectionKind::Client, &config);
+        let conn_id = handle.id;
+
+        let svc = Arc::new(
+            QueryService::new(
+                registry,
+                factory,
+                conn_registry,
+                None,
+                10_000,
+                None,
+                #[cfg(feature = "datafusion")]
+                None,
+            )
+            .with_linear_engine_for_tests(),
+        );
+
+        let ctx = make_ctx(Some(conn_id));
+        let payload = QuerySubMessage {
+            payload: QuerySubPayload {
+                query_id: "lin-1".to_string(),
+                map_name: map_name.to_string(),
+                query: Query {
+                    predicate: Some(PredicateNode {
+                        op: PredicateOp::Gte,
+                        attribute: Some("age".to_string()),
+                        value: Some(rmpv::Value::Integer(18.into())),
+                        ..Default::default()
+                    }),
+                    ..Query::default()
+                },
+                fields: None,
+            },
+        };
+        let resp = match svc
+            .oneshot(Operation::QuerySubscribe { ctx, payload })
+            .await
+            .unwrap()
+        {
+            OperationResponse::Message(msg) => match *msg {
+                Message::QueryResp(resp) => resp,
+                _ => panic!("expected QueryResp"),
+            },
+            _ => panic!("expected Message response"),
+        };
+
+        assert_eq!(resp.payload.results.len(), 1);
+        assert_eq!(resp.payload.results[0].key, "p-old");
     }
 
     /// AC1: `QuerySubscribe` returns `QUERY_RESP` with initial matching results.
@@ -1985,7 +2192,6 @@ mod tests {
             registry.clone(),
             factory,
             conn_registry,
-            Arc::new(PredicateBackend),
             None,
             10_000,
             None,
@@ -2242,7 +2448,6 @@ mod tests {
             registry.clone(),
             factory,
             conn_registry,
-            Arc::new(PredicateBackend),
             Some(Arc::clone(&merkle_mgr)),
             10_000,
             None,
@@ -2308,7 +2513,6 @@ mod tests {
             registry.clone(),
             factory,
             conn_registry,
-            Arc::new(PredicateBackend),
             Some(Arc::clone(&merkle_mgr)),
             10_000,
             None,
@@ -2380,112 +2584,91 @@ mod tests {
         assert!(registry.get_subscription("nonexistent").is_none());
     }
 
-    /// When `QueryService` has no coordinator attached, a `DagQuery` operation
-    /// must return `OperationError::Internal` rather than routing to the wrong path.
-    #[tokio::test]
-    async fn dag_query_returns_internal_error_when_coordinator_absent() {
-        let registry = Arc::new(QueryRegistry::new());
-        let factory = make_factory();
-        let conn_registry = Arc::new(ConnectionRegistry::new());
-        let config = test_config();
-        let (handle, _rx) = conn_registry.register(ConnectionKind::Client, &config);
-        let conn_id = handle.id;
+    /// Verifies `map_dag_rows_to_entries`: the entry key prefers the real `_key`
+    /// injected by `ScanProcessor`, falls back to the group `__key`, then to a
+    /// synthetic `row-{i}`; internal `_key` is stripped from the value, and a
+    /// `_value`-wrapped scalar is unwrapped back to its scalar value.
+    #[test]
+    fn map_dag_rows_to_entries_recovers_keys_and_strips_internal_fields() {
+        // 1. Non-group-by Map row with real `_key` → key from `_key`, `_key` stripped.
+        let row_with_key = rmpv::Value::Map(vec![
+            (
+                rmpv::Value::String("name".into()),
+                rmpv::Value::String("Alice".into()),
+            ),
+            (
+                rmpv::Value::String("_key".into()),
+                rmpv::Value::String("rec-1".into()),
+            ),
+        ]);
+        // 2. Group-by aggregate row with `__key` (no `_key`) → key from `__key`,
+        //    `__key` retained in the value.
+        let row_group = rmpv::Value::Map(vec![
+            (
+                rmpv::Value::String("__key".into()),
+                rmpv::Value::String("active".into()),
+            ),
+            (
+                rmpv::Value::String("__count".into()),
+                rmpv::Value::Integer(42.into()),
+            ),
+        ]);
+        // 3. Scalar record wrapped by ScanProcessor as {_key, _value} → key from
+        //    `_key`, value unwrapped to the scalar.
+        let row_scalar = rmpv::Value::Map(vec![
+            (
+                rmpv::Value::String("_key".into()),
+                rmpv::Value::String("rec-3".into()),
+            ),
+            (
+                rmpv::Value::String("_value".into()),
+                rmpv::Value::Integer(99.into()),
+            ),
+        ]);
+        // 4. Row with neither key → synthetic `row-{i}`.
+        let row_no_key = rmpv::Value::Map(vec![(
+            rmpv::Value::String("x".into()),
+            rmpv::Value::Integer(1.into()),
+        )]);
 
-        // Build a QueryService with no coordinator (coordinator = None).
-        let svc = Arc::new(QueryService::new(
-            registry,
-            factory,
-            conn_registry,
-            Arc::new(PredicateBackend),
-            None,
-            10_000,
-            None,
-            #[cfg(feature = "datafusion")]
-            None,
-        ));
+        let entries =
+            map_dag_rows_to_entries(vec![row_with_key, row_group, row_scalar, row_no_key]);
 
-        let ctx = make_ctx(Some(conn_id));
-        let payload = QuerySubMessage {
-            payload: QuerySubPayload {
-                query_id: "dag-q-1".to_string(),
-                map_name: "orders".to_string(),
-                query: Query {
-                    group_by: Some(vec!["category".to_string()]),
-                    ..Query::default()
-                },
-                fields: None,
-            },
-        };
-        let op = Operation::DagQuery { ctx, payload };
-        let result = svc.oneshot(op).await;
+        assert_eq!(entries.len(), 4);
 
-        match result {
-            Err(OperationError::Internal(e)) => {
-                assert!(
-                    e.to_string().contains("coordinator"),
-                    "error message should mention coordinator, got: {e}"
-                );
-            }
-            other => panic!("expected OperationError::Internal, got: {:?}", other),
-        }
+        // (1) real key recovered; value has only `name` (no `_key`).
+        assert_eq!(entries[0].key, "rec-1");
+        assert_eq!(
+            entries[0].value,
+            rmpv::Value::Map(vec![(
+                rmpv::Value::String("name".into()),
+                rmpv::Value::String("Alice".into()),
+            )])
+        );
+
+        // (2) group key recovered; `__key` retained for aggregate rows.
+        assert_eq!(entries[1].key, "active");
+        assert_eq!(entries[1].value, row_group_expected());
+
+        // (3) scalar unwrapped.
+        assert_eq!(entries[2].key, "rec-3");
+        assert_eq!(entries[2].value, rmpv::Value::Integer(99.into()));
+
+        // (4) synthetic fallback at index 3.
+        assert_eq!(entries[3].key, "row-3");
     }
 
-    /// Verifies the `__key` extraction and `group-{i}` fallback logic used by
-    /// `handle_dag_query` when mapping `Vec<rmpv::Value>` to `Vec<QueryResultEntry>`.
-    #[test]
-    fn dag_query_key_synthesis_extracts_key_and_falls_back() {
-        use topgun_core::messages::query::QueryResultEntry;
-
-        // Mirrors the mapping closure in handle_dag_query().
-        let map_results_to_entries = |raw_results: Vec<rmpv::Value>| -> Vec<QueryResultEntry> {
-            raw_results
-                .into_iter()
-                .enumerate()
-                .map(|(i, val)| {
-                    let key = if let rmpv::Value::Map(ref pairs) = val {
-                        pairs.iter().find_map(|(k, v)| {
-                            if k.as_str() == Some("__key") {
-                                v.as_str().map(str::to_string)
-                            } else {
-                                None
-                            }
-                        })
-                    } else {
-                        None
-                    }
-                    .unwrap_or_else(|| format!("group-{i}"));
-                    QueryResultEntry { key, value: val }
-                })
-                .collect()
-        };
-
-        let raw_results = vec![
-            // Result with __key present
-            rmpv::Value::Map(vec![
-                (
-                    rmpv::Value::String("__key".into()),
-                    rmpv::Value::String("active".into()),
-                ),
-                (
-                    rmpv::Value::String("__count".into()),
-                    rmpv::Value::Integer(42.into()),
-                ),
-            ]),
-            // Result with __key absent — should fall back to "group-1"
-            rmpv::Value::Map(vec![(
+    fn row_group_expected() -> rmpv::Value {
+        rmpv::Value::Map(vec![
+            (
+                rmpv::Value::String("__key".into()),
+                rmpv::Value::String("active".into()),
+            ),
+            (
                 rmpv::Value::String("__count".into()),
-                rmpv::Value::Integer(7.into()),
-            )]),
-            // Non-map value — should fall back to "group-2"
-            rmpv::Value::Integer(99.into()),
-        ];
-
-        let entries = map_results_to_entries(raw_results);
-
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].key, "active");
-        assert_eq!(entries[1].key, "group-1");
-        assert_eq!(entries[2].key, "group-2");
+                rmpv::Value::Integer(42.into()),
+            ),
+        ])
     }
 
     // ---------------------------------------------------------------------------
@@ -2534,7 +2717,6 @@ mod tests {
             registry,
             factory,
             conn_registry,
-            Arc::new(PredicateBackend),
             None,
             10_000,
             Some(observer_factory),

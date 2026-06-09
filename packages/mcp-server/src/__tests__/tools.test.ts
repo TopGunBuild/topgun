@@ -3,6 +3,7 @@
  */
 
 import type { ToolContext, ResolvedMCPServerConfig } from '../types';
+import { QueryOnceUnsettledError } from '@topgunbuild/client';
 import { handleQuery } from '../tools/query';
 import { handleMutate } from '../tools/mutate';
 import { handleSchema } from '../tools/schema';
@@ -45,6 +46,8 @@ class MockTopGunClient {
   private maps = new Map<string, MockLWWMap>();
   // Configurable search results so individual tests can inject non-empty hit lists.
   searchResults: MockSearchHit[] = [];
+  // When set, queryOnce rejects with this error to simulate offline / not-settled.
+  queryOnceRejection: Error | null = null;
 
   getMap(name: string): MockLWWMap {
     if (!this.maps.has(name)) {
@@ -85,7 +88,16 @@ class MockTopGunClient {
     return this.searchResults;
   }
 
-  query(mapName: string, filter: { where?: Record<string, unknown>; limit?: number } = {}) {
+  // One-shot read mirroring TopGunClient.queryOnce: resolves with settled,
+  // authoritative server data, or rejects to simulate offline / not-settled.
+  async queryOnce(
+    mapName: string,
+    filter: { where?: Record<string, unknown>; limit?: number } = {},
+  ): Promise<Array<Record<string, unknown> & { _key: string }>> {
+    if (this.queryOnceRejection) {
+      throw this.queryOnceRejection;
+    }
+
     const lwwMap = this.maps.get(mapName);
     let items: Array<Record<string, unknown> & { _key: string }> = [];
 
@@ -108,23 +120,7 @@ class MockTopGunClient {
       items = items.slice(0, filter.limit);
     }
 
-    const captured = items;
-
-    return {
-      subscribe: (callback: (data: typeof captured) => void) => {
-        // Invoke callback synchronously so handleQuery's subscribe Promise resolves immediately
-        callback(captured);
-        return () => {};
-      },
-      onPaginationChange: (
-        listener: (info: { hasMore: boolean; cursorStatus: string }) => void,
-      ) => {
-        // Report 'valid' cursor status so the pagination race in handleQuery resolves without waiting
-        listener({ hasMore: false, cursorStatus: 'valid' });
-        return () => {};
-      },
-      getPaginationInfo: () => ({ hasMore: false, cursorStatus: 'valid' as const }),
-    };
+    return items;
   }
 }
 
@@ -222,6 +218,47 @@ describe('MCP Tools', () => {
       expect(result.content[0].text).toContain('5 result');
     });
 
+    it('should signal truncation when more rows match than the limit', async () => {
+      const ctx = createTestContext();
+      const map = (ctx.client as unknown as MockTopGunClient).getMap('tasks');
+      for (let i = 0; i < 20; i++) {
+        map.set(`task${i}`, { title: `Task ${i}`, index: i });
+      }
+
+      const result = await handleQuery({ map: 'tasks', limit: 5 }, ctx);
+
+      expect(result.isError).toBeUndefined();
+      // The capped count is the requested limit, NOT the probe row.
+      expect(result.content[0].text).toContain('5 result');
+      // The agent must be told the view was capped — never a silent truncation.
+      expect(result.content[0].text).toContain('More rows match than were returned');
+    });
+
+    it('should NOT signal truncation when results fit within the limit', async () => {
+      const ctx = createTestContext();
+      const map = (ctx.client as unknown as MockTopGunClient).getMap('tasks');
+      map.set('task1', { title: 'Only Task', status: 'todo' });
+
+      const result = await handleQuery({ map: 'tasks', limit: 10 }, ctx);
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('1 result');
+      expect(result.content[0].text).not.toContain('More rows match');
+    });
+
+    it('should ignore a now-removed cursor argument without erroring', async () => {
+      const ctx = createTestContext();
+      const map = (ctx.client as unknown as MockTopGunClient).getMap('tasks');
+      map.set('task1', { title: 'Only Task', status: 'todo' });
+
+      // `cursor` is no longer part of the schema; Zod strips unknown keys, so the
+      // call must still succeed (not reject) and return normally.
+      const result = await handleQuery({ map: 'tasks', cursor: 'stale-cursor' }, ctx);
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('1 result');
+    });
+
     it('should deny access to restricted maps', async () => {
       const ctx = createTestContext({
         allowedMaps: ['users'],
@@ -231,6 +268,62 @@ describe('MCP Tools', () => {
 
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('not allowed');
+    });
+
+    it('should return settled server data (not a silent empty)', async () => {
+      const ctx = createTestContext();
+      const map = (ctx.client as unknown as MockTopGunClient).getMap('tasks');
+      // A record that exists authoritatively on the server.
+      map.set('task1', { title: 'Server Record', status: 'todo' });
+
+      const result = await handleQuery({ map: 'tasks' }, ctx);
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('1 result');
+      expect(result.content[0].text).toContain('Server Record');
+      // Settled server data must never read as the offline/not-settled message.
+      expect(result.content[0].text).not.toContain('not settled');
+    });
+
+    it('should surface an explicit not-settled message when offline', async () => {
+      const ctx = createTestContext();
+      (ctx.client as unknown as MockTopGunClient).queryOnceRejection = new QueryOnceUnsettledError(
+        'offline',
+        'tasks',
+      );
+
+      const result = await handleQuery({ map: 'tasks' }, ctx);
+
+      expect(result.isError).toBe(true);
+      // Must explicitly signal offline / not-settled, never the silent empty text.
+      expect(result.content[0].text).toContain('not settled');
+      expect(result.content[0].text).toContain('offline');
+      expect(result.content[0].text).not.toContain('No results found');
+    });
+
+    it('should surface an explicit not-settled message on timeout', async () => {
+      const ctx = createTestContext();
+      (ctx.client as unknown as MockTopGunClient).queryOnceRejection = new QueryOnceUnsettledError(
+        'timeout',
+        'tasks',
+      );
+
+      const result = await handleQuery({ map: 'tasks' }, ctx);
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('not settled');
+      expect(result.content[0].text).toContain('timed out');
+      expect(result.content[0].text).not.toContain('No results found');
+    });
+
+    it('should still report a settled-but-empty server result as no results', async () => {
+      const ctx = createTestContext();
+
+      const result = await handleQuery({ map: 'tasks' }, ctx);
+
+      // Genuinely empty (but settled) server answer — distinct from offline.
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('No results found');
     });
   });
 
