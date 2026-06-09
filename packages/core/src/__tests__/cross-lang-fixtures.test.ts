@@ -213,6 +213,39 @@ describe('Cross-language fixture generation', () => {
     });
   });
 
+  test('QUERY_SUB_GROUPBY_AGG', () => {
+    // GROUP BY with typed field aggregations. Locks the request-side wire shape of the
+    // aggregations spec (camelCase func enum + optional field) across TS <-> Rust.
+    writeFixture('QUERY_SUB_GROUPBY_AGG', {
+      type: 'QUERY_SUB',
+      payload: {
+        queryId: 'q-agg-1',
+        mapName: 'orders',
+        query: {
+          groupBy: ['category'],
+          aggregations: [{ func: 'count' }, { func: 'sum', field: 'price' }],
+        },
+      },
+    });
+  });
+
+  test('QUERY_RESP_AGG', () => {
+    // Aggregate result row with an integer-valued SUM. Locks that a SUM over integer
+    // fields round-trips as a MsgPack integer (not float64) — the Rust side asserts the
+    // decoded `__sum_price` is an Integer. Group sums (35, 50) are deliberately distinct
+    // from the group counts (2, 1) so the fixture cannot encode the degenerate sum==count.
+    writeFixture('QUERY_RESP_AGG', {
+      type: 'QUERY_RESP',
+      payload: {
+        queryId: 'q-agg-1',
+        results: [
+          { key: 'a', value: { __key: 'a', __count: 2, __sum_price: 35, category: 'a' } },
+          { key: 'b', value: { __key: 'b', __count: 1, __sum_price: 50, category: 'b' } },
+        ],
+      },
+    });
+  });
+
   test('QUERY_UNSUB', () => {
     writeFixture('QUERY_UNSUB', {
       type: 'QUERY_UNSUB',

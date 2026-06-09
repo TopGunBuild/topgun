@@ -199,6 +199,7 @@ mod tests {
             limit: None,
             cursor: None,
             group_by: None,
+            aggregations: None,
         };
         let result = backend
             .execute_query("users", entries, &query)
@@ -236,6 +237,7 @@ mod tests {
             limit: None,
             cursor: None,
             group_by: None,
+            aggregations: None,
         };
         let result = backend
             .execute_query("items", entries, &query)
@@ -281,6 +283,7 @@ mod tests {
             limit: Some(2),
             cursor: None,
             group_by: None,
+            aggregations: None,
         };
         let result = backend
             .execute_query("people", entries, &query)

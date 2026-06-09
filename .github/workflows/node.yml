@@ -51,13 +51,11 @@ jobs:
   build-test-lint:
     name: Build · Test · Lint
     runs-on: ubuntu-latest
-    # 25m headroom over the real ~15m run. The previous 20m cancellations were NOT
-    # slowness — several packages (client, mcp-server) finish their tests but leave
-    # open handles (WebSocket reconnect timers, spawned topgun-server children), so
-    # jest never exits and the recursive run stalls until the cap. The real fix is
-    # --forceExit on the Unit tests step below. Proper per-test teardown + not running
-    # server-dependent tests in this Node-only job is tracked in TODO-448.
-    timeout-minutes: 25
+    # Real test wall time is ~3m (core + client + mcp-server + adapters/react).
+    # mcp-server alone takes ~55s because of five 5-second queryOnce settle-waits.
+    # 18m leaves comfortable headroom over the observed ~3m run while still
+    # catching genuine hangs well before the GitHub Actions 6h job cap.
+    timeout-minutes: 18
     steps:
       - uses: actions/checkout@v4
 
@@ -81,14 +79,15 @@ jobs:
         run: pnpm -r build
 
       - name: Unit tests
-        # pnpm -r runs jest in every workspace package, sequentially (--runInBand,
+        # pnpm -r runs jest in every workspace package, sequentially (--runInBand
         # so per-package fixtures don't contend on ports/files — CLAUDE.md guidance).
-        # --forceExit ends jest past benign open handles. Per-package marker + hard
-        # SIGKILL timeout: the marker pinpoints a stalling package in the log, and
-        # the timeout converts any hang into a fast failure instead of burning the
-        # whole job budget — a permanent safety net. See TODO-448.
-        run: |
-          pnpm -r exec sh -c 'echo ">>>> JEST ENTER: $(pwd)"; timeout -s KILL 360 jest --runInBand --forceExit --passWithNoTests'
+        # Open-handle leaks that previously prevented clean Jest exit were fixed at
+        # the source: SingleServerProvider now cancels its connection-timeout and
+        # reconnect timers on close(), mcp-server tests mock WebSocket so no real
+        # undici handles outlive each test, and pino disables the thread-stream
+        # transport in test environments, so the run exits on its own with no
+        # force-exit stopgap.
+        run: pnpm -r exec jest --runInBand --passWithNoTests
 
       - name: Lint (eslint)
         run: pnpm lint

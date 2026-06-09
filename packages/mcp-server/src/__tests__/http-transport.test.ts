@@ -11,8 +11,39 @@ import { TopGunMCPServer } from '../TopGunMCPServer';
 import { HTTPTransport } from '../transport/http';
 import * as http from 'node:http';
 
-// Fixed test port to avoid conflicts
+// Fixed test port to avoid conflicts. Safe under --runInBand (no parallel workers).
 const TEST_PORT = 19876;
+
+// Mock the WebSocket used by TopGunMCPServer's internal TopGunClient so the client
+// does not open a real undici connection to ws://localhost:8080. Without a mock, the
+// real socket's DNS/TCP handles persist after client.close() and keep Jest alive.
+class MockWebSocket {
+  static OPEN = 1;
+  static CONNECTING = 0;
+  static CLOSED = 3;
+
+  readyState = MockWebSocket.CONNECTING;
+  binaryType: string = 'blob';
+  onopen: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  onerror: ((error: Error) => void) | null = null;
+  onmessage: ((event: unknown) => void) | null = null;
+
+  constructor(public url: string) {
+    queueMicrotask(() => {
+      this.readyState = MockWebSocket.OPEN;
+      if (this.onopen) this.onopen();
+    });
+  }
+
+  send() {}
+  close() {
+    this.readyState = MockWebSocket.CLOSED;
+    if (this.onclose) this.onclose();
+  }
+}
+
+(global as unknown as { WebSocket: typeof MockWebSocket }).WebSocket = MockWebSocket;
 
 /**
  * Helper to make HTTP requests
@@ -34,7 +65,11 @@ function makeRequest(options: {
         port: TEST_PORT,
         method: options.method,
         path: options.path,
-        headers: options.headers || {},
+        // 'connection: close' disables HTTP keep-alive on each request so the
+        // socket is destroyed immediately after the response — without this, the
+        // global http.Agent keeps sockets in its keep-alive pool for ~5s and Jest
+        // sees them as open handles after all tests finish.
+        headers: { connection: 'close', ...(options.headers || {}) },
         // Must exceed the queryOnce settle timeout (DEFAULT_QUERY_ONCE_TIMEOUT_MS,
         // 5000ms): offline read tools resolve a not-settled message only after that
         // settle wait, so a shorter HTTP timeout would race and flake.

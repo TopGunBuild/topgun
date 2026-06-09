@@ -1,7 +1,7 @@
 import { SyncEngine } from './SyncEngine';
 import { ChangeTracker, ChangeEvent } from './ChangeTracker';
 import { logger } from './utils/logger';
-import type { PredicateNode } from '@topgunbuild/core';
+import type { Aggregation, PredicateNode } from '@topgunbuild/core';
 import type { RecordSyncState } from './RecordSyncState';
 
 export interface QueryFilter {
@@ -14,6 +14,14 @@ export interface QueryFilter {
   cursor?: string;
   /** Optional field projection — only these fields will be returned by the server */
   fields?: string[];
+  /** GROUP BY columns. Results carry one row per group with `__count` and any requested aggregate keys. */
+  groupBy?: string[];
+  /**
+   * Field aggregations to compute per group (alongside the implicit `__count`).
+   * Each requested `{ func, field }` surfaces as a `__<func>_<field>` key on the result row
+   * (e.g. `{ func: 'sum', field: 'price' }` → `__sum_price`). Unrequested functions are not emitted.
+   */
+  aggregations?: Aggregation[];
 }
 
 /** Cursor status for debugging */

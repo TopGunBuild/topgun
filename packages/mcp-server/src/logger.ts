@@ -13,6 +13,14 @@ import pino from 'pino';
 export function createLogger(options: { debug?: boolean; name?: string } = {}) {
   const { debug = false, name = 'topgun-mcp' } = options;
 
+  // pino.destination uses SonicBoom (async buffered writes), which holds an open
+  // write handle that prevents Node.js from exiting naturally in Jest. In test
+  // environments, switch to synchronous mode so the handle is released immediately
+  // after each write and Jest can exit cleanly without --forceExit.
+  const isTest =
+    typeof process !== 'undefined' &&
+    (Boolean(process.env.JEST_WORKER_ID) || process.env.NODE_ENV === 'test');
+
   return pino(
     {
       name,
@@ -20,7 +28,7 @@ export function createLogger(options: { debug?: boolean; name?: string } = {}) {
       // Always use stderr to not interfere with MCP stdio protocol
       transport: undefined,
     },
-    pino.destination(2),
+    pino.destination({ fd: 2, sync: isTest }),
   ); // fd 2 = stderr
 }
 

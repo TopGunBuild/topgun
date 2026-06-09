@@ -80,7 +80,9 @@ impl QueryToDagConverter {
     /// Converts a `Query` to a `DagPlanDescriptor` for the given partition assignment.
     ///
     /// Pipeline layout (single-node):
-    ///   scan -> [filter] -> [local-aggregate -> combine-aggregate] -> [sort] -> [limit] -> collector
+    ///   scan -> [filter] -> [local-aggregate] -> [sort] -> [limit] -> collector
+    /// (No combine vertex single-node: the parallelism-1 local-aggregate already produces
+    /// complete per-group results, so its emitted key set is final.)
     ///
     /// Pipeline layout (multi-node) — `NetworkSender`/`NetworkReceiver` vertices are
     /// inserted at the partition boundary between per-node local processors and the
@@ -163,6 +165,20 @@ impl QueryToDagConverter {
                 .expect("has_group_by guard ensures Some");
             let first_field = group_by_fields.first().cloned().unwrap_or_default();
 
+            // Serialize the requested aggregation specs (func + optional field) into the
+            // vertex config. Round-tripping `Vec<Aggregation>` through named MsgPack keeps
+            // the on-wire shape (camelCase func strings) identical to what the coordinator
+            // deserializes back, so the converter↔coordinator config contract cannot drift.
+            // Absent/empty aggregations serialize to an empty array, which the processor
+            // reads as COUNT-only mode (back-compat for groupBy-only clients).
+            let aggregations_value = match &query.aggregations {
+                Some(aggs) if !aggs.is_empty() => rmp_serde::to_vec_named(aggs)
+                    .ok()
+                    .and_then(|bytes| rmp_serde::from_slice::<rmpv::Value>(&bytes).ok())
+                    .unwrap_or_else(|| rmpv::Value::Array(vec![])),
+                _ => rmpv::Value::Array(vec![]),
+            };
+
             let agg_config = rmpv::Value::Map(vec![
                 (
                     rmpv::Value::String("groupBy".into()),
@@ -174,8 +190,8 @@ impl QueryToDagConverter {
                     ),
                 ),
                 (
-                    rmpv::Value::String("aggField".into()),
-                    rmpv::Value::String("".into()),
+                    rmpv::Value::String("aggregations".into()),
+                    aggregations_value,
                 ),
             ]);
 
@@ -239,27 +255,34 @@ impl QueryToDagConverter {
                 edge_priority += 1;
 
                 last_vertex = "network-receiver".to_string();
+
+                // Combine-aggregate merges partial aggregates arriving from multiple nodes.
+                // It belongs to the multi-node path only: the parallelism-1 local-aggregate
+                // already produces complete per-group results on a single node, so its
+                // emitted (requested-only) key set is the final result. Re-running combine
+                // single-node would re-project to the legacy unqualified __sum/__min/__max
+                // keys and re-introduce the degenerate leak this query path is fixing.
+                // (Multi-node combine still reads the legacy keys and stays COUNT-correct;
+                // per-function combine of field aggregations is deferred to the cluster path.)
+                vertices.push(VertexDescriptor {
+                    name: "combine-aggregate".to_string(),
+                    local_parallelism: 1,
+                    processor_type: ProcessorType::Combine,
+                    preferred_partitions: None,
+                    config: None,
+                });
+
+                edges.push(Edge {
+                    source_name: last_vertex.clone(),
+                    source_ordinal: 0,
+                    dest_name: "combine-aggregate".to_string(),
+                    dest_ordinal: 0,
+                    routing_policy: RoutingPolicy::Unicast,
+                    priority: edge_priority,
+                });
+                edge_priority += 1;
+                last_vertex = "combine-aggregate".to_string();
             }
-
-            // Combine-aggregate: merges partial aggregates from all nodes.
-            vertices.push(VertexDescriptor {
-                name: "combine-aggregate".to_string(),
-                local_parallelism: 1,
-                processor_type: ProcessorType::Combine,
-                preferred_partitions: None,
-                config: None,
-            });
-
-            edges.push(Edge {
-                source_name: last_vertex.clone(),
-                source_ordinal: 0,
-                dest_name: "combine-aggregate".to_string(),
-                dest_ordinal: 0,
-                routing_policy: RoutingPolicy::Unicast,
-                priority: edge_priority,
-            });
-            edge_priority += 1;
-            last_vertex = "combine-aggregate".to_string();
         } else if multi_node {
             // No GROUP BY but multi-node: insert network boundary before collector.
             vertices.push(VertexDescriptor {
@@ -562,7 +585,10 @@ mod tests {
             .expect("convert should succeed");
 
         assert!(vertex_names(&desc).contains(&"local-aggregate"));
-        assert!(vertex_names(&desc).contains(&"combine-aggregate"));
+        // Single-node needs no combine: the parallelism-1 local-aggregate already produces
+        // complete per-group results, so its emitted key set is the final result. A combine
+        // pass here would only re-project to the legacy degenerate aggregate keys.
+        assert!(!vertex_names(&desc).contains(&"combine-aggregate"));
         assert!(!vertex_names(&desc).contains(&"network-sender"));
     }
 
@@ -787,7 +813,7 @@ mod tests {
     // --- Sort + Limit after GROUP BY ---
 
     #[test]
-    fn convert_query_with_group_by_and_sort_limit_inserts_after_combine() {
+    fn convert_query_with_group_by_and_sort_limit_inserts_after_aggregate() {
         use topgun_core::messages::base::{SortDirection, SortField};
 
         let q = Query {
@@ -804,17 +830,17 @@ mod tests {
             .expect("convert should succeed");
 
         let names = vertex_names(&desc);
-        let combine_idx = names
-            .iter()
-            .position(|&n| n == "combine-aggregate")
-            .unwrap();
+        // Single-node has no combine vertex; the aggregate is local-aggregate and sort/limit
+        // chain after it.
+        assert!(!names.contains(&"combine-aggregate"));
+        let aggregate_idx = names.iter().position(|&n| n == "local-aggregate").unwrap();
         let sort_idx = names.iter().position(|&n| n == "sort").unwrap();
         let limit_idx = names.iter().position(|&n| n == "limit").unwrap();
         let collector_idx = names.iter().position(|&n| n == "collector").unwrap();
 
         assert!(
-            combine_idx < sort_idx,
-            "sort must come after combine-aggregate"
+            aggregate_idx < sort_idx,
+            "sort must come after local-aggregate"
         );
         assert!(sort_idx < limit_idx, "sort must come before limit");
         assert!(

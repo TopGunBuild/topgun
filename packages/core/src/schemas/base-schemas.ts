@@ -85,6 +85,18 @@ export const PredicateNodeSchema: z.ZodType<any> = z.lazy(() =>
 );
 // Type export omitted: PredicateNode is already exported from predicate.ts
 
+// --- Aggregation Types ---
+// Mirror of the Rust `AggFunc` enum / `Aggregation` struct (core-rust base.rs).
+// COUNT needs no field (it is group-level); SUM/MIN/MAX/AVG aggregate over `field`.
+export const AggFuncSchema = z.enum(['count', 'sum', 'min', 'max', 'avg']);
+export type AggFunc = z.infer<typeof AggFuncSchema>;
+
+export const AggregationSchema = z.object({
+  func: AggFuncSchema,
+  field: z.string().optional(),
+});
+export type Aggregation = z.infer<typeof AggregationSchema>;
+
 // --- Query Types ---
 export const QuerySchema = z.object({
   where: z.record(z.string(), z.any()).optional(),
@@ -92,6 +104,8 @@ export const QuerySchema = z.object({
   sort: z.record(z.string(), z.enum(['asc', 'desc'])).optional(),
   limit: z.number().optional(),
   cursor: z.string().optional(), // Replaces offset for pagination
+  groupBy: z.array(z.string()).optional(),
+  aggregations: z.array(AggregationSchema).optional(),
 });
 export type Query = z.infer<typeof QuerySchema>;
 

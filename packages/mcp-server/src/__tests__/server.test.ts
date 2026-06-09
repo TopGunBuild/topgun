@@ -23,12 +23,17 @@ jest.mock('@modelcontextprotocol/sdk/types.js', () => ({
   ListToolsRequestSchema: Symbol('ListToolsRequestSchema'),
 }));
 
-// Mock WebSocket for TopGunClient
+// Mock WebSocket for TopGunClient. Uses queueMicrotask (not setTimeout) so the
+// onopen fires before the first awaited expression in each test, giving
+// SingleServerProvider's onopen wrapper a chance to clear its connection-timeout
+// before the test assertions run. queueMicrotask has no associated timer handle,
+// so --detectOpenHandles does not report it as a leak.
 class MockWebSocket {
   static OPEN = 1;
+  static CONNECTING = 0;
   static CLOSED = 3;
 
-  readyState = MockWebSocket.OPEN;
+  readyState = MockWebSocket.CONNECTING;
   binaryType: string = 'blob';
   onopen: (() => void) | null = null;
   onclose: (() => void) | null = null;
@@ -36,9 +41,10 @@ class MockWebSocket {
   onmessage: ((event: unknown) => void) | null = null;
 
   constructor(public url: string) {
-    setTimeout(() => {
+    queueMicrotask(() => {
+      this.readyState = MockWebSocket.OPEN;
       if (this.onopen) this.onopen();
-    }, 0);
+    });
   }
 
   send() {}
@@ -59,13 +65,35 @@ Object.defineProperty(global, 'crypto', {
 });
 
 describe('TopGunMCPServer', () => {
+  // Every TopGunMCPServer created inside an individual test is registered here so
+  // afterEach can close the underlying TopGunClient. Without this, the client's
+  // SingleServerProvider leaves its connection-timeout timer pending and Jest's
+  // event loop never drains naturally.
+  const servers: TopGunMCPServer[] = [];
+
+  function makeServer(config?: MCPServerConfig): TopGunMCPServer {
+    const s = new TopGunMCPServer(config);
+    servers.push(s);
+    return s;
+  }
+
   beforeEach(() => {
     uuidCounter = 0;
   });
 
+  afterEach(async () => {
+    // Close each server's underlying TopGunClient so all async timers are cleared
+    // before Jest moves to the next test. stop() is guarded by isStarted — since
+    // these tests skip start(), close the client directly via getClient().close().
+    for (const s of servers) {
+      await s.getClient().close();
+    }
+    servers.length = 0;
+  });
+
   describe('constructor', () => {
     it('should create server with default config', () => {
-      const server = new TopGunMCPServer();
+      const server = makeServer();
       const config = server.getConfig();
 
       expect(config.name).toBe('topgun-mcp-server');
@@ -88,7 +116,7 @@ describe('TopGunMCPServer', () => {
         debug: true,
       };
 
-      const server = new TopGunMCPServer(config);
+      const server = makeServer(config);
       const resolvedConfig = server.getConfig();
 
       expect(resolvedConfig.name).toBe('custom-server');
@@ -101,7 +129,7 @@ describe('TopGunMCPServer', () => {
     });
 
     it('should set auth token when provided', () => {
-      const server = new TopGunMCPServer({
+      const server = makeServer({
         authToken: 'test-jwt-token',
       });
 
@@ -111,7 +139,7 @@ describe('TopGunMCPServer', () => {
 
   describe('getClient', () => {
     it('should return TopGunClient instance', () => {
-      const server = new TopGunMCPServer();
+      const server = makeServer();
       const client = server.getClient();
 
       expect(client).toBeDefined();
@@ -121,7 +149,7 @@ describe('TopGunMCPServer', () => {
 
   describe('getServer', () => {
     it('should return MCP Server instance', () => {
-      const server = new TopGunMCPServer();
+      const server = makeServer();
       const mcpServer = server.getServer();
 
       expect(mcpServer).toBeDefined();
@@ -131,7 +159,7 @@ describe('TopGunMCPServer', () => {
 
   describe('callTool', () => {
     it('should execute query tool', async () => {
-      const server = new TopGunMCPServer();
+      const server = makeServer();
 
       const result = await server.callTool('topgun_query', { map: 'tasks' });
 
@@ -147,7 +175,7 @@ describe('TopGunMCPServer', () => {
     });
 
     it('should execute list_maps tool', async () => {
-      const server = new TopGunMCPServer({
+      const server = makeServer({
         allowedMaps: ['tasks', 'users'],
       });
 
@@ -159,7 +187,7 @@ describe('TopGunMCPServer', () => {
     });
 
     it('should execute stats tool', async () => {
-      const server = new TopGunMCPServer();
+      const server = makeServer();
 
       const result = await server.callTool('topgun_stats', {});
 
@@ -170,7 +198,7 @@ describe('TopGunMCPServer', () => {
     });
 
     it('should throw for unknown tool', async () => {
-      const server = new TopGunMCPServer();
+      const server = makeServer();
 
       await expect(server.callTool('unknown_tool', {})).rejects.toThrow('Unknown tool');
     });
@@ -178,7 +206,7 @@ describe('TopGunMCPServer', () => {
 
   describe('mutations', () => {
     it('should allow mutations when enabled', async () => {
-      const server = new TopGunMCPServer({ enableMutations: true });
+      const server = makeServer({ enableMutations: true });
 
       const result = await server.callTool('topgun_mutate', {
         map: 'tasks',
@@ -194,7 +222,7 @@ describe('TopGunMCPServer', () => {
     });
 
     it('should block mutations when disabled', async () => {
-      const server = new TopGunMCPServer({ enableMutations: false });
+      const server = makeServer({ enableMutations: false });
 
       const result = await server.callTool('topgun_mutate', {
         map: 'tasks',
@@ -212,7 +240,7 @@ describe('TopGunMCPServer', () => {
 
   describe('map restrictions', () => {
     it('should allow access to allowed maps', async () => {
-      const server = new TopGunMCPServer({
+      const server = makeServer({
         allowedMaps: ['tasks'],
       });
 
@@ -227,7 +255,7 @@ describe('TopGunMCPServer', () => {
     });
 
     it('should deny access to restricted maps', async () => {
-      const server = new TopGunMCPServer({
+      const server = makeServer({
         allowedMaps: ['tasks'],
       });
 

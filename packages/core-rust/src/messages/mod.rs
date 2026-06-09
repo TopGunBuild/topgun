@@ -21,8 +21,8 @@ pub mod http_sync;
 pub mod messaging;
 
 pub use base::{
-    AuthMessage, AuthRequiredMessage, ChangeEventType, ClientOp, PredicateNode, PredicateOp, Query,
-    SortDirection, WriteConcern,
+    AggFunc, Aggregation, AuthMessage, AuthRequiredMessage, ChangeEventType, ClientOp,
+    PredicateNode, PredicateOp, Query, SortDirection, WriteConcern,
 };
 
 pub use cluster::{

@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use topgun_core::messages::base::{PredicateNode, SortDirection};
+use topgun_core::messages::base::{AggFunc, Aggregation, PredicateNode, SortDirection};
 
 use crate::dag::types::{Inbox, Outbox, Processor, ProcessorContext, ProcessorSupplier};
 use crate::service::domain::predicate::{evaluate_predicate, EvalContext};
@@ -85,6 +85,44 @@ impl AggregatorState {
                 }
             }
         });
+    }
+}
+
+/// Per-group accumulator for the local aggregate pass.
+///
+/// Tracks the group cardinality (`count`, the unconditional COUNT) plus one
+/// [`AggregatorState`] per field referenced by a requested non-COUNT aggregation.
+/// Keeping a separate state per field lets a single query aggregate over multiple
+/// distinct fields (e.g. `SUM(price)` and `MAX(qty)`) without collisions, and lets
+/// AVG divide a field's running sum by the number of numeric observations of *that*
+/// field rather than the group cardinality.
+struct GroupAggregator {
+    count: u64,
+    fields: HashMap<String, AggregatorState>,
+}
+
+impl GroupAggregator {
+    fn new() -> Self {
+        Self {
+            count: 0,
+            fields: HashMap::new(),
+        }
+    }
+}
+
+/// Encodes a numeric aggregate result as a `MsgPack` integer when it is a whole number,
+/// otherwise as f64. Integer-valued source fields (the common case) thus round-trip as
+/// `MsgPack` integers rather than being coerced to float64, matching `msgpackr` on the
+/// TS side. AVG bypasses this (always f64) because an average is genuinely fractional.
+fn num_value(n: f64) -> rmpv::Value {
+    if n.is_finite() && n.fract() == 0.0 {
+        // Whole and finite, so the i64 cast preserves the value for the integer sums this
+        // path targets; a sum large enough to exceed i64 would already have lost integer
+        // precision as an f64 accumulator, so float is the correct fallback there anyway.
+        #[allow(clippy::cast_possible_truncation)]
+        rmpv::Value::Integer((n as i64).into())
+    } else {
+        rmpv::Value::F64(n)
     }
 }
 
@@ -432,30 +470,32 @@ impl ProcessorSupplier for ProjectProcessorSupplier {
 
 /// Two-phase local pre-aggregation.
 ///
-/// Phase 1 (`process()`): accumulates `AggregatorState` per GROUP BY key.
-/// Phase 2 (`complete()`): emits partial aggregates as `rmpv::Value` Maps to
-/// the outbox for downstream `CombineProcessor`.
+/// Phase 1 (`process()`): accumulates a [`GroupAggregator`] per GROUP BY key — the group
+/// cardinality plus one [`AggregatorState`] per field named by a requested non-COUNT
+/// aggregation.
+/// Phase 2 (`complete()`): emits one `rmpv::Value` Map per group with only the requested
+/// aggregate keys.
 ///
 /// Emitted aggregate map fields:
 /// - `__key`: GROUP BY key string
-/// - `__count`: u64 count
-/// - `__sum`: f64 sum
-/// - `__min`: min value (or Nil)
-/// - `__max`: max value (or Nil)
-/// - one field per `group_by` column with its sampled value
+/// - `__count`: u64 count (always — the group cardinality)
+/// - `__<func>_<field>` for each requested non-COUNT aggregation
+///   (e.g. `__sum_price`, `__min_qty`, `__max_age`, `__avg_score`). Functions that were
+///   not requested are NOT emitted — there is no degenerate `__sum`/`__min`/`__max` leak.
+/// - one field per `group_by` column with its sampled value (for join-back)
 pub struct AggregateProcessor {
     group_by: Vec<String>,
-    agg_field: String,
+    aggregations: Vec<Aggregation>,
     /// GROUP BY key string -> partial aggregate
-    partial: HashMap<String, AggregatorState>,
+    partial: HashMap<String, GroupAggregator>,
     done: bool,
 }
 
 impl AggregateProcessor {
-    fn new(group_by: Vec<String>, agg_field: String) -> Self {
+    fn new(group_by: Vec<String>, aggregations: Vec<Aggregation>) -> Self {
         Self {
             group_by,
-            agg_field,
+            aggregations,
             partial: HashMap::new(),
             done: false,
         }
@@ -474,22 +514,39 @@ impl Processor for AggregateProcessor {
         _outbox: &mut dyn Outbox,
     ) -> Result<bool> {
         let group_by = &self.group_by;
-        let agg_field = &self.agg_field;
+        // Distinct fields referenced by a requested non-COUNT aggregation. Deduplicated so
+        // that a field targeted by several functions (e.g. SUM(price) AND MIN(price)) is
+        // accumulated exactly once per row — otherwise its sum/count would be multiplied by
+        // the number of aggregations over it.
+        let mut agg_fields: Vec<String> = Vec::new();
+        for spec in &self.aggregations {
+            if spec.func != AggFunc::Count {
+                if let Some(field) = &spec.field {
+                    if !agg_fields.contains(field) {
+                        agg_fields.push(field.clone());
+                    }
+                }
+            }
+        }
         inbox.drain(&mut |item| {
             let key = group_key_string(&item, group_by);
-            let state = self.partial.entry(key).or_insert_with(AggregatorState::new);
-            // Aggregate the numeric value of agg_field; count all if no specific agg_field
-            let numeric = if agg_field.is_empty() {
-                1.0 // COUNT(*) — always increment by 1
-            } else {
-                get_field(&item, agg_field)
-                    .and_then(rmpv_to_f64)
-                    .unwrap_or(0.0)
-            };
-            let raw = get_field(&item, agg_field)
-                .cloned()
-                .unwrap_or(rmpv::Value::Nil);
-            state.update(numeric, raw);
+            let group = self.partial.entry(key).or_insert_with(GroupAggregator::new);
+            // Every row increments the group cardinality (the unconditional COUNT).
+            group.count += 1;
+            // Accumulate per-field state only when the row carries a numeric value for that
+            // field. Non-numeric / absent values are skipped, so a field's state.count is its
+            // numeric-observation count (the correct AVG denominator).
+            for field in &agg_fields {
+                if let Some(raw) = get_field(&item, field) {
+                    if let Some(numeric) = rmpv_to_f64(raw) {
+                        group
+                            .fields
+                            .entry(field.clone())
+                            .or_insert_with(AggregatorState::new)
+                            .update(numeric, raw.clone());
+                    }
+                }
+            }
         });
         Ok(false)
     }
@@ -498,8 +555,7 @@ impl Processor for AggregateProcessor {
         if self.done {
             return Ok(true);
         }
-        // Emit partial aggregates
-        for (key, state) in &self.partial {
+        for (key, group) in &self.partial {
             let mut pairs = vec![
                 (
                     rmpv::Value::String("__key".into()),
@@ -507,22 +563,61 @@ impl Processor for AggregateProcessor {
                 ),
                 (
                     rmpv::Value::String("__count".into()),
-                    rmpv::Value::Integer(state.count.into()),
-                ),
-                (
-                    rmpv::Value::String("__sum".into()),
-                    rmpv::Value::F64(state.sum),
-                ),
-                (
-                    rmpv::Value::String("__min".into()),
-                    state.min.clone().unwrap_or(rmpv::Value::Nil),
-                ),
-                (
-                    rmpv::Value::String("__max".into()),
-                    state.max.clone().unwrap_or(rmpv::Value::Nil),
+                    rmpv::Value::Integer(group.count.into()),
                 ),
             ];
-            // Also emit the GROUP BY field values for join-back
+
+            // Emit only the requested field-qualified aggregate keys. A `Count` entry is a
+            // no-op here because `__count` is already emitted unconditionally.
+            for spec in &self.aggregations {
+                let Some(field) = &spec.field else { continue };
+                let state = group.fields.get(field);
+                match spec.func {
+                    AggFunc::Count => {}
+                    AggFunc::Sum => {
+                        let sum = state.map_or(0.0, |s| s.sum);
+                        pairs.push((
+                            rmpv::Value::String(format!("__sum_{field}").into()),
+                            num_value(sum),
+                        ));
+                    }
+                    AggFunc::Min => {
+                        pairs.push((
+                            rmpv::Value::String(format!("__min_{field}").into()),
+                            state
+                                .and_then(|s| s.min.clone())
+                                .unwrap_or(rmpv::Value::Nil),
+                        ));
+                    }
+                    AggFunc::Max => {
+                        pairs.push((
+                            rmpv::Value::String(format!("__max_{field}").into()),
+                            state
+                                .and_then(|s| s.max.clone())
+                                .unwrap_or(rmpv::Value::Nil),
+                        ));
+                    }
+                    AggFunc::Avg => {
+                        let avg = state.map_or(0.0, |s| {
+                            if s.count > 0 {
+                                // Group cardinalities never approach 2^52, so the divisor
+                                // cast is exact in practice.
+                                #[allow(clippy::cast_precision_loss)]
+                                let denom = s.count as f64;
+                                s.sum / denom
+                            } else {
+                                0.0
+                            }
+                        });
+                        pairs.push((
+                            rmpv::Value::String(format!("__avg_{field}").into()),
+                            rmpv::Value::F64(avg),
+                        ));
+                    }
+                }
+            }
+
+            // Also emit the GROUP BY field values for join-back.
             for field in &self.group_by {
                 pairs.push((
                     rmpv::Value::String(field.clone().into()),
@@ -547,7 +642,7 @@ impl Processor for AggregateProcessor {
 /// Supplier for `AggregateProcessor`.
 pub struct AggregateProcessorSupplier {
     pub group_by: Vec<String>,
-    pub agg_field: String,
+    pub aggregations: Vec<Aggregation>,
 }
 
 impl ProcessorSupplier for AggregateProcessorSupplier {
@@ -556,7 +651,7 @@ impl ProcessorSupplier for AggregateProcessorSupplier {
             .map(|_| {
                 Box::new(AggregateProcessor::new(
                     self.group_by.clone(),
-                    self.agg_field.clone(),
+                    self.aggregations.clone(),
                 )) as Box<dyn Processor>
             })
             .collect()
@@ -565,7 +660,7 @@ impl ProcessorSupplier for AggregateProcessorSupplier {
     fn clone_supplier(&self) -> Box<dyn ProcessorSupplier> {
         Box::new(AggregateProcessorSupplier {
             group_by: self.group_by.clone(),
-            agg_field: self.agg_field.clone(),
+            aggregations: self.aggregations.clone(),
         })
     }
 }
@@ -1300,7 +1395,8 @@ mod tests {
 
     #[test]
     fn aggregate_groups_by_field() {
-        let mut proc = AggregateProcessor::new(vec!["category".to_string()], String::new());
+        // COUNT-only mode (no field aggregations requested).
+        let mut proc = AggregateProcessor::new(vec!["category".to_string()], vec![]);
         let ctx = make_context();
         proc.init(&ctx).unwrap();
 
@@ -1350,6 +1446,108 @@ mod tests {
             get_f64_field(group_b.unwrap(), "__count").unwrap() as u64,
             2
         );
+
+        // No-leak: a COUNT-only (groupBy-only) aggregate must not emit any field-aggregate
+        // keys — neither the legacy unqualified __sum/__min/__max nor any __<func>_<field>.
+        for item in &items {
+            assert!(get_field(item, "__sum").is_none(), "no legacy __sum leak");
+            assert!(get_field(item, "__min").is_none(), "no legacy __min leak");
+            assert!(get_field(item, "__max").is_none(), "no legacy __max leak");
+            if let rmpv::Value::Map(p) = item {
+                for (k, _) in p {
+                    if let Some(s) = k.as_str() {
+                        assert!(
+                            !(s.starts_with("__sum_")
+                                || s.starts_with("__min_")
+                                || s.starts_with("__max_")
+                                || s.starts_with("__avg_")),
+                            "unexpected field-aggregate key leaked: {s}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn aggregate_emits_only_requested_field_qualified_keys() {
+        // SUM + MIN over `price`; MAX/AVG NOT requested, so must be absent.
+        let mut proc = AggregateProcessor::new(
+            vec!["category".to_string()],
+            vec![
+                Aggregation {
+                    func: AggFunc::Sum,
+                    field: Some("price".to_string()),
+                },
+                Aggregation {
+                    func: AggFunc::Min,
+                    field: Some("price".to_string()),
+                },
+            ],
+        );
+        let ctx = make_context();
+        proc.init(&ctx).unwrap();
+
+        // Group "a": price 10 + 25 => sum 35, min 10, count 2 (sum != count, non-degenerate).
+        let mut inbox = VecDequeInbox::new(16);
+        for price in [10i64, 25] {
+            inbox.push(make_map_item(&[
+                ("category", rmpv::Value::String("a".into())),
+                ("price", rmpv::Value::Integer(price.into())),
+            ]));
+        }
+        // Group "b": price 50 => sum 50, min 50, count 1.
+        inbox.push(make_map_item(&[
+            ("category", rmpv::Value::String("b".into())),
+            ("price", rmpv::Value::Integer(50.into())),
+        ]));
+
+        let mut sink = VecDequeOutbox::new(1, 16);
+        proc.process(0, &mut inbox, &mut sink).unwrap();
+        let mut out = VecDequeOutbox::new(1, 16);
+        proc.complete(&mut out).unwrap();
+        let items: Vec<_> = out.drain_bucket(0).collect();
+        assert_eq!(items.len(), 2);
+
+        let group = |k: &str| {
+            items
+                .iter()
+                .find(|it| get_field(it, "__key") == Some(&rmpv::Value::String(k.into())))
+                .cloned()
+                .unwrap()
+        };
+
+        let a = group("a");
+        assert_eq!(get_f64_field(&a, "__count").unwrap() as u64, 2);
+        // SUM round-trips as a MsgPack Integer (integer-valued field), not F64.
+        assert_eq!(
+            get_field(&a, "__sum_price"),
+            Some(&rmpv::Value::Integer(35.into())),
+            "sum of integer prices must be an integer 35"
+        );
+        assert_eq!(
+            get_field(&a, "__min_price"),
+            Some(&rmpv::Value::Integer(10.into()))
+        );
+        // Non-degenerate: sum (35) is distinct from count (2).
+        assert_ne!(
+            get_f64_field(&a, "__sum_price"),
+            get_f64_field(&a, "__count")
+        );
+
+        let b = group("b");
+        assert_eq!(get_f64_field(&b, "__count").unwrap() as u64, 1);
+        assert_eq!(
+            get_field(&b, "__sum_price"),
+            Some(&rmpv::Value::Integer(50.into()))
+        );
+
+        // MAX and AVG were NOT requested -> must be absent; legacy keys never present.
+        for it in &items {
+            assert!(get_field(it, "__max_price").is_none(), "MAX not requested");
+            assert!(get_field(it, "__avg_price").is_none(), "AVG not requested");
+            assert!(get_field(it, "__sum").is_none(), "no legacy __sum");
+        }
     }
 
     // --- CombineProcessor ---

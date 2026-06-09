@@ -107,6 +107,35 @@ pub enum SortDirection {
     Desc,
 }
 
+/// Aggregation function for GROUP BY queries.
+///
+/// `Count` is the default because it applies to every group without a field argument.
+/// `Default` is required here so that `Aggregation` (which has a non-Option `func` field)
+/// can derive `Default` without a hand-written impl.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AggFunc {
+    #[default]
+    Count,
+    Sum,
+    Min,
+    Max,
+    Avg,
+}
+
+/// A single aggregation specification: which function to apply and, for non-COUNT
+/// functions, over which field.
+///
+/// `field` is `None` for COUNT, which is group-level and requires no field argument.
+/// `Default` is derived because this struct has 2+ effective fields (rule 3 in PROJECT.md).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Aggregation {
+    pub func: AggFunc,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub field: Option<String>,
+}
+
 /// A single sort field with direction, used in the ordered sort list.
 ///
 /// Named struct chosen over bare tuple because `rmp_serde::to_vec_named` encodes named
@@ -169,6 +198,13 @@ pub struct Query {
     /// GROUP BY columns for non-SQL query paths. Absent on existing TS clients deserializes to `None`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub group_by: Option<Vec<String>>,
+    /// Field aggregation specifications for GROUP BY queries.
+    ///
+    /// Each entry names a function (SUM/MIN/MAX/AVG) and the field to aggregate.
+    /// COUNT is always emitted unconditionally; an explicit `Count` entry is accepted but redundant.
+    /// Absent when the client sends a groupBy-only query (COUNT-only mode, back-compat).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub aggregations: Option<Vec<Aggregation>>,
 }
 
 /// A client operation message containing CRDT data.
@@ -354,6 +390,110 @@ mod tests {
         assert_eq!(s, "desc");
     }
 
+    #[test]
+    fn agg_func_roundtrip() {
+        let variants = vec![
+            AggFunc::Count,
+            AggFunc::Sum,
+            AggFunc::Min,
+            AggFunc::Max,
+            AggFunc::Avg,
+        ];
+        for v in &variants {
+            assert_eq!(&roundtrip_named(v), v);
+        }
+    }
+
+    #[test]
+    fn agg_func_serializes_camel_case() {
+        let bytes = rmp_serde::to_vec_named(&AggFunc::Sum).unwrap();
+        let s: String = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(s, "sum");
+
+        let bytes = rmp_serde::to_vec_named(&AggFunc::Count).unwrap();
+        let s: String = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(s, "count");
+    }
+
+    #[test]
+    fn aggregation_roundtrip() {
+        let agg = Aggregation {
+            func: AggFunc::Sum,
+            field: Some("price".to_string()),
+        };
+        assert_eq!(roundtrip_named(&agg), agg);
+
+        let count_agg = Aggregation {
+            func: AggFunc::Count,
+            field: None,
+        };
+        assert_eq!(roundtrip_named(&count_agg), count_agg);
+    }
+
+    #[test]
+    fn aggregation_field_omitted_when_none() {
+        // When field is None, it must be absent from the serialized map (skip_serializing_if).
+        let agg = Aggregation {
+            func: AggFunc::Count,
+            field: None,
+        };
+        let bytes = rmp_serde::to_vec_named(&agg).unwrap();
+        let val: rmpv::Value = rmp_serde::from_slice(&bytes).unwrap();
+        let map = val.as_map().expect("should be a map");
+        let has_field_key = map.iter().any(|(k, _)| k.as_str() == Some("field"));
+        assert!(
+            !has_field_key,
+            "field key must be absent when None (skip_serializing_if)"
+        );
+    }
+
+    #[test]
+    fn query_aggregations_key_present_when_some() {
+        // When aggregations is Some, the camelCase key must appear in serialized output.
+        let query = Query {
+            r#where: None,
+            predicate: None,
+            sort: None,
+            limit: None,
+            cursor: None,
+            group_by: Some(vec!["category".to_string()]),
+            aggregations: Some(vec![Aggregation {
+                func: AggFunc::Sum,
+                field: Some("price".to_string()),
+            }]),
+        };
+        let bytes = rmp_serde::to_vec_named(&query).unwrap();
+        let val: rmpv::Value = rmp_serde::from_slice(&bytes).unwrap();
+        let map = val.as_map().expect("should be a map");
+        let has_agg_key = map.iter().any(|(k, _)| k.as_str() == Some("aggregations"));
+        assert!(
+            has_agg_key,
+            "expected camelCase 'aggregations' key when Some"
+        );
+    }
+
+    #[test]
+    fn query_aggregations_absent_when_none() {
+        // When aggregations is None, the key must be absent (skip_serializing_if).
+        let query = Query {
+            r#where: None,
+            predicate: None,
+            sort: None,
+            limit: None,
+            cursor: None,
+            group_by: Some(vec!["category".to_string()]),
+            aggregations: None,
+        };
+        let bytes = rmp_serde::to_vec_named(&query).unwrap();
+        let val: rmpv::Value = rmp_serde::from_slice(&bytes).unwrap();
+        let map = val.as_map().expect("should be a map");
+        let has_agg_key = map.iter().any(|(k, _)| k.as_str() == Some("aggregations"));
+        assert!(
+            !has_agg_key,
+            "aggregations key must be absent when None (skip_serializing_if)"
+        );
+    }
+
     // ---- Struct round-trip tests ----
 
     #[test]
@@ -423,6 +563,7 @@ mod tests {
             limit: Some(50),
             cursor: Some("abc123".to_string()),
             group_by: None,
+            aggregations: None,
         };
         assert_eq!(roundtrip_named(&query), query);
     }
@@ -436,6 +577,30 @@ mod tests {
             limit: None,
             cursor: None,
             group_by: None,
+            aggregations: None,
+        };
+        assert_eq!(roundtrip_named(&query), query);
+    }
+
+    #[test]
+    fn query_with_aggregations_roundtrip() {
+        let query = Query {
+            r#where: None,
+            predicate: None,
+            sort: None,
+            limit: None,
+            cursor: None,
+            group_by: Some(vec!["category".to_string()]),
+            aggregations: Some(vec![
+                Aggregation {
+                    func: AggFunc::Sum,
+                    field: Some("price".to_string()),
+                },
+                Aggregation {
+                    func: AggFunc::Count,
+                    field: None,
+                },
+            ]),
         };
         assert_eq!(roundtrip_named(&query), query);
     }
@@ -553,6 +718,7 @@ mod tests {
             limit: None,
             cursor: None,
             group_by: None,
+            aggregations: None,
         };
         let bytes = rmp_serde::to_vec_named(&query).unwrap();
         let val: rmpv::Value = rmp_serde::from_slice(&bytes).unwrap();
@@ -723,6 +889,7 @@ mod tests {
         assert_eq!(q.limit, None);
         assert_eq!(q.cursor, None);
         assert_eq!(q.group_by, None);
+        assert_eq!(q.aggregations, None);
     }
 
     #[test]
