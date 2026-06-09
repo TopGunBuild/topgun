@@ -86,13 +86,13 @@ jobs:
         # locally). Will be reverted once the leak is identified + fixed. See TODO-448.
         run: |
           cd packages/client
-          # --detectOpenHandles instruments async ops (slow); give it room. Target the
-          # cluster-mode suite first (prime suspect: ConnectionPool/SingleServerProvider).
-          timeout -s KILL 600 pnpm exec jest --runInBand --detectOpenHandles src/__tests__/TopGunClient.test.ts > /tmp/c.log 2>&1 || true
-          echo "===== OPEN HANDLES REPORT ====="
-          grep -nE -A18 "Jest has detected|open handle|cannot log after" /tmp/c.log | grep -vE '"level":[0-9]+' | head -180 || true
-          echo "===== TEST RESULT TAIL ====="
-          grep -E "Tests:|Test Suites:|Force exiting|Ran all|Killed" /tmp/c.log | tail -10 || true
+          # Full client package under --detectOpenHandles (instrumented = slow; give room).
+          # Strip pino JSON log lines, then dump the raw tail — jest prints the open-handle
+          # report at the very end after the test summary.
+          timeout -s KILL 700 pnpm exec jest --runInBand --detectOpenHandles > /tmp/c.log 2>&1 || true
+          echo "===== c.log line count ====="; wc -l /tmp/c.log
+          echo "===== non-pino tail (last 120 lines) ====="
+          grep -vE '^\{"level"' /tmp/c.log | tail -120 || true
 
       - name: Lint (eslint)
         run: pnpm lint
