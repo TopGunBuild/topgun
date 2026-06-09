@@ -25,7 +25,7 @@ describe('topgun dev', () => {
           // resolves (e.g. CI monorepo node_modules), dev() would spawn a
           // long-running server and execSync would hang (orphaning topgun-server
           // and stalling the whole recursive jest run). Timeout is belt-and-
-          // suspenders. See TODO-448.
+          // suspenders.
           env: { ...process.env, TOPGUN_SERVER_BINARY: '/nonexistent/topgun-server' },
           timeout: 30000,
           killSignal: 'SIGKILL',

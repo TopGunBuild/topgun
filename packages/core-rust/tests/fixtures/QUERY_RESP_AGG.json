@@ -1,0 +1,26 @@
+{
+  "type": "QUERY_RESP",
+  "payload": {
+    "queryId": "q-agg-1",
+    "results": [
+      {
+        "key": "a",
+        "value": {
+          "__key": "a",
+          "__count": 2,
+          "__sum_price": 35,
+          "category": "a"
+        }
+      },
+      {
+        "key": "b",
+        "value": {
+          "__key": "b",
+          "__count": 1,
+          "__sum_price": 50,
+          "category": "b"
+        }
+      }
+    ]
+  }
+}

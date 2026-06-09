@@ -30,7 +30,12 @@ export class SingleServerProvider implements IConnectionProvider {
   private ws: WebSocket | null = null;
   private reconnectAttempts: number = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private connectionTimeoutId: ReturnType<typeof setTimeout> | null = null;
   private isClosing: boolean = false;
+  // When a connect() promise is in-flight, its reject handle is stored here so
+  // that close() can reject it immediately instead of leaving a pending Promise
+  // that would keep the Jest event loop alive after teardown.
+  private pendingConnectReject: ((err: Error) => void) | null = null;
   private listeners: Map<ConnectionProviderEvent, Set<ConnectionEventHandler>> = new Map();
   private onlineHandler: (() => void) | null = null;
   private offlineHandler: (() => void) | null = null;
@@ -66,6 +71,15 @@ export class SingleServerProvider implements IConnectionProvider {
     this.isClosing = false;
 
     return new Promise((resolve, reject) => {
+      // Store reject so close() can reject this Promise immediately if called
+      // while the connect attempt is in-flight — prevents a permanently-pending
+      // Promise from keeping the Jest event loop alive after test teardown.
+      this.pendingConnectReject = reject;
+
+      const clearPending = () => {
+        this.pendingConnectReject = null;
+      };
+
       try {
         this.ws = new WebSocket(this.url);
         this.ws.binaryType = 'arraybuffer';
@@ -74,6 +88,7 @@ export class SingleServerProvider implements IConnectionProvider {
           this.reconnectAttempts = 0;
           logger.info({ url: this.url }, 'SingleServerProvider connected');
           this.emit('connected', 'default');
+          clearPending();
           resolve();
         };
 
@@ -96,10 +111,15 @@ export class SingleServerProvider implements IConnectionProvider {
           this.emit('message', 'default', event.data);
         };
 
-        // Set up initial connection timeout
-        const timeoutId = setTimeout(() => {
+        // Set up initial connection timeout. Stored as an instance field so
+        // close() can cancel it even if called mid-CONNECTING before onopen fires —
+        // a local variable would be unreachable from close() and keep the Node.js
+        // timer alive past test teardown.
+        this.connectionTimeoutId = setTimeout(() => {
+          this.connectionTimeoutId = null;
           if (this.ws && this.ws.readyState === WebSocket.CONNECTING) {
             this.ws.close();
+            clearPending();
             reject(new Error(`Connection timeout to ${this.url}`));
           }
         }, this.config.reconnectDelayMs * 5); // 5x initial delay as connection timeout
@@ -108,12 +128,16 @@ export class SingleServerProvider implements IConnectionProvider {
         const originalOnOpen = this.ws.onopen;
         const wsRef = this.ws;
         this.ws.onopen = (ev) => {
-          clearTimeout(timeoutId);
+          if (this.connectionTimeoutId !== null) {
+            clearTimeout(this.connectionTimeoutId);
+            this.connectionTimeoutId = null;
+          }
           if (originalOnOpen) {
             originalOnOpen.call(wsRef, ev);
           }
         };
       } catch (error) {
+        clearPending();
         reject(error);
       }
     });
@@ -192,6 +216,21 @@ export class SingleServerProvider implements IConnectionProvider {
       this.reconnectTimer = null;
     }
 
+    // Cancel the pending connection-timeout if close() is called mid-CONNECTING.
+    // Without this, the timer would outlive the test and keep Jest's event loop alive.
+    if (this.connectionTimeoutId) {
+      clearTimeout(this.connectionTimeoutId);
+      this.connectionTimeoutId = null;
+    }
+
+    // Reject any in-flight connect() Promise so it does not hang indefinitely.
+    // If we null ws.onclose before calling ws.close(), the Promise's close-triggered
+    // reject path never fires — the pending Promise would keep the event loop alive.
+    if (this.pendingConnectReject) {
+      this.pendingConnectReject(new Error('Provider closed'));
+      this.pendingConnectReject = null;
+    }
+
     if (this.ws) {
       // Remove onclose handler to prevent reconnect
       this.ws.onclose = null;
@@ -228,6 +267,10 @@ export class SingleServerProvider implements IConnectionProvider {
    * Schedule a reconnection attempt with exponential backoff.
    */
   private scheduleReconnect(): void {
+    // Do not schedule if close() has been called — prevents a stale timer from
+    // keeping the Jest event loop alive after test teardown.
+    if (this.isClosing) return;
+
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -264,6 +307,10 @@ export class SingleServerProvider implements IConnectionProvider {
 
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null;
+      // Guard: close() may have been called while this timer was pending.
+      // Without this check, the reconnect would call connect() which resets
+      // isClosing = false and starts a new connection cycle after teardown.
+      if (this.isClosing) return;
       this.reconnectAttempts++;
 
       try {

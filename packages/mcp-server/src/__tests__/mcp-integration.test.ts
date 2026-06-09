@@ -9,6 +9,38 @@
 
 import { TopGunMCPServer } from '../TopGunMCPServer';
 
+// Mock WebSocket so TopGunClient does not open a real undici connection to
+// ws://localhost:8080. Without a mock, DNS/TCP handles outlive each test's
+// afterEach and Force-exit Jest. queueMicrotask fires onopen synchronously
+// before the next macrotask, clearing SingleServerProvider's connectionTimeoutId.
+class MockWebSocket {
+  static OPEN = 1;
+  static CONNECTING = 0;
+  static CLOSED = 3;
+
+  readyState = MockWebSocket.CONNECTING;
+  binaryType: string = 'blob';
+  onopen: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  onerror: ((error: Error) => void) | null = null;
+  onmessage: ((event: unknown) => void) | null = null;
+
+  constructor(public url: string) {
+    queueMicrotask(() => {
+      this.readyState = MockWebSocket.OPEN;
+      if (this.onopen) this.onopen();
+    });
+  }
+
+  send() {}
+  close() {
+    this.readyState = MockWebSocket.CLOSED;
+    if (this.onclose) this.onclose();
+  }
+}
+
+(global as unknown as { WebSocket: typeof MockWebSocket }).WebSocket = MockWebSocket;
+
 describe('MCP Integration', () => {
   let server: TopGunMCPServer;
 

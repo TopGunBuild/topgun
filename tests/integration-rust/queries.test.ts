@@ -1328,4 +1328,128 @@ describe('Integration: Queries (Rust Server)', () => {
       client2.close();
     });
   });
+
+  // ========================================
+  // GROUP BY field aggregations (SUM/COUNT) + no-leak contract
+  // ========================================
+  describe('QUERY_SUB with GROUP BY field aggregations', () => {
+    // Reference value set (pinned for determinism): group "a" = price 10 + 25 (sum 35,
+    // count 2); group "b" = price 50 (sum 50, count 1). Each group's sum is provably
+    // distinct from its count, so a pass cannot be the old degenerate __sum == __count.
+    const seed = async (client: TestClient, mapName: string) => {
+      const records = [
+        { key: 'a1', value: { category: 'a', price: 10 } },
+        { key: 'a2', value: { category: 'a', price: 25 } },
+        { key: 'b1', value: { category: 'b', price: 50 } },
+      ];
+      for (const rec of records) {
+        client.messages.length = 0;
+        client.send({
+          type: 'CLIENT_OP',
+          payload: {
+            id: `agg-put-${rec.key}`,
+            mapName,
+            opType: 'PUT',
+            key: rec.key,
+            record: createLWWRecord(rec.value),
+          },
+        });
+        await client.waitForMessage('OP_ACK');
+      }
+      await waitForSync(200);
+    };
+
+    const byGroup = (results: any[]) => {
+      const map: Record<string, any> = {};
+      for (const r of results) {
+        map[r.value.__key ?? r.key] = r.value;
+      }
+      return map;
+    };
+
+    test('groupBy + sum(price) returns correct non-degenerate sums and counts', async () => {
+      const mapName = `agg-map-${Date.now()}`;
+      const client = await createRustTestClient(port, {
+        nodeId: 'agg-client-1',
+        userId: 'agg-user-1',
+        roles: ['ADMIN'],
+      });
+      await client.waitForMessage('AUTH_ACK');
+      await seed(client, mapName);
+
+      client.messages.length = 0;
+      client.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: 'agg-q-1',
+          mapName,
+          query: {
+            groupBy: ['category'],
+            aggregations: [{ func: 'count' }, { func: 'sum', field: 'price' }],
+          },
+        },
+      });
+
+      const response = await client.waitForMessage('QUERY_RESP');
+      expect(response.payload.results.length).toBe(2);
+      const groups = byGroup(response.payload.results);
+
+      // (a) correct counts + correct non-degenerate sums.
+      expect(groups.a.__count).toBe(2);
+      expect(groups.a.__sum_price).toBe(35);
+      expect(groups.a.__sum_price).not.toBe(groups.a.__count);
+      expect(groups.b.__count).toBe(1);
+      expect(groups.b.__sum_price).toBe(50);
+      expect(groups.b.__sum_price).not.toBe(groups.b.__count);
+
+      // (b) only the requested aggregate keys — no MIN/MAX/AVG, no legacy unqualified keys.
+      for (const g of [groups.a, groups.b]) {
+        expect(g.__min_price).toBeUndefined();
+        expect(g.__max_price).toBeUndefined();
+        expect(g.__avg_price).toBeUndefined();
+        expect(g.__sum).toBeUndefined();
+        expect(g.__min).toBeUndefined();
+        expect(g.__max).toBeUndefined();
+      }
+
+      client.close();
+    });
+
+    test('groupBy-only (no aggregations) emits count but no degenerate aggregate keys', async () => {
+      const mapName = `agg-only-map-${Date.now()}`;
+      const client = await createRustTestClient(port, {
+        nodeId: 'agg-client-2',
+        userId: 'agg-user-2',
+        roles: ['ADMIN'],
+      });
+      await client.waitForMessage('AUTH_ACK');
+      await seed(client, mapName);
+
+      client.messages.length = 0;
+      client.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: 'agg-q-2',
+          mapName,
+          query: { groupBy: ['category'] },
+        },
+      });
+
+      const response = await client.waitForMessage('QUERY_RESP');
+      expect(response.payload.results.length).toBe(2);
+      const groups = byGroup(response.payload.results);
+
+      // Count present; NO field aggregate keys and NO legacy degenerate keys leak.
+      expect(groups.a.__count).toBe(2);
+      expect(groups.b.__count).toBe(1);
+      for (const g of [groups.a, groups.b]) {
+        expect(g.__sum_price).toBeUndefined();
+        expect(g.__sum).toBeUndefined();
+        expect(g.__min).toBeUndefined();
+        expect(g.__max).toBeUndefined();
+      }
+
+      client.close();
+    });
+  });
 });

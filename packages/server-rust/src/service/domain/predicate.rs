@@ -1321,6 +1321,7 @@ mod tests {
             limit: Some(2),
             cursor: None,
             group_by: None,
+            aggregations: None,
         };
 
         let results = execute_query(entries, &query);
@@ -1367,6 +1368,7 @@ mod tests {
             limit: None,
             cursor: None,
             group_by: None,
+            aggregations: None,
         };
         let results = execute_query(entries, &query);
         assert_eq!(results.len(), 1);
@@ -1399,6 +1401,7 @@ mod tests {
             limit: None,
             cursor: None,
             group_by: None,
+            aggregations: None,
         };
         let results = execute_query(entries, &query);
         assert_eq!(results[0].key, "b"); // 30
@@ -1420,6 +1423,7 @@ mod tests {
             limit: Some(1),
             cursor: None,
             group_by: None,
+            aggregations: None,
         };
         let results = execute_query(entries, &query);
         assert_eq!(results.len(), 1);
@@ -1459,6 +1463,7 @@ mod tests {
             limit: None,
             cursor: None,
             group_by: None,
+            aggregations: None,
         };
         let results = execute_query(entries, &query);
         assert_eq!(results.len(), 1);
@@ -1488,6 +1493,7 @@ mod tests {
             limit: None,
             cursor: None,
             group_by: None,
+            aggregations: None,
         };
         let results = execute_query(entries, &query);
         assert_eq!(results[0].key, "c"); // score 5

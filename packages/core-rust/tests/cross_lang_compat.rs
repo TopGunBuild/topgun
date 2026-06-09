@@ -46,8 +46,10 @@ const MESSAGE_FIXTURES: &[&str] = &[
     "ORMAP_SYNC_INIT",
     // Query domain
     "QUERY_SUB",
+    "QUERY_SUB_GROUPBY_AGG",
     "QUERY_UNSUB",
     "QUERY_RESP",
+    "QUERY_RESP_AGG",
     "QUERY_UPDATE",
     // Search domain
     "SEARCH",
@@ -183,6 +185,82 @@ fn message_fixtures_roundtrip() {
     );
 
     assert_eq!(success_count, MESSAGE_FIXTURES.len());
+}
+
+// ---------------------------------------------------------------------------
+// GROUP BY field aggregations: typed decode + integer SUM wire representation
+// ---------------------------------------------------------------------------
+
+/// Extracts a named field from an `rmpv::Value` Map.
+fn get_value_field<'a>(value: &'a rmpv::Value, field: &str) -> Option<&'a rmpv::Value> {
+    value
+        .as_map()?
+        .iter()
+        .find(|(k, _)| k.as_str() == Some(field))
+        .map(|(_, v)| v)
+}
+
+#[test]
+fn query_sub_groupby_agg_decodes_typed_aggregations() {
+    use topgun_core::messages::base::{AggFunc, Aggregation};
+
+    let bytes = read_fixture("QUERY_SUB_GROUPBY_AGG");
+    let msg: Message = rmp_serde::from_slice(&bytes).expect("decode QUERY_SUB_GROUPBY_AGG");
+    let Message::QuerySub(sub) = msg else {
+        panic!("expected QuerySub message");
+    };
+    assert_eq!(
+        sub.payload.query.group_by,
+        Some(vec!["category".to_string()])
+    );
+    let aggs = sub
+        .payload
+        .query
+        .aggregations
+        .expect("aggregations present");
+    assert_eq!(
+        aggs,
+        vec![
+            Aggregation {
+                func: AggFunc::Count,
+                field: None,
+            },
+            Aggregation {
+                func: AggFunc::Sum,
+                field: Some("price".to_string()),
+            },
+        ]
+    );
+}
+
+#[test]
+fn query_resp_agg_sum_roundtrips_as_msgpack_integer() {
+    let bytes = read_fixture("QUERY_RESP_AGG");
+    let msg: Message = rmp_serde::from_slice(&bytes).expect("decode QUERY_RESP_AGG");
+    let Message::QueryResp(resp) = msg else {
+        panic!("expected QueryResp message");
+    };
+    // Group "a": __sum_price must decode as a MsgPack Integer (35), not F64, and be distinct
+    // from __count (2) — the integer round-trip + non-degenerate lock for A4 / R6.
+    let group_a = resp
+        .payload
+        .results
+        .iter()
+        .find(|e| e.key == "a")
+        .expect("group a present");
+    let sum = get_value_field(&group_a.value, "__sum_price").expect("__sum_price present");
+    assert!(
+        matches!(sum, rmpv::Value::Integer(_)),
+        "SUM over integer fields must be a MsgPack integer, got {sum:?}"
+    );
+    assert_eq!(sum.as_i64(), Some(35));
+    let count = get_value_field(&group_a.value, "__count").and_then(rmpv::Value::as_i64);
+    assert_eq!(count, Some(2));
+    assert_ne!(
+        sum.as_i64(),
+        count,
+        "sum must be non-degenerate (distinct from count)"
+    );
 }
 
 // ---------------------------------------------------------------------------

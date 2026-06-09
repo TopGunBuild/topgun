@@ -433,6 +433,7 @@ mod tests {
             limit: None,
             cursor: None,
             group_by: None,
+            aggregations: None,
         };
 
         let result = backend

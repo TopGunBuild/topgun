@@ -30,7 +30,7 @@ use crate::dag::types::{
 };
 use crate::network::connection::{ConnectionKind, ConnectionRegistry, OutboundMessage};
 use crate::storage::factory::RecordStoreFactory;
-use topgun_core::messages::base::Query;
+use topgun_core::messages::base::{Aggregation, Query};
 
 // ---------------------------------------------------------------------------
 // ClusterQueryCoordinator
@@ -424,7 +424,7 @@ pub(crate) fn make_supplier_from_descriptor(
             Ok(Box::new(FilterProcessorSupplier { predicate }))
         }
         ProcessorType::Aggregate => {
-            let (group_by, agg_field) = vd
+            let (group_by, aggregations) = vd
                 .config
                 .as_ref()
                 .and_then(|c| {
@@ -447,17 +447,22 @@ pub(crate) fn make_supplier_from_descriptor(
                                 }
                             })
                             .unwrap_or_default();
-                        let agg_field = pairs
+                        // Deserialize the requested aggregation specs back into the typed
+                        // Vec<Aggregation>. The converter wrote them with the same named
+                        // MsgPack encoding, so this round-trip is the converter↔coordinator
+                        // contract; an absent/empty list yields COUNT-only mode.
+                        let aggregations: Vec<Aggregation> = pairs
                             .iter()
                             .find_map(|(k, v)| {
-                                if k.as_str() == Some("aggField") {
-                                    v.as_str().map(str::to_string)
+                                if k.as_str() == Some("aggregations") {
+                                    let bytes = rmp_serde::to_vec_named(v).ok()?;
+                                    rmp_serde::from_slice::<Vec<Aggregation>>(&bytes).ok()
                                 } else {
                                     None
                                 }
                             })
                             .unwrap_or_default();
-                        Some((group_by, agg_field))
+                        Some((group_by, aggregations))
                     } else {
                         None
                     }
@@ -465,7 +470,7 @@ pub(crate) fn make_supplier_from_descriptor(
                 .unwrap_or_default();
             Ok(Box::new(AggregateProcessorSupplier {
                 group_by,
-                agg_field,
+                aggregations,
             }))
         }
         ProcessorType::Combine => Ok(Box::new(CombineProcessorSupplier)),

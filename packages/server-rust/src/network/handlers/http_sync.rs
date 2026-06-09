@@ -435,6 +435,7 @@ async fn dispatch_queries(
             cursor: None,
             sort: None,
             group_by: None,
+            aggregations: None,
         };
 
         // Execute the query synchronously against the collected entries.

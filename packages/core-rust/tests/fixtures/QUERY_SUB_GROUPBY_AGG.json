@@ -1,0 +1,21 @@
+{
+  "type": "QUERY_SUB",
+  "payload": {
+    "queryId": "q-agg-1",
+    "mapName": "orders",
+    "query": {
+      "groupBy": [
+        "category"
+      ],
+      "aggregations": [
+        {
+          "func": "count"
+        },
+        {
+          "func": "sum",
+          "field": "price"
+        }
+      ]
+    }
+  }
+}

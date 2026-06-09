@@ -1097,7 +1097,7 @@ mod tests {
             local_parallelism: 1,
             processor_supplier: Box::new(AggregateProcessorSupplier {
                 group_by: vec!["category".to_string()],
-                agg_field: String::new(), // COUNT(*)
+                aggregations: vec![], // COUNT(*)
             }),
             preferred_partitions: None,
         });

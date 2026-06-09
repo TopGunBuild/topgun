@@ -133,6 +133,11 @@ export class HTTPTransport {
     }
 
     return new Promise((resolve) => {
+      // Force-close keep-alive connections so close() completes immediately instead of
+      // waiting for each client to finish its TCP keep-alive idle timeout (up to 5s),
+      // which would block Node.js exit in test environments.
+      this.httpServer!.closeAllConnections?.();
+
       this.httpServer!.close(() => {
         this.isRunning = false;
         this.log('HTTP transport stopped');
