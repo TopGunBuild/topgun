@@ -54,7 +54,7 @@ async function dev(options: DevOptions) {
         serverBinary = shimPath;
         isNodeShim = true;
       }
-    } catch (_) {
+    } catch {
       // @topgunbuild/server not installed — fall through to error below
     }
   }
@@ -63,7 +63,11 @@ async function dev(options: DevOptions) {
     console.error(chalk.red('  Error: Rust server binary not found.'));
     console.log(chalk.yellow(`  Expected: ${cwdBinaryPath}`));
     console.log(chalk.yellow('  Options:'));
-    console.log(chalk.yellow('    Build from source: cargo build --release -p topgun-server --bin topgun-server'));
+    console.log(
+      chalk.yellow(
+        '    Build from source: cargo build --release -p topgun-server --bin topgun-server',
+      ),
+    );
     console.log(chalk.yellow('    Or install prebuilt: npm install @topgunbuild/server'));
     process.exit(1);
   }
@@ -106,11 +110,17 @@ async function dev(options: DevOptions) {
 
     if (!adminDashboardExists) {
       console.log(chalk.yellow('\n  Admin dashboard source not found at apps/admin-dashboard.'));
-      console.log(chalk.yellow('  The --admin flag requires the TopGun monorepo to be checked out.'));
+      console.log(
+        chalk.yellow('  The --admin flag requires the TopGun monorepo to be checked out.'),
+      );
       console.log(chalk.gray(''));
       console.log(chalk.gray('  Alternatives:'));
       console.log(chalk.gray('    Hosted demo:   https://demo.topgun.build'));
-      console.log(chalk.gray('    Self-host:     docker compose --profile admin up  →  http://localhost:3001'));
+      console.log(
+        chalk.gray(
+          '    Self-host:     docker compose --profile admin up  →  http://localhost:3001',
+        ),
+      );
       console.log(chalk.gray(''));
       console.log(chalk.gray('  Continuing with server only...\n'));
     } else {

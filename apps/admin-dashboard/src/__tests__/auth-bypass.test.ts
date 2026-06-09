@@ -51,11 +51,12 @@ function mockFetch(impl: FetchImpl) {
 
 describe('getAuthStatus', () => {
   it('returns authRequired:false when server responds with authRequired:false', async () => {
-    mockFetch(async () =>
-      new Response(JSON.stringify({ authRequired: false }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      })
+    mockFetch(
+      async () =>
+        new Response(JSON.stringify({ authRequired: false }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
     );
 
     const result = await getAuthStatus();
@@ -63,11 +64,12 @@ describe('getAuthStatus', () => {
   });
 
   it('returns authRequired:true when server responds with authRequired:true', async () => {
-    mockFetch(async () =>
-      new Response(JSON.stringify({ authRequired: true }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      })
+    mockFetch(
+      async () =>
+        new Response(JSON.stringify({ authRequired: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
     );
 
     const result = await getAuthStatus();
@@ -84,18 +86,14 @@ describe('getAuthStatus', () => {
   });
 
   it('defaults to authRequired:true on HTTP 500 (fail-safe)', async () => {
-    mockFetch(async () =>
-      new Response('Internal Server Error', { status: 500 })
-    );
+    mockFetch(async () => new Response('Internal Server Error', { status: 500 }));
 
     const result = await getAuthStatus();
     expect(result.authRequired).toBe(true);
   });
 
   it('defaults to authRequired:true on HTTP 404 (fail-safe)', async () => {
-    mockFetch(async () =>
-      new Response('Not Found', { status: 404 })
-    );
+    mockFetch(async () => new Response('Not Found', { status: 404 }));
 
     const result = await getAuthStatus();
     expect(result.authRequired).toBe(true);
