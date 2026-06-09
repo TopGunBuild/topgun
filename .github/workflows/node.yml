@@ -51,11 +51,13 @@ jobs:
   build-test-lint:
     name: Build · Test · Lint
     runs-on: ubuntu-latest
-    # The recursive ts-jest unit run (pnpm -r exec jest) is legitimately long on
-    # GitHub runners (~3x local; ts-jest type-checks every file). 20m was too tight
-    # and cancelled even after the mcp-server hang was fixed. Suite speedup
-    # (isolatedModules/SWC/sharding) tracked in TODO-448.
-    timeout-minutes: 35
+    # 25m headroom over the real ~15m run. The previous 20m cancellations were NOT
+    # slowness — several packages (client, mcp-server) finish their tests but leave
+    # open handles (WebSocket reconnect timers, spawned topgun-server children), so
+    # jest never exits and the recursive run stalls until the cap. The real fix is
+    # --forceExit on the Unit tests step below. Proper per-test teardown + not running
+    # server-dependent tests in this Node-only job is tracked in TODO-448.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -81,7 +83,12 @@ jobs:
       - name: Unit tests
         # --runInBand keeps Jest sequential so per-package fixtures don't
         # contend on ports/files. Matches CLAUDE.md guidance.
-        run: pnpm -r exec jest --runInBand --passWithNoTests
+        # --forceExit: several packages leave benign open handles after their tests
+        # pass (client WebSocket reconnect timers to a non-running server; spawned
+        # topgun-server children). Without it, jest hangs post-run and stalls the
+        # whole recursive chain until the job timeout. Tests still report pass/fail
+        # normally — only the post-run handle-wait is skipped. See TODO-448.
+        run: pnpm -r exec jest --runInBand --forceExit --passWithNoTests
 
       - name: Lint (eslint)
         run: pnpm lint
