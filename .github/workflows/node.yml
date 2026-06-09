@@ -81,14 +81,15 @@ jobs:
         run: pnpm -r build
 
       - name: Unit tests
-        # --runInBand keeps Jest sequential so per-package fixtures don't
-        # contend on ports/files. Matches CLAUDE.md guidance.
-        # --forceExit: several packages leave benign open handles after their tests
-        # pass (client WebSocket reconnect timers to a non-running server; spawned
-        # topgun-server children). Without it, jest hangs post-run and stalls the
-        # whole recursive chain until the job timeout. Tests still report pass/fail
-        # normally — only the post-run handle-wait is skipped. See TODO-448.
-        run: pnpm -r exec jest --runInBand --forceExit --passWithNoTests
+        # pnpm -r runs jest in every workspace package, sequentially (--runInBand,
+        # so per-package fixtures don't contend on ports/files — CLAUDE.md guidance).
+        # --forceExit ends jest past benign open handles (client WS reconnect timers).
+        # Per-package marker + hard SIGKILL timeout: the marker pinpoints a stalling
+        # package in the log, and the timeout converts any hang (e.g. an orphaned
+        # child process holding the stdio pipe so pnpm waits forever) into a fast
+        # failure instead of burning the whole job budget. See TODO-448.
+        run: |
+          pnpm -r exec sh -c 'echo ">>>> JEST ENTER: $(pwd)"; timeout -s KILL 360 jest --runInBand --forceExit --passWithNoTests'
 
       - name: Lint (eslint)
         run: pnpm lint
