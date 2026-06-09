@@ -51,7 +51,11 @@ jobs:
   build-test-lint:
     name: Build · Test · Lint
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The recursive ts-jest unit run (pnpm -r exec jest) is legitimately long on
+    # GitHub runners (~3x local; ts-jest type-checks every file). 20m was too tight
+    # and cancelled even after the mcp-server hang was fixed. Suite speedup
+    # (isolatedModules/SWC/sharding) tracked in TODO-448.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
 
