@@ -1601,7 +1601,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // AC1 + AC2: global sort + global limit across a true 2-node fan-out under
+    // Global sort + global limit must hold across a true 2-node fan-out under
     // a partition/heal fault scenario.
     //
     // Each node's local stream is individually sorted but the two streams
@@ -1666,26 +1666,27 @@ mod tests {
 
         // Write records to the node that OWNS each key's natural partition.
         // Partition ownership: even partition IDs → node-0, odd → node-1.
-        // Keys are chosen so that node-0 owns scores {10,30,50} and node-1
-        // owns scores {20,40,60}, making correct global ascending order
-        // 10,20,30,40,50,60 — a naive concat of per-node streams (10,30,50
-        // then 20,40,60) would fail the ordering assertion, proving vacuity.
+        // Key names are dictated by partition hashing, not by score: each key
+        // must hash to a partition whose parity routes it to the intended node,
+        // so neutral names are used to avoid implying any key↔score relation.
+        // Node-0 owns scores {10,30,50} and node-1 owns scores {20,40,60},
+        // making correct global ascending order 10,20,30,40,50,60.
         //
         // Verified partition hashes (UTF-16 FNV-1a mod 271):
-        //   "m10" → 166 (even → node-0)
-        //   "m20" → 162 (even → node-0)
-        //   "m60" → 46  (even → node-0)
-        //   "m30" → 209 (odd  → node-1)
-        //   "m40" → 205 (odd  → node-1)
-        //   "m50" → 201 (odd  → node-1)
+        //   "bravo"   → 168 (even → node-0)
+        //   "delta"   → 142 (even → node-0)
+        //   "foxtrot" → 112 (even → node-0)
+        //   "alpha"   → 215 (odd  → node-1)
+        //   "charlie" → 43  (odd  → node-1)
+        //   "echo"    → 239 (odd  → node-1)
         let all_records: &[(&str, i64, usize)] = &[
             // (key, score, node_idx that owns the partition)
-            ("m10", 10, 0), // partition 166 → node-0
-            ("m20", 30, 0), // partition 162 → node-0
-            ("m60", 50, 0), // partition 46  → node-0
-            ("m30", 20, 1), // partition 209 → node-1
-            ("m40", 40, 1), // partition 205 → node-1
-            ("m50", 60, 1), // partition 201 → node-1
+            ("bravo", 10, 0),   // partition 168 → node-0
+            ("delta", 30, 0),   // partition 142 → node-0
+            ("foxtrot", 50, 0), // partition 112 → node-0
+            ("alpha", 20, 1),   // partition 215 → node-1
+            ("charlie", 40, 1), // partition 43  → node-1
+            ("echo", 60, 1),    // partition 239 → node-1
         ];
 
         for &(key, score, node_idx) in all_records {
@@ -1739,7 +1740,7 @@ mod tests {
             .await
             .expect("distributed query should succeed");
 
-        // AC2: exactly limit rows returned (never up to N×per-node-limit).
+        // Exactly `limit` rows must be returned (never up to N×per-node-limit).
         // Vacuity: naive concat without global limit could return up to 6 rows.
         assert_eq!(
             raw_results.len(),
@@ -1769,10 +1770,11 @@ mod tests {
             })
             .collect();
 
-        // AC1: globally-correct ascending order across node boundaries.
+        // Globally-correct ascending order must hold across node boundaries.
         // Vacuity: a naive concat would produce node-0's stream first (10,30,50)
-        // then node-1's stream (20,40); this assertion (scores == [10,20,30,40])
-        // would FAIL on a concat-style merge.
+        // then node-1's stream (20,40,60), and limit=4 would truncate that to
+        // [10,30,50,20]; this assertion (scores == [10,20,30,40]) would FAIL
+        // on a concat-style merge.
         assert_eq!(
             scores,
             vec![10, 20, 30, 40],
