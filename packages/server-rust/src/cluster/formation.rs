@@ -68,15 +68,18 @@ const MASTER_PROPOSAL_TIMEOUT_MS: u64 = 2_000;
 /// Used by `discover_seeds_and_join` to decide whether to enter the
 /// master-election wait, skip a seed, or return early on success.
 enum SeedAttemptOutcome {
-    /// Join accepted; caller hands stream off to `handle_peer_connection`.
+    /// Join accepted; caller hands the framed connection off to
+    /// `handle_peer_framed`. The `Framed` (not the raw stream) is carried so any
+    /// frame the master pipelined behind the `JoinResponse` survives the handoff.
     Accepted {
-        stream: TcpStream,
+        framed: Framed<TcpStream, LengthDelimitedCodec>,
         master_node_id: String,
     },
     /// Join rejected with `NotMasterYet`; caller adds `responder_node_id`
-    /// to the tiebreak set and holds the stream open for `MasterElected`.
+    /// to the tiebreak set and holds the framed connection open for
+    /// `MasterElected`. Carrying the `Framed` preserves any buffered bytes.
     RetryableRejection {
-        stream: TcpStream,
+        framed: Framed<TcpStream, LengthDelimitedCodec>,
         responder_node_id: Option<String>,
     },
     /// Join rejected with a permanent reason (auth, version, `cluster_id`, full);
@@ -175,12 +178,36 @@ impl ClusterFormationService {
     ///
     /// If `known_node_id` is `Some`, the peer is registered immediately (outbound connection).
     /// For inbound connections (`None`), the peer is registered when a `JoinRequest` is received.
+    ///
+    /// Wraps the raw stream in a fresh codec. Use only for connections that have
+    /// NOT yet had any frame read off them (the inbound listener and freshly
+    /// dialed sockets). Connections from which a handshake frame was already read
+    /// MUST hand off the existing `Framed` via `handle_peer_framed` instead, so
+    /// any frame the peer pipelined behind the handshake (e.g. a `MembersUpdate`
+    /// coalesced into the same TCP segment as the `JoinResponse`) is not silently
+    /// dropped with the codec's read buffer.
     async fn handle_peer_connection(
         self: Arc<Self>,
         stream: TcpStream,
         known_node_id: Option<String>,
     ) {
         let framed = Framed::new(stream, LengthDelimitedCodec::new());
+        self.handle_peer_framed(framed, known_node_id).await;
+    }
+
+    /// Drives the persistent read/write loop over an already-framed connection.
+    ///
+    /// Takes ownership of the `Framed` rather than a raw `TcpStream` so that any
+    /// bytes the codec buffered while reading the handshake frame are carried
+    /// into the read loop. Recovering the raw stream via `Framed::into_inner()`
+    /// and re-wrapping it would discard those buffered bytes — the source of a
+    /// lost `MembersUpdate` when the master pipelines it immediately behind the
+    /// `JoinResponse`.
+    async fn handle_peer_framed(
+        self: Arc<Self>,
+        framed: Framed<TcpStream, LengthDelimitedCodec>,
+        known_node_id: Option<String>,
+    ) {
         let (mut sink, mut stream_reader) = framed.split();
 
         // Write channel: peer sends frames via this channel, write loop forwards to TCP
@@ -337,10 +364,11 @@ impl ClusterFormationService {
         let mut tiebreak_set: HashSet<String> = HashSet::new();
         tiebreak_set.insert(self.local_member.node_id.clone());
 
-        // TCP streams held open after NotMasterYet rejections so the seed can
-        // deliver a MasterElected broadcast over the existing connection.
-        // Each entry is (responder_node_id, TcpStream).
-        let mut held_streams: Vec<(String, TcpStream)> = Vec::new();
+        // Framed connections held open after NotMasterYet rejections so the seed
+        // can deliver a MasterElected broadcast over the existing connection.
+        // Each entry is (responder_node_id, Framed). The `Framed` is retained
+        // rather than the raw stream so buffered bytes are never lost.
+        let mut held_streams: Vec<(String, Framed<TcpStream, LengthDelimitedCodec>)> = Vec::new();
 
         'outer: loop {
             if Instant::now() >= total_deadline {
@@ -371,24 +399,24 @@ impl ClusterFormationService {
                             info!(seed = %seed_addr, "Connected to seed node");
                             match self.send_join_request(stream, seed_addr).await {
                                 SeedAttemptOutcome::Accepted {
-                                    stream,
+                                    framed,
                                     master_node_id,
                                 } => {
-                                    // Hand off the TCP connection to per-peer handler
+                                    // Hand off the framed connection to the per-peer
+                                    // handler, preserving any pipelined frames.
                                     let this = Arc::clone(self);
                                     tokio::spawn(async move {
-                                        this.handle_peer_connection(stream, Some(master_node_id))
-                                            .await;
+                                        this.handle_peer_framed(framed, Some(master_node_id)).await;
                                     });
                                     return; // Successfully joined
                                 }
                                 SeedAttemptOutcome::RetryableRejection {
-                                    stream,
+                                    framed,
                                     responder_node_id,
                                 } => {
                                     if let Some(ref id) = responder_node_id {
                                         tiebreak_set.insert(id.clone());
-                                        held_streams.push((id.clone(), stream));
+                                        held_streams.push((id.clone(), framed));
                                     }
                                     // Older peer with no responder_node_id: stream dropped;
                                     // correctness preserved because self is always in tiebreak_set.
@@ -454,7 +482,7 @@ impl ClusterFormationService {
                 match TcpStream::connect(&payload.master_address).await {
                     Ok(stream) => {
                         if let SeedAttemptOutcome::Accepted {
-                            stream,
+                            framed,
                             master_node_id,
                         } = self
                             .send_join_request(stream, &payload.master_address)
@@ -462,8 +490,7 @@ impl ClusterFormationService {
                         {
                             let this = Arc::clone(self);
                             tokio::spawn(async move {
-                                this.handle_peer_connection(stream, Some(master_node_id))
-                                    .await;
+                                this.handle_peer_framed(framed, Some(master_node_id)).await;
                             });
                             return;
                         }
@@ -506,21 +533,18 @@ impl ClusterFormationService {
                     };
 
                     // Promote held streams: send MasterElected then hand off to read loop.
-                    for (responder_id, stream) in held_streams.drain(..) {
+                    for (responder_id, mut framed) in held_streams.drain(..) {
                         let this = Arc::clone(self);
                         let bytes_opt = broadcast_bytes.clone();
                         tokio::spawn(async move {
-                            // Wrap in a Framed codec to write the length-prefixed frame,
-                            // then recover the stream for the persistent read/write loop.
-                            let stream = if let Some(bytes) = bytes_opt {
-                                let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
+                            // The held connection is already framed; send the
+                            // length-prefixed MasterElected over it, then hand the
+                            // same `Framed` to the read loop so any frame the peer
+                            // pipelined behind its rejection is not dropped.
+                            if let Some(bytes) = bytes_opt {
                                 let _ = framed.send(bytes.into()).await;
-                                framed.into_inner()
-                            } else {
-                                stream
-                            };
-                            this.handle_peer_connection(stream, Some(responder_id))
-                                .await;
+                            }
+                            this.handle_peer_framed(framed, Some(responder_id)).await;
                         });
                     }
                     return;
@@ -637,13 +661,13 @@ impl ClusterFormationService {
                         self.apply_join_response(&response);
 
                         if let Some(node_id) = master_node_id {
-                            // Recover the raw TcpStream so the caller can hand it off
-                            // to handle_peer_connection for a persistent read/write loop.
-                            // The codec's internal buffer is empty after reading a complete
-                            // frame, so no data is lost.
-                            let stream = framed.into_inner();
+                            // Hand off the live `Framed` so any frame the master
+                            // pipelined immediately behind the `JoinResponse`
+                            // (e.g. the next `MembersUpdate`) is preserved in the
+                            // codec's read buffer. `into_inner()` here would drop
+                            // that buffer and lose the update.
                             return SeedAttemptOutcome::Accepted {
-                                stream,
+                                framed,
                                 master_node_id: node_id,
                             };
                         }
@@ -676,17 +700,17 @@ impl ClusterFormationService {
                         return SeedAttemptOutcome::PermanentRejection;
                     }
 
-                    // NotMasterYet (or unknown older peer): keep stream open so this
-                    // seed can deliver a MasterElected broadcast once it or another
-                    // node wins the deterministic tiebreak.
+                    // NotMasterYet (or unknown older peer): keep the framed stream
+                    // open so this seed can deliver a MasterElected broadcast once
+                    // it or another node wins the deterministic tiebreak. Carry the
+                    // `Framed` (not the raw stream) to preserve buffered bytes.
                     info!(
                         seed = %seed_addr,
                         responder = ?response.responder_node_id,
                         "Seed not yet master; holding connection for MasterElected broadcast"
                     );
-                    let stream = framed.into_inner();
                     return SeedAttemptOutcome::RetryableRejection {
-                        stream,
+                        framed,
                         responder_node_id: response.responder_node_id,
                     };
                 }
@@ -995,34 +1019,26 @@ impl ClusterFormationService {
 /// loop tracks the overall `timeout` deadline. This avoids the compile-time
 /// branch-count limit of `tokio::select!` while handling a dynamic set of streams.
 async fn listen_for_master_elected(
-    held_streams: &mut Vec<(String, TcpStream)>,
+    held_streams: &mut [(String, Framed<TcpStream, LengthDelimitedCodec>)],
     timeout: Duration,
 ) -> Option<MasterElectedPayload> {
     let deadline = Instant::now() + timeout;
     let mut seen_ids: HashSet<String> = HashSet::new();
 
-    // Wrap each stream in a length-delimited framed reader.
-    // We use `TcpStream::try_read` via a Framed codec; a short per-stream
-    // poll window avoids stalling on silent streams.
-    let mut frameds: Vec<Framed<tokio::net::TcpStream, LengthDelimitedCodec>> = Vec::new();
-
-    // Temporarily move streams into framed wrappers by draining held_streams.
-    // We'll restore them afterwards if no broadcast was found.
-    let mut node_ids: Vec<String> = Vec::new();
-    for (id, stream) in held_streams.drain(..) {
-        node_ids.push(id);
-        frameds.push(Framed::new(stream, LengthDelimitedCodec::new()));
-    }
-
-    let result = 'poll: loop {
+    // Poll the already-framed held connections in place. Operating on the
+    // existing `Framed` (rather than recovering the raw stream and re-wrapping)
+    // is what preserves any bytes the codec has buffered — a fresh wrapper
+    // followed by `into_inner()` would discard the codec's read buffer and lose
+    // a frame the peer pipelined behind its rejection.
+    loop {
         if Instant::now() >= deadline {
-            break 'poll None;
+            return None;
         }
 
-        for framed in &mut frameds {
+        for (_id, framed) in held_streams.iter_mut() {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                break 'poll None;
+                return None;
             }
 
             // Try to read one frame within a short window from this stream.
@@ -1033,7 +1049,7 @@ async fn listen_for_master_elected(
                     rmp_serde::from_slice::<ClusterMessage>(&frame)
                 {
                     if seen_ids.insert(payload.election_id.clone()) {
-                        break 'poll Some(payload);
+                        return Some(payload);
                     }
                 }
                 // Non-MasterElected frame or duplicate election_id: discard and continue
@@ -1043,15 +1059,7 @@ async fn listen_for_master_elected(
 
         // Brief sleep before the next round-robin pass to avoid busy-spinning
         tokio::time::sleep(Duration::from_millis(5)).await;
-    };
-
-    // Restore streams into held_streams (preserving node_id association).
-    // Streams for which we got a result are still valid; caller decides to drop them.
-    for (id, framed) in node_ids.into_iter().zip(frameds) {
-        held_streams.push((id, framed.into_inner()));
     }
-
-    result
 }
 
 // ---------------------------------------------------------------------------
