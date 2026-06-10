@@ -21,22 +21,30 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use arc_swap::ArcSwap;
+use async_trait::async_trait;
 use axum::routing::get;
 use clap::Parser;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use tokio::net::TcpListener;
 use tokio::signal;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use topgun_core::{SystemClock, HLC};
 
 use topgun_server::cluster::failure_detector::PhiAccrualConfig;
+use topgun_server::cluster::messages::DagCompletePayload;
 use topgun_server::cluster::peer_connection::PeerConnectionMap;
 use topgun_server::cluster::state::{ClusterState, InboundClusterMessage, MigrationCommand};
-use topgun_server::cluster::types::{ClusterConfig, MemberInfo, NodeState};
-use topgun_server::cluster::{
-    ClusterFormationService, HeartbeatService, MembershipReactor, PhiAccrualFailureDetector,
+use topgun_server::cluster::types::{
+    ClusterConfig, ClusterHealth, MemberInfo, MembersView, NodeState,
 };
+use topgun_server::cluster::{
+    run_cluster_dispatch_loop, ClusterChange, ClusterDispatchContext, ClusterFormationService,
+    ClusterPartitionTable, ClusterService, HeartbeatService, MembershipReactor,
+    PhiAccrualFailureDetector,
+};
+use topgun_server::dag::types::QueryConfig;
+use topgun_server::dag::ClusterQueryCoordinator;
 use topgun_server::network::config::NetworkConfig;
 use topgun_server::network::connection::ConnectionRegistry;
 use topgun_server::network::handlers::AppState;
@@ -64,6 +72,7 @@ use topgun_server::service::domain::LockRegistry;
 use topgun_server::service::middleware::build_operation_pipeline;
 use topgun_server::service::operation::service_names;
 use topgun_server::service::policy::{InMemoryPolicyStore, PolicyEvaluator, PolicyStore};
+use topgun_server::service::registry::{ManagedService, ServiceContext};
 use topgun_server::service::router::OperationRouter;
 use topgun_server::service::security::{SecurityConfig, WriteValidator};
 use topgun_server::service::OperationService;
@@ -194,6 +203,71 @@ struct Args {
 /// and will trigger the no-auth + exposed-bind warning.
 fn is_loopback(addr: &str) -> bool {
     addr == "127.0.0.1" || addr == "::1" || addr.starts_with("localhost")
+}
+
+// ---------------------------------------------------------------------------
+// ClusterStateAdapter — bridges ClusterState to the ClusterService trait
+// ---------------------------------------------------------------------------
+
+/// Thin adapter so `ClusterState` can satisfy `Arc<dyn ClusterService>` for
+/// the `ClusterQueryCoordinator`.  Only the production binary needs this;
+/// simulation tests use `SimClusterService` directly.
+struct ClusterStateAdapter {
+    state: Arc<ClusterState>,
+    node_id: String,
+}
+
+#[async_trait]
+impl ManagedService for ClusterStateAdapter {
+    fn name(&self) -> &'static str {
+        "cluster-state-adapter"
+    }
+    async fn init(&self, _ctx: &ServiceContext) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn reset(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn shutdown(&self, _terminate: bool) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+impl ClusterService for ClusterStateAdapter {
+    fn node_id(&self) -> &str {
+        &self.node_id
+    }
+    fn is_master(&self) -> bool {
+        self.state.is_master()
+    }
+    fn master_id(&self) -> Option<String> {
+        let view = self.state.current_view();
+        view.members.first().map(|m| m.node_id.clone())
+    }
+    fn members_view(&self) -> Arc<MembersView> {
+        self.state.current_view()
+    }
+    fn partition_table(&self) -> &ClusterPartitionTable {
+        &self.state.partition_table
+    }
+    fn subscribe_changes(&self) -> tokio::sync::mpsc::UnboundedReceiver<ClusterChange> {
+        // Callers that need change events should use ClusterState::change_sender() directly;
+        // this adapter is used only by ClusterQueryCoordinator, which polls membership
+        // on each execute_distributed call and does not subscribe to change events.
+        tokio::sync::mpsc::unbounded_channel().1
+    }
+    fn health(&self) -> ClusterHealth {
+        let view = self.state.current_view();
+        ClusterHealth {
+            node_count: view.members.len(),
+            active_nodes: view.members.len(),
+            suspect_nodes: 0,
+            partition_table_version: self.state.partition_table.version(),
+            active_migrations: 0,
+            is_master: self.state.is_master(),
+            master_node_id: self.master_id(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -337,19 +411,42 @@ async fn main() -> anyhow::Result<()> {
         let (heartbeat_tx, heartbeat_rx) =
             mpsc::unbounded_channel::<topgun_server::cluster::ClusterMessage>();
 
-        // Spawn the routing task that fans out inbound frames to the heartbeat channel.
-        // All other variants are currently discarded; future dispatch integration will
-        // route them to the cluster dispatch loop instead.
+        // The completion_registry is shared between the ClusterQueryCoordinator
+        // (which inserts oneshot senders before fanning out) and the cluster
+        // dispatch loop (which resolves them when DagComplete frames arrive from
+        // peer nodes).  Both must hold a reference to the SAME Arc or the
+        // coordinator will time out waiting for completions that are never resolved.
+        let completion_registry: Arc<DashMap<String, oneshot::Sender<DagCompletePayload>>> =
+            Arc::new(DashMap::new());
+
+        // Dispatch channel: the routing task forwards DAG frames here; the
+        // dispatch loop consumes them and routes to the appropriate handler.
+        let (dispatch_tx, dispatch_rx) = mpsc::channel::<InboundClusterMessage>(1024);
+
+        // Spawn the routing task that fans out inbound frames.  Heartbeat and
+        // complaint frames go to the heartbeat service; DAG frames (DagExecute,
+        // DagComplete, DagData) go to the cluster dispatch loop so the coordinator
+        // can receive peer completions.  All other variants are logged and dropped.
         tokio::spawn(async move {
             let mut rx = inbound_rx;
             while let Some(msg) = rx.recv().await {
-                match msg.message {
+                match &msg.message {
                     topgun_server::cluster::ClusterMessage::Heartbeat(_)
                     | topgun_server::cluster::ClusterMessage::HeartbeatComplaint(_) => {
                         let _ = heartbeat_tx.send(msg.message);
                     }
+                    topgun_server::cluster::ClusterMessage::DagExecute(_)
+                    | topgun_server::cluster::ClusterMessage::DagComplete(_)
+                    | topgun_server::cluster::ClusterMessage::DagData(_) => {
+                        // Route DAG frames to the dispatch loop so DagComplete can
+                        // resolve the coordinator's awaiting oneshot receivers.
+                        let _ = dispatch_tx.send(msg).await;
+                    }
                     _ => {
-                        // Non-heartbeat frames: no dispatch service wired yet.
+                        tracing::trace!(
+                            "inbound cluster frame not routed (no handler wired): {:?}",
+                            std::mem::discriminant(&msg.message)
+                        );
                     }
                 }
             }
@@ -398,6 +495,9 @@ async fn main() -> anyhow::Result<()> {
 
         // Build domain services, sharing the cluster_state with CoordinationService.
         // Pass the policy evaluator so every client operation is checked against RBAC.
+        // Pass the completion_registry and cluster_state so build_services can
+        // construct the ClusterQueryCoordinator with the real connection_registry
+        // and record_store_factory that it creates internally.
         let (
             classify_svc,
             dispatcher,
@@ -412,6 +512,7 @@ async fn main() -> anyhow::Result<()> {
             Arc::clone(&cluster_state),
             Some(Arc::clone(&policy_evaluator)),
             Arc::clone(&datastore),
+            Some((Arc::clone(&cluster_state), Arc::clone(&completion_registry))),
         );
 
         // Wire up the membership reactor (partition rebalancing on member changes).
@@ -423,6 +524,18 @@ async fn main() -> anyhow::Result<()> {
             migration_tx,
         };
         tokio::spawn(Arc::new(reactor).run(change_rx));
+
+        // Spawn the cluster dispatch loop.  It consumes DAG frames forwarded by
+        // the routing task above and routes them to the appropriate handlers.
+        // The completion_registry Arc is shared with the coordinator (wired inside
+        // build_services) so DagComplete frames resolve the coordinator's receivers.
+        let dispatch_ctx = ClusterDispatchContext {
+            local_node_id: node_id.clone(),
+            completion_registry: Arc::clone(&completion_registry),
+            record_store_factory: Arc::clone(&record_store_factory),
+            connection_registry: Arc::clone(&connection_registry),
+        };
+        tokio::spawn(run_cluster_dispatch_loop(dispatch_ctx, dispatch_rx));
 
         (
             (
@@ -455,6 +568,7 @@ async fn main() -> anyhow::Result<()> {
             Arc::clone(&cs),
             Some(Arc::clone(&policy_evaluator)),
             Arc::clone(&datastore),
+            None,
         );
 
         // Single-node mode: expose no cluster state to AppState (existing behavior).
@@ -803,12 +917,27 @@ type BuildServicesResult = (
     Arc<IndexObserverFactory>,
 );
 
+/// Cluster-mode parameters passed to [`build_services`] when starting with `--seed-nodes`.
+///
+/// Carries the shared `ClusterState` (used to satisfy `ClusterService` via
+/// `ClusterStateAdapter`) and the `completion_registry` `DashMap` (shared between
+/// `ClusterQueryCoordinator` and the cluster dispatch loop so `DagComplete`
+/// messages from peer nodes can resolve the coordinator's awaiting receivers).
+type ClusterParams = (
+    Arc<ClusterState>,
+    Arc<DashMap<String, oneshot::Sender<DagCompletePayload>>>,
+);
+
 /// Wires all 7 domain services and builds the partition dispatcher.
 ///
 /// Accepts `node_id`, `cluster_state`, and an optional `PolicyEvaluator` so
 /// callers can wire RBAC enforcement into the Tower middleware pipeline.
 /// When `policy_evaluator` is `Some`, every client operation is checked against
 /// the policy store before reaching domain services.
+///
+/// Pass `cluster_params` as `Some(...)` in cluster mode so `QueryService`
+/// routes queries through the distributed coordinator.  `None` preserves
+/// single-node behaviour.
 ///
 /// The `connection_registry` returned must be shared with `AppState.registry`
 /// so domain services can track subscriptions and route messages by `connection_id`.
@@ -823,6 +952,7 @@ fn build_services(
     cluster_state: Arc<ClusterState>,
     policy_evaluator: Option<Arc<PolicyEvaluator>>,
     datastore: Arc<dyn MapDataStore>,
+    cluster_params: Option<ClusterParams>,
 ) -> BuildServicesResult {
     let config = ServerConfig {
         node_id: node_id.clone(),
@@ -949,7 +1079,7 @@ fn build_services(
     ));
     let query_merkle_manager =
         Arc::new(topgun_server::storage::query_merkle::QueryMerkleSyncManager::new());
-    let query_svc = Arc::new(QueryService::new(
+    let query_svc_base = QueryService::new(
         Arc::clone(&query_registry),
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
@@ -958,7 +1088,28 @@ fn build_services(
         None,
         #[cfg(feature = "datafusion")]
         None,
-    ));
+    );
+    // In cluster mode, construct a ClusterQueryCoordinator using the real
+    // connection_registry and record_store_factory available here, and wire it
+    // into QueryService.  Single-node startup passes None and leaves query_svc
+    // using run_dag_local (unchanged behaviour).
+    let query_svc = Arc::new(if let Some((cs, completion_registry)) = cluster_params {
+        let cluster_svc: Arc<dyn ClusterService> = Arc::new(ClusterStateAdapter {
+            state: cs,
+            node_id: node_id.clone(),
+        });
+        let coordinator = Arc::new(ClusterQueryCoordinator::new(
+            cluster_svc,
+            Arc::clone(&connection_registry),
+            Arc::clone(&record_store_factory),
+            node_id.clone(),
+            QueryConfig::default(),
+            completion_registry,
+        ));
+        query_svc_base.with_coordinator(coordinator)
+    } else {
+        query_svc_base
+    });
     let messaging_svc = Arc::new(MessagingService::new(Arc::clone(&connection_registry)));
     // Capture Arc<TopicRegistry> before messaging_svc is moved into the closure.
     let topic_registry_arc = messaging_svc.topic_registry_arc();

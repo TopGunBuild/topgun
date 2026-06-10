@@ -53,6 +53,40 @@ fn predicate_to_config(predicate: &PredicateNode) -> Result<rmpv::Value> {
     Ok(val)
 }
 
+/// Builds the config map for a Cursor vertex from a keyset-cursor-bearing query.
+///
+/// The predicate and sort hashes travel alongside the cursor token so the
+/// `CursorProcessor` can validate that the cursor was produced by the same query
+/// shape — a cursor from a different query would otherwise return incorrect results
+/// silently. Callers must only invoke this when `query.cursor` is `Some`.
+fn build_cursor_vertex_config(cursor_str: &str, query: &Query) -> rmpv::Value {
+    use std::hash::{Hash, Hasher};
+
+    let hash_debug = |value: &dyn std::fmt::Debug| -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        format!("{value:?}").hash(&mut h);
+        h.finish()
+    };
+
+    let predicate_hash: u64 = query.predicate.as_ref().map_or(0, |p| hash_debug(p));
+    let sort_hash: u64 = query.sort.as_ref().map_or(0, |s| hash_debug(s));
+
+    rmpv::Value::Map(vec![
+        (
+            rmpv::Value::String("cursor".into()),
+            rmpv::Value::String(cursor_str.into()),
+        ),
+        (
+            rmpv::Value::String("predicateHash".into()),
+            rmpv::Value::Integer(rmpv::Integer::from(predicate_hash)),
+        ),
+        (
+            rmpv::Value::String("sortHash".into()),
+            rmpv::Value::Integer(rmpv::Integer::from(sort_hash)),
+        ),
+    ])
+}
+
 // ---------------------------------------------------------------------------
 // QueryToDagConverter
 // ---------------------------------------------------------------------------
@@ -284,7 +318,34 @@ impl QueryToDagConverter {
                 last_vertex = "combine-aggregate".to_string();
             }
         } else if multi_node {
-            // No GROUP BY but multi-node: insert network boundary before collector.
+            // No GROUP BY but multi-node: cursor filtering must happen worker-side (before
+            // the network boundary) so each node filters by the global keyset position before
+            // sending — applying the cursor coordinator-side over already-limited per-node
+            // streams would return wrong pages.  Insert the cursor vertex here, before
+            // network-sender, when the query carries a keyset cursor.
+            if let Some(ref cursor_str) = query.cursor {
+                let cursor_config = build_cursor_vertex_config(cursor_str, query);
+
+                vertices.push(VertexDescriptor {
+                    name: "cursor".to_string(),
+                    local_parallelism: 1,
+                    processor_type: ProcessorType::Cursor,
+                    preferred_partitions: None,
+                    config: Some(cursor_config),
+                });
+
+                edges.push(Edge {
+                    source_name: last_vertex.clone(),
+                    source_ordinal: 0,
+                    dest_name: "cursor".to_string(),
+                    dest_ordinal: 0,
+                    routing_policy: RoutingPolicy::Isolated,
+                    priority: edge_priority,
+                });
+                edge_priority += 1;
+                last_vertex = "cursor".to_string();
+            }
+
             vertices.push(VertexDescriptor {
                 name: "network-sender".to_string(),
                 local_parallelism: 1,
@@ -328,58 +389,31 @@ impl QueryToDagConverter {
         // A Cursor vertex is only emitted when the query carries a keyset cursor.
         // Placing it before Sort means the sort stage operates on the already-filtered
         // post-cursor result set, which is the correct semantics for keyset pagination.
-        if let Some(ref cursor_str) = query.cursor {
-            // Pass the predicate hash and sort hash alongside the cursor token so the
-            // CursorProcessor can validate that the cursor was produced by the same query
-            // shape. Without this check, a cursor from a different query could return
-            // incorrect results silently.
-            let predicate_hash: u64 = query.predicate.as_ref().map_or(0, |p| {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                format!("{p:?}").hash(&mut h);
-                h.finish()
-            });
+        // In multi-node plans the cursor is already emitted worker-side (above) so this
+        // branch is restricted to single-node plans only.
+        if !multi_node {
+            if let Some(ref cursor_str) = query.cursor {
+                let cursor_config = build_cursor_vertex_config(cursor_str, query);
 
-            let sort_hash: u64 = query.sort.as_ref().map_or(0, |s| {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                format!("{s:?}").hash(&mut h);
-                h.finish()
-            });
+                vertices.push(VertexDescriptor {
+                    name: "cursor".to_string(),
+                    local_parallelism: 1,
+                    processor_type: ProcessorType::Cursor,
+                    preferred_partitions: None,
+                    config: Some(cursor_config),
+                });
 
-            let cursor_config = rmpv::Value::Map(vec![
-                (
-                    rmpv::Value::String("cursor".into()),
-                    rmpv::Value::String(cursor_str.clone().into()),
-                ),
-                (
-                    rmpv::Value::String("predicateHash".into()),
-                    rmpv::Value::Integer(rmpv::Integer::from(predicate_hash)),
-                ),
-                (
-                    rmpv::Value::String("sortHash".into()),
-                    rmpv::Value::Integer(rmpv::Integer::from(sort_hash)),
-                ),
-            ]);
-
-            vertices.push(VertexDescriptor {
-                name: "cursor".to_string(),
-                local_parallelism: 1,
-                processor_type: ProcessorType::Cursor,
-                preferred_partitions: None,
-                config: Some(cursor_config),
-            });
-
-            edges.push(Edge {
-                source_name: last_vertex.clone(),
-                source_ordinal: 0,
-                dest_name: "cursor".to_string(),
-                dest_ordinal: 0,
-                routing_policy: RoutingPolicy::Isolated,
-                priority: edge_priority,
-            });
-            edge_priority += 1;
-            last_vertex = "cursor".to_string();
+                edges.push(Edge {
+                    source_name: last_vertex.clone(),
+                    source_ordinal: 0,
+                    dest_name: "cursor".to_string(),
+                    dest_ordinal: 0,
+                    routing_policy: RoutingPolicy::Isolated,
+                    priority: edge_priority,
+                });
+                edge_priority += 1;
+                last_vertex = "cursor".to_string();
+            }
         }
 
         // --- Step 4: Sort vertex (optional) ---
@@ -989,6 +1023,57 @@ mod tests {
         assert!(
             !vertex_names(&desc).contains(&"cursor"),
             "no cursor vertex on the non-paginated path"
+        );
+    }
+
+    // --- Multi-node cursor is worker-side (before network-sender) ---
+
+    #[test]
+    fn convert_query_multi_node_with_cursor_places_cursor_before_network_sender() {
+        use topgun_core::messages::base::{SortDirection, SortField};
+
+        // In a distributed plan the cursor vertex must sit on the worker side of the
+        // network boundary so each node filters by the global keyset position before
+        // sending.  A coordinator-side cursor over already-limited per-node streams
+        // would silently return wrong pages.
+        let q = Query {
+            cursor: Some("page2-cursor-token".to_string()),
+            sort: Some(vec![SortField {
+                field: "score".to_string(),
+                direction: SortDirection::Desc,
+            }]),
+            ..Default::default()
+        };
+
+        let desc = QueryToDagConverter::convert_query(&q, "users", &multi_node_assignment())
+            .expect("convert should succeed");
+
+        let names = vertex_names(&desc);
+        assert!(names.contains(&"cursor"), "cursor vertex must be emitted");
+        assert!(
+            names.contains(&"network-sender"),
+            "network-sender must be emitted in multi-node plan"
+        );
+
+        // The cursor's edge ordinal/priority must be strictly before network-sender:
+        // confirm by checking the edge chain.
+        let cursor_to_netsender = desc
+            .edges
+            .iter()
+            .any(|e| e.source_name == "cursor" && e.dest_name == "network-sender");
+        assert!(
+            cursor_to_netsender,
+            "cursor must connect directly to network-sender (worker-side cursor)"
+        );
+
+        // No edge from network-receiver to cursor: the cursor is not coordinator-side.
+        let receiver_to_cursor = desc
+            .edges
+            .iter()
+            .any(|e| e.source_name == "network-receiver" && e.dest_name == "cursor");
+        assert!(
+            !receiver_to_cursor,
+            "cursor must not be placed after network-receiver (coordinator-side would be wrong)"
         );
     }
 }

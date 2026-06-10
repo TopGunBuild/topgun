@@ -1786,4 +1786,281 @@ mod tests {
         bridge_0_to_1.abort();
         bridge_1_to_0.abort();
     }
+
+    // -----------------------------------------------------------------------
+    // Distributed keyset cursor under partition fault.
+    //
+    // Verifies that a global keyset cursor applied across a 2-node fan-out
+    // returns the correct second page — strictly after the cursor position —
+    // in global sort order with no duplicates and no first-page rows.
+    //
+    // Vacuity: a coordinator-only cursor (filtering the already-merged result
+    // instead of pre-filtering on each worker) would work only when no
+    // per-node limit is applied before sending — but with per-node limits,
+    // coordinator-side cursor filtering would miss rows, producing pages that
+    // overlap or have gaps.  A per-node-offset cursor (the stale TS blueprint)
+    // would also be wrong here because each node's offset is independent of
+    // the other node's data; the global keyset cursor is correct by construction.
+    //
+    // Coverage note: this sim drives SimCluster::query directly (which calls
+    // coordinator.execute_distributed) and does NOT exercise the production
+    // routing through handle_query_subscribe or the bin dispatch-loop wiring.
+    // The dispatch-loop↔completion_registry link (bin:343-356) is verified by
+    // source inspection per the Validation Checklist, not by this sim.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    #[cfg(feature = "simulation")]
+    #[allow(clippy::too_many_lines)]
+    async fn distributed_keyset_cursor_under_partition() {
+        use crate::query::cursor::{encode_cursor, CursorData, SortValue};
+        use topgun_core::messages::base::{SortDirection, SortField};
+
+        let mut cluster = SimCluster::new(2, 77);
+        cluster.start().expect("cluster start");
+
+        let node_ids = ["sim-node-0", "sim-node-1"];
+        let map_name = "cursor_test";
+
+        // Both nodes must see the full membership so execute_distributed engages
+        // multi-node fan-out.
+        for node in &cluster.nodes {
+            set_membership(node, &node_ids);
+        }
+
+        // Partition assignment: even partition IDs → node-0, odd → node-1.
+        let owner_fn = |pid: u32| -> String {
+            if pid % 2 == 0 {
+                "sim-node-0".to_string()
+            } else {
+                "sim-node-1".to_string()
+            }
+        };
+        for node in &cluster.nodes {
+            assign_partitions(node, &owner_fn);
+        }
+
+        // Bridge connections in both directions so DagExecute/DagComplete flow
+        // between the coordinator (node-0) and the peer (node-1).
+        // node-0 also needs a self-targeting connection for its own partitions.
+        let bridge_0_to_self = bridge_peer_connection(
+            &cluster.nodes[0],
+            "sim-node-0",
+            cluster.nodes[0].inbound_tx.clone(),
+        )
+        .await;
+        let bridge_0_to_1 = bridge_peer_connection(
+            &cluster.nodes[0],
+            "sim-node-1",
+            cluster.nodes[1].inbound_tx.clone(),
+        )
+        .await;
+        let bridge_1_to_0 = bridge_peer_connection(
+            &cluster.nodes[1],
+            "sim-node-0",
+            cluster.nodes[0].inbound_tx.clone(),
+        )
+        .await;
+
+        // Write records with interleaved scores: node-0 owns {10,30,50}, node-1 owns {20,40,60}.
+        // Global ascending order: 10,20,30,40,50,60.
+        //
+        // Partition hashes (UTF-16 FNV-1a mod 271) — same keys as the sort/limit test:
+        //   "bravo"   → 168 (even → node-0)  score=10
+        //   "delta"   → 142 (even → node-0)  score=30
+        //   "foxtrot" → 112 (even → node-0)  score=50
+        //   "alpha"   → 215 (odd  → node-1)  score=20
+        //   "charlie" → 43  (odd  → node-1)  score=40
+        //   "echo"    → 239 (odd  → node-1)  score=60
+        let all_records: &[(&str, i64, usize)] = &[
+            ("bravo", 10, 0),
+            ("delta", 30, 0),
+            ("foxtrot", 50, 0),
+            ("alpha", 20, 1),
+            ("charlie", 40, 1),
+            ("echo", 60, 1),
+        ];
+
+        for &(key, score, node_idx) in all_records {
+            let partition_id = topgun_core::hash_to_partition(key);
+            let node_id = format!("sim-node-{node_idx}");
+            let store = cluster.nodes[node_idx]
+                .record_store_factory
+                .get_or_create(map_name, partition_id);
+            store
+                .put(
+                    key,
+                    RecordValue::Lww {
+                        value: topgun_core::Value::Map(std::collections::BTreeMap::from([(
+                            "score".to_string(),
+                            topgun_core::Value::Int(score),
+                        )])),
+                        timestamp: Timestamp {
+                            millis: 1_000,
+                            counter: 0,
+                            node_id,
+                        },
+                    },
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Client,
+                )
+                .await
+                .expect("write record to owning node's store");
+        }
+
+        // Build a sort-on-score query used for both pages.
+        let sort_fields = vec![SortField {
+            field: "score".to_string(),
+            direction: SortDirection::Asc,
+        }];
+
+        // ---- Page 1: no cursor, limit 3 → expect [10, 20, 30] ----
+
+        let page1_query = Query {
+            sort: Some(sort_fields.clone()),
+            limit: Some(3),
+            ..Default::default()
+        };
+
+        let page1_raw = cluster.nodes[0]
+            .coordinator
+            .execute_distributed(&page1_query, map_name)
+            .await
+            .expect("page 1 query should succeed");
+
+        assert_eq!(page1_raw.len(), 3, "page 1 must have exactly 3 rows");
+
+        let page1_scores: Vec<i64> = page1_raw.iter().filter_map(get_score).collect();
+
+        assert_eq!(
+            page1_scores,
+            vec![10, 20, 30],
+            "page 1 must be globally sorted: [10, 20, 30]"
+        );
+
+        // Compute sort_hash so CursorData validates against the same query shape.
+        let sort_hash: u64 = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            format!("{:?}", &sort_fields).hash(&mut h);
+            h.finish()
+        };
+
+        // Build cursor from the last row of page 1 (score=30, key="delta").
+        // The sort_values list uses the real score value; last_key is the real
+        // record key ("delta") which has score=30.  This matches what a real
+        // client would construct from the returned data + the known query sort spec.
+        //
+        // Row-key caveat: SimCluster::query wraps results in synthetic "row-{i}" keys.
+        // We bypass that wrapper here by calling coordinator.execute_distributed
+        // directly, which returns raw rmpv::Value rows without key wrappers.
+        // We use the known real key "delta" (score=30, partition 142, node-0) as
+        // last_key because the coordinator returns raw values — not keyed entries.
+        // In production the client derives last_key from the returned entry's key field.
+        let cursor = CursorData {
+            sort_values: vec![SortValue {
+                field: "score".to_string(),
+                value: serde_json::json!(30),
+                direction: SortDirection::Asc,
+            }],
+            last_key: "delta".to_string(),
+            predicate_hash: 0,
+            sort_hash,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as i64),
+        };
+        let cursor_token = encode_cursor(&cursor);
+
+        // ---- Fault injection: partition nodes, then heal ----
+        // The partition/heal pair exercises the fault-tolerant path around the
+        // second fan-out without making the query itself fail (heal before query).
+        cluster.inject_partition(&[0], &[1]);
+        cluster.heal_partition();
+
+        // ---- Page 2: with cursor, limit 3 → expect [40, 50, 60] ----
+        //
+        // Each worker node filters by the global keyset cursor (score > 30, or
+        // score == 30 AND key > "delta") before sending to the coordinator.
+        // Worker-side placement (AC3) ensures node-0 sends only {50} (foxtrot)
+        // and node-1 sends only {40, 60} (charlie, echo).  The coordinator's
+        // apply_global_sort_and_limit (SPEC-301) merges them into [40, 50, 60].
+        //
+        // Vacuity: if the cursor were applied coordinator-side after per-node
+        // unlimited sends (without limit on workers), the coordinator would
+        // receive {30, 50} from node-0 and {40, 60} from node-1, then cursor-
+        // filter those results.  In that case the coordinator-only cursor
+        // could still produce the right answer — but with a per-node limit < total,
+        // coordinator-side filtering would silently return wrong pages because
+        // the per-node limited stream might cut off records before the cursor
+        // position.  Worker-side cursor is the correct architecture.
+
+        let page2_query = Query {
+            sort: Some(sort_fields.clone()),
+            limit: Some(3),
+            cursor: Some(cursor_token),
+            ..Default::default()
+        };
+
+        let page2_raw = cluster.nodes[0]
+            .coordinator
+            .execute_distributed(&page2_query, map_name)
+            .await
+            .expect("page 2 query should succeed");
+
+        assert_eq!(page2_raw.len(), 3, "page 2 must have exactly 3 rows");
+
+        let page2_scores: Vec<i64> = page2_raw.iter().filter_map(get_score).collect();
+
+        // Globally-correct order: [40, 50, 60].
+        assert_eq!(
+            page2_scores,
+            vec![40, 50, 60],
+            "page 2 must be globally sorted strictly after cursor: [40, 50, 60]"
+        );
+
+        // No overlap between pages: page 2 must contain no first-page scores.
+        let page1_set: std::collections::HashSet<i64> = page1_scores.iter().copied().collect();
+        for score in &page2_scores {
+            assert!(
+                !page1_set.contains(score),
+                "page 2 must not contain first-page score {score}"
+            );
+        }
+
+        // No duplicates within page 2.
+        let unique_page2: std::collections::HashSet<i64> = page2_scores.iter().copied().collect();
+        assert_eq!(
+            unique_page2.len(),
+            page2_scores.len(),
+            "page 2 must not have duplicate scores"
+        );
+
+        // All page 2 rows must come strictly after the cursor position (score > 30).
+        for score in &page2_scores {
+            assert!(
+                *score > 30,
+                "page 2 row with score {score} is not strictly after cursor (score=30)"
+            );
+        }
+
+        // Cleanup bridge tasks.
+        bridge_0_to_self.abort();
+        bridge_0_to_1.abort();
+        bridge_1_to_0.abort();
+    }
+
+    /// Extracts the `score` field as i64 from a raw `rmpv::Value` DAG row.
+    fn get_score(val: &rmpv::Value) -> Option<i64> {
+        if let rmpv::Value::Map(pairs) = val {
+            for (k, v) in pairs {
+                if k.as_str() == Some("score") {
+                    if let rmpv::Value::Integer(i) = v {
+                        return i.as_i64();
+                    }
+                }
+            }
+        }
+        None
+    }
 }

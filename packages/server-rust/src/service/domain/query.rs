@@ -695,6 +695,17 @@ impl QueryService {
             };
 
             predicate_execute_query(entries, &query)
+        } else if let Some(ref coordinator) = self.coordinator {
+            // Distributed path: the coordinator fans out to all owning nodes, collects
+            // per-node results, and applies the global sort+limit merge (SPEC-301).
+            // The coordinator's single-node bypass routes back through run_dag_local
+            // when only one member is active, keeping single-node behaviour identical.
+            let raw = coordinator
+                .execute_distributed(&query, &map_name)
+                .await
+                .map_err(|e| OperationError::Internal(anyhow::anyhow!("{e}")))?;
+
+            map_dag_rows_to_entries(raw)
         } else {
             let partition_ids: Vec<u32> = stores.iter().map(|s| s.partition_id()).collect();
             let raw = run_dag_local(
