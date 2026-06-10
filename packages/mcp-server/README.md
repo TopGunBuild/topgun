@@ -115,10 +115,20 @@ Example: "Create a task called 'Review PR #123'"
 ```
 
 ### topgun_search
-Perform hybrid search (BM25 full-text + exact matching).
+Tri-hybrid search combining exact, full-text (BM25), and semantic methods fused with Reciprocal Rank Fusion. Defaults to full-text only.
+
+**Parameters:**
+- `map` (required) — name of the map to search
+- `query` (required) — search query text
+- `methods` (optional, default `["fullText"]`) — array of methods to combine: `"exact"`, `"fullText"`, `"semantic"`. `"semantic"` requires server-side auto-embedding.
+- `limit` (optional, default 10) — maximum results to return (maps to `k` in the hybrid search engine internally)
+- `minScore` (optional, default 0) — minimum fused relevance score (0–1)
+
+Returns results ranked by fused score with per-method score breakdown.
 
 ```
 Example: "Find tasks about authentication"
+Example with methods: { map: "docs", query: "auth flow", methods: ["exact", "fullText"] }
 ```
 
 ### topgun_subscribe

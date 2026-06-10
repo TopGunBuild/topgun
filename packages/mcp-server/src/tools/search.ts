@@ -1,5 +1,6 @@
 /**
- * topgun_search - Perform hybrid search (exact + full-text) across a map
+ * topgun_search — Tri-hybrid search (exact + full-text BM25 + semantic) via RRF fusion.
+ * Routes through the hybridSearch client method so the tool actually performs what it advertises.
  */
 
 import type { MCPTool, MCPToolResult, ToolContext } from '../types';
@@ -8,9 +9,12 @@ import { SearchArgsSchema, toolSchemas, type SearchArgs } from '../schemas';
 export const searchTool: MCPTool = {
   name: 'topgun_search',
   description:
-    'Perform hybrid search across a TopGun map using BM25 full-text search. ' +
-    'Returns results ranked by relevance score. ' +
-    'Use this when searching for text content or when the exact field values are unknown.',
+    'Search a TopGun map combining exact, full-text (BM25), and semantic methods, ' +
+    'fused with Reciprocal Rank Fusion. ' +
+    'Defaults to full-text only. ' +
+    'Pass methods: ["exact","fullText"] or ["fullText","semantic"] to enable additional legs. ' +
+    '"semantic" requires server-side auto-embedding (the tool sends a text query, not a vector). ' +
+    'Returns results ranked by a fused relevance score with per-method score breakdown.',
   inputSchema: toolSchemas.search as MCPTool['inputSchema'],
 };
 
@@ -28,7 +32,7 @@ export async function handleSearch(rawArgs: unknown, ctx: ToolContext): Promise<
   }
 
   const args: SearchArgs = parseResult.data;
-  const { map, query, limit, minScore } = args;
+  const { map, query, limit, minScore, methods } = args;
 
   // Validate map access
   if (ctx.config.allowedMaps && !ctx.config.allowedMaps.includes(map)) {
@@ -43,12 +47,15 @@ export async function handleSearch(rawArgs: unknown, ctx: ToolContext): Promise<
     };
   }
 
+  // Map the existing `limit` arg to hybridSearch's `k` so agents keep using the same param name.
   const effectiveLimit = Math.min(limit ?? ctx.config.defaultLimit, ctx.config.maxLimit);
+  const effectiveMethods = methods ?? ['fullText'];
   const effectiveMinScore = minScore ?? 0;
 
   try {
-    const results = await ctx.client.search<Record<string, unknown>>(map, query, {
-      limit: effectiveLimit,
+    const results = await ctx.client.hybridSearch(map, query, {
+      methods: effectiveMethods,
+      k: effectiveLimit,
       minScore: effectiveMinScore,
     });
 
@@ -74,9 +81,18 @@ export async function handleSearch(rawArgs: unknown, ctx: ToolContext): Promise<
           body !== undefined
             ? `Data: ${JSON.stringify(body, null, 2).split('\n').join('\n   ')}`
             : `Data: (record body not available locally)`;
+
+        // Render per-method score breakdown so the calling agent can see which leg contributed.
+        const methodScoreEntries = Object.entries(result.methodScores)
+          .map(([method, score]) => `${method}: ${(score as number).toFixed(3)}`)
+          .join(', ');
+        const methodLine = methodScoreEntries
+          ? `Method scores: ${methodScoreEntries}`
+          : 'Method scores: (none)';
+
         return (
           `${idx + 1}. [Score: ${result.score.toFixed(3)}] [${result.key}]\n` +
-          `   Matched: ${result.matchedTerms.join(', ')}\n` +
+          `   ${methodLine}\n` +
           `   ${dataLine}`
         );
       })
@@ -93,7 +109,27 @@ export async function handleSearch(rawArgs: unknown, ctx: ToolContext): Promise<
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
 
-    // Handle case where FTS is not enabled for the map
+    // When the server cannot embed the query for semantic search, surface an actionable message
+    // so the calling agent knows to retry without the semantic leg.
+    if (
+      message.toLowerCase().includes('embed') ||
+      (effectiveMethods.includes('semantic') &&
+        (message.includes('semantic') || message.includes('vector')))
+    ) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text:
+              `Semantic search requires server-side embedding, which is not available for map '${map}'. ` +
+              `Retry with methods: ["fullText"] or methods: ["exact", "fullText"] to avoid the semantic leg.`,
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    // Handle case where full-text search is not enabled for the map
     if (message.includes('not enabled') || message.includes('FTS')) {
       return {
         content: [
