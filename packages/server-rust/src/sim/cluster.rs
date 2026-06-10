@@ -1599,4 +1599,191 @@ mod tests {
             "Int>=10 should be cut off by limit=2 after ascending DAG sort"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Global sort + global limit must hold across a true 2-node fan-out under
+    // a partition/heal fault scenario.
+    //
+    // Each node's local stream is individually sorted but the two streams
+    // interleave: node-0 holds {10,30,50} and node-1 holds {20,40,60}.
+    // Correct globally-ascending order is 10,20,30,40,50,60.
+    // A naive concat would produce node-0-stream ++ node-1-stream (i.e.
+    // 10,30,50,20,40,60) which fails the ordering assertion, proving vacuity.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    #[cfg(feature = "simulation")]
+    #[allow(clippy::too_many_lines)]
+    async fn distributed_merge_global_sort_and_limit_under_partition() {
+        let mut cluster = SimCluster::new(2, 99);
+        cluster.start().expect("cluster start");
+
+        let node_ids = ["sim-node-0", "sim-node-1"];
+        let map_name = "merge_test";
+
+        // Both nodes must see the full membership so coordinator.execute_distributed
+        // engages multi-node fan-out (needs_distribution → true).
+        for node in &cluster.nodes {
+            set_membership(node, &node_ids);
+        }
+
+        // Partition assignment: even partition IDs → node-0, odd → node-1.
+        // This mirrors the dag_execute_roundtrip_resolves_completion pattern.
+        let owner_fn = |pid: u32| -> String {
+            if pid % 2 == 0 {
+                "sim-node-0".to_string()
+            } else {
+                "sim-node-1".to_string()
+            }
+        };
+        for node in &cluster.nodes {
+            assign_partitions(node, &owner_fn);
+        }
+
+        // Bridge connections in both directions so DagExecute/DagComplete flow
+        // between the coordinator node (node-0) and the peer (node-1).
+        // The coordinator fans out to ALL active members including itself, so
+        // node-0 also needs a self-targeting ClusterPeer connection so that
+        // send_to_peer("sim-node-0", ...) can deliver to node-0's dispatch loop.
+        let bridge_0_to_self = bridge_peer_connection(
+            &cluster.nodes[0],
+            "sim-node-0",
+            cluster.nodes[0].inbound_tx.clone(),
+        )
+        .await;
+        let bridge_0_to_1 = bridge_peer_connection(
+            &cluster.nodes[0],
+            "sim-node-1",
+            cluster.nodes[1].inbound_tx.clone(),
+        )
+        .await;
+        let bridge_1_to_0 = bridge_peer_connection(
+            &cluster.nodes[1],
+            "sim-node-0",
+            cluster.nodes[0].inbound_tx.clone(),
+        )
+        .await;
+
+        // Write records to the node that OWNS each key's natural partition.
+        // Partition ownership: even partition IDs → node-0, odd → node-1.
+        // Key names are dictated by partition hashing, not by score: each key
+        // must hash to a partition whose parity routes it to the intended node,
+        // so neutral names are used to avoid implying any key↔score relation.
+        // Node-0 owns scores {10,30,50} and node-1 owns scores {20,40,60},
+        // making correct global ascending order 10,20,30,40,50,60.
+        //
+        // Verified partition hashes (UTF-16 FNV-1a mod 271):
+        //   "bravo"   → 168 (even → node-0)
+        //   "delta"   → 142 (even → node-0)
+        //   "foxtrot" → 112 (even → node-0)
+        //   "alpha"   → 215 (odd  → node-1)
+        //   "charlie" → 43  (odd  → node-1)
+        //   "echo"    → 239 (odd  → node-1)
+        let all_records: &[(&str, i64, usize)] = &[
+            // (key, score, node_idx that owns the partition)
+            ("bravo", 10, 0),   // partition 168 → node-0
+            ("delta", 30, 0),   // partition 142 → node-0
+            ("foxtrot", 50, 0), // partition 112 → node-0
+            ("alpha", 20, 1),   // partition 215 → node-1
+            ("charlie", 40, 1), // partition 43  → node-1
+            ("echo", 60, 1),    // partition 239 → node-1
+        ];
+
+        for &(key, score, node_idx) in all_records {
+            let partition_id = topgun_core::hash_to_partition(key);
+            let node_id = format!("sim-node-{node_idx}");
+            let store = cluster.nodes[node_idx]
+                .record_store_factory
+                .get_or_create(map_name, partition_id);
+            store
+                .put(
+                    key,
+                    RecordValue::Lww {
+                        value: topgun_core::Value::Map(std::collections::BTreeMap::from([(
+                            "score".to_string(),
+                            topgun_core::Value::Int(score),
+                        )])),
+                        timestamp: Timestamp {
+                            millis: 1_000,
+                            counter: 0,
+                            node_id,
+                        },
+                    },
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Client,
+                )
+                .await
+                .expect("write record to owning node's store");
+        }
+
+        // Fault scenario: inject a partition between the two nodes, then heal
+        // before issuing the query. This exercises partition/heal around the
+        // fan-out and confirms the coordinator handles the healed state correctly.
+        cluster.inject_partition(&[0], &[1]);
+        cluster.heal_partition();
+
+        // Issue a non-GROUP-BY query with ascending sort on "score" and limit 4.
+        // Global ascending order: 10,20,30,40,50,60 → limit 4 → [10,20,30,40].
+        use topgun_core::messages::base::{SortDirection, SortField};
+        let query = Query {
+            sort: Some(vec![SortField {
+                field: "score".to_string(),
+                direction: SortDirection::Asc,
+            }]),
+            limit: Some(4),
+            ..Default::default()
+        };
+
+        let raw_results = cluster.nodes[0]
+            .coordinator
+            .execute_distributed(&query, map_name)
+            .await
+            .expect("distributed query should succeed");
+
+        // Exactly `limit` rows must be returned (never up to N×per-node-limit).
+        // Vacuity: naive concat without global limit could return up to 6 rows.
+        assert_eq!(
+            raw_results.len(),
+            4,
+            "global limit=4 must yield exactly 4 rows, not up to N×per-node-limit"
+        );
+
+        // Extract scores from raw rmpv::Value results.
+        let scores: Vec<i64> = raw_results
+            .iter()
+            .filter_map(|v| {
+                if let rmpv::Value::Map(pairs) = v {
+                    pairs.iter().find_map(|(k, val)| {
+                        if k.as_str() == Some("score") {
+                            if let rmpv::Value::Integer(i) = val {
+                                i.as_i64()
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Globally-correct ascending order must hold across node boundaries.
+        // Vacuity: a naive concat would produce node-0's stream first (10,30,50)
+        // then node-1's stream (20,40,60), and limit=4 would truncate that to
+        // [10,30,50,20]; this assertion (scores == [10,20,30,40]) would FAIL
+        // on a concat-style merge.
+        assert_eq!(
+            scores,
+            vec![10, 20, 30, 40],
+            "results must be in global ascending order across node boundaries"
+        );
+
+        // Cleanup bridge tasks.
+        bridge_0_to_self.abort();
+        bridge_0_to_1.abort();
+        bridge_1_to_0.abort();
+    }
 }

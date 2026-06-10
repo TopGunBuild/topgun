@@ -23,7 +23,9 @@ use crate::cluster::state::ClusterPartitionTable;
 use crate::cluster::traits::ClusterService;
 use crate::dag::converter::QueryToDagConverter;
 use crate::dag::executor::{DagExecutor, ExecutorContext};
-use crate::dag::processors::CombineProcessorSupplier;
+use crate::dag::processors::{
+    CombineProcessorSupplier, LimitProcessorSupplier, SortProcessorSupplier,
+};
 use crate::dag::types::ProcessorSupplier;
 use crate::dag::types::{
     Dag, DagPlanDescriptor, ExecutionPlan, ProcessorType, QueryConfig, VertexDescriptor,
@@ -221,10 +223,15 @@ impl ClusterQueryCoordinator {
         // Step 8: merge results
         let has_group_by = query.group_by.as_ref().is_some_and(|v| !v.is_empty());
         if has_group_by {
-            self.combine_group_by_results(node_results, &descriptor)
+            self.combine_group_by_results(node_results, query, &descriptor)
         } else {
-            // Simple concatenation for non-GROUP BY queries
-            Ok(node_results.into_iter().flatten().collect())
+            // Re-sort and clamp the flattened per-node results so the merged
+            // stream respects the global sort order and the global limit.
+            // Without this, each node's locally-sorted, locally-limited stream
+            // would be concatenated verbatim — destroying global ordering and
+            // returning up to N×limit rows.
+            let flattened: Vec<rmpv::Value> = node_results.into_iter().flatten().collect();
+            self.apply_global_sort_and_limit(flattened, query)
         }
     }
 
@@ -283,10 +290,14 @@ impl ClusterQueryCoordinator {
         }
     }
 
-    /// Merges partial GROUP BY aggregates from multiple nodes using `CombineProcessor`.
+    /// Merges partial GROUP BY aggregates from multiple nodes using `CombineProcessor`,
+    /// then applies coordinator-side global sort + limit so GROUP BY results are
+    /// ordered and limit-respecting. The `CombineProcessor` aggregate logic and the
+    /// emitted key set (`__count` / `__<func>_<field>` / `__key`) are unchanged.
     fn combine_group_by_results(
         &self,
         node_results: Vec<Vec<rmpv::Value>>,
+        query: &Query,
         _descriptor: &DagPlanDescriptor,
     ) -> Result<Vec<rmpv::Value>> {
         use crate::dag::executor::{VecDequeInbox, VecDequeOutbox};
@@ -323,7 +334,103 @@ impl ClusterQueryCoordinator {
         let mut final_outbox = VecDequeOutbox::new(1, 1024);
         processor.complete(&mut final_outbox)?;
 
-        Ok(final_outbox.drain_bucket(0).collect())
+        let merged: Vec<rmpv::Value> = final_outbox.drain_bucket(0).collect();
+
+        // Apply coordinator-side global sort + limit after the combine pass so
+        // GROUP BY results respect the query's ordering and limit constraints.
+        self.apply_global_sort_and_limit(merged, query)
+    }
+
+    /// Applies coordinator-side global sort (when `query.sort` is non-empty) and
+    /// global limit (when `query.limit` is set) to an already-materialized row set.
+    ///
+    /// Reuses `SortProcessor` and `LimitProcessor` via the same
+    /// `VecDequeInbox`/`VecDequeOutbox` drive pattern used by `combine_group_by_results`
+    /// so global sort and per-node sort always agree by construction on field/direction.
+    ///
+    /// When sort is absent the rows pass through unchanged (no implicit ordering imposed).
+    /// When limit is absent no row-count clamp is applied.
+    fn apply_global_sort_and_limit(
+        &self,
+        rows: Vec<rmpv::Value>,
+        query: &Query,
+    ) -> Result<Vec<rmpv::Value>> {
+        use crate::dag::executor::{VecDequeInbox, VecDequeOutbox};
+        use crate::dag::types::ProcessorContext;
+        use topgun_core::messages::base::SortDirection;
+
+        let sort_fields_opt = query.sort.as_ref().filter(|v| !v.is_empty());
+
+        // Run a global sort when the query requests it.
+        let sorted = if let Some(sort_fields) = sort_fields_opt {
+            let fields: Vec<(String, SortDirection)> = sort_fields
+                .iter()
+                .map(|sf| (sf.field.clone(), sf.direction.clone()))
+                .collect();
+
+            let mut sort_procs = SortProcessorSupplier {
+                sort_fields: fields,
+            }
+            .get(1);
+            let mut sort_proc = sort_procs
+                .pop()
+                .ok_or_else(|| anyhow!("SortProcessorSupplier returned no processors"))?;
+
+            let ctx = ProcessorContext {
+                node_id: self.local_node_id.clone(),
+                global_processor_index: 0,
+                local_processor_index: 0,
+                total_parallelism: 1,
+                vertex_name: "global-sort".to_string(),
+                partition_ids: vec![],
+            };
+            sort_proc.init(&ctx)?;
+
+            let n = rows.len();
+            let mut inbox = VecDequeInbox::new(n.max(64));
+            let mut noop_outbox = VecDequeOutbox::new(1, n.max(64));
+            for item in rows {
+                inbox.push(item);
+            }
+            sort_proc.process(0, &mut inbox, &mut noop_outbox)?;
+
+            let mut sorted_outbox = VecDequeOutbox::new(1, n.max(64));
+            sort_proc.complete(&mut sorted_outbox)?;
+
+            sorted_outbox.drain_bucket(0).collect::<Vec<_>>()
+        } else {
+            rows
+        };
+
+        // Apply the global limit when the query requests it.
+        if let Some(limit) = query.limit {
+            let n = sorted.len();
+            let mut limit_procs = LimitProcessorSupplier { limit }.get(1);
+            let mut limit_proc = limit_procs
+                .pop()
+                .ok_or_else(|| anyhow!("LimitProcessorSupplier returned no processors"))?;
+
+            let ctx = ProcessorContext {
+                node_id: self.local_node_id.clone(),
+                global_processor_index: 0,
+                local_processor_index: 0,
+                total_parallelism: 1,
+                vertex_name: "global-limit".to_string(),
+                partition_ids: vec![],
+            };
+            limit_proc.init(&ctx)?;
+
+            let mut inbox = VecDequeInbox::new(n.max(64));
+            let mut limit_outbox = VecDequeOutbox::new(1, n.max(64));
+            for item in sorted {
+                inbox.push(item);
+            }
+            limit_proc.process(0, &mut inbox, &mut limit_outbox)?;
+
+            Ok(limit_outbox.drain_bucket(0).collect())
+        } else {
+            Ok(sorted)
+        }
     }
 }
 
@@ -475,12 +582,17 @@ pub(crate) fn make_supplier_from_descriptor(
         }
         ProcessorType::Combine => Ok(Box::new(CombineProcessorSupplier)),
         ProcessorType::Collector => Ok(Box::new(CollectorProcessorSupplier)),
-        ProcessorType::NetworkSender | ProcessorType::NetworkReceiver | ProcessorType::Project => {
-            Err(anyhow!(
-                "processor type {:?} is not supported in local bypass execution",
-                vd.processor_type
-            ))
+        // NetworkSender and NetworkReceiver are transparent pass-throughs in local/sim
+        // execution: there is no real network I/O, so items flow directly to the next
+        // vertex. CollectorProcessorSupplier emits everything it receives, which is
+        // exactly the pass-through behaviour needed.
+        ProcessorType::NetworkSender | ProcessorType::NetworkReceiver => {
+            Ok(Box::new(CollectorProcessorSupplier))
         }
+        ProcessorType::Project => Err(anyhow!(
+            "processor type {:?} is not supported in local bypass execution",
+            vd.processor_type
+        )),
         ProcessorType::Sort => {
             let sort_fields = vd
                 .config
@@ -887,6 +999,7 @@ mod tests {
         let merged = coordinator
             .combine_group_by_results(
                 vec![node1_results, node2_results, node3_results],
+                &Query::default(),
                 &descriptor,
             )
             .expect("combine should succeed");
