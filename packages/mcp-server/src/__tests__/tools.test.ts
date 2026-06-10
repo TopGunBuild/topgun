@@ -56,6 +56,9 @@ class MockTopGunClient {
   // Configurable hybrid search results + recorded options for assertion.
   hybridSearchResults: MockHybridSearchHit[] = [];
   lastHybridSearchOptions: unknown = null;
+  // When set, hybridSearch rejects with this error to simulate server-side failures
+  // (no embedding model, FTS not enabled for the map, etc.).
+  hybridSearchRejection: Error | null = null;
   // When set, queryOnce rejects with this error to simulate offline / not-settled.
   queryOnceRejection: Error | null = null;
 
@@ -101,6 +104,9 @@ class MockTopGunClient {
   async hybridSearch(_map: string, _query: string, options?: unknown) {
     // Record the options so tests can assert which methods/k were forwarded.
     this.lastHybridSearchOptions = options;
+    if (this.hybridSearchRejection) {
+      throw this.hybridSearchRejection;
+    }
     return this.hybridSearchResults;
   }
 
@@ -662,7 +668,10 @@ describe('MCP Tools', () => {
         { key: 'doc1', score: 0.82, methodScores: { exact: 0.6, fullText: 0.5 } },
       ];
 
-      await handleSearch({ map: 'docs', query: 'login', methods: ['exact', 'fullText'] }, ctx);
+      const result = await handleSearch(
+        { map: 'docs', query: 'login', methods: ['exact', 'fullText'] },
+        ctx,
+      );
 
       const opts = mockClient.lastHybridSearchOptions as {
         methods: string[];
@@ -672,12 +681,38 @@ describe('MCP Tools', () => {
       // Both requested methods must be forwarded verbatim.
       expect(opts.methods).toEqual(['exact', 'fullText']);
       // Output must render per-method scores for both legs so the agent can see the breakdown.
-      const result = await handleSearch(
-        { map: 'docs', query: 'login', methods: ['exact', 'fullText'] },
-        ctx,
-      );
       expect(result.content[0].text).toContain('exact:');
       expect(result.content[0].text).toContain('fullText:');
+    });
+
+    it('should surface an actionable retry message when the server cannot embed for the semantic leg', async () => {
+      const ctx = createTestContext();
+      const mockClient = ctx.client as unknown as MockTopGunClient;
+      mockClient.hybridSearchRejection = new Error(
+        'failed to embed query: no embedding model configured',
+      );
+
+      const result = await handleSearch(
+        { map: 'docs', query: 'login', methods: ['fullText', 'semantic'] },
+        ctx,
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Semantic search requires server-side embedding');
+      // The message must tell the agent how to retry without the semantic leg.
+      expect(result.content[0].text).toContain('methods: ["fullText"]');
+    });
+
+    it('should point the agent at topgun_query when full-text search is not enabled for the map', async () => {
+      const ctx = createTestContext();
+      const mockClient = ctx.client as unknown as MockTopGunClient;
+      mockClient.hybridSearchRejection = new Error("FTS is not enabled for map 'docs'");
+
+      const result = await handleSearch({ map: 'docs', query: 'login' }, ctx);
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("Full-text search is not enabled for map 'docs'");
+      expect(result.content[0].text).toContain('topgun_query');
     });
   });
 });
