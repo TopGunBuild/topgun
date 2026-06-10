@@ -1,0 +1,234 @@
+---
+title: Vector & hybrid search
+description: Run exact, full-text (BM25), and semantic (vector/HNSW) queries together — fused with RRF — with live subscriptions that update as your data changes.
+order: 15
+---
+
+import { ChevronRight, Cpu } from 'lucide-react';
+import { AlertBox } from '../../../components/docs/AlertBox';
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Vector & hybrid search</span>
+</div>
+
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <Cpu className="w-10 h-10 text-brand" />
+  <h1 className="text-4xl font-bold text-foreground">Vector & hybrid search</h1>
+</div>
+
+TopGun ships with tri-hybrid search built in: **exact** key lookup, **BM25 full-text** (via tantivy), and **semantic vector search** (HNSW ANN with embeddings), all combined with Reciprocal Rank Fusion (RRF) into a single ranked result. Subscriptions update in real time as records change — no polling, no separate search index to keep in sync.
+
+For BM25 predicates and `useQuery` live subscriptions without embeddings, see [Search & live queries](/docs/guides/search-and-live-queries). For exposing search to AI agents over MCP, see [MCP Server](/docs/guides/mcp-server).
+
+---
+
+## Search methods
+
+The `HybridSearchMethod` type controls which search strategies run:
+
+```ts
+type HybridSearchMethod = 'exact' | 'fullText' | 'semantic';
+```
+
+| Method | When to use |
+|--------|-------------|
+| `'exact'` | Key-based lookup; zero latency, no index required |
+| `'fullText'` | BM25 ranked full-text search on string fields; works offline against local data |
+| `'semantic'` | HNSW approximate nearest-neighbour in embedding space; requires server-side embedding config |
+
+Pass one or more methods to run them together; RRF fuses the ranked lists into a single score per result.
+
+---
+
+## React hooks
+
+### `useHybridSearch`
+
+One-shot search that re-runs whenever `query` or `options` change:
+
+```tsx
+import { useHybridSearch } from '@topgunbuild/react';
+
+function DocSearch({ query }: { query: string }) {
+  const { results, loading } = useHybridSearch('docs', query, {
+    methods: ['fullText', 'semantic'],
+    k: 10,
+    minScore: 0.3,
+  });
+
+  if (loading) return <p>Searching…</p>;
+
+  return (
+    <ul>
+      {results.map((r) => (
+        <li key={r.key}>
+          {r.key} — score {r.score.toFixed(3)}
+          <small>
+            {' '}(BM25: {r.methodScores?.fullText?.toFixed(3)},
+            semantic: {r.methodScores?.semantic?.toFixed(3)})
+          </small>
+        </li>
+      ))}
+    </ul>
+  );
+}
+```
+
+Each result is a `HybridSearchClientResult`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `key` | `string` | Record key in the map |
+| `score` | `number` | RRF-fused score across all methods |
+| `methodScores` | `Record<string, number>` | Per-method score breakdown |
+| `value` | `T \| undefined` | Record value (present when `includeValue: true`) |
+
+### `useVectorSearch`
+
+Pure vector (HNSW ANN) search, bypassing BM25 and exact strategies:
+
+```tsx
+import { useVectorSearch } from '@topgunbuild/react';
+
+function SimilarProducts({ embedding }: { embedding: number[] }) {
+  const { results, loading } = useVectorSearch('products', embedding, {
+    k: 5,
+    includeValue: true,
+  });
+
+  if (loading) return null;
+  return <ul>{results.map((r) => <li key={r.key}>{r.key}</li>)}</ul>;
+}
+```
+
+### `useHybridSearchSubscribe`
+
+Live subscription — results re-rank automatically as records are written:
+
+```tsx
+import { useHybridSearchSubscribe } from '@topgunbuild/react';
+
+function LiveResults({ query }: { query: string }) {
+  const { results } = useHybridSearchSubscribe('docs', query, {
+    methods: ['semantic'],
+    k: 5,
+  });
+
+  return (
+    <ul>
+      {results.map((r) => (
+        <li key={r.key}>{r.key} ({r.score.toFixed(3)})</li>
+      ))}
+    </ul>
+  );
+}
+```
+
+For the full hook option signatures see the [React reference](/docs/reference/react).
+
+---
+
+## Client methods
+
+Use the client methods directly in non-React code (Node.js scripts, background jobs, MCP tools):
+
+```ts
+// Full tri-hybrid search
+const results = await client.hybridSearch('products', 'wireless headphones', {
+  methods: ['exact', 'fullText', 'semantic'],
+  k: 20,
+  predicate: (item) => item.inStock === true,
+});
+// results: HybridSearchClientResult[] — key, score, methodScores
+
+// Pure vector search
+const similar = await client.vectorSearch('products', queryEmbedding, { k: 10 });
+```
+
+`client.hybridSearch` accepts `HybridSearchClientOptions`:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `methods` | `HybridSearchMethod[]` | `['fullText']` | Which strategies to run |
+| `k` | `number` | `10` | Max results to return |
+| `queryVector` | `number[]` | — | Pre-computed embedding (skips auto-embed) |
+| `predicate` | `(value: T) => boolean` | — | Pre-filter applied before ranking |
+| `includeValue` | `boolean` | `false` | Include record value in results |
+| `minScore` | `number` | — | Discard results below this RRF score |
+
+For the full client API see the [Client reference](/docs/reference/client).
+
+---
+
+## RRF score fusion
+
+When two or more methods run, TopGun uses **Reciprocal Rank Fusion** to merge the ranked lists:
+
+```
+RRF score = Σ  1 / (k_rrf + rank_i)
+```
+
+where `k_rrf = 60` by default. This produces a single `score` per result plus a `methodScores` map so you can inspect each method's contribution. The fused score is always in `(0, 1]`.
+
+---
+
+## Semantic search and embedding providers
+
+Semantic search works by embedding query text and record fields into a shared vector space, then finding the nearest neighbours with HNSW ANN.
+
+**Embeddings are generated server-side.** TopGun supports:
+
+- **Local Ollama** (e.g. `nomic-embed-text`) — zero egress cost, runs on-device
+- **Any OpenAI-compatible HTTP endpoint** — OpenAI, Together AI, Cohere, or a self-hosted model serving the `/v1/embeddings` API
+
+Records are auto-vectorized on write — no separate indexing pipeline is needed.
+
+### Server configuration
+
+`VectorConfig` is a **Rust server-side struct** (`provider` + per-map dimension config). Configure it via server environment variables; it is not a TypeScript client import.
+
+```bash
+# Path where the HNSW index is persisted
+TOPGUN_VECTOR_INDEX_PATH=./data/vectors
+```
+
+For the full `VectorConfig` struct (provider type, model, endpoint, dimensions per map) see the [Server reference](/docs/reference/server).
+
+<AlertBox variant="info" title="Semantic search requires server-side config" text="The 'exact' and 'fullText' methods work fully offline against local data. The 'semantic' method requires a running server with VectorConfig set (provider + TOPGUN_VECTOR_INDEX_PATH). Calls that include 'semantic' while offline gracefully fall back to the remaining methods." />
+
+---
+
+## HNSW index
+
+TopGun builds an **HNSW (Hierarchical Navigable Small World)** approximate nearest-neighbour index over each configured map. HNSW provides sub-linear query time at high recall — typical `k=10` queries over millions of vectors complete in single-digit milliseconds.
+
+The index is persisted to `TOPGUN_VECTOR_INDEX_PATH` and loaded into memory at server start. Writes auto-insert into the live index so there is no explicit rebuild step.
+
+---
+
+## Real-time deltas
+
+`useHybridSearchSubscribe` maintains a live WebSocket subscription. When any record in the map changes, the server re-ranks that record's neighbourhood and pushes deltas to subscribers. This means your search UI reflects fresh data without re-issuing queries.
+
+The subscription uses the same CRDT merge semantics as the rest of TopGun: offline writes are queued and the subscription reconciles when connectivity resumes.
+
+---
+
+## AI agents via MCP
+
+The bundled `topgun_search` MCP tool routes through the same tri-hybrid RRF pipeline. AI agents using Claude Desktop, Cursor, or any MCP-compatible client call it identically to `client.hybridSearch`. See the [MCP Server guide](/docs/guides/mcp-server) and the [MCP reference](/docs/reference/mcp).
+
+---
+
+## Related
+
+- [Search & live queries](/docs/guides/search-and-live-queries) — BM25 only, predicates, `useQuery`
+- [MCP Server guide](/docs/guides/mcp-server) — AI agents on live CRDT data
+- [React reference](/docs/reference/react) — full hook signatures
+- [Client reference](/docs/reference/client) — `client.hybridSearch` / `client.vectorSearch` full options
+- [Server reference](/docs/reference/server) — `VectorConfig`, `TOPGUN_VECTOR_INDEX_PATH`, embedding provider config
+- [MCP reference](/docs/reference/mcp) — `topgun_search` and all 8 MCP tools

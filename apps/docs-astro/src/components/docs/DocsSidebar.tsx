@@ -250,6 +250,12 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
             <SubItem to="/docs/guides/search-and-live-queries" currentPath={currentPath}>
               Search & live queries
             </SubItem>
+            <SubItem to="/docs/guides/vector-and-hybrid-search" currentPath={currentPath}>
+              Vector & hybrid search
+            </SubItem>
+            <SubItem to="/docs/guides/mcp-server" currentPath={currentPath}>
+              MCP server
+            </SubItem>
             <SubItem to="/docs/guides/counters-and-locks" currentPath={currentPath}>
               Counters & locks
             </SubItem>
