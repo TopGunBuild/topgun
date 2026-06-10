@@ -155,6 +155,7 @@ export interface SearchToolArgs {
   query: string;
   limit?: number;
   minScore?: number;
+  methods?: Array<'exact' | 'fullText' | 'semantic'>;
 }
 
 /**
