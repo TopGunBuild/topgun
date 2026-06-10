@@ -580,7 +580,14 @@ pub(crate) fn make_supplier_from_descriptor(
         }
         ProcessorType::Combine => Ok(Box::new(CombineProcessorSupplier)),
         ProcessorType::Collector => Ok(Box::new(CollectorProcessorSupplier)),
-        ProcessorType::NetworkSender | ProcessorType::NetworkReceiver | ProcessorType::Project => {
+        // NetworkSender and NetworkReceiver are transparent pass-throughs in local/sim
+        // execution: there is no real network I/O, so items flow directly to the next
+        // vertex. CollectorProcessorSupplier emits everything it receives, which is
+        // exactly the pass-through behaviour needed.
+        ProcessorType::NetworkSender | ProcessorType::NetworkReceiver => {
+            Ok(Box::new(CollectorProcessorSupplier))
+        }
+        ProcessorType::Project => {
             Err(anyhow!(
                 "processor type {:?} is not supported in local bypass execution",
                 vd.processor_type
