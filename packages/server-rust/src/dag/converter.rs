@@ -384,59 +384,60 @@ impl QueryToDagConverter {
         // post-cursor result set, which is the correct semantics for keyset pagination.
         // In multi-node plans the cursor is already emitted worker-side (above) so this
         // branch is restricted to single-node plans only.
-        if query.cursor.is_some() && !multi_node {
-            // Pass the predicate hash and sort hash alongside the cursor token so the
-            // CursorProcessor can validate that the cursor was produced by the same query
-            // shape. Without this check, a cursor from a different query could return
-            // incorrect results silently.
-            let cursor_str = query.cursor.as_ref().expect("checked above");
-            let predicate_hash: u64 = query.predicate.as_ref().map_or(0, |p| {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                format!("{p:?}").hash(&mut h);
-                h.finish()
-            });
+        if !multi_node {
+            if let Some(ref cursor_str) = query.cursor {
+                // Pass the predicate hash and sort hash alongside the cursor token so the
+                // CursorProcessor can validate that the cursor was produced by the same
+                // query shape. Without this check, a cursor from a different query could
+                // return incorrect results silently.
+                let predicate_hash: u64 = query.predicate.as_ref().map_or(0, |p| {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    format!("{p:?}").hash(&mut h);
+                    h.finish()
+                });
 
-            let sort_hash: u64 = query.sort.as_ref().map_or(0, |s| {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                format!("{s:?}").hash(&mut h);
-                h.finish()
-            });
+                let sort_hash: u64 = query.sort.as_ref().map_or(0, |s| {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    format!("{s:?}").hash(&mut h);
+                    h.finish()
+                });
 
-            let cursor_config = rmpv::Value::Map(vec![
-                (
-                    rmpv::Value::String("cursor".into()),
-                    rmpv::Value::String(cursor_str.clone().into()),
-                ),
-                (
-                    rmpv::Value::String("predicateHash".into()),
-                    rmpv::Value::Integer(rmpv::Integer::from(predicate_hash)),
-                ),
-                (
-                    rmpv::Value::String("sortHash".into()),
-                    rmpv::Value::Integer(rmpv::Integer::from(sort_hash)),
-                ),
-            ]);
+                let cursor_config = rmpv::Value::Map(vec![
+                    (
+                        rmpv::Value::String("cursor".into()),
+                        rmpv::Value::String(cursor_str.clone().into()),
+                    ),
+                    (
+                        rmpv::Value::String("predicateHash".into()),
+                        rmpv::Value::Integer(rmpv::Integer::from(predicate_hash)),
+                    ),
+                    (
+                        rmpv::Value::String("sortHash".into()),
+                        rmpv::Value::Integer(rmpv::Integer::from(sort_hash)),
+                    ),
+                ]);
 
-            vertices.push(VertexDescriptor {
-                name: "cursor".to_string(),
-                local_parallelism: 1,
-                processor_type: ProcessorType::Cursor,
-                preferred_partitions: None,
-                config: Some(cursor_config),
-            });
+                vertices.push(VertexDescriptor {
+                    name: "cursor".to_string(),
+                    local_parallelism: 1,
+                    processor_type: ProcessorType::Cursor,
+                    preferred_partitions: None,
+                    config: Some(cursor_config),
+                });
 
-            edges.push(Edge {
-                source_name: last_vertex.clone(),
-                source_ordinal: 0,
-                dest_name: "cursor".to_string(),
-                dest_ordinal: 0,
-                routing_policy: RoutingPolicy::Isolated,
-                priority: edge_priority,
-            });
-            edge_priority += 1;
-            last_vertex = "cursor".to_string();
+                edges.push(Edge {
+                    source_name: last_vertex.clone(),
+                    source_ordinal: 0,
+                    dest_name: "cursor".to_string(),
+                    dest_ordinal: 0,
+                    routing_policy: RoutingPolicy::Isolated,
+                    priority: edge_priority,
+                });
+                edge_priority += 1;
+                last_vertex = "cursor".to_string();
+            }
         }
 
         // --- Step 4: Sort vertex (optional) ---
