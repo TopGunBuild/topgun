@@ -62,6 +62,18 @@ export const SearchArgsSchema = z.object({
   query: z.string().describe('Search query (keywords or phrases to find)'),
   limit: z.number().optional().default(10).describe('Maximum number of results to return'),
   minScore: z.number().optional().default(0).describe('Minimum relevance score (0-1) for results'),
+  methods: z
+    .array(z.enum(['exact', 'fullText', 'semantic']))
+    .optional()
+    .default(['fullText'])
+    .describe(
+      'Search methods to combine via Reciprocal Rank Fusion. ' +
+        '"exact" matches field values exactly; ' +
+        '"fullText" uses BM25 full-text search; ' +
+        '"semantic" uses vector similarity (requires server-side auto-embedding — ' +
+        'the tool sends a text query, not a vector). ' +
+        'Defaults to ["fullText"] to preserve existing behaviour when omitted.',
+    ),
 });
 
 export type SearchArgs = z.infer<typeof SearchArgsSchema>;
@@ -199,6 +211,21 @@ export const toolSchemas = {
         type: 'number',
         description: 'Minimum relevance score (0-1) for results',
         default: 0,
+      },
+      methods: {
+        type: 'array',
+        items: {
+          type: 'string',
+          enum: ['exact', 'fullText', 'semantic'],
+        },
+        description:
+          'Search methods to combine via Reciprocal Rank Fusion. ' +
+          '"exact" matches field values exactly; ' +
+          '"fullText" uses BM25 full-text search; ' +
+          '"semantic" uses vector similarity (requires server-side auto-embedding — ' +
+          'the tool sends a text query, not a vector). ' +
+          'Defaults to ["fullText"] to preserve existing behaviour when omitted.',
+        default: ['fullText'],
       },
     },
     required: ['map', 'query'],
