@@ -30,9 +30,41 @@ use topgun_server::cluster::{ClusterConfig, MemberInfo, NodeState};
 // Test constants
 // ---------------------------------------------------------------------------
 
-/// Total wall-clock budget for convergence assertions:
-/// `MASTER_ELECTION_TOTAL_BUDGET_MS` (30s) + 5s slack for CI CPU contention.
+/// Total wall-clock budget for the settle-on-stable-master condition.
+///
+/// Derived from the formation service's own constants, NOT a magic number:
+/// the election's hard ceiling is `MASTER_ELECTION_TOTAL_BUDGET_MS` (30s, the
+/// safety-valve self-promote deadline), after which the slowest joiner has
+/// either joined a master or self-promoted. We add 5s slack for the
+/// re-dial + `MembersUpdate` propagation that follows a `MasterElected`
+/// broadcast under CI CPU contention. A node that has not settled by this
+/// ceiling indicates a genuine convergence failure, not a too-tight window.
+///
+/// Investigation conclusion (kept here because `.specflow/` is gitignored and
+/// must not be the only record of why this budget is correct):
+/// Under reproduced CPU starvation (all cores pinned, ~20-30% failure rate),
+/// the flake was NEVER the safety-valve split-brain — `master_count` stayed 1
+/// and the lowest-`node_id` node always won. The real defect was a lost
+/// `MembersUpdate`: the master pipelines it immediately behind the
+/// `JoinResponse`, the two frames coalesce into one TCP segment, and the
+/// joiner's codec read buffer (carrying the second frame) was discarded by a
+/// `Framed::into_inner()` + re-wrap during connection handoff in
+/// `formation.rs`. The stuck node never recovered in this isolated harness (it
+/// has no `resilience.rs` heartbeat gossip to re-deliver the update), so a
+/// wider budget alone could not fix it — extending to 90s still failed at the
+/// 90s ceiling. The root cause was fixed in `formation.rs` by carrying the
+/// live `Framed` through the handoff; this harness change additionally gates
+/// assertions on a *stable* converged state so a transient mid-election
+/// snapshot can never be asserted against. Post-fix: 0 failures across the
+/// stress loop under the same CPU pressure.
 const CONVERGENCE_BUDGET_MS: u64 = 35_000;
+
+/// Interval between the two stability re-samples in `wait_for_stable_master`.
+/// Long enough that a transient mid-election state (a follower briefly in the
+/// safety-valve window, or a not-yet-delivered `MembersUpdate`) would change
+/// between samples and fail the stability check, short enough to keep the
+/// suite fast.
+const STABILITY_RESAMPLE_MS: u64 = 300;
 
 /// Number of proptest tiebreak iterations. All 4 tests in this file are annotated
 /// with `#[serial_test::serial]`, which forces cargo to schedule them one at a time
@@ -54,13 +86,55 @@ async fn bind_listener() -> (TcpListener, u16) {
     (listener, port)
 }
 
-/// Start all nodes concurrently and wait up to `budget_ms` for all to converge
-/// to `expected_node_count` Active members in their membership views.
-async fn wait_for_convergence(nodes: &[Arc<ClusterFormationService>], budget_ms: u64) {
+/// Returns `true` only when the cluster is in a fully settled state: every node
+/// sees exactly `nodes.len()` Active members AND exactly one node reports
+/// `is_master()`. Reads production `ClusterState` (`current_view()` /
+/// `is_master()`) — there is no test-only shadow state.
+fn cluster_is_settled(nodes: &[Arc<ClusterFormationService>]) -> bool {
+    let all_active = nodes.iter().all(|n| {
+        n.cluster_state
+            .current_view()
+            .members
+            .iter()
+            .filter(|m| m.state == NodeState::Active)
+            .count()
+            == nodes.len()
+    });
+    let master_count = nodes.iter().filter(|n| n.cluster_state.is_master()).count();
+    all_active && master_count == 1
+}
+
+/// Returns the `node_id` of the single node reporting `is_master()`, or `None`
+/// if zero or more than one node claims mastership (a non-settled state).
+fn unique_master_id(nodes: &[Arc<ClusterFormationService>]) -> Option<String> {
+    let mut masters = nodes
+        .iter()
+        .filter(|n| n.cluster_state.is_master())
+        .map(|n| {
+            n.cluster_state
+                .current_view()
+                .master()
+                .map(|m| m.node_id.clone())
+        });
+    match (masters.next(), masters.next()) {
+        (Some(id), None) => id,
+        _ => None,
+    }
+}
+
+/// Waits up to `budget_ms` for the cluster to reach a *stable* settled state and
+/// returns once it holds, panicking with diagnostics on timeout.
+///
+/// "Settled" requires both (a) every node sees N Active members and (b) exactly
+/// one master. "Stable" additionally requires that the same single master
+/// identity is observed across a short re-sample (`STABILITY_RESAMPLE_MS`) — so
+/// the caller's assertions never fire on a transient mid-election snapshot (a
+/// follower briefly in the safety-valve self-promote window, or a master
+/// identity that is about to change as a delayed `MembersUpdate` lands).
+async fn wait_for_stable_master(nodes: &[Arc<ClusterFormationService>], budget_ms: u64) {
     let deadline = std::time::Instant::now() + Duration::from_millis(budget_ms);
     loop {
         if std::time::Instant::now() >= deadline {
-            // Print diagnostics before panicking
             for (i, node) in nodes.iter().enumerate() {
                 let view = node.cluster_state.current_view();
                 eprintln!(
@@ -70,20 +144,20 @@ async fn wait_for_convergence(nodes: &[Arc<ClusterFormationService>], budget_ms:
                     view.version,
                 );
             }
-            panic!("Cluster did not converge within {budget_ms}ms");
+            panic!("Cluster did not reach a stable single-master state within {budget_ms}ms");
         }
 
-        let all_ready = nodes.iter().all(|n| {
-            let view = n.cluster_state.current_view();
-            view.members
-                .iter()
-                .filter(|m| m.state == NodeState::Active)
-                .count()
-                == nodes.len()
-        });
-
-        if all_ready {
-            return;
+        if cluster_is_settled(nodes) {
+            // Re-sample after a brief interval: require the same unique master
+            // both times before declaring the state stable. A transient
+            // mid-election state would change between samples and loop again.
+            let first = unique_master_id(nodes);
+            tokio::time::sleep(Duration::from_millis(STABILITY_RESAMPLE_MS)).await;
+            let second = unique_master_id(nodes);
+            if first.is_some() && first == second && cluster_is_settled(nodes) {
+                return;
+            }
+            continue;
         }
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -158,10 +232,10 @@ async fn parallel_boot_elects_single_master() {
     Arc::clone(&svc1).start(l1);
     Arc::clone(&svc2).start(l2);
 
-    // Step 4: wait for convergence
+    // Step 4: wait for a STABLE single-master state (not a mid-election snapshot)
     let nodes: Vec<Arc<ClusterFormationService>> =
         vec![Arc::clone(&svc0), Arc::clone(&svc1), Arc::clone(&svc2)];
-    wait_for_convergence(&nodes, CONVERGENCE_BUDGET_MS).await;
+    wait_for_stable_master(&nodes, CONVERGENCE_BUDGET_MS).await;
 
     // Step 5: assert exactly one master, correct identity, consistent views
     let master_count = nodes.iter().filter(|n| n.cluster_state.is_master()).count();
@@ -291,12 +365,29 @@ async fn parallel_boot_with_loopback_delays() {
     let nodes: Vec<Arc<ClusterFormationService>> =
         vec![Arc::clone(&svc0), Arc::clone(&svc1), Arc::clone(&svc2)];
 
-    // Allow extra time for the jitter + election budget
-    wait_for_convergence(&nodes, CONVERGENCE_BUDGET_MS + 500).await;
+    // Allow extra time for the jitter + election budget. Settle on a STABLE
+    // single-master state so the identity assertion below never fires on a
+    // transient mid-election snapshot.
+    wait_for_stable_master(&nodes, CONVERGENCE_BUDGET_MS + 500).await;
 
     let master_count = nodes.iter().filter(|n| n.cluster_state.is_master()).count();
     assert_eq!(master_count, 1, "Exactly one master; got {master_count}");
     assert!(svc0.cluster_state.is_master(), "node-0 must be master");
+
+    // All nodes must agree on 3 active members in their settled views.
+    for (i, node) in nodes.iter().enumerate() {
+        let active = node
+            .cluster_state
+            .current_view()
+            .members
+            .iter()
+            .filter(|m| m.state == NodeState::Active)
+            .count();
+        assert_eq!(
+            active, 3,
+            "Node {i} should see 3 active members; saw {active}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
