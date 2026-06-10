@@ -100,6 +100,12 @@ afterAll(() => {
 describe('ORMap Integration & Persistence', () => {
   let storage: MemoryStorageAdapter;
   let client: TopGunClient;
+  // Track clients constructed inside individual tests so afterEach can dispose
+  // them too. An unclosed client keeps a live SingleServerProvider whose
+  // heartbeat fails (the mock never pongs) and falls into a reconnect loop;
+  // once afterAll restores the real WebSocket, that loop hits real undici and
+  // keeps Jest's worker alive indefinitely past the last expect().
+  const extraClients: TopGunClient[] = [];
 
   beforeEach(() => {
     storage = new MemoryStorageAdapter();
@@ -115,6 +121,10 @@ describe('ORMap Integration & Persistence', () => {
     // installed above) the 5s connection-timeout. Without this, each test
     // leaks resources that keep Jest's worker alive past the last expect().
     await client.close();
+    for (const c of extraClients) {
+      await c.close();
+    }
+    extraClients.length = 0;
   });
 
   test('should persist added items to storage', async () => {
@@ -174,6 +184,7 @@ describe('ORMap Integration & Persistence', () => {
       serverUrl: 'ws://localhost:1234',
       storage,
     });
+    extraClients.push(newClient);
 
     const map = newClient.getORMap<string, string>('tags');
 
@@ -200,6 +211,7 @@ describe('ORMap Integration & Persistence', () => {
       serverUrl: 'ws://localhost:1234',
       storage,
     });
+    extraClients.push(newClient);
 
     const map = newClient.getORMap<string, string>('tags');
     await new Promise((resolve) => setTimeout(resolve, 50));
