@@ -153,6 +153,13 @@ describe('BetterAuth Integration', () => {
       }
     });
 
+    afterAll(async () => {
+      // Dispose the started client — its SingleServerProvider keeps a live
+      // heartbeat/reconnect timer that otherwise outlives the suite and keeps
+      // Jest's worker alive past the last expect() (hangs CI without --forceExit).
+      await client?.close();
+    });
+
     // Conditionally skip tests when BetterAuth is not available (ESM-only package
     // cannot be dynamically imported in all Jest CJS configs). Using a conditional
     // wrapper so Jest reports these as "skipped" rather than false-positive "passed".
@@ -255,6 +262,12 @@ describe('BetterAuth Integration', () => {
       client = createClient();
       await client.start();
       adapter = topGunAdapter({ client })({} as BetterAuthOptions);
+    });
+
+    afterEach(async () => {
+      // Each test starts a fresh client; dispose it so its heartbeat/reconnect
+      // timer does not leak across tests and keep Jest's worker alive at exit.
+      await client?.close();
     });
 
     it('creates and retrieves a user record', async () => {

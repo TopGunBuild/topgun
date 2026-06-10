@@ -1,43 +1,38 @@
 import { execSync } from 'child_process';
 import path from 'path';
+import { runCli } from './test-utils';
 
 const CLI_PATH = path.join(__dirname, '../../dist/topgun.js');
 // Run from the repo root so doctor finds the server binary + .env
 const CLI_CWD = path.join(__dirname, '../../../..');
 
 describe('topgun doctor', () => {
+  // `doctor` intentionally exits non-zero when an optional dependency is absent
+  // (e.g. the Rust toolchain, which the Node CI runner does not install), so the
+  // raw execSync would throw before any assertion. runCli captures stdout/stderr
+  // regardless of exit code; the environment-check report still prints in full.
   it('should run doctor command', () => {
-    // Pipe stderr to avoid propagation of docker-not-found shell errors to the test runner
-    const output = execSync(`node ${CLI_PATH} doctor`, {
-      encoding: 'utf8',
-      cwd: CLI_CWD,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    const { stdout, stderr } = runCli(['doctor'], CLI_CWD);
+    const out = stdout + stderr;
 
-    expect(output).toContain('TopGun Environment Check');
-    expect(output).toContain('Node.js');
-    expect(output).toContain('pnpm');
+    expect(out).toContain('TopGun Environment Check');
+    expect(out).toContain('Node.js');
+    expect(out).toContain('pnpm');
   });
 
   it('should detect Node.js version', () => {
-    const output = execSync(`node ${CLI_PATH} doctor`, {
-      encoding: 'utf8',
-      cwd: CLI_CWD,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    const { stdout, stderr } = runCli(['doctor'], CLI_CWD);
+    const out = stdout + stderr;
 
-    expect(output).toMatch(/Node\.js.*v\d+/);
-    expect(output).toContain('✓');
+    expect(out).toMatch(/Node\.js.*v\d+/);
+    expect(out).toContain('✓');
   });
 
   it('should check for dependencies', () => {
-    const output = execSync(`node ${CLI_PATH} doctor`, {
-      encoding: 'utf8',
-      cwd: CLI_CWD,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    const { stdout, stderr } = runCli(['doctor'], CLI_CWD);
+    const out = stdout + stderr;
 
-    expect(output).toContain('Dependencies');
+    expect(out).toContain('Dependencies');
   });
 });
 

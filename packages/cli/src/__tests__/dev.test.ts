@@ -103,6 +103,14 @@ describe('topgun dev', () => {
           encoding: 'utf8',
           cwd: tempDir,
           stdio: 'pipe',
+          // Force the server binary to be absent so `dev` deterministically hits
+          // the "binary not found" exit (code 1). The binary is resolved from the
+          // installed @topgunbuild/server package, NOT from cwd — so without this
+          // override, on a machine where the binary IS present (CI) `dev` boots a
+          // real foreground server that never returns, hanging execSync and the
+          // whole job. The timeout is a belt-and-suspenders guard.
+          env: { ...process.env, TOPGUN_SERVER_BINARY: '/nonexistent/topgun-server' },
+          timeout: 30000,
         });
       } catch (error: unknown) {
         const err = error as NodeJS.ErrnoException & {

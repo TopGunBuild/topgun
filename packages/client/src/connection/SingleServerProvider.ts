@@ -19,6 +19,16 @@ const DEFAULT_CONFIG = {
 };
 
 /**
+ * Detach a background timer from the host event loop. A pending reconnect or
+ * connection-timeout is background machinery — it must never be the sole reason
+ * a Node process (or a Jest worker) stays alive. Node timers expose unref();
+ * in browsers setTimeout returns a number with no unref(), so this is a no-op there.
+ */
+function unrefTimer(timer: ReturnType<typeof setTimeout> | null): void {
+  (timer as unknown as { unref?: () => void } | null)?.unref?.();
+}
+
+/**
  * SingleServerProvider implements IConnectionProvider for single-server mode.
  *
  * This is an adapter that wraps direct WebSocket connection handling,
@@ -123,6 +133,7 @@ export class SingleServerProvider implements IConnectionProvider {
             reject(new Error(`Connection timeout to ${this.url}`));
           }
         }, this.config.reconnectDelayMs * 5); // 5x initial delay as connection timeout
+        unrefTimer(this.connectionTimeoutId);
 
         // Clear timeout on successful connection
         const originalOnOpen = this.ws.onopen;
@@ -321,6 +332,7 @@ export class SingleServerProvider implements IConnectionProvider {
         this.scheduleReconnect();
       }
     }, delay);
+    unrefTimer(this.reconnectTimer);
   }
 
   /**

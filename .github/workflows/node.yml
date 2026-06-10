@@ -79,14 +79,15 @@ jobs:
         run: pnpm -r build
 
       - name: Unit tests
-        # pnpm -r runs jest in every workspace package, sequentially (--runInBand
-        # so per-package fixtures don't contend on ports/files — CLAUDE.md guidance).
-        # Open-handle leaks that previously prevented clean Jest exit were fixed at
-        # the source: SingleServerProvider now cancels its connection-timeout and
-        # reconnect timers on close(), mcp-server tests mock WebSocket so no real
-        # undici handles outlive each test, and pino disables the thread-stream
-        # transport in test environments, so the run exits on its own with no
-        # force-exit stopgap.
+        # pnpm -r runs jest in every workspace package (--runInBand so per-package
+        # fixtures don't contend on ports/files — CLAUDE.md guidance). Open-handle
+        # leaks that previously prevented clean Jest exit were fixed at the source:
+        # SingleServerProvider unref()s its connection-timeout and reconnect timers
+        # so an unclosed client can never keep the worker alive, mcp-server tests
+        # mock WebSocket, and pino disables the thread-stream transport in tests —
+        # so the run exits on its own with no force-exit stopgap. CLI tests that
+        # invoke the foreground `dev` server force an absent binary so they never
+        # boot a real server that would block execSync.
         run: pnpm -r exec jest --runInBand --passWithNoTests
 
       - name: Lint (eslint)
