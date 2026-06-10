@@ -19,6 +19,8 @@ TopGun v2 is a complete rewrite. It's not a port — it's a new architecture des
 - **Pluggable storage**: Embedded redb by default; Postgres optional for production; bring your own adapter.
 - **Cluster-ready**: Server-side partitioning, pub/sub, and distributed locks (single-node stable; cluster-mode uses partition-routing — Raft-backed cluster locks in progress).
 - **Rust server, TypeScript client**: Type-safe SDK with a high-performance Rust backend.
+- **AI-native**: AI agents read and mutate your live data natively over MCP — the bundled `@topgunbuild/mcp-server` exposes your maps to Claude Desktop, Cursor, or any MCP client. Query, mutate, search, and subscribe without leaving your agent workflow.
+- **Hybrid search**: Real-time hybrid search in one query — exact + full-text (BM25) + semantic vector search, RRF-fused, with live subscriptions. Pluggable embeddings (local Ollama or any OpenAI-compatible endpoint). Built-in HNSW vector database; works with your existing map data. Covers vector search, semantic search, hybrid search, RAG pipelines, and embeddings out of the box.
 
 ## Quick start
 
@@ -161,6 +163,40 @@ function TodoList() {
   );
 }
 ```
+
+### Hybrid search (vector + full-text + exact)
+
+TopGun supports tri-hybrid search — exact key lookup, BM25 full-text, and semantic vector search — fused with RRF into a single ranked result. Subscriptions update in real time as data changes.
+
+```tsx
+import { useHybridSearch } from '@topgunbuild/react';
+
+function DocSearch({ query }: { query: string }) {
+  const { results, loading } = useHybridSearch('docs', query, {
+    methods: ['fullText', 'semantic'],  // HybridSearchMethod: 'exact' | 'fullText' | 'semantic'
+    k: 10,
+    minScore: 0.3,
+  });
+
+  if (loading) return <p>Searching…</p>;
+
+  return (
+    <ul>
+      {results.map((r) => (
+        <li key={r.key}>
+          {r.key} — score {r.score.toFixed(3)}
+          <small>
+            {' '}(BM25: {r.methodScores?.fullText?.toFixed(3)},
+            semantic: {r.methodScores?.semantic?.toFixed(3)})
+          </small>
+        </li>
+      ))}
+    </ul>
+  );
+}
+```
+
+> **Semantic search** requires server-side embedding config (`VectorConfig` on the server — set `TOPGUN_VECTOR_INDEX_PATH` and configure your embedding provider). `fullText` and `exact` work fully offline. See the [Vector & hybrid search guide](https://topgun.build/docs/guides/vector-and-hybrid-search).
 
 ## Documentation
 
