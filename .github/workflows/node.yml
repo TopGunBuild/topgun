@@ -79,15 +79,22 @@ jobs:
         run: pnpm -r build
 
       - name: Unit tests
-        # pnpm -r runs jest in every workspace package, sequentially (--runInBand
-        # so per-package fixtures don't contend on ports/files — CLAUDE.md guidance).
-        # Open-handle leaks that previously prevented clean Jest exit were fixed at
-        # the source: SingleServerProvider now cancels its connection-timeout and
-        # reconnect timers on close(), mcp-server tests mock WebSocket so no real
-        # undici handles outlive each test, and pino disables the thread-stream
-        # transport in test environments, so the run exits on its own with no
-        # force-exit stopgap.
-        run: pnpm -r exec jest --runInBand --passWithNoTests
+        # TEMP DIAGNOSTIC (revert after): a CI-only hang stops the run after the
+        # client package — it does NOT reproduce locally (full `pnpm -r exec jest
+        # --runInBand` exits clean, 0 "did not exit"). pnpm -r prints no package
+        # boundaries, so this prints a marker per package and bounds each package
+        # with a 240s timeout: the hanging package names itself and fails fast
+        # instead of letting the whole job hit the 18m cap. Restore the plain
+        # `pnpm -r exec jest --runInBand --passWithNoTests` once identified.
+        run: |
+          pnpm -r exec sh -c '
+            pkg=$(basename "$(pwd)")
+            echo ">>>> PKG START: $pkg"
+            timeout --signal=KILL 240 jest --runInBand --passWithNoTests
+            code=$?
+            echo ">>>> PKG END: $pkg exit=$code"
+            exit $code
+          '
 
       - name: Lint (eslint)
         run: pnpm lint
