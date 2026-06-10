@@ -705,9 +705,12 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     // Awaiting the provider directly here ensures all reconnect timers are cleared
     // before close() returns — otherwise pending connectionTimeoutId / reconnectTimer
     // handles keep the Jest event loop alive after every test that creates a client.
-    await this.syncEngine.getConnectionProvider().close().catch(() => {
-      // Error already logged inside provider.close()
-    });
+    await this.syncEngine
+      .getConnectionProvider()
+      .close()
+      .catch(() => {
+        // Error already logged inside provider.close()
+      });
   }
 
   // ============================================
