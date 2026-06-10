@@ -42,10 +42,20 @@ interface MockSearchHit {
   matchedTerms: string[];
 }
 
+interface MockHybridSearchHit {
+  key: string;
+  score: number;
+  methodScores: Partial<Record<'exact' | 'fullText' | 'semantic', number>>;
+  value?: unknown;
+}
+
 class MockTopGunClient {
   private maps = new Map<string, MockLWWMap>();
-  // Configurable search results so individual tests can inject non-empty hit lists.
+  // Configurable BM25 search results (legacy — not used by handleSearch after this spec).
   searchResults: MockSearchHit[] = [];
+  // Configurable hybrid search results + recorded options for assertion.
+  hybridSearchResults: MockHybridSearchHit[] = [];
+  lastHybridSearchOptions: unknown = null;
   // When set, queryOnce rejects with this error to simulate offline / not-settled.
   queryOnceRejection: Error | null = null;
 
@@ -86,6 +96,12 @@ class MockTopGunClient {
 
   async search(_map: string, _query: string, _options?: unknown) {
     return this.searchResults;
+  }
+
+  async hybridSearch(_map: string, _query: string, options?: unknown) {
+    // Record the options so tests can assert which methods/k were forwarded.
+    this.lastHybridSearchOptions = options;
+    return this.hybridSearchResults;
   }
 
   // One-shot read mirroring TopGunClient.queryOnce: resolves with settled,
@@ -553,9 +569,9 @@ describe('MCP Tools', () => {
       const mockClient = ctx.client as unknown as MockTopGunClient;
       // Pre-populate the map so the local read-by-key finds the body.
       mockClient.getMap('tasks').set('task1', { title: 'Test Task', status: 'todo' });
-      // Wire search() to return a hit mirroring the server's wire shape (value: null).
-      mockClient.searchResults = [
-        { key: 'task1', value: null, score: 0.42, matchedTerms: ['test'] },
+      // Wire hybridSearch() to return a hit with the hybrid result shape (methodScores, no matchedTerms).
+      mockClient.hybridSearchResults = [
+        { key: 'task1', score: 0.42, methodScores: { fullText: 0.42 } },
       ];
 
       const result = await handleSearch({ map: 'tasks', query: 'test' }, ctx);
@@ -568,26 +584,27 @@ describe('MCP Tools', () => {
       expect(result.content[0].text).not.toContain('Data: null');
     });
 
-    it('should preserve score with fixed-precision rendering and matched-term metadata', async () => {
+    it('should preserve score with fixed-precision rendering and per-method score breakdown', async () => {
       const ctx = createTestContext();
       const mockClient = ctx.client as unknown as MockTopGunClient;
       mockClient.getMap('tasks').set('task1', { title: 'Test Task', status: 'todo' });
       mockClient.getMap('tasks').set('task2', { title: 'Smoke Task', status: 'done' });
       // Two hits: one plain three-decimal score, one rounding-sensitive score matching
       // the real smoke output (0.2876 → "0.288") to guard toFixed(3) against digit-dropping.
-      mockClient.searchResults = [
-        { key: 'task1', value: null, score: 0.42, matchedTerms: ['test'] },
-        { key: 'task2', value: null, score: 0.2876, matchedTerms: ['smoke'] },
+      mockClient.hybridSearchResults = [
+        { key: 'task1', score: 0.42, methodScores: { fullText: 0.42 } },
+        { key: 'task2', score: 0.2876, methodScores: { fullText: 0.2876 } },
       ];
 
       const result = await handleSearch({ map: 'tasks', query: 'test smoke' }, ctx);
 
       expect(result.isError).toBeUndefined();
       expect(result.content[0].text).toContain('[Score: 0.420]');
-      expect(result.content[0].text).toContain('Matched: test');
       // Rounding-sensitive assertion: 0.2876 must render as 0.288, not 0.287.
       expect(result.content[0].text).toContain('[Score: 0.288]');
-      expect(result.content[0].text).toContain('Matched: smoke');
+      // Per-method scores must appear in the output — the old matchedTerms line is gone.
+      expect(result.content[0].text).toContain('Method scores:');
+      expect(result.content[0].text).not.toContain('Matched:');
     });
 
     it('should emit the not-available-locally marker when the key is absent from the local replica', async () => {
@@ -595,8 +612,8 @@ describe('MCP Tools', () => {
       const mockClient = ctx.client as unknown as MockTopGunClient;
       // Intentionally do NOT pre-populate the map — simulates an evicted or
       // partially-replicated record where lwwMap.get() returns undefined.
-      mockClient.searchResults = [
-        { key: 'missing-key', value: null, score: 0.9, matchedTerms: ['term'] },
+      mockClient.hybridSearchResults = [
+        { key: 'missing-key', score: 0.9, methodScores: { fullText: 0.9 } },
       ];
 
       // Handler must not throw; the hit must still appear with the pinned fallback marker.
@@ -608,12 +625,59 @@ describe('MCP Tools', () => {
 
     it('should return the empty-results message when search returns no hits', async () => {
       const ctx = createTestContext();
-      // searchResults defaults to [] — no configuration needed.
+      // hybridSearchResults defaults to [] — no configuration needed.
 
       const result = await handleSearch({ map: 'tasks', query: 'nothing' }, ctx);
 
       expect(result.isError).toBeUndefined();
       expect(result.content[0].text).toContain('No results found');
+    });
+
+    it('should call hybridSearch (not the BM25 search path) with the default fullText method', async () => {
+      const ctx = createTestContext();
+      const mockClient = ctx.client as unknown as MockTopGunClient;
+      mockClient.hybridSearchResults = [
+        { key: 'doc1', score: 0.75, methodScores: { fullText: 0.75 } },
+      ];
+
+      // Invoke with no methods arg — the default ['fullText'] must be forwarded.
+      await handleSearch({ map: 'docs', query: 'auth' }, ctx);
+
+      // The tool must have gone through hybridSearch, not the old BM25 search path.
+      // If hybridSearch was called, lastHybridSearchOptions is populated; if search()
+      // was called instead, it would remain null.
+      const opts = mockClient.lastHybridSearchOptions as {
+        methods: string[];
+        k: number;
+        minScore: number;
+      };
+      expect(opts).not.toBeNull();
+      expect(opts.methods).toEqual(['fullText']);
+    });
+
+    it('should forward custom methods to hybridSearch and render multi-method score breakdown', async () => {
+      const ctx = createTestContext();
+      const mockClient = ctx.client as unknown as MockTopGunClient;
+      mockClient.hybridSearchResults = [
+        { key: 'doc1', score: 0.82, methodScores: { exact: 0.6, fullText: 0.5 } },
+      ];
+
+      await handleSearch({ map: 'docs', query: 'login', methods: ['exact', 'fullText'] }, ctx);
+
+      const opts = mockClient.lastHybridSearchOptions as {
+        methods: string[];
+        k: number;
+        minScore: number;
+      };
+      // Both requested methods must be forwarded verbatim.
+      expect(opts.methods).toEqual(['exact', 'fullText']);
+      // Output must render per-method scores for both legs so the agent can see the breakdown.
+      const result = await handleSearch(
+        { map: 'docs', query: 'login', methods: ['exact', 'fullText'] },
+        ctx,
+      );
+      expect(result.content[0].text).toContain('exact:');
+      expect(result.content[0].text).toContain('fullText:');
     });
   });
 });
