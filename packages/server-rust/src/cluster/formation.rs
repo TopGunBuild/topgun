@@ -1163,4 +1163,106 @@ mod tests {
             assert!(is_permanent, "Expected {code:?} to be permanent");
         }
     }
+
+    /// Regression: a `MembersUpdate` the master pipelines immediately behind the
+    /// `JoinResponse` must survive the connection handoff. When both frames land
+    /// in the same TCP read, `LengthDelimitedCodec` buffers the second one; the
+    /// join path must keep reading from the SAME `Framed` rather than recovering
+    /// the raw stream and re-wrapping it (which would drop the codec read buffer
+    /// and lose the update, stranding the joiner on a stale membership view).
+    ///
+    /// This pins the buffer-preservation invariant deterministically: the prior
+    /// behavior reproduced only under CPU starvation, where the two frames
+    /// coalesced into one segment ~20-30% of the time.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pipelined_members_update_survives_after_join_response_read() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        // First frame: an accepted JoinResponse carrying a v2 view.
+        let join_response = ClusterMessage::JoinResponse(JoinResponsePayload {
+            accepted: true,
+            reject_reason: None,
+            reject_code: None,
+            responder_node_id: None,
+            members_view: Some(MembersView {
+                version: 2,
+                members: vec![MemberInfo {
+                    node_id: "node-0".to_string(),
+                    host: "127.0.0.1".to_string(),
+                    client_port: 0,
+                    cluster_port: 1,
+                    state: NodeState::Active,
+                    join_version: 1,
+                }],
+            }),
+            partition_assignments: None,
+        });
+        // Second frame: a MembersUpdate carrying the newer v3 view, written
+        // back-to-back so both frames arrive in a single read on the peer side.
+        let members_update = ClusterMessage::MembersUpdate(MembersUpdatePayload {
+            view: MembersView {
+                version: 3,
+                members: Vec::new(),
+            },
+            cluster_time_ms: 0,
+        });
+
+        let jr_bytes = rmp_serde::to_vec_named(&join_response).expect("ser join response");
+        let mu_bytes = rmp_serde::to_vec_named(&members_update).expect("ser members update");
+
+        // Server side: accept, then write both length-prefixed frames coalesced.
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
+            // Send both frames before yielding so they coalesce on the wire.
+            framed
+                .send(jr_bytes.into())
+                .await
+                .expect("send join response");
+            framed
+                .send(mu_bytes.into())
+                .await
+                .expect("send members update");
+            framed.flush().await.expect("flush");
+            // Hold the connection open briefly so the client can drain both.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let _ = framed.into_inner().shutdown().await;
+        });
+
+        // Client side: read the first frame (JoinResponse), then — WITHOUT
+        // recovering the raw stream — read the next frame off the same `Framed`.
+        let stream = TcpStream::connect(addr).await.expect("connect");
+        let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
+
+        let first = framed.next().await.expect("first frame").expect("ok frame");
+        let first_msg: ClusterMessage = rmp_serde::from_slice(&first).expect("decode first");
+        assert!(
+            matches!(first_msg, ClusterMessage::JoinResponse(_)),
+            "first frame should be JoinResponse"
+        );
+
+        // The MembersUpdate must still be readable from the SAME Framed. If the
+        // join path used into_inner() + re-wrap here, the buffered v3 frame would
+        // be gone and this read would time out / return the wrong frame.
+        let second = tokio::time::timeout(Duration::from_secs(2), framed.next())
+            .await
+            .expect("should not time out waiting for pipelined frame")
+            .expect("second frame present")
+            .expect("ok frame");
+        let second_msg: ClusterMessage = rmp_serde::from_slice(&second).expect("decode second");
+        match second_msg {
+            ClusterMessage::MembersUpdate(p) => {
+                assert_eq!(
+                    p.view.version, 3,
+                    "pipelined MembersUpdate (v3) must survive the handoff"
+                );
+            }
+            other => panic!("expected pipelined MembersUpdate, got {other:?}"),
+        }
+
+        server.await.expect("server task");
+    }
 }
