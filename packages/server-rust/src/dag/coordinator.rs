@@ -23,7 +23,9 @@ use crate::cluster::state::ClusterPartitionTable;
 use crate::cluster::traits::ClusterService;
 use crate::dag::converter::QueryToDagConverter;
 use crate::dag::executor::{DagExecutor, ExecutorContext};
-use crate::dag::processors::{CombineProcessorSupplier, LimitProcessorSupplier, SortProcessorSupplier};
+use crate::dag::processors::{
+    CombineProcessorSupplier, LimitProcessorSupplier, SortProcessorSupplier,
+};
 use crate::dag::types::ProcessorSupplier;
 use crate::dag::types::{
     Dag, DagPlanDescriptor, ExecutionPlan, ProcessorType, QueryConfig, VertexDescriptor,
@@ -290,7 +292,7 @@ impl ClusterQueryCoordinator {
 
     /// Merges partial GROUP BY aggregates from multiple nodes using `CombineProcessor`,
     /// then applies coordinator-side global sort + limit so GROUP BY results are
-    /// ordered and limit-respecting. The CombineProcessor aggregate logic and the
+    /// ordered and limit-respecting. The `CombineProcessor` aggregate logic and the
     /// emitted key set (`__count` / `__<func>_<field>` / `__key`) are unchanged.
     fn combine_group_by_results(
         &self,
@@ -587,12 +589,10 @@ pub(crate) fn make_supplier_from_descriptor(
         ProcessorType::NetworkSender | ProcessorType::NetworkReceiver => {
             Ok(Box::new(CollectorProcessorSupplier))
         }
-        ProcessorType::Project => {
-            Err(anyhow!(
-                "processor type {:?} is not supported in local bypass execution",
-                vd.processor_type
-            ))
-        }
+        ProcessorType::Project => Err(anyhow!(
+            "processor type {:?} is not supported in local bypass execution",
+            vd.processor_type
+        )),
         ProcessorType::Sort => {
             let sort_fields = vd
                 .config
