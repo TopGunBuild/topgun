@@ -113,6 +113,28 @@ How TopGun compares to other solutions in the ecosystem.
         <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Apache-2.0</td>
         <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">MIT (client) + proprietary cloud</td>
       </tr>
+      {/* AI-agents/MCP + hybrid-search rows — TopGun claims verified 2026-06-10 against packages/mcp-server/src/tools/index.ts (8 tools) and packages/react/src/hooks/ + packages/client/src/sync/types.ts */}
+      {/* Competitor claims sourced from each vendor's public docs — verified 2026-06-10; "Not Supported" used only where the feature is absent from the realtime/sync path */}
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">AI Agents (MCP)</td>
+        <td className="py-3 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10 text-green-600 dark:text-green-400">Native — read, mutate, search &amp; subscribe over MCP (8 tools, stdio)</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Not Supported</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Not Supported</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Not Supported</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Not Supported</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Not Supported</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Not Supported</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Hybrid Search</td>
+        <td className="py-3 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10 text-green-600 dark:text-green-400">Tri-hybrid (exact + BM25 + HNSW vector), RRF-fused, live subscriptions</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">No built-in hybrid search in the realtime path</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">No built-in vector/hybrid search in the realtime path</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Not Supported</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Full-text via plugin; no built-in vector/hybrid</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Not Supported</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">No built-in vector/hybrid search</td>
+      </tr>
     </tbody>
   </table>
 </div>
@@ -160,6 +182,18 @@ How TopGun compares to other solutions in the ecosystem.
     <span className="mt-1 text-brand">vs InstantDB:</span>
     <p>
       InstantDB is a local-first graph database with an excellent developer experience. It currently runs on InstantDB Cloud (community-led self-hosting available via the open-source repo). TopGun is fully self-hostable under Apache-2.0 with no cloud dependency.
+    </p>
+  </li>
+  <li className="flex gap-3">
+    <span className="mt-1 text-brand">AI agents:</span>
+    <p>
+      TopGun's bundled MCP server gives AI assistants (Claude Desktop, Cursor, or any MCP-compatible client) native read/write/search/subscribe access to your live CRDT data over stdio — no proxy or custom integration required. None of the compared tools ship a first-party MCP server today.
+    </p>
+  </li>
+  <li className="flex gap-3">
+    <span className="mt-1 text-brand">Hybrid search:</span>
+    <p>
+      TopGun runs exact, BM25 full-text (tantivy), and HNSW semantic vector search in a single query and fuses results with Reciprocal Rank Fusion. Subscriptions update in real time as data changes. The compared tools either lack built-in vector/hybrid search or require a separate search service outside the sync path.
     </p>
   </li>
 </ul>
