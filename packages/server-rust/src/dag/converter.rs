@@ -53,6 +53,40 @@ fn predicate_to_config(predicate: &PredicateNode) -> Result<rmpv::Value> {
     Ok(val)
 }
 
+/// Builds the config map for a Cursor vertex from a keyset-cursor-bearing query.
+///
+/// The predicate and sort hashes travel alongside the cursor token so the
+/// `CursorProcessor` can validate that the cursor was produced by the same query
+/// shape — a cursor from a different query would otherwise return incorrect results
+/// silently. Callers must only invoke this when `query.cursor` is `Some`.
+fn build_cursor_vertex_config(cursor_str: &str, query: &Query) -> rmpv::Value {
+    use std::hash::{Hash, Hasher};
+
+    let hash_debug = |value: &dyn std::fmt::Debug| -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        format!("{value:?}").hash(&mut h);
+        h.finish()
+    };
+
+    let predicate_hash: u64 = query.predicate.as_ref().map_or(0, |p| hash_debug(p));
+    let sort_hash: u64 = query.sort.as_ref().map_or(0, |s| hash_debug(s));
+
+    rmpv::Value::Map(vec![
+        (
+            rmpv::Value::String("cursor".into()),
+            rmpv::Value::String(cursor_str.into()),
+        ),
+        (
+            rmpv::Value::String("predicateHash".into()),
+            rmpv::Value::Integer(rmpv::Integer::from(predicate_hash)),
+        ),
+        (
+            rmpv::Value::String("sortHash".into()),
+            rmpv::Value::Integer(rmpv::Integer::from(sort_hash)),
+        ),
+    ])
+}
+
 // ---------------------------------------------------------------------------
 // QueryToDagConverter
 // ---------------------------------------------------------------------------
@@ -290,34 +324,7 @@ impl QueryToDagConverter {
             // streams would return wrong pages.  Insert the cursor vertex here, before
             // network-sender, when the query carries a keyset cursor.
             if let Some(ref cursor_str) = query.cursor {
-                let predicate_hash: u64 = query.predicate.as_ref().map_or(0, |p| {
-                    use std::hash::{Hash, Hasher};
-                    let mut h = std::collections::hash_map::DefaultHasher::new();
-                    format!("{p:?}").hash(&mut h);
-                    h.finish()
-                });
-
-                let sort_hash: u64 = query.sort.as_ref().map_or(0, |s| {
-                    use std::hash::{Hash, Hasher};
-                    let mut h = std::collections::hash_map::DefaultHasher::new();
-                    format!("{s:?}").hash(&mut h);
-                    h.finish()
-                });
-
-                let cursor_config = rmpv::Value::Map(vec![
-                    (
-                        rmpv::Value::String("cursor".into()),
-                        rmpv::Value::String(cursor_str.clone().into()),
-                    ),
-                    (
-                        rmpv::Value::String("predicateHash".into()),
-                        rmpv::Value::Integer(rmpv::Integer::from(predicate_hash)),
-                    ),
-                    (
-                        rmpv::Value::String("sortHash".into()),
-                        rmpv::Value::Integer(rmpv::Integer::from(sort_hash)),
-                    ),
-                ]);
+                let cursor_config = build_cursor_vertex_config(cursor_str, query);
 
                 vertices.push(VertexDescriptor {
                     name: "cursor".to_string(),
@@ -386,38 +393,7 @@ impl QueryToDagConverter {
         // branch is restricted to single-node plans only.
         if !multi_node {
             if let Some(ref cursor_str) = query.cursor {
-                // Pass the predicate hash and sort hash alongside the cursor token so the
-                // CursorProcessor can validate that the cursor was produced by the same
-                // query shape. Without this check, a cursor from a different query could
-                // return incorrect results silently.
-                let predicate_hash: u64 = query.predicate.as_ref().map_or(0, |p| {
-                    use std::hash::{Hash, Hasher};
-                    let mut h = std::collections::hash_map::DefaultHasher::new();
-                    format!("{p:?}").hash(&mut h);
-                    h.finish()
-                });
-
-                let sort_hash: u64 = query.sort.as_ref().map_or(0, |s| {
-                    use std::hash::{Hash, Hasher};
-                    let mut h = std::collections::hash_map::DefaultHasher::new();
-                    format!("{s:?}").hash(&mut h);
-                    h.finish()
-                });
-
-                let cursor_config = rmpv::Value::Map(vec![
-                    (
-                        rmpv::Value::String("cursor".into()),
-                        rmpv::Value::String(cursor_str.clone().into()),
-                    ),
-                    (
-                        rmpv::Value::String("predicateHash".into()),
-                        rmpv::Value::Integer(rmpv::Integer::from(predicate_hash)),
-                    ),
-                    (
-                        rmpv::Value::String("sortHash".into()),
-                        rmpv::Value::Integer(rmpv::Integer::from(sort_hash)),
-                    ),
-                ]);
+                let cursor_config = build_cursor_vertex_config(cursor_str, query);
 
                 vertices.push(VertexDescriptor {
                     name: "cursor".to_string(),
