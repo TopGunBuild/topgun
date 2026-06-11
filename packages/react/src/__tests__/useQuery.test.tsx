@@ -9,11 +9,13 @@ const mockSubscribe = jest.fn();
 const mockOnDelta = jest.fn();
 const mockOnPaginationChange = jest.fn();
 const mockOnSyncStateChange = jest.fn();
+const mockLoadMore = jest.fn();
 const mockQuery = jest.fn().mockReturnValue({
   subscribe: mockSubscribe,
   onDelta: mockOnDelta,
   onPaginationChange: mockOnPaginationChange,
   onSyncStateChange: mockOnSyncStateChange,
+  loadMore: mockLoadMore,
 });
 const mockClient = {
   query: mockQuery,
@@ -26,6 +28,7 @@ describe('useQuery', () => {
     mockOnDelta.mockReturnValue(() => {}); // Unsubscribe function for changes
     mockOnPaginationChange.mockReturnValue(() => {});
     mockOnSyncStateChange.mockReturnValue(() => {});
+    mockLoadMore.mockResolvedValue(undefined);
   });
 
   const wrapper = ({ children }: { children: React.ReactNode }) => (
@@ -107,5 +110,69 @@ describe('useQuery', () => {
       callback([{ _key: 'item-2', id: '2', text: 'with-meta' }], { settled: true });
     });
     expect(result.current.data).toEqual([{ _key: 'item-2', id: '2', text: 'with-meta' }]);
+  });
+
+  it('loadMore() delegates to handle.loadMore() when hasMore is true', async () => {
+    let paginationCallback: (info: any) => void;
+    mockOnPaginationChange.mockImplementation((cb) => {
+      paginationCallback = cb;
+      return () => {};
+    });
+
+    const { result } = renderHook(() => useQuery('testMap', {}), { wrapper });
+
+    // Signal that more results are available
+    act(() => {
+      paginationCallback({ hasMore: true, nextCursor: 'cursor-abc', cursorStatus: 'valid' });
+    });
+
+    await act(async () => {
+      await result.current.loadMore();
+    });
+
+    expect(mockLoadMore).toHaveBeenCalledTimes(1);
+  });
+
+  it('loadMore() is a no-op when hasMore is false', async () => {
+    // Default paginationInfo has hasMore: false — no explicit trigger needed
+    const { result } = renderHook(() => useQuery('testMap', {}), { wrapper });
+
+    await act(async () => {
+      await result.current.loadMore();
+    });
+
+    expect(mockLoadMore).not.toHaveBeenCalled();
+  });
+
+  it('loadMore ref is stable across re-renders when hasMore stays true', async () => {
+    let paginationCallback: (info: any) => void;
+    mockOnPaginationChange.mockImplementation((cb) => {
+      paginationCallback = cb;
+      return () => {};
+    });
+
+    let subscribeCallback: (results: any[]) => void;
+    mockSubscribe.mockImplementation((cb) => {
+      subscribeCallback = cb;
+      return () => {};
+    });
+
+    const { result, rerender } = renderHook(() => useQuery('testMap', {}), { wrapper });
+
+    act(() => {
+      paginationCallback({ hasMore: true, nextCursor: 'cursor-abc', cursorStatus: 'valid' });
+    });
+
+    const loadMoreBefore = result.current.loadMore;
+
+    // Trigger a re-render by delivering new results (hasMore stays true)
+    act(() => {
+      subscribeCallback([{ _key: 'item-1' }]);
+    });
+    rerender();
+
+    const loadMoreAfter = result.current.loadMore;
+
+    expect(Object.is(loadMoreBefore, loadMoreAfter)).toBe(true);
   });
 });
