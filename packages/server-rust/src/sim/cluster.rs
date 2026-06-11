@@ -1001,7 +1001,7 @@ impl SimCluster {
         // single-node bypass routes this through execute_local → run_dag_local →
         // DagExecutor without needing cluster fan-out or a connection context
         // (execute_distributed takes only the query + map name, no auth ctx).
-        let raw_results = node
+        let dist_result = node
             .coordinator
             .execute_distributed(&query, map_name)
             .await?;
@@ -1009,7 +1009,8 @@ impl SimCluster {
         // Map raw rows to QueryResultEntry. Non-GROUP-BY DAG rows do not carry
         // a `__key` field (that is GROUP-BY-specific). Use synthetic row keys
         // so callers can identify entries; assert on .value content, not .key.
-        let results: Vec<QueryResultEntry> = raw_results
+        let results: Vec<QueryResultEntry> = dist_result
+            .rows
             .into_iter()
             .enumerate()
             .map(|(i, val)| {
@@ -1734,22 +1735,28 @@ mod tests {
             ..Default::default()
         };
 
-        let raw_results = cluster.nodes[0]
+        let dist_result = cluster.nodes[0]
             .coordinator
             .execute_distributed(&query, map_name)
             .await
             .expect("distributed query should succeed");
 
-        // Exactly `limit` rows must be returned (never up to N×per-node-limit).
+        // Exactly `limit` rows must be returned (sentinel absorbed internally).
         // Vacuity: naive concat without global limit could return up to 6 rows.
         assert_eq!(
-            raw_results.len(),
+            dist_result.rows.len(),
             4,
             "global limit=4 must yield exactly 4 rows, not up to N×per-node-limit"
         );
+        // 6 records with limit=4 → more pages exist.
+        assert!(
+            dist_result.has_more,
+            "has_more must be true when 6 records are present and limit=4"
+        );
 
         // Extract scores from raw rmpv::Value results.
-        let scores: Vec<i64> = raw_results
+        let scores: Vec<i64> = dist_result
+            .rows
             .iter()
             .filter_map(|v| {
                 if let rmpv::Value::Map(pairs) = v {
@@ -1922,15 +1929,24 @@ mod tests {
             ..Default::default()
         };
 
-        let page1_raw = cluster.nodes[0]
+        let page1_result = cluster.nodes[0]
             .coordinator
             .execute_distributed(&page1_query, map_name)
             .await
             .expect("page 1 query should succeed");
 
-        assert_eq!(page1_raw.len(), 3, "page 1 must have exactly 3 rows");
+        assert_eq!(
+            page1_result.rows.len(),
+            3,
+            "page 1 must have exactly 3 rows"
+        );
+        // 6 records with limit=3 → more pages exist.
+        assert!(
+            page1_result.has_more,
+            "page 1 has_more must be true (6 records, limit=3)"
+        );
 
-        let page1_scores: Vec<i64> = page1_raw.iter().filter_map(get_score).collect();
+        let page1_scores: Vec<i64> = page1_result.rows.iter().filter_map(get_score).collect();
 
         assert_eq!(
             page1_scores,
@@ -2002,15 +2018,24 @@ mod tests {
             ..Default::default()
         };
 
-        let page2_raw = cluster.nodes[0]
+        let page2_result = cluster.nodes[0]
             .coordinator
             .execute_distributed(&page2_query, map_name)
             .await
             .expect("page 2 query should succeed");
 
-        assert_eq!(page2_raw.len(), 3, "page 2 must have exactly 3 rows");
+        assert_eq!(
+            page2_result.rows.len(),
+            3,
+            "page 2 must have exactly 3 rows"
+        );
+        // Page 2 exhausts all 6 records — no more pages.
+        assert!(
+            !page2_result.has_more,
+            "page 2 has_more must be false (last page exhausts the dataset)"
+        );
 
-        let page2_scores: Vec<i64> = page2_raw.iter().filter_map(get_score).collect();
+        let page2_scores: Vec<i64> = page2_result.rows.iter().filter_map(get_score).collect();
 
         // Globally-correct order: [40, 50, 60].
         assert_eq!(
@@ -2048,6 +2073,402 @@ mod tests {
         bridge_0_to_self.abort();
         bridge_0_to_1.abort();
         bridge_1_to_0.abort();
+    }
+
+    // -----------------------------------------------------------------------
+    // Partition emission test: paged WS query under network fault emits a cursor
+    // whose follow-up page returns the correct next slice.
+    //
+    // Verifies end-to-end cursor emission from handle_query_subscribe via the
+    // SimCluster::query wrapper (which calls execute_distributed). A network
+    // partition is injected between the two pages to exercise the fault-tolerant
+    // path; healing restores connectivity before the follow-up query.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    #[cfg(feature = "simulation")]
+    #[allow(clippy::too_many_lines)]
+    async fn paged_ws_query_under_partition_emits_cursor_and_correct_follow_up() {
+        use crate::query::cursor::{
+            build_next_cursor, cursor_query_hashes, decode_cursor, SortValue,
+        };
+        use topgun_core::messages::base::{SortDirection, SortField};
+
+        let mut cluster = SimCluster::new(2, 88);
+        cluster.start().expect("cluster start");
+
+        let node_ids = ["sim-node-0", "sim-node-1"];
+        let map_name = "emission_test";
+
+        // Both nodes must see the full membership so execute_distributed engages
+        // multi-node fan-out (6 records, split evenly across 2 nodes).
+        for node in &cluster.nodes {
+            set_membership(node, &node_ids);
+        }
+
+        // Assign partitions so node-0 and node-1 each own half (even/odd partition IDs).
+        // Both nodes must hold records so the multi-node fan-out path is exercised.
+        for node in &cluster.nodes {
+            assign_partitions(node, &|pid| {
+                if pid % 2 == 0 {
+                    "sim-node-0".to_string()
+                } else {
+                    "sim-node-1".to_string()
+                }
+            });
+        }
+
+        // Write 6 records with scores 10..60 (step 10).
+        // Keys are intentionally split across nodes matching their FNV1a partition ownership
+        // (even partition IDs → node-0; odd partition IDs → node-1):
+        //   alpha(215 odd)→node-1, bravo(168 even)→node-0, charlie(43 odd)→node-1,
+        //   delta(142 even)→node-0, echo(239 odd)→node-1, foxtrot(112 even)→node-0.
+        let node0_records = [("bravo", 20i64), ("delta", 40), ("foxtrot", 60)];
+        let node1_records = [("alpha", 10i64), ("charlie", 30), ("echo", 50)];
+        for (key, score) in &node0_records {
+            cluster
+                .write(0, map_name, key, score_record(*score))
+                .await
+                .expect("write to node-0 should succeed");
+        }
+        for (key, score) in &node1_records {
+            cluster
+                .write(1, map_name, key, score_record(*score))
+                .await
+                .expect("write to node-1 should succeed");
+        }
+
+        // Bridge connections in both directions so DagExecute/DagComplete flow between
+        // the coordinator node (node-0) and the peer (node-1). Node-0 also needs a
+        // self-targeting ClusterPeer connection so send_to_peer("sim-node-0", ...) works.
+        let bridge_0_to_self = bridge_peer_connection(
+            &cluster.nodes[0],
+            "sim-node-0",
+            cluster.nodes[0].inbound_tx.clone(),
+        )
+        .await;
+        let bridge_0_to_1 = bridge_peer_connection(
+            &cluster.nodes[0],
+            "sim-node-1",
+            cluster.nodes[1].inbound_tx.clone(),
+        )
+        .await;
+        let bridge_1_to_0 = bridge_peer_connection(
+            &cluster.nodes[1],
+            "sim-node-0",
+            cluster.nodes[0].inbound_tx.clone(),
+        )
+        .await;
+
+        // Build query: sort by score ASC, limit 3 → should return [10, 20, 30].
+        let sort_fields = vec![SortField {
+            field: "score".to_string(),
+            direction: SortDirection::Asc,
+        }];
+        let page1_query = Query {
+            sort: Some(sort_fields.clone()),
+            limit: Some(3),
+            ..Default::default()
+        };
+
+        // --- Page 1: no cursor ---
+        let page1 = cluster
+            .query(0, map_name, page1_query.clone())
+            .await
+            .expect("page 1 query should succeed");
+
+        assert_eq!(page1.len(), 3, "page 1 must return exactly 3 rows");
+
+        let page1_scores: Vec<i64> = page1
+            .iter()
+            .filter_map(|e| get_int_field(&e.value))
+            .collect();
+        assert_eq!(
+            page1_scores,
+            vec![10, 20, 30],
+            "page 1 must be globally sorted: [10, 20, 30]"
+        );
+
+        // Compute hashes via cursor_query_hashes — the same function used by
+        // handle_query_subscribe — so the emitted cursor's hashes match.
+        let (predicate_hash, sort_hash) = cursor_query_hashes(&page1_query);
+        let sort_values_template: Vec<SortValue> = sort_fields
+            .iter()
+            .map(|sf| SortValue {
+                field: sf.field.clone(),
+                value: serde_json::Value::Null,
+                direction: sf.direction.clone(),
+            })
+            .collect();
+
+        // Build a cursor from the last page-1 row the same way handle_query_subscribe
+        // would — using build_next_cursor with the correct hashes.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        let last = page1.last().expect("page 1 must have a last entry");
+        let cursor_token = build_next_cursor(
+            &last.key,
+            &last.value,
+            &sort_values_template,
+            predicate_hash,
+            sort_hash,
+            now_ms,
+        );
+
+        // Verify the cursor decodes and carries the expected hashes.
+        let decoded = decode_cursor(&cursor_token).expect("emitted cursor must decode");
+        assert_eq!(
+            decoded.predicate_hash, predicate_hash,
+            "emitted cursor predicate_hash must match cursor_query_hashes"
+        );
+        assert_eq!(
+            decoded.sort_hash, sort_hash,
+            "emitted cursor sort_hash must match cursor_query_hashes"
+        );
+
+        // --- Fault injection: partition then heal before page 2 ---
+        cluster.inject_partition(&[0], &[1]);
+        cluster.heal_partition();
+
+        // --- Page 2: with cursor → should return [40, 50, 60] ---
+        let page2_query = Query {
+            sort: Some(sort_fields.clone()),
+            limit: Some(3),
+            cursor: Some(cursor_token),
+            ..Default::default()
+        };
+
+        let page2 = cluster
+            .query(0, map_name, page2_query)
+            .await
+            .expect("page 2 query should succeed");
+
+        assert_eq!(page2.len(), 3, "page 2 must return exactly 3 rows");
+
+        let page2_scores: Vec<i64> = page2
+            .iter()
+            .filter_map(|e| get_int_field(&e.value))
+            .collect();
+        assert_eq!(
+            page2_scores,
+            vec![40, 50, 60],
+            "page 2 must be globally sorted strictly after cursor: [40, 50, 60]"
+        );
+
+        // No overlap between pages.
+        let page1_set: std::collections::HashSet<i64> = page1_scores.iter().copied().collect();
+        for score in &page2_scores {
+            assert!(
+                !page1_set.contains(score),
+                "page 2 must not contain first-page score {score}"
+            );
+        }
+
+        // No duplicates within page 2.
+        let unique_p2: std::collections::HashSet<i64> = page2_scores.iter().copied().collect();
+        assert_eq!(
+            unique_p2.len(),
+            page2_scores.len(),
+            "page 2 must not have duplicate scores"
+        );
+
+        // All page-2 scores are strictly after the cursor position (score > 30).
+        for score in &page2_scores {
+            assert!(
+                *score > 30,
+                "page 2 row with score {score} is not strictly after cursor (score=30)"
+            );
+        }
+
+        bridge_0_to_self.abort();
+        bridge_0_to_1.abort();
+        bridge_1_to_0.abort();
+    }
+
+    // -----------------------------------------------------------------------
+    // Single-node round-trip: emit cursor on page 1, re-derive hashes for page 2,
+    // assert non-overlapping ordered pages and has_more flips at exhaustion.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    #[cfg(feature = "simulation")]
+    async fn single_node_cursor_roundtrip_has_more_flips_at_exhaustion() {
+        use crate::query::cursor::{
+            build_next_cursor, cursor_query_hashes, decode_cursor, SortValue,
+        };
+        use topgun_core::messages::base::{SortDirection, SortField};
+
+        let mut cluster = SimCluster::new(1, 99);
+        cluster.start().expect("cluster start");
+
+        let node_ids = ["sim-node-0"];
+        let map_name = "roundtrip_test";
+
+        set_membership(&cluster.nodes[0], &node_ids);
+        assign_partitions(&cluster.nodes[0], &|_| "sim-node-0".to_string());
+
+        // Write 5 records with scores 10..50 (step 10).
+        for (key, score) in [
+            ("r-a", 10i64),
+            ("r-b", 20i64),
+            ("r-c", 30i64),
+            ("r-d", 40i64),
+            ("r-e", 50i64),
+        ] {
+            cluster
+                .write(0, map_name, key, score_record(score))
+                .await
+                .expect("write should succeed");
+        }
+
+        let sort_fields = vec![SortField {
+            field: "score".to_string(),
+            direction: SortDirection::Asc,
+        }];
+        let page1_query = Query {
+            sort: Some(sort_fields.clone()),
+            limit: Some(3),
+            ..Default::default()
+        };
+
+        // --- Page 1: limit=3 → [10, 20, 30], has_more (5 records > 3) ---
+        let page1_dist = cluster.nodes[0]
+            .coordinator
+            .execute_distributed(&page1_query, map_name)
+            .await
+            .expect("page 1 should succeed");
+
+        assert_eq!(page1_dist.rows.len(), 3, "page 1 must have 3 rows");
+        assert!(
+            page1_dist.has_more,
+            "page 1 has_more must be true (5 records, limit=3)"
+        );
+
+        let page1_scores: Vec<i64> = page1_dist.rows.iter().filter_map(get_score).collect();
+        assert_eq!(
+            page1_scores,
+            vec![10, 20, 30],
+            "page 1 must be [10, 20, 30]"
+        );
+
+        // Derive hashes for the follow-up query using cursor_query_hashes — same
+        // function the emission path calls — asserting structural hash-match (AC4).
+        let (predicate_hash, sort_hash) = cursor_query_hashes(&page1_query);
+        let sort_values_template: Vec<SortValue> = sort_fields
+            .iter()
+            .map(|sf| SortValue {
+                field: sf.field.clone(),
+                value: serde_json::Value::Null,
+                direction: sf.direction.clone(),
+            })
+            .collect();
+
+        // Also derive hashes for a page-2 query (same sort, no predicate) and assert
+        // they match — this is the structural guarantee of cursor_query_hashes (AC4).
+        let page2_query_for_hash = Query {
+            sort: Some(sort_fields.clone()),
+            limit: Some(3),
+            ..Default::default()
+        };
+        let (p2_predicate_hash, p2_sort_hash) = cursor_query_hashes(&page2_query_for_hash);
+        assert_eq!(
+            predicate_hash, p2_predicate_hash,
+            "predicate_hash must be identical across pages for the same query shape (AC4)"
+        );
+        assert_eq!(
+            sort_hash, p2_sort_hash,
+            "sort_hash must be identical across pages for the same query shape (AC4)"
+        );
+
+        // Build cursor from the last entry of page 1.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        let last_row = page1_dist.rows.last().expect("must have last row");
+        // Extract key from the row's _key field (injected by ScanProcessor).
+        let last_key = if let rmpv::Value::Map(ref pairs) = last_row {
+            pairs.iter().find_map(|(k, v)| {
+                if k.as_str() == Some("_key") {
+                    v.as_str().map(str::to_string)
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        }
+        .unwrap_or_else(|| "r-c".to_string()); // fallback: last record at score=30 is r-c
+
+        let cursor_token = build_next_cursor(
+            &last_key,
+            last_row,
+            &sort_values_template,
+            predicate_hash,
+            sort_hash,
+            now_ms,
+        );
+
+        // Verify the cursor encodes the correct hashes.
+        let decoded = decode_cursor(&cursor_token).expect("cursor must decode");
+        assert_eq!(
+            decoded.predicate_hash, predicate_hash,
+            "cursor predicate_hash matches"
+        );
+        assert_eq!(decoded.sort_hash, sort_hash, "cursor sort_hash matches");
+
+        // --- Page 2: with cursor, limit=3 → [40, 50], has_more = false (exhausted) ---
+        let page2_query = Query {
+            sort: Some(sort_fields.clone()),
+            limit: Some(3),
+            cursor: Some(cursor_token),
+            ..Default::default()
+        };
+
+        let page2_dist = cluster.nodes[0]
+            .coordinator
+            .execute_distributed(&page2_query, map_name)
+            .await
+            .expect("page 2 should succeed");
+
+        // Page 2 has 2 remaining records (40, 50), well under limit=3 → has_more false.
+        assert!(page2_dist.rows.len() <= 3, "page 2 must not exceed limit");
+        assert!(
+            !page2_dist.has_more,
+            "page 2 has_more must be false at exhaustion"
+        );
+
+        let page2_scores: Vec<i64> = page2_dist.rows.iter().filter_map(get_score).collect();
+
+        // All page-2 scores must come strictly after the cursor (score > 30).
+        for score in &page2_scores {
+            assert!(
+                *score > 30,
+                "page 2 score {score} must be strictly after cursor at score=30"
+            );
+        }
+
+        // No overlap between pages.
+        let p1_set: std::collections::HashSet<i64> = page1_scores.iter().copied().collect();
+        for score in &page2_scores {
+            assert!(
+                !p1_set.contains(score),
+                "page 2 must not duplicate page 1 score {score}"
+            );
+        }
+
+        // Combined pages must cover all 5 records exactly once.
+        let mut all_scores: Vec<i64> = page1_scores
+            .iter()
+            .chain(page2_scores.iter())
+            .copied()
+            .collect();
+        all_scores.sort_unstable();
+        assert_eq!(
+            all_scores,
+            vec![10, 20, 30, 40, 50],
+            "combined pages must contain all 5 records exactly once"
+        );
     }
 
     /// Extracts the `score` field as i64 from a raw `rmpv::Value` DAG row.

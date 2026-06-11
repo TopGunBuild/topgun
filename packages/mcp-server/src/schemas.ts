@@ -31,6 +31,13 @@ export const QueryArgsSchema = z.object({
     .array(z.string())
     .optional()
     .describe('Field names to return (projection). If omitted, all fields are returned.'),
+  cursor: z
+    .string()
+    .optional()
+    .describe(
+      'Continuation cursor from a previous query response. ' +
+        'Pass the cursor value from a prior result to retrieve the next page.',
+    ),
 });
 
 export type QueryArgs = z.infer<typeof QueryArgsSchema>;
@@ -176,6 +183,12 @@ export const toolSchemas = {
         type: 'array',
         items: { type: 'string' },
         description: 'Field names to return (projection). If omitted, all fields are returned.',
+      },
+      cursor: {
+        type: 'string',
+        description:
+          'Continuation cursor from a previous query response. ' +
+          'Pass the cursor value from a prior result to retrieve the next page.',
       },
     },
     required: ['map'],

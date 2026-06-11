@@ -1,7 +1,7 @@
 /**
  * topgun_query - Query data from a TopGun map with filters
  *
- * Resolves on the first settled server snapshot via client.queryOnce().
+ * Resolves on the first settled server snapshot via client.queryOncePaged().
  */
 
 import type { QueryFilter } from '@topgunbuild/client';
@@ -14,7 +14,7 @@ export const queryTool: MCPTool = {
   description:
     'Query data from a TopGun map with filters and sorting. ' +
     'Use this to read data from the database. ' +
-    'Supports filtering by field values, sorting, and pagination via limit.',
+    'Supports filtering by field values, sorting, and pagination via limit and cursor.',
   inputSchema: toolSchemas.query as MCPTool['inputSchema'],
 };
 
@@ -31,7 +31,7 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
     };
   }
 
-  const { map, filter, sort, limit, fields } = parseResult.data;
+  const { map, filter, sort, limit, fields, cursor } = parseResult.data;
 
   // Validate map access
   if (ctx.config.allowedMaps && !ctx.config.allowedMaps.includes(map)) {
@@ -50,15 +50,9 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
   const effectiveLimit = Math.min(limit ?? ctx.config.defaultLimit, ctx.config.maxLimit);
 
   try {
-    // Build query filter for QueryHandle. Fetch ONE extra row beyond the
-    // effective limit so we can detect (and signal) that results were truncated.
-    // queryOnce returns a plain array with no hasMore metadata, so without this
-    // probe an agent that asks for `limit` rows and gets exactly `limit` back
-    // cannot tell a complete result from a capped one — and would silently report
-    // a truncated view as the whole answer.
     const queryFilter: QueryFilter = {
       where: filter,
-      limit: effectiveLimit + 1,
+      limit: effectiveLimit,
     };
 
     // Add sort if provided
@@ -70,14 +64,31 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
       queryFilter.fields = fields;
     }
 
-    // queryOnce returns settled, authoritative server data on a normal resolve.
-    // Using the default (no allowLocal) is the strict server-truth contract: it
-    // never silently returns stale local data — on offline/timeout it rejects
+    // Thread the continuation cursor through so the agent can page forward
+    // without re-fetching records it has already seen.
+    if (cursor) {
+      queryFilter.cursor = cursor;
+    }
+
+    // queryOncePaged resolves with settled, authoritative server data on a normal
+    // resolve, and returns server-authoritative hasMore + cursor metadata so we
+    // never need a +1 probe to detect truncation.  On offline/timeout it rejects
     // with QueryOnceUnsettledError, which we surface explicitly below so an
     // unreachable server is never confused with a genuinely empty result.
-    let results: Array<Record<string, unknown> & { _key: string }>;
+    type PagedResult = {
+      items: Array<Record<string, unknown> & { _key: string }>;
+      cursor?: string;
+      hasMore: boolean;
+    };
+    type ClientWithPaged = {
+      queryOncePaged(map: string, filter: unknown): Promise<PagedResult>;
+    };
+    let pagedResult: PagedResult;
     try {
-      results = await ctx.client.queryOnce<Record<string, unknown>>(map, queryFilter);
+      pagedResult = await (ctx.client as unknown as ClientWithPaged).queryOncePaged(
+        map,
+        queryFilter,
+      );
     } catch (error) {
       if (error instanceof QueryOnceUnsettledError) {
         const why =
@@ -100,12 +111,7 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
       throw error;
     }
 
-    // We requested effectiveLimit + 1 rows; if the server had more, drop the
-    // probe row and remember to tell the caller the result was capped.
-    const truncated = results.length > effectiveLimit;
-    if (truncated) {
-      results = results.slice(0, effectiveLimit);
-    }
+    const { items: results, cursor: nextCursor, hasMore } = pagedResult;
 
     // A settled-but-empty result is a legitimate "no matching records" answer,
     // distinct from the offline/not-settled branch handled above.
@@ -127,24 +133,24 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
       })
       .join('\n\n');
 
-    // Honest truncation signal: there is intentionally no cursor to page through
-    // (continuation cursors are an anti-pattern for LLM callers), so point the
-    // agent at narrowing the query instead — and at raising `limit` only when it
-    // is still below the server's maxLimit cap.
-    const truncationNote = truncated
+    // When the server indicates more results are available, surface the opaque
+    // continuation cursor token so the agent can request the next page — without
+    // it the pagination surface is purely informational.
+    const continuationNote = hasMore
       ? `\n\n---\nMore rows match than were returned; showing the first ${effectiveLimit}. ` +
-        `Narrow with \`filter\`/\`sort\`` +
+        `To fetch the next page, call this tool again with cursor: "${nextCursor}". ` +
+        `Alternatively, narrow with \`filter\`/\`sort\`` +
         (effectiveLimit < ctx.config.maxLimit
           ? ` or raise \`limit\` (up to ${ctx.config.maxLimit})`
           : '') +
-        ` to see the rest. There is no cursor to page through.`
+        `.`
       : '';
 
     return {
       content: [
         {
           type: 'text',
-          text: `Found ${results.length} result(s) in map '${map}':\n\n${formatted}${truncationNote}`,
+          text: `Found ${results.length} result(s) in map '${map}':\n\n${formatted}${continuationNote}`,
         },
       ],
     };

@@ -134,8 +134,8 @@ List every map the server knows about.
 
 Read records from a map with filters and sorting. Returns **authoritative server data** — the assistant gets the live, server-confirmed answer, not a stale local guess.
 
-- **Parameters:** `{ map, filter?, sort?, limit?, fields? }`
-- **Response:** `[{ _key, ...fields }]` (a plain settled array)
+- **Parameters:** `{ map, filter?, sort?, limit?, fields?, cursor? }`
+- **Response:** `[{ _key, ...fields }]` (a settled array) with an optional continuation note when `hasMore` is true
 - **Security:** rejects maps outside `allowedMaps`; clamps `limit` to `maxLimit`
 
 ```text
@@ -147,7 +147,11 @@ A settled result with no matching records renders as `No results found in map '<
 
 **Offline / not-settled behavior.** `topgun_query` never silently returns stale local data and never conflates "offline" with "empty". If the server cannot be reached, or the query does not settle within the default 5000 ms window, the tool returns an error (`isError: true`) explaining that no authoritative data was returned — so the assistant knows to retry rather than reporting an empty list. The message distinguishes the two causes (server unreachable / client offline, vs. timed out waiting for the server).
 
-**No cursor pagination, but truncation is never silent.** `topgun_query` returns a plain settled array; the previous `nextCursor` / `hasMore` continuation hint and `cursor` parameter have been removed (continuation cursors are an anti-pattern for an LLM caller). It does **not** drop the one signal that matters: when more rows match than the returned `limit`, the response appends a `More rows match than were returned…` note so the assistant knows the view was capped and can narrow `filter` / `sort` (or raise `limit` up to `maxLimit`) — rather than reporting a truncated list as the whole answer.
+**Cursor pagination.** When the server has more results than the returned `limit`, the response includes a `cursor` token and appends a continuation note: "To fetch the next page, call this tool again with `cursor: <value>`." Pass that token as the optional `cursor` parameter on the next call to receive the following page. Repeat until `hasMore` is false (no continuation note appears). This lets an agent walk through a large result set page by page without re-fetching rows it has already seen.
+
+If you do not need further pages, the continuation note also tells you to narrow with `filter` / `sort` or raise `limit` (up to `maxLimit`) — useful when you want a different slice rather than sequential pages.
+
+A settled result with no matching records renders as `No results found in map '<map>'...` — that means the server genuinely has no such rows, not that the query failed.
 
 ### topgun_mutate
 

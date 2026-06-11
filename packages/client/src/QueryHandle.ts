@@ -414,6 +414,85 @@ export class QueryHandle<T> {
   // ============== Pagination Methods ==============
 
   /**
+   * In-flight cursor token for loadMore. Stores the cursor being fetched so
+   * concurrent calls with the same cursor are deduplicated to a single request.
+   */
+  private _loadMoreInFlight: string | null = null;
+
+  /**
+   * Append-only merge: adds/updates keys from the page batch without removing
+   * any existing keys. This preserves results from prior pages that are absent
+   * from the new page batch — a full-set reconciliation via onResult would
+   * prune those prior-page rows.
+   */
+  private mergePageResults(items: { key: string; value: T }[]): void {
+    for (const item of items) {
+      this.currentResults.set(item.key, item.value);
+    }
+    this.computeAndNotifyChanges(Date.now());
+    this.notify();
+  }
+
+  /**
+   * Load the next page of results and append them to the current result set.
+   *
+   * Uses the cursor from the most recent server response. If no further pages
+   * are available (`hasMore` is false) or a request for the same cursor is
+   * already in flight, resolves immediately without issuing a duplicate request.
+   *
+   * Results from the new page are merged with the existing result set using an
+   * append-only strategy: prior-page rows are never removed.
+   */
+  public async loadMore(): Promise<void> {
+    const { nextCursor, hasMore } = this._paginationInfo;
+
+    // No more pages available — nothing to fetch.
+    if (!hasMore || !nextCursor) return;
+
+    // Deduplicate concurrent calls for the same cursor.
+    if (this._loadMoreInFlight === nextCursor) return;
+
+    this._loadMoreInFlight = nextCursor;
+
+    try {
+      // Create a temporary one-shot handle with the next cursor, exactly
+      // mirroring the queryOnce pattern: subscribe → settle → unsubscribe.
+      const tempHandle = new QueryHandle<T>(this.syncEngine, this.mapName, {
+        ...this.filter,
+        cursor: nextCursor,
+      });
+
+      const pageItems: { key: string; value: T }[] = [];
+
+      const unsub = tempHandle.subscribe((results) => {
+        pageItems.length = 0;
+        for (const item of results) {
+          // Destructure the synthetic _key field added by getSortedResults.
+          const { _key, ...rest } = item as T & { _key: string };
+          pageItems.push({ key: _key, value: rest as T });
+        }
+      });
+
+      await tempHandle.whenSettled();
+      unsub();
+
+      // Append-only merge: preserves rows from all prior pages.
+      this.mergePageResults(pageItems);
+
+      // Advance pagination state to reflect the new page's cursor/hasMore.
+      const newPaginationInfo = tempHandle.getPaginationInfo();
+      this._paginationInfo = {
+        nextCursor: newPaginationInfo.nextCursor,
+        hasMore: newPaginationInfo.hasMore,
+        cursorStatus: newPaginationInfo.cursorStatus,
+      };
+      this.notifyPaginationListeners();
+    } finally {
+      this._loadMoreInFlight = null;
+    }
+  }
+
+  /**
    * Get current pagination info.
    * Returns nextCursor, hasMore, and cursorStatus.
    */

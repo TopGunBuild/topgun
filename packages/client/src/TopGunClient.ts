@@ -23,6 +23,19 @@ import {
   QueryOnceLocalError,
   type QueryOnceUnsettledReason,
 } from './errors/QueryOnceError';
+
+/**
+ * Return value of {@link TopGunClient.queryOncePaged}.
+ *
+ * `items` is the authoritative server result for this page.
+ * `cursor` is the opaque token for the next page (undefined when none).
+ * `hasMore` is true when the server signalled additional rows beyond this page.
+ */
+export interface QueryOncePagedResult<T> {
+  items: QueryResultItem<T>[];
+  cursor?: string;
+  hasMore: boolean;
+}
 import { DistributedLock } from './DistributedLock';
 import { TopicHandle } from './TopicHandle';
 import { PNCounterHandle } from './PNCounterHandle';
@@ -374,6 +387,81 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
   }
 
   /**
+   * One-shot paged read: resolves with authoritative server data including cursor
+   * metadata for pagination. Unlike {@link queryOnce}, the return value carries
+   * `{ items, cursor, hasMore }` so callers can drive {@link QueryHandle.loadMore}
+   * or issue a follow-up `queryOncePaged` for the next page.
+   *
+   * The offline policy is identical to {@link queryOnce}:
+   * - Default: rejects with {@link QueryOnceUnsettledError} when offline or timed-out.
+   * - `{ allowLocal: true }`: throws {@link QueryOnceLocalError} carrying a local
+   *   snapshot on `.localData`.
+   *
+   * `queryOnce` is left unchanged — this is a separate method so that the plain
+   * `Promise<items[]>` return type of `queryOnce` is not disturbed.
+   */
+  public queryOncePaged<K extends keyof TSchema & string>(
+    mapName: K,
+    filter: QueryFilter,
+    opts?: QueryOnceOptions,
+  ): Promise<QueryOncePagedResult<TSchema[K]>>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped overload for back-compat callers that do not supply a schema type parameter
+  public queryOncePaged<T = any>(
+    mapName: string,
+    filter: QueryFilter,
+    opts?: QueryOnceOptions,
+  ): Promise<QueryOncePagedResult<T>>;
+  public async queryOncePaged(
+    mapName: string,
+    filter: QueryFilter,
+    opts?: QueryOnceOptions,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- implementation signature uses any to satisfy both overloads; return type is narrowed by the overload the caller selects
+  ): Promise<QueryOncePagedResult<any>> {
+    const timeoutMs = opts?.timeoutMs ?? DEFAULT_QUERY_ONCE_TIMEOUT_MS;
+    const allowLocal = opts?.allowLocal ?? false;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- handle storage is untyped internally; result type flows from the selected overload
+    const handle = new QueryHandle<any>(this.syncEngine, mapName, filter);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- latest sorted snapshot for the active query; element type narrowed by the selected overload
+    let latest: QueryResultItem<any>[] = [];
+    const unsubscribe = handle.subscribe((results) => {
+      latest = results;
+    });
+
+    const cleanup = (): void => {
+      unsubscribe();
+    };
+
+    try {
+      if (!this.isClientOnline()) {
+        if (allowLocal) {
+          await this.flushLocalPreload();
+        }
+        return this.handleUnsettledPaged('offline', mapName, latest, allowLocal, {
+          hasMore: false,
+        });
+      }
+
+      const settled = await this.raceSettle(handle, timeoutMs);
+      if (!settled) {
+        return this.handleUnsettledPaged('timeout', mapName, latest, allowLocal, {
+          hasMore: false,
+        });
+      }
+
+      const paginationInfo = handle.getPaginationInfo();
+      return {
+        items: latest,
+        cursor: paginationInfo.nextCursor,
+        hasMore: paginationInfo.hasMore,
+      };
+    } finally {
+      cleanup();
+    }
+  }
+
+  /**
    * Resolves true when the query settles (first server QUERY_RESP), false when the
    * timeout fires first. Clears the timer on settlement so it never dangles.
    */
@@ -405,6 +493,29 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
       throw new QueryOnceLocalError(reason, mapName, localData);
     }
     throw new QueryOnceUnsettledError(reason, mapName);
+  }
+
+  /**
+   * Build the offline/timeout outcome for queryOncePaged.
+   * Mirrors handleUnsettled but returns QueryOncePagedResult on allowLocal.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- never actually returns; typed to satisfy the queryOncePaged return contract
+  private handleUnsettledPaged(
+    reason: QueryOnceUnsettledReason,
+    mapName: string,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- local snapshot element type flows from the selected overload at the call site
+    localData: QueryResultItem<any>[],
+    allowLocal: boolean,
+    paginationFallback: { hasMore: boolean; cursor?: string },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- never actually returns; typed to satisfy the queryOncePaged return contract
+  ): Promise<QueryOncePagedResult<any>> {
+    if (allowLocal) {
+      throw new QueryOnceLocalError(reason, mapName, localData);
+    }
+    throw new QueryOnceUnsettledError(reason, mapName);
+    // paginationFallback would only be used in a non-throwing path; included for
+    // future extensibility.
+    void paginationFallback;
   }
 
   /**

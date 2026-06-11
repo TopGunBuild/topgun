@@ -61,6 +61,8 @@ export interface UseQueryResult<T> {
    * stable across renders unless at least one relevant key changes state.
    */
   syncState: ReadonlyMap<string, RecordSyncState>;
+  /** Load the next page of results. No-op when hasMore is false or no query is active. */
+  loadMore: () => Promise<void>;
 }
 
 /**
@@ -152,6 +154,17 @@ export function useQuery<T = any>(
     setChanges([]);
     setLastChange(null);
   }, []);
+
+  // Stable reference: the underlying handle can change across query-filter changes,
+  // but this ref-based callback always routes to the current handle without
+  // creating a new function identity on every render.
+  const loadMore = useCallback((): Promise<void> => {
+    const handle = handleRef.current;
+    if (!handle || !paginationInfo.hasMore) {
+      return Promise.resolve();
+    }
+    return handle.loadMore();
+  }, [paginationInfo.hasMore]);
 
   // Memoize options callbacks to avoid unnecessary effect runs
   const optionsRef = useRef(options);
@@ -268,8 +281,9 @@ export function useQuery<T = any>(
       hasMore: paginationInfo.hasMore,
       cursorStatus: paginationInfo.cursorStatus,
       syncState,
+      loadMore,
     }),
-    [data, loading, error, lastChange, changes, clearChanges, paginationInfo, syncState],
+    [data, loading, error, lastChange, changes, clearChanges, paginationInfo, syncState, loadMore],
   );
 }
 

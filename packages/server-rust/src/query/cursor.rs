@@ -5,7 +5,8 @@
 //! the HTTP-specific `HttpCursorData` and any future per-transport cursors from
 //! diverging silently.
 
-use topgun_core::messages::base::SortDirection;
+use topgun_core::messages::base::{Query, SortDirection};
+use topgun_core::messages::query::CursorStatus;
 
 // ---------------------------------------------------------------------------
 // CursorData
@@ -173,6 +174,119 @@ pub fn validate_cursor_hashes(cursor: &CursorData, predicate_hash: u64, sort_has
 #[must_use]
 pub fn validate_cursor_expiry(cursor: &CursorData, now_ms: i64) -> bool {
     now_ms - cursor.timestamp <= CURSOR_TTL_MS
+}
+
+/// Classifies the status to report for an incoming query cursor, reusing the exact
+/// expiry + hash checks the DAG's `CursorProcessor` applies. Because the emission path
+/// and the DAG both validate against the same `(predicate_hash, sort_hash)` derived from
+/// `cursor_query_hashes`, the reported status agrees with the DAG's accept/reject decision
+/// by construction.
+///
+/// Expiry is checked before hash-match so a stale-but-shape-matching token reports
+/// `Expired` (the client should refresh) rather than `Invalid`. Returns `None` when no
+/// cursor was supplied. This is deterministic and does NOT infer rejection from an empty
+/// result page — a legitimately empty final page stays `Valid`.
+#[must_use]
+pub fn classify_cursor_status(
+    cursor: Option<&CursorData>,
+    now_ms: i64,
+    predicate_hash: u64,
+    sort_hash: u64,
+) -> CursorStatus {
+    match cursor {
+        None => CursorStatus::None,
+        Some(c) if !validate_cursor_expiry(c, now_ms) => CursorStatus::Expired,
+        Some(c) if !validate_cursor_hashes(c, predicate_hash, sort_hash) => CursorStatus::Invalid,
+        Some(_) => CursorStatus::Valid,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared hash computation for cursor validation
+// ---------------------------------------------------------------------------
+
+/// Computes the predicate and sort hashes for a query in a single authoritative place.
+///
+/// Both the cursor *consumption* path (`build_cursor_vertex_config` in `dag/converter.rs`)
+/// and the cursor *emission* path (`query.rs::handle_query_subscribe`) must call this
+/// function so their hashes are identical by construction — making hash divergence
+/// structurally impossible regardless of how query fields evolve.
+///
+/// Returns `(predicate_hash, sort_hash)`. Either value is `0` when the corresponding
+/// field is absent from the query.
+///
+/// Hash stability note: uses `DefaultHasher` over `format!("{:?}")` — acceptable for
+/// short-lived (≤10 min TTL) cursors always validated by the same binary that emitted them.
+#[must_use]
+pub fn cursor_query_hashes(query: &Query) -> (u64, u64) {
+    use std::hash::{Hash, Hasher};
+
+    let hash_debug = |value: &dyn std::fmt::Debug| -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        format!("{value:?}").hash(&mut h);
+        h.finish()
+    };
+
+    let predicate_hash = query.predicate.as_ref().map_or(0, |p| hash_debug(p));
+    let sort_hash = query.sort.as_ref().map_or(0, |s| hash_debug(s));
+
+    (predicate_hash, sort_hash)
+}
+
+/// Builds an encoded keyset cursor from the last entry in a page.
+///
+/// This is the single authoritative cursor-encode emission helper. Both the HTTP sync
+/// handler and the WS query handler call this function so there is exactly one encoding
+/// path — no duplicated `CursorData` construction logic.
+///
+/// Takes `predicate_hash`/`sort_hash` as parameters (hash-source-agnostic) so callers
+/// can supply their own hash sources without coupling the encode logic to any particular
+/// derivation strategy:
+/// - WS path: passes values from `cursor_query_hashes(query)`
+/// - HTTP cursor branch: passes values copied from the incoming cursor
+/// - HTTP offset branch: passes `0/0` (offset-based cursors do not validate hashes)
+///
+/// `sort_values_template` provides the sort-field names and directions (from the query's
+/// sort spec or from the incoming cursor's `sort_values`). Field values are extracted
+/// from `last_entry` by name.
+#[must_use]
+pub fn build_next_cursor(
+    last_entry_key: &str,
+    last_entry_value: &rmpv::Value,
+    sort_values_template: &[SortValue],
+    predicate_hash: u64,
+    sort_hash: u64,
+    now_ms: i64,
+) -> String {
+    let sort_values: Vec<SortValue> = sort_values_template
+        .iter()
+        .map(|sv| {
+            let value = if let rmpv::Value::Map(ref pairs) = last_entry_value {
+                pairs
+                    .iter()
+                    .find(|(k, _)| k.as_str() == Some(sv.field.as_str()))
+                    .and_then(|(_, v)| rmpv_to_json_value(v))
+                    .unwrap_or(serde_json::Value::Null)
+            } else {
+                serde_json::Value::Null
+            };
+            SortValue {
+                field: sv.field.clone(),
+                value,
+                direction: sv.direction.clone(),
+            }
+        })
+        .collect();
+
+    let cursor_data = CursorData {
+        sort_values,
+        last_key: last_entry_key.to_string(),
+        predicate_hash,
+        sort_hash,
+        timestamp: now_ms,
+    };
+
+    encode_cursor(&cursor_data)
 }
 
 // ---------------------------------------------------------------------------
@@ -624,6 +738,69 @@ mod tests {
             timestamp: now_ms - 11 * 60 * 1000, // 11 minutes ago → expired
         };
         assert!(!validate_cursor_expiry(&cursor, now_ms));
+    }
+
+    // -----------------------------------------------------------------------
+    // classify_cursor_status
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn classify_cursor_status_none_when_absent() {
+        assert_eq!(
+            classify_cursor_status(None, 1_700_000_000_000, 42, 99),
+            CursorStatus::None
+        );
+    }
+
+    #[test]
+    fn classify_cursor_status_valid_when_fresh_and_matching() {
+        let now_ms = 1_700_000_000_000i64;
+        let cursor = CursorData {
+            sort_values: vec![],
+            last_key: "k".to_string(),
+            predicate_hash: 42,
+            sort_hash: 99,
+            timestamp: now_ms - 60_000, // within TTL
+        };
+        assert_eq!(
+            classify_cursor_status(Some(&cursor), now_ms, 42, 99),
+            CursorStatus::Valid
+        );
+    }
+
+    #[test]
+    fn classify_cursor_status_invalid_on_hash_mismatch() {
+        let now_ms = 1_700_000_000_000i64;
+        let cursor = CursorData {
+            sort_values: vec![],
+            last_key: "k".to_string(),
+            predicate_hash: 42,
+            sort_hash: 99,
+            timestamp: now_ms - 60_000, // fresh, so only the hash differs
+        };
+        // Query shape changed under the same token → Invalid, not Valid.
+        assert_eq!(
+            classify_cursor_status(Some(&cursor), now_ms, 43, 99),
+            CursorStatus::Invalid
+        );
+    }
+
+    #[test]
+    fn classify_cursor_status_expired_takes_precedence_over_hash() {
+        let now_ms = 1_700_000_000_000i64;
+        // Stale AND hash-mismatched: expiry is checked first, so it reports Expired
+        // (the client should refresh the token) rather than Invalid.
+        let cursor = CursorData {
+            sort_values: vec![],
+            last_key: "k".to_string(),
+            predicate_hash: 1,
+            sort_hash: 2,
+            timestamp: now_ms - 11 * 60 * 1000, // past TTL
+        };
+        assert_eq!(
+            classify_cursor_status(Some(&cursor), now_ms, 42, 99),
+            CursorStatus::Expired
+        );
     }
 
     // -----------------------------------------------------------------------

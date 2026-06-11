@@ -143,7 +143,12 @@ export type { HttpSyncProviderConfig } from './connection/HttpSyncProvider';
 export type { AutoConnectionProviderConfig } from './connection/AutoConnectionProvider';
 
 // TopGunClient cluster config types
-export type { TopGunClusterConfig, TopGunClientConfig, QueryOnceOptions } from './TopGunClient';
+export type {
+  TopGunClusterConfig,
+  TopGunClientConfig,
+  QueryOnceOptions,
+  QueryOncePagedResult,
+} from './TopGunClient';
 export { DEFAULT_QUERY_ONCE_TIMEOUT_MS } from './TopGunClient';
 
 // queryOnce one-shot read errors

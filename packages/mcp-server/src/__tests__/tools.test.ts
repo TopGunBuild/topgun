@@ -59,8 +59,11 @@ class MockTopGunClient {
   // When set, hybridSearch rejects with this error to simulate server-side failures
   // (no embedding model, FTS not enabled for the map, etc.).
   hybridSearchRejection: Error | null = null;
-  // When set, queryOnce rejects with this error to simulate offline / not-settled.
+  // When set, queryOncePaged rejects with this error to simulate offline / not-settled.
   queryOnceRejection: Error | null = null;
+  // Override hasMore/cursor returned by queryOncePaged for pagination tests.
+  queryOncePagedHasMore = false;
+  queryOncePagedCursor: string | undefined = undefined;
 
   getMap(name: string): MockLWWMap {
     if (!this.maps.has(name)) {
@@ -110,12 +113,17 @@ class MockTopGunClient {
     return this.hybridSearchResults;
   }
 
-  // One-shot read mirroring TopGunClient.queryOnce: resolves with settled,
-  // authoritative server data, or rejects to simulate offline / not-settled.
-  async queryOnce(
+  // One-shot paged read mirroring TopGunClient.queryOncePaged: resolves with
+  // settled, authoritative server data including cursor metadata, or rejects
+  // to simulate offline / not-settled.
+  async queryOncePaged(
     mapName: string,
-    filter: { where?: Record<string, unknown>; limit?: number } = {},
-  ): Promise<Array<Record<string, unknown> & { _key: string }>> {
+    filter: { where?: Record<string, unknown>; limit?: number; cursor?: string } = {},
+  ): Promise<{
+    items: Array<Record<string, unknown> & { _key: string }>;
+    cursor?: string;
+    hasMore: boolean;
+  }> {
     if (this.queryOnceRejection) {
       throw this.queryOnceRejection;
     }
@@ -142,7 +150,20 @@ class MockTopGunClient {
       items = items.slice(0, filter.limit);
     }
 
-    return items;
+    return {
+      items,
+      cursor: this.queryOncePagedCursor,
+      hasMore: this.queryOncePagedHasMore,
+    };
+  }
+
+  // Legacy queryOnce for any remaining callers outside handleQuery
+  async queryOnce(
+    mapName: string,
+    filter: { where?: Record<string, unknown>; limit?: number } = {},
+  ): Promise<Array<Record<string, unknown> & { _key: string }>> {
+    const result = await this.queryOncePaged(mapName, filter);
+    return result.items;
   }
 }
 
@@ -240,20 +261,25 @@ describe('MCP Tools', () => {
       expect(result.content[0].text).toContain('5 result');
     });
 
-    it('should signal truncation when more rows match than the limit', async () => {
+    it('should signal truncation and provide continuation cursor when hasMore is true', async () => {
       const ctx = createTestContext();
-      const map = (ctx.client as unknown as MockTopGunClient).getMap('tasks');
-      for (let i = 0; i < 20; i++) {
+      const mockClient = ctx.client as unknown as MockTopGunClient;
+      const map = mockClient.getMap('tasks');
+      for (let i = 0; i < 5; i++) {
         map.set(`task${i}`, { title: `Task ${i}`, index: i });
       }
+      // Server-authoritative pagination signal: more results exist
+      mockClient.queryOncePagedHasMore = true;
+      mockClient.queryOncePagedCursor = 'next-page-cursor-abc';
 
       const result = await handleQuery({ map: 'tasks', limit: 5 }, ctx);
 
       expect(result.isError).toBeUndefined();
-      // The capped count is the requested limit, NOT the probe row.
       expect(result.content[0].text).toContain('5 result');
       // The agent must be told the view was capped — never a silent truncation.
       expect(result.content[0].text).toContain('More rows match than were returned');
+      // The real continuation cursor must be surfaced so the agent can page forward.
+      expect(result.content[0].text).toContain('cursor: "next-page-cursor-abc"');
     });
 
     it('should NOT signal truncation when results fit within the limit', async () => {
@@ -268,17 +294,46 @@ describe('MCP Tools', () => {
       expect(result.content[0].text).not.toContain('More rows match');
     });
 
-    it('should ignore a now-removed cursor argument without erroring', async () => {
+    it('should thread cursor arg through to queryOncePaged when provided', async () => {
       const ctx = createTestContext();
-      const map = (ctx.client as unknown as MockTopGunClient).getMap('tasks');
+      const mockClient = ctx.client as unknown as MockTopGunClient;
+      const map = mockClient.getMap('tasks');
       map.set('task1', { title: 'Only Task', status: 'todo' });
 
-      // `cursor` is no longer part of the schema; Zod strips unknown keys, so the
-      // call must still succeed (not reject) and return normally.
-      const result = await handleQuery({ map: 'tasks', cursor: 'stale-cursor' }, ctx);
+      // Cursor is a valid schema field — the call must succeed and return normally.
+      const result = await handleQuery({ map: 'tasks', cursor: 'page-2-cursor' }, ctx);
 
       expect(result.isError).toBeUndefined();
       expect(result.content[0].text).toContain('1 result');
+    });
+
+    it('should return continuation cursor in result text when hasMore is true', async () => {
+      const ctx = createTestContext();
+      const mockClient = ctx.client as unknown as MockTopGunClient;
+      mockClient.getMap('tasks').set('task1', { title: 'Task 1' });
+      mockClient.queryOncePagedHasMore = true;
+      mockClient.queryOncePagedCursor = 'cursor-token-xyz';
+
+      const result = await handleQuery({ map: 'tasks', limit: 1 }, ctx);
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('cursor: "cursor-token-xyz"');
+      // Should NOT say there is no cursor to page through
+      expect(result.content[0].text).not.toContain('no cursor to page through');
+    });
+
+    it('should NOT include continuation note when hasMore is false', async () => {
+      const ctx = createTestContext();
+      const mockClient = ctx.client as unknown as MockTopGunClient;
+      mockClient.getMap('tasks').set('task1', { title: 'Only Task', status: 'todo' });
+      // Default: queryOncePagedHasMore = false
+
+      const result = await handleQuery({ map: 'tasks', limit: 10 }, ctx);
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('1 result');
+      expect(result.content[0].text).not.toContain('More rows match');
+      expect(result.content[0].text).not.toContain('cursor:');
     });
 
     it('should deny access to restricted maps', async () => {
