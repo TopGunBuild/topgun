@@ -1542,20 +1542,38 @@ const handle = client.query<Todo>('todos', {
 const unsubscribe = handle.subscribe((results) => {
   console.log('Results:', results);
 });
+```
 
-// Cursor pagination
-const { nextCursor, hasMore } = handle.getPaginationInfo();
-if (hasMore && nextCursor) {
-  const nextPage = client.query<Todo>('todos', {
-    where: { completed: false },
-    sort: { createdAt: 'desc' },
-    limit: 10,
-    cursor: nextCursor,
-  });
+#### Cursor pagination — `loadMore()`
+
+Call `handle.loadMore()` to fetch the next page and append its rows to the existing result set. This is the recommended path: it guards against duplicate in-flight requests for the same cursor and merges the new page using an append-only strategy so earlier rows are never lost.
+
+```typescript
+const handle = client.query<Todo>('todos', {
+  where: { completed: false },
+  sort: { createdAt: 'desc' },
+  limit: 10,
+});
+
+// Render the first page
+const unsubscribe = handle.subscribe((results) => render(results));
+
+// Load subsequent pages on demand (e.g. a "Load more" button)
+await handle.loadMore();
+// The handle's subscriber fires again with the merged result set
+// (first page rows + new page rows combined).
+
+// Check whether more pages exist before calling again
+const { hasMore } = handle.getPaginationInfo();
+if (hasMore) {
+  await handle.loadMore();
 }
 ```
 
-`QueryHandle<T>` methods: `subscribe(cb)`, `onDelta(listener)`, `consumeChanges()`, `getLastChange()`, `getPendingChanges()`, `clearChanges()`, `resetChangeTracker()`, `getFilter()`, `getMapName()`, `getPaginationInfo()`, `onPaginationChange(listener)`, `updatePaginationInfo(info)`, `syncState` (getter), `onSyncStateChange(listener)`.
+`loadMore()` resolves immediately when there are no more pages (`hasMore` is false) or when a request for the same cursor is already in flight, so it is safe to call on every scroll event without extra debouncing.
+
+
+`QueryHandle<T>` methods: `subscribe(cb)`, `loadMore()`, `onDelta(listener)`, `consumeChanges()`, `getLastChange()`, `getPendingChanges()`, `clearChanges()`, `resetChangeTracker()`, `getFilter()`, `getMapName()`, `getPaginationInfo()`, `onPaginationChange(listener)`, `updatePaginationInfo(info)`, `syncState` (getter), `onSyncStateChange(listener)`.
 
 #### Knowing when a result is authoritative — `subscribe` `{ settled }`
 
@@ -1763,19 +1781,30 @@ const unsubscribe = handle.subscribe((results) => setResults(results));
 handle.dispose();
 ```
 
-### `sql(query)`
+### `sql(query)` — opt-in, server-feature-gated
 
 ```typescript
 public async sql(query: string): Promise<SqlQueryResult>
 ```
 
-Execute a SQL query server-side via DataFusion. Map names are table names. Requires the server's DataFusion feature and registered schemas.
+Execute a one-shot SQL query server-side via the DataFusion engine. Map names are used as table names; the server must have schemas registered for them.
+
+**Off by default.** The server's DataFusion feature is a compile-time opt-in (`--features datafusion`). The default server build (`default = ["redb"]`) does NOT include DataFusion. If you send a SQL query to a server built without this feature, the server returns an error.
+
+**Niche — use only for what the structured query API cannot express.** `client.sql()` exists for queries that genuinely require SQL: multi-map **joins**, **window functions**, **HAVING** clauses, and **DISTINCT** aggregation. For everything else — filtering, sorting, full-text search, group-by, aggregate functions — use the structured query API (`client.query()`, `client.queryOnce()`, `client.queryOncePaged()`) backed by the canonical DAG engine. Reaching for SQL when the structured API suffices adds a server-side dependency and bypasses the local-first offline path.
 
 ```typescript
-const result = await client.sql('SELECT name, age FROM users WHERE age > 21 ORDER BY age');
-// result.columns: ['name', 'age']
-// result.rows: [[...], [...]]
+// Only appropriate for cross-map joins or window/HAVING/DISTINCT queries
+const result = await client.sql(
+  'SELECT u.name, COUNT(t.id) AS task_count ' +
+  'FROM users u JOIN tasks t ON t.userId = u.id ' +
+  'GROUP BY u.name HAVING COUNT(t.id) > 3'
+);
+// result.columns: ['name', 'task_count']
+// result.rows: [['Alice', 5], ['Bob', 4]]
 ```
+
+`SqlQueryResult` shape: `{ columns: string[]; rows: unknown[][] }`. There is no cursor or pagination — SQL queries return the full result set. For large result sets, add a `LIMIT` clause.
 
 ### `vectorSearch(mapName, queryVector, options?)`
 
