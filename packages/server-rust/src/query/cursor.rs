@@ -6,6 +6,7 @@
 //! diverging silently.
 
 use topgun_core::messages::base::{Query, SortDirection};
+use topgun_core::messages::query::CursorStatus;
 
 // ---------------------------------------------------------------------------
 // CursorData
@@ -173,6 +174,31 @@ pub fn validate_cursor_hashes(cursor: &CursorData, predicate_hash: u64, sort_has
 #[must_use]
 pub fn validate_cursor_expiry(cursor: &CursorData, now_ms: i64) -> bool {
     now_ms - cursor.timestamp <= CURSOR_TTL_MS
+}
+
+/// Classifies the status to report for an incoming query cursor, reusing the exact
+/// expiry + hash checks the DAG's `CursorProcessor` applies. Because the emission path
+/// and the DAG both validate against the same `(predicate_hash, sort_hash)` derived from
+/// `cursor_query_hashes`, the reported status agrees with the DAG's accept/reject decision
+/// by construction.
+///
+/// Expiry is checked before hash-match so a stale-but-shape-matching token reports
+/// `Expired` (the client should refresh) rather than `Invalid`. Returns `None` when no
+/// cursor was supplied. This is deterministic and does NOT infer rejection from an empty
+/// result page — a legitimately empty final page stays `Valid`.
+#[must_use]
+pub fn classify_cursor_status(
+    cursor: Option<&CursorData>,
+    now_ms: i64,
+    predicate_hash: u64,
+    sort_hash: u64,
+) -> CursorStatus {
+    match cursor {
+        None => CursorStatus::None,
+        Some(c) if !validate_cursor_expiry(c, now_ms) => CursorStatus::Expired,
+        Some(c) if !validate_cursor_hashes(c, predicate_hash, sort_hash) => CursorStatus::Invalid,
+        Some(_) => CursorStatus::Valid,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -712,6 +738,69 @@ mod tests {
             timestamp: now_ms - 11 * 60 * 1000, // 11 minutes ago → expired
         };
         assert!(!validate_cursor_expiry(&cursor, now_ms));
+    }
+
+    // -----------------------------------------------------------------------
+    // classify_cursor_status
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn classify_cursor_status_none_when_absent() {
+        assert_eq!(
+            classify_cursor_status(None, 1_700_000_000_000, 42, 99),
+            CursorStatus::None
+        );
+    }
+
+    #[test]
+    fn classify_cursor_status_valid_when_fresh_and_matching() {
+        let now_ms = 1_700_000_000_000i64;
+        let cursor = CursorData {
+            sort_values: vec![],
+            last_key: "k".to_string(),
+            predicate_hash: 42,
+            sort_hash: 99,
+            timestamp: now_ms - 60_000, // within TTL
+        };
+        assert_eq!(
+            classify_cursor_status(Some(&cursor), now_ms, 42, 99),
+            CursorStatus::Valid
+        );
+    }
+
+    #[test]
+    fn classify_cursor_status_invalid_on_hash_mismatch() {
+        let now_ms = 1_700_000_000_000i64;
+        let cursor = CursorData {
+            sort_values: vec![],
+            last_key: "k".to_string(),
+            predicate_hash: 42,
+            sort_hash: 99,
+            timestamp: now_ms - 60_000, // fresh, so only the hash differs
+        };
+        // Query shape changed under the same token → Invalid, not Valid.
+        assert_eq!(
+            classify_cursor_status(Some(&cursor), now_ms, 43, 99),
+            CursorStatus::Invalid
+        );
+    }
+
+    #[test]
+    fn classify_cursor_status_expired_takes_precedence_over_hash() {
+        let now_ms = 1_700_000_000_000i64;
+        // Stale AND hash-mismatched: expiry is checked first, so it reports Expired
+        // (the client should refresh the token) rather than Invalid.
+        let cursor = CursorData {
+            sort_values: vec![],
+            last_key: "k".to_string(),
+            predicate_hash: 1,
+            sort_hash: 2,
+            timestamp: now_ms - 11 * 60 * 1000, // past TTL
+        };
+        assert_eq!(
+            classify_cursor_status(Some(&cursor), now_ms, 42, 99),
+            CursorStatus::Expired
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -17,9 +17,7 @@ use tower::Service;
 
 use topgun_core::messages::base::{ChangeEventType, Query};
 use topgun_core::messages::client_events::QueryUpdatePayload;
-use topgun_core::messages::query::{
-    CursorStatus, QueryRespMessage, QueryRespPayload, QueryResultEntry,
-};
+use topgun_core::messages::query::{QueryRespMessage, QueryRespPayload, QueryResultEntry};
 use topgun_core::messages::vector::{
     VectorSearchPayload, VectorSearchRespPayload, VectorSearchResult,
 };
@@ -27,7 +25,9 @@ use topgun_core::messages::{Message, SyncRespRootMessage, SyncRespRootPayload};
 use topgun_core::vector::distance::DistanceMetric;
 
 use crate::dag::coordinator::{run_dag_local, ClusterQueryCoordinator};
-use crate::query::cursor::{build_next_cursor, cursor_query_hashes, SortValue};
+use crate::query::cursor::{
+    build_next_cursor, classify_cursor_status, cursor_query_hashes, decode_cursor, SortValue,
+};
 
 use tracing::Instrument;
 
@@ -659,8 +659,11 @@ impl QueryService {
         // consume-side path in converter.rs, making hash divergence impossible.
         let (predicate_hash, sort_hash) = cursor_query_hashes(&query);
         let query_limit = query.limit;
-        // Track whether the incoming cursor was present/valid for cursor_status reporting.
-        let input_cursor_present = query.cursor.is_some();
+        // Decode the incoming cursor (if any) before `query` is moved, so the emission
+        // site can report an accurate cursor_status. Validation reuses the same helpers
+        // the DAG's CursorProcessor runs, against the same hashes computed above — so the
+        // status reported here agrees with the DAG's accept/reject decision by construction.
+        let input_cursor = query.cursor.as_deref().and_then(decode_cursor);
         // Build a sort_values template from the query's sort spec for cursor construction.
         let sort_values_template: Vec<SortValue> = query
             .sort
@@ -854,18 +857,18 @@ impl QueryService {
             None
         };
 
-        // Reflect the input cursor processing outcome.
-        let cursor_status = if input_cursor_present {
-            // The cursor was consumed by the DAG's CursorProcessor. Whether it was
-            // accepted or rejected is opaque at this level; surfacing Valid is the
-            // correct semantic for a cursor that survived to produce results.
-            // Rejection paths (expired/hash-mismatch) return empty results, which the
-            // client interprets as exhaustion. Fine-grained rejected-cursor reporting
-            // can be added in a follow-up when the DAG surfaces rejection reasons.
-            Some(CursorStatus::Valid)
-        } else {
-            Some(CursorStatus::None)
-        };
+        // Reflect the input cursor processing outcome. Re-validate the decoded cursor with
+        // the same checks the DAG's CursorProcessor applies (expiry first, then hash-match
+        // against this query's predicate/sort hashes), so the client can distinguish a stale
+        // token (restart pagination) from genuine exhaustion. This is deterministic — it does
+        // NOT infer rejection from an empty result page, which would mislabel a legitimately
+        // empty final page as expired/invalid.
+        let cursor_status = Some(classify_cursor_status(
+            input_cursor.as_ref(),
+            now_ms,
+            predicate_hash,
+            sort_hash,
+        ));
 
         // Register standing subscription (with fields for future QUERY_UPDATE projection).
         // Must happen AFTER hashes are captured (query is moved here).
