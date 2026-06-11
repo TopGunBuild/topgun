@@ -1,7 +1,8 @@
 import { QueryHandle } from '../QueryHandle';
 import { SyncEngine } from '../SyncEngine';
 
-// Mock SyncEngine
+// Mock SyncEngine — reused across tests; some test sections override subscribeToQuery
+// per-test for precise call-count assertions.
 const mockSyncEngine = {
   subscribeToQuery: jest.fn(),
   unsubscribeFromQuery: jest.fn(),
@@ -330,6 +331,151 @@ describe('QueryHandle', () => {
       const [results, meta] = late.mock.calls[0];
       expect(results).toHaveLength(1);
       expect(meta).toEqual({ settled: true });
+    });
+  });
+
+  describe('loadMore()', () => {
+    /**
+     * Builds a fake SyncEngine whose subscribeToQuery immediately settles the
+     * QueryHandle with the provided items and pagination info. This lets
+     * loadMore() complete synchronously in tests without real networking.
+     */
+    function makeFakeEngine(pageItems: { key: string; value: any }[], nextCursor?: string) {
+      const subscribeToQuery = jest.fn((h: QueryHandle<any>) => {
+        // Deliver results synchronously so whenSettled() resolves in the next microtask.
+        h.onResult(pageItems, 'server');
+        if (nextCursor !== undefined) {
+          h.updatePaginationInfo({ nextCursor, hasMore: true, cursorStatus: 'valid' });
+        } else {
+          h.updatePaginationInfo({ hasMore: false, cursorStatus: 'none' });
+        }
+      });
+
+      return {
+        subscribeToQuery,
+        unsubscribeFromQuery: jest.fn(),
+        runLocalQuery: jest.fn().mockResolvedValue([]),
+      } as unknown as SyncEngine;
+    }
+
+    test('loadMore() appends page-2 rows without pruning page-1 rows (disjoint keys)', async () => {
+      // Page-2 engine returns keys p2a and p2b only.
+      const page2Engine = makeFakeEngine([
+        { key: 'p2a', value: { name: 'Page2-A' } },
+        { key: 'p2b', value: { name: 'Page2-B' } },
+      ]);
+
+      const handle = new QueryHandle<any>(page2Engine, 'items', { limit: 2 });
+
+      // Seed page-1 results directly — simulates the initial QUERY_RESP.
+      let notified: any[] = [];
+      handle.subscribe((results) => {
+        notified = results;
+      });
+      handle.onResult(
+        [
+          { key: 'p1a', value: { name: 'Page1-A' } },
+          { key: 'p1b', value: { name: 'Page1-B' } },
+        ],
+        'server',
+      );
+      // Tell the handle there is a next page.
+      handle.updatePaginationInfo({ nextCursor: 'cursor-1', hasMore: true, cursorStatus: 'valid' });
+
+      await handle.loadMore();
+
+      // Both page-1 and page-2 keys must be present.
+      const keys = notified.map((r) => r._key);
+      expect(keys).toContain('p1a');
+      expect(keys).toContain('p1b');
+      expect(keys).toContain('p2a');
+      expect(keys).toContain('p2b');
+      expect(keys).toHaveLength(4);
+    });
+
+    test('loadMore() is a no-op when hasMore is false', async () => {
+      const fakeEngine = makeFakeEngine([]);
+      const handle = new QueryHandle<any>(fakeEngine, 'items', {});
+      handle.subscribe(jest.fn());
+      handle.onResult([], 'server');
+      handle.updatePaginationInfo({ hasMore: false, cursorStatus: 'none' });
+
+      // subscribeToQuery call count before loadMore
+      const callsBefore = (fakeEngine.subscribeToQuery as jest.Mock).mock.calls.length;
+      await handle.loadMore();
+
+      // No additional subscribeToQuery calls — no temp handle was created.
+      expect((fakeEngine.subscribeToQuery as jest.Mock).mock.calls.length).toBe(callsBefore);
+    });
+
+    test('concurrent loadMore() calls do not issue duplicate follow-up queries', async () => {
+      // The fake engine settles the temp handle immediately but we need to
+      // control timing to keep the first loadMore in-flight while the second fires.
+      // We use a deferred settle: subscribeToQuery captures the handle, and we
+      // resolve it manually after both loadMore calls have been issued.
+      let capturedHandle: QueryHandle<any> | undefined;
+      let resolveSettle!: () => void;
+      const settlePromise = new Promise<void>((resolve) => {
+        resolveSettle = resolve;
+      });
+
+      const deferredEngine = {
+        subscribeToQuery: jest.fn((h: QueryHandle<any>) => {
+          capturedHandle = h;
+          // Settle asynchronously so both loadMore() calls can be issued first.
+          settlePromise.then(() => {
+            h.onResult([{ key: 'p2a', value: { name: 'Page2-A' } }], 'server');
+            h.updatePaginationInfo({ hasMore: false, cursorStatus: 'none' });
+          });
+        }),
+        unsubscribeFromQuery: jest.fn(),
+        runLocalQuery: jest.fn().mockResolvedValue([]),
+      } as unknown as SyncEngine;
+
+      const handle = new QueryHandle<any>(deferredEngine, 'items', {});
+      // handle.subscribe() triggers subscribeToQuery for the main handle (call #1).
+      handle.subscribe(jest.fn());
+      handle.onResult([], 'server');
+      handle.updatePaginationInfo({ nextCursor: 'cursor-1', hasMore: true, cursorStatus: 'valid' });
+
+      // Reset the call count AFTER main subscribe — we only care about temp-handle calls.
+      (deferredEngine.subscribeToQuery as jest.Mock).mockClear();
+
+      // Fire two concurrent loadMore calls — neither has resolved yet.
+      const p1 = handle.loadMore();
+      const p2 = handle.loadMore();
+
+      // Allow first call to proceed.
+      resolveSettle();
+      await Promise.all([p1, p2]);
+
+      // subscribeToQuery should have been called exactly ONCE for the temp handle
+      // (the in-flight latch deduplicates the second concurrent call).
+      expect((deferredEngine.subscribeToQuery as jest.Mock).mock.calls.length).toBe(1);
+      void capturedHandle; // referenced to satisfy no-unused-vars
+    });
+
+    test('loadMore() advances paginationInfo to the new page cursor', async () => {
+      // Page-2 engine returns a cursor for page-3.
+      const page2Engine = makeFakeEngine(
+        [{ key: 'p2a', value: { name: 'Page2-A' } }],
+        'cursor-for-page-3',
+      );
+
+      const handle = new QueryHandle<any>(page2Engine, 'items', { limit: 1 });
+      handle.subscribe(jest.fn());
+      handle.onResult([{ key: 'p1a', value: { name: 'Page1-A' } }], 'server');
+      handle.updatePaginationInfo({
+        nextCursor: 'cursor-for-page-2',
+        hasMore: true,
+        cursorStatus: 'valid',
+      });
+
+      await handle.loadMore();
+
+      const info = handle.getPaginationInfo();
+      expect(info.hasMore).toBe(true);
+      expect(info.nextCursor).toBe('cursor-for-page-3');
     });
   });
 

@@ -2,6 +2,7 @@ import { TopGunClient } from '../TopGunClient';
 import { QueryHandle } from '../QueryHandle';
 import { SyncState } from '../SyncState';
 import { QueryOnceUnsettledError, QueryOnceLocalError } from '../errors/QueryOnceError';
+import type { QueryOncePagedResult } from '../TopGunClient';
 import type { IStorageAdapter, OpLogEntry } from '../IStorageAdapter';
 
 // crypto.randomUUID is needed by the TopGunClient constructor in Node test envs.
@@ -132,6 +133,23 @@ async function settleServer(
   handle.onResult(items, 'server');
 }
 
+/** Push a QUERY_RESP with pagination metadata into the active queryOncePaged handle. */
+async function settleServerPaged(
+  engine: SyncEngineDouble,
+  items: { key: string; value: unknown }[],
+  pagination: { nextCursor?: string; hasMore: boolean },
+): Promise<void> {
+  await Promise.resolve();
+  const handle = engine.lastHandle();
+  if (!handle) throw new Error('queryOncePaged did not subscribe a handle');
+  handle.onResult(items, 'server');
+  handle.updatePaginationInfo({
+    nextCursor: pagination.nextCursor,
+    hasMore: pagination.hasMore,
+    cursorStatus: pagination.nextCursor ? 'valid' : 'none',
+  });
+}
+
 describe('TopGunClient.queryOnce', () => {
   describe('AC1 — returns authoritative server data not local []', () => {
     test('resolves with a server-only record (not [])', async () => {
@@ -256,6 +274,90 @@ describe('TopGunClient.queryOnce', () => {
       const results = await promise; // resolves, does not throw → settled server data
       expect(results[0]._key).toBe('u1');
       expect((results[0] as { name: string }).name).toBe('ServerAda');
+    });
+  });
+});
+
+describe('TopGunClient.queryOncePaged', () => {
+  describe('AC3 — resolves to { items, cursor, hasMore }', () => {
+    test('resolves with items, cursor, and hasMore from the server response', async () => {
+      const { client, engine } = makeClient(SyncState.CONNECTED);
+
+      const promise = client.queryOncePaged('posts', { limit: 2 });
+
+      await settleServerPaged(
+        engine,
+        [
+          { key: 'p1', value: { title: 'Post 1' } },
+          { key: 'p2', value: { title: 'Post 2' } },
+        ],
+        { nextCursor: 'cursor-abc', hasMore: true },
+      );
+
+      const result: QueryOncePagedResult<{ title: string }> = await promise;
+      expect(result.items).toHaveLength(2);
+      expect(result.items[0]._key).toBe('p1');
+      expect(result.items[1]._key).toBe('p2');
+      expect(result.cursor).toBe('cursor-abc');
+      expect(result.hasMore).toBe(true);
+    });
+
+    test('hasMore is false and cursor is undefined when server has no further pages', async () => {
+      const { client, engine } = makeClient(SyncState.CONNECTED);
+
+      const promise = client.queryOncePaged('posts', { limit: 10 });
+
+      await settleServerPaged(engine, [{ key: 'p1', value: { title: 'Only Post' } }], {
+        hasMore: false,
+      });
+
+      const result = await promise;
+      expect(result.hasMore).toBe(false);
+      expect(result.cursor).toBeUndefined();
+      expect(result.items).toHaveLength(1);
+    });
+
+    test('auto-unsubscribes after resolving (no live subscription leak)', async () => {
+      const { client, engine } = makeClient(SyncState.CONNECTED);
+      const promise = client.queryOncePaged('posts', {});
+      await settleServerPaged(engine, [{ key: 'p1', value: {} }], { hasMore: false });
+      await promise;
+
+      expect(engine.unsubscribeFromQuery).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('AC4 — offline policy matches queryOnce', () => {
+    test('default offline → throws QueryOnceUnsettledError', async () => {
+      const { client } = makeClient(SyncState.DISCONNECTED);
+
+      await expect(client.queryOncePaged('posts', {})).rejects.toBeInstanceOf(
+        QueryOnceUnsettledError,
+      );
+      await expect(client.queryOncePaged('posts', {})).rejects.toMatchObject({
+        code: 'QUERY_ONCE_UNSETTLED',
+        reason: 'offline',
+      });
+    });
+
+    test('default timeout → throws QueryOnceUnsettledError (timeout)', async () => {
+      const { client } = makeClient(SyncState.CONNECTED);
+
+      await expect(client.queryOncePaged('posts', {}, { timeoutMs: 20 })).rejects.toMatchObject({
+        code: 'QUERY_ONCE_UNSETTLED',
+        reason: 'timeout',
+      });
+    });
+
+    test('allowLocal offline → throws QueryOnceLocalError carrying local snapshot', async () => {
+      const { client, engine } = makeClient(SyncState.DISCONNECTED);
+      engine.runLocalQuery.mockResolvedValue([{ key: 'p1', value: { title: 'LocalPost' } }]);
+
+      const promise = client.queryOncePaged('posts', {}, { allowLocal: true });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      await expect(promise).rejects.toBeInstanceOf(QueryOnceLocalError);
     });
   });
 });
