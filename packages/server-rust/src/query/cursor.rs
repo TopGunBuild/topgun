@@ -5,7 +5,7 @@
 //! the HTTP-specific `HttpCursorData` and any future per-transport cursors from
 //! diverging silently.
 
-use topgun_core::messages::base::SortDirection;
+use topgun_core::messages::base::{Query, SortDirection};
 
 // ---------------------------------------------------------------------------
 // CursorData
@@ -173,6 +173,94 @@ pub fn validate_cursor_hashes(cursor: &CursorData, predicate_hash: u64, sort_has
 #[must_use]
 pub fn validate_cursor_expiry(cursor: &CursorData, now_ms: i64) -> bool {
     now_ms - cursor.timestamp <= CURSOR_TTL_MS
+}
+
+// ---------------------------------------------------------------------------
+// Shared hash computation for cursor validation
+// ---------------------------------------------------------------------------
+
+/// Computes the predicate and sort hashes for a query in a single authoritative place.
+///
+/// Both the cursor *consumption* path (`build_cursor_vertex_config` in `dag/converter.rs`)
+/// and the cursor *emission* path (`query.rs::handle_query_subscribe`) must call this
+/// function so their hashes are identical by construction — making hash divergence
+/// structurally impossible regardless of how query fields evolve.
+///
+/// Returns `(predicate_hash, sort_hash)`. Either value is `0` when the corresponding
+/// field is absent from the query.
+///
+/// Hash stability note: uses `DefaultHasher` over `format!("{:?}")` — acceptable for
+/// short-lived (≤10 min TTL) cursors always validated by the same binary that emitted them.
+#[must_use]
+pub fn cursor_query_hashes(query: &Query) -> (u64, u64) {
+    use std::hash::{Hash, Hasher};
+
+    let hash_debug = |value: &dyn std::fmt::Debug| -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        format!("{value:?}").hash(&mut h);
+        h.finish()
+    };
+
+    let predicate_hash = query.predicate.as_ref().map_or(0, |p| hash_debug(p));
+    let sort_hash = query.sort.as_ref().map_or(0, |s| hash_debug(s));
+
+    (predicate_hash, sort_hash)
+}
+
+/// Builds an encoded keyset cursor from the last entry in a page.
+///
+/// This is the single authoritative cursor-encode emission helper. Both the HTTP sync
+/// handler and the WS query handler call this function so there is exactly one encoding
+/// path — no duplicated `CursorData` construction logic.
+///
+/// Takes `predicate_hash`/`sort_hash` as parameters (hash-source-agnostic) so callers
+/// can supply their own hash sources without coupling the encode logic to any particular
+/// derivation strategy:
+/// - WS path: passes values from `cursor_query_hashes(query)`
+/// - HTTP cursor branch: passes values copied from the incoming cursor
+/// - HTTP offset branch: passes `0/0` (offset-based cursors do not validate hashes)
+///
+/// `sort_values_template` provides the sort-field names and directions (from the query's
+/// sort spec or from the incoming cursor's `sort_values`). Field values are extracted
+/// from `last_entry` by name.
+#[must_use]
+pub fn build_next_cursor(
+    last_entry_key: &str,
+    last_entry_value: &rmpv::Value,
+    sort_values_template: &[SortValue],
+    predicate_hash: u64,
+    sort_hash: u64,
+    now_ms: i64,
+) -> String {
+    let sort_values: Vec<SortValue> = sort_values_template
+        .iter()
+        .map(|sv| {
+            let value = if let rmpv::Value::Map(ref pairs) = last_entry_value {
+                pairs
+                    .iter()
+                    .find(|(k, _)| k.as_str() == Some(sv.field.as_str()))
+                    .and_then(|(_, v)| rmpv_to_json_value(v))
+                    .unwrap_or(serde_json::Value::Null)
+            } else {
+                serde_json::Value::Null
+            };
+            SortValue {
+                field: sv.field.clone(),
+                value,
+                direction: sv.direction.clone(),
+            }
+        })
+        .collect();
+
+    let cursor_data = CursorData {
+        sort_values,
+        last_key: last_entry_key.to_string(),
+        predicate_hash,
+        sort_hash,
+        timestamp: now_ms,
+    };
+
+    encode_cursor(&cursor_data)
 }
 
 // ---------------------------------------------------------------------------

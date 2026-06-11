@@ -14,6 +14,7 @@ use anyhow::Result;
 use topgun_core::messages::base::{PredicateNode, PredicateOp, Query, SortDirection, SortField};
 
 use crate::dag::types::{DagPlanDescriptor, Edge, ProcessorType, RoutingPolicy, VertexDescriptor};
+use crate::query::cursor::cursor_query_hashes;
 
 // ---------------------------------------------------------------------------
 // Private helpers
@@ -59,17 +60,12 @@ fn predicate_to_config(predicate: &PredicateNode) -> Result<rmpv::Value> {
 /// `CursorProcessor` can validate that the cursor was produced by the same query
 /// shape — a cursor from a different query would otherwise return incorrect results
 /// silently. Callers must only invoke this when `query.cursor` is `Some`.
+///
+/// Hashes are computed via `cursor_query_hashes` — the single authoritative source
+/// shared with the emission path in `query.rs` — making hash divergence impossible
+/// by construction.
 fn build_cursor_vertex_config(cursor_str: &str, query: &Query) -> rmpv::Value {
-    use std::hash::{Hash, Hasher};
-
-    let hash_debug = |value: &dyn std::fmt::Debug| -> u64 {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        format!("{value:?}").hash(&mut h);
-        h.finish()
-    };
-
-    let predicate_hash: u64 = query.predicate.as_ref().map_or(0, |p| hash_debug(p));
-    let sort_hash: u64 = query.sort.as_ref().map_or(0, |s| hash_debug(s));
+    let (predicate_hash, sort_hash) = cursor_query_hashes(query);
 
     rmpv::Value::Map(vec![
         (
@@ -460,7 +456,11 @@ impl QueryToDagConverter {
 
         // --- Step 5: Limit vertex (optional) ---
         if let Some(limit) = query.limit {
-            let limit_config = rmpv::Value::Integer(rmpv::Integer::from(u64::from(limit)));
+            // Request limit+1 rows so the emission site can detect whether more records
+            // exist beyond the page boundary without a separate count query. The extra
+            // sentinel row is never returned to callers — the emission site truncates to
+            // `limit` and sets `has_more = true` when it observes limit+1 rows.
+            let limit_config = rmpv::Value::Integer(rmpv::Integer::from(u64::from(limit) + 1));
 
             vertices.push(VertexDescriptor {
                 name: "limit".to_string(),

@@ -26,8 +26,7 @@ use topgun_core::Timestamp;
 use super::auth_validator::AuthValidationContext;
 use super::AppState;
 use crate::query::cursor::{
-    decode_cursor, encode_cursor, is_after_cursor, rmpv_to_json_value, validate_cursor_expiry,
-    CursorData, SortValue,
+    build_next_cursor, decode_cursor, is_after_cursor, validate_cursor_expiry,
 };
 use crate::service::dispatch::PartitionDispatcher;
 use crate::service::domain::predicate::{execute_query, value_to_rmpv};
@@ -490,39 +489,18 @@ async fn dispatch_queries(
                 let truncated = total_after > lim;
                 let page_entries: Vec<_> = after_cursor.into_iter().take(lim).collect();
 
+                // Use the shared emission helper with the incoming cursor's hashes so the
+                // follow-up page uses the same predicate/sort context as the current page.
                 let nc = if truncated {
                     page_entries.last().map(|last| {
-                        // Rebuild sort_values for the next cursor by extracting the last
-                        // seen value for each sort field from the final entry in the page.
-                        let sort_values: Vec<SortValue> = cursor_data
-                            .sort_values
-                            .iter()
-                            .map(|sv| {
-                                let value = if let rmpv::Value::Map(ref pairs) = last.value {
-                                    pairs
-                                        .iter()
-                                        .find(|(k, _)| k.as_str() == Some(sv.field.as_str()))
-                                        .and_then(|(_, v)| rmpv_to_json_value(v))
-                                        .unwrap_or(serde_json::Value::Null)
-                                } else {
-                                    serde_json::Value::Null
-                                };
-                                SortValue {
-                                    field: sv.field.clone(),
-                                    value,
-                                    direction: sv.direction.clone(),
-                                }
-                            })
-                            .collect();
-
-                        let next = CursorData {
-                            sort_values,
-                            last_key: last.key.clone(),
-                            predicate_hash: cursor_data.predicate_hash,
-                            sort_hash: cursor_data.sort_hash,
-                            timestamp: now_ms,
-                        };
-                        encode_cursor(&next)
+                        build_next_cursor(
+                            &last.key,
+                            &last.value,
+                            &cursor_data.sort_values,
+                            cursor_data.predicate_hash,
+                            cursor_data.sort_hash,
+                            now_ms,
+                        )
                     })
                 } else {
                     None
@@ -546,18 +524,12 @@ async fn dispatch_queries(
                 let page_entries: Vec<_> = filtered.into_iter().skip(offset).take(lim).collect();
                 let truncated = total_filtered > offset + lim;
 
-                // Generate next_cursor from the last entry when more results exist.
-                // Key-based ordering uses an empty sort_values list (key tie-break only).
+                // Offset-based pagination uses an empty sort template (key tie-break only)
+                // and hard-coded 0/0 hashes because offset cursors do not validate hashes
+                // via CursorProcessor — they rely solely on the last_key position.
                 let nc = if truncated {
                     page_entries.last().map(|last| {
-                        let next = CursorData {
-                            sort_values: vec![],
-                            last_key: last.key.clone(),
-                            predicate_hash: 0,
-                            sort_hash: 0,
-                            timestamp: now_ms,
-                        };
-                        encode_cursor(&next)
+                        build_next_cursor(&last.key, &last.value, &[], 0, 0, now_ms)
                     })
                 } else {
                     None

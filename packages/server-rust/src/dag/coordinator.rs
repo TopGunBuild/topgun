@@ -35,6 +35,44 @@ use crate::storage::factory::RecordStoreFactory;
 use topgun_core::messages::base::{Aggregation, Query};
 
 // ---------------------------------------------------------------------------
+// DistributedQueryResult
+// ---------------------------------------------------------------------------
+
+/// Result type returned by `execute_distributed`.
+///
+/// The coordinator fetches `limit+1` rows internally so it can detect whether more
+/// records exist beyond the page boundary. It absorbs the sentinel row — truncating
+/// `rows` to `limit` — and surfaces the finding as an explicit `has_more` bool. This
+/// keeps the public contract honest: `rows.len() <= limit` always holds, and no caller
+/// needs to strip a sentinel or count rows to infer pagination state.
+///
+/// `Debug` is required because internal unit tests use `{results:?}` format strings.
+#[derive(Debug)]
+pub struct DistributedQueryResult {
+    /// Result rows, always `<= limit` for queries that carry a limit.
+    pub rows: Vec<rmpv::Value>,
+    /// `true` when the merged candidate set exceeded `limit` (i.e. more pages remain).
+    pub has_more: bool,
+}
+
+/// Absorbs the `limit+1` sentinel from a raw DAG output vector.
+///
+/// When a DAG pipeline is configured with `limit+1`, the returned vector may contain
+/// up to `limit+1` rows. If it does, more records exist beyond the page boundary.
+/// This helper detects that case, truncates to `limit`, and returns the `has_more`
+/// signal so callers do not need to reason about the sentinel directly.
+fn absorb_sentinel(mut rows: Vec<rmpv::Value>, limit: Option<u32>) -> (Vec<rmpv::Value>, bool) {
+    match limit {
+        Some(lim) => {
+            let has_more = rows.len() > lim as usize;
+            rows.truncate(lim as usize);
+            (rows, has_more)
+        }
+        None => (rows, false),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ClusterQueryCoordinator
 // ---------------------------------------------------------------------------
 
@@ -88,7 +126,7 @@ impl ClusterQueryCoordinator {
         }
     }
 
-    /// Executes a distributed query and returns the merged result rows.
+    /// Executes a distributed query and returns a `DistributedQueryResult`.
     ///
     /// Steps:
     /// 1. Retrieve active members and build partition assignment map
@@ -100,6 +138,10 @@ impl ClusterQueryCoordinator {
     /// 7. Await completions with timeout from `config.timeout_ms`
     /// 8. Merge results; run GROUP BY combine pass if needed
     ///
+    /// The returned `DistributedQueryResult.rows` always contains at most `limit` rows
+    /// (the `limit+1` sentinel is absorbed internally). `has_more` is `true` when the
+    /// merged candidate set exceeded `limit`.
+    ///
     /// # Errors
     /// Returns an error if any node reports failure, the timeout expires, or
     /// the descriptor/plan cannot be serialized.
@@ -107,7 +149,7 @@ impl ClusterQueryCoordinator {
         &self,
         query: &Query,
         map_name: &str,
-    ) -> Result<Vec<rmpv::Value>> {
+    ) -> Result<DistributedQueryResult> {
         // Step 1: membership and partition assignment
         let members_view = self.cluster_service.members_view();
         let active_members = members_view.active_members();
@@ -123,11 +165,15 @@ impl ClusterQueryCoordinator {
             .map(|nid| (nid.clone(), partition_table.partitions_for_node(nid)))
             .collect();
 
-        // Step 2: single-node bypass
+        // Step 2: single-node bypass — wrap local result in DistributedQueryResult.
+        // The DAG already ran with limit+1 (from the converter), so we detect has_more
+        // and truncate here using the same sentinel pattern as the multi-node path.
         if !QueryToDagConverter::needs_distribution(query, &partition_assignment) {
-            return self
+            let raw = self
                 .execute_local(query, map_name, &partition_assignment)
-                .await;
+                .await?;
+            let (rows, has_more) = absorb_sentinel(raw, query.limit);
+            return Ok(DistributedQueryResult { rows, has_more });
         }
 
         // Step 3: build plan descriptor
@@ -299,7 +345,7 @@ impl ClusterQueryCoordinator {
         node_results: Vec<Vec<rmpv::Value>>,
         query: &Query,
         _descriptor: &DagPlanDescriptor,
-    ) -> Result<Vec<rmpv::Value>> {
+    ) -> Result<DistributedQueryResult> {
         use crate::dag::executor::{VecDequeInbox, VecDequeOutbox};
         use crate::dag::types::ProcessorContext;
 
@@ -342,19 +388,25 @@ impl ClusterQueryCoordinator {
     }
 
     /// Applies coordinator-side global sort (when `query.sort` is non-empty) and
-    /// global limit (when `query.limit` is set) to an already-materialized row set.
+    /// global limit+1 (when `query.limit` is set) to an already-materialized row set,
+    /// then absorbs the sentinel and returns a `DistributedQueryResult`.
+    ///
+    /// Fetching `limit+1` globally (instead of exactly `limit`) lets the coordinator
+    /// detect whether more records exist beyond the page boundary without a separate
+    /// count query. The sentinel row is absorbed here — `rows` always contains at most
+    /// `limit` entries — and `has_more` is set accordingly.
     ///
     /// Reuses `SortProcessor` and `LimitProcessor` via the same
     /// `VecDequeInbox`/`VecDequeOutbox` drive pattern used by `combine_group_by_results`
     /// so global sort and per-node sort always agree by construction on field/direction.
     ///
     /// When sort is absent the rows pass through unchanged (no implicit ordering imposed).
-    /// When limit is absent no row-count clamp is applied.
+    /// When limit is absent no row-count clamp is applied and `has_more` is always false.
     fn apply_global_sort_and_limit(
         &self,
         rows: Vec<rmpv::Value>,
         query: &Query,
-    ) -> Result<Vec<rmpv::Value>> {
+    ) -> Result<DistributedQueryResult> {
         use crate::dag::executor::{VecDequeInbox, VecDequeOutbox};
         use crate::dag::types::ProcessorContext;
         use topgun_core::messages::base::SortDirection;
@@ -402,10 +454,17 @@ impl ClusterQueryCoordinator {
             rows
         };
 
-        // Apply the global limit when the query requests it.
+        // Apply the global limit+1 when the query requests it. The extra row is the
+        // sentinel: if we receive limit+1 rows, it means more records exist beyond this
+        // page. We truncate to limit before returning so the contract stays honest.
         if let Some(limit) = query.limit {
+            // Request limit+1 to detect whether more records exist.
+            let fetch_limit = u32::saturating_add(limit, 1);
             let n = sorted.len();
-            let mut limit_procs = LimitProcessorSupplier { limit }.get(1);
+            let mut limit_procs = LimitProcessorSupplier {
+                limit: fetch_limit,
+            }
+            .get(1);
             let mut limit_proc = limit_procs
                 .pop()
                 .ok_or_else(|| anyhow!("LimitProcessorSupplier returned no processors"))?;
@@ -427,9 +486,20 @@ impl ClusterQueryCoordinator {
             }
             limit_proc.process(0, &mut inbox, &mut limit_outbox)?;
 
-            Ok(limit_outbox.drain_bucket(0).collect())
+            let mut candidate: Vec<rmpv::Value> = limit_outbox.drain_bucket(0).collect();
+            let merged_len = candidate.len();
+            let has_more = merged_len > limit as usize;
+            // Absorb the sentinel: truncate to exactly limit rows before returning.
+            candidate.truncate(limit as usize);
+            Ok(DistributedQueryResult {
+                rows: candidate,
+                has_more,
+            })
         } else {
-            Ok(sorted)
+            Ok(DistributedQueryResult {
+                rows: sorted,
+                has_more: false,
+            })
         }
     }
 }
@@ -1081,7 +1151,7 @@ mod tests {
 
         // Local execution should succeed (no records = empty result)
         assert!(result.is_ok(), "local bypass should succeed: {result:?}");
-        assert!(result.unwrap().is_empty(), "empty store returns no results");
+        assert!(result.unwrap().rows.is_empty(), "empty store returns no results");
 
         // No completion registry entries should have been created
         assert_eq!(
@@ -1353,11 +1423,14 @@ mod tests {
             .await
             .expect("page 1 query should succeed");
 
-        // Page 1 must have exactly 3 results.
-        assert_eq!(page1_results.len(), 3, "page 1 must return 3 rows");
+        // Page 1 must have exactly 3 results; coordinator absorbs the limit+1 sentinel.
+        assert_eq!(page1_results.rows.len(), 3, "page 1 must return 3 rows");
+        // More records exist beyond page 1.
+        assert!(page1_results.has_more, "page 1 has_more must be true (6 records, limit=3)");
 
         // Extract Int values from page 1 results.
         let page1_ints: Vec<i64> = page1_results
+            .rows
             .iter()
             .filter_map(|v| {
                 if let rmpv::Value::Map(pairs) = v {
@@ -1387,7 +1460,7 @@ mod tests {
 
         // Build the cursor from the last record on page 1.
         // The last record has Int=30 and _key="rec-c".
-        let last = &page1_results[2];
+        let last = &page1_results.rows[2];
         let last_key = if let rmpv::Value::Map(pairs) = last {
             pairs.iter().find_map(|(k, v)| {
                 if k.as_str() == Some("_key") {
@@ -1461,9 +1534,12 @@ mod tests {
             .expect("page 2 query should succeed");
 
         // Page 2 must have exactly 3 results (rec-d=40, rec-e=50, rec-f=60).
-        assert_eq!(page2_results.len(), 3, "page 2 must return 3 rows");
+        assert_eq!(page2_results.rows.len(), 3, "page 2 must return 3 rows");
+        // Page 2 exhausts the dataset — no more pages.
+        assert!(!page2_results.has_more, "page 2 has_more must be false (exhausted)");
 
         let page2_ints: Vec<i64> = page2_results
+            .rows
             .iter()
             .filter_map(|v| {
                 if let rmpv::Value::Map(pairs) = v {
@@ -1573,7 +1649,7 @@ mod tests {
 
         // With a hash-mismatched cursor, the CursorProcessor rejects all items.
         assert!(
-            results.is_empty(),
+            results.rows.is_empty(),
             "hash-mismatched cursor must return no results, got: {results:?}"
         );
     }
@@ -1647,7 +1723,7 @@ mod tests {
 
         // Expired cursor: all items must be rejected.
         assert!(
-            results.is_empty(),
+            results.rows.is_empty(),
             "expired cursor must return no results, got: {results:?}"
         );
     }

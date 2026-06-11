@@ -17,7 +17,9 @@ use tower::Service;
 
 use topgun_core::messages::base::{ChangeEventType, Query};
 use topgun_core::messages::client_events::QueryUpdatePayload;
-use topgun_core::messages::query::{QueryRespMessage, QueryRespPayload, QueryResultEntry};
+use topgun_core::messages::query::{
+    CursorStatus, QueryRespMessage, QueryRespPayload, QueryResultEntry,
+};
 use topgun_core::messages::vector::{
     VectorSearchPayload, VectorSearchRespPayload, VectorSearchResult,
 };
@@ -25,6 +27,7 @@ use topgun_core::messages::{Message, SyncRespRootMessage, SyncRespRootPayload};
 use topgun_core::vector::distance::DistanceMetric;
 
 use crate::dag::coordinator::{run_dag_local, ClusterQueryCoordinator};
+use crate::query::cursor::{build_next_cursor, cursor_query_hashes, SortValue};
 
 use tracing::Instrument;
 
@@ -651,6 +654,35 @@ impl QueryService {
             }
         }
 
+        // Capture cursor-emission inputs before `query` is moved into QuerySubscription.
+        // Hashes are computed via the single authoritative source shared with the
+        // consume-side path in converter.rs, making hash divergence impossible.
+        let (predicate_hash, sort_hash) = cursor_query_hashes(&query);
+        let query_limit = query.limit;
+        // Track whether the incoming cursor was present/valid for cursor_status reporting.
+        let input_cursor_present = query.cursor.is_some();
+        // Build a sort_values template from the query's sort spec for cursor construction.
+        let sort_values_template: Vec<SortValue> = query
+            .sort
+            .as_ref()
+            .map(|sf| {
+                sf.iter()
+                    .map(|f| SortValue {
+                        field: f.field.clone(),
+                        value: serde_json::Value::Null, // placeholder; real values extracted per-entry
+                        direction: f.direction.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // `coordinator_has_more` is set by the coordinator branch, which already absorbs
+        // the limit+1 sentinel internally. The local/predicate branches detect has_more
+        // from the raw DAG output length after running with limit+1.
+        let mut coordinator_has_more = false;
+        // For local/predicate branches, track whether more records existed beyond the page.
+        let mut local_has_more = false;
+
         // Canonical single-node engine: run the structured query through the DAG
         // pipeline locally over this map's partitions (Scan→Filter→Cursor→Sort→Limit,
         // or group-by aggregate). Multi-field sort, limit, and the cursor stage are
@@ -694,18 +726,21 @@ impl QueryService {
                 entries
             };
 
+            // Linear engine does not use the limit+1 sentinel; has_more comes from
+            // max_query_records clamping only for this legacy path.
             predicate_execute_query(entries, &query)
         } else if let Some(ref coordinator) = self.coordinator {
             // Distributed path: the coordinator fans out to all owning nodes, collects
             // per-node results, and applies the global sort+limit merge (SPEC-301).
             // The coordinator's single-node bypass routes back through run_dag_local
             // when only one member is active, keeping single-node behaviour identical.
-            let raw = coordinator
+            let dist_result = coordinator
                 .execute_distributed(&query, &map_name)
                 .await
                 .map_err(|e| OperationError::Internal(anyhow::anyhow!("{e}")))?;
 
-            map_dag_rows_to_entries(raw)
+            coordinator_has_more = dist_result.has_more;
+            map_dag_rows_to_entries(dist_result.rows)
         } else {
             let partition_ids: Vec<u32> = stores.iter().map(|s| s.partition_id()).collect();
             let raw = run_dag_local(
@@ -718,10 +753,27 @@ impl QueryService {
             .await
             .map_err(|e| OperationError::Internal(anyhow::anyhow!("{e}")))?;
 
-            map_dag_rows_to_entries(raw)
+            // The DAG ran with limit+1 (converter.rs), so if we got limit+1 rows it
+            // means more records exist. Detect and absorb the sentinel before mapping.
+            let (raw_truncated, more) = if let Some(lim) = query_limit {
+                let has_sentinel = raw.len() > lim as usize;
+                let mut r = raw;
+                r.truncate(lim as usize);
+                (r, has_sentinel)
+            } else {
+                (raw, false)
+            };
+            local_has_more = more;
+
+            map_dag_rows_to_entries(raw_truncated)
         };
 
-        // Apply max_query_records clamping
+        // Reconcile per-branch has_more signals: coordinator branch already absorbed
+        // its sentinel and set coordinator_has_more; local/predicate branches set
+        // local_has_more from the limit+1 sentinel detection above.
+        let page_has_more = coordinator_has_more || local_has_more;
+
+        // Apply max_query_records clamping — both sources of has_more are unified here.
         let total_count = results.len();
         let max = self.max_query_records as usize;
         let has_more = if total_count > max {
@@ -732,6 +784,8 @@ impl QueryService {
                 "Clamping query results to max_query_records limit"
             );
             results.truncate(max);
+            Some(true)
+        } else if page_has_more {
             Some(true)
         } else {
             None
@@ -774,7 +828,46 @@ impl QueryService {
             .as_ref()
             .map(|m| m.aggregate_query_root_hash(&query_id, &map_name));
 
-        // Register standing subscription (with fields for future QUERY_UPDATE projection)
+        // Emit a real keyset cursor when the query has a limit, more records exist, and
+        // a sort shape is available to derive a keyset position. The cursor is built from
+        // the last entry in the result page using the single authoritative emission helper.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+            .unwrap_or(0);
+
+        let next_cursor =
+            if has_more == Some(true) && query_limit.is_some() && !sort_values_template.is_empty()
+            {
+                results.last().map(|last| {
+                    build_next_cursor(
+                        &last.key,
+                        &last.value,
+                        &sort_values_template,
+                        predicate_hash,
+                        sort_hash,
+                        now_ms,
+                    )
+                })
+            } else {
+                None
+            };
+
+        // Reflect the input cursor processing outcome.
+        let cursor_status = if input_cursor_present {
+            // The cursor was consumed by the DAG's CursorProcessor. Whether it was
+            // accepted or rejected is opaque at this level; surfacing Valid is the
+            // correct semantic for a cursor that survived to produce results.
+            // Rejection paths (expired/hash-mismatch) return empty results, which the
+            // client interprets as exhaustion. Fine-grained rejected-cursor reporting
+            // can be added in a follow-up when the DAG surfaces rejection reasons.
+            Some(CursorStatus::Valid)
+        } else {
+            Some(CursorStatus::None)
+        };
+
+        // Register standing subscription (with fields for future QUERY_UPDATE projection).
+        // Must happen AFTER hashes are captured (query is moved here).
         let subscription = QuerySubscription {
             query_id: query_id.clone(),
             connection_id,
@@ -790,9 +883,9 @@ impl QueryService {
             payload: QueryRespPayload {
                 query_id,
                 results,
-                next_cursor: None,
+                next_cursor,
                 has_more,
-                cursor_status: None,
+                cursor_status,
                 merkle_root_hash,
             },
         });
