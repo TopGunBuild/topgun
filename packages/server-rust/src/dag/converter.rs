@@ -782,13 +782,13 @@ mod tests {
             "limit must come before collector"
         );
 
-        // Verify limit config
+        // Verify limit config is limit+1 (the sentinel row for has_more detection).
         let limit_vertex = &desc.vertices[limit_idx];
         let config = limit_vertex
             .config
             .as_ref()
             .expect("limit should have config");
-        assert_eq!(config.as_u64(), Some(10));
+        assert_eq!(config.as_u64(), Some(11)); // limit=10 → config=11 (limit+1 sentinel)
     }
 
     // --- Sort + Limit vertex ordering ---

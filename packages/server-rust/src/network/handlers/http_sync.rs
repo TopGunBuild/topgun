@@ -528,9 +528,9 @@ async fn dispatch_queries(
                 // and hard-coded 0/0 hashes because offset cursors do not validate hashes
                 // via CursorProcessor — they rely solely on the last_key position.
                 let nc = if truncated {
-                    page_entries.last().map(|last| {
-                        build_next_cursor(&last.key, &last.value, &[], 0, 0, now_ms)
-                    })
+                    page_entries
+                        .last()
+                        .map(|last| build_next_cursor(&last.key, &last.value, &[], 0, 0, now_ms))
                 } else {
                     None
                 };
@@ -709,6 +709,7 @@ mod tests {
     use super::*;
     use crate::network::handlers::auth::{decode_jwt_key, JwtClaims};
     use crate::network::NetworkConfig;
+    use crate::query::cursor::{decode_cursor, encode_cursor, CursorData, SortValue};
     use arc_swap::ArcSwap;
     use jsonwebtoken::{EncodingKey, Header};
     use serde::Serialize;

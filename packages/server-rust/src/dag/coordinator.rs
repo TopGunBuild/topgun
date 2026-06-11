@@ -461,10 +461,7 @@ impl ClusterQueryCoordinator {
             // Request limit+1 to detect whether more records exist.
             let fetch_limit = u32::saturating_add(limit, 1);
             let n = sorted.len();
-            let mut limit_procs = LimitProcessorSupplier {
-                limit: fetch_limit,
-            }
-            .get(1);
+            let mut limit_procs = LimitProcessorSupplier { limit: fetch_limit }.get(1);
             let mut limit_proc = limit_procs
                 .pop()
                 .ok_or_else(|| anyhow!("LimitProcessorSupplier returned no processors"))?;
@@ -1074,16 +1071,16 @@ mod tests {
             )
             .expect("combine should succeed");
 
-        assert_eq!(merged.len(), 5, "expected 5 distinct groups (A-E)");
+        assert_eq!(merged.rows.len(), 5, "expected 5 distinct groups (A-E)");
 
-        let total_count: u64 = merged.iter().map(get_count).sum();
+        let total_count: u64 = merged.rows.iter().map(get_count).sum();
         assert_eq!(
             total_count, 100,
             "total count across all groups should be 100"
         );
 
         // Each group should have count 20
-        for item in &merged {
+        for item in &merged.rows {
             let count = get_count(item);
             assert_eq!(
                 count, 20,
@@ -1151,7 +1148,10 @@ mod tests {
 
         // Local execution should succeed (no records = empty result)
         assert!(result.is_ok(), "local bypass should succeed: {result:?}");
-        assert!(result.unwrap().rows.is_empty(), "empty store returns no results");
+        assert!(
+            result.unwrap().rows.is_empty(),
+            "empty store returns no results"
+        );
 
         // No completion registry entries should have been created
         assert_eq!(
@@ -1426,7 +1426,10 @@ mod tests {
         // Page 1 must have exactly 3 results; coordinator absorbs the limit+1 sentinel.
         assert_eq!(page1_results.rows.len(), 3, "page 1 must return 3 rows");
         // More records exist beyond page 1.
-        assert!(page1_results.has_more, "page 1 has_more must be true (6 records, limit=3)");
+        assert!(
+            page1_results.has_more,
+            "page 1 has_more must be true (6 records, limit=3)"
+        );
 
         // Extract Int values from page 1 results.
         let page1_ints: Vec<i64> = page1_results
@@ -1536,7 +1539,10 @@ mod tests {
         // Page 2 must have exactly 3 results (rec-d=40, rec-e=50, rec-f=60).
         assert_eq!(page2_results.rows.len(), 3, "page 2 must return 3 rows");
         // Page 2 exhausts the dataset — no more pages.
-        assert!(!page2_results.has_more, "page 2 has_more must be false (exhausted)");
+        assert!(
+            !page2_results.has_more,
+            "page 2 has_more must be false (exhausted)"
+        );
 
         let page2_ints: Vec<i64> = page2_results
             .rows

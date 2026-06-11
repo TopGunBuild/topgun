@@ -836,22 +836,23 @@ impl QueryService {
             .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
             .unwrap_or(0);
 
-        let next_cursor =
-            if has_more == Some(true) && query_limit.is_some() && !sort_values_template.is_empty()
-            {
-                results.last().map(|last| {
-                    build_next_cursor(
-                        &last.key,
-                        &last.value,
-                        &sort_values_template,
-                        predicate_hash,
-                        sort_hash,
-                        now_ms,
-                    )
-                })
-            } else {
-                None
-            };
+        let next_cursor = if has_more == Some(true)
+            && query_limit.is_some()
+            && !sort_values_template.is_empty()
+        {
+            results.last().map(|last| {
+                build_next_cursor(
+                    &last.key,
+                    &last.value,
+                    &sort_values_template,
+                    predicate_hash,
+                    sort_hash,
+                    now_ms,
+                )
+            })
+        } else {
+            None
+        };
 
         // Reflect the input cursor processing outcome.
         let cursor_status = if input_cursor_present {
