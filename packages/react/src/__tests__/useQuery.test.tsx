@@ -175,4 +175,35 @@ describe('useQuery', () => {
 
     expect(Object.is(loadMoreBefore, loadMoreAfter)).toBe(true);
   });
+
+  it('loadMore identity changes when hasMore flips false→true and the new callback delegates', async () => {
+    let paginationCallback: (info: any) => void;
+    mockOnPaginationChange.mockImplementation((cb) => {
+      paginationCallback = cb;
+      return () => {};
+    });
+
+    const { result } = renderHook(() => useQuery('testMap', {}), { wrapper });
+
+    // Initial state: hasMore defaults to false, so loadMore is a no-op.
+    const loadMoreBefore = result.current.loadMore;
+    await act(async () => {
+      await loadMoreBefore();
+    });
+    expect(mockLoadMore).not.toHaveBeenCalled();
+
+    // Pagination becomes available — the callback identity must change so the
+    // new closure observes hasMore: true (removing the dep would strand it as a no-op).
+    act(() => {
+      paginationCallback({ hasMore: true, nextCursor: 'cursor-abc', cursorStatus: 'valid' });
+    });
+
+    const loadMoreAfter = result.current.loadMore;
+    expect(Object.is(loadMoreBefore, loadMoreAfter)).toBe(false);
+
+    await act(async () => {
+      await loadMoreAfter();
+    });
+    expect(mockLoadMore).toHaveBeenCalledTimes(1);
+  });
 });
