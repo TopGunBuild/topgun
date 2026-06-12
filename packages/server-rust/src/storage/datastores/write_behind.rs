@@ -497,7 +497,9 @@ impl MapDataStore for WriteBehindDataStore {
         // shutdown sequence the HTTP server is already draining before the shutdown
         // flag is set, making this path effectively unreachable under orderly shutdown.
         if self.is_shutdown.load(Ordering::Acquire) {
-            anyhow::bail!("write-behind store is shutting down; write rejected for map={map} key={key}");
+            anyhow::bail!(
+                "write-behind store is shutting down; write rejected for map={map} key={key}"
+            );
         }
 
         // Check capacity before insertion to avoid partial state on rejection
@@ -567,7 +569,9 @@ impl MapDataStore for WriteBehindDataStore {
     async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
         // Reject once graceful drain begins — same reasoning as `add`.
         if self.is_shutdown.load(Ordering::Acquire) {
-            anyhow::bail!("write-behind store is shutting down; remove rejected for map={map} key={key}");
+            anyhow::bail!(
+                "write-behind store is shutting down; remove rejected for map={map} key={key}"
+            );
         }
 
         // Check capacity before insertion
@@ -724,8 +728,7 @@ impl MapDataStore for WriteBehindDataStore {
         // Stop the background flush loop so it doesn't race with our direct drain.
         let _ = self.shutdown.send(true);
 
-        let timeout_duration =
-            tokio::time::Duration::from_millis(self.config.shutdown_timeout_ms);
+        let timeout_duration = tokio::time::Duration::from_millis(self.config.shutdown_timeout_ms);
         let deadline = tokio::time::Instant::now() + timeout_duration;
 
         // Flush all partition queues directly to the inner store. Using i64::MAX
@@ -784,8 +787,7 @@ impl MapDataStore for WriteBehindDataStore {
 
                 match tokio::time::timeout(remaining, flush_future).await {
                     Ok(Ok(())) => {
-                        self.staging
-                            .remove(&(entry.map.clone(), entry.key.clone()));
+                        self.staging.remove(&(entry.map.clone(), entry.key.clone()));
                         self.pending_count.fetch_sub(1, Ordering::Relaxed);
                     }
                     Ok(Err(err)) => {
@@ -1376,15 +1378,20 @@ mod tests {
         );
 
         // Verify the inner store received an add call for every key.
-        let recorded = spy.calls.lock().unwrap();
-        for key in &keys {
-            assert!(
-                recorded.iter().any(
-                    |c| matches!(c, SpyCall::Add { map, key: k } if map == "drain_map" && k == *key)
-                ),
-                "Inner store should have received add for key={key}"
-            );
-        }
+        // Drop the lock guard before any await point to satisfy clippy's
+        // `await_holding_lock` lint (holding a MutexGuard across an await
+        // can deadlock if another task also tries to acquire the same mutex).
+        {
+            let recorded = spy.calls.lock().unwrap();
+            for key in &keys {
+                assert!(
+                    recorded.iter().any(
+                        |c| matches!(c, SpyCall::Add { map, key: k } if map == "drain_map" && k == *key)
+                    ),
+                    "Inner store should have received add for key={key}"
+                );
+            }
+        } // recorded guard dropped here
 
         // Writes after shutdown must be rejected.
         let result = store.add("drain_map", "late_write", &val, 0, 1000).await;
@@ -1530,11 +1537,8 @@ mod tests {
         // shutdown_timeout_ms, not proportional to the slow inner-store delay.
         // The outer guard (500ms) is 10× the configured timeout (50ms) to
         // allow for scheduling jitter while still catching a pathological hang.
-        let result = tokio::time::timeout(
-            tokio::time::Duration::from_millis(500),
-            store.hard_flush(),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(tokio::time::Duration::from_millis(500), store.hard_flush()).await;
 
         assert!(
             result.is_ok(),
