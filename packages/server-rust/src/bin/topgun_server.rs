@@ -618,6 +618,7 @@ async fn main() -> anyhow::Result<()> {
         low_water_pct = eviction_config.low_water_pct,
         interval_ms = eviction_config.interval_ms,
         write_behind_enabled = !matches!(backend, StorageBackend::Null),
+        write_behind_shutdown_timeout_ms = write_behind_config.shutdown_timeout_ms,
         "eviction + write-behind initialized"
     );
 
@@ -803,11 +804,14 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // KNOWN GAP (TODO-339): WriteBehindDataStore does not yet flush its
-    // bounded buffer on shutdown. Up to TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS
-    // (1s default) of acked-but-unpersisted writes can be lost on clean
-    // SIGTERM. Tracked at https://topgun.build/docs/roadmap; landing in v2.x
-    // alongside WAL recovery.
+    // Drain the write-behind buffer so every write that was acked to a client
+    // is durable before the process exits. The HTTP server is already drained
+    // above, so no new client writes can arrive at this point. The drain is
+    // bounded by shutdown_timeout_ms (default 30s); on timeout, still-pending
+    // ops are logged via warn! and the process proceeds to exit.
+    if let Err(err) = datastore.hard_flush().await {
+        tracing::warn!(error = %err, "Write-behind drain encountered an error during shutdown");
+    }
 
     Ok(())
 }
