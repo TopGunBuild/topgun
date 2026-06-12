@@ -65,6 +65,7 @@ sha2 = "0.10"
 blake3 = "1"
 hex = "0.4"
 quick_cache = "0.6"
+crc32c = "0.6"
 
 [[bin]]
 name = "topgun-server"
