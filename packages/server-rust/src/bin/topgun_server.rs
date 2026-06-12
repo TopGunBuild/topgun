@@ -782,8 +782,9 @@ async fn main() -> anyhow::Result<()> {
         // Without this, /health stays "ready" until the process dies
         // and the LB happily forwards new requests into a dying server.
         shutdown_for_drain.trigger_shutdown();
-        // Signal cluster services (HeartbeatService, EvictionOrchestrator,
-        // WriteBehindDataStore flush loop, etc.) to exit their loops.
+        // Signal cluster services (HeartbeatService, EvictionOrchestrator, etc.)
+        // to exit their loops. The write-behind flush loop is stopped separately
+        // by hard_flush() below (via the store's own internal shutdown channel).
         let _ = shutdown_tx.send(true);
     })
     .await?;

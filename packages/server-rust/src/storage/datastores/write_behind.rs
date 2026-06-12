@@ -665,6 +665,14 @@ impl MapDataStore for WriteBehindDataStore {
     }
 
     async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+        // Reject new writes once graceful drain is in progress so any out-of-order
+        // arrival is visible as an error rather than silently lost, matching the
+        // add/remove guards. Effectively unreachable under orderly shutdown (the
+        // HTTP server drains before the shutdown flag is set).
+        if self.is_shutdown.load(Ordering::Acquire) {
+            anyhow::bail!("write-behind store is shutting down; remove_all rejected for map={map}");
+        }
+
         let now = now_millis();
 
         for key in keys {
