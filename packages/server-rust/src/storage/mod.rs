@@ -24,6 +24,7 @@ pub mod mutation_observer;
 pub mod query_merkle;
 pub mod record;
 pub mod record_store;
+pub mod wal;
 
 pub use datastores::*;
 pub use engine::*;
