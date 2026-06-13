@@ -29,6 +29,11 @@ const REQUIRED_ROUTES: &[(Method, &str)] = &[
     (Method::GET, "/api/admin/settings"),
     (Method::PUT, "/api/admin/settings"),
     (Method::GET, "/api/admin/maps"),
+    // /healthz is the readiness gate: 503 until WAL recovery completes, 200 after.
+    // Registered once in admin_routes() so it surfaces on both the binary serve
+    // path and NetworkModule; enumerated here so an admin_routes() refactor that
+    // accidentally drops it fails red instead of silently regressing the gate.
+    (Method::GET, "/healthz"),
     // /metrics is a live-verified binary 404 and a production-parity route;
     // included so binary and production router stay aligned even though the
     // admin SPA reaches metrics data via /api/status, not this endpoint directly.
