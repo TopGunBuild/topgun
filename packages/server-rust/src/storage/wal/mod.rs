@@ -10,9 +10,9 @@
 pub mod format;
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -205,8 +205,6 @@ pub struct WalWriter {
     policy: WalFsyncPolicy,
     /// Per-partition file handles, lazily opened on first append.
     files: AsyncMutex<HashMap<u32, PartitionFile>>,
-    /// Monotonically increasing sequence counter shared across all partitions.
-    sequence: AtomicU64,
     /// Batched-commit group-commit timer: shared notifier woken every ~10 ms.
     /// When `policy == Batched`, the writer also fsyncs after every 100 ops.
     batch_flush_tx: tokio::sync::watch::Sender<()>,
@@ -237,7 +235,6 @@ impl WalWriter {
             wal_dir,
             policy,
             files: AsyncMutex::new(HashMap::new()),
-            sequence: AtomicU64::new(0),
             batch_flush_tx,
         });
 
@@ -272,11 +269,6 @@ impl WalWriter {
         }
 
         Ok(writer)
-    }
-
-    /// Returns the next monotonically increasing sequence number.
-    pub fn next_sequence(&self) -> u64 {
-        self.sequence.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Path of the append log for a partition.
@@ -497,6 +489,120 @@ impl WalWriter {
         );
 
         Ok(())
+    }
+
+    /// Highest sequence this WAL has ever durably observed across **all**
+    /// partitions: the max over every `.applied` sidecar watermark AND every
+    /// log's max sequence.
+    ///
+    /// Seeds the live counter to `this + 1` so post-restart writes never reuse a
+    /// number at or below a watermark — the recovery filter `e.sequence >
+    /// applied_seq` silently drops such writes, so this is the sole guard for
+    /// post-restart acked-write durability.
+    ///
+    /// Must be called **after** `WalRecovery::run` so it observes the watermarks
+    /// that recovery's `mark_applied` advanced. Returns `0` for a fresh node
+    /// (no partitions / no sequences), so the `+1` seed is `1`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a partition log contains mid-file corruption, an
+    /// unrecognised magic, or an unknown format version — consistent with
+    /// recovery refusing to start on corrupt data.
+    pub async fn max_observed_sequence(&self) -> anyhow::Result<u64> {
+        let mut global = 0u64;
+        for partition in Self::discover_all_partitions(&self.wal_dir)? {
+            // The sidecar watermark survives compaction even when the log was
+            // rewritten to empty, so it must be read for every partition.
+            global = global.max(Self::read_applied_sequence(&self.applied_path(partition)));
+            global = global.max(self.max_log_sequence(partition).await?);
+        }
+        Ok(global)
+    }
+
+    /// Discovers partition IDs by scanning `wal_dir` for **both**
+    /// `partition-*.log` and `partition-*.applied`, taking the union.
+    ///
+    /// A compacted-empty partition (log rewritten to empty by `compact_log`)
+    /// still carries a live `.applied` watermark, so discovery keyed on `.log`
+    /// alone would skip it and the seed would land below that watermark —
+    /// reproducing the durability defect. The union defends against that.
+    fn discover_all_partitions(wal_dir: &Path) -> anyhow::Result<Vec<u32>> {
+        let mut ids: HashSet<u32> = HashSet::new();
+        let read_dir = std::fs::read_dir(wal_dir)
+            .map_err(|e| anyhow::anyhow!("Cannot read WAL dir {}: {e}", wal_dir.display()))?;
+        for entry in read_dir.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if !name_str.starts_with("partition-") {
+                continue;
+            }
+            let inner = if let Some(rest) = name_str.strip_suffix(".log") {
+                rest
+            } else if let Some(rest) = name_str.strip_suffix(".applied") {
+                rest
+            } else {
+                continue;
+            };
+            let inner = &inner["partition-".len()..];
+            if let Ok(id) = inner.parse::<u32>() {
+                ids.insert(id);
+            }
+        }
+        let mut ids: Vec<u32> = ids.into_iter().collect();
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
+    /// Returns the maximum `WalEntry.sequence` still present in a partition's
+    /// log, or `0` if the log is absent/empty.
+    ///
+    /// Tolerates a truncated tail (uses the intact prefix) using the same
+    /// `format::decode_all` classification as `unapplied`; refuses (returns
+    /// `Err`) on mid-file corruption, bad magic, or an unknown version.
+    async fn max_log_sequence(&self, partition: u32) -> anyhow::Result<u64> {
+        let log_path = self.log_path(partition);
+        if !log_path.exists() {
+            return Ok(0);
+        }
+
+        let data = tokio::fs::read(&log_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("Cannot read WAL file {}: {e}", log_path.display()))?;
+
+        let entries = match format::decode_all(&data) {
+            format::FrameDecodeResult::Complete(entries) => entries,
+            format::FrameDecodeResult::CleanEof => Vec::new(),
+            format::FrameDecodeResult::TruncatedTail { complete } => complete,
+            format::FrameDecodeResult::BadMagic { offset } => {
+                let path_display = log_path.display();
+                anyhow::bail!(
+                    "WAL file {path_display} has wrong magic at offset {offset}; \
+                     refusing to compute max sequence on corrupt data"
+                );
+            }
+            format::FrameDecodeResult::UnknownVersion { found, offset } => {
+                let path_display = log_path.display();
+                anyhow::bail!(
+                    "WAL file {path_display} has unknown format version {found} at offset {offset}; \
+                     refusing to compute max sequence"
+                );
+            }
+            format::FrameDecodeResult::Corruption {
+                offset,
+                stored_crc,
+                computed_crc,
+            } => {
+                let path_display = log_path.display();
+                anyhow::bail!(
+                    "WAL corruption in {path_display} at offset {offset}: \
+                     stored CRC={stored_crc:#010x} computed CRC={computed_crc:#010x}; \
+                     refusing to compute max sequence on corrupt data"
+                );
+            }
+        };
+
+        Ok(entries.iter().map(|e| e.sequence).max().unwrap_or(0))
     }
 }
 
