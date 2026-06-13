@@ -452,6 +452,7 @@ impl WriteBehindDataStore {
 ///
 /// Runs until the shutdown signal is received. Wakes on either the configured
 /// interval or an explicit notify (from `soft_flush`/`hard_flush`).
+#[allow(clippy::too_many_lines)]
 async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Receiver<bool>) {
     let interval = tokio::time::Duration::from_millis(store.config.flush_interval_ms);
 
@@ -533,7 +534,10 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                         // Mark the WAL entry applied so a clean restart does not
                         // re-replay writes that are already durable in the inner store.
                         if let Some(wal) = &store.wal {
-                            if let Err(err) = wal.mark_applied(partition_id_for_wal, entry.wal_sequence).await {
+                            if let Err(err) = wal
+                                .mark_applied(partition_id_for_wal, entry.wal_sequence)
+                                .await
+                            {
                                 warn!(
                                     map = %entry.map,
                                     key = %entry.key,
@@ -626,23 +630,31 @@ impl MapDataStore for WriteBehindDataStore {
         // Append to WAL and satisfy the fsync policy before touching in-memory
         // state. This must happen before returning Ok(()) so a crash after ack
         // still has the write in the WAL for recovery to replay.
-        let wal_value_for_entry = match value {
-            RecordValue::Lww { value: v, timestamp } => {
-                let wal_op = WalOp::Store {
-                    value: v.clone(),
-                    expiration_time: if expiration_time == 0 { None } else { Some(expiration_time) },
-                };
-                let wal_ts = Some(timestamp.clone());
-                (wal_op, wal_ts)
-            }
-            _ => {
-                // Non-LWW values use a Store op with no timestamp.
-                let wal_op = WalOp::Store {
-                    value: topgun_core::types::Value::Null,
-                    expiration_time: if expiration_time == 0 { None } else { Some(expiration_time) },
-                };
-                (wal_op, None)
-            }
+        let wal_value_for_entry = if let RecordValue::Lww {
+            value: v,
+            timestamp,
+        } = value
+        {
+            let wal_op = WalOp::Store {
+                value: v.clone(),
+                expiration_time: if expiration_time == 0 {
+                    None
+                } else {
+                    Some(expiration_time)
+                },
+            };
+            (wal_op, Some(timestamp.clone()))
+        } else {
+            // Non-LWW values (OrMap, OrTombstones) use a Store op with no timestamp.
+            let wal_op = WalOp::Store {
+                value: topgun_core::types::Value::Null,
+                expiration_time: if expiration_time == 0 {
+                    None
+                } else {
+                    Some(expiration_time)
+                },
+            };
+            (wal_op, None)
         };
         let wal_entry = WalEntry {
             map: map.to_string(),
@@ -966,7 +978,10 @@ impl MapDataStore for WriteBehindDataStore {
                         // Mark WAL applied so a restart after clean shutdown is
                         // a no-op rather than re-replaying already-durable writes.
                         if let Some(wal) = &self.wal {
-                            if let Err(err) = wal.mark_applied(partition_id_for_wal, entry.wal_sequence).await {
+                            if let Err(err) = wal
+                                .mark_applied(partition_id_for_wal, entry.wal_sequence)
+                                .await
+                            {
                                 warn!(
                                     map = %entry.map,
                                     key = %entry.key,
@@ -1113,6 +1128,7 @@ mod tests {
             backoff_cap_ms: 100,
             capacity: 0,
             shutdown_timeout_ms: 5_000,
+            ..WriteBehindConfig::default()
         }
     }
 

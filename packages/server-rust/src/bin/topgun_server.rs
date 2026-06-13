@@ -80,13 +80,13 @@ use topgun_server::service::OperationService;
 use topgun_server::storage::datastores::RedbDataStore;
 use topgun_server::storage::datastores::{NullDataStore, WriteBehindConfig, WriteBehindDataStore};
 use topgun_server::storage::eviction_config::EvictionConfig;
-use topgun_server::storage::wal::{Wal, WalRecovery, WalWriter};
 use topgun_server::storage::eviction_orchestrator::EvictionOrchestrator;
 use topgun_server::storage::factory::{ObserverFactory, RecordStoreFactory};
 use topgun_server::storage::impls::StorageConfig;
 use topgun_server::storage::map_data_store::MapDataStore;
 use topgun_server::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
 use topgun_server::storage::mutation_observer::MutationObserver;
+use topgun_server::storage::wal::{Wal, WalRecovery, WalWriter};
 
 // ---------------------------------------------------------------------------
 // Storage backend selection
@@ -413,7 +413,11 @@ async fn main() -> anyhow::Result<()> {
             // WriteBehindDataStore::new_with_wal returns Arc<Self> directly (it
             // spawns its own background flush task). Wrapping with Arc::new here
             // would produce Arc<Arc<...>>, which cannot coerce to Arc<dyn MapDataStore>.
-            WriteBehindDataStore::new_with_wal(inner_data_store, write_behind_config.clone(), wal_opt)
+            WriteBehindDataStore::new_with_wal(
+                inner_data_store,
+                write_behind_config.clone(),
+                wal_opt,
+            )
         }
         StorageBackend::Null => {
             tracing::debug!(

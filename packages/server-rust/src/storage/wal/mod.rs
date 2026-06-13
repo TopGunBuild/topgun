@@ -23,6 +23,7 @@ use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
 
 use crate::storage::map_data_store::MapDataStore;
+use crate::storage::record::RecordValue;
 
 // ---------------------------------------------------------------------------
 // WalFsyncPolicy
@@ -217,12 +218,16 @@ impl WalWriter {
     /// The directory is created if it does not exist. Returns an error if the
     /// directory cannot be created, so a misconfigured `wal_dir` surfaces at
     /// startup rather than on the first write.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `wal_dir` cannot be created or accessed.
     pub fn new(wal_dir: PathBuf, policy: WalFsyncPolicy) -> anyhow::Result<Arc<Self>> {
         std::fs::create_dir_all(&wal_dir).map_err(|e| {
             anyhow::anyhow!(
-                "Cannot create WAL directory {:?}: {e}. \
+                "Cannot create WAL directory {}: {e}. \
                  Ensure the WAL dir is on the same volume as the durable store.",
-                wal_dir
+                wal_dir.display()
             )
         })?;
 
@@ -252,7 +257,9 @@ impl WalWriter {
                             }
                         }
                     }
-                    let Some(w) = writer_weak.upgrade() else { return };
+                    let Some(w) = writer_weak.upgrade() else {
+                        return;
+                    };
                     let mut guard = w.files.lock().await;
                     for pf in guard.values_mut() {
                         if pf.unfsynced_count > 0 {
@@ -279,16 +286,15 @@ impl WalWriter {
 
     /// Path of the sidecar file that records the highest applied sequence.
     fn applied_path(&self, partition: u32) -> PathBuf {
-        self.wal_dir.join(format!("partition-{partition:03}.applied"))
+        self.wal_dir
+            .join(format!("partition-{partition:03}.applied"))
     }
 
     /// Reads the highest applied sequence number for a partition from the
     /// sidecar file, or 0 if the file does not exist.
     fn read_applied_sequence(path: &Path) -> u64 {
         match std::fs::read(path) {
-            Ok(bytes) if bytes.len() == 8 => {
-                u64::from_be_bytes(bytes.try_into().unwrap_or([0; 8]))
-            }
+            Ok(bytes) if bytes.len() == 8 => u64::from_be_bytes(bytes.try_into().unwrap_or([0; 8])),
             _ => 0,
         }
     }
@@ -318,7 +324,7 @@ impl Wal for WalWriter {
                 .append(true)
                 .open(&path)
                 .await
-                .map_err(|e| anyhow::anyhow!("Cannot open WAL file {:?}: {e}", path))?;
+                .map_err(|e| anyhow::anyhow!("Cannot open WAL file {}: {e}", path.display()))?;
             files.insert(
                 partition,
                 PartitionFile {
@@ -329,9 +335,10 @@ impl Wal for WalWriter {
             files.get_mut(&partition).unwrap()
         };
 
-        pf.file.write_all(&frame).await.map_err(|e| {
-            anyhow::anyhow!("WAL write failed for partition {partition}: {e}")
-        })?;
+        pf.file
+            .write_all(&frame)
+            .await
+            .map_err(|e| anyhow::anyhow!("WAL write failed for partition {partition}: {e}"))?;
 
         match self.policy {
             WalFsyncPolicy::PerOp => {
@@ -367,8 +374,9 @@ impl Wal for WalWriter {
         // Read the current max and only advance it, never regress it.
         let current = Self::read_applied_sequence(&path);
         if sequence > current {
-            Self::write_applied_sequence(&path, sequence)
-                .map_err(|e| anyhow::anyhow!("Cannot write applied sidecar {:?}: {e}", path))?;
+            Self::write_applied_sequence(&path, sequence).map_err(|e| {
+                anyhow::anyhow!("Cannot write applied sidecar {}: {e}", path.display())
+            })?;
         }
 
         // After marking applied, compact the WAL log: rebuild it with only
@@ -384,9 +392,9 @@ impl Wal for WalWriter {
 
         let applied_seq = Self::read_applied_sequence(&self.applied_path(partition));
 
-        let data = tokio::fs::read(&log_path).await.map_err(|e| {
-            anyhow::anyhow!("Cannot read WAL file {:?}: {e}", log_path)
-        })?;
+        let data = tokio::fs::read(&log_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("Cannot read WAL file {}: {e}", log_path.display()))?;
 
         let entries = match format::decode_all(&data) {
             format::FrameDecodeResult::Complete(entries) => entries,
@@ -400,17 +408,17 @@ impl Wal for WalWriter {
                 complete
             }
             format::FrameDecodeResult::BadMagic { offset } => {
+                let path_display = log_path.display();
                 anyhow::bail!(
-                    "WAL file {:?} has wrong magic at offset {offset}; \
-                     refusing to start to avoid replaying corrupt data",
-                    log_path
+                    "WAL file {path_display} has wrong magic at offset {offset}; \
+                     refusing to start to avoid replaying corrupt data"
                 );
             }
             format::FrameDecodeResult::UnknownVersion { found, offset } => {
+                let path_display = log_path.display();
                 anyhow::bail!(
-                    "WAL file {:?} has unknown format version {found} at offset {offset}; \
-                     refusing to start",
-                    log_path
+                    "WAL file {path_display} has unknown format version {found} at offset {offset}; \
+                     refusing to start"
                 );
             }
             format::FrameDecodeResult::Corruption {
@@ -418,12 +426,12 @@ impl Wal for WalWriter {
                 stored_crc,
                 computed_crc,
             } => {
+                let path_display = log_path.display();
                 anyhow::bail!(
-                    "WAL corruption in {:?} at offset {offset}: \
+                    "WAL corruption in {path_display} at offset {offset}: \
                      stored CRC={stored_crc:#010x} computed CRC={computed_crc:#010x}; \
                      refusing to start to avoid replaying corrupt data. \
-                     Delete or repair the WAL file to allow startup.",
-                    log_path
+                     Delete or repair the WAL file to allow startup."
                 );
             }
         };
@@ -519,9 +527,8 @@ impl WalRecovery {
     /// Discovers partition IDs by scanning `wal_dir` for `partition-*.log` files.
     fn discover_partitions(wal_dir: &Path) -> anyhow::Result<Vec<u32>> {
         let mut ids = Vec::new();
-        let read_dir = std::fs::read_dir(wal_dir).map_err(|e| {
-            anyhow::anyhow!("Cannot read WAL dir {:?}: {e}", wal_dir)
-        })?;
+        let read_dir = std::fs::read_dir(wal_dir)
+            .map_err(|e| anyhow::anyhow!("Cannot read WAL dir {}: {e}", wal_dir.display()))?;
         for entry in read_dir.flatten() {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
@@ -545,6 +552,11 @@ impl WalRecovery {
     ///
     /// After successful replay the WAL entries are marked applied so a subsequent
     /// clean restart is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a WAL file contains mid-file CRC corruption, an
+    /// unrecognised magic, or an unknown format version.
     pub async fn run(&self, inner_store: Arc<dyn MapDataStore>) -> anyhow::Result<()> {
         let partitions = if self.partitions.is_empty() {
             Self::discover_partitions(&self.wal.wal_dir)?
@@ -585,7 +597,6 @@ impl WalRecovery {
                             counter: 0,
                             node_id: String::new(),
                         });
-                        use crate::storage::record::RecordValue;
                         let record_value = RecordValue::Lww {
                             value: value.clone(),
                             timestamp: ts,
@@ -600,11 +611,7 @@ impl WalRecovery {
                             )
                             .await
                     }
-                    WalOp::Remove => {
-                        inner_store
-                            .remove(&entry.map, &entry.key, now)
-                            .await
-                    }
+                    WalOp::Remove => inner_store.remove(&entry.map, &entry.key, now).await,
                 };
 
                 if let Err(err) = result {
@@ -667,9 +674,7 @@ mod tests {
     /// Shared inner-store double that records every replayed operation.
     #[derive(Default)]
     struct ReplayStore {
-        adds: tokio::sync::Mutex<
-            Vec<(String, String, crate::storage::record::RecordValue)>,
-        >,
+        adds: tokio::sync::Mutex<Vec<(String, String, crate::storage::record::RecordValue)>>,
         removes: tokio::sync::Mutex<Vec<(String, String)>>,
     }
 
@@ -906,7 +911,10 @@ mod tests {
         let recovery = WalRecovery::new(Arc::clone(&wal), vec![0]);
 
         // First recovery run — must succeed.
-        recovery.run(Arc::clone(&store1) as Arc<dyn MapDataStore>).await.unwrap();
+        recovery
+            .run(Arc::clone(&store1) as Arc<dyn MapDataStore>)
+            .await
+            .unwrap();
 
         // Counts after first run.
         let first_adds = store1.adds.lock().await.len();
@@ -914,7 +922,10 @@ mod tests {
         // Second recovery run on a fresh store — entries are already marked
         // applied so the WAL is compacted; this run should replay nothing.
         let store2 = Arc::new(ReplayStore::default());
-        recovery.run(Arc::clone(&store2) as Arc<dyn MapDataStore>).await.unwrap();
+        recovery
+            .run(Arc::clone(&store2) as Arc<dyn MapDataStore>)
+            .await
+            .unwrap();
         let second_adds = store2.adds.lock().await.len();
 
         assert_eq!(
