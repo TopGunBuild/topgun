@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 0863522f785e13ea9702ccddb46aac6f2944865237d077ee291b3533c7346cd2 # shrinks to (ops, crash_after) = ([Store { key: "k0", value_tag: 0 }], 1)

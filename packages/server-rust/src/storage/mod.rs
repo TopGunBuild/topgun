@@ -11,6 +11,10 @@
 //! Additionally defines [`MutationObserver`] for reacting to record mutations
 //! and [`CompositeMutationObserver`] for fan-out to multiple observers.
 
+/// Storage-layer crash-safety property tests (no-acked-loss invariant).
+#[cfg(test)]
+mod crash_safety_proptest;
+
 pub mod datastores;
 pub mod engine;
 pub mod engines;
