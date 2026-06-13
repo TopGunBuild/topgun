@@ -18,4 +18,4 @@ pub use null::NullDataStore;
 pub use postgres::PostgresDataStore;
 #[cfg(feature = "redb")]
 pub use redb::RedbDataStore;
-pub use write_behind::{WriteBehindConfig, WriteBehindDataStore};
+pub use write_behind::{WalBootstrap, WriteBehindConfig, WriteBehindDataStore};

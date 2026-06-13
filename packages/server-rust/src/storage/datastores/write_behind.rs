@@ -377,6 +377,22 @@ pub struct WriteBehindDataStore {
     wal_sequence: AtomicU64,
 }
 
+/// WAL plus the live sequence counter's starting value, threaded into
+/// `WriteBehindDataStore::new_with_wal`.
+///
+/// `sequence_start` must be `max_observed_sequence() + 1` computed *after*
+/// recovery so the live counter never re-hands a number at or below any
+/// persisted log sequence or `.applied` watermark — reusing such a number lets
+/// the recovery filter (`e.sequence > applied_seq`) silently drop a post-restart
+/// acked write. A fresh node passes `1` (sequence `0` is the reserved
+/// "nothing applied" sentinel and is never handed out).
+pub struct WalBootstrap {
+    /// The WAL implementation every write is appended to before ack.
+    pub wal: Arc<dyn Wal>,
+    /// First sequence number the live counter hands out (1-based).
+    pub sequence_start: u64,
+}
+
 impl WriteBehindDataStore {
     /// Creates a new write-behind data store wrapping `inner`.
     ///
@@ -386,18 +402,28 @@ impl WriteBehindDataStore {
         Self::new_with_wal(inner, config, None)
     }
 
-    /// Creates a new write-behind data store with an optional WAL.
+    /// Creates a new write-behind data store with an optional WAL bootstrap.
     ///
-    /// When `wal` is `Some`, every write is appended to the WAL and satisfies
-    /// the configured fsync policy before returning `Ok(())`. When `None`, the
-    /// store behaves identically to `new` (no crash-safe durability guarantee).
+    /// When `bootstrap` is `Some`, every write is appended to the WAL and
+    /// satisfies the configured fsync policy before returning `Ok(())`, and the
+    /// live sequence counter starts at `bootstrap.sequence_start`. When `None`,
+    /// the store behaves identically to `new` (no crash-safe durability
+    /// guarantee) and the counter starts at `1` so sequence `0` is never handed
+    /// out.
     pub fn new_with_wal(
         inner: Arc<dyn MapDataStore>,
         config: WriteBehindConfig,
-        wal: Option<Arc<dyn Wal>>,
+        bootstrap: Option<WalBootstrap>,
     ) -> Arc<Self> {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let flush_notify = Arc::new(Notify::new());
+
+        let wal = bootstrap.as_ref().map(|b| b.wal.clone());
+        // Seed the live counter from the WAL watermark so post-restart writes
+        // never reuse a sequence at or below a persisted watermark (which the
+        // recovery filter `e.sequence > applied_seq` would silently drop). A
+        // missing bootstrap seeds to 1: sequence 0 is the reserved sentinel.
+        let wal_sequence_start = bootstrap.map_or(1, |b| b.sequence_start);
 
         let store = Arc::new(Self {
             inner,
@@ -410,7 +436,7 @@ impl WriteBehindDataStore {
             shutdown: shutdown_tx,
             is_shutdown: AtomicBool::new(false),
             wal,
-            wal_sequence: AtomicU64::new(0),
+            wal_sequence: AtomicU64::new(wal_sequence_start),
         });
 
         // Spawn background flush loop with a clone of the Arc
@@ -1758,6 +1784,7 @@ mod tests {
     // WAL behavioral tests (AC1, AC2, AC7)
     // -----------------------------------------------------------------------
 
+    use super::WalBootstrap;
     use crate::storage::wal::{Wal, WalEntry, WalFsyncPolicy};
     use std::sync::atomic::{AtomicU64 as TestAtomicU64, Ordering as TestOrdering};
 
@@ -1819,7 +1846,14 @@ mod tests {
             flush_interval_ms: 60_000,
             ..WriteBehindConfig::default()
         };
-        let store = WriteBehindDataStore::new_with_wal(inner, config, Some(wal_arc));
+        let store = WriteBehindDataStore::new_with_wal(
+            inner,
+            config,
+            Some(WalBootstrap {
+                wal: wal_arc,
+                sequence_start: 1,
+            }),
+        );
 
         let val = dummy_value();
         store.add("m", "k1", &val, 0, 1000).await.unwrap();
@@ -1846,7 +1880,14 @@ mod tests {
             flush_interval_ms: 60_000,
             ..WriteBehindConfig::default()
         };
-        let store = WriteBehindDataStore::new_with_wal(inner, config, Some(wal_arc));
+        let store = WriteBehindDataStore::new_with_wal(
+            inner,
+            config,
+            Some(WalBootstrap {
+                wal: wal_arc,
+                sequence_start: 1,
+            }),
+        );
 
         store.remove("m", "k1", 1000).await.unwrap();
 
@@ -1866,7 +1907,14 @@ mod tests {
             flush_interval_ms: 60_000,
             ..WriteBehindConfig::default()
         };
-        let store = WriteBehindDataStore::new_with_wal(inner, config, Some(wal_arc));
+        let store = WriteBehindDataStore::new_with_wal(
+            inner,
+            config,
+            Some(WalBootstrap {
+                wal: wal_arc,
+                sequence_start: 1,
+            }),
+        );
 
         let keys = vec!["k1".to_string(), "k2".to_string(), "k3".to_string()];
         store.remove_all("m", &keys).await.unwrap();
@@ -1896,7 +1944,14 @@ mod tests {
 
         let inner: Arc<dyn MapDataStore> = Arc::new(SpyDataStore::new());
         let config = short_delay_config();
-        let store = WriteBehindDataStore::new_with_wal(inner, config, Some(wal_arc));
+        let store = WriteBehindDataStore::new_with_wal(
+            inner,
+            config,
+            Some(WalBootstrap {
+                wal: wal_arc,
+                sequence_start: 1,
+            }),
+        );
 
         let val = dummy_value();
         store.add("m", "k1", &val, 0, 1000).await.unwrap();
