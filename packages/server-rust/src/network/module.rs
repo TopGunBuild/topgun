@@ -548,10 +548,15 @@ pub fn admin_routes(rate_limit_per_ip: u32, rate_limit_burst: u32) -> Router<App
         .route_layer(governor_layer);
 
     let router = Router::new()
-        // Health probes -- never rate-limited (Kubernetes liveness/readiness)
+        // Health probes -- never rate-limited (Kubernetes liveness/readiness).
+        // /healthz is the ops-standard alias for /health/ready: returns 503
+        // during startup recovery and 200 once the server is ready. Registered
+        // once here so it surfaces on both the binary serve path and NetworkModule
+        // without risking an axum duplicate-path panic.
         .route("/health", get(health_handler))
         .route("/health/live", get(liveness_handler))
         .route("/health/ready", get(readiness_handler))
+        .route("/healthz", get(readiness_handler))
         // Real-time transport -- operation-level load shedding, not HTTP rate limiting
         .route("/ws", get(ws_upgrade_handler))
         .route("/sync", post(http_sync_handler))
