@@ -78,7 +78,9 @@ use topgun_server::service::security::{SecurityConfig, WriteValidator};
 use topgun_server::service::OperationService;
 #[cfg(feature = "redb")]
 use topgun_server::storage::datastores::RedbDataStore;
-use topgun_server::storage::datastores::{NullDataStore, WriteBehindConfig, WriteBehindDataStore};
+use topgun_server::storage::datastores::{
+    NullDataStore, WalBootstrap, WriteBehindConfig, WriteBehindDataStore,
+};
 use topgun_server::storage::eviction_config::EvictionConfig;
 use topgun_server::storage::eviction_orchestrator::EvictionOrchestrator;
 use topgun_server::storage::factory::{ObserverFactory, RecordStoreFactory};
@@ -367,7 +369,7 @@ async fn main() -> anyhow::Result<()> {
     // write acked before the last crash is replayed to the inner store before
     // any client can observe stale state. The Null backend is intentionally
     // skipped (mirrors the write-behind skip: buffering a no-op store is wasteful).
-    let wal_opt: Option<Arc<dyn Wal>> = match backend {
+    let wal_opt: Option<WalBootstrap> = match backend {
         StorageBackend::Redb | StorageBackend::Postgres => {
             match WalWriter::new(
                 write_behind_config.wal_dir.clone(),
@@ -385,8 +387,26 @@ async fn main() -> anyhow::Result<()> {
                         std::process::exit(1);
                     }
 
+                    // Seed the live sequence counter to one past the highest
+                    // sequence ever durably observed. Computed AFTER recovery so
+                    // it sees the watermarks `mark_applied` advanced, and while
+                    // `writer` is still the concrete `WalWriter` (the method is
+                    // not on the `Wal` trait). A seed at or below a watermark lets
+                    // a post-restart write reuse a number the recovery filter
+                    // drops — the durability defect this guards against.
+                    let sequence_start = match writer.max_observed_sequence().await {
+                        Ok(max) => max + 1,
+                        Err(err) => {
+                            eprintln!("FATAL: WAL max-sequence scan failed: {err}");
+                            std::process::exit(1);
+                        }
+                    };
+
                     let wal: Arc<dyn Wal> = writer;
-                    Some(wal)
+                    Some(WalBootstrap {
+                        wal,
+                        sequence_start,
+                    })
                 }
                 Err(err) => {
                     // Cannot create the WAL directory alongside the durable store.
