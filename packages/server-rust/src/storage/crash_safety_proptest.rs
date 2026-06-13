@@ -1,7 +1,7 @@
 //! Storage-layer crash-safety property tests for the no-acked-loss invariant.
 //!
-//! These tests prove the SPEC-307 crash-safety guarantee behaviorally, driving
-//! the **real** production write path end-to-end:
+//! These tests prove the no-acked-loss crash-safety guarantee behaviorally,
+//! driving the **real** production write path end-to-end:
 //!
 //! - A real `WriteBehindDataStore` built over a real file-backed `WalWriter` in
 //!   a temp directory (append-before-ack is production behavior: the WAL frame is
