@@ -80,6 +80,7 @@ use topgun_server::service::OperationService;
 use topgun_server::storage::datastores::RedbDataStore;
 use topgun_server::storage::datastores::{NullDataStore, WriteBehindConfig, WriteBehindDataStore};
 use topgun_server::storage::eviction_config::EvictionConfig;
+use topgun_server::storage::wal::{Wal, WalRecovery, WalWriter};
 use topgun_server::storage::eviction_orchestrator::EvictionOrchestrator;
 use topgun_server::storage::factory::{ObserverFactory, RecordStoreFactory};
 use topgun_server::storage::impls::StorageConfig;
@@ -361,6 +362,44 @@ async fn main() -> anyhow::Result<()> {
     // preserves the legacy ephemeral integration-test behavior.
     let (inner_data_store, backend) = select_datastore().await?;
 
+    // For durable backends, construct the WAL writer and run startup recovery
+    // before the listener begins accepting connections. This ensures that every
+    // write acked before the last crash is replayed to the inner store before
+    // any client can observe stale state. The Null backend is intentionally
+    // skipped (mirrors the write-behind skip: buffering a no-op store is wasteful).
+    let wal_opt: Option<Arc<dyn Wal>> = match backend {
+        StorageBackend::Redb | StorageBackend::Postgres => {
+            match WalWriter::new(
+                write_behind_config.wal_dir.clone(),
+                write_behind_config.wal_fsync_policy,
+            ) {
+                Ok(writer) => {
+                    // Run recovery through the inner store (before write-behind wrap)
+                    // so replay bypasses the in-memory buffer and does not generate
+                    // new WAL entries. Recovery must complete before set_ready().
+                    let recovery = WalRecovery::new(Arc::clone(&writer), Vec::new());
+                    if let Err(err) = recovery.run(Arc::clone(&inner_data_store)).await {
+                        // Mid-file WAL corruption is fatal: refuse to start rather
+                        // than silently serving potentially stale data.
+                        eprintln!("FATAL: WAL recovery failed: {err}");
+                        std::process::exit(1);
+                    }
+
+                    let wal: Arc<dyn Wal> = writer;
+                    Some(wal)
+                }
+                Err(err) => {
+                    // Cannot create the WAL directory alongside the durable store.
+                    // Emit a startup error and exit rather than silently proceeding
+                    // without durability guarantees.
+                    eprintln!("FATAL: Cannot initialise WAL: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        StorageBackend::Null => None,
+    };
+
     // Wrap durable backends in WriteBehindDataStore so client OP_ACK round-trips
     // do not block on disk fsync. The Null backend is intentionally skipped:
     // buffering writes to a no-op store wastes overhead with no durability win.
@@ -371,15 +410,15 @@ async fn main() -> anyhow::Result<()> {
                 backend = ?backend,
                 "write-behind wrap applied"
             );
-            // WriteBehindDataStore::new returns Arc<Self> directly (it spawns its
-            // own background flush task). Wrapping with Arc::new here would
-            // produce Arc<Arc<...>>, which cannot coerce to Arc<dyn MapDataStore>.
-            WriteBehindDataStore::new(inner_data_store, write_behind_config.clone())
+            // WriteBehindDataStore::new_with_wal returns Arc<Self> directly (it
+            // spawns its own background flush task). Wrapping with Arc::new here
+            // would produce Arc<Arc<...>>, which cannot coerce to Arc<dyn MapDataStore>.
+            WriteBehindDataStore::new_with_wal(inner_data_store, write_behind_config.clone(), wal_opt)
         }
         StorageBackend::Null => {
             tracing::debug!(
                 target: "topgun_server::bootstrap",
-                "write-behind skipped for null backend"
+                "write-behind and WAL skipped for null backend"
             );
             inner_data_store
         }
@@ -610,8 +649,8 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(orchestrator.run());
 
     // Single operator-facing summary line. Reads against this line are how an
-    // operator confirms the effective ceiling and whether write-behind is
-    // wrapping the durable backend without reading source.
+    // operator confirms the effective ceiling, whether write-behind is wrapping
+    // the durable backend, and the active WAL configuration.
     tracing::info!(
         max_ram_mb = eviction_config.max_ram_bytes / (1024 * 1024),
         high_water_pct = eviction_config.high_water_pct,
@@ -619,7 +658,10 @@ async fn main() -> anyhow::Result<()> {
         interval_ms = eviction_config.interval_ms,
         write_behind_enabled = !matches!(backend, StorageBackend::Null),
         write_behind_shutdown_timeout_ms = write_behind_config.shutdown_timeout_ms,
-        "eviction + write-behind initialized"
+        wal_enabled = !matches!(backend, StorageBackend::Null),
+        wal_dir = %write_behind_config.wal_dir.display(),
+        wal_fsync_policy = ?write_behind_config.wal_fsync_policy,
+        "eviction + write-behind + WAL initialized"
     );
 
     // Allow integration test environments to opt in to detailed auth errors.
