@@ -1854,6 +1854,39 @@ mod tests {
         assert_eq!(count, 1, "WAL must have exactly 1 entry after remove()");
     }
 
+    // AC1: remove_all appends one WAL frame per key before returning Ok(())
+    #[tokio::test]
+    async fn wal_append_happens_before_remove_all_returns() {
+        let wal = InMemoryTestWal::new();
+        let wal_arc: Arc<dyn Wal> = Arc::clone(&wal) as Arc<dyn Wal>;
+
+        let inner: Arc<dyn MapDataStore> = Arc::new(SpyDataStore::new());
+        let config = WriteBehindConfig {
+            write_delay_ms: 60_000,
+            flush_interval_ms: 60_000,
+            ..WriteBehindConfig::default()
+        };
+        let store = WriteBehindDataStore::new_with_wal(inner, config, Some(wal_arc));
+
+        let keys = vec!["k1".to_string(), "k2".to_string(), "k3".to_string()];
+        store.remove_all("m", &keys).await.unwrap();
+
+        // Every key must be durable in the WAL the moment remove_all() returns,
+        // so an unclean crash replays each individual tombstone, not just the batch.
+        let count = wal.append_count.load(TestOrdering::Relaxed);
+        assert_eq!(
+            count, 3,
+            "WAL must have one entry per removed key after remove_all()"
+        );
+
+        let appended = wal.appended.lock().await;
+        assert_eq!(appended.len(), 3);
+        for entry in appended.iter() {
+            assert_eq!(entry.1.map, "m");
+            assert!(matches!(entry.1.op, WalOp::Remove));
+        }
+    }
+
     // AC2: after flush, WAL entry is marked applied
     #[tokio::test]
     async fn wal_entry_marked_applied_after_flush() {
