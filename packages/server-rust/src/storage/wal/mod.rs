@@ -638,11 +638,12 @@ impl WalRecovery {
         for entry in read_dir.flatten() {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            if name_str.starts_with("partition-") && name_str.ends_with(".log") {
-                // Extract the partition id from the filename pattern partition-NNN.log
-                let inner = &name_str["partition-".len()..name_str.len() - ".log".len()];
-                if let Ok(id) = inner.parse::<u32>() {
-                    ids.push(id);
+            // Extract the partition id from the filename pattern partition-NNN.log
+            if let Some(rest) = name_str.strip_prefix("partition-") {
+                if let Some(inner) = rest.strip_suffix(".log") {
+                    if let Ok(id) = inner.parse::<u32>() {
+                        ids.push(id);
+                    }
                 }
             }
         }

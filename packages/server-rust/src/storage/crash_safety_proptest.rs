@@ -125,7 +125,7 @@ impl MapDataStore for RetainingStore {
             .lock()
             .await
             .get(&(map.to_string(), key.to_string()))
-            .and_then(|v| v.clone()))
+            .and_then(Clone::clone))
     }
 
     async fn load_all(
@@ -485,9 +485,11 @@ async fn ac2b_truncated_tail_tolerated() {
         .flatten()
         .map(|e| e.path())
         .find(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("partition-") && n.ends_with(".log"))
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                n.strip_prefix("partition-")
+                    .and_then(|r| r.strip_suffix(".log"))
+                    .is_some()
+            })
         })
         .expect("a partition log file must exist");
 
@@ -559,9 +561,11 @@ async fn ac2c_mid_file_corruption_is_fatal() {
         .flatten()
         .map(|e| e.path())
         .find(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("partition-") && n.ends_with(".log"))
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                n.strip_prefix("partition-")
+                    .and_then(|r| r.strip_suffix(".log"))
+                    .is_some()
+            })
         })
         .expect("a partition log file must exist");
 
