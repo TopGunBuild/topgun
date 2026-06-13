@@ -59,7 +59,10 @@ impl RetainingStore {
     /// Returns `true` if the key is present and not tombstoned.
     async fn contains(&self, map: &str, key: &str) -> bool {
         matches!(
-            self.data.lock().await.get(&(map.to_string(), key.to_string())),
+            self.data
+                .lock()
+                .await
+                .get(&(map.to_string(), key.to_string())),
             Some(Some(_))
         )
     }
@@ -67,7 +70,10 @@ impl RetainingStore {
     /// Returns `true` if the key is present as a tombstone (removed).
     async fn is_tombstone(&self, map: &str, key: &str) -> bool {
         matches!(
-            self.data.lock().await.get(&(map.to_string(), key.to_string())),
+            self.data
+                .lock()
+                .await
+                .get(&(map.to_string(), key.to_string())),
             Some(None)
         )
     }
@@ -272,7 +278,10 @@ async fn run_crash_scenario(
                 acked.insert(key.clone(), Some(*value_tag));
             }
             Op::Remove { key } => {
-                store.remove(TEST_MAP, key, 1000).await.expect("remove must ack");
+                store
+                    .remove(TEST_MAP, key, 1000)
+                    .await
+                    .expect("remove must ack");
                 acked.insert(key.clone(), None);
             }
         }
@@ -413,8 +422,7 @@ async fn ac2a_clean_recovery_replays_all_acked_ops() {
     ];
     // crash_after == ops.len() ⇒ the whole sequence is acked; the intact log
     // decodes as Complete/CleanEof and every acked op must replay.
-    let (recovered, _acked) =
-        run_crash_scenario(&ops, ops.len(), WalFsyncPolicy::PerOp).await;
+    let (recovered, _acked) = run_crash_scenario(&ops, ops.len(), WalFsyncPolicy::PerOp).await;
 
     let expected = expected_final_state(&ops);
     for (key, state) in expected {
@@ -574,5 +582,199 @@ async fn ac2c_mid_file_corruption_is_fatal() {
     assert!(
         result.is_err(),
         "mid-file corruption must be fatal (recovery returns Err so the caller exits non-zero)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AC4: multi-restart no-acked-loss. Write k0 → drop → recover (k0 present) →
+// rebuild a NEW store over a NEW WalWriter on the SAME wal_dir seeded via
+// max_observed_sequence()+1 → write k1 → drop → recover → BOTH k0 and k1
+// present. Without the seed fix the rebuilt counter resets to a low value and
+// k1 reuses a sequence at or below the watermark recovery wrote for the shared
+// partition, so the second recovery drops it — this is the only schedule that
+// exercises Symptom 2 (counter-resume), not just the fresh-node off-by-one.
+// ---------------------------------------------------------------------------
+
+/// Finds a key distinct from `first_key` that maps to the **same** partition as
+/// `first_key` under `partition_for(map, key)`.
+///
+/// k0 and k1 must share a partition so that the watermark recovery advances for
+/// k0's partition is the exact value the rebuilt counter would (without the
+/// seed) re-hand to k1 — making the second recovery drop k1.
+fn colliding_key(map: &str, first_key: &str) -> String {
+    let target = partition_of(map, first_key);
+    for i in 0..1_000_000u64 {
+        let candidate = format!("collide-{i}");
+        if candidate != first_key && partition_of(map, &candidate) == target {
+            return candidate;
+        }
+    }
+    panic!("no colliding key found for partition {target}");
+}
+
+/// Mirrors `write_behind::partition_for` (private): deterministic partition id.
+fn partition_of(map: &str, key: &str) -> u32 {
+    let combined = format!("{map}:{key}");
+    topgun_core::fnv1a_hash(&combined) % topgun_core::PARTITION_COUNT
+}
+
+/// Recovers from the on-disk WAL at `wal_dir` into `inner`.
+///
+/// `inner` models the durable backend (redb): it persists across restart cycles,
+/// so an applied-then-compacted entry stays present even though it is no longer
+/// in the WAL tail. Recovery replays only the unapplied WAL entries on top.
+async fn recover_into(wal_dir: &std::path::Path, inner: Arc<RetainingStore>) {
+    let wal = WalWriter::new(wal_dir.to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+    let recovery = WalRecovery::new(Arc::clone(&wal), Vec::new());
+    recovery
+        .run(Arc::clone(&inner) as Arc<dyn MapDataStore>)
+        .await
+        .expect("recovery must succeed on an intact WAL");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ac4_acked_writes_survive_multiple_restart_cycles() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal_dir = dir.path().to_path_buf();
+
+    let k0 = "k0".to_string();
+    // k1 must share a partition with k0 so the watermark collision bites.
+    let k1 = colliding_key(TEST_MAP, &k0);
+    assert_eq!(
+        partition_of(TEST_MAP, &k0),
+        partition_of(TEST_MAP, &k1),
+        "k0 and k1 must collide on one partition to exercise the watermark resume"
+    );
+
+    // The durable backend (modeled by redb) persists across restart cycles, so
+    // an applied-then-compacted entry stays present even once it leaves the WAL.
+    let durable: Arc<RetainingStore> = Arc::new(RetainingStore::default());
+
+    // --- Cycle 1: write k0, drop before flush ---
+    {
+        let inner: Arc<dyn MapDataStore> = Arc::new(RetainingStore::default());
+        let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).unwrap();
+        let wal_dyn: Arc<dyn Wal> = Arc::clone(&wal) as Arc<dyn Wal>;
+        // Fresh node: seed 1 (no WAL observed yet).
+        let store = WriteBehindDataStore::new_with_wal(
+            inner,
+            never_flush_config(),
+            Some(WalBootstrap {
+                wal: wal_dyn,
+                sequence_start: 1,
+            }),
+        );
+        store
+            .add(TEST_MAP, &k0, &lww_value(1, 1), 0, 1000)
+            .await
+            .expect("k0 add must ack");
+        drop(store);
+    }
+
+    // First recovery into the durable store: k0 must be present. This also
+    // advances the .applied watermark for k0's partition and compacts that log
+    // to empty.
+    recover_into(&wal_dir, Arc::clone(&durable)).await;
+    assert!(
+        durable.contains(TEST_MAP, &k0).await,
+        "k0 must be present after the first recovery (Symptom 1 path)"
+    );
+
+    // --- Cycle 2: rebuild a NEW store over a NEW WalWriter on the SAME wal_dir,
+    // seeded from the WAL so the live counter resumes past the watermark. ---
+    {
+        let inner: Arc<dyn MapDataStore> = Arc::new(RetainingStore::default());
+        let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).unwrap();
+        // Seed AFTER recovery so it observes the advanced watermark (the
+        // compaction trap: k0's log is now empty but its sidecar persists).
+        let sequence_start = wal
+            .max_observed_sequence()
+            .await
+            .expect("max_observed_sequence")
+            + 1;
+        let wal_dyn: Arc<dyn Wal> = Arc::clone(&wal) as Arc<dyn Wal>;
+        let store = WriteBehindDataStore::new_with_wal(
+            inner,
+            never_flush_config(),
+            Some(WalBootstrap {
+                wal: wal_dyn,
+                sequence_start,
+            }),
+        );
+        store
+            .add(TEST_MAP, &k1, &lww_value(2, 2), 0, 1000)
+            .await
+            .expect("k1 add must ack");
+        drop(store);
+    }
+
+    // Second recovery into the SAME durable store: k0 stayed there from cycle 1,
+    // and k1 must now replay from the WAL. Without the seed fix k1 reuses a
+    // sequence <= the watermark recovery wrote for the shared partition, so the
+    // recovery filter drops it here and the assertion fails.
+    recover_into(&wal_dir, Arc::clone(&durable)).await;
+    assert!(
+        durable.contains(TEST_MAP, &k0).await,
+        "k0 must still be present after the second recovery"
+    );
+    assert!(
+        durable.contains(TEST_MAP, &k1).await,
+        "k1 (written post-restart) must survive the second recovery — \
+         the counter must resume past the persisted watermark"
+    );
+
+    drop(dir);
+}
+
+// ---------------------------------------------------------------------------
+// Compaction trap: max_observed_sequence must read the .applied sidecar of a
+// partition whose log was compacted to empty (so its log max is 0) but whose
+// watermark W persists. Returned max must be >= W or the seed lands below W and
+// a post-restart write to that partition is dropped.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn max_observed_sequence_reads_watermark_of_compacted_empty_partition() {
+    use crate::storage::wal::{WalEntry, WalOp};
+
+    let dir = tempfile::tempdir().unwrap();
+    let wal_dir = dir.path().to_path_buf();
+    let watermark: u64 = 7;
+
+    let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).unwrap();
+    // Append an entry, then mark it applied: mark_applied writes the .applied
+    // sidecar (watermark) AND compacts the log to retain only seq > watermark,
+    // leaving partition 3's log empty while its sidecar holds W.
+    let entry = WalEntry {
+        map: "m".to_string(),
+        key: "k".to_string(),
+        op: WalOp::Store {
+            value: Value::Int(1),
+            expiration_time: None,
+        },
+        timestamp: Some(Timestamp {
+            millis: 1,
+            counter: 0,
+            node_id: "n".to_string(),
+        }),
+        sequence: watermark,
+    };
+    wal.append(3, &entry).await.unwrap();
+    wal.mark_applied(3, watermark).await.unwrap();
+
+    // Sanity: the log is now compacted to empty (no entries above the watermark).
+    let unapplied = wal.unapplied(3).await.unwrap();
+    assert!(
+        unapplied.is_empty(),
+        "log must be compacted-empty after mark_applied"
+    );
+
+    // A fresh WalWriter (cold start) must still observe the sidecar watermark.
+    let cold = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).unwrap();
+    let max = cold.max_observed_sequence().await.unwrap();
+    assert!(
+        max >= watermark,
+        "max_observed_sequence must be >= the .applied watermark {watermark} of a \
+         compacted-empty partition, got {max}"
     );
 }
