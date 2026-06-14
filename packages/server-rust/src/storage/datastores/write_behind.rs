@@ -94,11 +94,23 @@ impl WriteBehindConfig {
     /// `backoff_base_ms`, `backoff_cap_ms`) retain their [`Self::default`] values.
     #[must_use]
     pub fn from_env() -> Self {
+        Self::from_source(|key| std::env::var(key).ok())
+    }
+
+    /// Construct [`WriteBehindConfig`] from an injected variable source.
+    ///
+    /// `get` maps a variable name to its value (or `None` if unset). This is the
+    /// testable seam behind [`Self::from_env`], which simply passes a closure
+    /// over `std::env::var`. Tests pass a map-backed closure so they exercise the
+    /// full parse logic without mutating process-global environment state —
+    /// eliminating the cross-test env race that made parallel runs flaky.
+    #[must_use]
+    pub fn from_source<F: Fn(&str) -> Option<String>>(get: F) -> Self {
         let defaults = Self::default();
         let mut cfg = defaults.clone();
 
         // Parse TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS → flush_interval_ms (u64)
-        if let Ok(raw) = std::env::var("TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS") {
+        if let Some(raw) = get("TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS") {
             match raw.trim().parse::<u64>() {
                 Ok(ms) => {
                     cfg.flush_interval_ms = ms;
@@ -118,7 +130,7 @@ impl WriteBehindConfig {
         }
 
         // Parse TOPGUN_WRITEBEHIND_BATCH_SIZE → batch_size (u32)
-        if let Ok(raw) = std::env::var("TOPGUN_WRITEBEHIND_BATCH_SIZE") {
+        if let Some(raw) = get("TOPGUN_WRITEBEHIND_BATCH_SIZE") {
             match raw.trim().parse::<u32>() {
                 Ok(size) => {
                     cfg.batch_size = size;
@@ -138,7 +150,7 @@ impl WriteBehindConfig {
         }
 
         // Parse TOPGUN_WRITEBEHIND_CAPACITY → capacity (u64)
-        if let Ok(raw) = std::env::var("TOPGUN_WRITEBEHIND_CAPACITY") {
+        if let Some(raw) = get("TOPGUN_WRITEBEHIND_CAPACITY") {
             match raw.trim().parse::<u64>() {
                 Ok(cap) => {
                     cfg.capacity = cap;
@@ -158,7 +170,7 @@ impl WriteBehindConfig {
         }
 
         // Parse TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS → shutdown_timeout_ms (u64)
-        if let Ok(raw) = std::env::var("TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS") {
+        if let Some(raw) = get("TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS") {
             match raw.trim().parse::<u64>() {
                 Ok(ms) => {
                     cfg.shutdown_timeout_ms = ms;
@@ -178,7 +190,7 @@ impl WriteBehindConfig {
         }
 
         // Parse TOPGUN_WAL_DIR → wal_dir (PathBuf)
-        if let Ok(raw) = std::env::var("TOPGUN_WAL_DIR") {
+        if let Some(raw) = get("TOPGUN_WAL_DIR") {
             let trimmed = raw.trim();
             if !trimmed.is_empty() {
                 cfg.wal_dir = PathBuf::from(trimmed);
@@ -186,7 +198,7 @@ impl WriteBehindConfig {
         }
 
         // Parse TOPGUN_WAL_FSYNC_POLICY → wal_fsync_policy (WalFsyncPolicy)
-        if let Ok(raw) = std::env::var("TOPGUN_WAL_FSYNC_POLICY") {
+        if let Some(raw) = get("TOPGUN_WAL_FSYNC_POLICY") {
             match raw.trim().parse::<WalFsyncPolicy>() {
                 Ok(policy) => {
                     cfg.wal_fsync_policy = policy;
@@ -1966,33 +1978,57 @@ mod tests {
         );
     }
 
-    // AC7: from_env parses TOPGUN_WAL_DIR and TOPGUN_WAL_FSYNC_POLICY
+    /// Build a `from_source` lookup closure from a fixed map of overrides — the
+    /// parallel-safe seam: full parse logic is exercised without touching
+    /// process-global env, so this test cannot race any other test reading the
+    /// same vars (the flake behind G3's withdrawal, TODO-468).
+    fn config_source(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: std::collections::HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        move |key: &str| map.get(key).cloned()
+    }
+
+    // AC7: from_source parses TOPGUN_WAL_DIR and TOPGUN_WAL_FSYNC_POLICY
     #[test]
-    fn from_env_parses_wal_dir_and_fsync_policy() {
-        // Test TOPGUN_WAL_DIR
-        std::env::set_var("TOPGUN_WAL_DIR", "/tmp/test-wal");
-        let cfg = WriteBehindConfig::from_env();
+    fn from_source_parses_wal_dir_and_fsync_policy() {
+        // TOPGUN_WAL_DIR
+        let cfg =
+            WriteBehindConfig::from_source(config_source(&[("TOPGUN_WAL_DIR", "/tmp/test-wal")]));
         assert_eq!(cfg.wal_dir, std::path::PathBuf::from("/tmp/test-wal"));
-        std::env::remove_var("TOPGUN_WAL_DIR");
 
-        // Test TOPGUN_WAL_FSYNC_POLICY with valid value
-        std::env::set_var("TOPGUN_WAL_FSYNC_POLICY", "per_op");
-        let cfg = WriteBehindConfig::from_env();
+        // TOPGUN_WAL_FSYNC_POLICY with a valid value
+        let cfg =
+            WriteBehindConfig::from_source(config_source(&[("TOPGUN_WAL_FSYNC_POLICY", "per_op")]));
         assert_eq!(cfg.wal_fsync_policy, WalFsyncPolicy::PerOp);
-        std::env::remove_var("TOPGUN_WAL_FSYNC_POLICY");
 
-        // Test TOPGUN_WAL_FSYNC_POLICY with invalid value falls back to Batched
-        std::env::set_var("TOPGUN_WAL_FSYNC_POLICY", "invalid_policy");
-        let cfg = WriteBehindConfig::from_env();
+        // TOPGUN_WAL_FSYNC_POLICY with an invalid value falls back to Batched
+        let cfg = WriteBehindConfig::from_source(config_source(&[(
+            "TOPGUN_WAL_FSYNC_POLICY",
+            "invalid_policy",
+        )]));
         assert_eq!(
             cfg.wal_fsync_policy,
             WalFsyncPolicy::Batched,
             "Invalid policy must fall back to Batched default"
         );
-        std::env::remove_var("TOPGUN_WAL_FSYNC_POLICY");
 
-        // Default is Batched
-        let cfg = WriteBehindConfig::default();
+        // No override → Batched default
+        let cfg = WriteBehindConfig::from_source(config_source(&[]));
         assert_eq!(cfg.wal_fsync_policy, WalFsyncPolicy::Batched);
+    }
+
+    /// Wiring-only smoke test for the real `from_env` → `std::env` seam. The sole
+    /// env-mutating config test, `#[serial]` so it cannot race the env-free tests
+    /// above. Parse logic is covered by `from_source_*`; here we only prove
+    /// `from_env` actually reads the process environment.
+    #[serial_test::serial]
+    #[test]
+    fn from_env_reads_process_environment() {
+        std::env::set_var("TOPGUN_WAL_FSYNC_POLICY", "per_op");
+        let cfg = WriteBehindConfig::from_env();
+        std::env::remove_var("TOPGUN_WAL_FSYNC_POLICY");
+        assert_eq!(cfg.wal_fsync_policy, WalFsyncPolicy::PerOp);
     }
 }
