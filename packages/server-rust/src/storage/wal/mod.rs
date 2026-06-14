@@ -332,6 +332,17 @@ impl Wal for WalWriter {
             .await
             .map_err(|e| anyhow::anyhow!("WAL write failed for partition {partition}: {e}"))?;
 
+        // Push tokio's internal write buffer out to the OS so a subsequent fresh
+        // read of this partition file (unapplied/recovery/compaction all reopen
+        // the path) observes the entry. This is visibility, not durability:
+        // flush() does not fsync. Durability is governed separately by the policy
+        // match below. Without this, the None policy never leaves tokio's buffer
+        // and a concurrent reader can miss a just-appended entry.
+        pf.file
+            .flush()
+            .await
+            .map_err(|e| anyhow::anyhow!("WAL flush failed for partition {partition}: {e}"))?;
+
         match self.policy {
             WalFsyncPolicy::PerOp => {
                 pf.file.sync_data().await.map_err(|e| {
