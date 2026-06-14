@@ -2204,4 +2204,638 @@ mod tests {
             other => panic!("expected Message, got {other:?}"),
         }
     }
+
+    // -----------------------------------------------------------------------
+    // OR-Map data-loss regression (add-wins / remove-wins / convergence).
+    //
+    // These assert the FIXED behaviour at the SERVER boundary: ops flow through
+    // CrdtService::apply_single_op (via oneshot) and the inbound
+    // SyncService::handle_ormap_push_diff ingest path, and the stored
+    // RecordValue::OrMap { records, tombstones } is read back and compared.
+    // The earlier audit repro demonstrated OR_REMOVE of one tag destroying every
+    // concurrent value under the key; the inverted forms below lock in survival.
+    // -----------------------------------------------------------------------
+
+    use topgun_core::hash_to_partition;
+
+    /// Builds a CRDT op context routed to the key's hash partition so the single
+    /// ClientOp path (which honours `ctx.partition_id`) and the SyncService
+    /// push-diff path (which uses `hash_to_partition(key)`) land on the same store.
+    fn make_ctx_for_key(key: &str) -> OperationContext {
+        let mut ctx = make_ctx();
+        ctx.partition_id = Some(hash_to_partition(key));
+        ctx
+    }
+
+    fn or_add_op(map: &str, key: &str, value: &str, tag: &str) -> Operation {
+        let or_rec = topgun_core::ORMapRecord {
+            value: rmpv::Value::String(value.into()),
+            timestamp: make_timestamp(),
+            tag: tag.to_string(),
+            ttl_ms: None,
+        };
+        Operation::ClientOp {
+            // connection_id = None -> tags used as-is, no sanitize/regeneration.
+            ctx: make_ctx_for_key(key),
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some(format!("add-{tag}")),
+                    map_name: map.to_string(),
+                    key: key.to_string(),
+                    op_type: None,
+                    record: None,
+                    or_record: Some(Some(or_rec)),
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        }
+    }
+
+    fn or_remove_op(map: &str, key: &str, tag: &str) -> Operation {
+        Operation::ClientOp {
+            ctx: make_ctx_for_key(key),
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some(format!("rm-{tag}")),
+                    map_name: map.to_string(),
+                    key: key.to_string(),
+                    op_type: None,
+                    record: None,
+                    or_record: None,
+                    or_tag: Some(Some(tag.to_string())),
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        }
+    }
+
+    fn make_service_with_factory() -> (Arc<CrdtService>, Arc<RecordStoreFactory>) {
+        let factory = make_factory();
+        let registry = Arc::new(ConnectionRegistry::new());
+        let query_registry = Arc::new(QueryRegistry::new());
+        let svc = Arc::new(CrdtService::new(
+            Arc::clone(&factory),
+            registry,
+            make_validator(),
+            query_registry,
+            Arc::new(SchemaService::new()),
+        ));
+        (svc, factory)
+    }
+
+    /// Reads back the stored OR-Map for a key at its hash partition.
+    async fn read_or_map(
+        factory: &Arc<RecordStoreFactory>,
+        map: &str,
+        key: &str,
+    ) -> (Vec<String>, Vec<String>) {
+        let store = factory.get_or_create(map, hash_to_partition(key));
+        let value = store.get(key, false).await.unwrap().map(|r| r.value);
+        match value {
+            Some(RecordValue::OrMap {
+                records,
+                tombstones,
+            }) => {
+                let mut tags: Vec<String> = records.into_iter().map(|e| e.tag).collect();
+                tags.sort();
+                let mut tombs = tombstones;
+                tombs.sort();
+                (tags, tombs)
+            }
+            Some(RecordValue::OrTombstones { tags }) => {
+                let mut tombs = tags;
+                tombs.sort();
+                (Vec::new(), tombs)
+            }
+            Some(RecordValue::Lww { .. }) | None => (Vec::new(), Vec::new()),
+        }
+    }
+
+    /// Returns the survivor values (not tags) for a key, for human-readable
+    /// assertions like "play survives".
+    async fn read_or_map_values(
+        factory: &Arc<RecordStoreFactory>,
+        map: &str,
+        key: &str,
+    ) -> Vec<String> {
+        let store = factory.get_or_create(map, hash_to_partition(key));
+        match store.get(key, false).await.unwrap().map(|r| r.value) {
+            Some(RecordValue::OrMap { records, .. }) => records
+                .into_iter()
+                .map(|e| format!("{:?}", e.value))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    // AC1: add-wins — OR_REMOVE of one tag preserves concurrent survivors.
+    #[tokio::test]
+    async fn or_remove_preserves_concurrent_value_add_wins() {
+        let (svc, factory) = make_service_with_factory();
+
+        svc.clone()
+            .oneshot(or_add_op("tags", "item-1", "work", "t1"))
+            .await
+            .unwrap();
+        svc.clone()
+            .oneshot(or_add_op("tags", "item-1", "play", "t2"))
+            .await
+            .unwrap();
+
+        let (tags_before, _) = read_or_map(&factory, "tags", "item-1").await;
+        assert_eq!(
+            tags_before,
+            vec!["t1", "t2"],
+            "both adds present before remove"
+        );
+
+        svc.clone()
+            .oneshot(or_remove_op("tags", "item-1", "t1"))
+            .await
+            .unwrap();
+
+        let (records, tombstones) = read_or_map(&factory, "tags", "item-1").await;
+        assert_eq!(
+            records,
+            vec!["t2"],
+            "removing t1 must NOT destroy t2 (add-wins); stored records={records:?}"
+        );
+        assert_eq!(tombstones, vec!["t1"], "t1 must be tombstoned");
+
+        let survivors = read_or_map_values(&factory, "tags", "item-1").await;
+        assert!(
+            survivors.iter().any(|v| v.contains("play")),
+            "\"play\" (t2) must survive the remove of t1; survivors={survivors:?}"
+        );
+    }
+
+    // AC2: remove-wins — a tombstoned tag is never resurrected by a later OR_ADD.
+    #[tokio::test]
+    async fn or_add_after_remove_does_not_resurrect_remove_wins() {
+        let (svc, factory) = make_service_with_factory();
+
+        svc.clone()
+            .oneshot(or_add_op("tags", "item-2", "hello", "tag-x"))
+            .await
+            .unwrap();
+        svc.clone()
+            .oneshot(or_remove_op("tags", "item-2", "tag-x"))
+            .await
+            .unwrap();
+        // Re-add the SAME tag after it was removed — observed-remove forbids resurrection.
+        svc.clone()
+            .oneshot(or_add_op("tags", "item-2", "hello", "tag-x"))
+            .await
+            .unwrap();
+
+        let (records, tombstones) = read_or_map(&factory, "tags", "item-2").await;
+        assert!(
+            !records.contains(&"tag-x".to_string()),
+            "tag-x must NOT reappear in visible records after remove (remove-wins); records={records:?}"
+        );
+        assert_eq!(
+            tombstones,
+            vec!["tag-x"],
+            "tag-x must remain tombstoned; tombstones={tombstones:?}"
+        );
+    }
+
+    // AC3 (i): apply_single_op convergence — same op set delivered in DIFFERENT
+    // orders to two independent stores yields byte-identical OrMap state.
+    #[tokio::test]
+    async fn convergence_apply_single_op_order_independent() {
+        let (svc_a, factory_a) = make_service_with_factory();
+        let (svc_b, factory_b) = make_service_with_factory();
+
+        // An interleaved op set with duplicate tags and an add-after-remove.
+        let key = "conv-1";
+        let ops_order_a: Vec<Operation> = vec![
+            or_add_op("tags", key, "a", "ta"),
+            or_add_op("tags", key, "b", "tb"),
+            or_remove_op("tags", key, "ta"),
+            or_add_op("tags", key, "a-dup", "ta"), // resurrection attempt
+            or_add_op("tags", key, "c", "tc"),
+            or_remove_op("tags", key, "tc"),
+        ];
+        // Different delivery order to store B (removes before some adds, dup tags).
+        let ops_order_b: Vec<Operation> = vec![
+            or_add_op("tags", key, "c", "tc"),
+            or_add_op("tags", key, "b", "tb"),
+            or_remove_op("tags", key, "tc"),
+            or_add_op("tags", key, "a", "ta"),
+            or_remove_op("tags", key, "ta"),
+            or_add_op("tags", key, "a-dup", "ta"),
+        ];
+
+        for op in ops_order_a {
+            svc_a.clone().oneshot(op).await.unwrap();
+        }
+        for op in ops_order_b {
+            svc_b.clone().oneshot(op).await.unwrap();
+        }
+
+        let state_a = read_or_map(&factory_a, "tags", key).await;
+        let state_b = read_or_map(&factory_b, "tags", key).await;
+        assert_eq!(
+            state_a, state_b,
+            "apply_single_op convergence: stores must agree on (records, tombstones)"
+        );
+
+        // Byte-identical after canonical (sorted) ordering: serialize the sorted
+        // unified OrMap and compare bytes, not merely the visible state.
+        let canonical = |s: &(Vec<String>, Vec<String>)| rmp_serde::to_vec_named(s).unwrap();
+        assert_eq!(
+            canonical(&state_a),
+            canonical(&state_b),
+            "serialized OrMap bytes must be identical after canonical ordering"
+        );
+        // Sanity: the convergent state is ta-removed, tc-removed, tb survives.
+        assert_eq!(state_a.0, vec!["tb"], "only tb survives");
+        assert_eq!(state_a.1, vec!["ta", "tc"], "ta and tc tombstoned");
+    }
+
+    // AC3 (ii) + AC4: inbound handle_ormap_push_diff convergence — one store emits
+    // an ORMapEntry diff, the other ingests it (and vice-versa); both converge to
+    // byte-identical state, tombstones are not discarded, concurrent records are
+    // not clobbered.
+    #[tokio::test]
+    async fn convergence_handle_ormap_push_diff_both_directions() {
+        use crate::service::domain::sync::SyncService;
+        use crate::storage::merkle_sync::MerkleSyncManager;
+        use topgun_core::messages::{ORMapEntry, ORMapPushDiff, ORMapPushDiffPayload};
+
+        let (svc_a, factory_a) = make_service_with_factory();
+        let (svc_b, factory_b) = make_service_with_factory();
+
+        let sync_a = Arc::new(SyncService::new(
+            Arc::new(MerkleSyncManager::default()),
+            Arc::clone(&factory_a),
+            Arc::new(ConnectionRegistry::new()),
+        ));
+        let sync_b = Arc::new(SyncService::new(
+            Arc::new(MerkleSyncManager::default()),
+            Arc::clone(&factory_b),
+            Arc::new(ConnectionRegistry::new()),
+        ));
+
+        let key = "conv-diff";
+        // Store A: add t1, add t2, remove t1  -> records {t2}, tombstones {t1}
+        svc_a
+            .clone()
+            .oneshot(or_add_op("tags", key, "work", "t1"))
+            .await
+            .unwrap();
+        svc_a
+            .clone()
+            .oneshot(or_add_op("tags", key, "play", "t2"))
+            .await
+            .unwrap();
+        svc_a
+            .clone()
+            .oneshot(or_remove_op("tags", key, "t1"))
+            .await
+            .unwrap();
+
+        // Store B: concurrent add t3 (a survivor that must NOT be clobbered on ingest).
+        svc_b
+            .clone()
+            .oneshot(or_add_op("tags", key, "concurrent", "t3"))
+            .await
+            .unwrap();
+
+        // Build A's diff entry from its stored OR-Map.
+        let store_a = factory_a.get_or_create("tags", hash_to_partition(key));
+        let (a_records, a_tombs) = match store_a.get(key, false).await.unwrap().unwrap().value {
+            RecordValue::OrMap {
+                records,
+                tombstones,
+            } => (records, tombstones),
+            other => panic!("expected OrMap, got {other:?}"),
+        };
+        let a_entry = ORMapEntry {
+            key: key.to_string(),
+            records: a_records
+                .iter()
+                .map(|e| topgun_core::ORMapRecord {
+                    value: value_to_rmpv(&e.value),
+                    timestamp: e.timestamp.clone(),
+                    tag: e.tag.clone(),
+                    ttl_ms: None,
+                })
+                .collect(),
+            tombstones: a_tombs.clone(),
+        };
+        // AC4: the emitted entry carries BOTH surviving records AND tombstones.
+        assert!(
+            !a_entry.records.is_empty(),
+            "emitted ORMapEntry must carry surviving records (t2)"
+        );
+        assert_eq!(
+            a_entry.tombstones,
+            vec!["t1".to_string()],
+            "emitted ORMapEntry must carry the tombstone set (t1)"
+        );
+
+        // Ingest A's diff into B via handle_ormap_push_diff (the inbound path).
+        sync_b
+            .clone()
+            .oneshot(Operation::ORMapPushDiff {
+                ctx: make_ctx_sync(),
+                payload: ORMapPushDiff {
+                    payload: ORMapPushDiffPayload {
+                        map_name: "tags".to_string(),
+                        entries: vec![a_entry],
+                    },
+                },
+            })
+            .await
+            .unwrap();
+
+        // Build B's diff (now t2 + t3 survive, t1 tombstoned) and ingest into A.
+        let store_b = factory_b.get_or_create("tags", hash_to_partition(key));
+        let (b_records, b_tombs) = match store_b.get(key, false).await.unwrap().unwrap().value {
+            RecordValue::OrMap {
+                records,
+                tombstones,
+            } => (records, tombstones),
+            other => panic!("expected OrMap, got {other:?}"),
+        };
+        // AC4: a client joining after the remove does NOT see t1 and DOES see survivors.
+        let b_tags: Vec<&str> = b_records.iter().map(|e| e.tag.as_str()).collect();
+        assert!(
+            !b_tags.contains(&"t1"),
+            "ingest must NOT resurrect removed t1; tags={b_tags:?}"
+        );
+        assert!(
+            b_tags.contains(&"t2") && b_tags.contains(&"t3"),
+            "ingest must preserve survivor t2 AND concurrent local t3; tags={b_tags:?}"
+        );
+        assert!(b_tombs.contains(&"t1".to_string()), "t1 tombstone retained");
+
+        let b_entry = ORMapEntry {
+            key: key.to_string(),
+            records: b_records
+                .iter()
+                .map(|e| topgun_core::ORMapRecord {
+                    value: value_to_rmpv(&e.value),
+                    timestamp: e.timestamp.clone(),
+                    tag: e.tag.clone(),
+                    ttl_ms: None,
+                })
+                .collect(),
+            tombstones: b_tombs.clone(),
+        };
+        sync_a
+            .clone()
+            .oneshot(Operation::ORMapPushDiff {
+                ctx: make_ctx_sync(),
+                payload: ORMapPushDiff {
+                    payload: ORMapPushDiffPayload {
+                        map_name: "tags".to_string(),
+                        entries: vec![b_entry],
+                    },
+                },
+            })
+            .await
+            .unwrap();
+
+        // Both stores must now be byte-identical: records {t2,t3}, tombstones {t1}.
+        let state_a = read_or_map(&factory_a, "tags", key).await;
+        let state_b = read_or_map(&factory_b, "tags", key).await;
+        assert_eq!(
+            state_a, state_b,
+            "handle_ormap_push_diff convergence: stores must agree after bidirectional ingest"
+        );
+        assert_eq!(
+            rmp_serde::to_vec_named(&state_a).unwrap(),
+            rmp_serde::to_vec_named(&state_b).unwrap(),
+            "serialized OrMap bytes must be identical after bidirectional diff ingest"
+        );
+        assert_eq!(state_a.0, vec!["t2", "t3"], "t2 and t3 survive");
+        assert_eq!(state_a.1, vec!["t1"], "t1 tombstoned");
+    }
+
+    // AC6: tombstoning a tag CHANGES the OR-Map merkle hash, and a key reduced to
+    // tombstones-only is NOT dropped from peer-visible suppression state.
+    #[tokio::test]
+    async fn merkle_hash_changes_on_tombstone_and_retains_tombstone_only_key() {
+        use crate::storage::merkle_sync::{MerkleMutationObserver, MerkleSyncManager};
+
+        let key = "merkle-1";
+        let partition = hash_to_partition(key);
+        let merkle = Arc::new(MerkleSyncManager::default());
+        let observer = Arc::new(MerkleMutationObserver::new(
+            Arc::clone(&merkle),
+            "tags".to_string(),
+            partition,
+        ));
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::new(NullDataStore),
+            vec![observer as Arc<dyn crate::storage::mutation_observer::MutationObserver>],
+        ));
+        let registry = Arc::new(ConnectionRegistry::new());
+        let svc = Arc::new(CrdtService::new(
+            Arc::clone(&factory),
+            registry,
+            make_validator(),
+            Arc::new(QueryRegistry::new()),
+            Arc::new(SchemaService::new()),
+        ));
+
+        svc.clone()
+            .oneshot(or_add_op("tags", key, "v", "m1"))
+            .await
+            .unwrap();
+        let hash_after_add = merkle.with_ormap_tree("tags", partition, |t| t.get_root_hash());
+        assert_ne!(hash_after_add, 0, "add must produce a non-zero merkle hash");
+
+        svc.clone()
+            .oneshot(or_remove_op("tags", key, "m1"))
+            .await
+            .unwrap();
+        let hash_after_remove = merkle.with_ormap_tree("tags", partition, |t| t.get_root_hash());
+
+        assert_ne!(
+            hash_after_remove, hash_after_add,
+            "tombstoning a tag must CHANGE the OR-Map merkle hash"
+        );
+        // Key reduced to tombstones-only must still be peer-visible (non-zero hash),
+        // not silently dropped — otherwise remove-wins suppression cannot replicate.
+        assert_ne!(
+            hash_after_remove, 0,
+            "tombstone-only key must NOT be dropped from suppression state"
+        );
+
+        // Confirm the stored value really is tombstones-only.
+        let (records, tombstones) = read_or_map(&factory, "tags", key).await;
+        assert!(records.is_empty(), "no active records after remove");
+        assert_eq!(tombstones, vec!["m1"], "m1 tombstoned");
+    }
+
+    fn make_ctx_sync() -> OperationContext {
+        OperationContext::new(1, service_names::SYNC, make_timestamp(), 5000)
+    }
+
+    // AC9: concurrent-OR_REMOVE convergence proptest.
+    //
+    // The SimCluster harness only expresses LWW writes (no OR_ADD/OR_REMOVE) and
+    // adding an or_remove helper to it is out of scope, so the F1 scenario cannot
+    // be reached through the sim proptests. Instead this proptest mirrors the AC3
+    // two-store oracle: it generates random interleaved OR_ADD/OR_REMOVE sequences
+    // with a small reused tag pool (so concurrent adds, removes, and resurrection
+    // attempts collide), delivers the SAME multiset of ops in two DIFFERENT orders
+    // to two independent CrdtService/RecordStore pairs, and asserts the stored
+    // OrMap (records + tombstones) converges byte-identically AND that the OR-Map
+    // merkle hash agrees. This is the proptest that would have caught F1.
+    use crate::storage::merkle_sync::{MerkleMutationObserver, MerkleSyncManager};
+    use proptest::prelude::*;
+
+    #[derive(Debug, Clone)]
+    enum OrAction {
+        Add { tag: u8, value: u8 },
+        Remove { tag: u8 },
+    }
+
+    fn arb_or_action() -> impl Strategy<Value = OrAction> {
+        // Tag pool deliberately tiny (0..4) so adds/removes of the SAME tag
+        // interleave, exercising add-wins, remove-wins, and resurrection paths.
+        prop_oneof![
+            (0u8..4, 0u8..16).prop_map(|(tag, value)| OrAction::Add { tag, value }),
+            (0u8..4).prop_map(|tag| OrAction::Remove { tag }),
+        ]
+    }
+
+    fn action_to_op(action: &OrAction, map: &str, key: &str) -> Operation {
+        match action {
+            OrAction::Add { tag, value } => {
+                or_add_op(map, key, &format!("v{value}"), &format!("tag-{tag}"))
+            }
+            OrAction::Remove { tag } => or_remove_op(map, key, &format!("tag-{tag}")),
+        }
+    }
+
+    /// Builds a CrdtService whose RecordStore feeds a MerkleSyncManager, so the
+    /// OR-Map merkle hash can be read back for the key's partition.
+    fn make_service_with_merkle(
+        map: &str,
+        partition: u32,
+    ) -> (
+        Arc<CrdtService>,
+        Arc<RecordStoreFactory>,
+        Arc<MerkleSyncManager>,
+    ) {
+        let merkle = Arc::new(MerkleSyncManager::default());
+        let observer = Arc::new(MerkleMutationObserver::new(
+            Arc::clone(&merkle),
+            map.to_string(),
+            partition,
+        ));
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::new(NullDataStore),
+            vec![observer as Arc<dyn crate::storage::mutation_observer::MutationObserver>],
+        ));
+        let svc = Arc::new(CrdtService::new(
+            Arc::clone(&factory),
+            Arc::new(ConnectionRegistry::new()),
+            make_validator(),
+            Arc::new(QueryRegistry::new()),
+            Arc::new(SchemaService::new()),
+        ));
+        (svc, factory, merkle)
+    }
+
+    #[test]
+    fn proptest_concurrent_or_remove_convergence() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+
+        let mut runner = proptest::test_runner::TestRunner::new(proptest::test_runner::Config {
+            cases: 64,
+            ..proptest::test_runner::Config::default()
+        });
+
+        let map = "tags";
+        let key = "conv-prop";
+        let partition = hash_to_partition(key);
+
+        runner
+            .run(
+                &(
+                    proptest::collection::vec(arb_or_action(), 1..24),
+                    any::<u64>(),
+                ),
+                |(actions, shuffle_seed)| {
+                    runtime.block_on(async {
+                        let (svc_a, factory_a, merkle_a) = make_service_with_merkle(map, partition);
+                        let (svc_b, factory_b, merkle_b) = make_service_with_merkle(map, partition);
+
+                        // Deliver to A in generated order.
+                        for action in &actions {
+                            svc_a
+                                .clone()
+                                .oneshot(action_to_op(action, map, key))
+                                .await
+                                .unwrap();
+                        }
+
+                        // Deliver the SAME multiset to B in a different order: a
+                        // deterministic rotation derived from the case seed.
+                        let mut reordered = actions.clone();
+                        if !reordered.is_empty() {
+                            let rot = (shuffle_seed as usize) % reordered.len();
+                            reordered.rotate_left(rot);
+                        }
+                        for action in &reordered {
+                            svc_b
+                                .clone()
+                                .oneshot(action_to_op(action, map, key))
+                                .await
+                                .unwrap();
+                        }
+
+                        let state_a = read_or_map(&factory_a, map, key).await;
+                        let state_b = read_or_map(&factory_b, map, key).await;
+
+                        prop_assert_eq!(
+                            &state_a,
+                            &state_b,
+                            "OrMap (records, tombstones) must converge across orders"
+                        );
+                        prop_assert_eq!(
+                            rmp_serde::to_vec_named(&state_a).unwrap(),
+                            rmp_serde::to_vec_named(&state_b).unwrap(),
+                            "serialized OrMap bytes must be identical after convergence"
+                        );
+
+                        // Merkle consistency: convergent stores must hash identically.
+                        let hash_a =
+                            merkle_a.with_ormap_tree(map, partition, |t| t.get_root_hash());
+                        let hash_b =
+                            merkle_b.with_ormap_tree(map, partition, |t| t.get_root_hash());
+                        prop_assert_eq!(
+                            hash_a,
+                            hash_b,
+                            "OR-Map merkle hashes must agree after convergence"
+                        );
+
+                        // Remove-wins invariant: no surviving record may be tombstoned.
+                        for tag in &state_a.0 {
+                            prop_assert!(
+                                !state_a.1.contains(tag),
+                                "a tombstoned tag must never appear in the visible record set"
+                            );
+                        }
+
+                        Ok(())
+                    })
+                },
+            )
+            .unwrap();
+    }
 }
