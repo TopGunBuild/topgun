@@ -417,7 +417,10 @@ impl SyncService {
                             .get_or_create(&map_name, key_partition);
                         if let Ok(Some(record)) = store.get(&key, false).await {
                             match record.value {
-                                RecordValue::OrMap { records, .. } => {
+                                RecordValue::OrMap {
+                                    records,
+                                    tombstones,
+                                } => {
                                     let wire_records: Vec<ORMapRecord<rmpv::Value>> = records
                                         .into_iter()
                                         .map(|r| ORMapRecord {
@@ -427,10 +430,12 @@ impl SyncService {
                                             ttl_ms: None,
                                         })
                                         .collect();
+                                    // Carry tombstones so remove-wins suppression and
+                                    // add-wins survival both replicate to the peer.
                                     entries.push(ORMapEntry {
                                         key,
                                         records: wire_records,
-                                        tombstones: Vec::new(),
+                                        tombstones,
                                     });
                                 }
                                 RecordValue::OrTombstones { tags } => {
@@ -507,7 +512,10 @@ impl SyncService {
                     .get_or_create(&map_name, key_partition);
                 if let Ok(Some(record)) = store.get(&key, false).await {
                     match record.value {
-                        RecordValue::OrMap { records, .. } => {
+                        RecordValue::OrMap {
+                            records,
+                            tombstones,
+                        } => {
                             let wire_records: Vec<ORMapRecord<rmpv::Value>> = records
                                 .into_iter()
                                 .map(|r| ORMapRecord {
@@ -517,10 +525,12 @@ impl SyncService {
                                     ttl_ms: None,
                                 })
                                 .collect();
+                            // Carry tombstones so remove-wins suppression and
+                            // add-wins survival both replicate to the peer.
                             entries.push(ORMapEntry {
                                 key,
                                 records: wire_records,
-                                tombstones: Vec::new(),
+                                tombstones,
                             });
                         }
                         RecordValue::OrTombstones { tags } => {
@@ -582,7 +592,10 @@ impl SyncService {
                 .get_or_create(&map_name, key_partition);
             match store.get(&key, false).await {
                 Ok(Some(record)) => match record.value {
-                    RecordValue::OrMap { records, .. } => {
+                    RecordValue::OrMap {
+                        records,
+                        tombstones,
+                    } => {
                         let wire_records: Vec<ORMapRecord<rmpv::Value>> = records
                             .into_iter()
                             .map(|r| ORMapRecord {
@@ -592,10 +605,12 @@ impl SyncService {
                                 ttl_ms: None,
                             })
                             .collect();
+                        // Carry tombstones so remove-wins suppression and
+                        // add-wins survival both replicate to the peer.
                         entries.push(ORMapEntry {
                             key,
                             records: wire_records,
-                            tombstones: Vec::new(),
+                            tombstones,
                         });
                     }
                     RecordValue::OrTombstones { tags } => {
@@ -660,23 +675,57 @@ impl SyncService {
             let store = self
                 .record_store_factory
                 .get_or_create(&map_name, key_partition);
-            // Convert wire-format ORMapRecords to storage OrMapEntries.
-            let storage_records: Vec<crate::storage::record::OrMapEntry> = entry
-                .records
-                .iter()
-                .map(|r| crate::storage::record::OrMapEntry {
+            // Read-modify-write: fold inbound records + tombstones into the
+            // locally-stored OR-Map rather than blind-clobbering it. Discarding
+            // either side would resurrect removed entries (remove-wins broken) or
+            // drop concurrent additions (add-wins broken).
+            use std::collections::BTreeSet;
+
+            let (mut merged_records, mut tombstones): (
+                Vec<crate::storage::record::OrMapEntry>,
+                BTreeSet<String>,
+            ) = match store.get(&entry.key, false).await {
+                Ok(Some(local)) => match local.value {
+                    RecordValue::OrMap {
+                        records,
+                        tombstones,
+                    } => (records, tombstones.into_iter().collect()),
+                    // Legacy persisted blob: fold its tags into the unified view.
+                    RecordValue::OrTombstones { tags } => (Vec::new(), tags.into_iter().collect()),
+                    RecordValue::Lww { .. } => (Vec::new(), BTreeSet::new()),
+                },
+                _ => (Vec::new(), BTreeSet::new()),
+            };
+
+            // Union inbound tombstones (remove-wins) before applying records, so a
+            // tag tombstoned anywhere suppresses its record everywhere.
+            tombstones.extend(entry.tombstones.iter().cloned());
+
+            // Drop any locally-stored record whose tag is now tombstoned.
+            merged_records.retain(|r| !tombstones.contains(&r.tag));
+
+            // Apply inbound records (add-wins): keep a record unless its tag is
+            // tombstoned. De-duplicate by tag so repeated pushes are idempotent.
+            for r in &entry.records {
+                if tombstones.contains(&r.tag) {
+                    continue;
+                }
+                if merged_records.iter().any(|existing| existing.tag == r.tag) {
+                    continue;
+                }
+                merged_records.push(crate::storage::record::OrMapEntry {
                     value: crate::service::domain::crdt::rmpv_to_value(&r.value),
                     tag: r.tag.clone(),
                     timestamp: r.timestamp.clone(),
-                })
-                .collect();
+                });
+            }
 
             store
                 .put(
                     &entry.key,
                     RecordValue::OrMap {
-                        records: storage_records,
-                        tombstones: vec![],
+                        records: merged_records,
+                        tombstones: tombstones.into_iter().collect(),
                     },
                     ExpiryPolicy::NONE,
                     CallerProvenance::CrdtMerge,
