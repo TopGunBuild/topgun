@@ -27,7 +27,7 @@ use crate::service::domain::predicate::{
 };
 use crate::service::domain::query::QueryRegistry;
 use crate::service::operation::{
-    service_names, CallerOrigin, Operation, OperationContext, OperationError, OperationResponse,
+    service_names, Operation, OperationContext, OperationError, OperationResponse,
 };
 use crate::service::registry::{ManagedService, ServiceContext};
 use crate::service::security::WriteValidator;
@@ -52,29 +52,6 @@ fn matches_query_predicate(query: &topgun_core::messages::base::Query, data: &rm
         // No filter: match all
         true
     }
-}
-
-/// Returns true when the caller is an untrusted external origin whose writes must
-/// pass `WriteValidator::validate_write` before being applied.
-///
-/// Covers `Client`, `HttpClient`, and `Anonymous`. The gate keys off the origin
-/// rather than `connection_id` presence because HTTP writes carry no
-/// `connection_id`; gating on it alone would skip validation/re-stamping on the
-/// HTTP path. `Anonymous` is included so an anonymous write is rejected at this
-/// layer (defense-in-depth) instead of being silently applied via the
-/// internal/system fast path.
-fn is_untrusted_write_origin(origin: CallerOrigin) -> bool {
-    matches!(
-        origin,
-        CallerOrigin::Client | CallerOrigin::HttpClient | CallerOrigin::Anonymous
-    )
-}
-
-/// Returns true when the caller is a real client transport whose timestamps must
-/// be re-stamped with a server HLC. `Anonymous` is excluded because anonymous
-/// writes never reach the re-stamp step — `validate_write` rejects them first.
-fn is_client_origin(origin: CallerOrigin) -> bool {
-    matches!(origin, CallerOrigin::Client | CallerOrigin::HttpClient)
 }
 
 // ---------------------------------------------------------------------------
@@ -194,22 +171,11 @@ impl CrdtService {
         let op = &msg.payload;
         let partition_id = ctx.partition_id.unwrap_or(0);
 
-        // Validate and re-stamp every untrusted external write, keyed on the
-        // caller origin rather than connection presence. HTTP writes carry
-        // `caller_origin = HttpClient` but no `connection_id`; gating on
-        // `connection_id` alone would let an HTTP client forge an HLC timestamp
-        // (e.g. millis = u64::MAX) that is stored and broadcast verbatim and wins
-        // LWW forever. Internal/system origins keep the client timestamp as-is.
-        let sanitized_ts = if is_untrusted_write_origin(ctx.caller_origin) {
-            // WebSocket clients carry a connection_id and thus per-connection
-            // ACL metadata; HTTP clients have no ConnectionMetadata (their auth is
-            // enforced at the handler layer), so fall back to a default snapshot.
-            let metadata_snapshot = match ctx.connection_id {
-                Some(conn_id) => self.snapshot_metadata(conn_id).await?,
-                None => ConnectionMetadata::default(),
-            };
+        // Acquire metadata snapshot if a connection_id is present.
+        // None means internal/system call — skip validation.
+        let sanitized_ts = if let Some(conn_id) = ctx.connection_id {
+            let metadata_snapshot = self.snapshot_metadata(conn_id).await?;
             let value_size = estimate_value_size(op);
-            // Rejects Anonymous outright; enforces ACL/size for Client/HttpClient.
             self.write_validator.validate_write(
                 ctx,
                 &metadata_snapshot,
@@ -218,8 +184,7 @@ impl CrdtService {
             )?;
             // Schema validation runs after auth/ACL/size checks.
             self.validate_schema_for_op(op)?;
-            // Re-stamp only real client transports; Anonymous never reaches here.
-            is_client_origin(ctx.caller_origin).then(|| self.write_validator.sanitize_hlc())
+            Some(self.write_validator.sanitize_hlc())
         } else {
             None
         };
@@ -269,18 +234,9 @@ impl CrdtService {
         let mut last_id = "unknown".to_string();
 
         // Validate all ops before applying any (atomic batch rejection).
-        // Gate on caller origin, not connection presence: HTTP writes have
-        // `caller_origin = HttpClient` but no `connection_id`, and must be
-        // re-stamped/validated identically to WS writes to close the
-        // timestamp-forgery gap. Snapshot metadata once at batch start to avoid
-        // per-op lock acquisition; HTTP clients use a default snapshot because
-        // their auth is enforced at the handler layer. Anonymous batches are
-        // rejected by validate_write before any op is applied.
-        if is_untrusted_write_origin(ctx.caller_origin) {
-            let metadata_snapshot = match ctx.connection_id {
-                Some(conn_id) => self.snapshot_metadata(conn_id).await?,
-                None => ConnectionMetadata::default(),
-            };
+        // Snapshot metadata once at batch start to avoid per-op lock acquisition.
+        if let Some(conn_id) = ctx.connection_id {
+            let metadata_snapshot = self.snapshot_metadata(conn_id).await?;
             for op in ops {
                 let value_size = estimate_value_size(op);
                 self.write_validator.validate_write(
@@ -292,20 +248,18 @@ impl CrdtService {
                 // Schema validation runs after auth/ACL/size checks, before any apply.
                 self.validate_schema_for_op(op)?;
             }
-            // All ops validated — apply them sequentially with sanitized timestamps
-            // for real client transports. Each op gets its own partition based on
-            // its key (OpBatch ctx has partition_id=None because the batch contains
-            // keys for many partitions).
-            let restamp = is_client_origin(ctx.caller_origin);
+            // All ops validated — apply them sequentially with sanitized timestamps.
+            // Each op gets its own partition based on its key (OpBatch ctx has
+            // partition_id=None because the batch contains keys for many partitions).
             for op in ops {
-                let sanitized_ts = restamp.then(|| self.write_validator.sanitize_hlc());
+                let sanitized_ts = self.write_validator.sanitize_hlc();
                 let partition_id = hash_to_partition(&op.key);
                 // Read old value before mutation for query broadcast filtering.
                 let old_rmpv_value = self
                     .read_old_value_for_queries(&op.map_name, &op.key, partition_id)
                     .await;
                 let event_payload = self
-                    .apply_single_op(op, partition_id, sanitized_ts.as_ref())
+                    .apply_single_op(op, partition_id, Some(&sanitized_ts))
                     .await?;
                 self.broadcast_event(&event_payload, ctx.connection_id)?;
                 self.broadcast_query_updates(
@@ -318,10 +272,7 @@ impl CrdtService {
                 }
             }
         } else {
-            // Trusted internal/system origin (Forwarded/Backup/Wan/System) — skip
-            // validation and re-stamping. Server-to-server traffic carries
-            // already-sanitized timestamps. Anonymous is handled in the branch above
-            // (rejected by validate_write), never here.
+            // Internal/system call (no connection_id) — skip validation.
             for op in ops {
                 let partition_id = hash_to_partition(&op.key);
                 // Read old value before mutation for query broadcast filtering.
@@ -1844,15 +1795,12 @@ mod tests {
         );
     }
 
-    /// AC8: internal/system call bypasses schema validation.
+    /// AC8: internal call (no connection_id) bypasses schema validation.
     #[tokio::test]
     async fn schema_internal_call_bypasses_validation() {
         let (svc, _registry, _conn_id) = make_schema_service().await;
-        // A genuine internal/system origin bypasses validation. Validation is now
-        // gated on caller origin (not connection_id presence) so the write path is
-        // exercised for HTTP clients that legitimately have no connection_id.
-        let mut ctx = make_ctx();
-        ctx.caller_origin = CallerOrigin::System;
+        // No connection_id = internal/system call — validation is skipped.
+        let ctx = make_ctx(); // connection_id is None
         let value = rmpv::Value::Map(vec![]); // would fail schema (missing "name")
         let op = make_lww_put_with_value(ctx, "typed-map", value);
         let result = svc.oneshot(op).await;
@@ -2204,300 +2152,5 @@ mod tests {
             },
             other => panic!("expected Message, got {other:?}"),
         }
-    }
-
-    // ---------------------------------------------------------------------------
-    // HTTP /sync HLC re-stamp / timestamp-forgery regression
-    //
-    // These tests exercise the CrdtService apply boundary with an HttpClient-origin
-    // OperationContext (no connection_id, mirroring the HTTP /sync path), then read
-    // the record back from the real RecordStore. They are behavioral (real apply +
-    // store readback + real connection-registry delivery), not source-inspection.
-    // ---------------------------------------------------------------------------
-
-    /// Forged client HLC sentinel: a real server HLC never produces this.
-    const FORGED_MILLIS: u64 = u64::MAX;
-
-    /// Builds a CrdtService plus the shared registries needed for HTTP-origin
-    /// forgery tests, returning the factory so tests can read stored records back.
-    fn make_http_forgery_setup() -> (
-        Arc<CrdtService>,
-        Arc<RecordStoreFactory>,
-        Arc<ConnectionRegistry>,
-        Arc<QueryRegistry>,
-    ) {
-        let factory = make_factory();
-        let conn_registry = Arc::new(ConnectionRegistry::new());
-        let query_registry = Arc::new(QueryRegistry::new());
-        let svc = Arc::new(CrdtService::new(
-            Arc::clone(&factory),
-            Arc::clone(&conn_registry),
-            make_validator(),
-            Arc::clone(&query_registry),
-            Arc::new(SchemaService::new()),
-        ));
-        (svc, factory, conn_registry, query_registry)
-    }
-
-    /// HttpClient-origin context with no connection_id, as built by the HTTP /sync
-    /// path (`dispatch_operations` sets caller_origin = HttpClient + a principal but
-    /// never a connection_id).
-    fn make_http_ctx() -> OperationContext {
-        let mut ctx = OperationContext::new(1, service_names::CRDT, make_timestamp(), 5000);
-        ctx.caller_origin = CallerOrigin::HttpClient;
-        ctx
-    }
-
-    fn make_forged_lww_op(ctx: OperationContext, map_name: &str, key: &str) -> Operation {
-        let record = topgun_core::LWWRecord {
-            value: Some(rmpv::Value::String("forged".into())),
-            timestamp: Timestamp {
-                millis: FORGED_MILLIS,
-                counter: u32::MAX,
-                node_id: "attacker".to_string(),
-            },
-            ttl_ms: None,
-        };
-        Operation::ClientOp {
-            ctx,
-            payload: topgun_core::messages::ClientOpMessage {
-                payload: topgun_core::messages::base::ClientOp {
-                    id: Some("forged-op".to_string()),
-                    map_name: map_name.to_string(),
-                    key: key.to_string(),
-                    op_type: None,
-                    record: Some(Some(record)),
-                    or_record: None,
-                    or_tag: None,
-                    write_concern: None,
-                    timeout: None,
-                },
-            },
-        }
-    }
-
-    /// AC1: an authenticated HTTP /sync LWW PUT with timestamp.millis = u64::MAX is
-    /// stored with a server HLC, not the forged sentinel.
-    #[tokio::test]
-    async fn http_lww_put_forged_timestamp_is_restamped_in_store() {
-        let (svc, factory, _conn, _query) = make_http_forgery_setup();
-
-        let mut ctx = make_http_ctx();
-        ctx.partition_id = Some(0);
-        let op = make_forged_lww_op(ctx, "users", "user-1");
-        svc.oneshot(op).await.unwrap();
-
-        // Read the stored record back from the real store for partition 0.
-        let store = factory.get_or_create("users", 0);
-        let record = store
-            .get("user-1", false)
-            .await
-            .unwrap()
-            .expect("record must be stored");
-        let RecordValue::Lww { timestamp, .. } = record.value else {
-            panic!("expected LWW record");
-        };
-
-        assert_ne!(
-            timestamp.millis, FORGED_MILLIS,
-            "stored LWW timestamp must be re-stamped, not the forged u64::MAX sentinel"
-        );
-        assert!(
-            timestamp.millis < FORGED_MILLIS,
-            "re-stamped millis must be a plausible wall-clock value"
-        );
-        assert_eq!(
-            timestamp.node_id, "test-node",
-            "stored timestamp must carry the server node id, not the attacker's"
-        );
-    }
-
-    /// AC2: the broadcast ServerEvent for the forged HTTP write carries the server
-    /// timestamp, not u64::MAX. Verified via real connection-registry delivery to a
-    /// subscribed connection (mirrors broadcast_sends_only_to_subscribers).
-    #[tokio::test]
-    async fn http_lww_put_forged_timestamp_is_restamped_in_broadcast() {
-        let (svc, _factory, conn_registry, query_registry) = make_http_forgery_setup();
-        let config = crate::network::config::ConnectionConfig::default();
-
-        // Register a subscribed connection so broadcast_event has a recipient.
-        let (sub_handle, mut sub_rx) = conn_registry.register(ConnectionKind::Client, &config);
-        query_registry.register(QuerySubscription {
-            query_id: "q-http".to_string(),
-            connection_id: sub_handle.id,
-            map_name: "users".to_string(),
-            query: Query {
-                predicate: None,
-                r#where: None,
-                sort: None,
-                limit: None,
-                cursor: None,
-                group_by: None,
-                aggregations: None,
-            },
-            previous_result_keys: DashSet::new(),
-            fields: None,
-        });
-
-        let mut ctx = make_http_ctx();
-        ctx.partition_id = Some(0);
-        let op = make_forged_lww_op(ctx, "users", "user-1");
-        svc.oneshot(op).await.unwrap();
-
-        // Decode the delivered ServerEvent and assert its LWW record is re-stamped.
-        let mut saw_event = false;
-        while let Ok(msg) = sub_rx.try_recv() {
-            if let crate::network::connection::OutboundMessage::Binary(bytes) = msg {
-                if let Ok(Message::ServerEvent { payload }) =
-                    rmp_serde::from_slice::<Message>(&bytes)
-                {
-                    let record = payload
-                        .record
-                        .expect("PUT ServerEvent must carry the LWW record");
-                    assert_ne!(
-                        record.timestamp.millis, FORGED_MILLIS,
-                        "broadcast LWW timestamp must be re-stamped, not the forged sentinel"
-                    );
-                    assert_eq!(
-                        record.timestamp.node_id, "test-node",
-                        "broadcast timestamp must carry the server node id"
-                    );
-                    saw_event = true;
-                }
-            }
-        }
-        assert!(
-            saw_event,
-            "subscribed connection must receive the re-stamped ServerEvent"
-        );
-    }
-
-    /// AC3: an authenticated HTTP /sync OR_ADD is re-stamped identically to the WS
-    /// path — stored tag and timestamp derive from the server HLC, not the client.
-    #[tokio::test]
-    async fn http_or_add_forged_timestamp_is_restamped_in_store() {
-        let (svc, factory, _conn, _query) = make_http_forgery_setup();
-
-        let forged_tag = format!("{FORGED_MILLIS}:{}:attacker", u32::MAX);
-        let or_rec = topgun_core::ORMapRecord {
-            value: rmpv::Value::String("forged".into()),
-            timestamp: Timestamp {
-                millis: FORGED_MILLIS,
-                counter: u32::MAX,
-                node_id: "attacker".to_string(),
-            },
-            tag: forged_tag.clone(),
-            ttl_ms: None,
-        };
-        let mut ctx = make_http_ctx();
-        ctx.partition_id = Some(hash_to_partition("item-1"));
-        let op = Operation::ClientOp {
-            ctx,
-            payload: topgun_core::messages::ClientOpMessage {
-                payload: topgun_core::messages::base::ClientOp {
-                    id: Some("forged-or-add".to_string()),
-                    map_name: "tags".to_string(),
-                    key: "item-1".to_string(),
-                    op_type: None,
-                    record: None,
-                    or_record: Some(Some(or_rec)),
-                    or_tag: None,
-                    write_concern: None,
-                    timeout: None,
-                },
-            },
-        };
-        svc.oneshot(op).await.unwrap();
-
-        let store = factory.get_or_create("tags", hash_to_partition("item-1"));
-        let record = store
-            .get("item-1", false)
-            .await
-            .unwrap()
-            .expect("OR record must be stored");
-        let RecordValue::OrMap { records } = record.value else {
-            panic!("expected OR-Map record");
-        };
-        assert_eq!(records.len(), 1, "exactly one OR entry expected");
-        let entry = &records[0];
-        assert_ne!(
-            entry.timestamp.millis, FORGED_MILLIS,
-            "OR_ADD timestamp must be re-stamped"
-        );
-        assert_eq!(
-            entry.timestamp.node_id, "test-node",
-            "OR_ADD timestamp must carry the server node id"
-        );
-        assert_ne!(
-            entry.tag, forged_tag,
-            "OR_ADD tag must be regenerated from the server HLC, not the client tag"
-        );
-        assert_eq!(
-            entry.tag,
-            format!(
-                "{}:{}:{}",
-                entry.timestamp.millis, entry.timestamp.counter, entry.timestamp.node_id
-            ),
-            "OR_ADD tag must derive from the sanitized timestamp"
-        );
-    }
-
-    /// AC5: an anonymous (no-token) forged HTTP write does not gain a new
-    /// silent-store path — it is rejected and not stored with the forged timestamp.
-    #[tokio::test]
-    async fn http_anonymous_forged_write_is_rejected_not_stored() {
-        let (svc, factory, _conn, _query) = make_http_forgery_setup();
-
-        let mut ctx = OperationContext::new(1, service_names::CRDT, make_timestamp(), 5000);
-        ctx.caller_origin = CallerOrigin::Anonymous;
-        ctx.partition_id = Some(0);
-        let op = make_forged_lww_op(ctx, "users", "anon-key");
-
-        let result = svc.oneshot(op).await;
-        assert!(
-            matches!(result, Err(OperationError::Forbidden { .. })),
-            "anonymous forged write must be rejected, got {result:?}"
-        );
-
-        // And nothing was stored under the forged timestamp.
-        let store = factory.get_or_create("users", 0);
-        let stored = store.get("anon-key", false).await.unwrap();
-        assert!(
-            stored.is_none(),
-            "anonymous forged write must not be stored"
-        );
-    }
-
-    /// AC6: validate_write now runs on the HTTP path — size limits apply to
-    /// HttpClient writes (previously skipped because connection_id was None).
-    #[tokio::test]
-    async fn http_write_value_size_limit_enforced() {
-        let hlc = Arc::new(Mutex::new(HLC::new(
-            "test-node".to_string(),
-            Box::new(SystemClock),
-        )));
-        let config = SecurityConfig {
-            require_auth: false,
-            max_value_bytes: 1, // tiny limit forces ValueTooLarge
-            ..SecurityConfig::default()
-        };
-        let validator = Arc::new(WriteValidator::new(Arc::new(config), hlc));
-        let factory = make_factory();
-        let svc = Arc::new(CrdtService::new(
-            Arc::clone(&factory),
-            Arc::new(ConnectionRegistry::new()),
-            validator,
-            Arc::new(QueryRegistry::new()),
-            Arc::new(SchemaService::new()),
-        ));
-
-        let mut ctx = make_http_ctx();
-        ctx.partition_id = Some(0);
-        let op = make_forged_lww_op(ctx, "users", "big-key");
-        let result = svc.oneshot(op).await;
-        assert!(
-            matches!(result, Err(OperationError::ValueTooLarge { .. })),
-            "HTTP write exceeding max_value_bytes must be rejected, got {result:?}"
-        );
     }
 }
