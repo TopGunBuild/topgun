@@ -114,7 +114,12 @@ pub enum RecordValue {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tombstones: Vec<String>,
     },
-    /// Tombstone markers for OR-Map deletions.
+    /// Legacy tombstone-only markers for OR-Map deletions.
+    ///
+    /// Retained read-only: new code NEVER writes this variant — removals now live
+    /// in `OrMap.tombstones` alongside active records. Kept decodable so blobs
+    /// persisted by older servers still deserialize on restart, and folded into
+    /// the unified `OrMap.tombstones` view when read by the merge path.
     OrTombstones {
         /// Tags of removed OR-Map entries.
         tags: Vec<String>,
@@ -145,4 +150,83 @@ pub struct Record {
     pub value: RecordValue,
     /// Server-internal metadata (NOT sent over the wire).
     pub metadata: RecordMetadata,
+}
+
+#[cfg(test)]
+mod or_map_tombstone_tests {
+    use super::*;
+
+    fn ts(millis: u64, counter: u32) -> Timestamp {
+        Timestamp {
+            millis,
+            counter,
+            node_id: "node-a".to_string(),
+        }
+    }
+
+    /// Active records and tombstones must coexist in the same serialized blob:
+    /// the unified `OrMap` shape carries live additions and observed-remove
+    /// tombstones together, so neither half may be dropped on round-trip.
+    #[test]
+    fn or_map_records_and_tombstones_coexist_round_trip() {
+        let original = RecordValue::OrMap {
+            records: vec![
+                OrMapEntry {
+                    value: Value::String("alice".to_string()),
+                    tag: "tag-1".to_string(),
+                    timestamp: ts(100, 0),
+                },
+                OrMapEntry {
+                    value: Value::Int(42),
+                    tag: "tag-2".to_string(),
+                    timestamp: ts(101, 0),
+                },
+            ],
+            tombstones: vec!["tag-removed-1".to_string(), "tag-removed-2".to_string()],
+        };
+
+        let bytes = rmp_serde::to_vec_named(&original).expect("serialize OrMap");
+        let decoded: RecordValue = rmp_serde::from_slice(&bytes).expect("deserialize OrMap");
+
+        match decoded {
+            RecordValue::OrMap {
+                records,
+                tombstones,
+            } => {
+                assert_eq!(records.len(), 2, "both active records must survive");
+                assert_eq!(records[0].tag, "tag-1");
+                assert_eq!(records[1].tag, "tag-2");
+                assert_eq!(
+                    tombstones,
+                    vec!["tag-removed-1".to_string(), "tag-removed-2".to_string()],
+                    "tombstones must survive alongside records"
+                );
+            }
+            other => panic!("expected OrMap, got {other:?}"),
+        }
+    }
+
+    /// Legacy tombstone-only blobs persisted by older servers must still decode
+    /// on restart — no migration, no un-decodable key (durability guarantee).
+    #[test]
+    fn legacy_or_tombstones_blob_round_trips() {
+        let legacy = RecordValue::OrTombstones {
+            tags: vec!["legacy-tag-1".to_string(), "legacy-tag-2".to_string()],
+        };
+
+        let bytes = rmp_serde::to_vec_named(&legacy).expect("serialize legacy OrTombstones");
+        let decoded: RecordValue =
+            rmp_serde::from_slice(&bytes).expect("legacy blob must still decode");
+
+        match decoded {
+            RecordValue::OrTombstones { tags } => {
+                assert_eq!(
+                    tags,
+                    vec!["legacy-tag-1".to_string(), "legacy-tag-2".to_string()],
+                    "legacy tombstone tags must round-trip intact"
+                );
+            }
+            other => panic!("expected OrTombstones, got {other:?}"),
+        }
+    }
 }

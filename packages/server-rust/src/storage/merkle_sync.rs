@@ -285,12 +285,22 @@ fn compute_lww_hash(key: &str, millis: u64, counter: u32, node_id: &str) -> u32 
 
 /// Computes the entry hash for an OR-Map record.
 ///
-/// Sorts tags for determinism, then hashes `"key:tag1|tag2|..."`.
-fn compute_ormap_hash(key: &str, records: &[super::record::OrMapEntry]) -> u32 {
+/// Sorts active tags and tombstone tags independently for determinism, then
+/// hashes `"key:tag1|tag2|...#tomb1|tomb2|..."`. Tombstones are folded in so the
+/// hash changes when a tag is removed — otherwise peers cannot observe a
+/// tombstone-only delta and remove-wins suppression would not replicate.
+fn compute_ormap_hash(
+    key: &str,
+    records: &[super::record::OrMapEntry],
+    tombstones: &[String],
+) -> u32 {
     let mut tags: Vec<&str> = records.iter().map(|r| r.tag.as_str()).collect();
     tags.sort_unstable();
     let joined = tags.join("|");
-    fnv1a_hash(&format!("key:{key}|{joined}"))
+    let mut tomb_tags: Vec<&str> = tombstones.iter().map(String::as_str).collect();
+    tomb_tags.sort_unstable();
+    let joined_tombs = tomb_tags.join("|");
+    fnv1a_hash(&format!("key:{key}|{joined}#{joined_tombs}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -334,8 +344,11 @@ impl MerkleMutationObserver {
                 self.manager
                     .update_lww(&self.map_name, self.partition_id, key, hash);
             }
-            RecordValue::OrMap { records, .. } => {
-                let hash = compute_ormap_hash(key, records);
+            RecordValue::OrMap {
+                records,
+                tombstones,
+            } => {
+                let hash = compute_ormap_hash(key, records, tombstones);
                 self.manager
                     .update_ormap(&self.map_name, self.partition_id, key, hash);
             }
