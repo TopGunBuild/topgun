@@ -456,8 +456,29 @@ impl WalWriter {
     /// so a crash mid-compaction does not corrupt the WAL.
     async fn compact_log(&self, partition: u32, applied_through: u64) -> anyhow::Result<()> {
         let log_path = self.log_path(partition);
+
+        // Hold the per-writer file lock across the ENTIRE compaction
+        // (snapshot read → rewrite → rename → handle swap). append() takes the
+        // same lock, so without holding it here an append that interleaves
+        // between the snapshot read and the rename writes to the old inode,
+        // which the rename then unlinks — silently dropping an already-acked
+        // write and defeating append-before-ack. Serializing append against
+        // compaction is the correctness guarantee; the O(n) rewrite cost under
+        // the lock is tracked separately (segment rotation).
+        let mut guard = self.files.lock().await;
+
         if !log_path.exists() {
             return Ok(());
+        }
+
+        // Flush the cached handle before the fresh read so the snapshot includes
+        // every byte appended so far (append() flushes too, but this is robust
+        // against any future buffered-write path).
+        if let Some(pf) = guard.get_mut(&partition) {
+            pf.file
+                .flush()
+                .await
+                .map_err(|e| anyhow::anyhow!("WAL flush before compaction failed: {e}"))?;
         }
 
         let data = tokio::fs::read(&log_path).await?;
@@ -483,14 +504,13 @@ impl WalWriter {
         tokio::fs::write(&tmp_path, &compacted).await?;
         tokio::fs::rename(&tmp_path, &log_path).await?;
 
-        // Update the in-memory file handle so subsequent appends go to the
-        // freshly-rewritten file.
+        // Swap the in-memory file handle (still under the lock) so subsequent
+        // appends go to the freshly-rewritten file.
         let new_file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&log_path)
             .await?;
-        let mut guard = self.files.lock().await;
         guard.insert(
             partition,
             PartitionFile {
@@ -923,6 +943,55 @@ mod tests {
         let unapplied = wal.unapplied(0).await.unwrap();
         assert_eq!(unapplied.len(), 1, "Entry must be readable after append");
         assert_eq!(unapplied[0].sequence, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Concurrency regression: compaction must not drop appends that interleave
+    // with it. mark_applied(0) triggers compact_log while an appender races on
+    // the same partition; before the fix (compaction did not hold the files
+    // lock across read→rename) acked appends written during compaction were
+    // silently dropped (~1864/2000 reproduced). applied_through stays 0 so every
+    // appended seq must survive in unapplied.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn compaction_does_not_drop_appends_racing_on_same_partition() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap();
+        let total: u64 = 2000;
+
+        let appender = {
+            let wal = Arc::clone(&wal);
+            tokio::spawn(async move {
+                for seq in 1..=total {
+                    wal.append(0, &make_wal_entry(seq)).await.unwrap();
+                }
+            })
+        };
+        let compactor = {
+            let wal = Arc::clone(&wal);
+            tokio::spawn(async move {
+                // applied_through = 0 → compaction retains every entry but still
+                // performs the read→rewrite→rename that races the appender.
+                for _ in 0..total {
+                    wal.mark_applied(0, 0).await.unwrap();
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+
+        appender.await.unwrap();
+        compactor.await.unwrap();
+
+        let unapplied = wal.unapplied(0).await.unwrap();
+        let seen: HashSet<u64> = unapplied.iter().map(|e| e.sequence).collect();
+        let missing: Vec<u64> = (1..=total).filter(|s| !seen.contains(s)).collect();
+        assert!(
+            missing.is_empty(),
+            "compaction dropped {} acked appends (first few: {:?})",
+            missing.len(),
+            &missing[..missing.len().min(10)]
+        );
     }
 
     // -----------------------------------------------------------------------
