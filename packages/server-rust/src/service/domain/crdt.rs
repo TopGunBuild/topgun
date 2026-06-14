@@ -27,7 +27,7 @@ use crate::service::domain::predicate::{
 };
 use crate::service::domain::query::QueryRegistry;
 use crate::service::operation::{
-    service_names, Operation, OperationContext, OperationError, OperationResponse,
+    service_names, CallerOrigin, Operation, OperationContext, OperationError, OperationResponse,
 };
 use crate::service::registry::{ManagedService, ServiceContext};
 use crate::service::security::WriteValidator;
@@ -52,6 +52,29 @@ fn matches_query_predicate(query: &topgun_core::messages::base::Query, data: &rm
         // No filter: match all
         true
     }
+}
+
+/// Returns true when the caller is an untrusted external origin whose writes must
+/// pass `WriteValidator::validate_write` before being applied.
+///
+/// Covers `Client`, `HttpClient`, and `Anonymous`. The gate keys off the origin
+/// rather than `connection_id` presence because HTTP writes carry no
+/// `connection_id`; gating on it alone would skip validation/re-stamping on the
+/// HTTP path. `Anonymous` is included so an anonymous write is rejected at this
+/// layer (defense-in-depth) instead of being silently applied via the
+/// internal/system fast path.
+fn is_untrusted_write_origin(origin: CallerOrigin) -> bool {
+    matches!(
+        origin,
+        CallerOrigin::Client | CallerOrigin::HttpClient | CallerOrigin::Anonymous
+    )
+}
+
+/// Returns true when the caller is a real client transport whose timestamps must
+/// be re-stamped with a server HLC. `Anonymous` is excluded because anonymous
+/// writes never reach the re-stamp step — `validate_write` rejects them first.
+fn is_client_origin(origin: CallerOrigin) -> bool {
+    matches!(origin, CallerOrigin::Client | CallerOrigin::HttpClient)
 }
 
 // ---------------------------------------------------------------------------
@@ -171,11 +194,22 @@ impl CrdtService {
         let op = &msg.payload;
         let partition_id = ctx.partition_id.unwrap_or(0);
 
-        // Acquire metadata snapshot if a connection_id is present.
-        // None means internal/system call — skip validation.
-        let sanitized_ts = if let Some(conn_id) = ctx.connection_id {
-            let metadata_snapshot = self.snapshot_metadata(conn_id).await?;
+        // Validate and re-stamp every untrusted external write, keyed on the
+        // caller origin rather than connection presence. HTTP writes carry
+        // `caller_origin = HttpClient` but no `connection_id`; gating on
+        // `connection_id` alone would let an HTTP client forge an HLC timestamp
+        // (e.g. millis = u64::MAX) that is stored and broadcast verbatim and wins
+        // LWW forever. Internal/system origins keep the client timestamp as-is.
+        let sanitized_ts = if is_untrusted_write_origin(ctx.caller_origin) {
+            // WebSocket clients carry a connection_id and thus per-connection
+            // ACL metadata; HTTP clients have no ConnectionMetadata (their auth is
+            // enforced at the handler layer), so fall back to a default snapshot.
+            let metadata_snapshot = match ctx.connection_id {
+                Some(conn_id) => self.snapshot_metadata(conn_id).await?,
+                None => ConnectionMetadata::default(),
+            };
             let value_size = estimate_value_size(op);
+            // Rejects Anonymous outright; enforces ACL/size for Client/HttpClient.
             self.write_validator.validate_write(
                 ctx,
                 &metadata_snapshot,
@@ -184,7 +218,8 @@ impl CrdtService {
             )?;
             // Schema validation runs after auth/ACL/size checks.
             self.validate_schema_for_op(op)?;
-            Some(self.write_validator.sanitize_hlc())
+            // Re-stamp only real client transports; Anonymous never reaches here.
+            is_client_origin(ctx.caller_origin).then(|| self.write_validator.sanitize_hlc())
         } else {
             None
         };
@@ -234,9 +269,18 @@ impl CrdtService {
         let mut last_id = "unknown".to_string();
 
         // Validate all ops before applying any (atomic batch rejection).
-        // Snapshot metadata once at batch start to avoid per-op lock acquisition.
-        if let Some(conn_id) = ctx.connection_id {
-            let metadata_snapshot = self.snapshot_metadata(conn_id).await?;
+        // Gate on caller origin, not connection presence: HTTP writes have
+        // `caller_origin = HttpClient` but no `connection_id`, and must be
+        // re-stamped/validated identically to WS writes to close the
+        // timestamp-forgery gap. Snapshot metadata once at batch start to avoid
+        // per-op lock acquisition; HTTP clients use a default snapshot because
+        // their auth is enforced at the handler layer. Anonymous batches are
+        // rejected by validate_write before any op is applied.
+        if is_untrusted_write_origin(ctx.caller_origin) {
+            let metadata_snapshot = match ctx.connection_id {
+                Some(conn_id) => self.snapshot_metadata(conn_id).await?,
+                None => ConnectionMetadata::default(),
+            };
             for op in ops {
                 let value_size = estimate_value_size(op);
                 self.write_validator.validate_write(
@@ -248,18 +292,20 @@ impl CrdtService {
                 // Schema validation runs after auth/ACL/size checks, before any apply.
                 self.validate_schema_for_op(op)?;
             }
-            // All ops validated — apply them sequentially with sanitized timestamps.
-            // Each op gets its own partition based on its key (OpBatch ctx has
-            // partition_id=None because the batch contains keys for many partitions).
+            // All ops validated — apply them sequentially with sanitized timestamps
+            // for real client transports. Each op gets its own partition based on
+            // its key (OpBatch ctx has partition_id=None because the batch contains
+            // keys for many partitions).
+            let restamp = is_client_origin(ctx.caller_origin);
             for op in ops {
-                let sanitized_ts = self.write_validator.sanitize_hlc();
+                let sanitized_ts = restamp.then(|| self.write_validator.sanitize_hlc());
                 let partition_id = hash_to_partition(&op.key);
                 // Read old value before mutation for query broadcast filtering.
                 let old_rmpv_value = self
                     .read_old_value_for_queries(&op.map_name, &op.key, partition_id)
                     .await;
                 let event_payload = self
-                    .apply_single_op(op, partition_id, Some(&sanitized_ts))
+                    .apply_single_op(op, partition_id, sanitized_ts.as_ref())
                     .await?;
                 self.broadcast_event(&event_payload, ctx.connection_id)?;
                 self.broadcast_query_updates(
@@ -272,7 +318,10 @@ impl CrdtService {
                 }
             }
         } else {
-            // Internal/system call (no connection_id) — skip validation.
+            // Trusted internal/system origin (Forwarded/Backup/Wan/System) — skip
+            // validation and re-stamping. Server-to-server traffic carries
+            // already-sanitized timestamps. Anonymous is handled in the branch above
+            // (rejected by validate_write), never here.
             for op in ops {
                 let partition_id = hash_to_partition(&op.key);
                 // Read old value before mutation for query broadcast filtering.
