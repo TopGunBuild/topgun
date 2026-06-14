@@ -397,7 +397,7 @@ public async search<T>(
 ): Promise<Array<{ key: string; value: T; score: number; matchedTerms: string[] }>>
 ```
 
-One-shot BM25 full-text search. Requires FTS enabled for the map on the server.
+One-shot BM25 full-text search, ranked server-side via tantivy. The server indexes every map for full-text search by default — there is no per-map opt-in to switch on first.
 
 ```typescript
 const results = await client.search<Article>('articles', 'machine learning', {

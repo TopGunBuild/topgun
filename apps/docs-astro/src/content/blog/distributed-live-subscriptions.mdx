@@ -10,6 +10,8 @@ image: "/images/blog-distributed-subscriptions.png"
 avatar: "/images/ivan-avatar.jpeg"
 ---
 
+> **Correction (June 2026): this describes a design that never shipped.** TopGun is **single-node stable** today. The distributed cross-node subscription system below — the coordinator, the four-message `CLUSTER_SUB_*` protocol, cross-node RRF merging, and self-healing on node failure — is **not implemented** in the released server. The cluster message types exist only as wire payloads; the server explicitly rejects them as future (Phase 3+) work, and no coordinator exists. Live subscriptions and full-text search work on a single node. Cross-node distributed subscriptions remain a future roadmap item and are **not available**. This post is kept for historical context; do not treat it as a description of shipped behavior.
+
 There's a moment in every distributed system's life when you realize your "real-time" feature only works on one machine.
 
 For TopGun, that moment came when a user reported that their live search wasn't showing results from other cluster nodes. They'd search for "machine learning" and see 3 results. Then they'd check the database directly and find 15 matching documents—spread across 3 nodes.
@@ -264,19 +266,12 @@ handle.subscribe((alerts) => {
 });
 ```
 
-## Try It Today
+## Status
 
-TopGun v0.10.0 is available now:
+To be clear about what shipped: `searchSubscribe()` and `query().subscribe()` work today on a **single node**. The cross-node distributed coordinator described above was a design that has not been built — there are no code changes that make these subscriptions span a cluster, because the cluster-side machinery does not exist in the released server.
 
-```bash
-npm install @topgunbuild/core @topgunbuild/client @topgunbuild/react
-```
+For what is actually shipped today, see:
+- [Search & live queries](/docs/guides/search-and-live-queries) — single-node live query and search subscriptions
+- [Roadmap](/docs/roadmap) — current cluster maturity and what is still planned
 
-The API is unchanged—your existing `searchSubscribe()` and `query().subscribe()` calls automatically work across clusters. No code changes required.
-
-Check out the updated documentation:
-- [Live Queries Guide](/docs/guides/live-queries) — Distributed query subscriptions
-- [Full-Text Search Guide](/docs/guides/full-text-search) — Cluster-wide live search
-- [Cluster Replication Guide](/docs/guides/cluster-replication) — Subscription protocol details
-
-Real-time should mean real-time everywhere. Now it does.
+Real-time works on a single node today. Cross-node distributed subscriptions remain a roadmap item.

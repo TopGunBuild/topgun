@@ -172,7 +172,7 @@ BM25 full-text search across a map.
 
 - **Parameters:** `{ map, query, limit?, minScore?, boost? }`
 - **Response:** `[{ _key, value, score, matchedTerms }]`
-- **Security:** requires FTS enabled for the map on the server
+- **Note:** the server indexes every map for full-text search by default — no per-map opt-in needed
 
 ```text
 > Find tasks mentioning "deployment"

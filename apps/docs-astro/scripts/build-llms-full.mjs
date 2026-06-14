@@ -55,6 +55,7 @@ const ALLOWLIST = [
   'guides/offline-first.mdx',        // Net-new — teaches the canonical local-first story agents cannot reconstruct from other pages
   'guides/building-with-ai.mdx',     // Linked from llms.txt — agents should find it via their RAG
   'guides/authentication.mdx',
+  'guides/rbac.mdx',                  // Security-critical: RBAC is enforced server-side today — agents must not advise app-layer reimplementation
   'reference/client.mdx',
   'reference/react.mdx',
   'reference/core.mdx',

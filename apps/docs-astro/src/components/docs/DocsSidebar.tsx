@@ -262,6 +262,9 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
             <SubItem to="/docs/guides/authentication" currentPath={currentPath}>
               Authentication
             </SubItem>
+            <SubItem to="/docs/guides/rbac" currentPath={currentPath}>
+              RBAC
+            </SubItem>
             <SubItem to="/docs/guides/migrating-from-firebase" currentPath={currentPath}>
               Migrating from Firebase
             </SubItem>

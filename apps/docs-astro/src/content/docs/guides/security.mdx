@@ -19,7 +19,7 @@ import { ChevronRight, KeyRound } from 'lucide-react';
   <h1 className="text-4xl font-bold text-foreground">Security</h1>
 </div>
 
-A short reference covering the security knobs you need to know about for a TopGun deployment: TLS termination, secret-at-rest encryption on the client, and credential hygiene. For role-based access control (RBAC) status and the full security roadmap, see [/docs/roadmap](/docs/roadmap).
+A short reference covering the security knobs you need to know about for a TopGun deployment: TLS termination, secret-at-rest encryption on the client, and credential hygiene. The server also enforces role-based access control — see the [RBAC guide](/docs/guides/rbac) for policy syntax and the [roadmap](/docs/roadmap) for what is still planned.
 
 ## TLS / wss\:// — terminate at the reverse proxy
 
@@ -100,6 +100,12 @@ Key management is the integrator's responsibility — derive from a password, fe
 - Cluster admin credentials (`TOPGUN_ADMIN_USERNAME`, `TOPGUN_ADMIN_PASSWORD`) ship with `changeme`-style defaults in `.env.example`; override them before any non-localhost deployment.
 - Report suspected vulnerabilities via the disclosure channel in [`SECURITY.md`](https://github.com/TopGunBuild/topgun/blob/main/SECURITY.md).
 
+## Authorization (RBAC)
+
+Per-map, per-operation RBAC **is enforced server-side today** — not planned. A Tower middleware layer checks every client read, write, and remove against the policy store before it reaches the domain services, using allow/deny rules with deny-wins semantics and optional predicate conditions. You do **not** need to re-implement authorization in your application code; server-side enforcement is the authoritative gate. App-layer claim checks are fine as optional defense-in-depth, but they are not a substitute and should not replace it.
+
+See the [RBAC guide](/docs/guides/rbac) for the policy model, the admin API used to define policies, role conditions, and the current persistence caveat (policies are in-memory and must be re-applied after a restart).
+
 ## Planned
 
-Per-map / per-op RBAC, cluster mTLS, mutual auth for the cluster transport, and field-level redaction are on the [roadmap](/docs/roadmap). Until they ship, enforce authorization at the application layer (token-claim checks before `client.getMap(...)`.set(...)) and rely on edge TLS for transport security.
+Cluster mTLS, mutual auth for the cluster transport, durable (restart-surviving) policy storage, and field-level redaction are on the [roadmap](/docs/roadmap). Until they ship, rely on edge TLS for transport security and re-apply RBAC policies after a server restart.
