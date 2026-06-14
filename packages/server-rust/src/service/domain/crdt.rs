@@ -392,23 +392,35 @@ impl CrdtService {
                 (entry, or_rec.clone())
             };
 
-            // Read existing OR-Map entries so the new entry is merged in rather than replacing.
-            // OR-Map add-wins semantics require all concurrent additions to be preserved.
+            // Read existing OR-Map state so the new entry is merged in rather than replacing.
+            // OR-Map add-wins semantics require all concurrent additions to be preserved,
+            // while observed-remove semantics require an already-tombstoned tag to stay
+            // suppressed (remove-wins: no resurrection). Inlined here rather than wiring
+            // core-rust ORMap because that primitive owns its own HLC + Merkle and is keyed
+            // map-wide; constructing one to mutate a single per-key storage slot would cost
+            // more than the set algebra it replaces. The algebra below matches core-rust
+            // ORMap (retain survivors, skip tombstoned re-adds) exactly.
             let record_value = {
                 let existing = store
                     .get(&op.key, false)
                     .await
                     .map_err(OperationError::Internal)?;
-                let mut records: Vec<OrMapEntry> = match existing.map(|r| r.value) {
-                    Some(RecordValue::OrMap { records, .. }) => records,
-                    _ => Vec::new(),
-                };
-                // Remove any existing entry with the same tag (idempotent re-add).
-                records.retain(|e| e.tag != new_entry.tag);
-                records.push(new_entry);
-                RecordValue::OrMap {
-                    records,
-                    tombstones: vec![],
+                let (mut records, tombstones) = read_or_map_state(existing.map(|r| r.value));
+
+                // Remove-wins: a tag already observed-removed is never resurrected.
+                if tombstones.contains(&new_entry.tag) {
+                    RecordValue::OrMap {
+                        records,
+                        tombstones,
+                    }
+                } else {
+                    // Remove any existing entry with the same tag (idempotent re-add).
+                    records.retain(|e| e.tag != new_entry.tag);
+                    records.push(new_entry);
+                    RecordValue::OrMap {
+                        records,
+                        tombstones,
+                    }
                 }
             };
 
@@ -438,9 +450,27 @@ impl CrdtService {
                 .and_then(|o| o.as_ref())
                 .expect("or_tag is Some(Some(_))");
 
-            // OR_REMOVE is tag-based; no timestamp sanitization needed
-            let record_value = RecordValue::OrTombstones {
-                tags: vec![tag.clone()],
+            // OR_REMOVE is tag-based; no timestamp sanitization needed.
+            // Read-modify-write over the unified OrMap shape: drop only the matched tag
+            // from records (preserving every concurrent survivor) and append the removed
+            // tag to the tombstone set. Writing the legacy destructive OrTombstones blob
+            // here would clobber all concurrent records, which is the data-loss bug.
+            let record_value = {
+                let existing = store
+                    .get(&op.key, false)
+                    .await
+                    .map_err(OperationError::Internal)?;
+                let (mut records, mut tombstones) = read_or_map_state(existing.map(|r| r.value));
+
+                records.retain(|e| e.tag != *tag);
+                // Dedup: a re-issued remove must not duplicate the tombstone.
+                if !tombstones.contains(tag) {
+                    tombstones.push(tag.clone());
+                }
+                RecordValue::OrMap {
+                    records,
+                    tombstones,
+                }
             };
             store
                 .put(
@@ -784,6 +814,24 @@ fn lww_record_to_record_value(record: &LWWRecord<rmpv::Value>) -> RecordValue {
     RecordValue::Lww {
         value,
         timestamp: record.timestamp.clone(),
+    }
+}
+
+/// Reads the current OR-Map state (active records + observed-remove tombstones)
+/// from a stored value, normalizing every prior storage shape into the unified pair.
+///
+/// Folds the retained read-only `OrTombstones` legacy blob into the tombstone set on
+/// read so legacy records participate in remove-wins on first touch (a subsequent
+/// add then correctly sees the tombstones and does not resurrect a removed tag).
+/// An absent or non-OR value yields empty state.
+fn read_or_map_state(value: Option<RecordValue>) -> (Vec<OrMapEntry>, Vec<String>) {
+    match value {
+        Some(RecordValue::OrMap {
+            records,
+            tombstones,
+        }) => (records, tombstones),
+        Some(RecordValue::OrTombstones { tags }) => (Vec::new(), tags),
+        _ => (Vec::new(), Vec::new()),
     }
 }
 
