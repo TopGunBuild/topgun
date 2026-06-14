@@ -417,7 +417,7 @@ impl SyncService {
                             .get_or_create(&map_name, key_partition);
                         if let Ok(Some(record)) = store.get(&key, false).await {
                             match record.value {
-                                RecordValue::OrMap { records } => {
+                                RecordValue::OrMap { records, .. } => {
                                     let wire_records: Vec<ORMapRecord<rmpv::Value>> = records
                                         .into_iter()
                                         .map(|r| ORMapRecord {
@@ -507,7 +507,7 @@ impl SyncService {
                     .get_or_create(&map_name, key_partition);
                 if let Ok(Some(record)) = store.get(&key, false).await {
                     match record.value {
-                        RecordValue::OrMap { records } => {
+                        RecordValue::OrMap { records, .. } => {
                             let wire_records: Vec<ORMapRecord<rmpv::Value>> = records
                                 .into_iter()
                                 .map(|r| ORMapRecord {
@@ -582,7 +582,7 @@ impl SyncService {
                 .get_or_create(&map_name, key_partition);
             match store.get(&key, false).await {
                 Ok(Some(record)) => match record.value {
-                    RecordValue::OrMap { records } => {
+                    RecordValue::OrMap { records, .. } => {
                         let wire_records: Vec<ORMapRecord<rmpv::Value>> = records
                             .into_iter()
                             .map(|r| ORMapRecord {
@@ -676,6 +676,7 @@ impl SyncService {
                     &entry.key,
                     RecordValue::OrMap {
                         records: storage_records,
+                        tombstones: vec![],
                     },
                     ExpiryPolicy::NONE,
                     CallerProvenance::CrdtMerge,

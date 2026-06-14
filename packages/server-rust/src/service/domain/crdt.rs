@@ -400,13 +400,16 @@ impl CrdtService {
                     .await
                     .map_err(OperationError::Internal)?;
                 let mut records: Vec<OrMapEntry> = match existing.map(|r| r.value) {
-                    Some(RecordValue::OrMap { records }) => records,
+                    Some(RecordValue::OrMap { records, .. }) => records,
                     _ => Vec::new(),
                 };
                 // Remove any existing entry with the same tag (idempotent re-add).
                 records.retain(|e| e.tag != new_entry.tag);
                 records.push(new_entry);
-                RecordValue::OrMap { records }
+                RecordValue::OrMap {
+                    records,
+                    tombstones: vec![],
+                }
             };
 
             store

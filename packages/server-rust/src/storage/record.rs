@@ -106,6 +106,13 @@ pub enum RecordValue {
     OrMap {
         /// All currently active entries in the OR-Map.
         records: Vec<OrMapEntry>,
+        /// Tags of entries that have been removed but not yet garbage-collected.
+        ///
+        /// Coexists with `records` so both live additions and observed-remove
+        /// tombstones are carried in the same storage slot. Empty on all paths
+        /// today; the read-modify-write `OR_REMOVE` fix populates this field.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tombstones: Vec<String>,
     },
     /// Tombstone markers for OR-Map deletions.
     OrTombstones {

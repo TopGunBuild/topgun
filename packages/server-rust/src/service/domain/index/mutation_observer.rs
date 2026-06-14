@@ -275,7 +275,10 @@ mod tests {
 
     fn make_ormap_record() -> Record {
         Record {
-            value: RecordValue::OrMap { records: vec![] },
+            value: RecordValue::OrMap {
+                records: vec![],
+                tombstones: vec![],
+            },
             metadata: RecordMetadata::new(1_000_000, 64),
         }
     }

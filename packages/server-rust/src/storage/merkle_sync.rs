@@ -334,7 +334,7 @@ impl MerkleMutationObserver {
                 self.manager
                     .update_lww(&self.map_name, self.partition_id, key, hash);
             }
-            RecordValue::OrMap { records } => {
+            RecordValue::OrMap { records, .. } => {
                 let hash = compute_ormap_hash(key, records);
                 self.manager
                     .update_ormap(&self.map_name, self.partition_id, key, hash);
@@ -472,6 +472,7 @@ mod tests {
                         node_id: "node-1".to_string(),
                     },
                 }],
+                tombstones: vec![],
             },
             #[allow(clippy::cast_possible_wrap)]
             metadata: RecordMetadata::new(millis as i64, 64),

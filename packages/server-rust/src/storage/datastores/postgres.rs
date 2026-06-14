@@ -636,13 +636,14 @@ mod tests {
                     node_id: "node-2".to_string(),
                 },
             }],
+            tombstones: vec![],
         };
 
         let bytes = rmp_serde::to_vec_named(&value).expect("serialize");
         let restored: RecordValue = rmp_serde::from_slice(&bytes).expect("deserialize");
 
         match restored {
-            RecordValue::OrMap { records } => {
+            RecordValue::OrMap { records, .. } => {
                 assert_eq!(records.len(), 1);
                 assert_eq!(records[0].tag, "tag-1");
                 assert!(matches!(records[0].value, Value::Int(42)));
