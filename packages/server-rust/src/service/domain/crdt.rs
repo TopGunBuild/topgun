@@ -1844,12 +1844,15 @@ mod tests {
         );
     }
 
-    /// AC8: internal call (no connection_id) bypasses schema validation.
+    /// AC8: internal/system call bypasses schema validation.
     #[tokio::test]
     async fn schema_internal_call_bypasses_validation() {
         let (svc, _registry, _conn_id) = make_schema_service().await;
-        // No connection_id = internal/system call — validation is skipped.
-        let ctx = make_ctx(); // connection_id is None
+        // A genuine internal/system origin bypasses validation. Validation is now
+        // gated on caller origin (not connection_id presence) so the write path is
+        // exercised for HTTP clients that legitimately have no connection_id.
+        let mut ctx = make_ctx();
+        ctx.caller_origin = CallerOrigin::System;
         let value = rmpv::Value::Map(vec![]); // would fail schema (missing "name")
         let op = make_lww_put_with_value(ctx, "typed-map", value);
         let result = svc.oneshot(op).await;
