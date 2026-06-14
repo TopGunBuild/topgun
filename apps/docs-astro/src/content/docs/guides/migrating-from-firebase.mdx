@@ -8,7 +8,7 @@ import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight } from 'lucide-react';
 import { AlertBox } from '../../../components/docs/AlertBox';
 
-<AlertBox variant="danger" title="Read this first — what's shipped vs. planned" text="Shipped today (single-node): JWT auth, per-map ACL booleans (read/write), JWT roles claim extraction, LWW-Map and OR-Map CRDTs, IndexedDB offline storage, WebSocket realtime sync, full-text search (tantivy), HLC-ordered pub/sub topics. Planned (not yet available): First-class RBAC role abstraction, map-pattern security policies (users:*, public:*), field-level allow-lists, cluster mTLS, Raft-replicated multi-region. See /docs/roadmap for the full maturity matrix." />
+<AlertBox variant="danger" title="Read this first — what's shipped vs. planned" text="Shipped today (single-node): JWT auth, per-map ACL booleans (read/write), JWT roles claim extraction, server-side RBAC with map-pattern security policies (users.*, public.*), roles, deny-wins, and predicate conditions, LWW-Map and OR-Map CRDTs, IndexedDB offline storage, WebSocket realtime sync, full-text search (tantivy), HLC-ordered pub/sub topics. Planned (not yet available): durable (restart-surviving) RBAC policy storage, field-level redaction/allow-lists, cluster mTLS, Raft-replicated multi-region. See /docs/roadmap for the full maturity matrix." />
 
 <div className="flex items-center gap-2 text-sm text-neutral-500 mt-8 mb-8 overflow-hidden whitespace-nowrap">
   <span className="text-foreground font-medium">Docs</span>

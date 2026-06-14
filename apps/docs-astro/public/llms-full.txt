@@ -1363,6 +1363,137 @@ TopGun reads only the `sub` and `roles` claims from the JWT payload:
 
 ---
 
+# RBAC — role-based access control
+
+> Per-collection, per-operation authorization enforced server-side with allow/deny policies, roles, and predicate conditions.
+
+
+
+  <span className="text-foreground font-medium">Docs</span>
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <span className="text-foreground font-medium">RBAC</span>
+
+# RBAC — role-based access control
+
+TopGun enforces **per-collection, per-operation** access control on the server. A Tower middleware layer checks every client read, write, and remove against a policy store before the operation reaches the domain services. This is shipped and active today — you do **not** need to re-implement authorization in your application code. App-layer claim checks are fine as optional defense-in-depth, but server-side enforcement is the authoritative gate.
+
+## How evaluation works
+
+Authorization runs on every client operation (`read`, `write`, `remove`):
+
+1. **Admin bypass** — a principal whose roles include `admin` is always allowed.
+2. **Permissive default** — if the policy store is empty, all operations are allowed, so an unconfigured deployment behaves exactly as before. RBAC "activates" the moment you create your first policy.
+3. **Allow-list once active** — with at least one policy present, a map is evaluated against the policies whose pattern matches it. The principal needs a matching `allow` for the action.
+4. **Deny-wins** — if any matching policy denies the action, the result is `Deny`, regardless of allow rules.
+5. **Default-deny for uncovered maps** — once any policy exists, a non-admin operation against a map with no matching `allow` is denied.
+
+<AlertBox
+  variant="warning"
+  title="The first policy switches the whole server to allow-list mode"
+  text="Because uncovered maps default to deny once any policy exists, adding a single narrow policy can lock non-admin clients out of every other map. Plan your policy set so that each collection your clients use has an explicit allow rule (a broad pattern like '*' works for a baseline)."
+/>
+
+## Policy model
+
+A policy is a single rule binding a map pattern + action to an allow/deny effect, with an optional condition:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `id` | string | Stable identifier. Generated as a UUID if omitted on create. |
+| `mapPattern` | string (glob) | `*` matches all maps; `users.*` matches `users.profiles`, `users.settings`, etc. |
+| `action` | `read` \| `write` \| `remove` \| `all` | The operation governed. `all` covers every action. |
+| `effect` | `allow` \| `deny` | Whether a match grants or denies access. |
+| `condition` | predicate (optional) | Rule only applies when the condition evaluates true against the record data and auth context. |
+
+## Defining policies (admin API)
+
+Policies are managed over the admin HTTP API. The endpoints require an **admin bearer token** (mint one by logging in with the operator credentials — see [self-hosting](/docs/deploy/self-host)).
+
+```http
+POST   /api/admin/policies        # create (or upsert with an explicit id)
+GET    /api/admin/policies        # list all policies
+DELETE /api/admin/policies/{id}   # delete by id (204 even if absent)
+```
+
+Create an allow rule that lets any authenticated user read the `articles` map:
+
+```bash
+curl -X POST https://api.example.com/api/admin/policies \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mapPattern": "articles",
+    "action": "read",
+    "effect": "allow"
+  }'
+```
+
+Add a deny rule — deny-wins, so this blocks writes to anything under `admin.*` even if a broader allow exists:
+
+```bash
+curl -X POST https://api.example.com/api/admin/policies \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mapPattern": "admin.*",
+    "action": "write",
+    "effect": "deny"
+  }'
+```
+
+## Conditions
+
+A policy can carry a condition that is evaluated against the record `data` and the caller's auth context. Conditions reference `data.<field>` and `auth.id` / `auth.roles`. The simplest way to express one is the `conditionExpr` string, a CEL-like expression parsed server-side:
+
+```bash
+# Owners can write only their own records
+curl -X POST https://api.example.com/api/admin/policies \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mapPattern": "documents",
+    "action": "write",
+    "effect": "allow",
+    "conditionExpr": "auth.id == data.ownerId"
+  }'
+```
+
+More expression examples:
+
+```text
+auth.id == data.ownerId
+data.role in auth.roles || data.public == true
+data.x == 'hello' && (auth.role == 'admin' || auth.role == 'editor')
+```
+
+Supported operators: `==`, `!=`, `>`, `<`, `>=`, `<=`, `in`, `contains`, `containsAll`, `containsAny`, `startsWith`, `endsWith`, combined with `&&`, `||`, `!`, and parentheses. Values are strings (`'...'`), numbers, or booleans. If you prefer to pass a structured predicate directly, send a `condition` JSON object instead — it takes precedence over `conditionExpr`.
+
+## Roles
+
+Roles come from the authenticated principal (the JWT validated on the WebSocket handshake — see [Authentication](/docs/guides/authentication)). The `admin` role short-circuits evaluation and is always allowed. Other roles are matched inside conditions via `auth.roles` (e.g. `data.role in auth.roles`).
+
+## Persistence caveat
+
+<AlertBox
+  variant="warning"
+  title="Policies are in-memory and do not survive a restart"
+  text="The current policy store keeps policies in memory only. They are enforced at runtime, but a server restart clears them — re-apply your policies after every restart (e.g. from a startup script that POSTs them). Durable, restart-surviving policy storage is on the roadmap."
+/>
+
+See the [roadmap](/docs/roadmap) for the status of durable policy storage and cluster-wide policy replication.
+
+  <a href="/docs/guides/authentication" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Authentication
+  </a>
+  <a href="/docs/roadmap" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+      Roadmap <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+  </a>
+
+
+---
+
 # Client API
 
 > TopGunClient — the imperative SDK surface that React hooks call under the hood.
@@ -1750,7 +1881,7 @@ public async search<T>(
 ): Promise<Array<{ key: string; value: T; score: number; matchedTerms: string[] }>>
 ```
 
-One-shot BM25 full-text search. Requires FTS enabled for the map on the server.
+One-shot BM25 full-text search, ranked server-side via tantivy. The server indexes every map for full-text search by default — there is no per-map opt-in to switch on first.
 
 ```typescript
 const results = await client.search<Article>('articles', 'machine learning', {

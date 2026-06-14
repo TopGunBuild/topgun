@@ -37,7 +37,7 @@ For v2, we took a radical new approach. TopGun v2 is an **In-Memory Data Grid** 
 ### Key Innovations:
 
 - **Zero-Latency Realtime:** Because data lives in memory, reads and subscription updates are instantaneous.
-- **Agnostic Persistence:** You can use *any* cold storage (Postgres, SQLite, S3). TopGun acts as the high-speed cache and synchronization layer.
+- **Pluggable Persistence:** TopGun ships with an embedded **redb** backend by default (zero-config local development) and supports **PostgreSQL** for production. TopGun acts as the high-speed in-memory cache and synchronization layer in front of whichever backend you choose.
 - **Smart Sharding:** Unlike v1, nodes don't need the full dataset. They can dynamically load and unload parts of the graph based on demand.
 - **True Offline Support:** By moving authorization and logic to the protocol level, we support secure offline operations without custom fragile code.
 

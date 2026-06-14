@@ -1,6 +1,6 @@
 ---
 title: Search & live queries
-description: Subscribe to reactive predicate queries and add BM25 full-text search to your maps.
+description: Subscribe to reactive predicate queries, filter text offline with a client-side index, and run server-side BM25 full-text search.
 order: 14
 ---
 
@@ -20,7 +20,14 @@ import { Activity, Filter, Search, Zap } from 'lucide-react';
 
 # Search & live queries
 
-Search and live queries: subscribe to filtered subsets of a map with `useQuery`; the subscription updates automatically when matching records change. For text-heavy data, layer an `InvertedIndex` on top for BM25-ranked full-text search. Both patterns work offline — the subscription runs against local data when the server is unreachable.
+Search and live queries: subscribe to filtered subsets of a map with `useQuery`; the subscription updates automatically when matching records change. The subscription works offline — it runs against local data when the server is unreachable.
+
+For text-heavy data there are two distinct tools, and they are not the same thing:
+
+- **Client-side `InvertedIndex`** — in-memory token matching (`contains` / AND / OR) over an `IndexedLWWMap`. Works fully offline, no server round-trip, but returns **unranked** matches (no relevance scoring).
+- **Server-side `client.search()`** — true **BM25** relevance ranking via the server's tantivy index. Returns scored, sorted results, but requires a reachable server.
+
+Pick the client-side index for offline filtering of a known set; pick `client.search()` when you need relevance-ranked results across a server-held collection.
 
 <div className="grid md:grid-cols-3 gap-6 mb-12 not-prose">
   <FeatureCard
@@ -39,7 +46,7 @@ Search and live queries: subscribe to filtered subsets of a map with `useQuery`;
     icon={Search}
     iconColor="text-orange-500"
     title="Full-text search"
-    description="InvertedIndex for token matching; BM25 for relevance-ranked results."
+    description="Client-side InvertedIndex for offline token matching; server-side client.search() for BM25 relevance ranking."
   />
 </div>
 
@@ -194,9 +201,15 @@ export function AffordableElectronics() {
 
 ---
 
-## Full-text search with InvertedIndex
+## Client-side token search with InvertedIndex
 
-For text-heavy data, add an `InvertedIndex` to an `IndexedLWWMap`. The index maps tokens to document keys, enabling O(K) search (where K is the number of matching tokens) instead of a full scan.
+For offline text filtering, add an `InvertedIndex` to an `IndexedLWWMap`. The index maps tokens to document keys, enabling O(K) search (where K is the number of matching tokens) instead of a full scan. This runs entirely in-memory on the client, so it works offline.
+
+<AlertBox
+  variant="info"
+  title="Token matching, not BM25"
+  text="queryValues({ type: 'contains' }) returns unranked matches — every document that contains the tokens, in no particular relevance order. There is no scoring here. For BM25 relevance ranking, use the server-side client.search() shown below."
+/>
 
 export const invertedIndexCode = `import {
   IndexedLWWMap,
@@ -257,6 +270,51 @@ const narrowed = articles.queryValues({
 | `contains` | All tokens must match (AND) | Search box with multiple words |
 | `containsAll` | All specified values present | Filter by required tags |
 | `containsAny` | Any token matches (OR) | Search with alternatives |
+
+---
+
+## Server-side BM25 search with `client.search()`
+
+When you need **relevance-ranked** results — not just "does it contain these tokens" — use `client.search()`. This runs against the server's tantivy full-text index and returns results scored and sorted by BM25. The server indexes every map for full-text search by default, so there is no per-map flag to switch on first.
+
+Unlike the client-side `InvertedIndex`, `client.search()` requires a reachable server — it is not an offline path.
+
+export const bm25Code = `import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080',
+  storage: new IDBAdapter(),
+});
+
+await client.start();
+
+// BM25-ranked search, scored and sorted server-side
+const results = await client.search<Article>('articles', 'machine learning', {
+  limit: 20,
+  minScore: 0.5,
+  boost: { title: 2.0, body: 1.0 }, // weight title matches higher than body
+});
+
+for (const r of results) {
+  // each result carries the BM25 relevance score and the terms that matched
+  console.log(\`\${r.key}: \${r.value.title} (score: \${r.score})\`, r.matchedTerms);
+}`;
+
+<div className="not-prose">
+  <CodeBlock title="src/lib/bm25-search.ts" language="typescript" code={bm25Code} />
+</div>
+
+For a live, auto-updating ranked result set, use `client.searchSubscribe()` with the same options — see the [Client API reference](/docs/reference/client).
+
+### When to use which
+
+| | Client-side `InvertedIndex` | Server-side `client.search()` |
+|---|---|---|
+| Ranking | Unranked token match | BM25 relevance score |
+| Offline | ✅ in-memory, no server | ❌ requires server |
+| Scope | Records loaded on the client | The full server-held map |
+| Returns | Matching values | `{ key, value, score, matchedTerms }` |
 
 ---
 

@@ -60,6 +60,12 @@ This page tracks the maturity level of distributed primitives across deployment 
         <td className="py-3 px-4 text-neutral-500">Cross-partition aggregation — planned</td>
       </tr>
       <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">RBAC authorization</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable — per-collection allow/deny policies enforced server-side (roles, deny-wins, predicate conditions). Policies are held in memory and are not yet durable across restart.</td>
+        <td className="py-3 px-4 text-yellow-600 dark:text-yellow-400">Enforced on every node; the policy store is not yet replicated across nodes</td>
+        <td className="py-3 px-4 text-neutral-500">Raft-replicated policy store — planned</td>
+      </tr>
+      <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Cluster Consensus (Raft)</td>
         <td className="py-3 px-4 text-neutral-500">N/A — single-node needs no consensus</td>
         <td className="py-3 px-4 text-red-600 dark:text-red-400">Not implemented — partition-routing only; no Raft leader election, no split-brain protection</td>
@@ -132,11 +138,6 @@ The features below are **not implemented** in the current Rust server. The guide
         <td className="py-3 px-4 font-medium text-foreground">Interceptors</td>
         <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned</td>
         <td className="py-3 px-4"><a href="/docs/guides/interceptors" className="text-brand hover:underline">/docs/guides/interceptors</a> — TODO-178</td>
-      </tr>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-medium text-foreground">RBAC role policies</td>
-        <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned</td>
-        <td className="py-3 px-4">Design sketch at <a href="/docs/guides/rbac" className="text-brand hover:underline">/docs/guides/rbac</a>; post-HN backlog</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Scheduler — data-driven actions</td>

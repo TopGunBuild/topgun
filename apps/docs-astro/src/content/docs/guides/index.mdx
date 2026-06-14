@@ -15,7 +15,7 @@ import { GuideCard } from '../../../components/docs/GuideCard';
 
 # Guides
 
-These pages cover what works in TopGun today. The [roadmap](/docs/roadmap) is the canonical source for what's planned (custom conflict resolvers, entry processors, RBAC, cluster mTLS).
+These pages cover what works in TopGun today. The [roadmap](/docs/roadmap) is the canonical source for what's planned (custom conflict resolvers, entry processors, cluster mTLS).
 
 ## Building with TopGun
 
@@ -72,6 +72,12 @@ These pages cover what works in TopGun today. The [roadmap](/docs/roadmap) is th
     icon={KeyRound}
     title="Security"
     description="TLS termination at the proxy, client-side encrypted storage, and credential hygiene."
+  />
+  <GuideCard
+    href="/docs/guides/rbac"
+    icon={Lock}
+    title="RBAC"
+    description="Per-collection, per-operation access control enforced server-side — allow/deny policies, roles, and predicate conditions."
   />
   <GuideCard
     href="/docs/guides/mcp-server"

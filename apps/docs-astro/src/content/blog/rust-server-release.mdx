@@ -37,10 +37,10 @@ Seven domain services, each independently testable:
 | **Query** | Live subscriptions, filtered result sets |
 | **Search** | Full-text search via tantivy |
 | **Messaging** | Pub/sub topics, ephemeral messages |
-| **Persistence** | PostgreSQL storage via sqlx |
+| **Persistence** | Embedded redb by default; PostgreSQL optional via sqlx |
 | **Coordination** | Distributed locks (single-node stable; cluster-mode uses partition-routing — Raft in progress), cluster protocol |
 
-The cluster protocol distributes data across **271 partitions** with consistent hashing. Nodes join, leave, and rebalance without downtime.
+The cluster protocol distributes data across **271 partitions** with consistent hashing. Nodes join and leave, and the partition map is reassigned on membership change. Note that this reassigns *ownership* of partitions — live migration of the data already held by a departing node is not yet wired up, so treat cluster mode as single-node-stable with partition-routing rather than a fully elastic, zero-downtime rebalancing cluster.
 
 ### Client Improvements
 
