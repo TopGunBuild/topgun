@@ -2462,6 +2462,7 @@ mod tests {
     // byte-identical state, tombstones are not discarded, concurrent records are
     // not clobbered.
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn convergence_handle_ormap_push_diff_both_directions() {
         use crate::service::domain::sync::SyncService;
         use crate::storage::merkle_sync::MerkleSyncManager;
@@ -2788,7 +2789,11 @@ mod tests {
                         // deterministic rotation derived from the case seed.
                         let mut reordered = actions.clone();
                         if !reordered.is_empty() {
-                            let rot = (shuffle_seed as usize) % reordered.len();
+                            // Modulo by the (usize) length bounds the result below
+                            // reordered.len(), so the narrowing back to usize cannot
+                            // truncate.
+                            let rot = usize::try_from(shuffle_seed).unwrap_or(usize::MAX)
+                                % reordered.len();
                             reordered.rotate_left(rot);
                         }
                         for action in &reordered {

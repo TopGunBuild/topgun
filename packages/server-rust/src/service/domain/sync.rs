@@ -664,6 +664,7 @@ impl SyncService {
         ctx: &crate::service::operation::OperationContext,
         payload: messages::ORMapPushDiff,
     ) -> Result<OperationResponse, OperationError> {
+        use std::collections::BTreeSet;
         use topgun_core::messages::{ServerEventPayload, ServerEventType};
 
         let map_name = payload.payload.map_name;
@@ -679,8 +680,6 @@ impl SyncService {
             // locally-stored OR-Map rather than blind-clobbering it. Discarding
             // either side would resurrect removed entries (remove-wins broken) or
             // drop concurrent additions (add-wins broken).
-            use std::collections::BTreeSet;
-
             let (mut merged_records, mut tombstones): (
                 Vec<crate::storage::record::OrMapEntry>,
                 BTreeSet<String>,
