@@ -47,6 +47,22 @@ pub const FRAME_VERSION: u8 = 1;
 /// Total header bytes: 4 (magic) + 1 (version) + 4 (length) + 4 (crc32c).
 pub const FRAME_HEADER_LEN: usize = 13;
 
+/// Upper bound on a single frame's declared payload length.
+///
+/// The length field is an untrusted on-disk `u32` — a torn write that corrupts
+/// only the length while leaving valid magic+version (a plausible partial-sector
+/// write) could declare up to `u32::MAX` (~4 GiB). `decode_all` would then
+/// `vec![0u8; payload_len]` **before** verifying the CRC, so a single corrupt
+/// length turns recovery into a multi-gigabyte allocation (OOM / crash-loop on
+/// startup). We reject any frame whose declared length exceeds this ceiling
+/// rather than allocate for it.
+///
+/// 64 MiB is far above any legitimate `WalEntry` (one CRDT record: map + key +
+/// value) yet small enough that a rejection allocates nothing. This mirrors the
+/// per-record size caps in Postgres WAL / `RocksDB` log / tikv `raft-engine`,
+/// none of which allocate for an unbounded on-disk length.
+pub const MAX_FRAME_PAYLOAD_LEN: usize = 64 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // FrameDecodeResult
 // ---------------------------------------------------------------------------
@@ -213,6 +229,36 @@ pub fn decode_all(data: &[u8]) -> FrameDecodeResult {
             Err(_) => return FrameDecodeResult::TruncatedTail { complete: entries },
         }
         let stored_crc = u32::from_be_bytes(crc_buf);
+
+        // --- Bound the declared payload length BEFORE allocating ---
+        // The length field is untrusted on-disk data; a corrupt/torn length must
+        // never drive the allocation below. Two distinct rejections, ordered so a
+        // crash-mid-append (the common case) stays recoverable rather than fatal:
+        //
+        // 1. `payload_len > remaining` — the frame extends past the end of the
+        //    data, so it cannot be a complete frame. This is the torn-tail case
+        //    (writer crashed mid-append); replay the intact prefix. This also
+        //    catches the ~4 GiB bloated-length-on-a-small-file DoS, because a huge
+        //    declared length always exceeds the bytes actually present, so we
+        //    return here without allocating `payload_len`.
+        // 2. `payload_len > MAX_FRAME_PAYLOAD_LEN` — enough bytes are present for
+        //    the declared length, but it exceeds any legitimate frame. Refuse
+        //    fatally (Corruption) rather than allocate: with valid frames possibly
+        //    following, a silent truncation could drop acked writes.
+        let remaining =
+            total_len.saturating_sub(usize::try_from(cursor.position()).unwrap_or(usize::MAX));
+        if payload_len > remaining {
+            return FrameDecodeResult::TruncatedTail { complete: entries };
+        }
+        if payload_len > MAX_FRAME_PAYLOAD_LEN {
+            return FrameDecodeResult::Corruption {
+                offset,
+                stored_crc,
+                // The frame is rejected on the length bound before its CRC is
+                // computed; 0 is a sentinel "not computed", stored_crc is real.
+                computed_crc: 0,
+            };
+        }
 
         // --- Read payload ---
         let mut payload = vec![0u8; payload_len];
@@ -464,6 +510,90 @@ mod tests {
     // -----------------------------------------------------------------------
     // AC2: Unknown version — distinct classification
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Bounded payload allocation — a corrupt/bloated length field must never
+    // drive a multi-gigabyte allocation during recovery (DoS / OOM hardening).
+    // -----------------------------------------------------------------------
+
+    /// Build a raw frame header (valid magic + version) with an arbitrary
+    /// declared `length`, followed by `payload` bytes verbatim. The CRC field is
+    /// filled with `0` because these tests exercise the length bound, which is
+    /// checked *before* the CRC is computed.
+    fn raw_frame_with_declared_len(length: u32, payload: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(FRAME_HEADER_LEN + payload.len());
+        frame.extend_from_slice(&FRAME_MAGIC.to_be_bytes());
+        frame.push(FRAME_VERSION);
+        frame.extend_from_slice(&length.to_be_bytes());
+        frame.extend_from_slice(&0u32.to_be_bytes()); // CRC placeholder
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    #[test]
+    fn bloated_length_is_truncated_tail_without_allocating() {
+        // A frame header claims a ~4 GiB payload but only a handful of bytes
+        // follow. The decoder must NOT allocate `vec![0u8; 4 GiB]`; because the
+        // declared length exceeds the bytes actually present, it is classified as
+        // a truncated tail (crash-mid-append) and the intact prefix is returned.
+        // Pre-fix this test would attempt a ~4 GiB allocation and OOM/abort.
+        let data = raw_frame_with_declared_len(u32::MAX, &[1, 2, 3, 4]);
+
+        match decode_all(&data) {
+            FrameDecodeResult::TruncatedTail { complete } => {
+                assert!(
+                    complete.is_empty(),
+                    "no complete frame precedes the bad one"
+                );
+            }
+            other => panic!("Expected TruncatedTail (no allocation), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bloated_length_after_valid_frame_keeps_prefix() {
+        // A valid frame, then a frame declaring a ~4 GiB payload with no bytes
+        // behind it. The valid prefix must survive; the bloated frame must be
+        // treated as a truncated tail, never allocated.
+        let entry = make_store_entry(1);
+        let mut data = encode(&entry).unwrap();
+        data.extend_from_slice(&raw_frame_with_declared_len(u32::MAX, &[]));
+
+        match decode_all(&data) {
+            FrameDecodeResult::TruncatedTail { complete } => {
+                assert_eq!(complete.len(), 1);
+                assert_eq!(complete[0], entry);
+            }
+            other => panic!("Expected TruncatedTail with intact prefix, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oversized_but_present_payload_is_corruption() {
+        // Enough bytes ARE present for the declared length, but it exceeds the
+        // per-frame ceiling. This is genuine corruption (not a torn tail) and
+        // must be refused, not allocated-and-replayed. Built as a single buffer
+        // (header + zero payload in place) to avoid a transient double-copy of
+        // the 64 MiB payload under parallel test memory pressure.
+        let over = MAX_FRAME_PAYLOAD_LEN + 1;
+        let mut data = vec![0u8; FRAME_HEADER_LEN + over];
+        data[0..4].copy_from_slice(&FRAME_MAGIC.to_be_bytes());
+        data[4] = FRAME_VERSION;
+        data[5..9].copy_from_slice(
+            &u32::try_from(over)
+                .expect("over fits in u32 for this test")
+                .to_be_bytes(),
+        );
+        // bytes 9..13 (CRC) and the payload stay zeroed; the length bound is
+        // checked before the CRC, so the CRC value is irrelevant here.
+
+        match decode_all(&data) {
+            FrameDecodeResult::Corruption { offset, .. } => {
+                assert_eq!(offset, 0, "the over-sized frame is the first frame");
+            }
+            other => panic!("Expected Corruption for an over-MAX frame, got {other:?}"),
+        }
+    }
 
     #[test]
     fn unknown_version_is_distinct_from_corruption_and_bad_magic() {

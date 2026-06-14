@@ -78,11 +78,23 @@ impl EvictionConfig {
     /// other from the default.
     #[must_use]
     pub fn from_env() -> Self {
+        Self::from_source(|key| std::env::var(key).ok())
+    }
+
+    /// Construct [`EvictionConfig`] from an injected variable source.
+    ///
+    /// `get` maps a variable name to its value (or `None` if unset). This is the
+    /// testable seam behind [`Self::from_env`], which simply passes a closure
+    /// over `std::env::var`. Tests pass a map-backed closure so they exercise the
+    /// full parse/validation logic without mutating process-global environment
+    /// state — eliminating the cross-test env race that made parallel runs flaky.
+    #[must_use]
+    pub fn from_source<F: Fn(&str) -> Option<String>>(get: F) -> Self {
         let defaults = Self::default();
         let mut cfg = defaults.clone();
 
         // Parse TOPGUN_MAX_RAM_MB → max_ram_bytes (u64, then multiply by 1 MiB)
-        if let Ok(raw) = std::env::var("TOPGUN_MAX_RAM_MB") {
+        if let Some(raw) = get("TOPGUN_MAX_RAM_MB") {
             match raw.trim().parse::<u64>() {
                 Ok(mb) => {
                     cfg.max_ram_bytes = mb.saturating_mul(1024 * 1024);
@@ -102,7 +114,7 @@ impl EvictionConfig {
         }
 
         // Parse TOPGUN_EVICTION_HIGH_PCT → high_water_pct (u8)
-        if let Ok(raw) = std::env::var("TOPGUN_EVICTION_HIGH_PCT") {
+        if let Some(raw) = get("TOPGUN_EVICTION_HIGH_PCT") {
             match raw.trim().parse::<u8>() {
                 Ok(pct) => {
                     cfg.high_water_pct = pct;
@@ -122,7 +134,7 @@ impl EvictionConfig {
         }
 
         // Parse TOPGUN_EVICTION_LOW_PCT → low_water_pct (u8)
-        if let Ok(raw) = std::env::var("TOPGUN_EVICTION_LOW_PCT") {
+        if let Some(raw) = get("TOPGUN_EVICTION_LOW_PCT") {
             match raw.trim().parse::<u8>() {
                 Ok(pct) => {
                     cfg.low_water_pct = pct;
@@ -142,7 +154,7 @@ impl EvictionConfig {
         }
 
         // Parse TOPGUN_EVICTION_INTERVAL_MS → interval_ms (u64)
-        if let Ok(raw) = std::env::var("TOPGUN_EVICTION_INTERVAL_MS") {
+        if let Some(raw) = get("TOPGUN_EVICTION_INTERVAL_MS") {
             match raw.trim().parse::<u64>() {
                 Ok(ms) => {
                     cfg.interval_ms = ms;
@@ -189,6 +201,20 @@ impl EvictionConfig {
 mod tests {
     use super::*;
     use serial_test::serial;
+    use std::collections::HashMap;
+
+    /// Build a `from_source` lookup closure from a fixed map of overrides.
+    ///
+    /// This is the parallel-safe seam: parsing/validation is exercised in full
+    /// without touching process-global env, so these tests never race each other
+    /// or any other test reading the same vars.
+    fn source(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        move |key: &str| map.get(key).cloned()
+    }
 
     #[test]
     fn default_values_are_sane() {
@@ -202,16 +228,9 @@ mod tests {
         assert!(cfg.high_water_pct <= 100);
     }
 
-    #[serial]
     #[test]
-    fn from_env_without_env_vars_returns_defaults() {
-        // Ensure no TOPGUN_ eviction vars leak from test environment
-        std::env::remove_var("TOPGUN_MAX_RAM_MB");
-        std::env::remove_var("TOPGUN_EVICTION_HIGH_PCT");
-        std::env::remove_var("TOPGUN_EVICTION_LOW_PCT");
-        std::env::remove_var("TOPGUN_EVICTION_INTERVAL_MS");
-
-        let cfg = EvictionConfig::from_env();
+    fn from_source_without_vars_returns_defaults() {
+        let cfg = EvictionConfig::from_source(source(&[]));
         let defaults = EvictionConfig::default();
         assert_eq!(cfg.max_ram_bytes, defaults.max_ram_bytes);
         assert_eq!(cfg.high_water_pct, defaults.high_water_pct);
@@ -219,21 +238,14 @@ mod tests {
         assert_eq!(cfg.interval_ms, defaults.interval_ms);
     }
 
-    #[serial]
     #[test]
-    fn from_env_parses_valid_values() {
-        // Use a serial test to avoid env-var races in parallel test runs
-        std::env::set_var("TOPGUN_MAX_RAM_MB", "2048");
-        std::env::set_var("TOPGUN_EVICTION_HIGH_PCT", "90");
-        std::env::set_var("TOPGUN_EVICTION_LOW_PCT", "60");
-        std::env::set_var("TOPGUN_EVICTION_INTERVAL_MS", "500");
-
-        let cfg = EvictionConfig::from_env();
-
-        std::env::remove_var("TOPGUN_MAX_RAM_MB");
-        std::env::remove_var("TOPGUN_EVICTION_HIGH_PCT");
-        std::env::remove_var("TOPGUN_EVICTION_LOW_PCT");
-        std::env::remove_var("TOPGUN_EVICTION_INTERVAL_MS");
+    fn from_source_parses_valid_values() {
+        let cfg = EvictionConfig::from_source(source(&[
+            ("TOPGUN_MAX_RAM_MB", "2048"),
+            ("TOPGUN_EVICTION_HIGH_PCT", "90"),
+            ("TOPGUN_EVICTION_LOW_PCT", "60"),
+            ("TOPGUN_EVICTION_INTERVAL_MS", "500"),
+        ]));
 
         assert_eq!(cfg.max_ram_bytes, 2048 * 1024 * 1024);
         assert_eq!(cfg.high_water_pct, 90);
@@ -241,17 +253,19 @@ mod tests {
         assert_eq!(cfg.interval_ms, 500);
     }
 
-    #[serial]
+    #[test]
+    fn unparseable_value_falls_back_to_default() {
+        let cfg = EvictionConfig::from_source(source(&[("TOPGUN_MAX_RAM_MB", "not-a-number")]));
+        assert_eq!(cfg.max_ram_bytes, EvictionConfig::default().max_ram_bytes);
+    }
+
     #[test]
     fn watermark_inversion_reverts_both_to_defaults() {
-        // low >= high should trigger atomic revert of BOTH fields
-        std::env::set_var("TOPGUN_EVICTION_HIGH_PCT", "50");
-        std::env::set_var("TOPGUN_EVICTION_LOW_PCT", "75"); // low > high — invalid
-
-        let cfg = EvictionConfig::from_env();
-
-        std::env::remove_var("TOPGUN_EVICTION_HIGH_PCT");
-        std::env::remove_var("TOPGUN_EVICTION_LOW_PCT");
+        // low > high should trigger atomic revert of BOTH fields
+        let cfg = EvictionConfig::from_source(source(&[
+            ("TOPGUN_EVICTION_HIGH_PCT", "50"),
+            ("TOPGUN_EVICTION_LOW_PCT", "75"),
+        ]));
 
         let defaults = EvictionConfig::default();
         assert_eq!(
@@ -264,20 +278,30 @@ mod tests {
         );
     }
 
-    #[serial]
     #[test]
     fn watermark_equal_reverts_both_to_defaults() {
         // low == high is also invalid (requires strict ordering)
-        std::env::set_var("TOPGUN_EVICTION_HIGH_PCT", "70");
-        std::env::set_var("TOPGUN_EVICTION_LOW_PCT", "70");
-
-        let cfg = EvictionConfig::from_env();
-
-        std::env::remove_var("TOPGUN_EVICTION_HIGH_PCT");
-        std::env::remove_var("TOPGUN_EVICTION_LOW_PCT");
+        let cfg = EvictionConfig::from_source(source(&[
+            ("TOPGUN_EVICTION_HIGH_PCT", "70"),
+            ("TOPGUN_EVICTION_LOW_PCT", "70"),
+        ]));
 
         let defaults = EvictionConfig::default();
         assert_eq!(cfg.high_water_pct, defaults.high_water_pct);
         assert_eq!(cfg.low_water_pct, defaults.low_water_pct);
+    }
+
+    /// Wiring-only smoke test for the real `from_env` → `std::env` seam. This is
+    /// the sole env-mutating test and is `#[serial]` so it cannot race the other
+    /// (env-free) config tests. All parse/validation logic is covered above via
+    /// `from_source`; here we only prove `from_env` actually reads the process
+    /// environment.
+    #[serial]
+    #[test]
+    fn from_env_reads_process_environment() {
+        std::env::set_var("TOPGUN_MAX_RAM_MB", "2048");
+        let cfg = EvictionConfig::from_env();
+        std::env::remove_var("TOPGUN_MAX_RAM_MB");
+        assert_eq!(cfg.max_ram_bytes, 2048 * 1024 * 1024);
     }
 }

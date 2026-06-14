@@ -782,3 +782,133 @@ async fn max_observed_sequence_reads_watermark_of_compacted_empty_partition() {
          compacted-empty partition, got {max}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Concurrent same-partition durability under crash (F1 / visibility class).
+//
+// The other crash scenarios drive the write path single-threaded-sequentially:
+// every op is appended, then the store is dropped. That schedule can never see
+// the F1 compaction race (compact_log rewriting the active log while an append
+// interleaves) — it slipped past the suite and `kill -9` cannot see it either
+// (the page cache survives a process kill, and steady-state entries usually also
+// reached the inner store before the kill).
+//
+// This test runs append and compaction CONCURRENTLY on ONE partition through the
+// production WriteBehindDataStore write path, then models the crash (drop), and
+// asserts against a FRESH durable inner store recovered from the on-disk WAL —
+// NOT against the OS-cached WAL file. With never-flush config every acked write
+// lives only in the WAL until the crash, so a compaction that drops a
+// concurrently-appended frame is a lost acked write that recovery cannot find.
+//
+// `mark_applied(partition, 0)` is the fault injection: it retains every entry
+// (watermark 0) yet still performs compact_log's read->rewrite->rename on the
+// active file, exactly as the real flush loop's mark_applied does while clients
+// keep writing the same partition. Driving it directly (rather than via the
+// flush loop) is what makes the race deterministic instead of timing-dependent.
+//
+// Negative control: reverting compact_log to acquire the files lock late (the
+// pre-PR#50 shape — read/rewrite/rename without the lock) makes this test drop a
+// large fraction of acked writes and fail.
+// ---------------------------------------------------------------------------
+
+/// Generates `count` distinct keys that all map to `partition` under
+/// `partition_of`, so appends and compaction contend on a single WAL file.
+fn keys_for_partition(map: &str, partition: u32, count: usize) -> Vec<String> {
+    let mut out = Vec::with_capacity(count);
+    let mut i = 0u64;
+    while out.len() < count {
+        let candidate = format!("cp-{i}");
+        if partition_of(map, &candidate) == partition {
+            out.push(candidate);
+        }
+        i += 1;
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_compaction_loses_no_acked_write_across_crash() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal_dir = dir.path().to_path_buf();
+
+    // One partition; every key collides onto it so append races compaction on
+    // the same file. 2000 ops reproduces the pre-fix loss reliably (the audit's
+    // repro dropped 1864/2000).
+    let total = 2000usize;
+    let partition = partition_of(TEST_MAP, "anchor");
+    let keys = keys_for_partition(TEST_MAP, partition, total);
+
+    // Production write path; never-flush so acked writes live ONLY in the WAL
+    // until the crash (no leak to the inner store before the drop). None policy
+    // also maximally stresses the append()-flush visibility path (PR #49).
+    let pre_crash_inner: Arc<dyn MapDataStore> = Arc::new(RetainingStore::default());
+    let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::None).expect("WalWriter::new");
+    let store = WriteBehindDataStore::new_with_wal(
+        pre_crash_inner,
+        never_flush_config(),
+        Some(WalBootstrap {
+            wal: Arc::clone(&wal) as Arc<dyn Wal>,
+            sequence_start: 1,
+        }),
+    );
+
+    // Appender: each add returns Ok (an ack) ⇒ its WAL frame is durable per the
+    // append-before-ack contract.
+    let appender = {
+        let store = Arc::clone(&store);
+        let keys = keys.clone();
+        tokio::spawn(async move {
+            for (i, key) in keys.iter().enumerate() {
+                let tag = u64::try_from(i).unwrap() + 1;
+                store
+                    .add(TEST_MAP, key, &lww_value(tag, tag), 0, 1000)
+                    .await
+                    .expect("add must ack");
+            }
+        })
+    };
+
+    // Compactor: hammer mark_applied on the SAME partition, racing the appender's
+    // writes to the active log file.
+    let compactor = {
+        let wal = Arc::clone(&wal);
+        tokio::spawn(async move {
+            for _ in 0..total {
+                wal.mark_applied(partition, 0).await.expect("mark_applied");
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+
+    appender.await.unwrap();
+    compactor.await.unwrap();
+
+    // Crash: the in-memory staging buffer is gone; the on-disk WAL survives.
+    drop(store);
+
+    // Recover into a FRESH durable inner store via the real recovery path and
+    // assert against THAT — not the OS-cached WAL file.
+    let recovered: Arc<RetainingStore> = Arc::new(RetainingStore::default());
+    let recovery = WalRecovery::new(Arc::clone(&wal), Vec::new());
+    recovery
+        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+        .await
+        .expect("recovery must succeed on an intact WAL");
+    drop(dir);
+
+    // Every acked write must survive. Pre-fix the compaction race silently drops
+    // most concurrently-appended frames and this fails (negative control).
+    let mut missing = Vec::new();
+    for key in &keys {
+        if !recovered.contains(TEST_MAP, key).await {
+            missing.push(key.clone());
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "concurrent compaction lost {} of {total} acked writes across the crash \
+         (first few: {:?})",
+        missing.len(),
+        &missing[..missing.len().min(10)]
+    );
+}
