@@ -18,6 +18,7 @@ use proptest::prelude::*;
 use proptest::test_runner::{Config as PropConfig, TestRunner};
 use tokio::runtime::Handle;
 use topgun_server::sim::cluster::SimCluster;
+use topgun_server::storage::record::RecordValue;
 
 // ---------------------------------------------------------------------------
 // Operation enum
@@ -432,5 +433,254 @@ async fn random_operations_merkle_consistent() {
 
     if let Err(e) = result {
         panic!("random_operations_merkle_consistent failed: {e}");
+    }
+}
+
+// ===========================================================================
+// Concurrent OR_REMOVE convergence (blocking gate — closes the OR-Map coverage gap)
+// ===========================================================================
+//
+// The generic `random_operations_*` properties above only generate LWW writes,
+// so they never exercised the OR-Map merge path. That gap is exactly why the
+// suite once missed the OR_REMOVE clobber bug (a blind `OrTombstones` put that
+// destroyed every concurrent OR-Map value for the key). This property drives
+// random interleavings of OR_ADD / OR_REMOVE / one-way sync / partition across
+// a 3-node cluster on overlapping keys and asserts every node converges to the
+// CRDT-correct live set with zero acknowledged-write loss.
+
+/// A single operation in a concurrent OR-Map sequence.
+#[derive(Debug, Clone)]
+enum OrOp {
+    /// `OR_ADD`: node `node_idx % 3` adds a freshly-minted unique tag to `key_idx`.
+    /// A globally-unique tag means each tag maps to exactly one value, so the
+    /// convergent live set is order-independent (no last-writer-wins ambiguity).
+    Add { node_idx: usize, key_idx: usize },
+    /// `OR_REMOVE`: node `node_idx % 3` removes a previously-added `(key, tag)`
+    /// resolved from the add pool by `target % pool.len()`. The removing node is
+    /// frequently NOT the adding node, exercising concurrent cross-node add/remove.
+    Remove { node_idx: usize, target: usize },
+    /// One-way Merkle sync of the OR-Map between two distinct nodes (partition-aware,
+    /// silently dropped across a partitioned link). Creates random partial-delivery
+    /// orders mid-sequence so convergence cannot rely on a tidy delivery schedule.
+    Sync { src_idx: usize, dst_idx: usize },
+    /// Partition the cluster into two non-empty groups.
+    Partition { split: usize },
+    /// Heal all active partitions.
+    Heal,
+}
+
+/// Map name for the OR-Map convergence property (single map keeps the focus on
+/// OR semantics rather than cross-map fan-out).
+const OR_MAP: &str = "orset";
+
+/// Number of distinct keys. A small set forces many adds/removes onto the same
+/// key so concurrent add/remove on intersecting keys is the common case.
+const OR_KEY_COUNT: usize = 3;
+
+/// Strategy for a single OR-Map operation. Adds dominate so the pool fills and
+/// removes have meaningful targets.
+fn arb_or_op() -> impl Strategy<Value = OrOp> {
+    prop_oneof![
+        4 => (any::<usize>(), 0..OR_KEY_COUNT).prop_map(|(node_idx, key_idx)| OrOp::Add {
+            node_idx,
+            key_idx
+        }),
+        3 => (any::<usize>(), any::<usize>())
+            .prop_map(|(node_idx, target)| OrOp::Remove { node_idx, target }),
+        3 => (any::<usize>(), any::<usize>())
+            .prop_map(|(src_idx, dst_idx)| OrOp::Sync { src_idx, dst_idx }),
+        1 => any::<usize>().prop_map(|split| OrOp::Partition { split }),
+        1 => Just(OrOp::Heal),
+    ]
+}
+
+fn arb_or_ops() -> impl Strategy<Value = Vec<OrOp>> {
+    proptest::collection::vec(arb_or_op(), 10..=64)
+}
+
+/// The CRDT-expected outcome for the OR-Map sequence, accumulated during
+/// execution: which tags were acknowledged-added per key, and which were
+/// acknowledged-removed. The convergent live set per key is `added - removed`.
+#[derive(Default)]
+struct OrExpectation {
+    /// key -> set of tags whose `OR_ADD` was acknowledged.
+    added: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    /// key -> set of tags whose `OR_REMOVE` was acknowledged.
+    removed: std::collections::HashMap<String, std::collections::HashSet<String>>,
+}
+
+fn or_key(key_idx: usize) -> String {
+    format!("k{}", key_idx % OR_KEY_COUNT)
+}
+
+/// Executes an OR-Map operation sequence against a fresh fixed-size 3-node
+/// cluster. No nodes are killed or joined, so every acknowledged add must
+/// survive to the convergence check — `0 acked-loss` is directly assertable.
+async fn execute_or_ops(ops: &[OrOp], seed: u64) -> (SimCluster, OrExpectation) {
+    let mut cluster = SimCluster::new(3, seed);
+    cluster.start().expect("cluster should start");
+
+    let mut expect = OrExpectation::default();
+    // Pool of acknowledged (key, tag) adds that removes can target.
+    let mut pool: Vec<(String, String)> = Vec::new();
+    // Globally-monotonic tag sequence guarantees every add gets a unique tag.
+    let mut seq: usize = 0;
+
+    for op in ops {
+        match op {
+            OrOp::Add { node_idx, key_idx } => {
+                let node = node_idx % cluster.nodes.len();
+                let key = or_key(*key_idx);
+                let tag = format!("n{node}-{seq}");
+                seq += 1;
+                // Value is tied 1:1 to the tag so there is never value ambiguity.
+                let value = rmpv::Value::String(tag.as_str().into());
+                if cluster
+                    .or_write(node, OR_MAP, &key, tag.clone(), value)
+                    .await
+                    .is_ok()
+                {
+                    expect
+                        .added
+                        .entry(key.clone())
+                        .or_default()
+                        .insert(tag.clone());
+                    pool.push((key, tag));
+                }
+            }
+            OrOp::Remove { node_idx, target } => {
+                if pool.is_empty() {
+                    continue;
+                }
+                let node = node_idx % cluster.nodes.len();
+                let (key, tag) = pool[target % pool.len()].clone();
+                if cluster
+                    .or_remove(node, OR_MAP, &key, tag.clone())
+                    .await
+                    .is_ok()
+                {
+                    expect.removed.entry(key).or_default().insert(tag);
+                }
+            }
+            OrOp::Sync { src_idx, dst_idx } => {
+                let n = cluster.nodes.len();
+                let src = src_idx % n;
+                // Force a distinct destination.
+                let dst = (dst_idx % n.saturating_sub(1).max(1) + src + 1) % n;
+                if src != dst {
+                    let _ = cluster.merkle_sync_pair(src, dst, OR_MAP).await;
+                }
+            }
+            OrOp::Partition { split } => {
+                let n = cluster.nodes.len();
+                if n < 2 {
+                    continue;
+                }
+                let boundary = (split % (n - 1)) + 1;
+                let all: Vec<usize> = (0..n).collect();
+                cluster.inject_partition(&all[..boundary], &all[boundary..]);
+            }
+            OrOp::Heal => cluster.heal_partition(),
+        }
+    }
+
+    (cluster, expect)
+}
+
+/// Asserts OR-Map convergence: after healing + full Merkle sync, every alive
+/// node holds an identical live tag set per key, equal to `added - removed`.
+///
+/// This single assertion encodes three guarantees:
+/// - **convergence**: all nodes agree on the live set for every key;
+/// - **0 acked-loss**: every acknowledged add that was never removed survives;
+/// - **remove-wins**: every acknowledged remove is absent on every node, with no
+///   resurrection regardless of add/remove/delivery interleaving.
+///
+/// Comparison is on tag *sets*, not serialized bytes: the `records`/`tombstones`
+/// Vec order is an implementation artifact of delivery order, whereas CRDT
+/// convergence is defined on the live-element set.
+async fn assert_or_converged(
+    cluster: &SimCluster,
+    expect: &OrExpectation,
+) -> Result<(), TestCaseError> {
+    let mut keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+    keys.extend(expect.added.keys().cloned());
+    keys.extend(expect.removed.keys().cloned());
+
+    let empty = std::collections::HashSet::new();
+
+    for key in &keys {
+        let added = expect.added.get(key).unwrap_or(&empty);
+        let removed = expect.removed.get(key).unwrap_or(&empty);
+        let expected_live: std::collections::BTreeSet<String> =
+            added.difference(removed).cloned().collect();
+
+        for (idx, node) in cluster.nodes.iter().enumerate() {
+            if !node.is_alive() {
+                continue;
+            }
+            let value = cluster
+                .read(idx, OR_MAP, key)
+                .await
+                .map_err(|e| TestCaseError::fail(format!("read error: {e}")))?;
+
+            // Live tag set as stored on this node (None ⇒ key absent ⇒ empty set).
+            let live: std::collections::BTreeSet<String> = match value {
+                Some(RecordValue::OrMap { records, .. }) => {
+                    records.into_iter().map(|e| e.tag).collect()
+                }
+                Some(RecordValue::OrTombstones { .. }) | None => std::collections::BTreeSet::new(),
+                Some(other) => {
+                    return Err(TestCaseError::fail(format!(
+                        "key {key:?} on node {idx} is non-OR-Map: {other:?}"
+                    )));
+                }
+            };
+
+            if live != expected_live {
+                return Err(TestCaseError::fail(format!(
+                    "OR convergence failure: key={key:?} node={idx}\n  \
+                     expected live tags (added−removed) = {expected_live:?}\n  \
+                     actual live tags                   = {live:?}\n  \
+                     added={added:?} removed={removed:?}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Property: concurrent `OR_ADD` / `OR_REMOVE` sequences converge with zero
+/// acknowledged-write loss.
+///
+/// This is the blocking gate that closes the convergence coverage gap for the
+/// `OR_REMOVE` clobber class. Negative control: reverting the server-side
+/// `OR_REMOVE` merge to the old blind-clobber `OrTombstones` put MUST make this
+/// test fail — proving the guard actually catches that regression class.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_or_remove_preserves_convergence() {
+    let handle = Handle::current();
+    let mut runner = TestRunner::new(PropConfig {
+        cases: 64,
+        ..PropConfig::default()
+    });
+
+    let result = runner.run(&arb_or_ops(), |ops| {
+        tokio::task::block_in_place(|| {
+            handle.block_on(async {
+                let seed = 1234u64;
+                let (cluster, expect) = execute_or_ops(&ops, seed).await;
+
+                // Heal + full bidirectional Merkle sync, then assert convergence.
+                converge_cluster(&cluster, &[OR_MAP]).await;
+                assert_or_converged(&cluster, &expect).await?;
+
+                Ok(())
+            })
+        })
+    });
+
+    if let Err(e) = result {
+        panic!("concurrent_or_remove_preserves_convergence failed: {e}");
     }
 }

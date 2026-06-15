@@ -107,8 +107,8 @@ async fn concurrent_writes_converge() {
 /// nodes must hold both tags (OR-Map add-wins semantics).
 ///
 /// Uses `sync_all` after the first write to propagate tag-A to node 1, then
-/// `merkle_sync_pair` for full OR-Map convergence because `sync_all` only
-/// forwards the first entry per key.
+/// `merkle_sync_pair` for full OR-Map convergence. Both paths now carry the
+/// complete OR-Map state (every live entry plus every tombstone).
 #[tokio::test]
 async fn ormap_concurrent_add_remove() {
     let mut cluster = SimCluster::new(2, 7);
