@@ -223,18 +223,25 @@ describe('Hash utilities', () => {
       });
 
       test('should handle single hash', () => {
+        // A single input combines to the stable avalanche-mixed value of `hash`
+        // (no longer `hash` itself), matching the Rust combine_hashes_single test.
         const hash = hashString('single');
         const combined = combineHashes([hash]);
-        expect(combined).toBe(hash >>> 0);
+        expect(combined).toBe(0xf0047af6);
+        expect(combineHashes([hash])).toBe(combined); // deterministic
       });
 
       test('should handle array with zero', () => {
+        // mix(0) === 0, so zero remains an additive identity: appending a
+        // zero-valued entry does not change the combined hash. Matches the Rust
+        // combine_hashes_with_zero test.
         const h1 = hashString('test');
         const combined1 = combineHashes([h1, 0]);
         const combined2 = combineHashes([0, h1]);
 
         expect(combined1).toBe(combined2);
-        expect(combined1).toBe(h1 >>> 0);
+        expect(combined1).toBe(0xd3705a82);
+        expect(combined1).toBe(combineHashes([h1]));
       });
 
       test('should handle large numbers', () => {
@@ -282,6 +289,24 @@ describe('Hash utilities', () => {
         expect(combined1).not.toBe(combined2);
         expect(combined1).not.toBe(combined3);
         expect(combined2).not.toBe(combined3);
+      });
+    });
+
+    describe('Cross-language parity', () => {
+      // Pinned cross-language vector: the Rust combine_hashes(&[0x64, 0xc8]) test
+      // asserts this exact u32. The TS port must reproduce it bit-for-bit so a Rust
+      // replica and a TS replica with identical data agree on Merkle root hashes.
+      test('reproduces the Rust pinned vector for inputs [100, 200]', () => {
+        expect(combineHashes([100, 200])).toBe(0xbc1dab1c >>> 0);
+      });
+
+      // Avalanche mixing must keep compensating pairs distinct: under a plain
+      // additive fold 100 + 200 === 250 + 50, so divergent sets used to collide.
+      test('resists compensating-pair collisions', () => {
+        expect(combineHashes([100, 200])).not.toBe(combineHashes([250, 50]));
+        expect(combineHashes([0xaaaa0000, 0x00005555])).not.toBe(
+          combineHashes([0xaaaa5555, 0x00000000]),
+        );
       });
     });
 

@@ -136,9 +136,13 @@ impl SyncService {
     /// `SyncInitMessage` is a FLAT message: `map_name` is directly on the payload struct,
     /// not nested in a `.payload` sub-field (contrast with `MerkleReqBucketMessage`).
     ///
-    /// Returns a scatter-gathered root hash: the `wrapping_add` of all per-partition
-    /// root hashes. This eliminates the Mutex bottleneck on a shared partition 0
-    /// that previously serialized all writes under concurrent load.
+    /// Returns a scatter-gathered root hash: the collision-resistant combine of all
+    /// per-partition root hashes. This eliminates the Mutex bottleneck on a shared
+    /// partition 0 that previously serialized all writes under concurrent load. The
+    /// combine is order-independent (commutative + associative) so `DashMap`'s
+    /// non-deterministic iteration order does not affect the aggregate, yet resists the
+    /// compensating-pair collision that plain additive folding would reintroduce one
+    /// level above the trie.
     #[allow(clippy::unused_async)] // declared async for uniformity with other handlers
     async fn handle_sync_init(
         &self,
@@ -167,7 +171,9 @@ impl SyncService {
     ///
     /// Path encoding operates in two modes:
     /// - **Aggregate mode** (`""` or paths without a 3-digit partition prefix): the server
-    ///   combines results from all partition trees via `wrapping_add` for hashes.
+    ///   combines results from all partition trees via the order-independent,
+    ///   collision-resistant combine for hashes (not plain additive folding, which would
+    ///   reintroduce the compensating-pair collision one level above the trie).
     /// - **Routed mode** (paths beginning with a 3-digit zero-padded partition prefix like
     ///   `"042/abc"`): the server strips the prefix and routes to the specific partition tree.
     #[allow(clippy::too_many_lines)] // two-mode dispatch (routed vs aggregate) with leaf collection is inherently verbose
@@ -916,7 +922,9 @@ mod tests {
             connection_registry,
         ));
 
-        let expected_root = merkle_manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
+        // SyncInit returns the cross-partition aggregate, not the raw partition
+        // root, so the expected value is the collision-resistant combine.
+        let expected_root = merkle_manager.aggregate_lww_root_hash("users");
         assert_ne!(
             expected_root, 0,
             "precondition: tree must have non-zero hash"
@@ -1229,7 +1237,9 @@ mod tests {
             Arc::new(ConnectionRegistry::new()),
         ));
 
-        let expected_root = merkle_manager.with_ormap_tree("tags", 0, |tree| tree.get_root_hash());
+        // ORMapSyncInit returns the cross-partition aggregate, not the raw
+        // partition root, so the expected value is the collision-resistant combine.
+        let expected_root = merkle_manager.aggregate_ormap_root_hash("tags");
         assert_ne!(
             expected_root, 0,
             "precondition: OR-Map tree must have non-zero hash"
