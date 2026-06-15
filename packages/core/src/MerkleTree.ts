@@ -1,5 +1,5 @@
 import { LWWRecord } from './LWWMap';
-import { hashString } from './utils/hash';
+import { combineHashes, hashString } from './utils/hash';
 
 export interface MerkleNode {
   hash: number;
@@ -63,12 +63,8 @@ export class MerkleTree {
       if (node.entries) {
         node.entries.delete(key);
 
-        // Recalculate leaf hash
-        let h = 0;
-        for (const val of node.entries.values()) {
-          h = (h + val) | 0;
-        }
-        node.hash = h >>> 0;
+        // Recalculate leaf hash (collision-resistant combine of item hashes)
+        node.hash = combineHashes([...node.entries.values()]);
       }
       return node.hash;
     }
@@ -85,13 +81,9 @@ export class MerkleTree {
     }
 
     // Recalculate this node's hash from children
-    let h = 0;
-    if (node.children) {
-      for (const child of Object.values(node.children)) {
-        h = (h + child.hash) | 0;
-      }
-    }
-    node.hash = h >>> 0;
+    node.hash = node.children
+      ? combineHashes(Object.values(node.children).map((child) => child.hash))
+      : 0;
     return node.hash;
   }
 
@@ -107,12 +99,8 @@ export class MerkleTree {
       if (!node.entries) node.entries = new Map();
       node.entries.set(key, itemHash);
 
-      // Recalculate leaf hash (Sum of item hashes)
-      let h = 0;
-      for (const val of node.entries.values()) {
-        h = (h + val) | 0;
-      }
-      node.hash = h >>> 0;
+      // Recalculate leaf hash (collision-resistant combine of item hashes)
+      node.hash = combineHashes([...node.entries.values()]);
       return node.hash;
     }
 
@@ -127,11 +115,7 @@ export class MerkleTree {
     this.updateNode(node.children[bucketChar], key, itemHash, pathHash, level + 1);
 
     // Recalculate this node's hash from children
-    let h = 0;
-    for (const child of Object.values(node.children)) {
-      h = (h + child.hash) | 0;
-    }
-    node.hash = h >>> 0;
+    node.hash = combineHashes(Object.values(node.children).map((child) => child.hash));
     return node.hash;
   }
 
