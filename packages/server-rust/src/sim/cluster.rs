@@ -41,7 +41,7 @@ use crate::storage::datastores::NullDataStore;
 use crate::storage::factory::{ObserverFactory, RecordStoreFactory};
 use crate::storage::impls::StorageConfig;
 use crate::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
-use crate::storage::record::RecordValue;
+use crate::storage::record::{OrMapEntry, RecordValue};
 
 use super::network::{SimNetwork, SimTransport};
 
@@ -365,6 +365,49 @@ fn value_to_rmpv(v: &topgun_core::Value) -> rmpv::Value {
     }
 }
 
+/// Builds an `OR_ADD` `ClientOp` from a stored OR-Map entry.
+///
+/// Carries the entry's value, tag, and timestamp so the destination merges it
+/// via add-wins semantics (`or_record: Some(Some(_))`).
+fn or_add_client_op(map: &str, key: &str, entry: &OrMapEntry) -> ClientOp {
+    ClientOp {
+        id: Some(format!("{map}/{key}/{}", entry.tag)),
+        map_name: map.to_string(),
+        key: key.to_string(),
+        op_type: None,
+        record: None,
+        or_record: Some(Some(ORMapRecord {
+            value: value_to_rmpv(&entry.value),
+            timestamp: entry.timestamp.clone(),
+            tag: entry.tag.clone(),
+            ttl_ms: None,
+        })),
+        or_tag: Some(Some(entry.tag.clone())),
+        write_concern: None,
+        timeout: None,
+    }
+}
+
+/// Builds an `OR_REMOVE` `ClientOp` for a tombstoned tag.
+///
+/// An `OR_REMOVE` carries no value: `or_record: None` + `or_tag: Some(Some(tag))`
+/// is the shape the CRDT merge path classifies as a tag-based removal. Without
+/// this, a removal observed on the source node could never propagate — the
+/// destination would keep resurrecting the removed tag, defeating convergence.
+fn or_remove_client_op(map: &str, key: &str, tag: &str) -> ClientOp {
+    ClientOp {
+        id: Some(format!("{map}/{key}/{tag}#remove")),
+        map_name: map.to_string(),
+        key: key.to_string(),
+        op_type: None,
+        record: None,
+        or_record: None,
+        or_tag: Some(Some(tag.to_string())),
+        write_concern: None,
+        timeout: None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SimCluster
 // ---------------------------------------------------------------------------
@@ -593,54 +636,55 @@ impl SimCluster {
             let record = store.get(key, false).await?;
 
             if let Some(rec) = record {
-                let client_op = match rec.value {
+                match rec.value {
                     RecordValue::Lww { value, timestamp } => {
                         let lww = LWWRecord {
                             value: Some(value_to_rmpv(&value)),
                             timestamp,
                             ttl_ms: None,
                         };
-                        ClientOp {
-                            id: Some(format!("{map}/{key}")),
-                            map_name: map.to_string(),
-                            key: key.to_string(),
-                            op_type: None,
-                            record: Some(Some(lww)),
-                            or_record: None,
-                            or_tag: None,
-                            write_concern: None,
-                            timeout: None,
+                        entries.push((
+                            node.node_id.clone(),
+                            ClientOp {
+                                id: Some(format!("{map}/{key}")),
+                                map_name: map.to_string(),
+                                key: key.to_string(),
+                                op_type: None,
+                                record: Some(Some(lww)),
+                                or_record: None,
+                                or_tag: None,
+                                write_concern: None,
+                                timeout: None,
+                            },
+                        ));
+                    }
+                    RecordValue::OrMap {
+                        records,
+                        tombstones,
+                    } => {
+                        // Carry the full OR-Map state: every live entry as an
+                        // OR_ADD and every tombstone as an OR_REMOVE. Forwarding
+                        // only `records[0]` (the old behavior) made a two-node
+                        // OR_REMOVE convergence scenario inexpressible — removals
+                        // never crossed the wire, so a removed tag silently
+                        // resurrected on the peer.
+                        for entry in &records {
+                            entries.push((node.node_id.clone(), or_add_client_op(map, key, entry)));
+                        }
+                        for tag in &tombstones {
+                            entries
+                                .push((node.node_id.clone(), or_remove_client_op(map, key, tag)));
                         }
                     }
-                    RecordValue::OrMap { records, .. } => {
-                        // Deliver each OR-Map entry as a separate op.
-                        // Use the first entry's tag as representative for simplicity;
-                        // full OR-Map convergence goes through or_write/merkle_sync_pair.
-                        if records.is_empty() {
-                            continue;
-                        }
-                        let entry = &records[0];
-                        let or_rec = ORMapRecord {
-                            value: value_to_rmpv(&entry.value),
-                            timestamp: entry.timestamp.clone(),
-                            tag: entry.tag.clone(),
-                            ttl_ms: None,
-                        };
-                        ClientOp {
-                            id: Some(format!("{map}/{key}/{}", entry.tag)),
-                            map_name: map.to_string(),
-                            key: key.to_string(),
-                            op_type: None,
-                            record: None,
-                            or_record: Some(Some(or_rec)),
-                            or_tag: Some(Some(entry.tag.clone())),
-                            write_concern: None,
-                            timeout: None,
+                    RecordValue::OrTombstones { tags } => {
+                        // Legacy tombstone-only blob: propagate each removal so a
+                        // peer still holding the tag drops it (remove-wins).
+                        for tag in &tags {
+                            entries
+                                .push((node.node_id.clone(), or_remove_client_op(map, key, tag)));
                         }
                     }
-                    RecordValue::OrTombstones { .. } => continue,
-                };
-                entries.push((node.node_id.clone(), client_op));
+                }
             }
         }
 
@@ -769,30 +813,31 @@ impl SimCluster {
                         timeout: None,
                     }
                 }
-                RecordValue::OrMap { records, .. } => {
-                    // Transfer all OR-Map entries; destination merges via CRDT semantics.
+                RecordValue::OrMap {
+                    records,
+                    tombstones,
+                } => {
+                    // Transfer the full OR-Map state: every live entry as an
+                    // OR_ADD and every tombstone as an OR_REMOVE. The destination
+                    // merges via CRDT semantics (add-wins / remove-wins). Dropping
+                    // tombstones here would let a removed tag resurrect on the
+                    // peer — the exact gap that hid the F1 OR_REMOVE clobber bug.
                     for entry in records {
-                        let op = ClientOp {
-                            id: Some(format!("{map}/{key}/{}", entry.tag)),
-                            map_name: map.to_string(),
-                            key: key.clone(),
-                            op_type: None,
-                            record: None,
-                            or_record: Some(Some(ORMapRecord {
-                                value: value_to_rmpv(&entry.value),
-                                timestamp: entry.timestamp.clone(),
-                                tag: entry.tag.clone(),
-                                ttl_ms: None,
-                            })),
-                            or_tag: Some(Some(entry.tag.clone())),
-                            write_concern: None,
-                            timeout: None,
-                        };
-                        ops.push(op);
+                        ops.push(or_add_client_op(map, &key, entry));
+                    }
+                    for tag in tombstones {
+                        ops.push(or_remove_client_op(map, &key, tag));
                     }
                     continue;
                 }
-                RecordValue::OrTombstones { .. } => continue,
+                RecordValue::OrTombstones { tags } => {
+                    // Legacy tombstone-only blob: propagate each removal so a peer
+                    // still holding the tag drops it (remove-wins).
+                    for tag in tags {
+                        ops.push(or_remove_client_op(map, &key, tag));
+                    }
+                    continue;
+                }
             };
             ops.push(client_op);
         }
@@ -900,6 +945,59 @@ impl SimCluster {
             write_concern: None,
             timeout: None,
         };
+
+        let op = Operation::ClientOp {
+            ctx,
+            payload: ClientOpMessage { payload: client_op },
+        };
+
+        let mut svc = Arc::clone(&node.crdt_service);
+        Service::call(&mut svc, op).await?;
+
+        Ok(())
+    }
+
+    /// Removes an OR-Map entry (by tag) from a specific node.
+    ///
+    /// Mirrors [`or_write`](Self::or_write) but constructs the `OR_REMOVE` shape:
+    /// `or_record: None` + `or_tag: Some(Some(tag))`. The CRDT merge path applies
+    /// this as a tag-based, remove-wins deletion — dropping the matched tag from
+    /// the live entry set and recording it as a tombstone, while preserving every
+    /// concurrent survivor. The removal need not have been observed locally first:
+    /// tombstoning an unseen tag still suppresses a later-arriving add.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the node index is out of range, the node is dead,
+    /// or the CRDT service rejects the operation.
+    pub async fn or_remove(
+        &self,
+        node_idx: usize,
+        map: &str,
+        key: &str,
+        tag: impl Into<String>,
+    ) -> anyhow::Result<()> {
+        let tag = tag.into();
+        let node = self
+            .nodes
+            .get(node_idx)
+            .ok_or_else(|| anyhow::anyhow!("node index {node_idx} out of range"))?;
+
+        if !node.is_alive() {
+            return Err(anyhow::anyhow!("node {node_idx} is dead"));
+        }
+
+        let partition_id = topgun_core::hash_to_partition(key);
+        let ts = Timestamp {
+            millis: 0,
+            counter: 0,
+            node_id: node.node_id.clone(),
+        };
+        let mut ctx = OperationContext::new(0, service_names::CRDT, ts, 5000);
+        ctx.partition_id = Some(partition_id);
+        ctx.caller_origin = CallerOrigin::System;
+
+        let client_op = or_remove_client_op(map, key, &tag);
 
         let op = Operation::ClientOp {
             ctx,
