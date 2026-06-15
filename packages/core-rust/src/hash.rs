@@ -278,9 +278,9 @@ mod tests {
         assert_ne!(s1, s2);
     }
 
-    /// Pinned cross-language test vector. SPEC-309c's `hash.test.ts` MUST
-    /// reproduce this exact `u32` output bit-for-bit; it is the anchor that
-    /// proves the Rust and TS `combineHashes` implementations agree.
+    /// Pinned cross-language test vector. The TypeScript `combineHashes` port
+    /// MUST reproduce this exact `u32` output bit-for-bit; it is the anchor that
+    /// proves the Rust and TS implementations agree.
     #[test]
     fn combine_hashes_cross_language_pinned_vector() {
         assert_eq!(combine_hashes(&[0x0000_0064, 0x0000_00c8]), 0xbc1d_ab1c);
