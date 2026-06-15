@@ -821,7 +821,7 @@ impl SimCluster {
                     // OR_ADD and every tombstone as an OR_REMOVE. The destination
                     // merges via CRDT semantics (add-wins / remove-wins). Dropping
                     // tombstones here would let a removed tag resurrect on the
-                    // peer — the exact gap that hid the F1 OR_REMOVE clobber bug.
+                    // peer — the exact gap that hid the OR_REMOVE clobber bug.
                     for entry in records {
                         ops.push(or_add_client_op(map, &key, entry));
                     }

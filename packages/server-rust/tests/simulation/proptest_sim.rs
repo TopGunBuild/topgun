@@ -437,12 +437,12 @@ async fn random_operations_merkle_consistent() {
 }
 
 // ===========================================================================
-// Concurrent OR_REMOVE convergence (blocking gate — closes G4a coverage gap)
+// Concurrent OR_REMOVE convergence (blocking gate — closes the OR-Map coverage gap)
 // ===========================================================================
 //
 // The generic `random_operations_*` properties above only generate LWW writes,
 // so they never exercised the OR-Map merge path. That gap is exactly why the
-// suite missed the F1 OR_REMOVE clobber bug (a blind `OrTombstones` put that
+// suite once missed the OR_REMOVE clobber bug (a blind `OrTombstones` put that
 // destroyed every concurrent OR-Map value for the key). This property drives
 // random interleavings of OR_ADD / OR_REMOVE / one-way sync / partition across
 // a 3-node cluster on overlapping keys and asserts every node converges to the
@@ -653,10 +653,10 @@ async fn assert_or_converged(
 /// Property: concurrent `OR_ADD` / `OR_REMOVE` sequences converge with zero
 /// acknowledged-write loss.
 ///
-/// This is the blocking gate that closes the G4a coverage gap for the F1
-/// `OR_REMOVE` class. The negative control (TODO-481): reverting the F1 fix in
-/// `crdt.rs` to the old blind-clobber `OrTombstones` put MUST make this test
-/// fail — proving the guard actually catches the F1 regression class.
+/// This is the blocking gate that closes the convergence coverage gap for the
+/// `OR_REMOVE` clobber class. Negative control: reverting the server-side
+/// `OR_REMOVE` merge to the old blind-clobber `OrTombstones` put MUST make this
+/// test fail — proving the guard actually catches that regression class.
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_or_remove_preserves_convergence() {
     let handle = Handle::current();
