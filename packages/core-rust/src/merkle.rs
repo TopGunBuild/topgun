@@ -7,16 +7,16 @@
 
 use std::collections::HashMap;
 
-use crate::hash::fnv1a_hash;
+use crate::hash::{combine_hashes, fnv1a_hash};
 
 /// A node in the `MerkleTree` prefix trie.
 ///
 /// Internal nodes have `children` (keyed by hex digit). Leaf nodes have `entries`
 /// (keyed by the original string key, mapping to the content hash). The `hash`
-/// field is the wrapping sum of all child/entry hashes.
+/// field is the collision-resistant combine of all child/entry hashes.
 #[derive(Debug, Clone)]
 pub struct MerkleNode {
-    /// Aggregated hash of all descendants (wrapping sum).
+    /// Aggregated hash of all descendants (order-independent collision-resistant combine).
     pub hash: u32,
     /// Child nodes keyed by hex digit (0-9, a-f). Present on internal nodes.
     pub children: HashMap<char, MerkleNode>,
@@ -88,22 +88,18 @@ fn trie_remove_node(node: &mut MerkleNode, key: &str, path: &str, level: usize, 
     node.hash = recalc_internal_hash(&node.children);
 }
 
-/// Recalculates a leaf node's hash from its entries (wrapping sum).
+/// Recalculates a leaf node's hash from its entries using the collision-resistant
+/// order-independent combine.
 fn recalc_leaf_hash(entries: &HashMap<String, u32>) -> u32 {
-    let mut h: u32 = 0;
-    for &val in entries.values() {
-        h = h.wrapping_add(val);
-    }
-    h
+    let values: Vec<u32> = entries.values().copied().collect();
+    combine_hashes(&values)
 }
 
-/// Recalculates an internal node's hash from its children (wrapping sum).
+/// Recalculates an internal node's hash from its children using the collision-resistant
+/// order-independent combine.
 fn recalc_internal_hash(children: &HashMap<char, MerkleNode>) -> u32 {
-    let mut h: u32 = 0;
-    for child in children.values() {
-        h = h.wrapping_add(child.hash);
-    }
-    h
+    let hashes: Vec<u32> = children.values().map(|c| c.hash).collect();
+    combine_hashes(&hashes)
 }
 
 /// A `MerkleTree` for efficient delta synchronization of LWW-Maps.
