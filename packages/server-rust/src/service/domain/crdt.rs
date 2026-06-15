@@ -2314,6 +2314,40 @@ mod tests {
         }
     }
 
+    /// Like `read_or_map` but pairs each surviving tag with its record value
+    /// (debug-formatted), so convergence assertions catch value divergence and
+    /// not merely tag/tombstone-set divergence. The reused-tag proptest pool makes
+    /// this matter: two stores could agree on the surviving tag set yet disagree on
+    /// which value won for a given tag.
+    async fn read_or_map_full(
+        factory: &Arc<RecordStoreFactory>,
+        map: &str,
+        key: &str,
+    ) -> (Vec<(String, String)>, Vec<String>) {
+        let store = factory.get_or_create(map, hash_to_partition(key));
+        match store.get(key, false).await.unwrap().map(|r| r.value) {
+            Some(RecordValue::OrMap {
+                records,
+                tombstones,
+            }) => {
+                let mut pairs: Vec<(String, String)> = records
+                    .into_iter()
+                    .map(|e| (e.tag, format!("{:?}", e.value)))
+                    .collect();
+                pairs.sort();
+                let mut tombs = tombstones;
+                tombs.sort();
+                (pairs, tombs)
+            }
+            Some(RecordValue::OrTombstones { tags }) => {
+                let mut tombs = tags;
+                tombs.sort();
+                (Vec::new(), tombs)
+            }
+            Some(RecordValue::Lww { .. }) | None => (Vec::new(), Vec::new()),
+        }
+    }
+
     /// Returns the survivor values (not tags) for a key, for human-readable
     /// assertions like "play survives".
     async fn read_or_map_values(
@@ -2455,6 +2489,15 @@ mod tests {
         // Sanity: the convergent state is ta-removed, tc-removed, tb survives.
         assert_eq!(state_a.0, vec!["tb"], "only tb survives");
         assert_eq!(state_a.1, vec!["ta", "tc"], "ta and tc tombstoned");
+
+        // Values (not just tags) must converge too: a tag winning with a different
+        // value on each store would pass the tag-set check but is still divergence.
+        let full_a = read_or_map_full(&factory_a, "tags", key).await;
+        let full_b = read_or_map_full(&factory_b, "tags", key).await;
+        assert_eq!(
+            full_a, full_b,
+            "apply_single_op convergence: records (tag→value) AND tombstones must agree"
+        );
     }
 
     // AC3 (ii) + AC4: inbound handle_ormap_push_diff convergence — one store emits
@@ -2617,6 +2660,14 @@ mod tests {
         );
         assert_eq!(state_a.0, vec!["t2", "t3"], "t2 and t3 survive");
         assert_eq!(state_a.1, vec!["t1"], "t1 tombstoned");
+
+        // Values (not just tags) must converge after bidirectional ingest.
+        let full_a = read_or_map_full(&factory_a, "tags", key).await;
+        let full_b = read_or_map_full(&factory_b, "tags", key).await;
+        assert_eq!(
+            full_a, full_b,
+            "handle_ormap_push_diff convergence: records (tag→value) AND tombstones must agree"
+        );
     }
 
     // AC6: tombstoning a tag CHANGES the OR-Map merkle hash, and a key reduced to
@@ -2818,6 +2869,16 @@ mod tests {
                             rmp_serde::to_vec_named(&state_b).unwrap(),
                             "serialized OrMap bytes must be identical after convergence"
                         );
+
+                        // Convergence here is asserted on the (tag, tombstone) sets,
+                        // NOT on per-tag values. The pool deliberately re-adds the
+                        // SAME tag with DIFFERENT values, and OR_ADD has no value
+                        // tiebreak (first-arrival wins), so a reused tag's value is
+                        // order-dependent across the two delivery orders. This is not
+                        // a production concern: real OR_ADD tags are globally unique
+                        // (HLC-based), so a tag never carries two values. Per-tag
+                        // value convergence IS asserted in the deterministic
+                        // convergence_* tests above, which use unique tags.
 
                         // Merkle consistency: convergent stores must hash identically.
                         let hash_a =
