@@ -332,8 +332,16 @@ impl HLC {
             self.last_millis = system_time;
             self.last_counter = 0;
         } else {
-            // System clock unchanged or behind: increment counter
-            self.last_counter += 1;
+            // System clock unchanged or behind: increment counter.
+            // On u32 counter exhaustion within a single millisecond, roll to the
+            // next millisecond with counter 0 instead of silently wrapping to 0
+            // on the same millisecond, which would break strict monotonicity.
+            if let Some(next) = self.last_counter.checked_add(1) {
+                self.last_counter = next;
+            } else {
+                self.last_millis = self.last_millis.saturating_add(1);
+                self.last_counter = 0;
+            }
         }
 
         Timestamp {
@@ -376,17 +384,35 @@ impl HLC {
             }
         }
 
-        let max_millis = self.last_millis.max(system_time).max(remote.millis);
+        let mut max_millis = self.last_millis.max(system_time).max(remote.millis);
 
+        // Each "+ 1" below can exhaust the u32 counter. On overflow, roll to the
+        // next millisecond with counter 0 instead of silently wrapping on the
+        // same millisecond, which would break strict monotonicity.
         if max_millis == self.last_millis && max_millis == remote.millis {
             // Both clocks on the same millisecond: take max counter + 1
-            self.last_counter = self.last_counter.max(remote.counter) + 1;
+            if let Some(next) = self.last_counter.max(remote.counter).checked_add(1) {
+                self.last_counter = next;
+            } else {
+                max_millis = max_millis.saturating_add(1);
+                self.last_counter = 0;
+            }
         } else if max_millis == self.last_millis {
             // Local logical clock is ahead: just increment
-            self.last_counter += 1;
+            if let Some(next) = self.last_counter.checked_add(1) {
+                self.last_counter = next;
+            } else {
+                max_millis = max_millis.saturating_add(1);
+                self.last_counter = 0;
+            }
         } else if max_millis == remote.millis {
             // Remote clock is ahead: fast-forward
-            self.last_counter = remote.counter + 1;
+            if let Some(next) = remote.counter.checked_add(1) {
+                self.last_counter = next;
+            } else {
+                max_millis = max_millis.saturating_add(1);
+                self.last_counter = 0;
+            }
         } else {
             // System time is ahead of both: reset counter
             self.last_counter = 0;
@@ -613,6 +639,71 @@ mod tests {
         let bytes = rmp_serde::to_vec(&ts).expect("serialize");
         let decoded: Timestamp = rmp_serde::from_slice(&bytes).expect("deserialize");
         assert_eq!(ts, decoded);
+    }
+
+    // ---- HLC counter-overflow rollover tests ----
+
+    #[test]
+    fn now_counter_overflow_rolls_to_next_millisecond() {
+        // System clock stays fixed so now() takes the counter-increment branch.
+        let (clock, _) = FixedClock::new(1_000_000);
+        let mut hlc = HLC::new("test-node".to_string(), Box::new(clock));
+
+        // Drive the logical clock to the brink of u32 counter exhaustion.
+        hlc.last_millis = 1_000_000;
+        hlc.last_counter = u32::MAX;
+
+        let ts = hlc.now();
+
+        assert_eq!(
+            ts.millis, 1_000_001,
+            "counter overflow must roll to the next millisecond"
+        );
+        assert_eq!(
+            ts.counter, 0,
+            "counter must reset to 0 on rollover, not wrap"
+        );
+    }
+
+    #[test]
+    fn update_same_millisecond_counter_overflow_rolls_to_next_millisecond() {
+        // Fix the system clock on the same millisecond as both local and remote
+        // so update() takes the same-millisecond max-counter + 1 branch.
+        let (clock, _) = FixedClock::new(1_000_000);
+        let mut hlc = HLC::new("test-node".to_string(), Box::new(clock));
+
+        hlc.last_millis = 1_000_000;
+        hlc.last_counter = u32::MAX;
+
+        let remote = Timestamp {
+            millis: 1_000_000,
+            counter: u32::MAX,
+            node_id: "remote".to_string(),
+        };
+
+        hlc.update(&remote).expect("update should succeed");
+
+        assert_eq!(
+            hlc.last_millis, 1_000_001,
+            "update counter overflow must roll to the next millisecond"
+        );
+        assert_eq!(
+            hlc.last_counter, 0,
+            "update counter must reset to 0 on rollover, not wrap"
+        );
+
+        // Monotonicity: the next emitted timestamp must exceed the pre-overflow state.
+        let pre_overflow = Timestamp {
+            millis: 1_000_000,
+            counter: u32::MAX,
+            node_id: "test-node".to_string(),
+        };
+        let after = Timestamp {
+            millis: hlc.last_millis,
+            counter: hlc.last_counter,
+            node_id: "test-node".to_string(),
+        };
+        assert!(after > pre_overflow, "rollover must preserve monotonicity");
     }
 
     // ---- HLC::now() monotonicity tests ----
