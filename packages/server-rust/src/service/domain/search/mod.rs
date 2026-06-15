@@ -815,7 +815,7 @@ impl MutationObserver for SearchMutationObserver {
 fn record_to_rmpv(record_value: &RecordValue) -> rmpv::Value {
     match record_value {
         RecordValue::Lww { value, .. } => value_to_rmpv(value),
-        RecordValue::OrMap { records } => {
+        RecordValue::OrMap { records, .. } => {
             // OR-Map entries carry individual Values indexed by tag.
             // Wrap as an array of values for text extraction.
             let items: Vec<rmpv::Value> = records.iter().map(|e| value_to_rmpv(&e.value)).collect();

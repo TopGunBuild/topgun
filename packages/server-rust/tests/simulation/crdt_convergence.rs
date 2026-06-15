@@ -9,7 +9,7 @@ use topgun_server::storage::record::{OrMapEntry, RecordValue};
 /// are present in its entry set. Panics with a descriptive message otherwise.
 fn assert_or_tags(value: &RecordValue, expected_tags: &[&str]) {
     match value {
-        RecordValue::OrMap { records } => {
+        RecordValue::OrMap { records, .. } => {
             let present: Vec<&str> = records
                 .iter()
                 .map(|e: &OrMapEntry| e.tag.as_str())

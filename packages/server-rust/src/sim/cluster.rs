@@ -612,7 +612,7 @@ impl SimCluster {
                             timeout: None,
                         }
                     }
-                    RecordValue::OrMap { records } => {
+                    RecordValue::OrMap { records, .. } => {
                         // Deliver each OR-Map entry as a separate op.
                         // Use the first entry's tag as representative for simplicity;
                         // full OR-Map convergence goes through or_write/merkle_sync_pair.
@@ -769,7 +769,7 @@ impl SimCluster {
                         timeout: None,
                     }
                 }
-                RecordValue::OrMap { records } => {
+                RecordValue::OrMap { records, .. } => {
                     // Transfer all OR-Map entries; destination merges via CRDT semantics.
                     for entry in records {
                         let op = ClientOp {
