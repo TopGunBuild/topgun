@@ -11,6 +11,7 @@
 
 use dashmap::DashMap;
 use parking_lot::Mutex;
+use topgun_core::hash::combine_hashes;
 use topgun_core::merkle::MerkleTree;
 
 // ---------------------------------------------------------------------------
@@ -108,21 +109,24 @@ impl QueryMerkleSyncManager {
 
     /// Computes the aggregate root hash across all partitions for `(query_id, map_name)`.
     ///
-    /// Accumulates per-partition root hashes using `wrapping_add`. This is
-    /// commutative and associative, so the result is independent of `DashMap`'s
-    /// non-deterministic iteration order. Returns `0` if no partitions exist.
+    /// Combines per-partition root hashes with the collision-resistant
+    /// `combine_hashes`. It is commutative and associative, so the result is
+    /// independent of `DashMap`'s non-deterministic iteration order, while
+    /// preventing compensating per-partition hashes from producing an identical
+    /// query root (which the client treats as the query-scoped in-sync signal).
+    /// Returns `0` if no partitions exist.
     #[must_use]
     pub fn aggregate_query_root_hash(&self, query_id: &str, map_name: &str) -> u32 {
-        self.trees
+        let hashes: Vec<u32> = self
+            .trees
             .iter()
             .filter(|entry| {
                 let (qid, mn, _) = entry.key();
                 qid == query_id && mn == map_name
             })
-            .fold(0u32, |acc, entry| {
-                let hash = entry.value().lock().get_root_hash();
-                acc.wrapping_add(hash)
-            })
+            .map(|entry| entry.value().lock().get_root_hash())
+            .collect();
+        combine_hashes(&hashes)
     }
 
     /// Removes all Merkle trees for a given `query_id`.
@@ -159,5 +163,59 @@ impl QueryMerkleSyncManager {
 impl Default for QueryMerkleSyncManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aggregate_query_root_hash_empty_returns_zero() {
+        let manager = QueryMerkleSyncManager::new();
+        assert_eq!(
+            manager.aggregate_query_root_hash("q1", "users"),
+            0,
+            "no partitions should produce aggregate hash = 0"
+        );
+    }
+
+    #[test]
+    fn aggregate_query_root_hash_combines_partitions() {
+        let manager = QueryMerkleSyncManager::new();
+        manager.init_tree("q1", "users", 1, &[("alice".to_string(), 111)]);
+        manager.init_tree("q1", "users", 2, &[("bob".to_string(), 222)]);
+
+        let hash_1 = manager.get_root_hash("q1", "users", 1);
+        let hash_2 = manager.get_root_hash("q1", "users", 2);
+        let expected = combine_hashes(&[hash_1, hash_2]);
+
+        assert_eq!(
+            manager.aggregate_query_root_hash("q1", "users"),
+            expected,
+            "aggregate should equal combine_hashes of all partition hashes"
+        );
+    }
+
+    #[test]
+    fn aggregate_query_root_hash_resists_compensating_partition_pairs() {
+        // Two per-partition hash sets that are equal under a plain additive fold
+        // (0xAAAA0000 + 0x00005555 == 0xAAAA5555 + 0x00000000). The query-scoped
+        // aggregate must keep them distinct via combine_hashes so compensating
+        // per-partition hashes can never produce an identical query root, which
+        // the client treats as the query-scoped "in sync" signal.
+        let set_a = [0xAAAA_0000u32, 0x0000_5555u32];
+        let set_b = [0xAAAA_5555u32, 0x0000_0000u32];
+
+        assert_eq!(
+            set_a[0].wrapping_add(set_a[1]),
+            set_b[0].wrapping_add(set_b[1]),
+            "test vectors must collide under the old additive scheme"
+        );
+        assert_ne!(
+            combine_hashes(&set_a),
+            combine_hashes(&set_b),
+            "compensating partition-hash pairs must produce different aggregates"
+        );
     }
 }
