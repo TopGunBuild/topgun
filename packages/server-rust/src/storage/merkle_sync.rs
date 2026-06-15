@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use parking_lot::Mutex;
-use topgun_core::hash::fnv1a_hash;
+use topgun_core::hash::{combine_hashes, fnv1a_hash};
 use topgun_core::merkle::{MerkleTree, ORMapMerkleTree};
 
 use super::factory::ObserverFactory;
@@ -135,19 +135,20 @@ impl MerkleSyncManager {
 
     /// Aggregates LWW root hashes across all partitions for `map_name`.
     ///
-    /// Returns the `wrapping_add` of all per-partition root hashes.
-    /// Returns 0 when no partitions exist for the given map.
-    /// `wrapping_add` is commutative and associative, so the result is
-    /// independent of `DashMap`'s non-deterministic iteration order.
+    /// Combines all per-partition root hashes with the collision-resistant
+    /// `combine_hashes`. Returns 0 when no partitions exist for the given map.
+    /// `combine_hashes` is commutative and associative, so the result is
+    /// independent of `DashMap`'s non-deterministic iteration order, while
+    /// avoiding the compensating-pair collisions a plain additive fold admits.
     #[must_use]
     pub fn aggregate_lww_root_hash(&self, map_name: &str) -> u32 {
-        self.lww_trees
+        let hashes: Vec<u32> = self
+            .lww_trees
             .iter()
             .filter(|entry| entry.key().0 == map_name)
-            .fold(0u32, |acc, entry| {
-                let hash = entry.value().lock().get_root_hash();
-                acc.wrapping_add(hash)
-            })
+            .map(|entry| entry.value().lock().get_root_hash())
+            .collect();
+        combine_hashes(&hashes)
     }
 
     /// Aggregates OR-Map root hashes across all partitions for `map_name`.
@@ -155,36 +156,39 @@ impl MerkleSyncManager {
     /// Same aggregation strategy as `aggregate_lww_root_hash`.
     #[must_use]
     pub fn aggregate_ormap_root_hash(&self, map_name: &str) -> u32 {
-        self.ormap_trees
+        let hashes: Vec<u32> = self
+            .ormap_trees
             .iter()
             .filter(|entry| entry.key().0 == map_name)
-            .fold(0u32, |acc, entry| {
-                let hash = entry.value().lock().get_root_hash();
-                acc.wrapping_add(hash)
-            })
+            .map(|entry| entry.value().lock().get_root_hash())
+            .collect();
+        combine_hashes(&hashes)
     }
 
     /// Aggregates LWW bucket hashes at `path` across all partitions for `map_name`.
     ///
-    /// For each hex bucket character, combines partition values via `wrapping_add`.
-    /// Returns a `HashMap<char, u32>` with the combined hashes, suitable for
-    /// returning as a `SyncRespBuckets` response covering all partitions.
+    /// For each hex bucket character, combines partition values with the
+    /// collision-resistant `combine_hashes`. Returns a `HashMap<char, u32>` with
+    /// the combined hashes, suitable for returning as a `SyncRespBuckets` response
+    /// covering all partitions. Per-character hashes are gathered into a list and
+    /// folded once via `combine_hashes`, whose commutativity + associativity make
+    /// the result independent of `DashMap`'s non-deterministic iteration order.
     #[must_use]
     pub fn aggregate_lww_buckets(&self, map_name: &str, path: &str) -> HashMap<char, u32> {
-        let mut combined: HashMap<char, u32> = HashMap::new();
+        let mut per_char: HashMap<char, Vec<u32>> = HashMap::new();
         for entry in &self.lww_trees {
             if entry.key().0 != map_name {
                 continue;
             }
             let buckets = entry.value().lock().get_buckets(path);
             for (c, h) in buckets {
-                combined
-                    .entry(c)
-                    .and_modify(|acc| *acc = acc.wrapping_add(h))
-                    .or_insert(h);
+                per_char.entry(c).or_default().push(h);
             }
         }
-        combined
+        per_char
+            .into_iter()
+            .map(|(c, hashes)| (c, combine_hashes(&hashes)))
+            .collect()
     }
 
     /// Aggregates OR-Map bucket hashes at `path` across all partitions for `map_name`.
@@ -192,20 +196,20 @@ impl MerkleSyncManager {
     /// Same aggregation strategy as `aggregate_lww_buckets`.
     #[must_use]
     pub fn aggregate_ormap_buckets(&self, map_name: &str, path: &str) -> HashMap<char, u32> {
-        let mut combined: HashMap<char, u32> = HashMap::new();
+        let mut per_char: HashMap<char, Vec<u32>> = HashMap::new();
         for entry in &self.ormap_trees {
             if entry.key().0 != map_name {
                 continue;
             }
             let buckets = entry.value().lock().get_buckets(path);
             for (c, h) in buckets {
-                combined
-                    .entry(c)
-                    .and_modify(|acc| *acc = acc.wrapping_add(h))
-                    .or_insert(h);
+                per_char.entry(c).or_default().push(h);
             }
         }
-        combined
+        per_char
+            .into_iter()
+            .map(|(c, hashes)| (c, combine_hashes(&hashes)))
+            .collect()
     }
 
     /// Returns all partition IDs that have a LWW tree for `map_name`.
@@ -726,16 +730,38 @@ mod tests {
 
         let hash_1 = manager.with_lww_tree("users", 1, |tree| tree.get_root_hash());
         let hash_2 = manager.with_lww_tree("users", 2, |tree| tree.get_root_hash());
-        let expected = hash_1.wrapping_add(hash_2);
+        let expected = combine_hashes(&[hash_1, hash_2]);
 
         let aggregate = manager.aggregate_lww_root_hash("users");
         assert_eq!(
             aggregate, expected,
-            "aggregate should equal wrapping_add of all partition hashes"
+            "aggregate should equal combine_hashes of all partition hashes"
         );
         assert_ne!(
             aggregate, 0,
             "aggregate should be non-zero when partitions have data"
+        );
+    }
+
+    #[test]
+    fn aggregate_lww_root_hash_resists_compensating_partition_pairs() {
+        // Two per-partition hash sets that are equal under a plain additive fold
+        // (0xAAAA0000 + 0x00005555 == 0xAAAA5555 + 0x00000000 == 0xAAAA5555).
+        // The cross-partition aggregate folds these with combine_hashes, which
+        // must keep them distinct so compensating per-partition hashes can never
+        // produce an identical server root (which the client treats as "in sync").
+        let set_a = [0xAAAA_0000u32, 0x0000_5555u32];
+        let set_b = [0xAAAA_5555u32, 0x0000_0000u32];
+
+        assert_eq!(
+            set_a[0].wrapping_add(set_a[1]),
+            set_b[0].wrapping_add(set_b[1]),
+            "test vectors must collide under the old additive scheme"
+        );
+        assert_ne!(
+            combine_hashes(&set_a),
+            combine_hashes(&set_b),
+            "compensating partition-hash pairs must produce different aggregates"
         );
     }
 
@@ -774,12 +800,12 @@ mod tests {
 
         let hash_1 = manager.with_ormap_tree("tags", 1, |tree| tree.get_root_hash());
         let hash_2 = manager.with_ormap_tree("tags", 2, |tree| tree.get_root_hash());
-        let expected = hash_1.wrapping_add(hash_2);
+        let expected = combine_hashes(&[hash_1, hash_2]);
 
         let aggregate = manager.aggregate_ormap_root_hash("tags");
         assert_eq!(
             aggregate, expected,
-            "OR-Map aggregate should equal wrapping_add of partition hashes"
+            "OR-Map aggregate should equal combine_hashes of partition hashes"
         );
     }
 
