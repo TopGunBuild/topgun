@@ -724,7 +724,7 @@ impl SyncService {
                     &entry.key,
                     RecordValue::OrMap {
                         records: merged_records,
-                        tombstones: tombstones.into_iter().collect(),
+                        tombstones: tombstones.iter().cloned().collect(),
                     },
                     ExpiryPolicy::NONE,
                     CallerProvenance::CrdtMerge,
@@ -732,8 +732,14 @@ impl SyncService {
                 .await
                 .map_err(|e| OperationError::Internal(anyhow::anyhow!("{e}")))?;
 
-            // Broadcast OR_ADD event for each entry.
+            // Broadcast OR_ADD only for inbound records that actually survived the
+            // merge. A record whose tag is tombstoned (remove-wins) was suppressed
+            // from stored state, so emitting an OR_ADD for it would tell subscribers
+            // to resurrect a removed entry.
             for record in &entry.records {
+                if tombstones.contains(&record.tag) {
+                    continue;
+                }
                 let event_payload = ServerEventPayload {
                     map_name: map_name.clone(),
                     key: entry.key.clone(),
