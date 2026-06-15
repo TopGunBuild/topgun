@@ -776,8 +776,9 @@ mod tests {
         let orders_hash = manager.aggregate_lww_root_hash("orders");
         let users_p1 = manager.with_lww_tree("users", 1, |tree| tree.get_root_hash());
         assert_eq!(
-            users_hash, users_p1,
-            "users aggregate should match only its own partition"
+            users_hash,
+            combine_hashes(&[users_p1]),
+            "users aggregate should combine only its own partition"
         );
         assert_ne!(
             users_hash, orders_hash,

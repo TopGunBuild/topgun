@@ -916,7 +916,9 @@ mod tests {
             connection_registry,
         ));
 
-        let expected_root = merkle_manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
+        // SyncInit returns the cross-partition aggregate, not the raw partition
+        // root, so the expected value is the collision-resistant combine.
+        let expected_root = merkle_manager.aggregate_lww_root_hash("users");
         assert_ne!(
             expected_root, 0,
             "precondition: tree must have non-zero hash"
@@ -1229,7 +1231,9 @@ mod tests {
             Arc::new(ConnectionRegistry::new()),
         ));
 
-        let expected_root = merkle_manager.with_ormap_tree("tags", 0, |tree| tree.get_root_hash());
+        // ORMapSyncInit returns the cross-partition aggregate, not the raw
+        // partition root, so the expected value is the collision-resistant combine.
+        let expected_root = merkle_manager.aggregate_ormap_root_hash("tags");
         assert_ne!(
             expected_root, 0,
             "precondition: OR-Map tree must have non-zero hash"
