@@ -2684,14 +2684,15 @@ mod tests {
     // AC9: concurrent-OR_REMOVE convergence proptest.
     //
     // The SimCluster harness only expresses LWW writes (no OR_ADD/OR_REMOVE) and
-    // adding an or_remove helper to it is out of scope, so the F1 scenario cannot
-    // be reached through the sim proptests. Instead this proptest mirrors the AC3
-    // two-store oracle: it generates random interleaved OR_ADD/OR_REMOVE sequences
-    // with a small reused tag pool (so concurrent adds, removes, and resurrection
-    // attempts collide), delivers the SAME multiset of ops in two DIFFERENT orders
-    // to two independent CrdtService/RecordStore pairs, and asserts the stored
-    // OrMap (records + tombstones) converges byte-identically AND that the OR-Map
-    // merkle hash agrees. This is the proptest that would have caught F1.
+    // adding an or_remove helper to it is out of scope, so the concurrent-OR_REMOVE
+    // scenario cannot be reached through the sim proptests. Instead this proptest
+    // mirrors the two-store convergence oracle: it generates random interleaved
+    // OR_ADD/OR_REMOVE sequences with a small reused tag pool (so concurrent adds,
+    // removes, and resurrection attempts collide), delivers the SAME multiset of ops
+    // in two DIFFERENT orders to two independent CrdtService/RecordStore pairs, and
+    // asserts the stored OrMap (records + tombstones) converges byte-identically AND
+    // that the OR-Map merkle hash agrees. This is the proptest that would have caught
+    // the concurrent-OR_REMOVE add-wins/remove-wins data-loss regression.
     use crate::storage::merkle_sync::{MerkleMutationObserver, MerkleSyncManager};
     use proptest::prelude::*;
 
