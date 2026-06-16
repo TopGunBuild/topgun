@@ -447,107 +447,38 @@ struct AppServices {
 /// - `rate_limit_per_ip`: sustained request rate per IP (requests/second) fed
 ///   to the governor rate limiter on admin and login endpoints.
 /// - `rate_limit_burst`: initial burst capacity for the same governor.
+/// - `mount_admin`: when `false`, the admin control plane is left off the router.
+///   The admin API (`/api/admin/*`), the admin login/token/refresh routes
+///   (`/api/auth/login|token|refresh`), and the `/admin` SPA are NOT mounted, so
+///   they return 404 instead of exposing an unauthenticated superuser on a public
+///   no-auth bind. The data plane (`/health` + probes, `/ws`, `/sync`,
+///   `/metrics`, `/api/status`, `/api/auth/status`, `OpenAPI`) is always mounted.
 ///
-/// Neither parameter has an internal default: callers pass the values they read
-/// from their own `NetworkConfig` so the production rate-limit policy is always
-/// explicit and cannot silently drift.
+/// Neither rate-limit parameter has an internal default: callers pass the values
+/// they read from their own `NetworkConfig` so the production rate-limit policy is
+/// always explicit and cannot silently drift.
 ///
 /// # Panics
 ///
 /// Panics if the governor configuration fails to build (requires non-zero
 /// `rate_limit_burst`; `rate_limit_per_ip` of 0 is clamped to 1 internally).
 /// In practice this cannot happen when values come from a valid `NetworkConfig`.
-pub fn admin_routes(rate_limit_per_ip: u32, rate_limit_burst: u32) -> Router<AppState> {
+pub fn admin_routes(
+    rate_limit_per_ip: u32,
+    rate_limit_burst: u32,
+    mount_admin: bool,
+) -> Router<AppState> {
     // Build a per-IP rate limiter for admin and login endpoints.
     // Replenishment interval derived from rate_limit_per_ip: for 100 req/s the
     // governor refills 1 token every 10 ms. burst_size controls the initial
     // burst window. /ws and /sync are excluded because those have
     // operation-level load shedding instead of HTTP-layer rate limiting.
-    let replenish_interval_ms = (1000 / u64::from(rate_limit_per_ip).max(1)).max(1);
-    let governor_config = GovernorConfigBuilder::default()
-        .key_extractor(PeerIpKeyExtractor)
-        .per_millisecond(replenish_interval_ms)
-        .burst_size(rate_limit_burst)
-        .finish()
-        .expect("GovernorConfig should build with non-zero burst and period");
-
-    let governor_layer = GovernorLayer {
-        config: Arc::new(governor_config),
-    };
-
     // Swagger UI served at /api/docs (only when the `swagger` feature is enabled)
     #[cfg(feature = "swagger")]
     let swagger_ui = utoipa_swagger_ui::SwaggerUi::new("/api/docs")
         .url("/api/openapi.json", AdminApiDoc::openapi());
 
-    // Static SPA serving for admin dashboard.
-    //
-    // The unset default stays the monorepo-relative ./admin-dashboard/dist so
-    // `topgun dev` / `cargo run` from a checkout keeps working. For the prebuilt
-    // npm distribution the SPA lives inside the meta package, whose path the
-    // binary cannot know on its own — so the Node bin shim resolves the bundled
-    // SPA from its own __dirname and injects TOPGUN_ADMIN_DIR before exec'ing
-    // this binary. Layout resolution therefore lives entirely in the shim (one
-    // language, cross-layout-stable); no Rust-side path probing is added.
-    let admin_spa_dir =
-        std::env::var("TOPGUN_ADMIN_DIR").unwrap_or_else(|_| "./admin-dashboard/dist".to_string());
-    let index_html = format!("{admin_spa_dir}/index.html");
-    let serve_dir = ServeDir::new(&admin_spa_dir)
-        .append_index_html_on_directories(true)
-        .fallback(ServeFile::new(index_html));
-
-    // Rate-limited routes: admin API and login are brute-force targets and
-    // get per-IP throttling. All other routes (health, ws, sync, metrics,
-    // docs, status, admin SPA) bypass the governor.
-    let rate_limited_routes = Router::new()
-        .route("/api/auth/login", post(login))
-        .route("/api/auth/token", post(token_exchange_handler))
-        .route("/api/auth/refresh", post(refresh_handler))
-        .route("/api/admin/cluster/status", get(cluster_status))
-        .route("/api/admin/maps", get(list_maps))
-        .route(
-            "/api/admin/settings",
-            get(get_settings).put(update_settings),
-        )
-        .route(
-            "/api/admin/policies",
-            get(list_policies).post(create_policy),
-        )
-        .route("/api/admin/policies/{id}", delete(delete_policy))
-        .route("/api/admin/indexes", get(list_indexes).post(create_index))
-        .route(
-            "/api/admin/indexes/{map}/{attr}",
-            delete(remove_index_handler),
-        )
-        .route(
-            "/api/admin/indexes/{map}/{attr}/status",
-            get(index_backfill_status),
-        )
-        // Vector index admin endpoints — nested under /api/admin/indexes/vector
-        // to avoid collision with the existing /api/admin/indexes/{map}/{attr} routes.
-        .route(
-            "/api/admin/indexes/vector",
-            get(list_vector_indexes).post(create_vector_index),
-        )
-        .route(
-            "/api/admin/indexes/vector/{map}/{name}",
-            delete(remove_vector_index_handler),
-        )
-        .route(
-            "/api/admin/indexes/vector/{map}/{name}/optimize",
-            post(optimize_vector_index_handler),
-        )
-        .route(
-            "/api/admin/indexes/vector/{map}/{name}/optimize/{optimization_id}",
-            delete(cancel_vector_index_optimize_handler),
-        )
-        .route(
-            "/api/admin/indexes/vector/{map}/{name}/status",
-            get(vector_index_status),
-        )
-        .route_layer(governor_layer);
-
-    let router = Router::new()
+    let mut router = Router::new()
         // Health probes -- never rate-limited (Kubernetes liveness/readiness).
         // /healthz is the ops-standard alias for /health/ready: returns 503
         // during startup recovery and 200 once the server is ready. Registered
@@ -565,11 +496,104 @@ pub fn admin_routes(rate_limit_per_ip: u32, rate_limit_burst: u32) -> Router<App
         .route("/api/status", get(server_status))
         // Auth posture probe -- must be on the public router so the admin
         // frontend can call it without a token before deciding to show Login
-        .route("/api/auth/status", get(auth_status))
-        // Rate-limited admin and login routes
-        .merge(rate_limited_routes)
-        // Static SPA for admin dashboard -- served as static files, not rate-limited
-        .nest_service("/admin", serve_dir);
+        .route("/api/auth/status", get(auth_status));
+
+    // The admin control plane is mounted only when `mount_admin` is set. On a
+    // no-auth public bind the binary passes `false` so the unauthenticated
+    // synthesized superuser cannot be reached from the network: the admin API,
+    // the admin login/token/refresh routes, and the /admin SPA are simply absent
+    // (404) rather than guarded by a bypassable auth check.
+    if mount_admin {
+        // Build a per-IP rate limiter for admin and login endpoints.
+        // Replenishment interval derived from rate_limit_per_ip: for 100 req/s the
+        // governor refills 1 token every 10 ms. burst_size controls the initial
+        // burst window. /ws and /sync are excluded because those have
+        // operation-level load shedding instead of HTTP-layer rate limiting.
+        let replenish_interval_ms = (1000 / u64::from(rate_limit_per_ip).max(1)).max(1);
+        let governor_config = GovernorConfigBuilder::default()
+            .key_extractor(PeerIpKeyExtractor)
+            .per_millisecond(replenish_interval_ms)
+            .burst_size(rate_limit_burst)
+            .finish()
+            .expect("GovernorConfig should build with non-zero burst and period");
+
+        let governor_layer = GovernorLayer {
+            config: Arc::new(governor_config),
+        };
+
+        // Static SPA serving for admin dashboard.
+        //
+        // The unset default stays the monorepo-relative ./admin-dashboard/dist so
+        // `topgun dev` / `cargo run` from a checkout keeps working. For the prebuilt
+        // npm distribution the SPA lives inside the meta package, whose path the
+        // binary cannot know on its own — so the Node bin shim resolves the bundled
+        // SPA from its own __dirname and injects TOPGUN_ADMIN_DIR before exec'ing
+        // this binary. Layout resolution therefore lives entirely in the shim (one
+        // language, cross-layout-stable); no Rust-side path probing is added.
+        let admin_spa_dir = std::env::var("TOPGUN_ADMIN_DIR")
+            .unwrap_or_else(|_| "./admin-dashboard/dist".to_string());
+        let index_html = format!("{admin_spa_dir}/index.html");
+        let serve_dir = ServeDir::new(&admin_spa_dir)
+            .append_index_html_on_directories(true)
+            .fallback(ServeFile::new(index_html));
+
+        // Rate-limited routes: admin API and login are brute-force targets and
+        // get per-IP throttling. All other routes (health, ws, sync, metrics,
+        // docs, status, admin SPA) bypass the governor.
+        let rate_limited_routes = Router::new()
+            .route("/api/auth/login", post(login))
+            .route("/api/auth/token", post(token_exchange_handler))
+            .route("/api/auth/refresh", post(refresh_handler))
+            .route("/api/admin/cluster/status", get(cluster_status))
+            .route("/api/admin/maps", get(list_maps))
+            .route(
+                "/api/admin/settings",
+                get(get_settings).put(update_settings),
+            )
+            .route(
+                "/api/admin/policies",
+                get(list_policies).post(create_policy),
+            )
+            .route("/api/admin/policies/{id}", delete(delete_policy))
+            .route("/api/admin/indexes", get(list_indexes).post(create_index))
+            .route(
+                "/api/admin/indexes/{map}/{attr}",
+                delete(remove_index_handler),
+            )
+            .route(
+                "/api/admin/indexes/{map}/{attr}/status",
+                get(index_backfill_status),
+            )
+            // Vector index admin endpoints — nested under /api/admin/indexes/vector
+            // to avoid collision with the existing /api/admin/indexes/{map}/{attr} routes.
+            .route(
+                "/api/admin/indexes/vector",
+                get(list_vector_indexes).post(create_vector_index),
+            )
+            .route(
+                "/api/admin/indexes/vector/{map}/{name}",
+                delete(remove_vector_index_handler),
+            )
+            .route(
+                "/api/admin/indexes/vector/{map}/{name}/optimize",
+                post(optimize_vector_index_handler),
+            )
+            .route(
+                "/api/admin/indexes/vector/{map}/{name}/optimize/{optimization_id}",
+                delete(cancel_vector_index_optimize_handler),
+            )
+            .route(
+                "/api/admin/indexes/vector/{map}/{name}/status",
+                get(vector_index_status),
+            )
+            .route_layer(governor_layer);
+
+        router = router
+            // Rate-limited admin and login routes
+            .merge(rate_limited_routes)
+            // Static SPA for admin dashboard -- served as static files, not rate-limited
+            .nest_service("/admin", serve_dir);
+    }
 
     // Serve the machine-readable OpenAPI JSON spec. In swagger-feature builds the
     // SwaggerUi merge below already registers `/api/openapi.json` (via `.url(...)`),
@@ -722,7 +746,12 @@ fn build_app(
     // Delegate all route wiring to admin_routes() — the single source of truth
     // for the route set both build_app and the binary serve. This ensures the
     // production server and the binary can never drift apart.
-    admin_routes(rate_limit_per_ip, rate_limit_burst)
+    //
+    // This NetworkModule-managed path cannot compute bind posture from a startup
+    // decision (the listener is bound elsewhere), so it always mounts the admin
+    // plane; auth is enforced on this path, so the admin routes are JWT-protected.
+    // The binary serve path computes posture and passes the gated flag itself.
+    admin_routes(rate_limit_per_ip, rate_limit_burst, true)
         .layer(layers)
         .with_state(state)
 }
