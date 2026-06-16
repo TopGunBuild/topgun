@@ -106,10 +106,13 @@ impl WriteValidator {
             return Ok(());
         }
 
-        // Authentication check via connection metadata. HTTP operations have
-        // no connection_id and therefore no ConnectionMetadata, so this check
-        // is skipped for HttpClient (no metadata is passed through for them
-        // because the CRDT service gates validate_write on connection_id presence).
+        // Authentication check via connection metadata. WebSocket/Client writes
+        // pass a snapshot of the live connection metadata; HttpClient writes have
+        // no connection_id, so the CRDT service synthesizes a metadata snapshot
+        // whose `authenticated` flag is derived from the JWT-validated principal
+        // already attached to the operation context. The check therefore runs for
+        // HttpClient too: it passes for legitimate (token-bearing) HTTP writes and
+        // fail-closes if a principal is ever absent.
         if self.config.require_auth && !metadata.authenticated {
             return Err(OperationError::Unauthorized);
         }
