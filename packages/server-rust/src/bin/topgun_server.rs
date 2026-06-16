@@ -208,6 +208,39 @@ fn is_loopback(addr: &str) -> bool {
     addr == "127.0.0.1" || addr == "::1" || addr.starts_with("localhost")
 }
 
+/// Startup decision for the no-auth + bind-address combination.
+///
+/// With auth disabled, the admin control plane (`/api/admin/*`) synthesizes a
+/// superuser identity, so binding to a non-loopback interface would expose an
+/// unauthenticated control plane to the network. This enum captures whether that
+/// posture is safe, deliberately overridden, or must be refused outright.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindPosture {
+    /// Safe to proceed: either auth is enforced, or no-auth is loopback-only.
+    Allowed,
+    /// Dangerous posture explicitly opted into by the operator; proceed with a loud warning.
+    WarnOverride,
+    /// Dangerous posture with no opt-out; refuse to start.
+    Refused,
+}
+
+/// Decides startup posture for the no-auth + bind-address combination.
+///
+/// Auth-enforced binds are always allowed (the admin plane is protected by JWT).
+/// No-auth binds are allowed only on loopback, where the control plane is
+/// reachable solely from localhost. A no-auth bind on a non-loopback interface is
+/// refused unless the operator explicitly opts into the exposure.
+fn admin_bind_posture(no_auth: bool, bind_addr: &str, allow_public_override: bool) -> BindPosture {
+    if !no_auth || is_loopback(bind_addr) {
+        return BindPosture::Allowed;
+    }
+    if allow_public_override {
+        BindPosture::WarnOverride
+    } else {
+        BindPosture::Refused
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ClusterStateAdapter — bridges ClusterState to the ClusterService trait
 // ---------------------------------------------------------------------------
@@ -297,6 +330,13 @@ async fn main() -> anyhow::Result<()> {
         .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"))
         .unwrap_or(false);
 
+    // Deliberate-exposure opt-out: when set to 1 or true, downgrade the
+    // fail-closed refusal of a no-auth + non-loopback bind back to a loud warning
+    // for trusted-network operators who accept the risk.
+    let allow_no_auth_public_bind = std::env::var("TOPGUN_ALLOW_NO_AUTH_PUBLIC_BIND")
+        .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"))
+        .unwrap_or(false);
+
     // Bind the client WebSocket listener first so we know the actual port.
     // The default interface depends on auth posture: with auth disabled
     // (TOPGUN_NO_AUTH=1) we bind loopback-only so a zero-config local server is
@@ -306,17 +346,29 @@ async fn main() -> anyhow::Result<()> {
     let default_bind = if no_auth { "127.0.0.1" } else { "0.0.0.0" };
     let bind_addr = std::env::var("TOPGUN_BIND_ADDR").unwrap_or_else(|_| default_bind.to_string());
 
-    // When no-auth is active but the operator has overridden the bind address to
-    // a non-loopback interface, the admin control plane (/api/admin/*) becomes
-    // reachable unauthenticated from the network. Warn loudly so the operator
-    // can take corrective action; the bind itself is not altered here.
-    if no_auth && !is_loopback(&bind_addr) {
-        tracing::warn!(
-            bind_addr = %bind_addr,
-            "TOPGUN_NO_AUTH=1 with a non-loopback bind address: /api/admin/* endpoints \
-             are reachable unauthenticated on a network interface. Set TOPGUN_BIND_ADDR=127.0.0.1 \
-             or enable JWT authentication to restrict access."
-        );
+    // When no-auth is active and the bind address is a non-loopback interface, the
+    // admin control plane (/api/admin/*) would be reachable unauthenticated from the
+    // network (no-auth synthesizes a superuser identity). Fail closed by default;
+    // an explicit opt-out downgrades the refusal to a loud warning.
+    match admin_bind_posture(no_auth, &bind_addr, allow_no_auth_public_bind) {
+        BindPosture::Allowed => {}
+        BindPosture::WarnOverride => {
+            tracing::warn!(
+                bind_addr = %bind_addr,
+                "TOPGUN_NO_AUTH=1 with a non-loopback bind address: /api/admin/* endpoints \
+                 are reachable unauthenticated on a network interface. Proceeding because \
+                 TOPGUN_ALLOW_NO_AUTH_PUBLIC_BIND is set — this exposure is deliberate. \
+                 Set TOPGUN_BIND_ADDR=127.0.0.1 or enable JWT authentication to restrict access."
+            );
+        }
+        BindPosture::Refused => {
+            anyhow::bail!(
+                "Refusing to start: TOPGUN_NO_AUTH=1 with a non-loopback bind address ({bind_addr}) \
+                 would expose /api/admin/* unauthenticated on a network interface. Remediate by one of: \
+                 set TOPGUN_BIND_ADDR=127.0.0.1 (loopback-only), enable JWT authentication, or set \
+                 TOPGUN_ALLOW_NO_AUTH_PUBLIC_BIND=1 to deliberately accept this exposure."
+            );
+        }
     }
 
     let listener = TcpListener::bind(format!("{bind_addr}:{}", args.port)).await?;
@@ -1274,5 +1326,72 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => {},
         () = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{admin_bind_posture, BindPosture};
+
+    #[test]
+    fn auth_enforced_is_always_allowed() {
+        // Auth enforced: the admin plane is JWT-protected regardless of interface.
+        assert_eq!(
+            admin_bind_posture(false, "0.0.0.0", false),
+            BindPosture::Allowed
+        );
+        assert_eq!(
+            admin_bind_posture(false, "127.0.0.1", false),
+            BindPosture::Allowed
+        );
+        // The override flag is irrelevant when auth is enforced.
+        assert_eq!(
+            admin_bind_posture(false, "0.0.0.0", true),
+            BindPosture::Allowed
+        );
+    }
+
+    #[test]
+    fn no_auth_loopback_is_allowed() {
+        // Localhost no-auth dev convenience is preserved across all loopback forms.
+        for addr in ["127.0.0.1", "::1", "localhost", "localhost:8080"] {
+            assert_eq!(
+                admin_bind_posture(true, addr, false),
+                BindPosture::Allowed,
+                "loopback addr {addr} should be Allowed",
+            );
+            // Opt-out is irrelevant on loopback (never a dangerous posture).
+            assert_eq!(
+                admin_bind_posture(true, addr, true),
+                BindPosture::Allowed,
+                "loopback addr {addr} with override should still be Allowed",
+            );
+        }
+    }
+
+    #[test]
+    fn no_auth_public_bind_is_refused() {
+        // Fail closed: no-auth on a non-loopback interface without opt-out aborts.
+        assert_eq!(
+            admin_bind_posture(true, "0.0.0.0", false),
+            BindPosture::Refused
+        );
+        assert_eq!(
+            admin_bind_posture(true, "192.168.1.10", false),
+            BindPosture::Refused
+        );
+    }
+
+    #[test]
+    fn no_auth_public_bind_with_override_warns() {
+        // Documented escape hatch: opt-out downgrades the refusal to a warning.
+        assert_eq!(
+            admin_bind_posture(true, "0.0.0.0", true),
+            BindPosture::WarnOverride
+        );
+        assert_eq!(
+            admin_bind_posture(true, "192.168.1.10", true),
+            BindPosture::WarnOverride
+        );
     }
 }
