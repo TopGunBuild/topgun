@@ -240,6 +240,7 @@ impl CrdtService {
     ///
     /// Atomic rejection: if any op fails validation, no ops are applied.
     /// Each op gets its own sanitized HLC timestamp (monotonically increasing via successive calls).
+    #[allow(clippy::too_many_lines)]
     async fn handle_op_batch(
         &self,
         ctx: &OperationContext,
