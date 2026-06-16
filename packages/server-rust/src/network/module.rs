@@ -741,6 +741,9 @@ fn build_app(
         lock_registry,
         topic_registry,
         counter_registry,
+        // This NetworkModule-managed path always mounts the admin plane and
+        // enforces auth, so the extractor guard is enabled to match.
+        admin_enabled: true,
     };
 
     // Delegate all route wiring to admin_routes() — the single source of truth

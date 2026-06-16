@@ -244,6 +244,7 @@ async fn main() {
                 lock_registry: None,
                 topic_registry: None,
                 counter_registry: None,
+                admin_enabled: true,
             };
 
             let ws_handler = get(topgun_server::network::handlers::ws_upgrade_handler);

@@ -367,6 +367,10 @@ async fn main() -> anyhow::Result<()> {
     // the synthesized superuser. The data plane (/health, /ws, /sync, ...) stays live.
     let posture = admin_bind_posture(no_auth, &bind_addr, allow_no_auth_public_bind);
     let mount_admin = posture.mount_admin();
+    // One decision, two enforcement points: the route gate (`mount_admin`) and the
+    // extractor guard (`AppState.admin_enabled`) read the SAME boolean, so they can
+    // never drift. AdminDisabled => both false (admin plane off); otherwise both true.
+    let admin_enabled = mount_admin;
     match posture {
         BindPosture::Allowed => {}
         BindPosture::WarnOverride => {
@@ -830,6 +834,7 @@ async fn main() -> anyhow::Result<()> {
         lock_registry: Some(lock_registry),
         topic_registry: Some(topic_registry),
         counter_registry: Some(counter_registry),
+        admin_enabled,
     };
 
     // Mirror NetworkModule::serve()'s scalar index rebuild for the topgun_server
