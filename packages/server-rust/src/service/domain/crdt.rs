@@ -27,7 +27,7 @@ use crate::service::domain::predicate::{
 };
 use crate::service::domain::query::QueryRegistry;
 use crate::service::operation::{
-    service_names, Operation, OperationContext, OperationError, OperationResponse,
+    service_names, CallerOrigin, Operation, OperationContext, OperationError, OperationResponse,
 };
 use crate::service::registry::{ManagedService, ServiceContext};
 use crate::service::security::WriteValidator;
@@ -185,6 +185,24 @@ impl CrdtService {
             // Schema validation runs after auth/ACL/size checks.
             self.validate_schema_for_op(op)?;
             Some(self.write_validator.sanitize_hlc())
+        } else if ctx.caller_origin == CallerOrigin::HttpClient {
+            // HTTP /sync carries no per-connection ACL handle, but the JWT-validated
+            // identity is on ctx.principal (set eagerly by the HTTP handler before
+            // dispatch). Derive an honest authenticated flag from it so validate_write's
+            // auth gate passes for legitimate writes and fail-closes if a principal is
+            // ever absent. Empty map_permissions falls back to default_permissions (HTTP
+            // has no per-connection ACL). Then re-stamp the HLC so a forged client
+            // timestamp cannot win Last-Write-Wins forever.
+            let metadata_snapshot = ConnectionMetadata {
+                authenticated: ctx.principal.is_some(),
+                principal: ctx.principal.clone(),
+                ..Default::default()
+            };
+            let value_size = estimate_value_size(op);
+            self.write_validator
+                .validate_write(ctx, &metadata_snapshot, &op.map_name, value_size)?;
+            self.validate_schema_for_op(op)?;
+            Some(self.write_validator.sanitize_hlc())
         } else {
             None
         };
@@ -251,6 +269,46 @@ impl CrdtService {
             // All ops validated — apply them sequentially with sanitized timestamps.
             // Each op gets its own partition based on its key (OpBatch ctx has
             // partition_id=None because the batch contains keys for many partitions).
+            for op in ops {
+                let sanitized_ts = self.write_validator.sanitize_hlc();
+                let partition_id = hash_to_partition(&op.key);
+                // Read old value before mutation for query broadcast filtering.
+                let old_rmpv_value = self
+                    .read_old_value_for_queries(&op.map_name, &op.key, partition_id)
+                    .await;
+                let event_payload = self
+                    .apply_single_op(op, partition_id, Some(&sanitized_ts))
+                    .await?;
+                self.broadcast_event(&event_payload, ctx.connection_id)?;
+                self.broadcast_query_updates(
+                    &event_payload,
+                    old_rmpv_value.as_ref(),
+                    ctx.connection_id,
+                );
+                if let Some(id) = &op.id {
+                    last_id = id.clone();
+                }
+            }
+        } else if ctx.caller_origin == CallerOrigin::HttpClient {
+            // HTTP /sync batch: no per-connection ACL handle, but the JWT-validated
+            // identity is on ctx.principal (set eagerly by the HTTP handler before
+            // dispatch). Snapshot an honest authenticated flag from it once at batch
+            // start so validate_write's auth gate passes for legitimate writes and
+            // fail-closes if a principal is ever absent. Then re-stamp every op's HLC so
+            // a forged client timestamp cannot win Last-Write-Wins forever.
+            let metadata_snapshot = ConnectionMetadata {
+                authenticated: ctx.principal.is_some(),
+                principal: ctx.principal.clone(),
+                ..Default::default()
+            };
+            for op in ops {
+                let value_size = estimate_value_size(op);
+                self.write_validator
+                    .validate_write(ctx, &metadata_snapshot, &op.map_name, value_size)?;
+                // Schema validation runs after auth/ACL/size checks, before any apply.
+                self.validate_schema_for_op(op)?;
+            }
+            // All ops validated — apply them sequentially with sanitized timestamps.
             for op in ops {
                 let sanitized_ts = self.write_validator.sanitize_hlc();
                 let partition_id = hash_to_partition(&op.key);
