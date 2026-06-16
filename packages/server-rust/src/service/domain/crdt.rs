@@ -2963,4 +2963,337 @@ mod tests {
             )
             .unwrap();
     }
+
+    // -----------------------------------------------------------------------
+    // HTTP /sync HLC timestamp-forgery re-stamp.
+    //
+    // A malicious HTTP client can send a forged HLC (millis = u64::MAX) that
+    // would win Last-Write-Wins forever. The HttpClient-only middle arm in
+    // handle_client_op / handle_op_batch must re-stamp the timestamp with a
+    // fresh server-side HLC (server node_id, plausible millis), and the OR_ADD
+    // tag must be regenerated from the sanitized timestamp. These tests assert
+    // on BOTH the stored RecordStore state and the broadcast ServerEventPayload.
+    // -----------------------------------------------------------------------
+
+    const FORGED_MILLIS: u64 = u64::MAX;
+    const FORGED_NODE_ID: &str = "forged-client";
+    const SERVER_NODE_ID: &str = "test-node";
+
+    fn make_principal() -> topgun_core::Principal {
+        topgun_core::Principal {
+            id: "user-http".to_string(),
+            roles: vec!["user".to_string()],
+        }
+    }
+
+    /// Builds an HTTP-origin context (caller_origin = HttpClient, connection_id =
+    /// None, principal present) routed to the key's hash partition.
+    fn make_http_ctx_for_key(key: &str) -> OperationContext {
+        let mut ctx = OperationContext::new(1, service_names::CRDT, make_timestamp(), 5000);
+        ctx.caller_origin = CallerOrigin::HttpClient;
+        ctx.connection_id = None;
+        ctx.principal = Some(make_principal());
+        ctx.partition_id = Some(hash_to_partition(key));
+        ctx
+    }
+
+    fn forged_timestamp() -> Timestamp {
+        Timestamp {
+            millis: FORGED_MILLIS,
+            counter: 7,
+            node_id: FORGED_NODE_ID.to_string(),
+        }
+    }
+
+    /// Drains the broadcast ServerEvent messages from a connection receiver,
+    /// returning the decoded payloads.
+    fn drain_server_events(
+        rx: &mut tokio::sync::mpsc::Receiver<crate::network::connection::OutboundMessage>,
+    ) -> Vec<ServerEventPayload> {
+        let mut events = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let crate::network::connection::OutboundMessage::Binary(bytes) = msg {
+                if let Ok(Message::ServerEvent { payload }) =
+                    rmp_serde::from_slice::<Message>(&bytes)
+                {
+                    events.push(payload);
+                }
+            }
+        }
+        events
+    }
+
+    /// Subscribes a fresh connection to `map_name` so broadcast_event fires, and
+    /// returns the connection's receiver for ServerEvent capture.
+    fn subscribe_listener(
+        conn_registry: &Arc<ConnectionRegistry>,
+        query_registry: &Arc<QueryRegistry>,
+        map_name: &str,
+    ) -> tokio::sync::mpsc::Receiver<crate::network::connection::OutboundMessage> {
+        let config = crate::network::config::ConnectionConfig::default();
+        let (handle, rx) = conn_registry.register(ConnectionKind::Client, &config);
+        query_registry.register(QuerySubscription {
+            query_id: format!("q-{map_name}"),
+            connection_id: handle.id,
+            map_name: map_name.to_string(),
+            query: Query {
+                predicate: None,
+                r#where: None,
+                sort: None,
+                limit: None,
+                cursor: None,
+                group_by: None,
+                aggregations: None,
+            },
+            previous_result_keys: DashSet::new(),
+            fields: None,
+        });
+        rx
+    }
+
+    /// Reads back the stored LWW timestamp for a key at its hash partition.
+    async fn read_lww_timestamp(
+        factory: &Arc<RecordStoreFactory>,
+        map: &str,
+        key: &str,
+    ) -> Option<Timestamp> {
+        let store = factory.get_or_create(map, hash_to_partition(key));
+        match store.get(key, false).await.unwrap().map(|r| r.value) {
+            Some(RecordValue::Lww { timestamp, .. }) => Some(timestamp),
+            _ => None,
+        }
+    }
+
+    // AC1: HTTP-origin LWW PUT with a forged timestamp is re-stamped in both the
+    // stored record and the broadcast ServerEventPayload.
+    #[tokio::test]
+    async fn http_lww_put_restamps_forged_timestamp() {
+        let factory = make_factory();
+        let conn_registry = Arc::new(ConnectionRegistry::new());
+        let query_registry = Arc::new(QueryRegistry::new());
+        let svc = Arc::new(CrdtService::new(
+            Arc::clone(&factory),
+            Arc::clone(&conn_registry),
+            make_validator(),
+            Arc::clone(&query_registry),
+            Arc::new(SchemaService::new()),
+        ));
+
+        let key = "user-http-1";
+        let mut listener = subscribe_listener(&conn_registry, &query_registry, "users");
+
+        let record = topgun_core::LWWRecord {
+            value: Some(rmpv::Value::String("Alice".into())),
+            timestamp: forged_timestamp(),
+            ttl_ms: None,
+        };
+        let op = Operation::ClientOp {
+            ctx: make_http_ctx_for_key(key),
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some("http-put".to_string()),
+                    map_name: "users".to_string(),
+                    key: key.to_string(),
+                    op_type: None,
+                    record: Some(Some(record)),
+                    or_record: None,
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+
+        svc.clone().oneshot(op).await.unwrap();
+
+        // Stored record carries the server-re-stamped timestamp, not the forgery.
+        let stored = read_lww_timestamp(&factory, "users", key)
+            .await
+            .expect("LWW record must be stored");
+        assert_eq!(
+            stored.node_id, SERVER_NODE_ID,
+            "stored timestamp must carry the server node_id, not the forged one"
+        );
+        assert_ne!(
+            stored.millis, FORGED_MILLIS,
+            "stored timestamp must NOT keep the forged u64::MAX millis"
+        );
+
+        // Broadcast ServerEventPayload carries the same re-stamped timestamp.
+        let events = drain_server_events(&mut listener);
+        let put_event = events
+            .iter()
+            .find(|e| e.event_type == ServerEventType::PUT)
+            .expect("a PUT ServerEvent must be broadcast");
+        let broadcast_ts = &put_event
+            .record
+            .as_ref()
+            .expect("PUT event must carry the record")
+            .timestamp;
+        assert_eq!(
+            broadcast_ts.node_id, SERVER_NODE_ID,
+            "broadcast timestamp must carry the server node_id"
+        );
+        assert_ne!(
+            broadcast_ts.millis, FORGED_MILLIS,
+            "broadcast timestamp must NOT keep the forged u64::MAX millis"
+        );
+    }
+
+    // AC2: HTTP-origin OR_ADD with a forged timestamp is re-stamped, and the
+    // regenerated OR tag derives from the sanitized timestamp.
+    #[tokio::test]
+    async fn http_or_add_restamps_forged_timestamp_and_regenerates_tag() {
+        let factory = make_factory();
+        let conn_registry = Arc::new(ConnectionRegistry::new());
+        let query_registry = Arc::new(QueryRegistry::new());
+        let svc = Arc::new(CrdtService::new(
+            Arc::clone(&factory),
+            Arc::clone(&conn_registry),
+            make_validator(),
+            Arc::clone(&query_registry),
+            Arc::new(SchemaService::new()),
+        ));
+
+        let key = "item-http-1";
+        let mut listener = subscribe_listener(&conn_registry, &query_registry, "tags");
+
+        // Forged tag derived from the forged timestamp; must NOT survive.
+        let forged_tag = format!("{FORGED_MILLIS}:7:{FORGED_NODE_ID}");
+        let or_rec = topgun_core::ORMapRecord {
+            value: rmpv::Value::String("important".into()),
+            timestamp: forged_timestamp(),
+            tag: forged_tag.clone(),
+            ttl_ms: None,
+        };
+        let op = Operation::ClientOp {
+            ctx: make_http_ctx_for_key(key),
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some("http-or-add".to_string()),
+                    map_name: "tags".to_string(),
+                    key: key.to_string(),
+                    op_type: None,
+                    record: None,
+                    or_record: Some(Some(or_rec)),
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+
+        svc.clone().oneshot(op).await.unwrap();
+
+        // Stored OR-Map: the surviving tag must be the re-stamped one, not the forgery.
+        let store = factory.get_or_create("tags", hash_to_partition(key));
+        let stored_entry = match store.get(key, false).await.unwrap().map(|r| r.value) {
+            Some(RecordValue::OrMap { mut records, .. }) => {
+                assert_eq!(records.len(), 1, "exactly one OR entry must be stored");
+                records.pop().unwrap()
+            }
+            other => panic!("expected OrMap, got {other:?}"),
+        };
+        assert_ne!(
+            stored_entry.tag, forged_tag,
+            "stored tag must NOT be the forged tag"
+        );
+        assert_eq!(
+            stored_entry.timestamp.node_id, SERVER_NODE_ID,
+            "stored OR timestamp must carry the server node_id"
+        );
+        assert_ne!(
+            stored_entry.timestamp.millis, FORGED_MILLIS,
+            "stored OR timestamp must NOT keep the forged u64::MAX millis"
+        );
+        // Tag is regenerated as "{millis}:{counter}:{node_id}" from the sanitized ts.
+        let expected_tag = format!(
+            "{}:{}:{}",
+            stored_entry.timestamp.millis,
+            stored_entry.timestamp.counter,
+            stored_entry.timestamp.node_id
+        );
+        assert_eq!(
+            stored_entry.tag, expected_tag,
+            "stored tag must derive from the sanitized timestamp"
+        );
+
+        // Broadcast ServerEventPayload carries the same re-stamped tag + timestamp.
+        let events = drain_server_events(&mut listener);
+        let add_event = events
+            .iter()
+            .find(|e| e.event_type == ServerEventType::OR_ADD)
+            .expect("an OR_ADD ServerEvent must be broadcast");
+        assert_eq!(
+            add_event.or_tag.as_deref(),
+            Some(expected_tag.as_str()),
+            "broadcast or_tag must be the re-stamped tag"
+        );
+        let broadcast_or = add_event
+            .or_record
+            .as_ref()
+            .expect("OR_ADD event must carry the or_record");
+        assert_eq!(
+            broadcast_or.tag, expected_tag,
+            "broadcast or_record.tag must be the re-stamped tag"
+        );
+        assert_eq!(
+            broadcast_or.timestamp.node_id, SERVER_NODE_ID,
+            "broadcast OR timestamp must carry the server node_id"
+        );
+        assert_ne!(
+            broadcast_or.timestamp.millis, FORGED_MILLIS,
+            "broadcast OR timestamp must NOT keep the forged u64::MAX millis"
+        );
+    }
+
+    // AC3: HTTP-origin OR_REMOVE is tag-based and applies with no timestamp
+    // sanitization — identical behavior to today (drop the matched tag, append
+    // tombstone, preserving concurrent survivors).
+    #[tokio::test]
+    async fn http_or_remove_is_tag_based_and_preserves_survivors() {
+        let (svc, factory) = make_service_with_factory();
+        let key = "item-http-rm";
+
+        // Seed two concurrent adds via the non-HTTP path (tags used verbatim).
+        svc.clone()
+            .oneshot(or_add_op("tags", key, "work", "keep-a"))
+            .await
+            .unwrap();
+        svc.clone()
+            .oneshot(or_add_op("tags", key, "play", "drop-b"))
+            .await
+            .unwrap();
+
+        // HTTP-origin OR_REMOVE of one tag.
+        let op = Operation::ClientOp {
+            ctx: make_http_ctx_for_key(key),
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some("http-or-remove".to_string()),
+                    map_name: "tags".to_string(),
+                    key: key.to_string(),
+                    op_type: None,
+                    record: None,
+                    or_record: None,
+                    or_tag: Some(Some("drop-b".to_string())),
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+        svc.clone().oneshot(op).await.unwrap();
+
+        let (records, tombstones) = read_or_map(&factory, "tags", key).await;
+        assert_eq!(
+            records,
+            vec!["keep-a"],
+            "HTTP OR_REMOVE of drop-b must preserve the concurrent survivor keep-a"
+        );
+        assert_eq!(
+            tombstones,
+            vec!["drop-b"],
+            "the removed tag must be tombstoned verbatim (no sanitization)"
+        );
+    }
 }
