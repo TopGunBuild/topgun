@@ -199,8 +199,12 @@ impl CrdtService {
                 ..Default::default()
             };
             let value_size = estimate_value_size(op);
-            self.write_validator
-                .validate_write(ctx, &metadata_snapshot, &op.map_name, value_size)?;
+            self.write_validator.validate_write(
+                ctx,
+                &metadata_snapshot,
+                &op.map_name,
+                value_size,
+            )?;
             self.validate_schema_for_op(op)?;
             Some(self.write_validator.sanitize_hlc())
         } else {
@@ -303,8 +307,12 @@ impl CrdtService {
             };
             for op in ops {
                 let value_size = estimate_value_size(op);
-                self.write_validator
-                    .validate_write(ctx, &metadata_snapshot, &op.map_name, value_size)?;
+                self.write_validator.validate_write(
+                    ctx,
+                    &metadata_snapshot,
+                    &op.map_name,
+                    value_size,
+                )?;
                 // Schema validation runs after auth/ACL/size checks, before any apply.
                 self.validate_schema_for_op(op)?;
             }
