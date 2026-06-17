@@ -1,9 +1,15 @@
-//! Write validation layer: authentication, map-level ACL, value size limits, and HLC sanitization.
+//! Write admission layer: authentication baseline, value size limits, and HLC sanitization.
 //!
-//! The security layer intercepts all client write operations BEFORE they reach CRDT merge:
+//! This is an admission/integrity control at the edge, NOT an authorization layer.
+//! It performs cheap, identity-agnostic gating before client writes reach CRDT merge:
+//! deny anonymous writes, route trusted server-to-server traffic past the gate, enforce
+//! an authentication baseline, bound payload size, and sanitize client-provided HLC
+//! timestamps. Per-resource authorization (who may write which map/record) is owned
+//! exclusively by the RBAC policy engine, which runs separately — admission makes no
+//! identity-aware ACL decision.
 //!
 //! ```text
-//! Client write -> Auth check -> Map ACL check -> Size check -> HLC sanitize -> CRDT merge
+//! Client write -> Auth baseline -> Size check -> HLC sanitize -> CRDT merge
 //! ```
 //!
 //! Operations from trusted origins (`Forwarded`, `Backup`, `Wan`, `System`) bypass all checks.
@@ -13,18 +19,17 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use topgun_core::{Timestamp, HLC};
 
-use crate::network::connection::{ConnectionMetadata, MapPermissions};
+use crate::network::connection::ConnectionMetadata;
 use crate::service::operation::{CallerOrigin, OperationContext, OperationError};
 
 // ---------------------------------------------------------------------------
 // SecurityConfig
 // ---------------------------------------------------------------------------
 
-/// Configuration for the server-side write validation layer.
+/// Configuration for the server-side write admission layer.
 ///
-/// Default is intentionally permissive (`require_auth: false`, unlimited size,
-/// default read+write permissions) to preserve backward compatibility for
-/// deployments without security configuration.
+/// Default is intentionally permissive (`require_auth: false`, unlimited size)
+/// to preserve backward compatibility for deployments without security configuration.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SecurityConfig {
@@ -35,51 +40,53 @@ pub struct SecurityConfig {
     /// 0 means unlimited. Uses `u64` (not `usize`) so this value is stable across
     /// 32-bit and 64-bit platforms and can be safely stored in config files.
     pub max_value_bytes: u64,
-    /// Default permissions for maps not explicitly configured per-connection.
-    pub default_permissions: MapPermissions,
 }
 
 // ---------------------------------------------------------------------------
-// WriteValidator
+// WriteAdmission
 // ---------------------------------------------------------------------------
 
-/// Validates client write operations before they reach CRDT merge.
+/// Admits client write operations before they reach CRDT merge.
+///
+/// This is an identity-agnostic integrity gate, NOT an authorization layer.
+/// Per-resource authorization is owned by the RBAC policy engine elsewhere.
 ///
 /// Checks are applied in order:
-/// 1. Caller origin bypass (trusted server-to-server traffic skips all checks)
-/// 2. Authentication check (if `require_auth` is enabled)
-/// 3. Map-level ACL check (read/write permissions from `ConnectionMetadata`)
+/// 1. Anonymous-write deny (defense-in-depth: writes require an identity)
+/// 2. Caller origin bypass (trusted server-to-server traffic skips all checks)
+/// 3. Authentication baseline (if `require_auth` is enabled)
 /// 4. Value size check (against `max_value_bytes`)
 ///
-/// After validation passes, `sanitize_hlc()` generates a fresh server-side
+/// After admission passes, `sanitize_hlc()` generates a fresh server-side
 /// HLC timestamp that replaces the client-provided timestamp in the stored record.
-pub struct WriteValidator {
+pub struct WriteAdmission {
     config: Arc<SecurityConfig>,
     hlc: Arc<Mutex<HLC>>,
 }
 
-impl WriteValidator {
-    /// Creates a new `WriteValidator` with the given security configuration and server HLC.
+impl WriteAdmission {
+    /// Creates a new `WriteAdmission` with the given security configuration and server HLC.
     #[must_use]
     pub fn new(config: Arc<SecurityConfig>, hlc: Arc<Mutex<HLC>>) -> Self {
         Self { config, hlc }
     }
 
-    /// Validates a write operation against the security policy.
+    /// Admits a write operation against the admission/integrity policy.
     ///
     /// # Arguments
     ///
     /// - `ctx` — operation context, used for caller origin check
-    /// - `metadata` — snapshot of the connection's metadata (auth state, map permissions)
-    /// - `map_name` — target map for the write
+    /// - `metadata` — snapshot of the connection's metadata (auth state)
+    /// - `map_name` — target map for the write; used only for error context
+    ///   (`Forbidden`/`ValueTooLarge`), not for any ACL decision
     /// - `value_size` — serialized byte length of the record payload; pass `0` for `REMOVE`/`OR_REMOVE` ops
     ///
     /// # Errors
     ///
+    /// - `OperationError::Forbidden` — anonymous caller (writes require an identity)
     /// - `OperationError::Unauthorized` — connection is not authenticated when `require_auth` is true
-    /// - `OperationError::Forbidden` — connection lacks write permission for `map_name`
     /// - `OperationError::ValueTooLarge` — record exceeds `max_value_bytes`
-    pub fn validate_write(
+    pub fn admit_write(
         &self,
         ctx: &OperationContext,
         metadata: &ConnectionMetadata,
@@ -96,7 +103,7 @@ impl WriteValidator {
         }
 
         // Trusted server-to-server traffic bypasses all checks. HttpClient
-        // falls through to the same ACL/size checks as Client; its auth
+        // falls through to the same auth/size checks as Client; its auth
         // enforcement is handler-level (HTTP 401 before dispatch) rather
         // than metadata-based.
         if !matches!(
@@ -106,7 +113,7 @@ impl WriteValidator {
             return Ok(());
         }
 
-        // Authentication check via connection metadata. WebSocket/Client writes
+        // Authentication baseline via connection metadata. WebSocket/Client writes
         // pass a snapshot of the live connection metadata; HttpClient writes have
         // no connection_id, so the CRDT service synthesizes a metadata snapshot
         // whose `authenticated` flag is derived from the JWT-validated principal
@@ -115,19 +122,6 @@ impl WriteValidator {
         // fail-closes if a principal is ever absent.
         if self.config.require_auth && !metadata.authenticated {
             return Err(OperationError::Unauthorized);
-        }
-
-        // Map-level ACL check: look up per-connection permissions, fall back to default.
-        let permissions = metadata
-            .map_permissions
-            .get(map_name)
-            .copied()
-            .unwrap_or(self.config.default_permissions);
-
-        if !permissions.write {
-            return Err(OperationError::Forbidden {
-                map_name: map_name.to_string(),
-            });
         }
 
         // Value size check (0 means unlimited).
@@ -166,7 +160,6 @@ mod tests {
     use topgun_core::{SystemClock, HLC};
 
     use super::*;
-    use crate::network::connection::MapPermissions;
     use crate::service::operation::{service_names, CallerOrigin, OperationContext};
 
     fn make_hlc() -> Arc<Mutex<HLC>> {
@@ -215,23 +208,21 @@ mod tests {
         }
     }
 
-    fn make_validator(config: SecurityConfig) -> WriteValidator {
-        WriteValidator::new(Arc::new(config), make_hlc())
+    fn make_admission(config: SecurityConfig) -> WriteAdmission {
+        WriteAdmission::new(Arc::new(config), make_hlc())
     }
 
-    // -- AC11: default config allows unauthenticated writes --
+    // -- Default config admits unauthenticated writes (permissive baseline) --
 
     #[test]
-    fn default_config_allows_unauthenticated_writes() {
-        let validator = make_validator(SecurityConfig::default());
+    fn default_config_admits_unauthenticated_writes() {
+        let admission = make_admission(SecurityConfig::default());
         let ctx = make_ctx_client();
         let metadata = make_metadata(false);
-        assert!(validator
-            .validate_write(&ctx, &metadata, "my-map", 0)
-            .is_ok());
+        assert!(admission.admit_write(&ctx, &metadata, "my-map", 0).is_ok());
     }
 
-    // -- AC1: require_auth + unauthenticated => Unauthorized --
+    // -- R8(a): require_auth + unauthenticated => Unauthorized --
 
     #[test]
     fn require_auth_rejects_unauthenticated() {
@@ -239,54 +230,46 @@ mod tests {
             require_auth: true,
             ..SecurityConfig::default()
         };
-        let validator = make_validator(config);
+        let admission = make_admission(config);
         let ctx = make_ctx_client();
         let metadata = make_metadata(false);
-        let result = validator.validate_write(&ctx, &metadata, "my-map", 0);
+        let result = admission.admit_write(&ctx, &metadata, "my-map", 0);
         assert!(matches!(result, Err(OperationError::Unauthorized)));
     }
 
-    // -- AC3: require_auth + authenticated + write perm => Ok --
+    // -- R8(b): require_auth + authenticated => Ok --
 
     #[test]
-    fn require_auth_allows_authenticated_with_write_perm() {
+    fn require_auth_admits_authenticated() {
         let config = SecurityConfig {
             require_auth: true,
             ..SecurityConfig::default()
         };
-        let validator = make_validator(config);
+        let admission = make_admission(config);
         let ctx = make_ctx_client();
         let metadata = make_metadata(true);
-        assert!(validator
-            .validate_write(&ctx, &metadata, "my-map", 0)
-            .is_ok());
+        assert!(admission.admit_write(&ctx, &metadata, "my-map", 0).is_ok());
     }
 
-    // -- AC2: authenticated + no write perm => Forbidden --
+    // -- R8(c) + negative control: anonymous origin => Forbidden --
 
     #[test]
-    fn no_write_permission_returns_forbidden() {
-        let config = SecurityConfig {
-            require_auth: true,
-            ..SecurityConfig::default()
-        };
-        let validator = make_validator(config);
-        let ctx = make_ctx_client();
-        let mut metadata = make_metadata(true);
-        metadata.map_permissions.insert(
-            "locked-map".to_string(),
-            MapPermissions {
-                read: true,
-                write: false,
-            },
-        );
-        let result = validator.validate_write(&ctx, &metadata, "locked-map", 0);
+    fn anonymous_origin_is_rejected_with_forbidden() {
+        // NEGATIVE CONTROL: removing the deny-anonymous guard in `admit_write`
+        // makes this assertion fail (an anonymous write would be admitted Ok).
+        // That green->red flip is the entire point of this test — it proves the
+        // guard is load-bearing, not dead code.
+        let admission = make_admission(SecurityConfig::default());
+        let mut ctx = OperationContext::new(1, service_names::CRDT, make_timestamp(), 5000);
+        ctx.caller_origin = CallerOrigin::Anonymous;
+        let metadata = make_metadata(false);
+        let result = admission.admit_write(&ctx, &metadata, "my-map", 0);
         assert!(
-            matches!(result, Err(OperationError::Forbidden { map_name }) if map_name == "locked-map")
+            matches!(result, Err(OperationError::Forbidden { map_name }) if map_name == "my-map")
         );
     }
 
-    // -- AC6: value exceeds max_value_bytes => ValueTooLarge --
+    // -- R8(d): value exceeds max_value_bytes => ValueTooLarge --
 
     #[test]
     fn oversized_value_returns_value_too_large() {
@@ -294,10 +277,10 @@ mod tests {
             max_value_bytes: 100,
             ..SecurityConfig::default()
         };
-        let validator = make_validator(config);
+        let admission = make_admission(config);
         let ctx = make_ctx_client();
         let metadata = make_metadata(false);
-        let result = validator.validate_write(&ctx, &metadata, "my-map", 101);
+        let result = admission.admit_write(&ctx, &metadata, "my-map", 101);
         assert!(matches!(
             result,
             Err(OperationError::ValueTooLarge {
@@ -307,7 +290,7 @@ mod tests {
         ));
     }
 
-    // -- AC7: value exactly at max_value_bytes => Ok --
+    // -- R8(e): value exactly at max_value_bytes => Ok --
 
     #[test]
     fn exactly_max_value_bytes_succeeds() {
@@ -315,15 +298,15 @@ mod tests {
             max_value_bytes: 100,
             ..SecurityConfig::default()
         };
-        let validator = make_validator(config);
+        let admission = make_admission(config);
         let ctx = make_ctx_client();
         let metadata = make_metadata(false);
-        assert!(validator
-            .validate_write(&ctx, &metadata, "my-map", 100)
+        assert!(admission
+            .admit_write(&ctx, &metadata, "my-map", 100)
             .is_ok());
     }
 
-    // -- AC12: max_value_bytes=0 means unlimited --
+    // -- R8(f): max_value_bytes=0 means unlimited --
 
     #[test]
     fn zero_max_value_bytes_means_unlimited() {
@@ -331,73 +314,48 @@ mod tests {
             max_value_bytes: 0,
             ..SecurityConfig::default()
         };
-        let validator = make_validator(config);
+        let admission = make_admission(config);
         let ctx = make_ctx_client();
         let metadata = make_metadata(false);
-        assert!(validator
-            .validate_write(&ctx, &metadata, "my-map", u64::MAX)
+        assert!(admission
+            .admit_write(&ctx, &metadata, "my-map", u64::MAX)
             .is_ok());
     }
 
-    // -- AC9: Forwarded origin bypasses all checks --
+    // -- R8(g): Forwarded (trusted) origin bypasses all checks --
 
     #[test]
     fn forwarded_origin_bypasses_all_checks() {
         let config = SecurityConfig {
             require_auth: true,
             max_value_bytes: 1,
-            default_permissions: MapPermissions {
-                read: false,
-                write: false,
-            },
         };
-        let validator = make_validator(config);
+        let admission = make_admission(config);
         let ctx = make_ctx_forwarded();
         let metadata = make_metadata(false); // not authenticated
                                              // value_size=1000 > max_value_bytes=1, but bypass skips it
-        assert!(validator
-            .validate_write(&ctx, &metadata, "my-map", 1000)
+        assert!(admission
+            .admit_write(&ctx, &metadata, "my-map", 1000)
             .is_ok());
     }
 
-    // -- AC10: System origin bypasses all checks --
+    // -- R8(g): System (trusted) origin bypasses all checks --
 
     #[test]
     fn system_origin_bypasses_all_checks() {
         let config = SecurityConfig {
             require_auth: true,
             max_value_bytes: 1,
-            default_permissions: MapPermissions {
-                read: false,
-                write: false,
-            },
         };
-        let validator = make_validator(config);
+        let admission = make_admission(config);
         let ctx = make_ctx_system();
         let metadata = make_metadata(false);
-        assert!(validator
-            .validate_write(&ctx, &metadata, "my-map", 1000)
+        assert!(admission
+            .admit_write(&ctx, &metadata, "my-map", 1000)
             .is_ok());
     }
 
-    // -- AC13: MapPermissions defaults to read=true, write=true --
-
-    #[test]
-    fn map_permissions_default_is_read_write() {
-        let perms = MapPermissions::default();
-        assert!(perms.read);
-        assert!(perms.write);
-    }
-
-    // -- AC14: map_permissions defaults to empty HashMap --
-
-    #[test]
-    fn connection_metadata_map_permissions_defaults_to_empty() {
-        let meta = ConnectionMetadata::default();
-        assert!(meta.map_permissions.is_empty());
-    }
-
-    // -- AC15: sanitize_hlc returns timestamp with server's node_id --
+    // -- R8(h): sanitize_hlc returns timestamp with server's node_id --
 
     #[test]
     fn sanitize_hlc_returns_server_node_id() {
@@ -405,18 +363,18 @@ mod tests {
             "server-node".to_string(),
             Box::new(SystemClock),
         )));
-        let validator = WriteValidator::new(Arc::new(SecurityConfig::default()), hlc);
-        let ts = validator.sanitize_hlc();
+        let admission = WriteAdmission::new(Arc::new(SecurityConfig::default()), hlc);
+        let ts = admission.sanitize_hlc();
         assert_eq!(ts.node_id, "server-node");
     }
 
-    // -- AC16: successive sanitize_hlc calls produce monotonically increasing timestamps --
+    // -- R8(h): successive sanitize_hlc calls produce monotonically increasing timestamps --
 
     #[test]
     fn successive_sanitize_hlc_calls_are_monotonic() {
-        let validator = WriteValidator::new(Arc::new(SecurityConfig::default()), make_hlc());
-        let ts1 = validator.sanitize_hlc();
-        let ts2 = validator.sanitize_hlc();
+        let admission = WriteAdmission::new(Arc::new(SecurityConfig::default()), make_hlc());
+        let ts1 = admission.sanitize_hlc();
+        let ts2 = admission.sanitize_hlc();
         // Counter or millis must advance
         let t1 = (ts1.millis, ts1.counter);
         let t2 = (ts2.millis, ts2.counter);
@@ -426,68 +384,5 @@ mod tests {
             t2 > t1 || ts2.counter > ts1.counter,
             "HLC must strictly advance"
         );
-    }
-
-    // -- Default permissions fallback --
-
-    #[test]
-    fn falls_back_to_default_permissions_when_map_not_in_per_connection_map() {
-        let config = SecurityConfig {
-            default_permissions: MapPermissions {
-                read: true,
-                write: false,
-            },
-            ..SecurityConfig::default()
-        };
-        let validator = make_validator(config);
-        let ctx = make_ctx_client();
-        let metadata = make_metadata(true); // no per-map permissions set
-        let result = validator.validate_write(&ctx, &metadata, "any-map", 0);
-        assert!(matches!(result, Err(OperationError::Forbidden { .. })));
-    }
-
-    // -- Anonymous origin is always rejected --
-
-    #[test]
-    fn anonymous_origin_is_rejected_with_forbidden() {
-        let validator = make_validator(SecurityConfig::default());
-        let mut ctx = OperationContext::new(1, service_names::CRDT, make_timestamp(), 5000);
-        ctx.caller_origin = CallerOrigin::Anonymous;
-        let metadata = make_metadata(false);
-        let result = validator.validate_write(&ctx, &metadata, "my-map", 0);
-        assert!(
-            matches!(result, Err(OperationError::Forbidden { map_name }) if map_name == "my-map")
-        );
-    }
-
-    // -- Per-connection map permissions override default --
-
-    #[test]
-    fn per_connection_permissions_override_default() {
-        let config = SecurityConfig {
-            default_permissions: MapPermissions {
-                read: true,
-                write: false,
-            }, // default: no write
-            ..SecurityConfig::default()
-        };
-        let validator = make_validator(config);
-        let ctx = make_ctx_client();
-        let mut metadata = make_metadata(true);
-        // Explicitly grant write for "allowed-map"
-        metadata.map_permissions.insert(
-            "allowed-map".to_string(),
-            MapPermissions {
-                read: true,
-                write: true,
-            },
-        );
-        // "allowed-map" should succeed despite default denying writes
-        assert!(validator
-            .validate_write(&ctx, &metadata, "allowed-map", 0)
-            .is_ok());
-        // "other-map" falls back to default (no write)
-        let result = validator.validate_write(&ctx, &metadata, "other-map", 0);
-        assert!(matches!(result, Err(OperationError::Forbidden { .. })));
     }
 }
