@@ -2582,4 +2582,378 @@ mod tests {
         }
         None
     }
+
+    // -----------------------------------------------------------------------
+    // Live top-N window behavioral tests (subscribe-and-observe).
+    //
+    // These exercise the REAL write-path delta channel: a client connection is
+    // registered on the node, a `QuerySubscribe` op is driven through the
+    // production handler (which seeds the subscription's `LiveWindow` from the
+    // real DAG page), and subsequent `cluster.write()` calls fire
+    // `CrdtService::broadcast_query_updates`, which derives ENTER/UPDATE/LEAVE
+    // via `live_window.apply_mutation` and pushes real `QUERY_UPDATE` frames onto
+    // the connection's outbound channel. The tests decode those frames off the
+    // wire and replay membership — no source inspection.
+    // -----------------------------------------------------------------------
+
+    /// Registers a client connection on `node` and drives a real
+    /// `QuerySubscribe` op through the production handler, seeding the
+    /// subscription's `LiveWindow` from the DAG page. Returns the outbound
+    /// receiver — the SAME channel `broadcast_query_updates` sends
+    /// `QUERY_UPDATE` frames on — so the caller can drain live deltas.
+    async fn subscribe_and_observe(
+        node: &mut SimNode,
+        map_name: &str,
+        query_id: &str,
+        query: Query,
+    ) -> mpsc::Receiver<OutboundMessage> {
+        let config = ConnectionConfig::default();
+        let (handle, rx) = node
+            .connection_registry
+            .register(ConnectionKind::Client, &config);
+
+        let ts = Timestamp {
+            millis: 0,
+            counter: 0,
+            node_id: node.node_id.clone(),
+        };
+        let mut ctx = OperationContext::new(0, service_names::QUERY, ts, 5000);
+        // The handler routes the QUERY_UPDATE stream to whatever connection this
+        // subscription was registered under, so it MUST be the connection whose
+        // receiver we return here.
+        ctx.connection_id = Some(handle.id);
+
+        let payload = topgun_core::messages::QuerySubMessage {
+            payload: topgun_core::messages::query::QuerySubPayload {
+                query_id: query_id.to_string(),
+                map_name: map_name.to_string(),
+                query,
+                fields: None,
+            },
+        };
+        let op = Operation::QuerySubscribe { ctx, payload };
+        Service::call(&mut node.operation_router, op)
+            .await
+            .expect("QuerySubscribe should seed the live window and register the subscription");
+
+        rx
+    }
+
+    /// Drains every currently-ready `QUERY_UPDATE` frame off the outbound
+    /// channel for `query_id`, decoding each from its real MsgPack wire form,
+    /// and returns `(key, change_type)` pairs in arrival order.
+    fn drain_live_updates(
+        rx: &mut mpsc::Receiver<OutboundMessage>,
+        query_id: &str,
+    ) -> Vec<(String, topgun_core::messages::base::ChangeEventType)> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let OutboundMessage::Binary(bytes) = msg {
+                if let Ok(topgun_core::messages::Message::QueryUpdate { payload }) =
+                    rmp_serde::from_slice::<topgun_core::messages::Message>(&bytes)
+                {
+                    if payload.query_id == query_id {
+                        out.push((payload.key, payload.change_type));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Replays an ENTER/LEAVE delta stream into the resulting live membership
+    /// set. UPDATE neither adds nor removes a key. This reconstructs exactly the
+    /// rows a subscriber would currently be holding.
+    fn replay_membership(
+        deltas: &[(String, topgun_core::messages::base::ChangeEventType)],
+    ) -> std::collections::HashSet<String> {
+        use topgun_core::messages::base::ChangeEventType;
+        let mut live = std::collections::HashSet::new();
+        for (key, event) in deltas {
+            match event {
+                ChangeEventType::ENTER => {
+                    live.insert(key.clone());
+                }
+                ChangeEventType::LEAVE => {
+                    live.remove(key);
+                }
+                ChangeEventType::UPDATE => {}
+            }
+        }
+        live
+    }
+
+    fn live_top_n_query() -> Query {
+        use topgun_core::messages::base::{PredicateNode, PredicateOp, SortDirection, SortField};
+        Query {
+            // Predicate every test row satisfies, so membership is governed by
+            // the top-N window, not by predicate filtering.
+            predicate: Some(PredicateNode {
+                op: PredicateOp::Gte,
+                attribute: Some("score".to_string()),
+                value: Some(rmpv::Value::Integer(0i64.into())),
+                children: None,
+                value_ref: None,
+            }),
+            sort: Some(vec![SortField {
+                field: "score".to_string(),
+                direction: SortDirection::Asc,
+            }]),
+            limit: Some(2),
+            ..Default::default()
+        }
+    }
+
+    /// Drives a REMOVE `ClientOp` (`record: Some(None)`) through the node's
+    /// `CrdtService`, mirroring `SimCluster::write` but for a delete. The delete
+    /// reaches `broadcast_query_updates` with `new_rmpv_value == None`, which the
+    /// live window models as a row leaving (freeing a slot for promotion).
+    async fn delete_record(node: &SimNode, map: &str, key: &str) {
+        let partition_id = topgun_core::hash_to_partition(key);
+        let ts = Timestamp {
+            millis: 0,
+            counter: 0,
+            node_id: node.node_id.clone(),
+        };
+        let mut ctx = OperationContext::new(0, service_names::CRDT, ts, 5000);
+        ctx.partition_id = Some(partition_id);
+        ctx.caller_origin = CallerOrigin::System;
+
+        let client_op = ClientOp {
+            id: Some(format!("{map}/{key}/rm")),
+            map_name: map.to_string(),
+            key: key.to_string(),
+            op_type: None,
+            // `Some(None)` is the tombstone form the CRDT service treats as REMOVE.
+            record: Some(None),
+            or_record: None,
+            or_tag: None,
+            write_concern: None,
+            timeout: None,
+        };
+        let op = Operation::ClientOp {
+            ctx,
+            payload: ClientOpMessage { payload: client_op },
+        };
+        let mut svc = Arc::clone(&node.crdt_service);
+        Service::call(&mut svc, op)
+            .await
+            .expect("REMOVE op should succeed");
+    }
+
+    /// NEGATIVE CONTROL: a `limit=2` + sort-ASC live subscription must never let
+    /// the observed live set grow to 3, even though all three writes satisfy the
+    /// predicate. The third (smaller) insert must displace the largest in-window
+    /// row, emitting a compensating LEAVE so membership stays at exactly 2.
+    ///
+    /// VACUITY GUARD: reverting the displacement LEAVE in `query/window.rs`
+    /// (the `in_window_before \ in_window_after` LEAVE loop) makes the third
+    /// insert ENTER with no compensating LEAVE, so the replayed live set drifts
+    /// to 3 and the `== 2` assertion FAILS. The explicit ENTER-for-displacing-row
+    /// and LEAVE-for-displaced-row assertions below stop a trivially-empty frame
+    /// stream from passing the size check vacuously.
+    #[tokio::test]
+    #[cfg(feature = "simulation")]
+    async fn live_top_n_negative_control_membership_stays_two() {
+        use topgun_core::messages::base::ChangeEventType;
+
+        let mut cluster = SimCluster::new(1, 0);
+        cluster.start().expect("cluster start");
+
+        let map_name = "neg_scores";
+        let query_id = "neg-top-n";
+
+        // Single-node DAG bypass so the seed page comes from the real engine.
+        set_membership(&cluster.nodes[0], &["sim-node-0"]);
+        assign_partitions(&cluster.nodes[0], &|_| "sim-node-0".to_string());
+
+        // Subscribe BEFORE any writes: the window seeds empty, then is populated
+        // entirely by the live write-path delta channel.
+        let mut rx = subscribe_and_observe(
+            &mut cluster.nodes[0],
+            map_name,
+            query_id,
+            live_top_n_query(),
+        )
+        .await;
+
+        // Three matching writes: 10, 20, then 5. With limit=2 sort ASC the final
+        // top-2 is {rec-c=5, rec-a=10}; rec-b=20 must be displaced out.
+        cluster
+            .write(0, map_name, "rec-a", score_record(10))
+            .await
+            .expect("write rec-a");
+        cluster
+            .write(0, map_name, "rec-b", score_record(20))
+            .await
+            .expect("write rec-b");
+        cluster
+            .write(0, map_name, "rec-c", score_record(5))
+            .await
+            .expect("write rec-c");
+
+        let deltas = drain_live_updates(&mut rx, query_id);
+
+        // Loud failure if the delta channel produced nothing — a silent empty
+        // stream must not pass the size assertion vacuously.
+        assert!(
+            !deltas.is_empty(),
+            "expected live QUERY_UPDATE frames on the outbound channel, got none"
+        );
+
+        // The displacing row entered and the displaced row left: this is what
+        // keeps the set at 2. Without the displacement LEAVE only the ENTER for
+        // rec-c would arrive.
+        assert!(
+            deltas
+                .iter()
+                .any(|(k, e)| k == "rec-c" && *e == ChangeEventType::ENTER),
+            "rec-c (score 5) must ENTER the top-2 window: {deltas:?}"
+        );
+        assert!(
+            deltas
+                .iter()
+                .any(|(k, e)| k == "rec-b" && *e == ChangeEventType::LEAVE),
+            "rec-b (score 20) must receive a displacement LEAVE: {deltas:?}"
+        );
+
+        let live = replay_membership(&deltas);
+        assert_eq!(
+            live.len(),
+            2,
+            "live set must stay at limit=2, never drift to 3: {live:?} from {deltas:?}"
+        );
+        assert_eq!(
+            live,
+            ["rec-a".to_string(), "rec-c".to_string()]
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>(),
+            "final top-2 must be the two smallest scores (rec-c=5, rec-a=10)"
+        );
+    }
+
+    /// POSITIVE: the live top-N window holds correct membership through
+    /// displacement and promotion while a fault is in effect. A non-queried node
+    /// is partitioned away; the queried node stays alive and its window is
+    /// maintained purely from the local write-path delta channel.
+    ///
+    /// VACUITY GUARD: each membership assertion is driven by the decoded
+    /// QUERY_UPDATE stream, not a test-side recomputation. If the displacement
+    /// LEAVE / promotion ENTER logic in `query/window.rs` were removed, the
+    /// observed live set would carry the wrong rows (drift to 3 on the
+    /// displacement, or fail to re-promote rec-b on the delete) and these
+    /// equality assertions would FAIL.
+    #[tokio::test]
+    #[cfg(feature = "simulation")]
+    async fn live_top_n_window_holds_under_fault() {
+        use topgun_core::messages::base::ChangeEventType;
+
+        let mut cluster = SimCluster::new(2, 7);
+        cluster.start().expect("cluster start");
+
+        let map_name = "fault_top_n";
+        let query_id = "fault-top-n";
+
+        // Each node sees only itself as active so the queried node's single-node
+        // DAG bypass fires for the seed page.
+        set_membership(&cluster.nodes[0], &["sim-node-0"]);
+        set_membership(&cluster.nodes[1], &["sim-node-1"]);
+        assign_partitions(&cluster.nodes[0], &|_| "sim-node-0".to_string());
+        assign_partitions(&cluster.nodes[1], &|_| "sim-node-1".to_string());
+
+        let mut rx = subscribe_and_observe(
+            &mut cluster.nodes[0],
+            map_name,
+            query_id,
+            live_top_n_query(),
+        )
+        .await;
+
+        // Fault: partition the non-queried node-1 away. node-0 (queried) stays
+        // alive and continues to maintain its live window locally.
+        cluster.inject_partition(&[0], &[1]);
+
+        // Fill the window: rec-a=10, rec-b=20 → window {rec-a, rec-b}.
+        cluster
+            .write(0, map_name, "rec-a", score_record(10))
+            .await
+            .expect("write rec-a");
+        cluster
+            .write(0, map_name, "rec-b", score_record(20))
+            .await
+            .expect("write rec-b");
+
+        // Displace: rec-c=5 enters, rec-b=20 is pushed out (window {rec-c, rec-a}).
+        cluster
+            .write(0, map_name, "rec-c", score_record(5))
+            .await
+            .expect("write rec-c");
+
+        // Drain the displacement phase and assert the displacement deltas.
+        let phase1 = drain_live_updates(&mut rx, query_id);
+        assert!(
+            phase1
+                .iter()
+                .any(|(k, e)| k == "rec-c" && *e == ChangeEventType::ENTER),
+            "rec-c must ENTER on displacement: {phase1:?}"
+        );
+        assert!(
+            phase1
+                .iter()
+                .any(|(k, e)| k == "rec-b" && *e == ChangeEventType::LEAVE),
+            "rec-b must receive a displacement LEAVE: {phase1:?}"
+        );
+        let after_displace = replay_membership(&phase1);
+        assert_eq!(
+            after_displace,
+            ["rec-a".to_string(), "rec-c".to_string()]
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>(),
+            "after displacement the window must be the two smallest (rec-c=5, rec-a=10): {phase1:?}"
+        );
+
+        // Promotion: delete the in-window rec-c. A slot frees and the retained
+        // rec-b (20) must be re-promoted into the window (window {rec-a, rec-b}).
+        cluster
+            .write(0, map_name, "rec-c", score_record(5))
+            .await
+            .expect("re-write rec-c before delete");
+        // Drain the redundant UPDATE from the re-write so it does not pollute the
+        // promotion-phase assertions.
+        let _ = drain_live_updates(&mut rx, query_id);
+        delete_record(&cluster.nodes[0], map_name, "rec-c").await;
+
+        let phase2 = drain_live_updates(&mut rx, query_id);
+        assert!(
+            phase2
+                .iter()
+                .any(|(k, e)| k == "rec-c" && *e == ChangeEventType::LEAVE),
+            "deleted rec-c must LEAVE: {phase2:?}"
+        );
+        assert!(
+            phase2
+                .iter()
+                .any(|(k, e)| k == "rec-b" && *e == ChangeEventType::ENTER),
+            "retained rec-b must be re-promoted (ENTER) when rec-c's slot frees: {phase2:?}"
+        );
+
+        // Final membership: replay the FULL stream (displacement + promotion).
+        let mut all = phase1;
+        all.extend(phase2);
+        let final_live = replay_membership(&all);
+        assert_eq!(
+            final_live.len(),
+            2,
+            "window must hold exactly limit=2 rows throughout: {final_live:?}"
+        );
+        assert_eq!(
+            final_live,
+            ["rec-a".to_string(), "rec-b".to_string()]
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>(),
+            "after promotion the top-2 must be rec-a=10, rec-b=20 (rec-c gone): {all:?}"
+        );
+
+        cluster.heal_partition();
+    }
 }
