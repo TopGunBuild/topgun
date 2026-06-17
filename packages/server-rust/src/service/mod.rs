@@ -34,5 +34,5 @@ pub use policy::{
 };
 pub use registry::{ManagedService, ServiceContext, ServiceRegistry};
 pub use router::OperationRouter;
-pub use security::{SecurityConfig, WriteValidator};
+pub use security::{SecurityConfig, WriteAdmission};
 pub use worker::{BackgroundRunnable, BackgroundWorker};

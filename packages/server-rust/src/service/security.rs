@@ -152,7 +152,6 @@ impl WriteAdmission {
 #[cfg(test)]
 #[allow(clippy::default_trait_access)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Instant;
 
@@ -204,7 +203,6 @@ mod tests {
             last_heartbeat: Instant::now(),
             last_hlc: None,
             peer_node_id: None,
-            map_permissions: HashMap::new(),
         }
     }
 

@@ -30,7 +30,7 @@ use crate::service::operation::{
     service_names, CallerOrigin, Operation, OperationContext, OperationError, OperationResponse,
 };
 use crate::service::registry::{ManagedService, ServiceContext};
-use crate::service::security::WriteValidator;
+use crate::service::security::WriteAdmission;
 use crate::storage::record::{OrMapEntry, RecordValue};
 use crate::storage::{CallerProvenance, ExpiryPolicy, RecordStoreFactory};
 use crate::traits::SchemaProvider;
@@ -64,11 +64,11 @@ fn matches_query_predicate(query: &topgun_core::messages::base::Query, data: &rm
 /// Merges LWW and OR-Map data into the `RecordStore` and broadcasts
 /// `ServerEvent` messages to connected clients.
 ///
-/// Validation order: auth/ACL/size (`WriteValidator`) → schema (`SchemaProvider`) → CRDT merge.
+/// Validation order: auth/size (`WriteAdmission`) → schema (`SchemaProvider`) → CRDT merge.
 pub struct CrdtService {
     record_store_factory: Arc<RecordStoreFactory>,
     connection_registry: Arc<ConnectionRegistry>,
-    write_validator: Arc<WriteValidator>,
+    write_validator: Arc<WriteAdmission>,
     query_registry: Arc<QueryRegistry>,
     schema_provider: Arc<dyn SchemaProvider>,
 }
@@ -79,7 +79,7 @@ impl CrdtService {
     pub fn new(
         record_store_factory: Arc<RecordStoreFactory>,
         connection_registry: Arc<ConnectionRegistry>,
-        write_validator: Arc<WriteValidator>,
+        write_validator: Arc<WriteAdmission>,
         query_registry: Arc<QueryRegistry>,
         schema_provider: Arc<dyn SchemaProvider>,
     ) -> Self {
@@ -176,22 +176,17 @@ impl CrdtService {
         let sanitized_ts = if let Some(conn_id) = ctx.connection_id {
             let metadata_snapshot = self.snapshot_metadata(conn_id).await?;
             let value_size = estimate_value_size(op);
-            self.write_validator.validate_write(
-                ctx,
-                &metadata_snapshot,
-                &op.map_name,
-                value_size,
-            )?;
-            // Schema validation runs after auth/ACL/size checks.
+            self.write_validator
+                .admit_write(ctx, &metadata_snapshot, &op.map_name, value_size)?;
+            // Schema validation runs after auth/size admission checks.
             self.validate_schema_for_op(op)?;
             Some(self.write_validator.sanitize_hlc())
         } else if ctx.caller_origin == CallerOrigin::HttpClient {
-            // HTTP /sync carries no per-connection ACL handle, but the JWT-validated
+            // HTTP /sync carries no per-connection handle, but the JWT-validated
             // identity is on ctx.principal (set eagerly by the HTTP handler before
-            // dispatch). Derive an honest authenticated flag from it so validate_write's
+            // dispatch). Derive an honest authenticated flag from it so admit_write's
             // auth gate passes for legitimate writes and fail-closes if a principal is
-            // ever absent. Empty map_permissions falls back to default_permissions (HTTP
-            // has no per-connection ACL). Then re-stamp the HLC so a forged client
+            // ever absent. Then re-stamp the HLC so a forged client
             // timestamp cannot win Last-Write-Wins forever.
             let metadata_snapshot = ConnectionMetadata {
                 authenticated: ctx.principal.is_some(),
@@ -199,12 +194,8 @@ impl CrdtService {
                 ..Default::default()
             };
             let value_size = estimate_value_size(op);
-            self.write_validator.validate_write(
-                ctx,
-                &metadata_snapshot,
-                &op.map_name,
-                value_size,
-            )?;
+            self.write_validator
+                .admit_write(ctx, &metadata_snapshot, &op.map_name, value_size)?;
             self.validate_schema_for_op(op)?;
             Some(self.write_validator.sanitize_hlc())
         } else {
@@ -262,7 +253,7 @@ impl CrdtService {
             let metadata_snapshot = self.snapshot_metadata(conn_id).await?;
             for op in ops {
                 let value_size = estimate_value_size(op);
-                self.write_validator.validate_write(
+                self.write_validator.admit_write(
                     ctx,
                     &metadata_snapshot,
                     &op.map_name,
@@ -295,10 +286,10 @@ impl CrdtService {
                 }
             }
         } else if ctx.caller_origin == CallerOrigin::HttpClient {
-            // HTTP /sync batch: no per-connection ACL handle, but the JWT-validated
+            // HTTP /sync batch: no per-connection handle, but the JWT-validated
             // identity is on ctx.principal (set eagerly by the HTTP handler before
             // dispatch). Snapshot an honest authenticated flag from it once at batch
-            // start so validate_write's auth gate passes for legitimate writes and
+            // start so admit_write's auth gate passes for legitimate writes and
             // fail-closes if a principal is ever absent. Then re-stamp every op's HLC so
             // a forged client timestamp cannot win Last-Write-Wins forever.
             let metadata_snapshot = ConnectionMetadata {
@@ -308,7 +299,7 @@ impl CrdtService {
             };
             for op in ops {
                 let value_size = estimate_value_size(op);
-                self.write_validator.validate_write(
+                self.write_validator.admit_write(
                     ctx,
                     &metadata_snapshot,
                     &op.map_name,
@@ -925,7 +916,7 @@ mod tests {
     use crate::service::domain::query::QueryRegistry;
     use crate::service::domain::schema::SchemaService;
     use crate::service::operation::{service_names, OperationContext, OperationResponse};
-    use crate::service::security::{SecurityConfig, WriteValidator};
+    use crate::service::security::{SecurityConfig, WriteAdmission};
     use crate::storage::datastores::NullDataStore;
     use crate::storage::factory::RecordStoreFactory;
     use crate::storage::impls::StorageConfig;
@@ -938,12 +929,12 @@ mod tests {
         ))
     }
 
-    fn make_validator() -> Arc<WriteValidator> {
+    fn make_validator() -> Arc<WriteAdmission> {
         let hlc = Arc::new(Mutex::new(HLC::new(
             "test-node".to_string(),
             Box::new(SystemClock),
         )));
-        Arc::new(WriteValidator::new(
+        Arc::new(WriteAdmission::new(
             Arc::new(SecurityConfig::default()),
             hlc,
         ))
@@ -1254,7 +1245,7 @@ mod tests {
     // Security integration tests (AC1, AC2, AC3, AC8, AC18, AC19, AC20)
     // ---------------------------------------------------------------------------
 
-    fn make_strict_validator() -> Arc<WriteValidator> {
+    fn make_strict_validator() -> Arc<WriteAdmission> {
         let hlc = Arc::new(Mutex::new(HLC::new(
             "server-node".to_string(),
             Box::new(SystemClock),
@@ -1262,9 +1253,8 @@ mod tests {
         let config = SecurityConfig {
             require_auth: true,
             max_value_bytes: 0,
-            ..SecurityConfig::default()
         };
-        Arc::new(WriteValidator::new(Arc::new(config), hlc))
+        Arc::new(WriteAdmission::new(Arc::new(config), hlc))
     }
 
     fn make_strict_service() -> (Arc<CrdtService>, Arc<ConnectionRegistry>) {
@@ -1367,52 +1357,26 @@ mod tests {
         );
     }
 
-    // -- AC2: authenticated + no write perm => Forbidden --
-
-    #[tokio::test]
-    async fn no_write_permission_returns_forbidden() {
-        use crate::network::connection::MapPermissions;
-        let (svc, registry) = make_strict_service();
-        let config = crate::network::config::ConnectionConfig::default();
-        let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
-        {
-            let mut meta = handle.metadata.write().await;
-            meta.authenticated = true;
-            meta.map_permissions.insert(
-                "locked-map".to_string(),
-                MapPermissions {
-                    read: true,
-                    write: false,
-                },
-            );
-        }
-
-        let ctx = make_ctx_with_conn(handle.id);
-        let op = make_lww_put_op(ctx, "locked-map");
-        let result = svc.oneshot(op).await;
-        assert!(
-            matches!(result, Err(OperationError::Forbidden { .. })),
-            "expected Forbidden for no-write-perm connection, got {result:?}"
-        );
-    }
-
     // -- AC8: batch atomic rejection: if 2nd op fails, 1st op's data not written --
     // (Verified via the validate-all-then-apply-all logic in handle_op_batch)
 
     #[tokio::test]
     async fn op_batch_atomic_rejection_when_second_op_fails() {
-        use crate::network::connection::MapPermissions;
-
+        // Atomicity is driven by a surviving admission check (value-size limit):
+        // op-1 is a tombstone REMOVE (size 0, admitted) while op-2 carries an
+        // oversized value that trips `max_value_bytes`. If admission were applied
+        // per-op-then-write instead of validate-all-then-apply-all, op-1's data
+        // would already be persisted when op-2 fails — this test fails the batch
+        // and (below) asserts op-1 left no record behind.
         let hlc = Arc::new(Mutex::new(HLC::new(
             "server-node".to_string(),
             Box::new(SystemClock),
         )));
         let config = SecurityConfig {
-            require_auth: true,
-            max_value_bytes: 0,
-            ..SecurityConfig::default()
+            require_auth: false,
+            max_value_bytes: 8,
         };
-        let validator = Arc::new(WriteValidator::new(Arc::new(config), hlc));
+        let validator = Arc::new(WriteAdmission::new(Arc::new(config), hlc));
         let factory = make_factory();
         let registry = Arc::new(ConnectionRegistry::new());
         let query_registry = Arc::new(QueryRegistry::new());
@@ -1426,18 +1390,6 @@ mod tests {
 
         let conn_config = crate::network::config::ConnectionConfig::default();
         let (handle, _rx) = registry.register(ConnectionKind::Client, &conn_config);
-        {
-            let mut meta = handle.metadata.write().await;
-            meta.authenticated = true;
-            // Grant write to "open-map" but deny write to "locked-map"
-            meta.map_permissions.insert(
-                "locked-map".to_string(),
-                MapPermissions {
-                    read: true,
-                    write: false,
-                },
-            );
-        }
 
         let ctx = {
             let mut ctx = make_ctx();
@@ -1445,26 +1397,35 @@ mod tests {
             ctx
         };
 
+        // op-2 carries a value that serializes well beyond the 8-byte limit.
+        let oversized_record = topgun_core::LWWRecord {
+            value: Some(rmpv::Value::String(
+                "this-value-is-far-larger-than-eight-bytes".into(),
+            )),
+            timestamp: make_timestamp(),
+            ttl_ms: None,
+        };
+
         let ops = vec![
-            // op-1 targets "open-map" — would succeed if applied alone
+            // op-1 is a tombstone REMOVE on "open-map" — size 0, admitted alone.
             topgun_core::messages::base::ClientOp {
                 id: Some("op-1".to_string()),
                 map_name: "open-map".to_string(),
                 key: "key-1".to_string(),
                 op_type: None,
-                record: None,
+                record: Some(None),
                 or_record: None,
                 or_tag: None,
                 write_concern: None,
                 timeout: None,
             },
-            // op-2 targets "locked-map" — will fail validation
+            // op-2 targets "open-map" with an oversized value — fails admission.
             topgun_core::messages::base::ClientOp {
                 id: Some("op-2".to_string()),
-                map_name: "locked-map".to_string(),
+                map_name: "open-map".to_string(),
                 key: "key-2".to_string(),
                 op_type: None,
-                record: None,
+                record: Some(Some(oversized_record)),
                 or_record: None,
                 or_tag: None,
                 write_concern: None,
@@ -1483,12 +1444,22 @@ mod tests {
             },
         };
 
-        // The batch must fail due to op-2
+        // The batch must fail due to op-2's oversized value.
         let result = svc.oneshot(op).await;
         assert!(
-            matches!(result, Err(OperationError::Forbidden { .. })),
-            "expected Forbidden for batch with locked op, got {result:?}"
+            matches!(result, Err(OperationError::ValueTooLarge { .. })),
+            "expected ValueTooLarge for batch with oversized op, got {result:?}"
         );
+
+        // Atomicity: op-1's tombstone must NOT have been applied. Because the batch
+        // is validated-all-then-applied-all, a rejection leaves no store touched for
+        // the target map (no record for key-1 in any partition).
+        for store in factory.get_all_for_map("open-map") {
+            assert!(
+                store.get("key-1", false).await.unwrap().is_none(),
+                "op-1 must not be persisted when the batch is rejected"
+            );
+        }
     }
 
     // -- AC20: REMOVE ops are never rejected due to value size --
@@ -1502,9 +1473,8 @@ mod tests {
         let config = SecurityConfig {
             require_auth: false,
             max_value_bytes: 1, // very small limit
-            ..SecurityConfig::default()
         };
-        let validator = Arc::new(WriteValidator::new(Arc::new(config), hlc));
+        let validator = Arc::new(WriteAdmission::new(Arc::new(config), hlc));
         let factory = make_factory();
         let registry = Arc::new(ConnectionRegistry::new());
         let query_registry = Arc::new(QueryRegistry::new());
@@ -1947,7 +1917,7 @@ mod tests {
             require_auth: false,
             ..SecurityConfig::default()
         };
-        let validator = Arc::new(WriteValidator::new(Arc::new(config), hlc));
+        let validator = Arc::new(WriteAdmission::new(Arc::new(config), hlc));
         let svc = Arc::new(CrdtService::new(
             Arc::clone(&factory),
             Arc::clone(&registry),
