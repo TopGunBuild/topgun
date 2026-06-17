@@ -28,6 +28,7 @@ use crate::dag::coordinator::{run_dag_local, ClusterQueryCoordinator};
 use crate::query::cursor::{
     build_next_cursor, classify_cursor_status, cursor_query_hashes, decode_cursor, SortValue,
 };
+use crate::query::window::LiveWindow;
 
 use tracing::Instrument;
 
@@ -61,6 +62,17 @@ pub struct QuerySubscription {
     pub query: Query,
     /// Keys that matched on the last evaluation (for ENTER/UPDATE/LEAVE detection).
     pub previous_result_keys: DashSet<String>,
+    /// Sorted top-N window maintaining live membership for this subscription.
+    ///
+    /// Interior-mutable (its state lives behind a `Mutex`), so mutations route through
+    /// `apply_mutation(&self, …)` over the `Arc<QuerySubscription>` with no `&mut` path.
+    /// This is the single authoritative window algorithm — the observer derives every
+    /// ENTER/UPDATE/LEAVE (including top-N displacement and promotion) from it.
+    ///
+    /// Wrapped in `Arc` so the mutation broadcast path can clone the handle cheaply out
+    /// of the `Arc<QuerySubscription>` and call `apply_mutation` without holding the
+    /// subscription borrow.
+    pub live_window: Arc<LiveWindow>,
     /// Optional field projection list. When `Some`, only these fields are
     /// included in `QUERY_RESP` and `QUERY_UPDATE` payloads sent to this subscriber.
     pub fields: Option<Vec<String>>,
@@ -259,26 +271,27 @@ impl QueryMutationObserver {
 
         for sub in &subs {
             let matches_now = Self::matches_query(sub, &rmpv_value);
-            let was_in_previous = sub.previous_result_keys.contains(key);
 
-            match (matches_now, was_in_previous) {
-                (true, false) => {
-                    // ENTER: new match
-                    sub.previous_result_keys.insert(key.to_string());
-                    self.send_update(sub, key, rmpv_value.clone(), ChangeEventType::ENTER);
+            // Route the mutation through the single window algorithm. It returns the
+            // complete delta set the subscriber must receive — predicate ENTER/UPDATE/LEAVE
+            // for unbounded subscriptions, plus top-N displacement LEAVEs and promotion
+            // ENTERs when the query has a limit. There is no second predicate-only path:
+            // membership is owned by the window, and previous_result_keys is kept in sync
+            // with the deltas the window emits.
+            let deltas = sub
+                .live_window
+                .apply_mutation(key, Some(&rmpv_value), matches_now);
+
+            for delta in deltas {
+                match delta.event {
+                    ChangeEventType::ENTER | ChangeEventType::UPDATE => {
+                        sub.previous_result_keys.insert(delta.key.clone());
+                    }
+                    ChangeEventType::LEAVE => {
+                        sub.previous_result_keys.remove(&delta.key);
+                    }
                 }
-                (true, true) => {
-                    // UPDATE: still matches
-                    self.send_update(sub, key, rmpv_value.clone(), ChangeEventType::UPDATE);
-                }
-                (false, true) => {
-                    // LEAVE: no longer matches
-                    sub.previous_result_keys.remove(key);
-                    self.send_update(sub, key, rmpv_value.clone(), ChangeEventType::LEAVE);
-                }
-                (false, false) => {
-                    // No-op
-                }
+                self.send_update(sub, &delta.key, delta.value, delta.event);
             }
         }
     }
@@ -306,17 +319,28 @@ impl MutationObserver for QueryMutationObserver {
         self.evaluate_change(key, record, is_backup);
     }
 
-    fn on_remove(&self, key: &str, record: &Record, is_backup: bool) {
+    fn on_remove(&self, key: &str, _record: &Record, is_backup: bool) {
         if is_backup {
             return;
         }
         let subs = self.registry.get_subscriptions_for_map(&self.map_name);
-        let rmpv_value = extract_rmpv_value(&record.value);
 
         for sub in &subs {
-            if sub.previous_result_keys.contains(key) {
-                sub.previous_result_keys.remove(key);
-                self.send_update(sub, key, rmpv_value.clone(), ChangeEventType::LEAVE);
+            // A delete routes through the same window algorithm as a mutation: removing a
+            // key can both emit a LEAVE for that key and promote a previously-displaced row
+            // into the top-N window (an ENTER). The window owns membership; we mirror its
+            // deltas into previous_result_keys so on_clear/on_reset/Merkle stay correct.
+            let deltas = sub.live_window.apply_mutation(key, None, false);
+            for delta in deltas {
+                match delta.event {
+                    ChangeEventType::ENTER | ChangeEventType::UPDATE => {
+                        sub.previous_result_keys.insert(delta.key.clone());
+                    }
+                    ChangeEventType::LEAVE => {
+                        sub.previous_result_keys.remove(&delta.key);
+                    }
+                }
+                self.send_update(sub, &delta.key, delta.value, delta.event);
             }
         }
     }
@@ -794,6 +818,18 @@ impl QueryService {
             None
         };
 
+        // Seed the live window from THIS initial DAG result page (before field projection,
+        // so sort-field values are still present for ordering). Membership and ordering are
+        // taken from the page the DAG already produced — we do not recompute. Every page row
+        // matched the predicate by construction, so each seeds as an in-window match.
+        let live_window = Arc::new(LiveWindow::new(
+            query.sort.clone().unwrap_or_default(),
+            query.limit,
+        ));
+        for entry in &results {
+            let _ = live_window.apply_mutation(&entry.key, Some(&entry.value), true);
+        }
+
         // Apply field projection if specified
         if let Some(ref proj_fields) = fields {
             for entry in &mut results {
@@ -801,7 +837,9 @@ impl QueryService {
             }
         }
 
-        // Build previous_result_keys from results (after clamping, before Merkle)
+        // Build previous_result_keys from results (after clamping, before Merkle).
+        // The page that seeds previous_result_keys is the same page that seeds the window,
+        // so the two membership views start consistent.
         let previous_keys = DashSet::new();
         for entry in &results {
             previous_keys.insert(entry.key.clone());
@@ -878,6 +916,7 @@ impl QueryService {
             map_name,
             query,
             previous_result_keys: previous_keys,
+            live_window,
             fields,
         };
         self.query_registry.register(subscription);
@@ -1485,6 +1524,23 @@ mod tests {
         ConnectionConfig::default()
     }
 
+    /// Builds a `live_window` for a test subscription whose membership matches the supplied
+    /// pre-existing keys. Tests simulate "this key was already in the result set" by
+    /// pre-populating `previous_result_keys`; the window must start with the same membership
+    /// or the observer (which now derives ENTER/UPDATE/LEAVE from the window) would emit
+    /// ENTER where the test expects UPDATE/LEAVE. Placeholder values are sufficient because
+    /// these tests use unbounded (`limit = None`) queries where membership is presence-only.
+    fn seeded_window(query: &Query, present_keys: &[&str]) -> Arc<LiveWindow> {
+        let window = Arc::new(LiveWindow::new(
+            query.sort.clone().unwrap_or_default(),
+            query.limit,
+        ));
+        for key in present_keys {
+            let _ = window.apply_mutation(key, Some(&rmpv::Value::Nil), true);
+        }
+        window
+    }
+
     // ---- QueryRegistry tests ----
 
     #[test]
@@ -1496,6 +1552,7 @@ mod tests {
             query_id: "q-1".to_string(),
             connection_id: ConnectionId(1),
             map_name: "users".to_string(),
+            live_window: seeded_window(&Query::default(), &[]),
             query: Query::default(),
             previous_result_keys: DashSet::new(),
             fields: None,
@@ -1511,6 +1568,7 @@ mod tests {
             query_id: "q-1".to_string(),
             connection_id: ConnectionId(1),
             map_name: "users".to_string(),
+            live_window: seeded_window(&Query::default(), &[]),
             query: Query::default(),
             previous_result_keys: DashSet::new(),
             fields: None,
@@ -1533,6 +1591,7 @@ mod tests {
             query_id: "q-1".to_string(),
             connection_id: ConnectionId(1),
             map_name: "users".to_string(),
+            live_window: seeded_window(&Query::default(), &[]),
             query: Query::default(),
             previous_result_keys: DashSet::new(),
             fields: None,
@@ -1541,6 +1600,7 @@ mod tests {
             query_id: "q-2".to_string(),
             connection_id: ConnectionId(2),
             map_name: "users".to_string(),
+            live_window: seeded_window(&Query::default(), &[]),
             query: Query::default(),
             previous_result_keys: DashSet::new(),
             fields: None,
@@ -1549,6 +1609,7 @@ mod tests {
             query_id: "q-3".to_string(),
             connection_id: ConnectionId(1),
             map_name: "orders".to_string(),
+            live_window: seeded_window(&Query::default(), &[]),
             query: Query::default(),
             previous_result_keys: DashSet::new(),
             fields: None,
@@ -1569,6 +1630,7 @@ mod tests {
             query_id: "q-1".to_string(),
             connection_id: ConnectionId(1),
             map_name: "users".to_string(),
+            live_window: seeded_window(&Query::default(), &[]),
             query: Query::default(),
             previous_result_keys: DashSet::new(),
             fields: None,
@@ -1577,6 +1639,7 @@ mod tests {
             query_id: "q-2".to_string(),
             connection_id: ConnectionId(1),
             map_name: "orders".to_string(),
+            live_window: seeded_window(&Query::default(), &[]),
             query: Query::default(),
             previous_result_keys: DashSet::new(),
             fields: None,
@@ -1605,6 +1668,7 @@ mod tests {
             query_id: "q-1".to_string(),
             connection_id: ConnectionId(1),
             map_name: "users".to_string(),
+            live_window: seeded_window(&Query::default(), &[]),
             query: Query::default(),
             previous_result_keys: prev_keys,
             fields: None,
@@ -1639,6 +1703,7 @@ mod tests {
             query_id: "q-1".to_string(),
             connection_id: conn_id,
             map_name: "users".to_string(),
+            live_window: seeded_window(&Query::default(), &[]),
             query: Query::default(),
             previous_result_keys: DashSet::new(),
             fields: None,
@@ -1686,11 +1751,13 @@ mod tests {
         // Register subscription with key already in previous_result_keys
         let prev_keys = DashSet::new();
         prev_keys.insert("key1".to_string());
+        let query = Query::default(); // match all
         registry.register(QuerySubscription {
             query_id: "q-1".to_string(),
             connection_id: conn_id,
             map_name: "users".to_string(),
-            query: Query::default(), // match all
+            live_window: seeded_window(&query, &["key1"]),
+            query,
             previous_result_keys: prev_keys,
             fields: None,
         });
@@ -1740,19 +1807,21 @@ mod tests {
         // Subscription requires age >= 18
         let prev_keys = DashSet::new();
         prev_keys.insert("key1".to_string());
+        let query = Query {
+            predicate: Some(PredicateNode {
+                op: PredicateOp::Gte,
+                attribute: Some("age".to_string()),
+                value: Some(rmpv::Value::Integer(18.into())),
+                ..Default::default()
+            }),
+            ..Query::default()
+        };
         registry.register(QuerySubscription {
             query_id: "q-1".to_string(),
             connection_id: conn_id,
             map_name: "users".to_string(),
-            query: Query {
-                predicate: Some(PredicateNode {
-                    op: PredicateOp::Gte,
-                    attribute: Some("age".to_string()),
-                    value: Some(rmpv::Value::Integer(18.into())),
-                    ..Default::default()
-                }),
-                ..Query::default()
-            },
+            live_window: seeded_window(&query, &["key1"]),
+            query,
             previous_result_keys: prev_keys,
             fields: None,
         });
@@ -1794,11 +1863,13 @@ mod tests {
 
         let prev_keys = DashSet::new();
         prev_keys.insert("key1".to_string());
+        let query = Query::default();
         registry.register(QuerySubscription {
             query_id: "q-1".to_string(),
             connection_id: conn_id,
             map_name: "users".to_string(),
-            query: Query::default(),
+            live_window: seeded_window(&query, &["key1"]),
+            query,
             previous_result_keys: prev_keys,
             fields: None,
         });
@@ -1838,11 +1909,13 @@ mod tests {
         let prev_keys = DashSet::new();
         prev_keys.insert("k1".to_string());
         prev_keys.insert("k2".to_string());
+        let query = Query::default();
         registry.register(QuerySubscription {
             query_id: "q-1".to_string(),
             connection_id: conn_id,
             map_name: "users".to_string(),
-            query: Query::default(),
+            live_window: seeded_window(&query, &["k1", "k2"]),
+            query,
             previous_result_keys: prev_keys,
             fields: None,
         });
@@ -1890,6 +1963,7 @@ mod tests {
             query_id: "q-1".to_string(),
             connection_id: conn_id,
             map_name: "users".to_string(),
+            live_window: seeded_window(&Query::default(), &[]),
             query: Query {
                 predicate: Some(PredicateNode {
                     op: PredicateOp::Gte,
@@ -2358,6 +2432,7 @@ mod tests {
             query_id: "q-1".to_string(),
             connection_id: conn1,
             map_name: "users".to_string(),
+            live_window: seeded_window(&Query::default(), &[]),
             query: Query {
                 predicate: None,
                 r#where: None,
@@ -2375,6 +2450,7 @@ mod tests {
             query_id: "q-2".to_string(),
             connection_id: conn2,
             map_name: "users".to_string(),
+            live_window: seeded_window(&Query::default(), &[]),
             query: Query {
                 predicate: None,
                 r#where: None,
@@ -2405,6 +2481,7 @@ mod tests {
             query_id: "q-1".to_string(),
             connection_id: conn1,
             map_name: "users".to_string(),
+            live_window: seeded_window(&Query::default(), &[]),
             query: Query {
                 predicate: None,
                 r#where: None,
@@ -2421,6 +2498,7 @@ mod tests {
             query_id: "q-2".to_string(),
             connection_id: conn1,
             map_name: "users".to_string(),
+            live_window: seeded_window(&Query::default(), &[]),
             query: Query {
                 predicate: None,
                 r#where: None,
@@ -2572,6 +2650,7 @@ mod tests {
             query_id: "q-sync-1".to_string(),
             connection_id: ConnectionId(1),
             map_name: "users".to_string(),
+            live_window: seeded_window(&Query::default(), &[]),
             query: Query::default(),
             previous_result_keys: DashSet::new(),
             fields: None,
@@ -2637,6 +2716,7 @@ mod tests {
             query_id: "q-sync-2".to_string(),
             connection_id: ConnectionId(1),
             map_name: "users".to_string(),
+            live_window: seeded_window(&Query::default(), &[]),
             query: Query::default(),
             previous_result_keys: DashSet::new(),
             fields: None,
@@ -2680,6 +2760,7 @@ mod tests {
             query_id: "q-lookup".to_string(),
             connection_id: ConnectionId(1),
             map_name: "users".to_string(),
+            live_window: seeded_window(&Query::default(), &[]),
             query: Query::default(),
             previous_result_keys: DashSet::new(),
             fields: Some(vec!["name".to_string()]),

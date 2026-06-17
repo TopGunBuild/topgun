@@ -656,15 +656,20 @@ impl CrdtService {
     /// Broadcasts `QUERY_UPDATE` messages to subscribers of queries targeting the mutated map.
     ///
     /// This method:
-    /// - Evaluates each standing query subscription against the old and new values
-    /// - Determines ENTER/UPDATE/LEAVE change type
+    /// - Routes each standing subscription's mutation through its `LiveWindow`, which is the
+    ///   single authoritative top-N algorithm and returns the complete delta set (ENTER,
+    ///   displacement LEAVE, promotion ENTER, in-window UPDATE, delete LEAVE)
+    /// - Suppresses deltas for rows outside the subscription's active cursor page
     /// - Applies field projection if the subscription has `fields`
     /// - Skips the writing connection (writer exclusion)
-    /// - Updates `previous_result_keys` for accurate future change detection
+    /// - Mirrors window membership into `previous_result_keys` for `on_remove`/`on_clear`/Merkle
+    ///
+    /// The old value is no longer needed for event derivation (the window tracks prior
+    /// membership), so `_old_rmpv_value` is retained only for call-site signature stability.
     fn broadcast_query_updates(
         &self,
         event_payload: &ServerEventPayload,
-        old_rmpv_value: Option<&rmpv::Value>,
+        _old_rmpv_value: Option<&rmpv::Value>,
         exclude_connection_id: Option<ConnectionId>,
     ) {
         let subs = self
@@ -686,49 +691,82 @@ impl CrdtService {
                 }
             }
 
-            // Evaluate old/new against the query predicate.
-            let old_matches =
-                old_rmpv_value.is_some_and(|v| matches_query_predicate(&sub.query, v));
+            // The predicate result the window needs for this mutation. A delete
+            // (`new_rmpv_value == None`) is a non-match, modelled by passing `None` through.
             let new_matches = new_rmpv_value
                 .as_ref()
                 .is_some_and(|v| matches_query_predicate(&sub.query, v));
 
-            let change_type = match (old_matches, new_matches) {
-                (false, true) => {
-                    sub.previous_result_keys.insert(event_payload.key.clone());
-                    topgun_core::messages::base::ChangeEventType::ENTER
+            // Single shared top-N algorithm: the window returns the COMPLETE delta set for
+            // this mutation — the new ENTER, any displacement LEAVE, any promotion ENTER, an
+            // in-window UPDATE, or a LEAVE for deletes/predicate-false rows. An empty result
+            // naturally sends nothing, so no `(false,false)` short-circuit is needed.
+            let deltas = sub.live_window.apply_mutation(
+                &event_payload.key,
+                new_rmpv_value.as_ref(),
+                new_matches,
+            );
+
+            // Decode this subscription's active page bound once (if any) so out-of-page
+            // deltas can be suppressed. `sub.query.cursor` is the only cursor state reachable
+            // from the subscription here; a row strictly before the cursor is on an earlier
+            // page the subscriber is not currently observing.
+            let page_cursor = sub
+                .query
+                .cursor
+                .as_deref()
+                .and_then(crate::query::cursor::decode_cursor);
+
+            for delta in deltas {
+                // Cursor out-of-window filter: drop deltas whose row falls outside this
+                // subscription's active page. LEAVE carries Nil (no row value to test), so it
+                // is always delivered — the subscriber must drop a row it may currently hold.
+                if let Some(ref cursor) = page_cursor {
+                    if !matches!(
+                        delta.event,
+                        topgun_core::messages::base::ChangeEventType::LEAVE
+                    ) && !crate::query::cursor::is_after_cursor(&delta.key, &delta.value, cursor)
+                    {
+                        continue;
+                    }
                 }
-                (true, true) => topgun_core::messages::base::ChangeEventType::UPDATE,
-                (true, false) => {
-                    sub.previous_result_keys.remove(&event_payload.key);
+
+                // Mirror window membership into `previous_result_keys`, which is still the
+                // source of truth for on_remove/on_clear/on_reset and Merkle init.
+                match delta.event {
+                    topgun_core::messages::base::ChangeEventType::ENTER => {
+                        sub.previous_result_keys.insert(delta.key.clone());
+                    }
+                    topgun_core::messages::base::ChangeEventType::LEAVE => {
+                        sub.previous_result_keys.remove(&delta.key);
+                    }
+                    topgun_core::messages::base::ChangeEventType::UPDATE => {}
+                }
+
+                // Apply field projection to ENTER/UPDATE values; LEAVE carries Nil.
+                let value = if matches!(
+                    delta.event,
                     topgun_core::messages::base::ChangeEventType::LEAVE
-                }
-                (false, false) => continue,
-            };
-
-            // Apply field projection if the subscription has fields.
-            let value = if new_matches {
-                let raw = new_rmpv_value.clone().unwrap_or(rmpv::Value::Nil);
-                if let Some(ref fields) = sub.fields {
-                    super::query::project_fields(fields, &raw)
+                ) {
+                    rmpv::Value::Nil
+                } else if let Some(ref fields) = sub.fields {
+                    super::query::project_fields(fields, &delta.value)
                 } else {
-                    raw
-                }
-            } else {
-                rmpv::Value::Nil
-            };
+                    delta.value.clone()
+                };
 
-            let payload = topgun_core::messages::client_events::QueryUpdatePayload {
-                query_id: sub.query_id.clone(),
-                key: event_payload.key.clone(),
-                value,
-                change_type,
-            };
-            let msg = topgun_core::messages::Message::QueryUpdate { payload };
-            if let Ok(bytes) = rmp_serde::to_vec_named(&msg) {
-                use crate::network::connection::OutboundMessage;
-                if let Some(handle) = self.connection_registry.get(sub.connection_id) {
-                    let _ = handle.try_send(OutboundMessage::Binary(bytes));
+                let payload = topgun_core::messages::client_events::QueryUpdatePayload {
+                    query_id: sub.query_id.clone(),
+                    key: delta.key.clone(),
+                    value,
+                    change_type: delta.event,
+                };
+                let msg = topgun_core::messages::Message::QueryUpdate { payload };
+                if let Ok(bytes) = rmp_serde::to_vec_named(&msg) {
+                    use crate::network::connection::OutboundMessage;
+                    if let Some(handle) = self.connection_registry.get(sub.connection_id) {
+                        let _ = handle.try_send(OutboundMessage::Binary(bytes));
+                    }
                 }
             }
         }
@@ -1620,6 +1658,7 @@ mod tests {
                 aggregations: None,
             },
             previous_result_keys: DashSet::new(),
+            live_window: Arc::new(crate::query::window::LiveWindow::new(vec![], None)),
             fields: None,
         });
 
@@ -1690,6 +1729,7 @@ mod tests {
                 aggregations: None,
             },
             previous_result_keys: DashSet::new(),
+            live_window: Arc::new(crate::query::window::LiveWindow::new(vec![], None)),
             fields: None,
         });
 
@@ -2098,6 +2138,7 @@ mod tests {
                 aggregations: None,
             },
             previous_result_keys: DashSet::new(),
+            live_window: Arc::new(crate::query::window::LiveWindow::new(vec![], None)),
             fields: Some(vec!["name".to_string()]),
         });
 
@@ -3025,6 +3066,7 @@ mod tests {
                 aggregations: None,
             },
             previous_result_keys: DashSet::new(),
+            live_window: Arc::new(crate::query::window::LiveWindow::new(vec![], None)),
             fields: None,
         });
         rx
