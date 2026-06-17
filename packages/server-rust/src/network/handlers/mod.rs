@@ -126,6 +126,12 @@ pub struct AppState {
     /// populated in production wiring so `handle_socket` can release
     /// subscriptions on WebSocket disconnect.
     pub counter_registry: Option<Arc<CounterRegistry>>,
+    /// Second, independent enforcement layer for the no-auth admin bypass.
+    /// When `false`, the `AdminClaims` extractor refuses to synthesize the
+    /// local-admin superuser regardless of how the route was mounted, so a
+    /// future route-mounting regression cannot re-expose the unauthenticated
+    /// admin control plane on a non-loopback bind.
+    pub admin_enabled: bool,
 }
 
 impl AppState {
@@ -173,6 +179,9 @@ impl AppState {
             lock_registry: None,
             topic_registry: None,
             counter_registry: None,
+            // Default-safe: tests exercise the admin plane as enabled unless they
+            // explicitly override this to assert the disabled-plane guard.
+            admin_enabled: true,
         }
     }
 }

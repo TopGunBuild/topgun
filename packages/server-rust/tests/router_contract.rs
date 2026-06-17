@@ -69,13 +69,14 @@ fn is_allowed_status_login(status: StatusCode) -> bool {
 /// `admin_routes()` + the browser WS dual-mount on `/`.
 /// Using the same construction path ensures the test exercises exactly the
 /// router the binary serves, not a hypothetical variant.
-fn build_binary_router() -> axum::Router {
+fn build_binary_router(mount_admin: bool) -> axum::Router {
     // Use the default rate-limit values from NetworkConfig so the governor is
     // configured exactly as the binary would configure it.
     let default_config = topgun_server::network::config::NetworkConfig::default();
     admin_routes(
         default_config.rate_limit_per_ip,
         default_config.rate_limit_burst,
+        mount_admin,
     )
     // Browser WS dual-mount: the binary's only extra route beyond admin_routes().
     .route(
@@ -90,7 +91,7 @@ async fn binary_router_serves_all_required_routes() {
     // Ensure no JWT_SECRET is set so no-auth endpoints respond normally.
     std::env::remove_var("JWT_SECRET");
 
-    let router = build_binary_router();
+    let router = build_binary_router(true);
 
     // A real loopback address injected as ConnectInfo so the governor's
     // PeerIpKeyExtractor can identify the client IP without a real TCP connection.
@@ -152,7 +153,11 @@ async fn admin_endpoints_bypass_auth_when_no_jwt_secret() {
     // rejecting the request when no JWT secret is configured.
     std::env::remove_var("JWT_SECRET");
 
-    let router = build_binary_router();
+    // mount_admin=true: this test's premise is that the admin plane IS mounted
+    // under for_test() (no-auth) and the AdminClaims extractor synthesizes a
+    // local-admin identity rather than 401ing. The gated-OFF posture is covered
+    // separately by admin_plane_gated_off_returns_404.
+    let router = build_binary_router(true);
 
     // GET endpoints: the store-less for_test() fixture returns 503 (not 401),
     // which proves the auth gate is bypassed.
@@ -210,5 +215,75 @@ async fn admin_endpoints_bypass_auth_when_no_jwt_secret() {
         StatusCode::UNAUTHORIZED,
         "PUT /api/admin/settings returned 401 on no-auth server — \
          AdminClaims extractor should synthesize local-admin for mutating paths too"
+    );
+}
+
+#[tokio::test]
+async fn admin_plane_gated_off_returns_404() {
+    // mount_admin=false is the no-auth public-bind posture: the admin control
+    // plane must be ABSENT (404), not merely auth-guarded. A 404 proves the
+    // synthesized superuser cannot be reached unauthenticated from the network;
+    // a 401 would mean the route is still mounted (a regression). The data plane
+    // (/health) must stay live (200) so the server is still useful.
+    std::env::remove_var("JWT_SECRET");
+
+    let router = build_binary_router(false);
+
+    // ConnectInfo is injected for parity with the other tests even though the
+    // governor layer is absent when the admin plane is gated off.
+    let peer_addr: SocketAddr = "127.0.0.1:12345".parse().expect("valid socket addr");
+
+    // Every gated-off path must return 404 (route absent), NOT 401 (mounted+guarded).
+    let gated_off: &[(Method, &str, Option<&str>)] = &[
+        (Method::GET, "/api/admin/cluster/status", None),
+        (Method::GET, "/api/admin/maps", None),
+        (Method::POST, "/api/auth/login", Some("application/json")),
+    ];
+
+    for (method, path, content_type) in gated_off {
+        let body: axum::body::Body = if *method == Method::POST {
+            axum::body::Body::from(r#"{"username":"admin","password":"test"}"#)
+        } else {
+            axum::body::Body::empty()
+        };
+        let mut builder = Request::builder().method(method.clone()).uri(*path);
+        if let Some(ct) = content_type {
+            builder = builder.header("content-type", *ct);
+        }
+        let mut req = builder.body(body).expect("request should build");
+        req.extensions_mut().insert(ConnectInfo(peer_addr));
+
+        let resp = router
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("router should handle the request");
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "{method} {path} should be 404 when mount_admin=false (admin plane absent), \
+             not {} — a non-404 means the route is still mounted and the gate failed.",
+            resp.status()
+        );
+    }
+
+    // The data plane stays live: /health must return 200 even with admin gated off.
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri("/health")
+        .body(axum::body::Body::empty())
+        .expect("request should build");
+    req.extensions_mut().insert(ConnectInfo(peer_addr));
+
+    let resp = router
+        .oneshot(req)
+        .await
+        .expect("router should handle the request");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "/health should be 200 with admin gated off — the data plane must stay live"
     );
 }

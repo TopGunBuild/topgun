@@ -70,11 +70,21 @@ impl FromRequestParts<AppState> for AdminClaims {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        // When no JWT secret is configured the server runs in no-auth posture
-        // (TOPGUN_NO_AUTH=1). The loopback-only bind means the admin control
-        // plane is reachable only from localhost, so synthesizing a local-admin
-        // identity here is safe and allows the zero-config dashboard panels to
-        // return real data without requiring a token-minting path.
+        // Second enforcement layer for the no-auth admin bypass: even if a route
+        // is mistakenly mounted, refuse to synthesize the superuser when the admin
+        // plane is disabled (no-auth posture on a non-loopback bind). This is
+        // evaluated BEFORE the no-JWT-secret bypass so a disabled plane never falls
+        // through to the synthesized identity.
+        if !state.admin_enabled {
+            return Err(AdminAuthError::NotConfigured);
+        }
+
+        // The synthesized local-admin identity fires ONLY when the admin plane is
+        // enabled (admin_enabled == true) AND no JWT secret is configured
+        // (TOPGUN_NO_AUTH=1). In that posture the bind is loopback-only, so the
+        // admin control plane is reachable only from localhost — synthesizing a
+        // local-admin identity here is safe and lets the zero-config dashboard
+        // panels return real data without requiring a token-minting path.
         let Some(jwt_secret) = state.jwt_secret.as_deref() else {
             return Ok(AdminClaims {
                 user_id: "local-admin".to_string(),
@@ -472,6 +482,30 @@ CQIDAQAB
         assert!(
             claims.roles.contains(&"admin".to_string()),
             "synthesized roles should contain 'admin'"
+        );
+    }
+
+    /// Layer-2 backstop: when the admin plane is disabled (`admin_enabled ==
+    /// false`) the extractor MUST refuse to synthesize the local-admin superuser
+    /// EVEN with no JWT secret configured — so a future route-mounting regression
+    /// cannot re-open the no-auth admin bypass on a non-loopback bind.
+    #[tokio::test]
+    async fn no_auth_disabled_plane_rejected() {
+        let state = AppState {
+            admin_enabled: false,
+            jwt_secret: None,
+            ..AppState::for_test()
+        };
+        // No Authorization header and no JWT secret — without the guard this would
+        // synthesize the superuser; with the guard it must be rejected.
+        let req = axum::http::Request::builder()
+            .body(())
+            .expect("request construction should not fail");
+        let (mut parts, ()) = req.into_parts();
+        let result = AdminClaims::from_request_parts(&mut parts, &state).await;
+        assert!(
+            result.is_err(),
+            "disabled admin plane must reject even with jwt_secret=None, got {result:?}"
         );
     }
 
