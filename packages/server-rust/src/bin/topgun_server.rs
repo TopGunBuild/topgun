@@ -76,7 +76,7 @@ use topgun_server::service::policy::{
 };
 use topgun_server::service::registry::{ManagedService, ServiceContext};
 use topgun_server::service::router::OperationRouter;
-use topgun_server::service::security::{SecurityConfig, WriteValidator};
+use topgun_server::service::security::{SecurityConfig, WriteAdmission};
 use topgun_server::service::OperationService;
 #[cfg(feature = "redb")]
 use topgun_server::storage::datastores::RedbDataStore;
@@ -1239,7 +1239,7 @@ fn build_services(
             config.node_id.clone(),
             Box::new(SystemClock),
         )));
-        Arc::new(WriteValidator::new(
+        Arc::new(WriteAdmission::new(
             Arc::new(SecurityConfig::default()),
             wv_hlc,
         ))

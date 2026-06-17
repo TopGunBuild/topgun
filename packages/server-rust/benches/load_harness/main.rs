@@ -38,7 +38,7 @@ use topgun_server::service::domain::sync::SyncService;
 use topgun_server::service::middleware::build_operation_pipeline;
 use topgun_server::service::operation::service_names;
 use topgun_server::service::router::OperationRouter;
-use topgun_server::service::security::{SecurityConfig, WriteValidator};
+use topgun_server::service::security::{SecurityConfig, WriteAdmission};
 use topgun_server::service::OperationService;
 use topgun_server::storage::datastores::NullDataStore;
 use topgun_server::storage::factory::{ObserverFactory, RecordStoreFactory};
@@ -628,7 +628,7 @@ fn build_services() -> (
             config.node_id.clone(),
             Box::new(SystemClock),
         )));
-        Arc::new(WriteValidator::new(
+        Arc::new(WriteAdmission::new(
             Arc::new(SecurityConfig::default()),
             wv_hlc,
         ))

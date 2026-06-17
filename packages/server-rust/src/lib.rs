@@ -61,18 +61,18 @@ mod integration_tests {
     use crate::service::operation::{service_names, CallerOrigin, OperationResponse};
     use crate::service::registry::{ServiceContext, ServiceRegistry};
     use crate::service::router::OperationRouter;
-    use crate::service::security::{SecurityConfig, WriteValidator};
+    use crate::service::security::{SecurityConfig, WriteAdmission};
     use crate::service::{ClassifyError, OperationService};
     use crate::storage::datastores::NullDataStore;
     use crate::storage::factory::{ObserverFactory, RecordStoreFactory};
     use crate::storage::impls::StorageConfig;
     use crate::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
-    fn make_write_validator(node_id: &str) -> Arc<WriteValidator> {
+    fn make_write_validator(node_id: &str) -> Arc<WriteAdmission> {
         let hlc = Arc::new(parking_lot::Mutex::new(HLC::new(
             node_id.to_string(),
             Box::new(topgun_core::SystemClock),
         )));
-        Arc::new(WriteValidator::new(
+        Arc::new(WriteAdmission::new(
             Arc::new(SecurityConfig::default()),
             hlc,
         ))
