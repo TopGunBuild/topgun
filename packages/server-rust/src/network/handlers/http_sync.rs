@@ -31,7 +31,9 @@ use crate::query::cursor::{
 use crate::service::dispatch::PartitionDispatcher;
 use crate::service::domain::predicate::{execute_query, value_to_rmpv};
 use crate::service::operation::CallerOrigin;
-use crate::service::policy::{PermissionAction, PolicyDecision, PolicyEvaluator, PolicyStore};
+use crate::service::policy::{
+    GateDecision, PermissionAction, PolicyDecision, PolicyEvaluator, PolicyStore,
+};
 use crate::storage::factory::RecordStoreFactory;
 use crate::storage::record::RecordValue;
 
@@ -374,26 +376,35 @@ async fn dispatch_queries(
         // keeps all changes within this file (no AppState field changes needed).
         if let Some(store) = policy_store {
             let evaluator = PolicyEvaluator::new(Arc::clone(store));
-            // Permissive default: if no policies are configured, allow all reads.
-            if evaluator.has_policies().await {
-                let decision = evaluator
-                    .evaluate(
-                        principal,
-                        PermissionAction::Read,
-                        &map_name,
-                        &rmpv::Value::Nil,
-                    )
-                    .await;
-                if decision == PolicyDecision::Deny {
-                    let errors = response.errors.get_or_insert_with(Vec::new);
-                    errors.push(HttpSyncError {
-                        code: 403,
-                        message: "access denied".into(),
-                        context: Some(q.query_id.clone()),
-                    });
-                    // Skip adding any queryResults entry for this denied query.
-                    continue;
+            // Single fail-closed gate shared with the authorization middleware.
+            // AllowAll = never-configured store (allow the read for backward
+            // compat); Evaluate = configured store, enforce policy (default-deny
+            // even if rules were deleted); Deny = store read failure, reject the
+            // read rather than silently open access on a backend outage.
+            let deny_read = match evaluator.should_evaluate().await {
+                GateDecision::AllowAll => false,
+                GateDecision::Evaluate => {
+                    let decision = evaluator
+                        .evaluate(
+                            principal,
+                            PermissionAction::Read,
+                            &map_name,
+                            &rmpv::Value::Nil,
+                        )
+                        .await;
+                    decision == PolicyDecision::Deny
                 }
+                GateDecision::Deny => true,
+            };
+            if deny_read {
+                let errors = response.errors.get_or_insert_with(Vec::new);
+                errors.push(HttpSyncError {
+                    code: 403,
+                    message: "access denied".into(),
+                    context: Some(q.query_id.clone()),
+                });
+                // Skip adding any queryResults entry for this denied query.
+                continue;
             }
         }
 
