@@ -36,7 +36,7 @@ use crate::service::domain::{
 use crate::service::operation::{service_names, CallerOrigin, Operation, OperationContext};
 use crate::service::registry::{ManagedService, ServiceContext};
 use crate::service::router::OperationRouter;
-use crate::service::security::{SecurityConfig, WriteValidator};
+use crate::service::security::{SecurityConfig, WriteAdmission};
 use crate::storage::datastores::NullDataStore;
 use crate::storage::factory::{ObserverFactory, RecordStoreFactory};
 use crate::storage::impls::StorageConfig;
@@ -169,7 +169,7 @@ impl SimNode {
         let node_id = node_id.into();
 
         let hlc = Arc::new(Mutex::new(HLC::new(node_id.clone(), Box::new(SystemClock))));
-        let write_validator = Arc::new(WriteValidator::new(
+        let write_validator = Arc::new(WriteAdmission::new(
             Arc::new(SecurityConfig::default()),
             hlc,
         ));
