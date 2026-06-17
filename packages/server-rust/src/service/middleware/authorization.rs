@@ -14,7 +14,7 @@ use std::task::{Context, Poll};
 use tower::{Layer, Service};
 
 use crate::service::operation::{CallerOrigin, Operation, OperationError, OperationResponse};
-use crate::service::policy::{PermissionAction, PolicyDecision, PolicyEvaluator};
+use crate::service::policy::{GateDecision, PermissionAction, PolicyDecision, PolicyEvaluator};
 
 // ---------------------------------------------------------------------------
 // AuthorizationLayer
@@ -83,19 +83,27 @@ where
         let data = extract_data(&op);
         let fut = self.inner.call(op);
         Box::pin(async move {
-            if !evaluator.has_policies().await {
-                return fut.await;
+            // Single fail-closed gate shared with the HTTP sync read path.
+            // AllowAll = never-configured store (backward-compat passthrough);
+            // Evaluate = configured store, run policy enforcement (default-deny
+            // even if all rules were since deleted); Deny = store read failure,
+            // so reject rather than silently open access on a backend outage.
+            match evaluator.should_evaluate().await {
+                GateDecision::AllowAll => fut.await,
+                GateDecision::Evaluate => {
+                    evaluate_and_dispatch(
+                        evaluator,
+                        principal,
+                        action,
+                        map_name,
+                        batch_ops_data,
+                        data,
+                        fut,
+                    )
+                    .await
+                }
+                GateDecision::Deny => Err(OperationError::Forbidden { map_name }),
             }
-            evaluate_and_dispatch(
-                evaluator,
-                principal,
-                action,
-                map_name,
-                batch_ops_data,
-                data,
-                fut,
-            )
-            .await
         })
     }
 }

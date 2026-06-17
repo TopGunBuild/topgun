@@ -71,7 +71,9 @@ use topgun_server::service::domain::sync::SyncService;
 use topgun_server::service::domain::LockRegistry;
 use topgun_server::service::middleware::build_operation_pipeline;
 use topgun_server::service::operation::service_names;
-use topgun_server::service::policy::{InMemoryPolicyStore, PolicyEvaluator, PolicyStore};
+use topgun_server::service::policy::{
+    DurablePolicyStore, InMemoryPolicyStore, PolicyEvaluator, PolicyStore,
+};
 use topgun_server::service::registry::{ManagedService, ServiceContext};
 use topgun_server::service::router::OperationRouter;
 use topgun_server::service::security::{SecurityConfig, WriteValidator};
@@ -426,19 +428,47 @@ async fn main() -> anyhow::Result<()> {
     let eviction_config = EvictionConfig::from_env();
     let write_behind_config = WriteBehindConfig::from_env();
 
-    // Create the policy store early so it can be shared between the admin HTTP API
-    // (AppState.policy_store) and the authorization middleware (PolicyEvaluator).
-    // Both hold Arc references to the same underlying InMemoryPolicyStore, so
-    // policies created via the admin API are immediately visible to the evaluator.
-    let policy_store = Arc::new(InMemoryPolicyStore::new());
-    let policy_evaluator = Arc::new(PolicyEvaluator::new(
-        policy_store.clone() as Arc<dyn PolicyStore>
-    ));
-
     // Resolve the persistence backend once per process. The default branch
     // creates ./topgun.redb in the working directory; STORAGE_BACKEND=null
     // preserves the legacy ephemeral integration-test behavior.
     let (inner_data_store, backend) = select_datastore().await?;
+
+    // Construct the policy store AFTER the backend resolves so durable backends
+    // get a write-through DurablePolicyStore whose configured-marker survives
+    // restart (fail-closed RBAC). The store binds to the INNER data store, not
+    // the write-behind façade, so policy writes persist synchronously (the same
+    // append-before-ack reasoning WAL recovery applies below). The Null backend
+    // keeps the ephemeral InMemoryPolicyStore: its non-durability is the
+    // legitimate integration-test / negative-control case.
+    //
+    // Recovery (load_from_backend) runs here, BEFORE readiness, in the same
+    // pre-listener window as WAL recovery. A configured-marker present but
+    // unreadable policy records is fatal (fail-closed): refuse to start rather
+    // than serving a configured store silently downgraded to allow-all.
+    //
+    // Both the admin HTTP API (AppState.policy_store) and the authorization
+    // middleware (PolicyEvaluator) hold Arc references to the SAME store, so
+    // policies created via the admin API are immediately visible to the evaluator.
+    let policy_store: Arc<dyn PolicyStore> = match backend {
+        StorageBackend::Redb | StorageBackend::Postgres => {
+            let durable = DurablePolicyStore::new(Arc::clone(&inner_data_store));
+            if let Err(err) = durable.load_from_backend().await {
+                eprintln!("FATAL: policy recovery failed: {err}");
+                std::process::exit(1);
+            }
+            Arc::new(durable)
+        }
+        StorageBackend::Null => Arc::new(InMemoryPolicyStore::new()),
+    };
+    let policy_evaluator = Arc::new(PolicyEvaluator::new(Arc::clone(&policy_store)));
+
+    // Counts for the boot summary so operators can confirm RBAC survived restart.
+    let policies_loaded: usize = policy_store
+        .list_policies()
+        .await
+        .map(|p| p.len())
+        .unwrap_or(0);
+    let rbac_configured: bool = policy_store.is_configured().await.unwrap_or(false);
 
     // For durable backends, construct the WAL writer and run startup recovery
     // before the listener begins accepting connections. This ensures that every
@@ -761,6 +791,8 @@ async fn main() -> anyhow::Result<()> {
         wal_enabled = !matches!(backend, StorageBackend::Null),
         wal_dir = %write_behind_config.wal_dir.display(),
         wal_fsync_policy = ?write_behind_config.wal_fsync_policy,
+        policies_loaded,
+        rbac_configured,
         "eviction + write-behind + WAL initialized"
     );
 

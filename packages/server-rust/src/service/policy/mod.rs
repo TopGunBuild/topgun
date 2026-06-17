@@ -4,6 +4,7 @@
 //! read/write/remove access per map, with optional predicate conditions
 //! evaluated against auth context and record data.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -14,7 +15,10 @@ use utoipa::ToSchema;
 
 // rmpv is used for auth context construction in PolicyEvaluator::evaluate.
 
+pub mod durable;
 pub mod expr_parser;
+
+pub use durable::DurablePolicyStore;
 
 // ---------------------------------------------------------------------------
 // Permission types
@@ -42,6 +46,26 @@ pub enum PolicyEffect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyDecision {
     Allow,
+    Deny,
+}
+
+/// The fail-closed gate decision returned by `PolicyEvaluator::should_evaluate`.
+///
+/// This is the single predicate both enforcement points (authorization
+/// middleware and the HTTP sync path) consult before deciding whether to run
+/// the full policy evaluation. It encodes the configured-marker decision table:
+///
+/// - `AllowAll`  — store was never configured (no policy ever upserted). Skip
+///   evaluation entirely; backward-compatible permissive default.
+/// - `Evaluate`  — store is configured (a policy has been upserted at least
+///   once). Run `evaluate`, whose default-deny applies even if all policies
+///   were since deleted.
+/// - `Deny`      — the store could not be read. Fail closed: deny without
+///   evaluating, so a backend outage cannot silently open access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateDecision {
+    AllowAll,
+    Evaluate,
     Deny,
 }
 
@@ -93,6 +117,18 @@ pub trait PolicyStore: Send + Sync {
     async fn upsert_policy(&self, policy: PermissionPolicy) -> Result<(), PolicyError>;
     /// Deletes a policy by id. Returns Ok(()) even if not found.
     async fn delete_policy(&self, policy_id: &str) -> Result<(), PolicyError>;
+
+    /// Returns `true` once any policy has ever been upserted (the "configured"
+    /// marker has been persisted), even if every policy was later deleted.
+    ///
+    /// This is the durable signal that distinguishes a deployment that has
+    /// adopted RBAC (configured, possibly emptied -> must default-deny) from a
+    /// deployment that has never configured RBAC at all (allow-all backward
+    /// compat). It exists so the evaluator can fail closed after a restart:
+    /// the empty-policy short-circuit must NOT be derived from live policy
+    /// count, because a configured-but-emptied store still has to enforce
+    /// default-deny semantics.
+    async fn is_configured(&self) -> Result<bool, PolicyError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +171,13 @@ fn glob_matches(pattern: &str, input: &str) -> bool {
 #[derive(Default)]
 pub struct InMemoryPolicyStore {
     policies: DashMap<String, PermissionPolicy>,
+    /// Process-lifetime sticky marker: set to `true` on the first upsert and
+    /// never cleared on delete. Deliberately NOT derived from `policies.len()`
+    /// so that a configured-then-emptied store reports `is_configured() == true`
+    /// and keeps enforcing default-deny. Resets to `false` only on process
+    /// restart — the documented, legitimate fail-open window for this
+    /// ephemeral (non-durable) backend.
+    configured: AtomicBool,
 }
 
 impl InMemoryPolicyStore {
@@ -143,6 +186,7 @@ impl InMemoryPolicyStore {
     pub fn new() -> Self {
         Self {
             policies: DashMap::new(),
+            configured: AtomicBool::new(false),
         }
     }
 }
@@ -170,12 +214,18 @@ impl PolicyStore for InMemoryPolicyStore {
 
     async fn upsert_policy(&self, policy: PermissionPolicy) -> Result<(), PolicyError> {
         self.policies.insert(policy.id.clone(), policy);
+        // Sticky: once configured, stays configured for this process lifetime.
+        self.configured.store(true, Ordering::SeqCst);
         Ok(())
     }
 
     async fn delete_policy(&self, policy_id: &str) -> Result<(), PolicyError> {
         self.policies.remove(policy_id);
         Ok(())
+    }
+
+    async fn is_configured(&self) -> Result<bool, PolicyError> {
+        Ok(self.configured.load(Ordering::SeqCst))
     }
 }
 
@@ -211,6 +261,30 @@ impl PolicyEvaluator {
             .await
             .unwrap_or_default()
             .is_empty()
+    }
+
+    /// Fail-closed gate consulted by enforcement points before evaluating.
+    ///
+    /// This replaces the bare `!has_policies()` permissive short-circuit at the
+    /// call sites. The contract:
+    ///
+    /// | `is_configured()` | result          |
+    /// |-----------------|-------------------|
+    /// | Ok(false)       | `AllowAll` (skip — never configured, backward compat) |
+    /// | Ok(true)        | `Evaluate` (configured — run `evaluate`, default-deny if empty) |
+    /// | Err(_)          | `Deny` (fail closed — never silently allow on a read error) |
+    ///
+    /// The "configured" signal is durable (it survives policy deletion), so an
+    /// operator who once enabled RBAC and then deleted every rule still gets
+    /// default-deny rather than reverting to allow-all. `has_policies()` remains
+    /// available for callers that need the live count, but it must NOT be used
+    /// as the gate, because an emptied-but-configured store would wrongly skip.
+    pub async fn should_evaluate(&self) -> GateDecision {
+        match self.store.is_configured().await {
+            Ok(true) => GateDecision::Evaluate,
+            Ok(false) => GateDecision::AllowAll,
+            Err(_) => GateDecision::Deny,
+        }
     }
 
     /// Evaluates whether the given principal may perform `action` on `map_name`.
