@@ -19,6 +19,20 @@ import { AlertBox } from '../../../components/docs/AlertBox';
 
 TopGun enforces **per-collection, per-operation** access control on the server. A Tower middleware layer checks every client read, write, and remove against a policy store before the operation reaches the domain services. This is shipped and active today — you do **not** need to re-implement authorization in your application code. App-layer claim checks are fine as optional defense-in-depth, but server-side enforcement is the authoritative gate.
 
+## Two server-side gates: admission, then authorization
+
+Every client operation passes through two distinct server-side gates, in order. They answer different questions, and only the second one is authorization:
+
+1. **Admission** — a cheap, identity-agnostic integrity and quota gate at the edge. It does not decide *who may touch which collection*; it only rejects malformed or unauthenticated traffic before any policy is consulted. Its responsibilities are: enforce the authentication baseline (`require_auth`), deny anonymous writes, cap payloads at the value-size limit (`max_value_bytes`), sanitize incoming HLC timestamps, and route by trusted origin.
+2. **Authorization** — **RBAC is the sole authorization layer**, and it is the policy engine described in the rest of this page. Once a request clears admission, RBAC is the only thing that decides whether a given principal may `read`, `write`, or `remove` a given collection.
+
+| Gate | Question it answers | Identity-aware? | Mechanism |
+|------|---------------------|-----------------|-----------|
+| Admission | Is this request well-formed, authenticated, and within limits? | No | `require_auth`, deny-anonymous-writes, `max_value_bytes`, HLC sanitization, trusted-origin routing |
+| Authorization | May *this principal* perform *this action* on *this collection*? | Yes | RBAC policies (this page) |
+
+There is exactly one authorization layer — RBAC. Admission is a guard, not a second set of permissions, so there is no per-map ACL or any other authorization mechanism to configure alongside it.
+
 ## How evaluation works
 
 Authorization runs on every client operation (`read`, `write`, `remove`):
