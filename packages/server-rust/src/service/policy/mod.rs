@@ -15,7 +15,10 @@ use utoipa::ToSchema;
 
 // rmpv is used for auth context construction in PolicyEvaluator::evaluate.
 
+pub mod durable;
 pub mod expr_parser;
+
+pub use durable::DurablePolicyStore;
 
 // ---------------------------------------------------------------------------
 // Permission types
@@ -265,7 +268,7 @@ impl PolicyEvaluator {
     /// This replaces the bare `!has_policies()` permissive short-circuit at the
     /// call sites. The contract:
     ///
-    /// | is_configured() | result            |
+    /// | `is_configured()` | result          |
     /// |-----------------|-------------------|
     /// | Ok(false)       | `AllowAll` (skip — never configured, backward compat) |
     /// | Ok(true)        | `Evaluate` (configured — run `evaluate`, default-deny if empty) |
