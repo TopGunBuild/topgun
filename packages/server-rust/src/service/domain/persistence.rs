@@ -88,6 +88,16 @@ impl PersistenceService {
     pub fn journal_store(&self) -> &JournalStore {
         &self.journal_store
     }
+
+    /// Returns a clone of the inner `Arc<JournalStore>`.
+    ///
+    /// Used by production wiring in `build_app()` so `AppState` can hold an
+    /// `Arc<JournalStore>` directly without going through the service at
+    /// disconnect time (avoids racing with service shutdown).
+    #[must_use]
+    pub fn journal_store_arc(&self) -> Arc<JournalStore> {
+        Arc::clone(&self.journal_store)
+    }
 }
 
 // ---------------------------------------------------------------------------

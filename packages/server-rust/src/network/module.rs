@@ -741,6 +741,12 @@ fn build_app(
         lock_registry,
         topic_registry,
         counter_registry,
+        // Disconnect-cleanup registries are threaded through in a later wiring
+        // step; default to None so this construction site stays valid until then.
+        query_registry: None,
+        journal_store: None,
+        search_registry: None,
+        hybrid_search_registry: None,
         // This NetworkModule-managed path always mounts the admin plane and
         // enforces auth, so the extractor guard is enabled to match.
         admin_enabled: true,

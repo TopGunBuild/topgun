@@ -42,7 +42,12 @@ use crate::service::config::ServerConfig;
 use crate::service::dispatch::PartitionDispatcher;
 use crate::service::domain::counter::CounterRegistry;
 use crate::service::domain::index::mutation_observer::IndexObserverFactory;
+use crate::service::domain::journal::JournalStore;
 use crate::service::domain::messaging::TopicRegistry;
+use crate::service::domain::query::QueryRegistry;
+use crate::service::domain::search::{
+    HybridSearchSubscription, SearchSubscription, SubscriptionRegistry,
+};
 use crate::service::domain::LockRegistry;
 use crate::service::middleware::ObservabilityHandle;
 use crate::service::policy::PolicyStore;
@@ -126,6 +131,22 @@ pub struct AppState {
     /// populated in production wiring so `handle_socket` can release
     /// subscriptions on WebSocket disconnect.
     pub counter_registry: Option<Arc<CounterRegistry>>,
+    /// Live-query subscription registry. `None` in network-only tests;
+    /// populated in production wiring so `handle_socket` can release standing
+    /// query subscriptions on WebSocket disconnect.
+    pub query_registry: Option<Arc<QueryRegistry>>,
+    /// Journal subscription store. `None` in network-only tests; populated in
+    /// production wiring so `handle_socket` can release journal subscriptions
+    /// on WebSocket disconnect.
+    pub journal_store: Option<Arc<JournalStore>>,
+    /// Text-search subscription registry. `None` in network-only tests;
+    /// populated in production wiring so `handle_socket` can release standing
+    /// search subscriptions on WebSocket disconnect.
+    pub search_registry: Option<Arc<SubscriptionRegistry<SearchSubscription>>>,
+    /// Hybrid-search subscription registry. `None` in network-only tests;
+    /// populated in production wiring so `handle_socket` can release standing
+    /// hybrid-search subscriptions on WebSocket disconnect.
+    pub hybrid_search_registry: Option<Arc<SubscriptionRegistry<HybridSearchSubscription>>>,
     /// Second, independent enforcement layer for the no-auth admin bypass.
     /// When `false`, the `AdminClaims` extractor refuses to synthesize the
     /// local-admin superuser regardless of how the route was mounted, so a
@@ -179,6 +200,10 @@ impl AppState {
             lock_registry: None,
             topic_registry: None,
             counter_registry: None,
+            query_registry: None,
+            journal_store: None,
+            search_registry: None,
+            hybrid_search_registry: None,
             // Default-safe: tests exercise the admin plane as enabled unless they
             // explicitly override this to assert the disabled-plane guard.
             admin_enabled: true,

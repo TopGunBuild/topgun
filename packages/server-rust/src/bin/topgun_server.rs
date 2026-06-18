@@ -866,6 +866,12 @@ async fn main() -> anyhow::Result<()> {
         lock_registry: Some(lock_registry),
         topic_registry: Some(topic_registry),
         counter_registry: Some(counter_registry),
+        // Disconnect-cleanup registries are threaded through in a later wiring
+        // step; default to None so this construction site stays valid until then.
+        query_registry: None,
+        journal_store: None,
+        search_registry: None,
+        hybrid_search_registry: None,
         admin_enabled,
     };
 

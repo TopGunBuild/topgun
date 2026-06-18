@@ -244,6 +244,10 @@ async fn main() {
                 lock_registry: None,
                 topic_registry: None,
                 counter_registry: None,
+                query_registry: None,
+                journal_store: None,
+                search_registry: None,
+                hybrid_search_registry: None,
                 admin_enabled: true,
             };
 
