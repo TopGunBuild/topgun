@@ -321,7 +321,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 ///
 /// Each registry field is `Option<Arc<_>>` — `None` is the in-test default
 /// so this function is a no-op in test contexts that do not wire the registries.
-/// Order: Lock -> Topic -> Counter (mirrors the struct field declaration order).
+/// Order: Lock -> Topic -> Counter -> Query -> Journal -> Search -> Hybrid
+/// (mirrors the struct field declaration order).
 fn release_session_state(state: &AppState, conn_id: ConnectionId) {
     if let Some(ref reg) = state.lock_registry {
         reg.release_on_disconnect(conn_id);
@@ -331,6 +332,20 @@ fn release_session_state(state: &AppState, conn_id: ConnectionId) {
     }
     if let Some(ref reg) = state.counter_registry {
         reg.release_on_disconnect(conn_id);
+    }
+    if let Some(ref reg) = state.query_registry {
+        reg.unregister_by_connection(conn_id);
+    }
+    if let Some(ref reg) = state.journal_store {
+        reg.unsubscribe_by_connection(conn_id);
+    }
+    // Removed-id vectors are intentionally dropped: disconnect cleanup needs no
+    // downstream fan-out, only the registry-side removal.
+    if let Some(ref reg) = state.search_registry {
+        let _ = reg.unregister_by_connection(conn_id);
+    }
+    if let Some(ref reg) = state.hybrid_search_registry {
+        let _ = reg.unregister_by_connection(conn_id);
     }
 }
 
