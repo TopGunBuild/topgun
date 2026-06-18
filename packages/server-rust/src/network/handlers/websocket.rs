@@ -794,3 +794,116 @@ async fn send_outbound_message(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::window::LiveWindow;
+    use crate::service::domain::journal::{JournalStore, JournalSubscription};
+    use crate::service::domain::query::{QueryRegistry, QuerySubscription};
+    use crate::service::domain::search::{
+        HybridSearchSubscription, SearchSubscription, SubscriptionRegistry,
+    };
+    use dashmap::DashSet;
+    use topgun_core::messages::base::Query;
+    use topgun_core::messages::search::SearchOptions;
+
+    /// Disconnect cleanup must drain a connection's standing subscriptions from
+    /// every registry wired into `AppState`, not just lock/topic/counter. This
+    /// drives `release_session_state` directly and asserts each of the four
+    /// later-added registries reports zero subscriptions for the disconnected
+    /// connection — the regression that left query/journal/search/hybrid
+    /// subscriptions leaked on disconnect.
+    #[test]
+    fn release_session_state_clears_query_journal_search_hybrid_subscriptions() {
+        let conn = ConnectionId(7);
+
+        let query_registry = Arc::new(QueryRegistry::new());
+        let journal_store = Arc::new(JournalStore::new(100));
+        let search_registry = Arc::new(SubscriptionRegistry::<SearchSubscription>::new());
+        let hybrid_registry = Arc::new(SubscriptionRegistry::<HybridSearchSubscription>::new());
+
+        // One subscription per registry, all owned by the same connection.
+        let query = Query::default();
+        let live_window = Arc::new(LiveWindow::new(
+            query.sort.clone().unwrap_or_default(),
+            query.limit,
+        ));
+        query_registry.register(QuerySubscription {
+            query_id: "q-1".to_string(),
+            connection_id: conn,
+            map_name: "users".to_string(),
+            query,
+            previous_result_keys: DashSet::new(),
+            live_window,
+            fields: None,
+        });
+
+        journal_store.subscribe(
+            "j-1".to_string(),
+            JournalSubscription {
+                connection_id: conn,
+                map_name: Some("users".to_string()),
+                types: None,
+            },
+        );
+
+        search_registry.register(SearchSubscription::new(
+            "s-1".to_string(),
+            conn,
+            "users".to_string(),
+            "hello".to_string(),
+            SearchOptions::default(),
+        ));
+
+        hybrid_registry.register(HybridSearchSubscription::new(
+            "h-1".to_string(),
+            conn,
+            "users".to_string(),
+            "hello".to_string(),
+            Vec::new(),
+            10,
+            None,
+            None,
+            false,
+            None,
+        ));
+
+        // Sanity: each registry holds the connection's subscription before disconnect.
+        assert_eq!(query_registry.subscription_count(), 1);
+        assert_eq!(journal_store.subscription_count_for_connection(conn), 1);
+        assert_eq!(search_registry.get_subscriptions_for_map("users").len(), 1);
+        assert_eq!(hybrid_registry.get_subscriptions_for_map("users").len(), 1);
+
+        let state = AppState {
+            query_registry: Some(Arc::clone(&query_registry)),
+            journal_store: Some(Arc::clone(&journal_store)),
+            search_registry: Some(Arc::clone(&search_registry)),
+            hybrid_search_registry: Some(Arc::clone(&hybrid_registry)),
+            ..AppState::for_test()
+        };
+
+        release_session_state(&state, conn);
+
+        assert_eq!(
+            query_registry.subscription_count(),
+            0,
+            "query registry retained subscription after disconnect"
+        );
+        assert_eq!(
+            journal_store.subscription_count_for_connection(conn),
+            0,
+            "journal store retained subscription after disconnect"
+        );
+        assert_eq!(
+            search_registry.get_subscriptions_for_map("users").len(),
+            0,
+            "search registry retained subscription after disconnect"
+        );
+        assert_eq!(
+            hybrid_registry.get_subscriptions_for_map("users").len(),
+            0,
+            "hybrid-search registry retained subscription after disconnect"
+        );
+    }
+}

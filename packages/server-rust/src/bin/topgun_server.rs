@@ -59,8 +59,8 @@ use topgun_server::service::domain::embedding::{
     EmbeddingProviderConfig, NoopConfig, VectorConfig as EmbeddingVectorConfig,
 };
 use topgun_server::service::domain::index::IndexObserverFactory;
-use topgun_server::service::domain::messaging::{MessagingService, TopicRegistry};
 use topgun_server::service::domain::journal::JournalStore;
+use topgun_server::service::domain::messaging::{MessagingService, TopicRegistry};
 use topgun_server::service::domain::persistence::PersistenceService;
 use topgun_server::service::domain::query::{QueryRegistry, QueryService};
 use topgun_server::service::domain::schema::SchemaService;

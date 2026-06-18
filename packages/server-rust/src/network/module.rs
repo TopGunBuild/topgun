@@ -203,10 +203,7 @@ impl NetworkModule {
     ///
     /// When set, journal subscriptions held by a disconnecting session are
     /// removed. Consumers that do not use the journal can omit this call.
-    pub fn set_journal_store(
-        &mut self,
-        store: Arc<crate::service::domain::journal::JournalStore>,
-    ) {
+    pub fn set_journal_store(&mut self, store: Arc<crate::service::domain::journal::JournalStore>) {
         self.journal_store = Some(store);
     }
 

@@ -104,6 +104,18 @@ impl JournalStore {
             .retain(|_, sub| sub.connection_id != conn_id);
     }
 
+    /// Returns the number of subscriptions held by the given connection.
+    ///
+    /// Exposed so disconnect-cleanup verification can observe per-connection
+    /// subscription removal without reaching into the private subscription map.
+    #[must_use]
+    pub fn subscription_count_for_connection(&self, conn_id: ConnectionId) -> usize {
+        self.subscriptions
+            .iter()
+            .filter(|entry| entry.value().connection_id == conn_id)
+            .count()
+    }
+
     /// Reads events from the ring buffer starting at `from_sequence` with
     /// optional map name filter.
     ///
