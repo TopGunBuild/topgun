@@ -10,13 +10,47 @@ import { logger } from '../utils/logger';
 
 /**
  * Default configuration values for SingleServerProvider.
+ *
+ * `maxReconnectAttempts` defaults to Infinity: for a real-time + offline product,
+ * a server that is briefly gone (deploy window, laptop sleep, server-started-after-client)
+ * is the NORMAL case, not a terminal one. Giving up after a finite budget silently
+ * stops sync while the app still "works". The retry rate is bounded by the capped
+ * backoff (~1 attempt / maxReconnectDelayMs), so unbounded attempts do not hammer the
+ * server. Callers who genuinely want a bounded policy can set a finite
+ * `maxReconnectAttempts`; exhaustion is then surfaced honestly via a
+ * ReconnectExhaustedError 'error' event (see scheduleReconnect).
  */
 const DEFAULT_CONFIG = {
-  maxReconnectAttempts: 10,
+  maxReconnectAttempts: Infinity,
   reconnectDelayMs: 1000,
   backoffMultiplier: 2,
   maxReconnectDelayMs: 30000,
 };
+
+/**
+ * Emitted via the 'error' connection event when a caller-configured finite
+ * `maxReconnectAttempts` budget is exhausted and the provider stops retrying.
+ * Distinct from transient WebSocket 'error' events (which do NOT stop reconnect):
+ * this is the honest, terminal "giving up" signal. SyncEngine maps it to
+ * SyncState.ERROR so consumers can react instead of silently believing they are
+ * still trying to reconnect. With the default Infinity budget this is never thrown.
+ */
+export class ReconnectExhaustedError extends Error {
+  /** Marks this as the terminal give-up signal (survives cross-realm instanceof gaps). */
+  readonly terminal = true;
+  /** Number of reconnect attempts made before giving up. */
+  readonly attempts: number;
+
+  constructor(attempts: number, url: string) {
+    super(
+      `Reconnect budget exhausted after ${attempts} attempt(s) to ${url}; ` +
+        `giving up (set maxReconnectAttempts: Infinity to retry indefinitely, ` +
+        `or call resetConnection() to start a fresh budget).`,
+    );
+    this.name = 'ReconnectExhaustedError';
+    this.attempts = attempts;
+  }
+}
 
 /**
  * Detach a background timer from the host event loop. A pending reconnect or
@@ -86,70 +120,116 @@ export class SingleServerProvider implements IConnectionProvider {
       // Promise from keeping the Jest event loop alive after test teardown.
       this.pendingConnectReject = reject;
 
-      const clearPending = () => {
-        this.pendingConnectReject = null;
+      // Per-attempt lifecycle flags. `opened` distinguishes a post-establishment
+      // drop (reconnect, don't reject the already-resolved promise) from a failed
+      // connect. `settled` makes succeed()/fail() run exactly once per attempt —
+      // necessary because a single failed connect can surface through onerror AND
+      // onclose AND the timeout, and the undici/WHATWG client does NOT reliably
+      // fire 'close' for a failed connect, so the retry must also be driven from
+      // onerror and the timeout (relying on onclose alone strands the client and
+      // breaks server-after-client recovery — TODO-414).
+      let opened = false;
+      let settled = false;
+
+      const clearConnectionTimeout = () => {
+        if (this.connectionTimeoutId !== null) {
+          clearTimeout(this.connectionTimeoutId);
+          this.connectionTimeoutId = null;
+        }
       };
 
       try {
-        this.ws = new WebSocket(this.url);
-        this.ws.binaryType = 'arraybuffer';
+        const ws = new WebSocket(this.url);
+        this.ws = ws;
+        ws.binaryType = 'arraybuffer';
 
-        this.ws.onopen = () => {
+        const succeed = () => {
+          if (settled) return;
+          settled = true;
+          opened = true;
+          clearConnectionTimeout();
+          this.pendingConnectReject = null;
           this.reconnectAttempts = 0;
           logger.info({ url: this.url }, 'SingleServerProvider connected');
           this.emit('connected', 'default');
-          clearPending();
           resolve();
         };
 
-        this.ws.onerror = (error) => {
-          logger.error({ err: error, url: this.url }, 'SingleServerProvider WebSocket error');
-          this.emit('error', error);
-          // Don't reject here - wait for onclose
-        };
-
-        this.ws.onclose = (event) => {
-          logger.info({ url: this.url, code: event.code }, 'SingleServerProvider disconnected');
+        // An attempt failed to establish (refused / closed-before-open / timed out).
+        // De-duplicated via `settled`; schedules the next retry (the single retry
+        // driver for failed connects).
+        const fail = (reason: string) => {
+          if (settled) return;
+          settled = true;
+          clearConnectionTimeout();
+          this.pendingConnectReject = null;
           this.emit('disconnected', 'default');
-
           if (!this.isClosing) {
             this.scheduleReconnect();
           }
+          reject(new Error(reason));
         };
 
-        this.ws.onmessage = (event) => {
-          this.emit('message', 'default', event.data);
-        };
-
-        // Set up initial connection timeout. Stored as an instance field so
-        // close() can cancel it even if called mid-CONNECTING before onopen fires —
-        // a local variable would be unreachable from close() and keep the Node.js
-        // timer alive past test teardown.
+        // Per-attempt connection timeout, bound to THIS socket (never `this.ws`),
+        // so a timeout from an earlier failed attempt can only ever close its OWN
+        // socket — it can no longer kill a later attempt's in-flight handshake.
         this.connectionTimeoutId = setTimeout(() => {
           this.connectionTimeoutId = null;
-          if (this.ws && this.ws.readyState === WebSocket.CONNECTING) {
-            this.ws.close();
-            clearPending();
-            reject(new Error(`Connection timeout to ${this.url}`));
+          if (ws.readyState !== WebSocket.OPEN) {
+            try {
+              ws.close();
+            } catch {
+              // Closing a still-CONNECTING socket can throw; ignore.
+            }
+            fail(`Connection timeout to ${this.url}`);
           }
         }, this.config.reconnectDelayMs * 5); // 5x initial delay as connection timeout
         unrefTimer(this.connectionTimeoutId);
 
-        // Clear timeout on successful connection
-        const originalOnOpen = this.ws.onopen;
-        const wsRef = this.ws;
-        this.ws.onopen = (ev) => {
-          if (this.connectionTimeoutId !== null) {
-            clearTimeout(this.connectionTimeoutId);
-            this.connectionTimeoutId = null;
-          }
-          if (originalOnOpen) {
-            originalOnOpen.call(wsRef, ev);
+        ws.onopen = () => succeed();
+
+        ws.onerror = (error) => {
+          logger.error({ err: error, url: this.url }, 'SingleServerProvider WebSocket error');
+          this.emit('error', error);
+          // A pre-open error means the connect failed. The client may not fire
+          // 'close', so drive the retry from here. An error on an already-OPEN
+          // socket is left to onclose.
+          if (!opened) {
+            fail('WebSocket connection failed');
           }
         };
+
+        ws.onclose = (event) => {
+          logger.info({ url: this.url, code: event.code }, 'SingleServerProvider disconnected');
+          if (opened) {
+            // Drop AFTER the connection was established: not part of the connect()
+            // promise (already resolved). Emit + reconnect.
+            clearConnectionTimeout();
+            this.emit('disconnected', 'default');
+            if (!this.isClosing) {
+              this.scheduleReconnect();
+            }
+          } else {
+            // Closed before it ever opened — a failed attempt. `settled` makes this
+            // a no-op if onerror/timeout already handled it.
+            fail(`WebSocket closed before open (code ${event.code})`);
+          }
+        };
+
+        ws.onmessage = (event) => {
+          this.emit('message', 'default', event.data);
+        };
       } catch (error) {
-        clearPending();
-        reject(error);
+        // Synchronous construction failure (e.g. invalid URL). Schedule a retry too.
+        clearConnectionTimeout();
+        this.pendingConnectReject = null;
+        if (!settled) {
+          settled = true;
+          if (!this.isClosing) {
+            this.scheduleReconnect();
+          }
+        }
+        reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
   }
@@ -304,9 +384,11 @@ export class SingleServerProvider implements IConnectionProvider {
     if (this.reconnectAttempts >= this.config.maxReconnectAttempts) {
       logger.error(
         { attempts: this.reconnectAttempts, url: this.url },
-        'SingleServerProvider max reconnect attempts reached',
+        'SingleServerProvider max reconnect attempts reached — giving up',
       );
-      this.emit('error', new Error('Max reconnection attempts reached'));
+      // Terminal, typed signal so SyncEngine can transition to SyncState.ERROR
+      // instead of leaving the client silently parked in DISCONNECTED.
+      this.emit('error', new ReconnectExhaustedError(this.reconnectAttempts, this.url));
       return;
     }
 
@@ -411,6 +493,18 @@ export class SingleServerProvider implements IConnectionProvider {
    */
   resetReconnectAttempts(): void {
     this.reconnectAttempts = 0;
+  }
+
+  /**
+   * Update the reconnect ceiling at runtime.
+   *
+   * Used by AutoConnectionProvider to promote a single-shot WebSocket *probe*
+   * (built with maxReconnectAttempts: 0 so it never spins a background loop while
+   * negotiating WS-vs-HTTP) into a *resilient persistent* connection once the
+   * probe succeeds — without opening a second socket.
+   */
+  setMaxReconnectAttempts(maxReconnectAttempts: number): void {
+    this.config.maxReconnectAttempts = maxReconnectAttempts;
   }
 
   /**

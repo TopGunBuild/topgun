@@ -45,8 +45,21 @@ export const VALID_TRANSITIONS: Record<SyncState, SyncState[]> = {
     SyncState.DISCONNECTED,
   ],
   [SyncState.CONNECTED]: [SyncState.SYNCING, SyncState.DISCONNECTED, SyncState.BACKOFF],
-  [SyncState.DISCONNECTED]: [SyncState.CONNECTING, SyncState.BACKOFF, SyncState.INITIAL],
-  [SyncState.BACKOFF]: [SyncState.CONNECTING, SyncState.DISCONNECTED, SyncState.INITIAL],
+  // DISCONNECTED/BACKOFF → ERROR: the reconnect loop runs while DISCONNECTED, so a
+  // terminal give-up (a finite reconnect cap is exhausted) must be able to surface
+  // ERROR from there. Without this the "gave up" signal would be silently dropped.
+  [SyncState.DISCONNECTED]: [
+    SyncState.CONNECTING,
+    SyncState.BACKOFF,
+    SyncState.INITIAL,
+    SyncState.ERROR,
+  ],
+  [SyncState.BACKOFF]: [
+    SyncState.CONNECTING,
+    SyncState.DISCONNECTED,
+    SyncState.INITIAL,
+    SyncState.ERROR,
+  ],
   [SyncState.ERROR]: [SyncState.INITIAL],
 };
 

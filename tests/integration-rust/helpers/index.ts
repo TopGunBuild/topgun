@@ -70,6 +70,13 @@ export async function spawnRustServer(
   options: {
     timeout?: number;
     env?: Record<string, string>;
+    /**
+     * Fixed port to bind. Defaults to 0 (OS-assigned ephemeral port) for parallel
+     * test isolation. Pass a specific port for the server-after-client reconnect
+     * scenario, where the client must be pointed at a known URL BEFORE the server
+     * exists. Either way the harness reads the actually-bound port from stdout.
+     */
+    port?: number;
   } = {},
 ): Promise<SpawnedServer> {
   const timeoutMs =
@@ -81,13 +88,15 @@ export async function spawnRustServer(
   // Allow overriding the binary path in CI for reliable single-process cleanup
   const binaryPath = process.env.RUST_SERVER_BINARY;
 
+  const requestedPort = String(options.port ?? 0);
+
   let proc: child_process.ChildProcess;
 
   if (binaryPath) {
     // Pre-built binary: single process, no cargo wrapper.
-    // Pass --port 0 explicitly to request an OS-assigned ephemeral port,
+    // Pass --port explicitly (default 0 = OS-assigned ephemeral port),
     // since the binary's CLI default is 8080 (matches the documented quick-start).
-    proc = child_process.spawn(binaryPath, ['--port', '0'], {
+    proc = child_process.spawn(binaryPath, ['--port', requestedPort], {
       cwd: REPO_ROOT,
       detached: true,
       stdio: ['ignore', 'pipe', 'inherit'],
@@ -100,11 +109,11 @@ export async function spawnRustServer(
     });
   } else {
     // Development: let cargo build and run the binary.
-    // Pass --port 0 explicitly to request an OS-assigned ephemeral port,
+    // Pass --port explicitly (default 0 = OS-assigned ephemeral port),
     // since the binary's CLI default is 8080 (matches the documented quick-start).
     proc = child_process.spawn(
       'cargo',
-      ['run', '--bin', 'topgun-server', '--release', '--', '--port', '0'],
+      ['run', '--bin', 'topgun-server', '--release', '--', '--port', requestedPort],
       {
         cwd: REPO_ROOT,
         detached: true,

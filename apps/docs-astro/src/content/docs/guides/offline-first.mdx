@@ -86,16 +86,18 @@ function SyncBadge({ mapName, itemKey }: { mapName: string; itemKey: string }) {
 
 ### Global connection state (imperative)
 
-export const connectionEventCode = `// Subscribe to connection state transitions.
-// event.to is a SyncState: CONNECTING | AUTHENTICATING | CONNECTED | OFFLINE | ERROR | DISPOSED
+export const connectionEventCode = `// Subscribe to connection state transitions. event.to is a SyncState:
+// INITIAL | CONNECTING | AUTHENTICATING | SYNCING | CONNECTED | DISCONNECTED | BACKOFF | ERROR
 const unsubscribe = client.onConnectionStateChange((event) => {
-  if (event.to === 'OFFLINE') {
+  if (event.to === 'DISCONNECTED') {
     showToast('You are offline. Changes will sync when you reconnect.');
   }
   if (event.to === 'CONNECTED') {
     hideToast();
   }
-});`;
+});
+// By default the client reconnects indefinitely with capped backoff — a brief
+// server outage recovers on its own. See the Client reference for tuning backoff.`;
 
 <div className="not-prose">
   <CodeBlock title="src/lib/connection.ts" language="typescript" code={connectionEventCode} />
