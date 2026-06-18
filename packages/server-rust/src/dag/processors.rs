@@ -99,13 +99,19 @@ impl AggregatorState {
 struct GroupAggregator {
     count: u64,
     fields: HashMap<String, AggregatorState>,
+    /// The first-seen typed value of each GROUP BY field for this bucket, in
+    /// `group_by` order. Retained so `complete()` can emit the original typed
+    /// group value (not the stringified bucket key). A missing field is stored
+    /// as `Nil`, matching the null/missing collapse encoded in the bucket key.
+    group_values: Vec<rmpv::Value>,
 }
 
 impl GroupAggregator {
-    fn new() -> Self {
+    fn new(group_values: Vec<rmpv::Value>) -> Self {
         Self {
             count: 0,
             fields: HashMap::new(),
+            group_values,
         }
     }
 }
@@ -152,6 +158,9 @@ fn rmpv_to_f64(v: &rmpv::Value) -> Option<f64> {
     }
 }
 
+/// Renders a value as a plain string for the `SortProcessor`'s string-fallback
+/// comparison (used only when neither side is numeric). This is a lossy display
+/// form — not a grouping key; GROUP BY uses `tagged_key_part` instead.
 fn rmpv_to_key_part(v: &rmpv::Value) -> String {
     match v {
         rmpv::Value::String(s) => s.as_str().unwrap_or("").to_string(),
@@ -164,15 +173,41 @@ fn rmpv_to_key_part(v: &rmpv::Value) -> String {
     }
 }
 
-fn group_key_string(item: &rmpv::Value, group_by: &[String]) -> String {
-    let mut parts = Vec::with_capacity(group_by.len());
-    for field in group_by {
-        let val = get_field(item, field)
-            .map(rmpv_to_key_part)
-            .unwrap_or_default();
-        parts.push(val);
+/// Encodes one group-by field value into an unambiguous, self-delimiting key part.
+///
+/// Each part carries a one-char type tag so values of different types (and the
+/// empty string vs null) never collide, and string parts are length-prefixed so
+/// composite keys cannot be confused with one another (`["a", "b"]` cannot alias
+/// `["a|b"]`). A present-but-null field maps to the same `N` token as a missing
+/// field (see `group_key_string`), so the two collapse into one "no value" group
+/// — consistent with the predicate engine's NULL handling and `MongoDB` `$group`.
+fn tagged_key_part(v: &rmpv::Value) -> String {
+    match v {
+        rmpv::Value::Nil => "N".to_string(),
+        rmpv::Value::Boolean(b) => format!("B{}", u8::from(*b)),
+        rmpv::Value::Integer(i) => format!("I{i};"),
+        rmpv::Value::F32(f) => format!("F{};", f64::from(*f).to_bits()),
+        rmpv::Value::F64(f) => format!("F{};", f.to_bits()),
+        rmpv::Value::String(s) => {
+            let s = s.as_str().unwrap_or("");
+            format!("S{}:{s}", s.len())
+        }
+        other => format!("O{other:?};"),
     }
-    parts.join("|")
+}
+
+/// Builds the internal GROUP BY bucket key for a row. A missing field and a
+/// present-but-null field both produce the `N` token, so they group together;
+/// the empty string and every typed value remain distinct (see `tagged_key_part`).
+fn group_key_string(item: &rmpv::Value, group_by: &[String]) -> String {
+    let mut key = String::new();
+    for field in group_by {
+        match get_field(item, field) {
+            None => key.push('N'),
+            Some(v) => key.push_str(&tagged_key_part(v)),
+        }
+    }
+    key
 }
 
 // ---------------------------------------------------------------------------
@@ -530,7 +565,16 @@ impl Processor for AggregateProcessor {
         }
         inbox.drain(&mut |item| {
             let key = group_key_string(&item, group_by);
-            let group = self.partial.entry(key).or_insert_with(GroupAggregator::new);
+            let group = self.partial.entry(key).or_insert_with(|| {
+                // Sample the typed group-by values from the first row of the bucket.
+                // A missing field becomes Nil, mirroring the null/missing collapse
+                // in the bucket key, so every row in this bucket shares these values.
+                let group_values = group_by
+                    .iter()
+                    .map(|field| get_field(&item, field).cloned().unwrap_or(rmpv::Value::Nil))
+                    .collect();
+                GroupAggregator::new(group_values)
+            });
             // Every row increments the group cardinality (the unconditional COUNT).
             group.count += 1;
             // Accumulate per-field state only when the row carries a numeric value for that
@@ -598,31 +642,32 @@ impl Processor for AggregateProcessor {
                         ));
                     }
                     AggFunc::Avg => {
-                        let avg = state.map_or(0.0, |s| {
-                            if s.count > 0 {
+                        // AVG over zero numeric observations is undefined; emit Nil
+                        // (the SQL / DataFusion result for AVG of an empty set) rather
+                        // than a misleading 0.0.
+                        let avg = state.and_then(|s| {
+                            (s.count > 0).then(|| {
                                 // Group cardinalities never approach 2^52, so the divisor
                                 // cast is exact in practice.
                                 #[allow(clippy::cast_precision_loss)]
                                 let denom = s.count as f64;
                                 s.sum / denom
-                            } else {
-                                0.0
-                            }
+                            })
                         });
                         pairs.push((
                             rmpv::Value::String(format!("__avg_{field}").into()),
-                            rmpv::Value::F64(avg),
+                            avg.map_or(rmpv::Value::Nil, rmpv::Value::F64),
                         ));
                     }
                 }
             }
 
-            // Also emit the GROUP BY field values for join-back.
-            for field in &self.group_by {
-                pairs.push((
-                    rmpv::Value::String(field.clone().into()),
-                    rmpv::Value::String(key.clone().into()),
-                ));
+            // Also emit the GROUP BY field values for join-back, preserving the
+            // original type. `group_values` is sampled per-field in `group_by`
+            // order during phase 1; a null/missing group field is emitted as Nil.
+            // (`__key` above stays the stringified bucket id used as the entry key.)
+            for (field, value) in self.group_by.iter().zip(&group.group_values) {
+                pairs.push((rmpv::Value::String(field.clone().into()), value.clone()));
             }
             outbox.offer(0, rmpv::Value::Map(pairs));
         }
@@ -1424,9 +1469,9 @@ mod tests {
         let items: Vec<_> = emit_outbox.drain_bucket(0).collect();
         assert_eq!(items.len(), 2, "two distinct groups (A and B)");
 
-        // Find group A
+        // Find group A by its typed group-by column (no longer the encoded __key).
         let group_a = items.iter().find(|item| {
-            get_field(item, "__key")
+            get_field(item, "category")
                 .map(|v| v == &rmpv::Value::String("A".into()))
                 .unwrap_or(false)
         });
@@ -1437,7 +1482,7 @@ mod tests {
         );
 
         let group_b = items.iter().find(|item| {
-            get_field(item, "__key")
+            get_field(item, "category")
                 .map(|v| v == &rmpv::Value::String("B".into()))
                 .unwrap_or(false)
         });
@@ -1512,7 +1557,7 @@ mod tests {
         let group = |k: &str| {
             items
                 .iter()
-                .find(|it| get_field(it, "__key") == Some(&rmpv::Value::String(k.into())))
+                .find(|it| get_field(it, "category") == Some(&rmpv::Value::String(k.into())))
                 .cloned()
                 .unwrap()
         };
@@ -1548,6 +1593,160 @@ mod tests {
             assert!(get_field(it, "__avg_price").is_none(), "AVG not requested");
             assert!(get_field(it, "__sum").is_none(), "no legacy __sum");
         }
+    }
+
+    /// GROUP BY must keep null/missing as one "no value" group, the empty string
+    /// as its own group, and never collapse them together. Pre-fix, all three
+    /// landed in a single `""` bucket (count 4) with a stringified `""` column —
+    /// so the assertions below (a distinct Nil group + a distinct "" group) are a
+    /// negative control on the old behavior.
+    #[test]
+    fn group_by_null_missing_collapse_empty_string_distinct() {
+        let mut proc = AggregateProcessor::new(vec!["cat".to_string()], vec![]);
+        proc.init(&make_context()).unwrap();
+
+        let mut inbox = VecDequeInbox::new(16);
+        // null + missing collapse into one group (2 rows).
+        inbox.push(make_map_item(&[("cat", rmpv::Value::Nil)]));
+        inbox.push(make_map_item(&[("other", rmpv::Value::Integer(1.into()))]));
+        // empty string is a real, distinct value (1 row).
+        inbox.push(make_map_item(&[("cat", rmpv::Value::String("".into()))]));
+        // a normal value (1 row).
+        inbox.push(make_map_item(&[("cat", rmpv::Value::String("x".into()))]));
+
+        proc.process(0, &mut inbox, &mut VecDequeOutbox::new(1, 16))
+            .unwrap();
+        let mut out = VecDequeOutbox::new(1, 16);
+        proc.complete(&mut out).unwrap();
+        let items: Vec<_> = out.drain_bucket(0).collect();
+
+        assert_eq!(
+            items.len(),
+            3,
+            "three groups: {{null,missing}}, {{\"\"}}, {{\"x\"}}"
+        );
+
+        // The Nil group carries null + missing → count 2, emitted column is Nil.
+        let nil_group = items
+            .iter()
+            .find(|it| get_field(it, "cat") == Some(&rmpv::Value::Nil))
+            .expect("a Nil group must exist (null + missing)");
+        assert_eq!(
+            get_f64_field(nil_group, "__count").unwrap() as u64,
+            2,
+            "null and missing collapse into one group of 2"
+        );
+
+        // The empty-string group is distinct from the Nil group.
+        let empty_group = items
+            .iter()
+            .find(|it| get_field(it, "cat") == Some(&rmpv::Value::String("".into())))
+            .expect("empty-string is its own group, distinct from null");
+        assert_eq!(get_f64_field(empty_group, "__count").unwrap() as u64, 1);
+
+        let x_group = items
+            .iter()
+            .find(|it| get_field(it, "cat") == Some(&rmpv::Value::String("x".into())))
+            .expect("the 'x' group must exist");
+        assert_eq!(get_f64_field(x_group, "__count").unwrap() as u64, 1);
+    }
+
+    /// The emitted group-by column preserves the original type (no stringification),
+    /// for both single numeric keys and composite keys. Pre-fix every group column
+    /// was a `String` (the joined bucket key), so an `Integer(30)` assertion fails
+    /// on the old behavior.
+    #[test]
+    fn group_by_preserves_numeric_and_composite_key_types() {
+        // Single numeric key: GROUP BY age.
+        let mut proc = AggregateProcessor::new(vec!["age".to_string()], vec![]);
+        proc.init(&make_context()).unwrap();
+        let mut inbox = VecDequeInbox::new(8);
+        inbox.push(make_map_item(&[("age", rmpv::Value::Integer(30.into()))]));
+        inbox.push(make_map_item(&[("age", rmpv::Value::Integer(30.into()))]));
+        inbox.push(make_map_item(&[("age", rmpv::Value::Integer(40.into()))]));
+        proc.process(0, &mut inbox, &mut VecDequeOutbox::new(1, 8))
+            .unwrap();
+        let mut out = VecDequeOutbox::new(1, 8);
+        proc.complete(&mut out).unwrap();
+        let items: Vec<_> = out.drain_bucket(0).collect();
+        assert_eq!(items.len(), 2, "two numeric groups: 30 and 40");
+        let g30 = items
+            .iter()
+            .find(|it| get_field(it, "age") == Some(&rmpv::Value::Integer(30.into())))
+            .expect("group age=30 must be emitted as a typed Integer, not \"30\"");
+        assert_eq!(get_f64_field(g30, "__count").unwrap() as u64, 2);
+
+        // Composite key: GROUP BY (region, tier) round-trips both columns typed and
+        // does not alias across groups.
+        let mut proc =
+            AggregateProcessor::new(vec!["region".to_string(), "tier".to_string()], vec![]);
+        proc.init(&make_context()).unwrap();
+        let mut inbox = VecDequeInbox::new(8);
+        inbox.push(make_map_item(&[
+            ("region", rmpv::Value::String("eu".into())),
+            ("tier", rmpv::Value::Integer(1.into())),
+        ]));
+        inbox.push(make_map_item(&[
+            ("region", rmpv::Value::String("eu".into())),
+            ("tier", rmpv::Value::Integer(2.into())),
+        ]));
+        proc.process(0, &mut inbox, &mut VecDequeOutbox::new(1, 8))
+            .unwrap();
+        let mut out = VecDequeOutbox::new(1, 8);
+        proc.complete(&mut out).unwrap();
+        let items: Vec<_> = out.drain_bucket(0).collect();
+        assert_eq!(
+            items.len(),
+            2,
+            "composite (eu,1) and (eu,2) are distinct groups"
+        );
+        for it in &items {
+            assert_eq!(
+                get_field(it, "region"),
+                Some(&rmpv::Value::String("eu".into())),
+                "region column is a typed String"
+            );
+            assert!(
+                matches!(get_field(it, "tier"), Some(rmpv::Value::Integer(_))),
+                "tier column preserves its Integer type"
+            );
+        }
+    }
+
+    /// AVG over a group with zero numeric observations emits Nil (the SQL/DataFusion
+    /// result for AVG of an empty set), not 0.0. Pre-fix this returned `F64(0.0)`,
+    /// so the `Nil` assertion is a negative control.
+    #[test]
+    fn avg_over_empty_numeric_group_emits_nil() {
+        let mut proc = AggregateProcessor::new(
+            vec!["cat".to_string()],
+            vec![Aggregation {
+                func: AggFunc::Avg,
+                field: Some("price".to_string()),
+            }],
+        );
+        proc.init(&make_context()).unwrap();
+
+        let mut inbox = VecDequeInbox::new(8);
+        // Two rows in group "x" but `price` is non-numeric → zero numeric observations.
+        inbox.push(make_map_item(&[
+            ("cat", rmpv::Value::String("x".into())),
+            ("price", rmpv::Value::String("n/a".into())),
+        ]));
+        inbox.push(make_map_item(&[("cat", rmpv::Value::String("x".into()))]));
+
+        proc.process(0, &mut inbox, &mut VecDequeOutbox::new(1, 8))
+            .unwrap();
+        let mut out = VecDequeOutbox::new(1, 8);
+        proc.complete(&mut out).unwrap();
+        let items: Vec<_> = out.drain_bucket(0).collect();
+        assert_eq!(items.len(), 1);
+        assert_eq!(get_f64_field(&items[0], "__count").unwrap() as u64, 2);
+        assert_eq!(
+            get_field(&items[0], "__avg_price"),
+            Some(&rmpv::Value::Nil),
+            "AVG of zero numeric observations must be Nil, not 0.0"
+        );
     }
 
     // --- CombineProcessor ---

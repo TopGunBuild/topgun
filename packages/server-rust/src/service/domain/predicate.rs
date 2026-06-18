@@ -199,6 +199,17 @@ fn evaluate_leaf(predicate: &PredicateNode, ctx: &EvalContext) -> bool {
         return false;
     };
 
+    // SQL 3-valued logic: a comparison against NULL is UNKNOWN, so the row is
+    // excluded. A present-but-null field is therefore treated identically to an
+    // absent field (which already returned `false` above) — `field = x`,
+    // `field != x`, and every ordered / pattern / membership comparison below
+    // excludes both null and missing rows. `IS NULL` / `IS NOT NULL` are the
+    // only operators that match null/absent fields; they bypass this path via
+    // `evaluate_null_check`.
+    if actual.is_nil() {
+        return false;
+    }
+
     // Resolve comparison value: value_ref takes precedence over value
     let expected = if let Some(ref_str) = &predicate.value_ref {
         let Some(resolved) = resolve_value_ref(ref_str, ctx) else {
@@ -2167,5 +2178,114 @@ mod tests {
         let actual = rmpv::Value::String("user@company.com".into());
         let suffix = rmpv::Value::String("@COMPANY.COM".into());
         assert!(!evaluate_ends_with(&actual, &suffix));
+    }
+
+    // ---- NULL 3-valued logic (SQL semantics) ----
+
+    /// `field != x` must exclude BOTH a present-null field and a missing field,
+    /// while still including real, non-matching values. This is the core F4 fix:
+    /// a comparison against NULL is UNKNOWN, so the row is excluded — and null is
+    /// treated identically to missing. The pre-fix behavior (`null` passing `!= x`)
+    /// would fail the `null` assertion below, making this a negative control.
+    #[test]
+    fn neq_against_null_and_missing_both_excluded() {
+        let pred = leaf(
+            PredicateOp::Neq,
+            "status",
+            rmpv::Value::String("archived".into()),
+        );
+
+        let data_null = make_map(vec![("status", rmpv::Value::Nil)]);
+        let data_missing = make_map(vec![("other", rmpv::Value::Integer(1.into()))]);
+        let data_active = make_map(vec![("status", rmpv::Value::String("active".into()))]);
+        let data_archived = make_map(vec![("status", rmpv::Value::String("archived".into()))]);
+
+        // NEW semantics: null excluded (was the leak), missing excluded (unchanged),
+        // and both behave the same.
+        assert!(
+            !evaluate_predicate(&pred, &EvalContext::data_only(&data_null)),
+            "present-null must be excluded by `!= archived` (3-VL); pre-fix leaked it"
+        );
+        assert!(
+            !evaluate_predicate(&pred, &EvalContext::data_only(&data_missing)),
+            "missing field must be excluded by `!= archived`"
+        );
+        // Negative controls on real values are unchanged.
+        assert!(
+            evaluate_predicate(&pred, &EvalContext::data_only(&data_active)),
+            "control: a real non-matching value still passes `!= archived`"
+        );
+        assert!(
+            !evaluate_predicate(&pred, &EvalContext::data_only(&data_archived)),
+            "control: the matching value is still excluded by `!= archived`"
+        );
+    }
+
+    /// `field = x` against null/missing is UNKNOWN → excluded (was already false
+    /// for both, asserted here to lock the symmetry with Neq).
+    #[test]
+    fn eq_against_null_and_missing_both_excluded() {
+        let pred = leaf(
+            PredicateOp::Eq,
+            "status",
+            rmpv::Value::String("active".into()),
+        );
+        let data_null = make_map(vec![("status", rmpv::Value::Nil)]);
+        let data_missing = make_map(vec![("other", rmpv::Value::Integer(1.into()))]);
+        assert!(!evaluate_predicate(
+            &pred,
+            &EvalContext::data_only(&data_null)
+        ));
+        assert!(!evaluate_predicate(
+            &pred,
+            &EvalContext::data_only(&data_missing)
+        ));
+    }
+
+    /// Ordered comparisons (Gt/Gte/Lt/Lte) against a null field are UNKNOWN →
+    /// excluded, matching SQL 3-VL.
+    #[test]
+    fn ordered_comparisons_against_null_excluded() {
+        let data_null = make_map(vec![("age", rmpv::Value::Nil)]);
+        for op in [
+            PredicateOp::Gt,
+            PredicateOp::Gte,
+            PredicateOp::Lt,
+            PredicateOp::Lte,
+        ] {
+            let label = format!("{op:?}");
+            let pred = leaf(op, "age", rmpv::Value::Integer(18.into()));
+            assert!(
+                !evaluate_predicate(&pred, &EvalContext::data_only(&data_null)),
+                "{label} against a null field must be excluded (3-VL)"
+            );
+        }
+    }
+
+    /// `IS NULL` / `IS NOT NULL` are unaffected by the 3-VL guard: they remain the
+    /// only operators that match null/absent fields.
+    #[test]
+    fn is_null_still_matches_null_and_missing() {
+        let data_null = make_map(vec![("status", rmpv::Value::Nil)]);
+        let data_missing = make_map(vec![("other", rmpv::Value::Integer(1.into()))]);
+        let data_present = make_map(vec![("status", rmpv::Value::String("x".into()))]);
+
+        let is_null = PredicateNode {
+            op: PredicateOp::IsNull,
+            attribute: Some("status".to_string()),
+            ..Default::default()
+        };
+        assert!(evaluate_predicate(
+            &is_null,
+            &EvalContext::data_only(&data_null)
+        ));
+        assert!(evaluate_predicate(
+            &is_null,
+            &EvalContext::data_only(&data_missing)
+        ));
+        assert!(!evaluate_predicate(
+            &is_null,
+            &EvalContext::data_only(&data_present)
+        ));
     }
 }
