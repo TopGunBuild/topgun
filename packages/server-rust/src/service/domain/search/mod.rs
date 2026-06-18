@@ -1838,6 +1838,28 @@ impl SearchService {
             }
         }
     }
+
+    /// Returns a clone of the inner `Arc<SearchRegistry>`.
+    ///
+    /// Used by production wiring in `build_app()` so `AppState` can hold the
+    /// text-search registry directly and release standing subscriptions at
+    /// disconnect time without going through the service (avoids racing with
+    /// service shutdown).
+    #[must_use]
+    pub fn search_registry_arc(&self) -> Arc<SearchRegistry> {
+        Arc::clone(&self.registry)
+    }
+
+    /// Returns a clone of the inner `Arc<HybridSearchRegistry>`.
+    ///
+    /// Used by production wiring in `build_app()` so `AppState` can hold the
+    /// hybrid-search registry directly and release standing subscriptions at
+    /// disconnect time without going through the service (avoids racing with
+    /// service shutdown).
+    #[must_use]
+    pub fn hybrid_search_registry_arc(&self) -> Arc<HybridSearchRegistry> {
+        Arc::clone(&self.hybrid_registry)
+    }
 }
 
 #[async_trait]

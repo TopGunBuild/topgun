@@ -59,6 +59,7 @@ use topgun_server::service::domain::embedding::{
     EmbeddingProviderConfig, NoopConfig, VectorConfig as EmbeddingVectorConfig,
 };
 use topgun_server::service::domain::index::IndexObserverFactory;
+use topgun_server::service::domain::journal::JournalStore;
 use topgun_server::service::domain::messaging::{MessagingService, TopicRegistry};
 use topgun_server::service::domain::persistence::PersistenceService;
 use topgun_server::service::domain::query::{QueryRegistry, QueryService};
@@ -676,6 +677,10 @@ async fn main() -> anyhow::Result<()> {
             counter_registry,
             record_store_factory,
             index_observer_factory,
+            query_registry,
+            search_registry,
+            hybrid_search_registry,
+            journal_store,
         ) = build_services(
             node_id.clone(),
             Arc::clone(&cluster_state),
@@ -716,6 +721,10 @@ async fn main() -> anyhow::Result<()> {
                 counter_registry,
                 record_store_factory,
                 index_observer_factory,
+                query_registry,
+                search_registry,
+                hybrid_search_registry,
+                journal_store,
             ),
             Some(cluster_state),
         )
@@ -732,6 +741,10 @@ async fn main() -> anyhow::Result<()> {
             counter_registry,
             record_store_factory,
             index_observer_factory,
+            query_registry,
+            search_registry,
+            hybrid_search_registry,
+            journal_store,
         ) = build_services(
             node_id.clone(),
             Arc::clone(&cs),
@@ -751,6 +764,10 @@ async fn main() -> anyhow::Result<()> {
                 counter_registry,
                 record_store_factory,
                 index_observer_factory,
+                query_registry,
+                search_registry,
+                hybrid_search_registry,
+                journal_store,
             ),
             None,
         )
@@ -765,6 +782,10 @@ async fn main() -> anyhow::Result<()> {
         counter_registry,
         record_store_factory,
         index_observer_factory,
+        query_registry,
+        search_registry,
+        hybrid_search_registry,
+        journal_store,
     ) = cluster_state_for_services;
 
     // Spawn the eviction orchestrator after services are wired so it observes
@@ -866,6 +887,13 @@ async fn main() -> anyhow::Result<()> {
         lock_registry: Some(lock_registry),
         topic_registry: Some(topic_registry),
         counter_registry: Some(counter_registry),
+        // Disconnect-cleanup registries: dropping a connection must prune the
+        // subscriptions it held in each of these so the server does not leak
+        // per-connection subscription state for the lifetime of the process.
+        query_registry: Some(query_registry),
+        journal_store: Some(journal_store),
+        search_registry: Some(search_registry),
+        hybrid_search_registry: Some(hybrid_search_registry),
         admin_enabled,
     };
 
@@ -1096,6 +1124,10 @@ type BuildServicesResult = (
     Arc<CounterRegistry>,
     Arc<RecordStoreFactory>,
     Arc<IndexObserverFactory>,
+    Arc<QueryRegistry>,
+    Arc<SearchRegistry>,
+    Arc<HybridSearchRegistry>,
+    Arc<JournalStore>,
 );
 
 /// Cluster-mode parameters passed to [`build_services`] when starting with `--seed-nodes`.
@@ -1291,6 +1323,8 @@ fn build_services(
     } else {
         query_svc_base
     });
+    // Capture Arc<QueryRegistry> before query_svc is moved into the closure.
+    let query_registry_arc = query_svc.query_registry_arc();
     let messaging_svc = Arc::new(MessagingService::new(Arc::clone(&connection_registry)));
     // Capture Arc<TopicRegistry> before messaging_svc is moved into the closure.
     let topic_registry_arc = messaging_svc.topic_registry_arc();
@@ -1309,6 +1343,10 @@ fn build_services(
         search_needs_population,
         Arc::clone(&index_observer_factory),
     ));
+    // Capture the search subscription registries before search_svc is moved into
+    // the closure, so disconnect cleanup can prune live search subscriptions.
+    let search_registry_arc = search_svc.search_registry_arc();
+    let hybrid_search_registry_arc = search_svc.hybrid_search_registry_arc();
     // Wire the search_service back into the observer factory so hybrid notifier
     // tasks can be spawned when observers are created for each map.
     search_observer_factory.init_search_service(Arc::clone(&search_svc));
@@ -1325,6 +1363,9 @@ fn build_services(
     ));
     // Capture Arc<CounterRegistry> before persistence_svc is moved into the closure.
     let counter_registry_arc = persistence_svc.counter_registry_arc();
+    // Capture Arc<JournalStore> before persistence_svc is moved into the closure,
+    // so disconnect cleanup can prune journal subscriptions held per connection.
+    let journal_store_arc = persistence_svc.journal_store_arc();
 
     // Factory closure: creates a fresh OperationRouter + pipeline per worker.
     // Domain services are Arc-cloned (cheap reference count bump), while
@@ -1355,6 +1396,10 @@ fn build_services(
         counter_registry_arc,
         record_store_factory,
         Arc::clone(&index_observer_factory),
+        query_registry_arc,
+        search_registry_arc,
+        hybrid_search_registry_arc,
+        journal_store_arc,
     )
 }
 

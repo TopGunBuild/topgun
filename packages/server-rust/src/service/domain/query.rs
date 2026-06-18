@@ -397,7 +397,8 @@ impl MutationObserver for QueryMutationObserver {
 pub struct QueryService {
     query_registry: Arc<QueryRegistry>,
     record_store_factory: Arc<RecordStoreFactory>,
-    /// Retained for `unregister_by_connection` on client disconnect (module wiring deferred).
+    /// Retained so `unregister_by_connection` can release standing query
+    /// subscriptions when a client disconnects.
     #[allow(dead_code)]
     connection_registry: Arc<ConnectionRegistry>,
     /// Per-query Merkle manager for delta sync init.
@@ -526,6 +527,16 @@ impl QueryService {
     #[must_use]
     pub fn registry(&self) -> &Arc<QueryRegistry> {
         &self.query_registry
+    }
+
+    /// Returns a clone of the inner `Arc<QueryRegistry>`.
+    ///
+    /// Used by production wiring in `build_app()` so `AppState` can hold an
+    /// `Arc<QueryRegistry>` directly without going through the service at
+    /// disconnect time (avoids racing with service shutdown).
+    #[must_use]
+    pub fn query_registry_arc(&self) -> Arc<QueryRegistry> {
+        Arc::clone(&self.query_registry)
     }
 }
 

@@ -73,7 +73,6 @@ impl<S: RegistryEntry> SubscriptionRegistry<S> {
     ///
     /// Returns the IDs of all removed subscriptions. Called when a WebSocket
     /// connection closes so stale subscriptions are not left in the registry.
-    #[allow(dead_code)]
     #[must_use]
     pub fn unregister_by_connection(&self, connection_id: ConnectionId) -> Vec<String> {
         let mut removed = Vec::new();

@@ -78,6 +78,22 @@ pub struct NetworkModule {
     lock_registry: Option<Arc<crate::service::domain::LockRegistry>>,
     topic_registry: Option<Arc<crate::service::domain::messaging::TopicRegistry>>,
     counter_registry: Option<Arc<crate::service::domain::counter::CounterRegistry>>,
+    query_registry: Option<Arc<crate::service::domain::query::QueryRegistry>>,
+    journal_store: Option<Arc<crate::service::domain::journal::JournalStore>>,
+    search_registry: Option<
+        Arc<
+            crate::service::domain::search::SubscriptionRegistry<
+                crate::service::domain::search::SearchSubscription,
+            >,
+        >,
+    >,
+    hybrid_search_registry: Option<
+        Arc<
+            crate::service::domain::search::SubscriptionRegistry<
+                crate::service::domain::search::HybridSearchSubscription,
+            >,
+        >,
+    >,
 }
 
 impl NetworkModule {
@@ -101,6 +117,10 @@ impl NetworkModule {
             lock_registry: None,
             topic_registry: None,
             counter_registry: None,
+            query_registry: None,
+            journal_store: None,
+            search_registry: None,
+            hybrid_search_registry: None,
         }
     }
 
@@ -168,6 +188,56 @@ impl NetworkModule {
         self.counter_registry = Some(registry);
     }
 
+    /// Configures the live-query registry for session disconnect cleanup.
+    ///
+    /// When set, standing query subscriptions held by a disconnecting session
+    /// are unregistered. Consumers that do not use live queries can omit this call.
+    pub fn set_query_registry(
+        &mut self,
+        registry: Arc<crate::service::domain::query::QueryRegistry>,
+    ) {
+        self.query_registry = Some(registry);
+    }
+
+    /// Configures the journal store for session disconnect cleanup.
+    ///
+    /// When set, journal subscriptions held by a disconnecting session are
+    /// removed. Consumers that do not use the journal can omit this call.
+    pub fn set_journal_store(&mut self, store: Arc<crate::service::domain::journal::JournalStore>) {
+        self.journal_store = Some(store);
+    }
+
+    /// Configures the text-search registry for session disconnect cleanup.
+    ///
+    /// When set, standing search subscriptions held by a disconnecting session
+    /// are unregistered. Consumers that do not use live search can omit this call.
+    pub fn set_search_registry(
+        &mut self,
+        registry: Arc<
+            crate::service::domain::search::SubscriptionRegistry<
+                crate::service::domain::search::SearchSubscription,
+            >,
+        >,
+    ) {
+        self.search_registry = Some(registry);
+    }
+
+    /// Configures the hybrid-search registry for session disconnect cleanup.
+    ///
+    /// When set, standing hybrid-search subscriptions held by a disconnecting
+    /// session are unregistered. Consumers that do not use live hybrid search
+    /// can omit this call.
+    pub fn set_hybrid_search_registry(
+        &mut self,
+        registry: Arc<
+            crate::service::domain::search::SubscriptionRegistry<
+                crate::service::domain::search::HybridSearchSubscription,
+            >,
+        >,
+    ) {
+        self.hybrid_search_registry = Some(registry);
+    }
+
     /// Returns a shared reference to the connection registry.
     ///
     /// Other modules use this to inspect or broadcast to active connections.
@@ -213,6 +283,10 @@ impl NetworkModule {
                 lock_registry: None,
                 topic_registry: None,
                 counter_registry: None,
+                query_registry: None,
+                journal_store: None,
+                search_registry: None,
+                hybrid_search_registry: None,
             },
         )
     }
@@ -379,6 +453,10 @@ impl NetworkModule {
                 lock_registry: self.lock_registry,
                 topic_registry: self.topic_registry,
                 counter_registry: self.counter_registry,
+                query_registry: self.query_registry,
+                journal_store: self.journal_store,
+                search_registry: self.search_registry,
+                hybrid_search_registry: self.hybrid_search_registry,
             },
         );
 
@@ -428,6 +506,26 @@ struct AppServices {
     topic_registry: Option<Arc<crate::service::domain::messaging::TopicRegistry>>,
     /// Arc<CounterRegistry> for disconnect cleanup.
     counter_registry: Option<Arc<crate::service::domain::counter::CounterRegistry>>,
+    /// `Arc<QueryRegistry>` for disconnect cleanup.
+    query_registry: Option<Arc<crate::service::domain::query::QueryRegistry>>,
+    /// `Arc<JournalStore>` for disconnect cleanup.
+    journal_store: Option<Arc<crate::service::domain::journal::JournalStore>>,
+    /// Text-search `Arc<SubscriptionRegistry>` for disconnect cleanup.
+    search_registry: Option<
+        Arc<
+            crate::service::domain::search::SubscriptionRegistry<
+                crate::service::domain::search::SearchSubscription,
+            >,
+        >,
+    >,
+    /// Hybrid-search `Arc<SubscriptionRegistry>` for disconnect cleanup.
+    hybrid_search_registry: Option<
+        Arc<
+            crate::service::domain::search::SubscriptionRegistry<
+                crate::service::domain::search::HybridSearchSubscription,
+            >,
+        >,
+    >,
 }
 
 /// Single source of truth for the `topgun-server` HTTP route set.
@@ -633,6 +731,10 @@ fn build_app(
         lock_registry,
         topic_registry,
         counter_registry,
+        query_registry,
+        journal_store,
+        search_registry,
+        hybrid_search_registry,
     } = services;
     let layers = build_http_layers(&config);
 
@@ -741,6 +843,10 @@ fn build_app(
         lock_registry,
         topic_registry,
         counter_registry,
+        query_registry,
+        journal_store,
+        search_registry,
+        hybrid_search_registry,
         // This NetworkModule-managed path always mounts the admin plane and
         // enforces auth, so the extractor guard is enabled to match.
         admin_enabled: true,
