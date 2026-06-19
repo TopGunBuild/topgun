@@ -654,7 +654,13 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
         { store: 'kv', type: 'put', key: `${name}:${key}`, value: record },
       ];
       this.syncEngine
-        .recordOperation(name, 'PUT', String(key), { record, timestamp: record.timestamp }, mutations)
+        .recordOperation(
+          name,
+          'PUT',
+          String(key),
+          { record, timestamp: record.timestamp },
+          mutations,
+        )
         .catch((err) => logger.error({ err }, 'Failed to commit PUT op'));
       return record;
     };
@@ -752,7 +758,12 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
           key: `${name}:${key}`,
           value: records,
         },
-        { store: 'meta', type: 'put', key: `__sys__:${name}:tombstones`, value: orMap.getTombstones() },
+        {
+          store: 'meta',
+          type: 'put',
+          key: `__sys__:${name}:tombstones`,
+          value: orMap.getTombstones(),
+        },
       ];
 
       let first = true;

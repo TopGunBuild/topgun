@@ -58,6 +58,11 @@ function createMockStorage(): IStorageAdapter {
     }),
     getPendingOps: jest.fn().mockResolvedValue([]),
     markOpsSynced: jest.fn().mockResolvedValue(undefined),
+    deleteOp: jest.fn().mockResolvedValue(undefined),
+    commitWrite: jest.fn().mockImplementation(() => {
+      opId++;
+      return Promise.resolve(opId);
+    }),
     close: jest.fn().mockResolvedValue(undefined),
     batchPut: jest.fn().mockResolvedValue(undefined),
   };

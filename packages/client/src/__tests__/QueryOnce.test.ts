@@ -60,7 +60,12 @@ class MemoryStorageAdapter implements IStorageAdapter {
     this.opLog = this.opLog.filter((op) => op.id !== id);
   }
   async commitWrite(
-    mutations: Array<{ store: 'kv' | 'meta'; type: 'put' | 'remove'; key: string; value?: unknown }>,
+    mutations: Array<{
+      store: 'kv' | 'meta';
+      type: 'put' | 'remove';
+      key: string;
+      value?: unknown;
+    }>,
     op: Omit<OpLogEntry, 'id'>,
   ): Promise<number> {
     for (const m of mutations) {

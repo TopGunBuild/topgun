@@ -254,7 +254,9 @@ export class SyncEngine {
         if (!isNaN(numericId)) {
           this.storageAdapter
             .deleteOp(numericId)
-            .catch((err) => logger.error({ err, opId }, 'Failed to delete dropped op from storage'));
+            .catch((err) =>
+              logger.error({ err, opId }, 'Failed to delete dropped op from storage'),
+            );
         }
       },
     });
