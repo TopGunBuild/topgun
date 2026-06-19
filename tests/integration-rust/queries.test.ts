@@ -1399,7 +1399,7 @@ describe('Integration: Queries (Rust Server)', () => {
       const groups = byGroup(response.payload.results);
 
       // (a) correct counts + correct non-degenerate sums.
-      expect(groups.a.__count).toBe(3); // NEGATIVE-CONTROL temp break
+      expect(groups.a.__count).toBe(2);
       expect(groups.a.__sum_price).toBe(35);
       expect(groups.a.__sum_price).not.toBe(groups.a.__count);
       expect(groups.b.__count).toBe(1);
