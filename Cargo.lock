@@ -4966,6 +4966,7 @@ dependencies = [
  "redb",
  "regex",
  "reqwest",
+ "rmp",
  "rmp-serde",
  "rmpv",
  "serde",

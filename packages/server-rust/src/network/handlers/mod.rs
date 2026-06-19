@@ -10,6 +10,7 @@ pub mod admin_types;
 pub mod auth;
 pub mod auth_provider;
 pub mod auth_validator;
+pub mod decode;
 pub mod health;
 pub mod http_sync;
 pub mod metrics_endpoint;
