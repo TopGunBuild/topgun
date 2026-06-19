@@ -53,6 +53,27 @@ class MemoryStorageAdapter implements IStorageAdapter {
   }
   async markOpsSynced(lastId: number): Promise<void> {
     this.pending = this.pending.filter((op) => (op.id ?? 0) > lastId);
+    this.opLog = this.opLog.filter((op) => (op.id ?? 0) > lastId);
+  }
+  async deleteOp(id: number): Promise<void> {
+    this.pending = this.pending.filter((op) => op.id !== id);
+    this.opLog = this.opLog.filter((op) => op.id !== id);
+  }
+  async commitWrite(
+    mutations: Array<{
+      store: 'kv' | 'meta';
+      type: 'put' | 'remove';
+      key: string;
+      value?: unknown;
+    }>,
+    op: Omit<OpLogEntry, 'id'>,
+  ): Promise<number> {
+    for (const m of mutations) {
+      const target = m.store === 'meta' ? this.meta : this.kv;
+      if (m.type === 'remove') target.delete(m.key);
+      else target.set(m.key, m.value);
+    }
+    return this.appendOpLog(op);
   }
   async getAllKeys(): Promise<string[]> {
     return Array.from(this.kv.keys());

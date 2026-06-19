@@ -1,5 +1,5 @@
 import type { LWWRecord, ORMapRecord } from '@topgunbuild/core';
-import { IStorageAdapter, OpLogEntry } from '@topgunbuild/client';
+import { IStorageAdapter, OpLogEntry, StorageMutation } from '@topgunbuild/client';
 import { openDB } from 'idb';
 import type { IDBPDatabase } from 'idb';
 
@@ -7,7 +7,15 @@ import type { IDBPDatabase } from 'idb';
  * Represents an operation queued before IndexedDB is ready.
  */
 interface QueuedOperation {
-  type: 'put' | 'remove' | 'setMeta' | 'appendOpLog' | 'markOpsSynced' | 'batchPut';
+  type:
+    | 'put'
+    | 'remove'
+    | 'setMeta'
+    | 'appendOpLog'
+    | 'markOpsSynced'
+    | 'batchPut'
+    | 'commitWrite'
+    | 'deleteOp';
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- queued operation args are heterogeneous across operation types; a discriminated union would require one args type per op type
   args: any[];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- resolve/reject carry the result of the eventual async operation whose type varies by op type
@@ -111,6 +119,12 @@ export class IDBAdapter implements IStorageAdapter {
             break;
           case 'batchPut':
             result = await this.batchPutInternal(op.args[0]);
+            break;
+          case 'commitWrite':
+            result = await this.commitWriteInternal(op.args[0], op.args[1]);
+            break;
+          case 'deleteOp':
+            result = await this.deleteOpInternal(op.args[0]);
             break;
         }
         op.resolve(result);
@@ -238,18 +252,55 @@ export class IDBAdapter implements IStorageAdapter {
     return this.queueOrExecute('markOpsSynced', [lastId], () => this.markOpsSyncedInternal(lastId));
   }
 
+  // Compaction: DELETE acked ops (id <= lastId) rather than flagging them. A synced op has
+  // no further use — the durable kv_store/meta_store record committed alongside it is the
+  // source of truth — and retaining flagged rows grew op_log unboundedly across all sessions.
   private async markOpsSyncedInternal(lastId: number): Promise<void> {
     const tx = this.db?.transaction('op_log', 'readwrite');
     if (!tx) return;
-
-    let cursor = await tx.store.openCursor();
-    while (cursor) {
-      if (cursor.value.id <= lastId) {
-        const update = { ...cursor.value, synced: 1 };
-        await cursor.update(update);
-      }
-      cursor = await cursor.continue();
-    }
+    await tx.store.delete(IDBKeyRange.upperBound(lastId));
     await tx.done;
+  }
+
+  async deleteOp(id: number): Promise<void> {
+    return this.queueOrExecute('deleteOp', [id], () => this.deleteOpInternal(id));
+  }
+
+  private async deleteOpInternal(id: number): Promise<void> {
+    await this.db?.delete('op_log', id);
+  }
+
+  async commitWrite(mutations: StorageMutation[], op: Omit<OpLogEntry, 'id'>): Promise<number> {
+    return this.queueOrExecute('commitWrite', [mutations, op], () =>
+      this.commitWriteInternal(mutations, op),
+    );
+  }
+
+  // Crash-consistent local write: apply every KV/meta mutation AND append the op log entry
+  // in ONE readwrite transaction spanning all affected stores, so a record and its pending
+  // op are never observable independently (no record-without-op, no op-without-record).
+  private async commitWriteInternal(
+    mutations: StorageMutation[],
+    op: Omit<OpLogEntry, 'id'>,
+  ): Promise<number> {
+    if (!this.db) {
+      throw new Error('IDBAdapter.commitWrite called before database is ready');
+    }
+    const storeNames = new Set<'kv_store' | 'meta_store'>(['kv_store']);
+    for (const m of mutations) {
+      storeNames.add(m.store === 'meta' ? 'meta_store' : 'kv_store');
+    }
+    const tx = this.db.transaction([...storeNames, 'op_log'], 'readwrite');
+    for (const m of mutations) {
+      const store = tx.objectStore(m.store === 'meta' ? 'meta_store' : 'kv_store');
+      if (m.type === 'remove') {
+        await store.delete(m.key);
+      } else {
+        await store.put({ key: m.key, value: m.value });
+      }
+    }
+    const id = (await tx.objectStore('op_log').add({ ...op, synced: 0 })) as number;
+    await tx.done;
+    return id;
   }
 }

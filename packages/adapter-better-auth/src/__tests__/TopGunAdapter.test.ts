@@ -76,6 +76,22 @@ class MemoryStorageAdapter implements IStorageAdapter {
     });
   }
 
+  async deleteOp(id: number): Promise<void> {
+    this.opLog = this.opLog.filter((op) => op.id !== id);
+  }
+
+  async commitWrite(
+    mutations: Array<{ store: 'kv' | 'meta'; type: 'put' | 'remove'; key: string; value?: any }>,
+    op: Omit<OpLogEntry, 'id'>,
+  ): Promise<number> {
+    for (const m of mutations) {
+      const target = m.store === 'meta' ? this.meta : this.data;
+      if (m.type === 'remove') target.delete(m.key);
+      else target.set(m.key, m.value as never);
+    }
+    return this.appendOpLog(op);
+  }
+
   async getAllKeys(): Promise<string[]> {
     return Array.from(this.data.keys());
   }

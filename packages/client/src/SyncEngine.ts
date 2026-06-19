@@ -13,7 +13,7 @@ import type {
   GcPruneMessage,
   BatchMessage,
 } from '@topgunbuild/core';
-import type { IStorageAdapter } from './IStorageAdapter';
+import type { IStorageAdapter, StorageMutation } from './IStorageAdapter';
 import { QueryHandle } from './QueryHandle';
 import type { QueryFilter } from './QueryHandle';
 import type { HybridQueryHandle, HybridQueryFilter } from './HybridQueryHandle';
@@ -246,6 +246,19 @@ export class SyncEngine {
     this.backpressureController = new BackpressureController({
       config: this.backpressureConfig,
       opLog: this.opLog, // Pass reference, not copy
+      // Durable drop: when drop-oldest evicts an unsynced op from the in-memory opLog, also
+      // delete it from storage so it cannot resurrect on the next reload (memory/disk agree).
+      // op.id is a stringified integer; coerce to the numeric storage id at this boundary.
+      onOpDropped: (opId: string) => {
+        const numericId = parseInt(opId, 10);
+        if (!isNaN(numericId)) {
+          this.storageAdapter
+            .deleteOp(numericId)
+            .catch((err) =>
+              logger.error({ err, opId }, 'Failed to delete dropped op from storage'),
+            );
+        }
+      },
     });
 
     // Merge topic queue config with defaults to ensure consistent backpressure behavior
@@ -354,6 +367,10 @@ export class SyncEngine {
         this.lastSyncTimestamp = ts.millis;
         await this.saveOpLog();
       },
+      // Persist server-origin ORMap merges (merkle leaf + diff) so they survive offline
+      // reload — same canonical helpers as the local-write + applyServerEvent paths.
+      persistKey: (name, key) => this.persistORMapKey(name, key),
+      persistTombstones: (name) => this.persistORMapTombstones(name),
     });
 
     // Initialize Conflict Resolver client
@@ -648,6 +665,12 @@ export class SyncEngine {
       orTag?: string;
       timestamp: Timestamp;
     },
+    /**
+     * KV/meta mutations that must commit atomically with this op (the record/records-array
+     * put + ORMap tombstone meta). When provided, the op + mutations land in ONE durable
+     * transaction (crash-consistent); otherwise the op is appended alone.
+     */
+    mutations?: StorageMutation[],
   ): Promise<string> {
     // Check backpressure before adding new operation (delegates to BackpressureController)
     await this.backpressureController.checkBackpressure();
@@ -663,8 +686,17 @@ export class SyncEngine {
       synced: false,
     };
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- IStorageAdapter.appendOpLog accepts any; the op log entry is typed internally but the adapter interface is backend-agnostic
-    const id = await this.storageAdapter.appendOpLog(opLogEntry as any);
+    // Commit-first ordering: persist durably BEFORE touching the in-memory opLog. If the
+    // commit rejects, no op is pushed — the in-memory opLog and the durable op_log stay
+    // consistent (no op-without-record in either layer) — and we rethrow so the caller's
+    // .catch surfaces the durability failure. The atomic commitWrite keeps the (record, op)
+    // pair crash-consistent on disk; the bare appendOpLog path is for ops with no KV write.
+    const id =
+      mutations && mutations.length > 0
+        ? // eslint-disable-next-line @typescript-eslint/no-explicit-any -- adapter OpLogEntry (numeric id/synced) differs from the engine's; the adapter stores it opaquely
+          await this.storageAdapter.commitWrite(mutations, opLogEntry as any)
+        : // eslint-disable-next-line @typescript-eslint/no-explicit-any -- IStorageAdapter.appendOpLog accepts any; the op log entry is typed internally but the adapter interface is backend-agnostic
+          await this.storageAdapter.appendOpLog(opLogEntry as any);
     opLogEntry.id = String(id);
 
     this.opLog.push(opLogEntry as OpLogEntry);
@@ -1020,6 +1052,19 @@ export class SyncEngine {
         .markOpsSynced(maxSyncedId)
         .catch((err) => logger.error({ err }, 'Failed to mark ops synced'));
     }
+
+    // Compaction (in-memory): splice acked ops out of opLog so it holds only pending ops.
+    // Without this the array grows for the whole session and getPendingOpsCount() scans O(n)
+    // on every write. The tracker was already notified above; the durable KV record is the
+    // source of truth, so a synced op has no further in-memory use.
+    if (ackedCount > 0 || maxSyncedId !== -1) {
+      for (let i = this.opLog.length - 1; i >= 0; i--) {
+        if (this.opLog[i].synced) {
+          this.opLog.splice(i, 1);
+        }
+      }
+    }
+
     // Check low water mark after ACKs reduce pending count (delegates to BackpressureController)
     if (ackedCount > 0) {
       this.backpressureController.checkLowWaterMark();
@@ -1114,13 +1159,41 @@ export class SyncEngine {
       } else if (localMap instanceof ORMap) {
         if (eventType === 'OR_ADD' && orRecord) {
           localMap.apply(key, orRecord);
-          // We need to store ORMap records differently in storageAdapter or use a convention
-          // For now, skipping persistent storage update for ORMap in this example
+          // Persist server-origin ORMap state so it survives an offline reload — symmetric
+          // with the LWW path above. Uses the same storage convention as local ORMap writes.
+          await this.persistORMapKey(mapName, key);
         } else if (eventType === 'OR_REMOVE' && orTag) {
           localMap.applyTombstone(orTag);
+          // The removed key's record list changed and the tombstone set grew — persist both.
+          await this.persistORMapKey(mapName, key);
+          await this.persistORMapTombstones(mapName);
         }
       }
     }
+  }
+
+  /**
+   * Canonical ORMap key persistence. Writes the full record list for `key` under the
+   * `mapName:key` convention (or removes the entry when empty). Single source of truth for
+   * both local-write (TopGunClient) and server-origin (applyServerEvent / ORMapSyncHandler)
+   * ORMap persistence so the two paths cannot diverge.
+   */
+  public async persistORMapKey(mapName: string, key: string): Promise<void> {
+    const map = this.maps.get(mapName);
+    if (!(map instanceof ORMap)) return;
+    const records = map.getRecords(key);
+    if (records.length > 0) {
+      await this.storageAdapter.put(`${mapName}:${key}`, records);
+    } else {
+      await this.storageAdapter.remove(`${mapName}:${key}`);
+    }
+  }
+
+  /** Canonical ORMap tombstone persistence (the `__sys__:mapName:tombstones` meta key). */
+  public async persistORMapTombstones(mapName: string): Promise<void> {
+    const map = this.maps.get(mapName);
+    if (!(map instanceof ORMap)) return;
+    await this.storageAdapter.setMeta(`__sys__:${mapName}:tombstones`, map.getTombstones());
   }
 
   /**

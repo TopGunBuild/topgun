@@ -1,4 +1,4 @@
-import type { IStorageAdapter, OpLogEntry } from '@topgunbuild/client';
+import type { IStorageAdapter, OpLogEntry, StorageMutation } from '@topgunbuild/client';
 
 /**
  * In-memory storage adapter for the Sync Lab demo.
@@ -56,9 +56,21 @@ export class MemoryStorageAdapter implements IStorageAdapter {
   }
 
   async markOpsSynced(lastId: number): Promise<void> {
-    this.opLog.forEach(e => {
-      if (e.id <= lastId) e.synced = 1;
-    });
+    // Delete acked ops — the durable record is the source of truth (matches IDBAdapter).
+    this.opLog = this.opLog.filter(e => e.id > lastId);
+  }
+
+  async deleteOp(id: number): Promise<void> {
+    this.opLog = this.opLog.filter(e => e.id !== id);
+  }
+
+  async commitWrite(mutations: StorageMutation[], op: Omit<OpLogEntry, 'id'>): Promise<number> {
+    for (const m of mutations) {
+      const target = m.store === 'meta' ? this.meta : this.data;
+      if (m.type === 'remove') target.delete(m.key);
+      else target.set(m.key, m.value);
+    }
+    return this.appendOpLog(op);
   }
 
   async getAllKeys(): Promise<string[]> {

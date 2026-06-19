@@ -9,7 +9,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { TopGunClient } from '@topgunbuild/client';
-import type { IStorageAdapter, OpLogEntry } from '@topgunbuild/client';
+import type { IStorageAdapter, OpLogEntry, StorageMutation } from '@topgunbuild/client';
 import type { MCPServerConfig, MCPToolResult, ResolvedMCPServerConfig, ToolContext } from './types';
 import { allTools, toolHandlers } from './tools';
 import { createLogger, type Logger } from './logger';
@@ -355,10 +355,25 @@ class InMemoryStorageAdapter implements IStorageAdapter {
   }
 
   async markOpsSynced(lastId: number): Promise<void> {
-    for (const op of this.opLog) {
-      if (op.id !== undefined && op.id <= lastId) {
-        op.synced = 1;
+    // Delete acked ops — the durable KV record is the source of truth (matches IDBAdapter).
+    this.opLog = this.opLog.filter((op) => op.id === undefined || op.id > lastId);
+  }
+
+  async deleteOp(id: number): Promise<void> {
+    this.opLog = this.opLog.filter((op) => op.id !== id);
+  }
+
+  async commitWrite(mutations: StorageMutation[], op: Omit<OpLogEntry, 'id'>): Promise<number> {
+    // In-memory: apply mutations then append the op. No real transaction, but synchronous
+    // map mutations cannot partially fail, so the atomicity contract holds.
+    for (const m of mutations) {
+      const target = m.store === 'meta' ? this.meta : this.data;
+      if (m.type === 'remove') {
+        target.delete(m.key);
+      } else {
+        target.set(m.key, m.value);
       }
     }
+    return this.appendOpLog(op);
   }
 }

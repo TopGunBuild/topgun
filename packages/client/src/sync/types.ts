@@ -232,6 +232,14 @@ export interface BackpressureControllerConfig {
    * Reference to opLog array (shared state from SyncEngine).
    */
   opLog: OpLogEntry[];
+
+  /**
+   * Called when the `drop-oldest` strategy evicts an unsynced op from the in-memory opLog.
+   * SyncEngine wires this to delete the op from storage too, so a dropped op cannot resurrect
+   * on the next reload. Receives the stringified op id; the callee coerces to the numeric
+   * storage id.
+   */
+  onOpDropped?: (opId: string) => void;
 }
 
 // ============================================
@@ -1056,6 +1064,17 @@ export interface ORMapSyncHandlerConfig {
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- HLC timestamp shape is opaque at the callback boundary; the callee updates the HLC directly
   onTimestampUpdate: (timestamp: any) => Promise<void>;
+
+  /**
+   * Persist the full record list for an ORMap key (server-origin merge durability).
+   * Wired by SyncEngine to its canonical `persistORMapKey` helper.
+   */
+  persistKey: (mapName: string, key: string) => Promise<void>;
+
+  /**
+   * Persist an ORMap's tombstone set. Wired by SyncEngine to `persistORMapTombstones`.
+   */
+  persistTombstones: (mapName: string) => Promise<void>;
 }
 
 // ============================================

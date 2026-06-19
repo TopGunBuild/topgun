@@ -29,6 +29,7 @@ import { logger } from '../utils/logger';
 export class BackpressureController implements IBackpressureController {
   private readonly config: BackpressureConfig;
   private readonly opLog: OpLogEntry[];
+  private readonly onOpDropped?: (opId: string) => void;
 
   // Internal state
   private backpressurePaused: boolean = false;
@@ -40,6 +41,7 @@ export class BackpressureController implements IBackpressureController {
   constructor(controllerConfig: BackpressureControllerConfig) {
     this.config = controllerConfig.config;
     this.opLog = controllerConfig.opLog; // Shared reference, not a copy
+    this.onOpDropped = controllerConfig.onOpDropped;
   }
 
   // ============================================
@@ -242,6 +244,11 @@ export class BackpressureController implements IBackpressureController {
     if (oldestIndex !== -1) {
       const dropped = this.opLog[oldestIndex];
       this.opLog.splice(oldestIndex, 1);
+
+      // Also delete from durable storage so the dropped op cannot resurrect on reload
+      // (otherwise memory and disk diverge — the op is gone from this session's sync queue
+      // but still present in IndexedDB).
+      this.onOpDropped?.(dropped.id);
 
       logger.warn(
         { opId: dropped.id, mapName: dropped.mapName, key: dropped.key },

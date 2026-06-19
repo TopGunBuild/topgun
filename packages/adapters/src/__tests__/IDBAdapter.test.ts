@@ -365,6 +365,119 @@ describe('IDBAdapter', () => {
     });
   });
 
+  // SPEC-321 — offline-durability bundle (F4/F5/F6) at the IndexedDB layer.
+  describe('atomic commit, compaction-on-sync, single-op delete (SPEC-321)', () => {
+    // Count ALL op_log rows (including any that an old flag-only markOpsSynced would retain).
+    const countOpRows = async (a: IDBAdapter): Promise<number> => {
+      await a.waitForReady();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- reach into the raw idb handle to count rows the public API filters out
+      return (a as any).db.count('op_log');
+    };
+
+    it('commitWrite persists the KV record, meta, AND the op in one go', async () => {
+      await adapter.initialize(getUniqueDbName());
+      await adapter.waitForReady();
+
+      const id = await adapter.commitWrite(
+        [
+          { store: 'kv', type: 'put', key: 'tags:list1', value: [{ value: 'work', tag: 't1' }] },
+          { store: 'meta', type: 'put', key: '__sys__:tags:tombstones', value: ['t0'] },
+        ],
+        { key: 'list1', op: 'OR_ADD', synced: 0, mapName: 'tags' },
+      );
+
+      expect(typeof id).toBe('number');
+      expect(await adapter.get('tags:list1')).toEqual([{ value: 'work', tag: 't1' }]);
+      expect(await adapter.getMeta('__sys__:tags:tombstones')).toEqual(['t0']);
+      const pending = await adapter.getPendingOps();
+      expect(pending.length).toBe(1);
+      expect(pending[0].key).toBe('list1');
+    });
+
+    it('commitWrite is atomic: a failed mutation leaves NEITHER the record nor the op', async () => {
+      await adapter.initialize(getUniqueDbName());
+      await adapter.waitForReady();
+
+      // A function value is not structured-cloneable → the put rejects and aborts the whole
+      // transaction before the op_log.add runs (models a mid-commit IndexedDB failure).
+      await expect(
+        adapter.commitWrite(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- intentionally non-cloneable value to force a DataCloneError / txn abort
+          [{ store: 'kv', type: 'put', key: 'm:k1', value: (() => {}) as any }],
+          { key: 'k1', op: 'PUT', synced: 0, mapName: 'm' },
+        ),
+      ).rejects.toBeDefined();
+
+      expect(await adapter.get('m:k1')).toBeUndefined();
+      expect(await adapter.getPendingOps()).toHaveLength(0);
+      expect(await countOpRows(adapter)).toBe(0);
+    });
+
+    it('markOpsSynced DELETES acked rows (does not just flag them)', async () => {
+      await adapter.initialize(getUniqueDbName());
+      await adapter.waitForReady();
+
+      await adapter.appendOpLog({ key: 'k1', op: 'PUT', value: 'v1', synced: 0, mapName: 'm' });
+      const id2 = await adapter.appendOpLog({
+        key: 'k2',
+        op: 'PUT',
+        value: 'v2',
+        synced: 0,
+        mapName: 'm',
+      });
+      await adapter.appendOpLog({ key: 'k3', op: 'PUT', value: 'v3', synced: 0, mapName: 'm' });
+
+      await adapter.markOpsSynced(id2);
+
+      // Total ROW count drops to 1 — the acked rows are gone, not flagged-and-retained.
+      expect(await countOpRows(adapter)).toBe(1);
+      const pending = await adapter.getPendingOps();
+      expect(pending.map((p) => p.key)).toEqual(['k3']);
+    });
+
+    it('deleteOp removes a single op by id', async () => {
+      await adapter.initialize(getUniqueDbName());
+      await adapter.waitForReady();
+
+      const id1 = await adapter.appendOpLog({ key: 'k1', op: 'PUT', synced: 0, mapName: 'm' });
+      await adapter.appendOpLog({ key: 'k2', op: 'PUT', synced: 0, mapName: 'm' });
+
+      await adapter.deleteOp(id1);
+
+      expect(await countOpRows(adapter)).toBe(1);
+      const pending = await adapter.getPendingOps();
+      expect(pending.map((p) => p.key)).toEqual(['k2']);
+    });
+
+    it('a committed (record, op) pair survives a reload (new adapter, same db)', async () => {
+      const dbName = getUniqueDbName();
+      await adapter.initialize(dbName);
+      await adapter.waitForReady();
+      await adapter.commitWrite(
+        [{ store: 'kv', type: 'put', key: 'm:k1', value: { value: 'hi' } }],
+        {
+          key: 'k1',
+          op: 'PUT',
+          synced: 0,
+          mapName: 'm',
+        },
+      );
+      await adapter.close();
+
+      // Reload: a fresh adapter over the SAME database.
+      const reloaded = new IDBAdapter();
+      await reloaded.initialize(dbName);
+      await reloaded.waitForReady();
+      try {
+        expect(await reloaded.get('m:k1')).toEqual({ value: 'hi' });
+        const pending = await reloaded.getPendingOps();
+        expect(pending.map((p) => p.key)).toEqual(['k1']);
+      } finally {
+        await reloaded.close();
+      }
+    });
+  });
+
   describe('persistence across operations', () => {
     it('should persist data between get/put cycles', async () => {
       const dbName = getUniqueDbName();

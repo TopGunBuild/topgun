@@ -6,7 +6,7 @@ import type {
   EntryProcessorResult,
   SearchOptions,
 } from '@topgunbuild/core';
-import type { IStorageAdapter } from './IStorageAdapter';
+import type { IStorageAdapter, StorageMutation } from './IStorageAdapter';
 import { SyncEngine } from './SyncEngine';
 import type { BackoffConfig, SqlQueryResult } from './SyncEngine';
 import type {
@@ -647,12 +647,21 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- key and value types are erased at the wrapper level; actual types flow from the caller's overload
     lwwMap.set = (key: any, value: any, ttlMs?: number) => {
       const record = originalSet(key, value, ttlMs);
-      this.storageAdapter
-        .put(`${name}:${key}`, record)
-        .catch((err) => logger.error({ err }, 'Failed to put record to storage'));
+      // Atomic durable write: the KV record + its op-log entry commit in ONE transaction
+      // (crash-consistent — no record-without-op / op-without-record). The optimistic
+      // in-memory mutation above is unaffected; on commit failure the op is not queued.
+      const mutations: StorageMutation[] = [
+        { store: 'kv', type: 'put', key: `${name}:${key}`, value: record },
+      ];
       this.syncEngine
-        .recordOperation(name, 'PUT', String(key), { record, timestamp: record.timestamp })
-        .catch((err) => logger.error({ err }, 'Failed to record PUT op'));
+        .recordOperation(
+          name,
+          'PUT',
+          String(key),
+          { record, timestamp: record.timestamp },
+          mutations,
+        )
+        .catch((err) => logger.error({ err }, 'Failed to commit PUT op'));
       return record;
     };
 
@@ -660,15 +669,18 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- key type is erased at the wrapper level; actual type flows from the caller's overload
     lwwMap.remove = (key: any) => {
       const tombstone = originalRemove(key);
-      this.storageAdapter
-        .put(`${name}:${key}`, tombstone)
-        .catch((err) => logger.error({ err }, 'Failed to put tombstone to storage'));
+      const mutations: StorageMutation[] = [
+        { store: 'kv', type: 'put', key: `${name}:${key}`, value: tombstone },
+      ];
       this.syncEngine
-        .recordOperation(name, 'REMOVE', String(key), {
-          record: tombstone,
-          timestamp: tombstone.timestamp,
-        })
-        .catch((err) => logger.error({ err }, 'Failed to record REMOVE op'));
+        .recordOperation(
+          name,
+          'REMOVE',
+          String(key),
+          { record: tombstone, timestamp: tombstone.timestamp },
+          mutations,
+        )
+        .catch((err) => logger.error({ err }, 'Failed to commit REMOVE op'));
       return tombstone;
     };
 
@@ -712,15 +724,19 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     orMap.add = (key: any, value: any, ttlMs?: number) => {
       const record = originalAdd(key, value, ttlMs);
 
-      // Persist records
-      this.persistORMapKey(name, orMap, key);
-
+      // Atomic durable write: the records-array KV put + its op-log entry in ONE transaction.
+      const mutations: StorageMutation[] = [
+        { store: 'kv', type: 'put', key: `${name}:${key}`, value: orMap.getRecords(key) },
+      ];
       this.syncEngine
-        .recordOperation(name, 'OR_ADD', String(key), {
-          orRecord: record,
-          timestamp: record.timestamp,
-        })
-        .catch((err) => logger.error({ err }, 'Failed to record OR_ADD op'));
+        .recordOperation(
+          name,
+          'OR_ADD',
+          String(key),
+          { orRecord: record, timestamp: record.timestamp },
+          mutations,
+        )
+        .catch((err) => logger.error({ err }, 'Failed to commit OR_ADD op'));
       return record;
     };
 
@@ -730,15 +746,38 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
       const tombstones = originalRemove(key, value);
       const timestamp = this.syncEngine.getHLC().now();
 
-      // Update storage for the key (items removed)
-      this.persistORMapKey(name, orMap, key);
-      // Update storage for tombstones
-      this.persistORMapTombstones(name, orMap);
+      // The removed key's record list shrank and the tombstone set grew — commit both the KV
+      // records-array (or delete when empty) and the tombstone meta atomically with the FIRST
+      // OR_REMOVE op. Subsequent tombstone tags for this remove are op-only appends; the
+      // durable KV/meta state is already captured by the first commit.
+      const records = orMap.getRecords(key);
+      const mutations: StorageMutation[] = [
+        {
+          store: 'kv',
+          type: records.length > 0 ? 'put' : 'remove',
+          key: `${name}:${key}`,
+          value: records,
+        },
+        {
+          store: 'meta',
+          type: 'put',
+          key: `__sys__:${name}:tombstones`,
+          value: orMap.getTombstones(),
+        },
+      ];
 
+      let first = true;
       for (const tag of tombstones) {
         this.syncEngine
-          .recordOperation(name, 'OR_REMOVE', String(key), { orTag: tag, timestamp })
-          .catch((err) => logger.error({ err }, 'Failed to record OR_REMOVE op'));
+          .recordOperation(
+            name,
+            'OR_REMOVE',
+            String(key),
+            { orTag: tag, timestamp },
+            first ? mutations : undefined,
+          )
+          .catch((err) => logger.error({ err }, 'Failed to commit OR_REMOVE op'));
+        first = false;
       }
       return tombstones;
     };
@@ -779,21 +818,6 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     } catch (e) {
       logger.error({ mapName: name, err: e }, 'Failed to restore ORMap');
     }
-  }
-
-  private async persistORMapKey<K, V>(mapName: string, orMap: ORMap<K, V>, key: K) {
-    const records = orMap.getRecords(key);
-    if (records.length > 0) {
-      await this.storageAdapter.put(`${mapName}:${key}`, records);
-    } else {
-      await this.storageAdapter.remove(`${mapName}:${key}`);
-    }
-  }
-
-  private async persistORMapTombstones<K, V>(mapName: string, orMap: ORMap<K, V>) {
-    const tombstoneKey = `__sys__:${mapName}:tombstones`;
-    const tombstones = orMap.getTombstones();
-    await this.storageAdapter.setMeta(tombstoneKey, tombstones);
   }
 
   /**
