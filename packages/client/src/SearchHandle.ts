@@ -139,7 +139,19 @@ export class SearchHandle<T = unknown> {
    * @returns Array of search results
    */
   getResults(): SearchResult<T>[] {
-    return Array.from(this.results.values()).sort((a, b) => b.score - a.score);
+    const sorted = Array.from(this.results.values()).sort((a, b) => b.score - a.score);
+
+    // Render-time top-N window clamp read from the current options each call, so
+    // a re-setOptions with a new limit takes effect on the next emission. This is
+    // a non-destructive view slice — this.results is never mutated — so it
+    // composes with the server's displacement LEAVE retractions without
+    // double-dropping rows and breaking the net-N invariant.
+    const limit = this._options?.limit;
+    if (Number.isInteger(limit) && (limit as number) > 0) {
+      return sorted.slice(0, limit);
+    }
+
+    return sorted;
   }
 
   /**

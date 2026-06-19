@@ -69,6 +69,12 @@ export class QueryHandle<T> {
   private listeners: Set<SubscribeCallback<T>> = new Set();
   private currentResults: Map<string, T> = new Map();
 
+  // Intent flag distinguishing a live-window handle (render-time top-N clamp
+  // applies) from a page-accumulation handle. Once loadMore() runs, the handle
+  // is permanently in page-accumulation mode and the clamp must NOT apply,
+  // otherwise accumulated pages beyond `limit` would be hidden.
+  private _paginated: boolean = false;
+
   // Change tracking for delta notifications
   private changeTracker = new ChangeTracker<T>();
   private pendingChanges: ChangeEvent<T>[] = [];
@@ -400,6 +406,20 @@ export class QueryHandle<T> {
       });
     }
 
+    // Render-time top-N window clamp. Keeps the HEAD of the sort-ordered array
+    // (the N rows the active comparator ranks first). This is a non-destructive
+    // view slice — currentResults is never mutated — so it composes with the
+    // server's displacement LEAVE retractions without double-dropping rows and
+    // breaking the net-N invariant. Skipped once the handle is paginated, since
+    // loadMore intentionally accumulates rows beyond `limit`.
+    if (
+      !this._paginated &&
+      Number.isInteger(this.filter.limit) &&
+      (this.filter.limit as number) > 0
+    ) {
+      return results.slice(0, this.filter.limit);
+    }
+
     return results;
   }
 
@@ -426,6 +446,9 @@ export class QueryHandle<T> {
    * prune those prior-page rows.
    */
   private mergePageResults(items: { key: string; value: T }[]): void {
+    // Entering page-accumulation mode permanently disables the live-window
+    // top-N clamp so accumulated pages beyond `limit` remain visible.
+    this._paginated = true;
     for (const item of items) {
       this.currentResults.set(item.key, item.value);
     }
