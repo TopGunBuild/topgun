@@ -1,4 +1,4 @@
-import { IStorageAdapter, OpLogEntry } from '../IStorageAdapter';
+import { IStorageAdapter, OpLogEntry, StorageMutation } from '../IStorageAdapter';
 import { EncryptionManager } from '../crypto/EncryptionManager';
 
 /**
@@ -104,7 +104,14 @@ export class EncryptedStorageAdapter implements IStorageAdapter {
   // --- OpLog ---
 
   async appendOpLog(entry: Omit<OpLogEntry, 'id'>): Promise<number> {
-    // Encrypt sensitive fields: value, record, orRecord
+    return this.wrapped.appendOpLog(await this.encryptOpEntry(entry));
+  }
+
+  /**
+   * Encrypts the sensitive op-log fields (value, record, orRecord). 'key', 'op', 'mapName',
+   * 'orTag', 'hlc', 'synced' remain plaintext for indexing. Shared by appendOpLog + commitWrite.
+   */
+  private async encryptOpEntry(entry: Omit<OpLogEntry, 'id'>): Promise<Omit<OpLogEntry, 'id'>> {
     const encryptedEntry = { ...entry };
 
     if (entry.value !== undefined) {
@@ -124,9 +131,26 @@ export class EncryptedStorageAdapter implements IStorageAdapter {
       encryptedEntry.orRecord = { iv: enc.iv, data: enc.data } as any;
     }
 
-    // Note: 'key', 'op', 'mapName', 'orTag', 'hlc', 'synced' remain plaintext for indexing
+    return encryptedEntry;
+  }
 
-    return this.wrapped.appendOpLog(encryptedEntry);
+  async commitWrite(mutations: StorageMutation[], op: Omit<OpLogEntry, 'id'>): Promise<number> {
+    // Encrypt each put mutation's value (removes carry no value); the wrapped adapter
+    // provides the atomic single-transaction guarantee over the encrypted blobs.
+    const encryptedMutations: StorageMutation[] = await Promise.all(
+      mutations.map(async (m) => {
+        if (m.type === 'put' && m.value !== undefined) {
+          const enc = await EncryptionManager.encrypt(this.key, m.value);
+          return { ...m, value: { iv: enc.iv, data: enc.data } };
+        }
+        return m;
+      }),
+    );
+    return this.wrapped.commitWrite(encryptedMutations, await this.encryptOpEntry(op));
+  }
+
+  async deleteOp(id: number): Promise<void> {
+    return this.wrapped.deleteOp(id);
   }
 
   async getPendingOps(): Promise<OpLogEntry[]> {

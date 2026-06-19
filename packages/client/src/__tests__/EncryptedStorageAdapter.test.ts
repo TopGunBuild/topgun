@@ -44,9 +44,23 @@ class MockStorageAdapter implements IStorageAdapter {
     return this.opLog.filter((o) => o.synced === 0);
   }
   async markOpsSynced(lastId: number): Promise<void> {
-    this.opLog.forEach((o) => {
-      if (o.id && o.id <= lastId) o.synced = 1;
-    });
+    this.opLog = this.opLog.filter((o) => !o.id || o.id > lastId);
+  }
+
+  async deleteOp(id: number): Promise<void> {
+    this.opLog = this.opLog.filter((o) => o.id !== id);
+  }
+
+  async commitWrite(
+    mutations: Array<{ store: 'kv' | 'meta'; type: 'put' | 'remove'; key: string; value?: any }>,
+    op: Omit<OpLogEntry, 'id'>,
+  ): Promise<number> {
+    for (const m of mutations) {
+      const target = m.store === 'meta' ? this.meta : this.store;
+      if (m.type === 'remove') target.delete(m.key);
+      else target.set(m.key, m.value);
+    }
+    return this.appendOpLog(op);
   }
 
   async getAllKeys(): Promise<string[]> {

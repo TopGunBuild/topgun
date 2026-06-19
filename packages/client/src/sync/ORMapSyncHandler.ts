@@ -114,9 +114,12 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
         const result = map.mergeKey(key, records, tombstones);
         totalAdded += result.added;
         totalUpdated += result.updated;
+        // Persist server-origin merge so it survives an offline reload (symmetric with LWW).
+        await this.config.persistKey(mapName, key);
       }
 
       if (totalAdded > 0 || totalUpdated > 0) {
+        await this.config.persistTombstones(mapName);
         logger.info(
           { mapName, added: totalAdded, updated: totalUpdated },
           'Synced ORMap records from server',
@@ -149,9 +152,12 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
         const result = map.mergeKey(key, records, tombstones);
         totalAdded += result.added;
         totalUpdated += result.updated;
+        // Persist server-origin merge so it survives an offline reload (symmetric with LWW).
+        await this.config.persistKey(mapName, key);
       }
 
       if (totalAdded > 0 || totalUpdated > 0) {
+        await this.config.persistTombstones(mapName);
         logger.info(
           { mapName, added: totalAdded, updated: totalUpdated },
           'Merged ORMap diff from server',

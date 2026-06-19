@@ -25,7 +25,7 @@ import {
 } from './connection';
 
 // Type imports
-import type { IStorageAdapter, OpLogEntry } from './IStorageAdapter';
+import type { IStorageAdapter, OpLogEntry, StorageMutation } from './IStorageAdapter';
 import type { LWWRecord, PredicateNode } from '@topgunbuild/core';
 import type {
   QueryFilter,
@@ -168,6 +168,7 @@ export type { AuthProvider, AuthEvent, AuthEventType, TokenExchangeConfig } from
 export type {
   IStorageAdapter,
   OpLogEntry,
+  StorageMutation,
   LWWRecord,
   PredicateNode,
   QueryFilter,
