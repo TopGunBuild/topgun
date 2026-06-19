@@ -31,6 +31,21 @@ export interface AutoConnectionProviderConfig {
   syncMaps?: string[];
   /** Custom fetch implementation for HTTP mode */
   fetchImpl?: typeof fetch;
+  /**
+   * Reconnect ceiling for the *persistent* WebSocket connection once WS is the
+   * active transport (default: Infinity — retry indefinitely with capped backoff,
+   * matching SingleServerProvider). This is independent of `maxWsAttempts`, which
+   * only bounds the initial WS-vs-HTTP negotiation probe. Set a finite value for a
+   * bounded policy; on exhaustion the WS sub-provider emits a terminal
+   * ReconnectExhaustedError 'error' event.
+   */
+  maxReconnectAttempts?: number;
+  /** Initial reconnect delay in ms for the persistent WS connection (default: 1000) */
+  reconnectDelayMs?: number;
+  /** Backoff multiplier for the persistent WS connection (default: 2) */
+  backoffMultiplier?: number;
+  /** Maximum reconnect delay in ms for the persistent WS connection (default: 30000) */
+  maxReconnectDelayMs?: number;
 }
 
 /**
@@ -69,24 +84,40 @@ export class AutoConnectionProvider implements IConnectionProvider {
 
     // Try WebSocket first
     const wsUrl = this.toWsUrl(this.config.url);
+    const reconnectDelayMs = this.config.reconnectDelayMs ?? 1000;
 
     for (let attempt = 0; attempt < this.maxWsAttempts; attempt++) {
-      try {
-        const wsProvider = new SingleServerProvider({
-          url: wsUrl,
-          maxReconnectAttempts: 1,
-          reconnectDelayMs: 1000,
-        });
+      // Probe with a single-shot provider: maxReconnectAttempts: 0 so a failed
+      // probe never spins a background reconnect loop while we are still deciding
+      // WS-vs-HTTP. On success we PROMOTE this exact socket to a resilient
+      // persistent connection (no second connect), keeping its browser
+      // online/offline listeners for instant network-return reconnect.
+      const wsProvider = new SingleServerProvider({
+        url: wsUrl,
+        maxReconnectAttempts: 0,
+        reconnectDelayMs,
+        backoffMultiplier: this.config.backoffMultiplier,
+        maxReconnectDelayMs: this.config.maxReconnectDelayMs,
+      });
 
+      try {
         await wsProvider.connect();
 
-        // WebSocket connected successfully
+        // WebSocket connected: promote the probe to a resilient persistent
+        // connection so it survives drops (deploys, sleeps, server bounces)
+        // instead of giving up — the old maxReconnectAttempts: 1 abandoned WS
+        // after a single failed reconnect. Default is Infinity (capped backoff).
+        wsProvider.setMaxReconnectAttempts(this.config.maxReconnectAttempts ?? Infinity);
         this.activeProvider = wsProvider;
         this.proxyEvents(wsProvider);
         logger.info({ url: wsUrl }, 'AutoConnectionProvider: WebSocket connected');
         return;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- caught error is typed as unknown; any is needed to access .message for the debug log during WS retry loop
       } catch (err: any) {
+        // Close the failed probe so it cannot linger (defensive — with
+        // maxReconnectAttempts: 0 there is no background timer, but this also
+        // tears down the socket and any in-flight connect promise).
+        await wsProvider.close().catch(() => {});
         logger.debug(
           { attempt: attempt + 1, maxAttempts: this.maxWsAttempts, err: err.message },
           'AutoConnectionProvider: WebSocket attempt failed',

@@ -20,6 +20,20 @@ import { logger } from '../utils/logger';
 import type { IWebSocketManager, WebSocketManagerConfig } from './types';
 
 /**
+ * Duck-typed check for the terminal reconnect-give-up signal. Matched by the
+ * `terminal === true` flag rather than `instanceof` so it holds across realms
+ * and for any connection provider (single-server, cluster, custom) that adopts
+ * the same convention without importing the connection module here.
+ */
+function isReconnectExhaustedError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { terminal?: unknown }).terminal === true
+  );
+}
+
+/**
  * WebSocketManager implements IWebSocketManager.
  *
  * Manages WebSocket connections via IConnectionProvider.
@@ -61,6 +75,14 @@ export class WebSocketManager implements IWebSocketManager {
     // Set up event handlers
     this.connectionProvider.on('connected', (_nodeId: string) => {
       logger.info('ConnectionProvider connected.');
+      // Re-arm the state machine to CONNECTING on every freshly-opened socket.
+      // On a RECONNECT the machine sits in DISCONNECTED when this fires, so without
+      // this re-arm the following CONNECTING→AUTHENTICATING auth step would instead
+      // be an invalid DISCONNECTED→AUTHENTICATING transition; the AUTH_ACK would then
+      // land in the wrong state and strand the client in CONNECTING (the TODO-414
+      // "connects but never finishes" symptom). No-op on the initial connect, where
+      // WebSocketManager.connect() already transitioned to CONNECTING.
+      this.config.stateMachine.transition(SyncState.CONNECTING);
       this.config.onConnected?.();
     });
 
@@ -73,8 +95,12 @@ export class WebSocketManager implements IWebSocketManager {
     });
 
     this.connectionProvider.on('reconnected', (_nodeId: string) => {
+      // Informational only. Every successful socket open — initial OR reconnect —
+      // drives re-arm + auth exactly once through the 'connected' handler above,
+      // which always fires first. Running auth again here produced a duplicate AUTH
+      // frame and an invalid AUTHENTICATING→CONNECTING transition (the F7 double-auth
+      // bug). Kept purely for provider-level observability.
       logger.info('ConnectionProvider reconnected.');
-      this.config.stateMachine.transition(SyncState.CONNECTING);
       this.config.onReconnected?.();
     });
 
@@ -92,6 +118,16 @@ export class WebSocketManager implements IWebSocketManager {
 
     this.connectionProvider.on('error', (error: Error) => {
       logger.error({ err: error }, 'ConnectionProvider error');
+      // A ReconnectExhaustedError is the terminal "we gave up" signal — only ever
+      // emitted when a caller configured a finite reconnect budget and it ran out.
+      // Surface it honestly as SyncState.ERROR so consumers observing
+      // onConnectionStateChange learn that reconnection has stopped, instead of
+      // believing the client is still silently retrying. Transient WebSocket
+      // 'error' events (which do NOT stop reconnect) carry an ordinary Error and
+      // leave the state machine in DISCONNECTED/backoff.
+      if (isReconnectExhaustedError(error)) {
+        this.config.stateMachine.transition(SyncState.ERROR);
+      }
     });
 
     // Start connection

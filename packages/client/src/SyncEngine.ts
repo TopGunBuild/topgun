@@ -92,7 +92,14 @@ export interface BackoffConfig {
   multiplier: number;
   /** Whether to add random jitter to delay (default: true) */
   jitter: boolean;
-  /** Maximum number of retry attempts before entering ERROR state (default: 10) */
+  /**
+   * Maximum number of reconnect attempts before giving up (default: Infinity).
+   * With the default, transient/network outages are retried indefinitely at the
+   * capped backoff interval (the offline-first contract). Set a finite number for
+   * a bounded policy: on exhaustion the engine transitions to SyncState.ERROR and
+   * fires onConnectionStateChange with the terminal state — it does NOT retry
+   * forever and does NOT fail silently.
+   */
   maxRetries: number;
 }
 
@@ -128,13 +135,11 @@ export interface SyncEngineConfig {
   onAuthRequired?: (error: AuthRequiredError) => void;
 }
 
-const DEFAULT_BACKOFF_CONFIG: BackoffConfig = {
-  initialDelayMs: 1000,
-  maxDelayMs: 30000,
-  multiplier: 2,
-  jitter: true,
-  maxRetries: 10,
-};
+// NOTE: reconnect/backoff defaults live in ONE place — SingleServerProvider's
+// DEFAULT_CONFIG (the component that actually executes reconnect). SyncEngine no
+// longer keeps a parallel BackoffConfig; `config.backoff` is mapped straight to the
+// connection provider in TopGunClient. This avoids the "two sources of truth, one
+// dead" trap where editing the wrong half changed nothing.
 
 export class SyncEngine {
   private readonly nodeId: string;
@@ -142,7 +147,6 @@ export class SyncEngine {
   private readonly hlc: HLC;
   private readonly stateMachine: SyncStateMachine;
   private readonly heartbeatConfig: HeartbeatConfig;
-  private readonly backoffConfig: BackoffConfig;
 
   // WebSocketManager handles all connection/websocket operations
   private readonly webSocketManager: WebSocketManager;
@@ -232,12 +236,6 @@ export class SyncEngine {
       enabled: config.heartbeat?.enabled ?? true,
     };
 
-    // Merge backoff config with defaults
-    this.backoffConfig = {
-      ...DEFAULT_BACKOFF_CONFIG,
-      ...config.backoff,
-    };
-
     // Merge backpressure config with defaults
     this.backpressureConfig = {
       ...DEFAULT_BACKPRESSURE_CONFIG,
@@ -260,12 +258,13 @@ export class SyncEngine {
     this.webSocketManager = new WebSocketManager({
       connectionProvider: config.connectionProvider,
       stateMachine: this.stateMachine,
-      backoffConfig: this.backoffConfig,
       heartbeatConfig: this.heartbeatConfig,
       onMessage: (msg) => this.handleServerMessage(msg),
       onConnected: () => this.handleConnectionEstablished(),
       onDisconnected: () => this.handleConnectionLost(),
-      onReconnected: () => this.handleReconnection(),
+      // No onReconnected: re-arm + auth for both initial and reconnect is driven
+      // once by handleConnectionEstablished (provider 'connected'), which fires on
+      // every opened socket. A separate reconnect auth path double-sent AUTH (F7).
     });
 
     // Initialize QueryManager with callbacks
@@ -456,27 +455,6 @@ export class SyncEngine {
     }
     // WebSocketManager already stopped heartbeat and transitioned state
     // SyncEngine can do additional cleanup if needed
-  }
-
-  /**
-   * Called when reconnection succeeds.
-   */
-  private handleReconnection(): void {
-    if (this.authToken || this.tokenProvider) {
-      this.stateMachine.transition(SyncState.AUTHENTICATING);
-      this.sendAuth();
-      return;
-    }
-
-    // Auth-optional wait on reconnect: same grace-timeout logic as initial connect.
-    logger.info(
-      { graceMs: this.AUTH_REQUIRED_GRACE_MS },
-      'Reconnected. Waiting briefly for AUTH_REQUIRED...',
-    );
-    this.authRequiredGraceTimer = setTimeout(() => {
-      this.authRequiredGraceTimer = null;
-      this.completeAuthOptionalConnection();
-    }, this.AUTH_REQUIRED_GRACE_MS);
   }
 
   /**

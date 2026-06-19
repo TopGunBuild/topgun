@@ -1,4 +1,4 @@
-export { SingleServerProvider } from './SingleServerProvider';
+export { SingleServerProvider, ReconnectExhaustedError } from './SingleServerProvider';
 export type { SingleServerProviderConfig } from '../types';
 export { HttpSyncProvider } from './HttpSyncProvider';
 export type { HttpSyncProviderConfig } from './HttpSyncProvider';

@@ -17,6 +17,7 @@ import { ConnectionPool, PartitionRouter, ClusterClient } from './cluster';
 // Connection provider imports
 import {
   SingleServerProvider,
+  ReconnectExhaustedError,
   HttpSyncProvider,
   AutoConnectionProvider,
   WebSocketConnection,
@@ -127,6 +128,7 @@ export type {
 // Connection provider exports
 export {
   SingleServerProvider,
+  ReconnectExhaustedError,
   HttpSyncProvider,
   AutoConnectionProvider,
   WebSocketConnection,

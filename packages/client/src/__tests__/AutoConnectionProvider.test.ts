@@ -7,6 +7,7 @@ jest.mock('../connection/SingleServerProvider', () => {
     SingleServerProvider: jest.fn().mockImplementation(() => ({
       connect: jest.fn().mockRejectedValue(new Error('WebSocket connection failed')),
       forceReconnect: jest.fn(),
+      setMaxReconnectAttempts: jest.fn(),
       close: jest.fn().mockResolvedValue(undefined),
       isConnected: jest.fn().mockReturnValue(false),
       getConnectedNodes: jest.fn().mockReturnValue([]),
@@ -55,6 +56,7 @@ describe('AutoConnectionProvider', () => {
     SingleServerProvider.mockImplementationOnce(() => ({
       connect: jest.fn().mockResolvedValue(undefined),
       forceReconnect: jest.fn(),
+      setMaxReconnectAttempts: jest.fn(),
       close: jest.fn().mockResolvedValue(undefined),
       isConnected: jest.fn().mockReturnValue(true),
       getConnectedNodes: jest.fn().mockReturnValue(['ws-node-1']),
@@ -81,6 +83,83 @@ describe('AutoConnectionProvider', () => {
     expect(provider.getConnectedNodes()).toEqual(['ws-node-1']);
     // fetch should NOT have been called since WS succeeded
     expect(mockFetch).not.toHaveBeenCalled();
+
+    await provider.close();
+  });
+
+  it('probes WS single-shot then promotes the live socket to resilient reconnect', async () => {
+    // require() accesses the Jest-mocked module to inspect constructor args + the promotion call
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { SingleServerProvider } = require('../connection/SingleServerProvider');
+
+    const setMaxReconnectAttempts = jest.fn();
+    SingleServerProvider.mockImplementationOnce((cfg: any) => {
+      // Record the config the probe was constructed with for assertions below.
+      (SingleServerProvider as any)._lastCfg = cfg;
+      return {
+        connect: jest.fn().mockResolvedValue(undefined),
+        forceReconnect: jest.fn(),
+        setMaxReconnectAttempts,
+        close: jest.fn().mockResolvedValue(undefined),
+        isConnected: jest.fn().mockReturnValue(true),
+        getConnectedNodes: jest.fn().mockReturnValue(['ws-node-1']),
+        on: jest.fn(),
+        off: jest.fn(),
+        send: jest.fn(),
+        getConnection: jest.fn(),
+        getAnyConnection: jest.fn(),
+      };
+    });
+
+    const provider = new AutoConnectionProvider({
+      url: 'http://localhost:8080',
+      clientId: 'c1',
+      hlc,
+      authToken: 'token',
+      fetchImpl: mockFetch,
+    });
+
+    await provider.connect();
+
+    // Probe is constructed single-shot (no background reconnect loop during negotiation).
+    expect((SingleServerProvider as any)._lastCfg.maxReconnectAttempts).toBe(0);
+    // On success the live socket is promoted to indefinite reconnect (the F2 fix:
+    // the old code left the WS sub-provider at maxReconnectAttempts: 1).
+    expect(setMaxReconnectAttempts).toHaveBeenCalledWith(Infinity);
+    expect(provider.isUsingHttp()).toBe(false);
+
+    await provider.close();
+  });
+
+  it('promotes WS to a caller-configured finite cap when maxReconnectAttempts is set', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { SingleServerProvider } = require('../connection/SingleServerProvider');
+    const setMaxReconnectAttempts = jest.fn();
+    SingleServerProvider.mockImplementationOnce(() => ({
+      connect: jest.fn().mockResolvedValue(undefined),
+      forceReconnect: jest.fn(),
+      setMaxReconnectAttempts,
+      close: jest.fn().mockResolvedValue(undefined),
+      isConnected: jest.fn().mockReturnValue(true),
+      getConnectedNodes: jest.fn().mockReturnValue(['ws-node-1']),
+      on: jest.fn(),
+      off: jest.fn(),
+      send: jest.fn(),
+      getConnection: jest.fn(),
+      getAnyConnection: jest.fn(),
+    }));
+
+    const provider = new AutoConnectionProvider({
+      url: 'http://localhost:8080',
+      clientId: 'c1',
+      hlc,
+      authToken: 'token',
+      maxReconnectAttempts: 25,
+      fetchImpl: mockFetch,
+    });
+
+    await provider.connect();
+    expect(setMaxReconnectAttempts).toHaveBeenCalledWith(25);
 
     await provider.close();
   });

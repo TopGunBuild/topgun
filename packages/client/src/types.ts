@@ -137,7 +137,12 @@ export interface SingleServerProviderConfig {
   /** WebSocket URL to connect to */
   url: string;
 
-  /** Maximum reconnection attempts (default: 10). Use Infinity for unlimited. */
+  /**
+   * Maximum reconnection attempts before giving up (default: Infinity — retry
+   * indefinitely with capped backoff). Set a finite number for a bounded policy;
+   * on exhaustion the provider emits a terminal ReconnectExhaustedError 'error'
+   * event (SyncEngine maps it to SyncState.ERROR).
+   */
   maxReconnectAttempts?: number;
 
   /** Initial reconnect delay in ms (default: 1000) */

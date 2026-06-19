@@ -11,7 +11,7 @@ import type {
   ConnectionEventHandler,
 } from '../types';
 import type { SyncStateMachine } from '../SyncStateMachine';
-import type { BackoffConfig, HeartbeatConfig, OpLogEntry, TopicQueueConfig } from '../SyncEngine';
+import type { HeartbeatConfig, OpLogEntry, TopicQueueConfig } from '../SyncEngine';
 import type {
   BackpressureConfig,
   BackpressureStatus,
@@ -132,11 +132,6 @@ export interface WebSocketManagerConfig {
    * State machine reference for managing connection states.
    */
   stateMachine: SyncStateMachine;
-
-  /**
-   * Configuration for exponential backoff reconnection.
-   */
-  backoffConfig: BackoffConfig;
 
   /**
    * Configuration for heartbeat mechanism.
