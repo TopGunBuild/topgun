@@ -218,15 +218,17 @@ describe('QueryHandle live-window top-N clamp', () => {
 
     // The temp page-handle that loadMore spins up calls subscribeToQuery and
     // runLocalQuery; we deliver its page-2 rows via the server path and settle it.
-    (engine.subscribeToQuery as jest.Mock).mockImplementation((temp: QueryHandle<{ n: number }>) => {
-      temp.onResult(
-        [
-          { key: 'c', value: { n: 3 } },
-          { key: 'd', value: { n: 4 } },
-        ],
-        'server',
-      );
-    });
+    (engine.subscribeToQuery as jest.Mock).mockImplementation(
+      (temp: QueryHandle<{ n: number }>) => {
+        temp.onResult(
+          [
+            { key: 'c', value: { n: 3 } },
+            { key: 'd', value: { n: 4 } },
+          ],
+          'server',
+        );
+      },
+    );
 
     const handle = new QueryHandle<{ n: number }>(engine, 'm', {
       limit: 2,
