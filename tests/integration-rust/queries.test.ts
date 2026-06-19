@@ -1359,10 +1359,14 @@ describe('Integration: Queries (Rust Server)', () => {
       await waitForSync(200);
     };
 
+    // Index each group row by its typed GROUP BY column (`category`). The server
+    // emits the original typed group value in the group-by column; the row's `__key`
+    // is an internal encoded bucket id (e.g. `S1:a`), not the group value, so indexing
+    // by `__key` would no longer resolve `groups.a`/`groups.b`.
     const byGroup = (results: any[]) => {
       const map: Record<string, any> = {};
       for (const r of results) {
-        map[r.value.__key ?? r.key] = r.value;
+        map[r.value.category] = r.value;
       }
       return map;
     };

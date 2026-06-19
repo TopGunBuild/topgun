@@ -1,0 +1,176 @@
+name: Integration (Rust server ↔ TS client)
+
+# Live cross-boundary integration: real Rust server + real TS client over a
+# WebSocket. This is the only gate that exercises sync / reconnect / offline-queue
+# / optimistic-restamp / live-query apply end-to-end — the durability and
+# convergence promises that unit tests (mocked transport) and Rust-only tests
+# (no client) both miss. A silent group-by wire-format regression reached main
+# precisely because this suite was not gated; this workflow closes that hole.
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'packages/client/**'
+      - 'packages/core/**'
+      - 'packages/server-rust/**'
+      - 'packages/core-rust/**'
+      - 'tests/integration-rust/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/integration-rust.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'packages/client/**'
+      - 'packages/core/**'
+      - 'packages/server-rust/**'
+      - 'packages/core-rust/**'
+      - 'tests/integration-rust/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/integration-rust.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Build the server binary once and hand it to both test jobs as an artifact, so
+  # the ~release-build cost is paid a single time rather than duplicated per job.
+  build-server:
+    name: Build server binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        # rustup ships preinstalled on ubuntu-latest; `rustup show` honors the
+        # pinned channel in rust-toolchain.toml (same pattern as rust.yml).
+        run: rustup show
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-integration-
+            ${{ runner.os }}-cargo-
+
+      - name: Build topgun-server (release)
+        run: cargo build --release --bin topgun-server
+
+      - name: Upload server binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: topgun-server-release
+          path: target/release/topgun-server
+          retention-days: 1
+          if-no-files-found: error
+
+  # BLOCKING gate. Single-server cross-boundary suites — sync, reconnect, offline,
+  # optimistic restamp, live-query apply, CRDT merge, RBAC, search, merkle delta.
+  # These are deterministic; verified green across repeated --runInBand runs.
+  integration:
+    name: Integration tests (blocking)
+    needs: [build-server]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download server binary
+        uses: actions/download-artifact@v4
+        with:
+          name: topgun-server-release
+          path: target/release
+
+      - name: Make server binary executable
+        run: chmod +x target/release/topgun-server
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.13.1 --activate
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Run integration tests (single-server suites)
+        # ts-jest compiles @topgunbuild/{core,client} from source via the config's
+        # moduleNameMapper, so no package build is needed. RUST_SERVER_BINARY points
+        # spawnRustServer() at the prebuilt binary (skips cargo). --runInBand keeps
+        # per-file fixtures from contending on the fixed server ports (CLAUDE.md).
+        # cluster-routing is excluded here and gated separately (non-blocking) below.
+        env:
+          RUST_SERVER_BINARY: ${{ github.workspace }}/target/release/topgun-server
+        run: |
+          pnpm exec jest \
+            --config tests/integration-rust/jest.config.js \
+            --runInBand \
+            --testPathIgnorePatterns '/node_modules/' '/dist/' '\.d\.ts$' 'cluster-routing\.test\.ts$'
+
+  # NON-BLOCKING. The 3-node cluster suite intermittently fails to converge
+  # (one node sometimes never joins → nodeCount stuck at 2) even from a cold
+  # start — a pre-existing race in the parallel-boot formation protocol, not a
+  # product-path regression (the server is single-node-stable today; clustering
+  # is experimental). Gating PRs on a ~30%-flaky suite would redden merges at
+  # random, so it runs for signal only until the join race is fixed.
+  # Tracked: TODO-504 (cluster-formation join race — un-gate once deterministic).
+  cluster-routing:
+    name: Cluster routing tests (non-blocking)
+    needs: [build-server]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download server binary
+        uses: actions/download-artifact@v4
+        with:
+          name: topgun-server-release
+          path: target/release
+
+      - name: Make server binary executable
+        run: chmod +x target/release/topgun-server
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.13.1 --activate
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Run cluster-routing suite
+        env:
+          RUST_SERVER_BINARY: ${{ github.workspace }}/target/release/topgun-server
+        run: |
+          pnpm exec jest \
+            --config tests/integration-rust/jest.config.js \
+            --runInBand \
+            cluster-routing
