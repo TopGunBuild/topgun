@@ -667,6 +667,60 @@ describe('Client Search', () => {
 
       handle.dispose();
     });
+
+    it('clamps getResults() to options.limit, keeping the top-N by score', () => {
+      // require() avoids TypeScript generic constraint mismatch for SearchHandle<T = unknown> in test context
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { SearchHandle } = require('../SearchHandle');
+      const handle = new SearchHandle(syncEngine, 'articles', 'test', { limit: 2 });
+
+      const sentMessage = mockSendMessage.mock.calls[0][0];
+      const subscriptionId = sentMessage.payload.subscriptionId;
+
+      const enter = (key: string, score: number) =>
+        (syncEngine as any).handleServerMessage({
+          type: 'SEARCH_UPDATE',
+          payload: {
+            subscriptionId,
+            key,
+            value: { title: key },
+            score,
+            matchedTerms: ['test'],
+            changeType: 'ENTER',
+          },
+        });
+
+      // Three ENTER deltas arrive; the window must clamp to the top-2 by score.
+      enter('a', 0.9);
+      enter('b', 0.7);
+      enter('c', 0.5);
+
+      const results = handle.getResults();
+      expect(results).toHaveLength(2);
+      expect(results.map((r: any) => r.score)).toEqual([0.9, 0.7]);
+      expect(results.map((r: any) => r.key)).toEqual(['a', 'b']);
+
+      // The excluded row c is retained in this.results, not evicted by the clamp.
+      // Raising its score above an in-window row promotes it back into view —
+      // proving the clamp was a pure render-time slice over the full set.
+      (syncEngine as any).handleServerMessage({
+        type: 'SEARCH_UPDATE',
+        payload: {
+          subscriptionId,
+          key: 'c',
+          value: { title: 'c' },
+          score: 0.95,
+          matchedTerms: ['test'],
+          changeType: 'UPDATE',
+        },
+      });
+
+      const promoted = handle.getResults();
+      expect(promoted).toHaveLength(2);
+      expect(promoted.map((r: any) => r.key)).toEqual(['c', 'a']);
+
+      handle.dispose();
+    });
   });
 
   describe('TopGunClient.searchSubscribe()', () => {
