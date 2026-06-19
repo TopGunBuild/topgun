@@ -630,7 +630,7 @@ pub async fn http_sync_handler(
     let request: HttpSyncRequest = if body.is_empty() {
         HttpSyncRequest::default()
     } else {
-        match rmp_serde::from_slice::<HttpSyncRequest>(&body) {
+        match super::decode::decode_depth_checked::<HttpSyncRequest>(&body) {
             Ok(req) => req,
             Err(e) => {
                 let json = format!(r#"{{"code":400,"message":"invalid MsgPack body: {e}"}}"#);

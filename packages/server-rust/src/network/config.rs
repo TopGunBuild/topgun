@@ -100,6 +100,15 @@ pub struct ConnectionConfig {
     pub ws_write_buffer_size: usize,
     /// Maximum WebSocket write buffer size in bytes.
     pub ws_max_write_buffer_size: usize,
+    /// Maximum size in bytes of a complete inbound WebSocket message. Frames
+    /// exceeding this are rejected by the transport before the handler decodes
+    /// them, bounding the unauthenticated memory-spike surface and capping the
+    /// input to the depth-checked decoder. Defaults to 2 MB to match the HTTP
+    /// `/sync` body limit.
+    pub ws_max_message_size: usize,
+    /// Maximum size in bytes of a single inbound WebSocket frame (a message may
+    /// span multiple frames). Defaults to 2 MB.
+    pub ws_max_frame_size: usize,
 }
 
 impl Default for ConnectionConfig {
@@ -108,8 +117,10 @@ impl Default for ConnectionConfig {
             outbound_channel_capacity: 256,
             send_timeout: Duration::from_secs(5),
             idle_timeout: Duration::from_secs(60),
-            ws_write_buffer_size: 131_072,     // 128 KB
-            ws_max_write_buffer_size: 524_288, // 512 KB
+            ws_write_buffer_size: 131_072,        // 128 KB
+            ws_max_write_buffer_size: 524_288,    // 512 KB
+            ws_max_message_size: 2 * 1024 * 1024, // 2 MB — matches HTTP /sync body limit
+            ws_max_frame_size: 2 * 1024 * 1024,   // 2 MB
         }
     }
 }
@@ -146,6 +157,8 @@ mod tests {
         assert_eq!(config.idle_timeout, Duration::from_secs(60));
         assert_eq!(config.ws_write_buffer_size, 131_072);
         assert_eq!(config.ws_max_write_buffer_size, 524_288);
+        assert_eq!(config.ws_max_message_size, 2 * 1024 * 1024);
+        assert_eq!(config.ws_max_frame_size, 2 * 1024 * 1024);
     }
 
     #[test]

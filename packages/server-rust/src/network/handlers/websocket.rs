@@ -28,6 +28,7 @@ use topgun_core::messages::{
 use tracing::{debug, warn};
 
 use super::auth::AuthHandler;
+use super::decode;
 use super::AppState;
 use crate::network::connection::ConnectionId;
 use crate::network::{ConnectionKind, OutboundMessage};
@@ -54,6 +55,11 @@ pub async fn ws_upgrade_handler(
 ) -> Response {
     ws.write_buffer_size(state.config.connection.ws_write_buffer_size)
         .max_write_buffer_size(state.config.connection.ws_max_write_buffer_size)
+        // Cap inbound message/frame size so an unauthenticated client cannot force
+        // a large allocation (tungstenite defaults are 64 MiB / 16 MiB) and so the
+        // depth-checked decoder only ever sees bounded frames.
+        .max_message_size(state.config.connection.ws_max_message_size)
+        .max_frame_size(state.config.connection.ws_max_frame_size)
         .on_upgrade(|socket| handle_socket(socket, state))
 }
 
@@ -112,7 +118,11 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         'auth: loop {
             match receiver.next().await {
                 Some(Ok(Message::Binary(data))) => {
-                    let tg_msg = match rmp_serde::from_slice::<TopGunMessage>(&data) {
+                    // Depth-checked decode BEFORE auth: a deeply-nested frame would
+                    // otherwise recurse `rmp_serde` to a stack-overflow abort,
+                    // killing every connection on the node from an unauthenticated
+                    // client. Over-deep/malformed frames are dropped, not fatal.
+                    let tg_msg = match decode::decode_depth_checked::<TopGunMessage>(&data) {
                         Ok(msg) => msg,
                         Err(e) => {
                             debug!("failed to deserialize message from {:?}: {}", conn_id, e);
@@ -243,7 +253,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     loop {
         match receiver.next().await {
             Some(Ok(Message::Binary(data))) => {
-                let tg_msg = match rmp_serde::from_slice::<TopGunMessage>(&data) {
+                let tg_msg = match decode::decode_depth_checked::<TopGunMessage>(&data) {
                     Ok(msg) => msg,
                     Err(e) => {
                         debug!("failed to deserialize message from {:?}: {}", conn_id, e);
