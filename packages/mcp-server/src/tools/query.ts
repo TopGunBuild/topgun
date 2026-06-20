@@ -134,17 +134,25 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
       .join('\n\n');
 
     // When the server indicates more results are available, surface the opaque
-    // continuation cursor token so the agent can request the next page — without
-    // it the pagination surface is purely informational.
-    const continuationNote = hasMore
-      ? `\n\n---\nMore rows match than were returned; showing the first ${effectiveLimit}. ` +
-        `To fetch the next page, call this tool again with cursor: "${nextCursor}". ` +
-        `Alternatively, narrow with \`filter\`/\`sort\`` +
-        (effectiveLimit < ctx.config.maxLimit
-          ? ` or raise \`limit\` (up to ${ctx.config.maxLimit})`
-          : '') +
-        `.`
-      : '';
+    // continuation cursor token so the agent can request the next page. The server
+    // can report hasMore WITHOUT a usable cursor (a known getPaginationInfo gap); in
+    // that case we must NOT render the missing token verbatim (the "cursor:
+    // \"undefined\"" defect) — instead advise narrowing the query, so the agent is
+    // never told to page with a non-token.
+    const hasUsableCursor = typeof nextCursor === 'string' && nextCursor.length > 0;
+    const raiseLimitHint =
+      effectiveLimit < ctx.config.maxLimit
+        ? ` or raise \`limit\` (up to ${ctx.config.maxLimit})`
+        : '';
+    let continuationNote = '';
+    if (hasMore) {
+      continuationNote = hasUsableCursor
+        ? `\n\n---\nMore rows match than were returned; showing the first ${effectiveLimit}. ` +
+          `To fetch the next page, call this tool again with cursor: "${nextCursor}". ` +
+          `Alternatively, narrow with \`filter\`/\`sort\`${raiseLimitHint}.`
+        : `\n\n---\nMore rows match than were returned; showing the first ${effectiveLimit}. ` +
+          `No pagination cursor is available for this query, so narrow with \`filter\`/\`sort\`${raiseLimitHint} to see the rest.`;
+    }
 
     return {
       content: [

@@ -141,7 +141,12 @@ class MockTopGunClient {
   // to simulate offline / not-settled.
   async queryOncePaged(
     mapName: string,
-    filter: { where?: Record<string, unknown>; limit?: number; cursor?: string } = {},
+    filter: {
+      where?: Record<string, unknown>;
+      predicate?: { op: string; attribute: string; value: unknown };
+      limit?: number;
+      cursor?: string;
+    } = {},
   ): Promise<{
     items: Array<Record<string, unknown> & { _key: string }>;
     cursor?: string;
@@ -166,6 +171,14 @@ class MockTopGunClient {
     if (filter.where) {
       const where = filter.where as Record<string, unknown>;
       items = items.filter((item) => Object.entries(where).every(([k, v]) => item[k] === v));
+    }
+
+    // Mirror the server's `_key IN (...)` predicate so key-targeted hydration
+    // returns exactly the requested records (the real server injects `_key` as a
+    // filterable column on every row).
+    if (filter.predicate?.op === 'in' && filter.predicate.attribute === '_key') {
+      const allowed = new Set(filter.predicate.value as string[]);
+      items = items.filter((item) => allowed.has(item._key));
     }
 
     // Apply limit
@@ -424,6 +437,28 @@ describe('MCP Tools', () => {
       expect(result.content[0].text).toContain('1 result');
       expect(result.content[0].text).not.toContain('More rows match');
       expect(result.content[0].text).not.toContain('cursor:');
+    });
+
+    it('should NOT render cursor:"undefined" when hasMore is true but no token is available', async () => {
+      const ctx = createTestContext();
+      const mockClient = ctx.client as unknown as MockTopGunClient;
+      for (let i = 0; i < 5; i++) {
+        mockClient.getMap('tasks').set(`task${i}`, { title: `Task ${i}`, index: i });
+      }
+      // Server signals more rows exist but returns NO usable cursor (the F7 gap).
+      mockClient.queryOncePagedHasMore = true;
+      mockClient.queryOncePagedCursor = undefined;
+
+      const result = await handleQuery({ map: 'tasks', limit: 5 }, ctx);
+
+      expect(result.isError).toBeUndefined();
+      // The truncation is still disclosed...
+      expect(result.content[0].text).toContain('More rows match than were returned');
+      // ...but the agent is NEVER told to page with the string "undefined".
+      expect(result.content[0].text).not.toContain('cursor: "undefined"');
+      expect(result.content[0].text).not.toContain('cursor:');
+      // Instead it is advised to narrow the query.
+      expect(result.content[0].text).toContain('narrow with');
     });
 
     it('should deny access to restricted maps', async () => {
@@ -820,11 +855,11 @@ describe('MCP Tools', () => {
       expect(result.content[0].text).not.toContain('Matched:');
     });
 
-    it('should emit the not-available-locally marker when the key is absent from the local replica', async () => {
+    it('should emit the not-available marker when the hit key is absent from the server read', async () => {
       const ctx = createTestContext();
       const mockClient = ctx.client as unknown as MockTopGunClient;
-      // Intentionally do NOT pre-populate the map — simulates an evicted or
-      // partially-replicated record where lwwMap.get() returns undefined.
+      // Intentionally do NOT pre-populate the map — the server-authoritative
+      // hydration read (queryOncePaged) returns no body for this key.
       mockClient.hybridSearchResults = [
         { key: 'missing-key', score: 0.9, methodScores: { fullText: 0.9 } },
       ];
@@ -833,7 +868,63 @@ describe('MCP Tools', () => {
       const result = await handleSearch({ map: 'tasks', query: 'term' }, ctx);
 
       expect(result.isError).toBeUndefined();
-      expect(result.content[0].text).toContain('Data: (record body not available locally)');
+      expect(result.content[0].text).toContain('Data: (record body not available on the server)');
+      // The old cold-cache marker must be gone — hydration is now server-authoritative.
+      expect(result.content[0].text).not.toContain('not available locally');
+    });
+
+    it('should hydrate bodies from the server read, not the local replica', async () => {
+      const ctx = createTestContext();
+      const mockClient = ctx.client as unknown as MockTopGunClient;
+      // Body lives only in the store the server read (queryOncePaged) sees.
+      mockClient.getMap('tasks').set('task1', { title: 'Server Body', status: 'open' });
+      mockClient.hybridSearchResults = [
+        { key: 'task1', score: 0.5, methodScores: { fullText: 0.5 } },
+      ];
+
+      const result = await handleSearch({ map: 'tasks', query: 'server' }, ctx);
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('Server Body');
+      expect(result.content[0].text).toContain('open');
+      expect(result.content[0].text).not.toContain('not available');
+    });
+
+    it('should hydrate a hit whose key sorts beyond the first page (key-targeted, not first-page scan)', async () => {
+      const ctx = createTestContext();
+      const mockClient = ctx.client as unknown as MockTopGunClient;
+      // Populate well past the maxLimit page size; the single hit is the LAST key,
+      // so a first-page scan (limit=maxLimit) ordered by insertion would miss it.
+      for (let i = 0; i < 150; i++) {
+        mockClient.getMap('big').set(`task${i}`, { title: `Task ${i}`, n: i });
+      }
+      mockClient.hybridSearchResults = [
+        { key: 'task149', score: 0.99, methodScores: { fullText: 0.99 } },
+      ];
+
+      const result = await handleSearch({ map: 'big', query: 'task' }, ctx);
+
+      expect(result.isError).toBeUndefined();
+      // The body is hydrated by exact key, never marked "not available".
+      expect(result.content[0].text).toContain('Task 149');
+      expect(result.content[0].text).not.toContain('not available');
+    });
+
+    it('should still render ranked keys when the server hydration read does not settle', async () => {
+      const ctx = createTestContext();
+      const mockClient = ctx.client as unknown as MockTopGunClient;
+      mockClient.hybridSearchResults = [
+        { key: 'task1', score: 0.7, methodScores: { fullText: 0.7 } },
+      ];
+      // hybridSearch succeeds (ranking), but the body hydration read is offline.
+      mockClient.queryOnceRejection = new QueryOnceUnsettledError('offline', 'tasks');
+
+      const result = await handleSearch({ map: 'tasks', query: 'term' }, ctx);
+
+      // The hit is still surfaced (key + score), with the body honestly marked unfetched.
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('task1');
+      expect(result.content[0].text).toContain('did not settle');
     });
 
     it('should return the empty-results message when search returns no hits', async () => {
@@ -892,22 +983,45 @@ describe('MCP Tools', () => {
       expect(result.content[0].text).toContain('fullText:');
     });
 
-    it('should surface an actionable retry message when the server cannot embed for the semantic leg', async () => {
+    it('should reject a semantic-only request honestly (vector search is dark on the server)', async () => {
       const ctx = createTestContext();
       const mockClient = ctx.client as unknown as MockTopGunClient;
-      mockClient.hybridSearchRejection = new Error(
-        'failed to embed query: no embedding model configured',
+      // If the gate failed and the request reached hybridSearch, lastHybridSearchOptions
+      // would be populated — assert it stays null to prove the leg never ran.
+      const result = await handleSearch(
+        { map: 'docs', query: 'login', methods: ['semantic'] },
+        ctx,
       );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Semantic (vector) search is not yet available');
+      // The message must tell the agent how to retry without the semantic leg.
+      expect(result.content[0].text).toContain('methods: ["fullText"]');
+      // The dead leg was never invoked — no silent Noop round-trip.
+      expect(mockClient.lastHybridSearchOptions).toBeNull();
+    });
+
+    it('should skip the semantic leg with a note when combined with a working method', async () => {
+      const ctx = createTestContext();
+      const mockClient = ctx.client as unknown as MockTopGunClient;
+      mockClient.getMap('docs').set('doc1', { title: 'Login Guide' });
+      mockClient.hybridSearchResults = [
+        { key: 'doc1', score: 0.6, methodScores: { fullText: 0.6 } },
+      ];
 
       const result = await handleSearch(
         { map: 'docs', query: 'login', methods: ['fullText', 'semantic'] },
         ctx,
       );
 
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('Semantic search requires server-side embedding');
-      // The message must tell the agent how to retry without the semantic leg.
-      expect(result.content[0].text).toContain('methods: ["fullText"]');
+      // The working leg still returns results...
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('Login Guide');
+      // ...and the agent is told the semantic leg was skipped — never silently dropped.
+      expect(result.content[0].text).toContain('"semantic" method was skipped');
+      // Only the non-semantic methods were forwarded to the server.
+      const opts = mockClient.lastHybridSearchOptions as { methods: string[] };
+      expect(opts.methods).toEqual(['fullText']);
     });
 
     it('should point the agent at topgun_query when full-text search is not enabled for the map', async () => {
@@ -918,8 +1032,23 @@ describe('MCP Tools', () => {
       const result = await handleSearch({ map: 'docs', query: 'login' }, ctx);
 
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("Full-text search is not enabled for map 'docs'");
+      expect(result.content[0].text).toContain("Full-text search is not available for map 'docs'");
       expect(result.content[0].text).toContain('topgun_query');
+    });
+
+    it('should map the raw "index registry not found" server error to a friendly message (no raw leak)', async () => {
+      const ctx = createTestContext();
+      const mockClient = ctx.client as unknown as MockTopGunClient;
+      // The exact low-level string the server emits for an unindexed auto-created map.
+      mockClient.hybridSearchRejection = new Error('index registry not found for map');
+
+      const result = await handleSearch({ map: 'fresh', query: 'anything' }, ctx);
+
+      expect(result.isError).toBe(true);
+      // Friendly, actionable text — not the raw internal error.
+      expect(result.content[0].text).toContain("Full-text search is not available for map 'fresh'");
+      expect(result.content[0].text).toContain('topgun_query');
+      expect(result.content[0].text).not.toContain('index registry not found');
     });
   });
 });

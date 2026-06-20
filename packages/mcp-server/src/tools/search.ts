@@ -1,20 +1,32 @@
 /**
- * topgun_search — Tri-hybrid search (exact + full-text BM25 + semantic) via RRF fusion.
+ * topgun_search — Hybrid search (exact + full-text BM25) via RRF fusion.
  * Routes through the hybridSearch client method so the tool actually performs what it advertises.
+ *
+ * Result bodies are read server-authoritatively (the same settled server read
+ * topgun_query uses), NOT from the MCP process's local CRDT replica. That replica
+ * is only ever populated by topgun_mutate writes made in this process, so for any
+ * record the agent did not write itself it is cold — a body read from it renders
+ * "(not available)" even when the server holds the real record.
+ *
+ * The "semantic" (vector) leg is not yet functional on the server, so it is not
+ * advertised and a semantic-only request is rejected honestly rather than silently
+ * routed to a dead leg.
  */
 
 import type { MCPTool, MCPToolResult, ToolContext } from '../types';
 import { SearchArgsSchema, toolSchemas, type SearchArgs } from '../schemas';
+import { fetchServerRecordsByKeys, ServerReadUnsettledError } from './serverRead';
 
 export const searchTool: MCPTool = {
   name: 'topgun_search',
   description:
-    'Search a TopGun map combining exact, full-text (BM25), and semantic methods, ' +
+    'Search a TopGun map combining exact and full-text (BM25) methods, ' +
     'fused with Reciprocal Rank Fusion. ' +
     'Defaults to full-text only. ' +
-    'Pass methods: ["exact","fullText"] or ["fullText","semantic"] to enable additional legs. ' +
-    '"semantic" requires server-side auto-embedding (the tool sends a text query, not a vector). ' +
-    'Returns results ranked by a fused relevance score with per-method score breakdown.',
+    'Pass methods: ["exact","fullText"] to combine both legs. ' +
+    'Result bodies are read authoritatively from the server. ' +
+    'Returns results ranked by a fused relevance score with per-method score breakdown. ' +
+    '(Semantic / vector search is not yet available on the server.)',
   inputSchema: toolSchemas.search as MCPTool['inputSchema'],
 };
 
@@ -49,8 +61,28 @@ export async function handleSearch(rawArgs: unknown, ctx: ToolContext): Promise<
 
   // Map the existing `limit` arg to hybridSearch's `k` so agents keep using the same param name.
   const effectiveLimit = Math.min(limit ?? ctx.config.defaultLimit, ctx.config.maxLimit);
-  const effectiveMethods = methods ?? ['fullText'];
+  const requestedMethods = methods ?? ['fullText'];
   const effectiveMinScore = minScore ?? 0;
+
+  // The semantic (vector) leg is dark on the server: routing a request to it would
+  // silently contribute nothing or stall on a dead embedding path. Drop it and tell
+  // the agent honestly rather than pretending it ran. When the remaining methods are
+  // empty (a semantic-only request) there is nothing to run, so reject outright.
+  const semanticRequested = requestedMethods.includes('semantic');
+  const effectiveMethods = requestedMethods.filter((m) => m !== 'semantic');
+  if (effectiveMethods.length === 0) {
+    return {
+      content: [
+        {
+          type: 'text',
+          text:
+            `Semantic (vector) search is not yet available on this server. ` +
+            `Retry with methods: ["fullText"] or methods: ["exact", "fullText"].`,
+        },
+      ],
+      isError: true,
+    };
+  }
 
   try {
     const results = await ctx.client.hybridSearch(map, query, {
@@ -70,17 +102,42 @@ export async function handleSearch(rawArgs: unknown, ctx: ToolContext): Promise<
       };
     }
 
-    // Obtain a single map handle before the loop — same accessor topgun_mutate uses —
-    // so each hit's body is read from the local CRDT replica without a network round-trip.
-    const lwwMap = ctx.client.getMap<string, Record<string, unknown>>(map);
+    // hybridSearch ranks keys but does not return record bodies. Hydrate them from a
+    // settled, server-authoritative read keyed by exactly the hit keys (a single
+    // `_key IN (...)` query), instead of the cold local replica, so each hit renders
+    // the real server body. Keying by the hits keeps this O(hits) and — unlike a
+    // first-page scan — never marks a real record "not available" just because its
+    // key sorted beyond a page boundary.
+    //
+    // A hydration failure must NOT be reclassified as a search/FTS error (ranking
+    // already succeeded): handle it here and degrade the bodies, rather than letting
+    // it fall through to the outer catch's FTS/index matcher.
+    let serverBodies = new Map<string, Record<string, unknown>>();
+    let hydrationFailure: 'unsettled' | 'failed' | null = null;
+    try {
+      serverBodies = await fetchServerRecordsByKeys(
+        ctx,
+        map,
+        results.map((r) => r.key),
+      );
+    } catch (hydrationError) {
+      hydrationFailure =
+        hydrationError instanceof ServerReadUnsettledError ? 'unsettled' : 'failed';
+    }
 
     const formatted = results
       .map((result, idx) => {
-        const body = lwwMap.get(result.key);
-        const dataLine =
-          body !== undefined
-            ? `Data: ${JSON.stringify(body, null, 2).split('\n').join('\n   ')}`
-            : `Data: (record body not available locally)`;
+        const body = serverBodies.get(result.key);
+        let dataLine: string;
+        if (body !== undefined) {
+          dataLine = `Data: ${JSON.stringify(body, null, 2).split('\n').join('\n   ')}`;
+        } else if (hydrationFailure === 'unsettled') {
+          dataLine = `Data: (record body not fetched — server read did not settle; retry)`;
+        } else if (hydrationFailure === 'failed') {
+          dataLine = `Data: (record body not fetched — server read failed; retry)`;
+        } else {
+          dataLine = `Data: (record body not available on the server)`;
+        }
 
         // Render per-method score breakdown so the calling agent can see which leg contributed.
         const methodScoreEntries = Object.entries(result.methodScores)
@@ -98,46 +155,41 @@ export async function handleSearch(rawArgs: unknown, ctx: ToolContext): Promise<
       })
       .join('\n\n');
 
+    // When the agent asked for the semantic leg, tell it the leg was skipped so the
+    // ranking is never silently narrower than requested.
+    const semanticNote = semanticRequested
+      ? `\n\n(Note: the "semantic" method was skipped — vector search is not yet available on this server. ` +
+        `Results above use only ${effectiveMethods.map((m) => `"${m}"`).join(', ')}.)`
+      : '';
+
     return {
       content: [
         {
           type: 'text',
-          text: `Found ${results.length} result(s) in map '${map}' for query "${query}":\n\n${formatted}`,
+          text: `Found ${results.length} result(s) in map '${map}' for query "${query}":\n\n${formatted}${semanticNote}`,
         },
       ],
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
 
-    // When the server cannot embed the query for semantic search, surface an actionable message
-    // so the calling agent knows to retry without the semantic leg.
+    // Full-text search index is absent for this map. The server surfaces this as
+    // several low-level strings ("FTS not enabled", "index registry not found for
+    // map", "no index"); map them all to one actionable message instead of leaking
+    // the raw internal error to the agent.
     if (
-      message.toLowerCase().includes('embed') ||
-      (effectiveMethods.includes('semantic') &&
-        (message.includes('semantic') || message.includes('vector')))
+      message.includes('not enabled') ||
+      message.includes('FTS') ||
+      /index registry not found/i.test(message) ||
+      /no (search )?index/i.test(message)
     ) {
       return {
         content: [
           {
             type: 'text',
             text:
-              `Semantic search requires server-side embedding, which is not available for map '${map}'. ` +
-              `Retry with methods: ["fullText"] or methods: ["exact", "fullText"] to avoid the semantic leg.`,
-          },
-        ],
-        isError: true,
-      };
-    }
-
-    // Handle case where full-text search is not enabled for the map
-    if (message.includes('not enabled') || message.includes('FTS')) {
-      return {
-        content: [
-          {
-            type: 'text',
-            text:
-              `Full-text search is not enabled for map '${map}'. ` +
-              `Use topgun_query instead for exact matching, or enable FTS on the server.`,
+              `Full-text search is not available for map '${map}' (no search index yet). ` +
+              `Use topgun_query instead for exact matching, or enable full-text search on the server.`,
           },
         ],
         isError: true,

@@ -76,10 +76,10 @@ export const SearchArgsSchema = z.object({
     .describe(
       'Search methods to combine via Reciprocal Rank Fusion. ' +
         '"exact" matches field values exactly; ' +
-        '"fullText" uses BM25 full-text search; ' +
-        '"semantic" uses vector similarity (requires server-side auto-embedding — ' +
-        'the tool sends a text query, not a vector). ' +
-        'Defaults to ["fullText"] to preserve existing behaviour when omitted.',
+        '"fullText" uses BM25 full-text search. ' +
+        '"semantic" (vector similarity) is NOT yet available on the server — ' +
+        'requesting it alone is rejected, and combined with other methods it is skipped with a note. ' +
+        'Defaults to ["fullText"] when omitted.',
     ),
 });
 
@@ -256,10 +256,10 @@ export const toolSchemas = {
         description:
           'Search methods to combine via Reciprocal Rank Fusion. ' +
           '"exact" matches field values exactly; ' +
-          '"fullText" uses BM25 full-text search; ' +
-          '"semantic" uses vector similarity (requires server-side auto-embedding — ' +
-          'the tool sends a text query, not a vector). ' +
-          'Defaults to ["fullText"] to preserve existing behaviour when omitted.',
+          '"fullText" uses BM25 full-text search. ' +
+          '"semantic" (vector similarity) is NOT yet available on the server — ' +
+          'requesting it alone is rejected, and combined with other methods it is skipped with a note. ' +
+          'Defaults to ["fullText"] when omitted.',
         default: ['fullText'],
       },
     },
