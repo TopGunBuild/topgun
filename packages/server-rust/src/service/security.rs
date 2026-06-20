@@ -197,6 +197,7 @@ mod tests {
     fn make_metadata(authenticated: bool) -> ConnectionMetadata {
         ConnectionMetadata {
             authenticated,
+            handshake_complete: authenticated,
             principal: None,
             subscriptions: Default::default(),
             topics: Default::default(),

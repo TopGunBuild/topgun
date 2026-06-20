@@ -95,7 +95,24 @@ pub struct ConnectionConfig {
     /// Maximum time to wait when sending a message to a connection.
     pub send_timeout: Duration,
     /// Duration after which an idle connection is considered stale.
+    ///
+    /// Enforced by the connection reaper: an authenticated connection whose
+    /// last heartbeat (client `PING`) is older than this is closed. The
+    /// `TopGun` client pings every 5 s, so the 60 s default tolerates many
+    /// missed pings before reaping a half-open or dead peer.
     pub idle_timeout: Duration,
+    /// Maximum time an unauthenticated connection may exist before it is
+    /// closed.
+    ///
+    /// Bounds the Phase-1 auth window so a client that connects and never
+    /// completes authentication (or dribbles malformed frames) cannot hold a
+    /// connection slot indefinitely (slowloris). Enforced both by a per-frame
+    /// deadline in the WebSocket auth loop and as a reaper backstop.
+    pub auth_timeout: Duration,
+    /// How often the connection reaper scans the registry for stale
+    /// connections. Should be well below `idle_timeout` so reaping latency is
+    /// bounded by roughly `idle_timeout + reaper_interval`.
+    pub reaper_interval: Duration,
     /// WebSocket write buffer size in bytes.
     pub ws_write_buffer_size: usize,
     /// Maximum WebSocket write buffer size in bytes.
@@ -117,6 +134,8 @@ impl Default for ConnectionConfig {
             outbound_channel_capacity: 256,
             send_timeout: Duration::from_secs(5),
             idle_timeout: Duration::from_secs(60),
+            auth_timeout: Duration::from_secs(10),
+            reaper_interval: Duration::from_secs(10),
             ws_write_buffer_size: 131_072,        // 128 KB
             ws_max_write_buffer_size: 524_288,    // 512 KB
             ws_max_message_size: 2 * 1024 * 1024, // 2 MB — matches HTTP /sync body limit
@@ -155,6 +174,8 @@ mod tests {
         assert_eq!(config.outbound_channel_capacity, 256);
         assert_eq!(config.send_timeout, Duration::from_secs(5));
         assert_eq!(config.idle_timeout, Duration::from_secs(60));
+        assert_eq!(config.auth_timeout, Duration::from_secs(10));
+        assert_eq!(config.reaper_interval, Duration::from_secs(10));
         assert_eq!(config.ws_write_buffer_size, 131_072);
         assert_eq!(config.ws_max_write_buffer_size, 524_288);
         assert_eq!(config.ws_max_message_size, 2 * 1024 * 1024);

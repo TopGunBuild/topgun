@@ -345,6 +345,9 @@ impl NetworkModule {
         let tls = config.tls.take();
         let observability = self.observability.clone();
 
+        // Capture reaper tunables before `config` is moved into `build_app`.
+        let reaper_config = super::reaper::ReaperConfig::from(&config.connection);
+
         // Allocate the backfill progress map BEFORE rebuild_from_store so that
         // progress entries written during startup rebuild are visible immediately
         // after set_ready(). The same Arc is threaded into AppState below.
@@ -463,7 +466,14 @@ impl NetworkModule {
         // Transition to Ready so readiness probes pass.
         shutdown_ctrl.set_ready();
 
-        if let Some(ref tls_config) = tls {
+        // Start the connection reaper: evicts idle/half-open and never-authed
+        // connections so slots and per-connection resources do not leak. Aborted
+        // after the serve future returns (post-drain), so it never outlives the
+        // server. Scanning a drained registry is harmless if it ticks first.
+        let reaper_handle =
+            super::reaper::spawn_connection_reaper(Arc::clone(&registry), reaper_config);
+
+        let result = if let Some(ref tls_config) = tls {
             serve_tls(
                 listener,
                 router,
@@ -475,7 +485,10 @@ impl NetworkModule {
             .await
         } else {
             serve_plain(listener, router, registry, shutdown_ctrl, shutdown).await
-        }
+        };
+
+        reaper_handle.abort();
+        result
     }
 }
 

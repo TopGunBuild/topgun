@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use tokio::sync::{mpsc, RwLock};
+use tokio_util::sync::CancellationToken;
 use topgun_core::{Principal, Timestamp};
 
 use super::config::ConnectionConfig;
@@ -64,6 +65,13 @@ pub struct ConnectionHandle {
     pub connected_at: Instant,
     /// Whether this is a client or cluster peer connection.
     pub kind: ConnectionKind,
+    /// Cancellation signal for forced teardown.
+    ///
+    /// The connection's read loop selects on this token, so cancelling it
+    /// unblocks a reader parked on a half-open socket and lets the connection
+    /// run its normal cleanup path. The reaper cancels this to evict stale or
+    /// never-authenticated connections.
+    pub cancel: CancellationToken,
 }
 
 impl ConnectionHandle {
@@ -103,6 +111,22 @@ impl ConnectionHandle {
     pub fn is_connected(&self) -> bool {
         !self.tx.is_closed()
     }
+
+    /// Signals the connection's read loop to tear down.
+    ///
+    /// Idempotent: cancelling an already-cancelled connection is a no-op, so
+    /// the reaper can call this on every tick without coordinating with the
+    /// read loop. The actual resource cleanup (subscriptions, registry slot)
+    /// still runs once, in the read loop's normal disconnect path.
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
+
+    /// Returns `true` once `cancel()` has been called on this connection.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
 }
 
 /// Mutable metadata associated with a connection.
@@ -116,6 +140,17 @@ impl ConnectionHandle {
 pub struct ConnectionMetadata {
     /// Whether this connection has completed authentication.
     pub authenticated: bool,
+    /// Whether this connection has finished the auth handshake and entered the
+    /// steady-state (Phase 2) read loop.
+    ///
+    /// Set once when the connection enters Phase 2 — true for both
+    /// JWT-authenticated connections and connections on a no-auth server (where
+    /// Phase 1 is skipped). The reaper uses this to decide which timeout
+    /// applies: connections still in the handshake are bounded by the auth
+    /// deadline; steady-state connections are bounded by the idle (heartbeat)
+    /// timeout. Distinct from `authenticated`, which is false on a no-auth
+    /// server even in steady state.
+    pub handshake_complete: bool,
     /// The authenticated principal, if any.
     pub principal: Option<Principal>,
     /// Active query subscriptions for this connection.
@@ -134,6 +169,7 @@ impl Default for ConnectionMetadata {
     fn default() -> Self {
         Self {
             authenticated: false,
+            handshake_complete: false,
             principal: None,
             subscriptions: HashSet::new(),
             topics: HashSet::new(),
@@ -184,6 +220,7 @@ impl ConnectionRegistry {
             metadata: Arc::new(RwLock::new(ConnectionMetadata::default())),
             connected_at: Instant::now(),
             kind,
+            cancel: CancellationToken::new(),
         });
 
         self.connections.insert(id, Arc::clone(&handle));

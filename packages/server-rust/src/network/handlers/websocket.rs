@@ -112,11 +112,48 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     // Closed on shutdown to unblock any pending acquire.
     let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT));
 
+    // Cancellation signal for forced teardown by the reaper. Cloned (cheap —
+    // Arc inside) so both read phases can select on it without borrowing the
+    // handle across the moves they perform on the disconnect path.
+    let cancel = handle.cancel.clone();
+
     // Phase 1: sequential auth — only proceed when JWT secret is configured.
     // If no secret is set, every connection is pre-authenticated.
     if state.jwt_secret.is_some() {
+        // Bound the auth handshake: a client that connects and never finishes
+        // authenticating (slowloris) must not hold a connection slot forever.
+        // The deadline is enforced per read; malformed frames `continue` the
+        // loop but do not reset it.
+        let auth_deadline = tokio::time::Instant::now() + state.config.connection.auth_timeout;
         'auth: loop {
-            match receiver.next().await {
+            let next = tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    debug!("connection {:?} reaped during auth phase", conn_id);
+                    semaphore.close();
+                    drop(handle);
+                    join_outbound_with_timeout(outbound_handle).await;
+                    release_session_state(&state, conn_id);
+                    state.registry.remove(conn_id);
+                    debug!("WebSocket disconnected: {:?}", conn_id);
+                    return;
+                }
+                () = tokio::time::sleep_until(auth_deadline) => {
+                    debug!(
+                        "connection {:?} exceeded auth deadline; closing (slowloris guard)",
+                        conn_id
+                    );
+                    semaphore.close();
+                    drop(handle);
+                    join_outbound_with_timeout(outbound_handle).await;
+                    release_session_state(&state, conn_id);
+                    state.registry.remove(conn_id);
+                    debug!("WebSocket disconnected: {:?}", conn_id);
+                    return;
+                }
+                msg = receiver.next() => msg,
+            };
+            match next {
                 Some(Ok(Message::Binary(data))) => {
                     // Depth-checked decode BEFORE auth: a deeply-nested frame would
                     // otherwise recurse `rmp_serde` to a stack-overflow abort,
@@ -178,12 +215,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                     // Drain semaphore and drop before returning
                                     semaphore.close();
                                     drop(handle);
-                                    tokio::time::timeout(
-                                        std::time::Duration::from_secs(2),
-                                        outbound_handle,
-                                    )
-                                    .await
-                                    .ok();
+                                    join_outbound_with_timeout(outbound_handle).await;
                                     release_session_state(&state, conn_id);
                                     state.registry.remove(conn_id);
                                     debug!("WebSocket disconnected: {:?}", conn_id);
@@ -203,9 +235,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     debug!("connection {:?} closed during auth phase", conn_id);
                     semaphore.close();
                     drop(handle);
-                    tokio::time::timeout(std::time::Duration::from_secs(2), outbound_handle)
-                        .await
-                        .ok();
+                    join_outbound_with_timeout(outbound_handle).await;
                     release_session_state(&state, conn_id);
                     state.registry.remove(conn_id);
                     debug!("WebSocket disconnected: {:?}", conn_id);
@@ -227,9 +257,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     );
                     semaphore.close();
                     drop(handle);
-                    tokio::time::timeout(std::time::Duration::from_secs(2), outbound_handle)
-                        .await
-                        .ok();
+                    join_outbound_with_timeout(outbound_handle).await;
                     release_session_state(&state, conn_id);
                     state.registry.remove(conn_id);
                     debug!("WebSocket disconnected: {:?}", conn_id);
@@ -242,8 +270,12 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     // Resolve principal once for this connection so the authorization middleware
     // can read ctx.principal without performing a registry lookup per operation.
     // This is done after Phase 1 completes so the metadata is guaranteed to be set.
+    // Also mark the handshake complete so the reaper switches this connection
+    // from the auth-deadline bound to the idle (heartbeat) bound — true for
+    // no-auth connections too, which skip Phase 1 entirely.
     let principal: Option<Principal> = {
-        let meta = handle.metadata.read().await;
+        let mut meta = handle.metadata.write().await;
+        meta.handshake_complete = true;
         meta.principal.clone()
     };
 
@@ -251,7 +283,18 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     // The reader continues immediately after spawning, so multiple frames
     // can be in-flight simultaneously up to MAX_IN_FLIGHT.
     loop {
-        match receiver.next().await {
+        // Select on the cancel token too, so the reaper can unblock a reader
+        // parked on a half-open socket (no FIN, no client traffic). On cancel
+        // we fall through to the shared cleanup below.
+        let next = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                debug!("connection {:?} reaped (idle/half-open)", conn_id);
+                break;
+            }
+            msg = receiver.next() => msg,
+        };
+        match next {
             Some(Ok(Message::Binary(data))) => {
                 let tg_msg = match decode::decode_depth_checked::<TopGunMessage>(&data) {
                     Ok(msg) => msg,
@@ -312,11 +355,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     // The outbound task will drain remaining buffered messages before exiting.
     drop(handle);
 
-    // Wait for the outbound task to finish flushing, with a timeout to
-    // prevent hanging if the writer is stuck.
-    tokio::time::timeout(std::time::Duration::from_secs(2), outbound_handle)
-        .await
-        .ok();
+    // Wait for the outbound task to finish flushing, then abort it if it is
+    // wedged so a stuck writer cannot linger holding the socket.
+    join_outbound_with_timeout(outbound_handle).await;
 
     release_session_state(&state, conn_id);
     state.registry.remove(conn_id);
@@ -750,6 +791,22 @@ async fn send_operation_response(resp: OperationResponse, tx: &mpsc::Sender<Outb
 /// checks `try_recv()` for additional ready messages and sends them all
 /// before waiting again. This reduces the number of individual write
 /// syscalls under load.
+/// Awaits the outbound task's clean exit, then aborts it if it is wedged.
+///
+/// The outbound task can stall on a writer whose TCP send-buffer is full (a
+/// slow or dead client). We give it a bounded window to drain and close
+/// gracefully; if it does not, `abort()` reclaims the task so it cannot linger
+/// holding the socket sender and receiver until the OS TCP layer errors.
+async fn join_outbound_with_timeout(handle: tokio::task::JoinHandle<()>) {
+    let mut handle = handle;
+    if tokio::time::timeout(std::time::Duration::from_secs(2), &mut handle)
+        .await
+        .is_err()
+    {
+        handle.abort();
+    }
+}
+
 async fn outbound_task(
     mut sender: SplitSink<WebSocket, Message>,
     mut rx: mpsc::Receiver<OutboundMessage>,

@@ -6,10 +6,12 @@ pub mod handlers;
 pub mod middleware;
 pub mod module;
 pub mod openapi;
+pub mod reaper;
 pub mod shutdown;
 
 pub use config::*;
 pub use connection::*;
 pub use handlers::AppState;
 pub use module::NetworkModule;
+pub use reaper::{spawn_connection_reaper, ReaperConfig};
 pub use shutdown::*;
