@@ -64,7 +64,11 @@ export class ServerReadUnsettledError extends Error {
 type ClientWithPaged = {
   queryOncePaged(
     map: string,
-    filter: { where?: Record<string, unknown>; limit?: number },
+    filter: {
+      where?: Record<string, unknown>;
+      predicate?: { op: string; attribute: string; value: unknown };
+      limit?: number;
+    },
   ): Promise<{
     items: Array<Record<string, unknown> & { _key: string }>;
     hasMore: boolean;
@@ -99,6 +103,52 @@ export async function fetchServerRecords(
       return { key: _key, value };
     });
     return { records, hasMore: paged.hasMore };
+  } catch (error) {
+    if (error instanceof QueryOnceUnsettledError) {
+      throw new ServerReadUnsettledError(error.reason, map);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Fetch settled, server-authoritative bodies for a specific set of record keys.
+ *
+ * Uses a single `_key IN (...)` predicate query so hydration is O(number of keys)
+ * — NOT a full-map scan — and never bounded by which rows happen to fall in the
+ * first page (the scan approach would fabricate "not available" for a real record
+ * whose key sorted beyond the first page). The server injects the real record key
+ * as the `_key` column on every row, so it is directly filterable.
+ *
+ * Returns a `key → body` map containing only the keys the server actually holds;
+ * absent keys are simply missing from the map (the caller decides how to render
+ * them). Offline/timeout surfaces as {@link ServerReadUnsettledError}, same as
+ * {@link fetchServerRecords}.
+ */
+export async function fetchServerRecordsByKeys(
+  ctx: ToolContext,
+  map: string,
+  keys: string[],
+): Promise<Map<string, Record<string, unknown>>> {
+  const bodies = new Map<string, Record<string, unknown>>();
+  if (keys.length === 0) {
+    return bodies;
+  }
+
+  // Deduplicate so the predicate list is minimal even if a key repeats.
+  const uniqueKeys = Array.from(new Set(keys));
+  const filter = {
+    predicate: { op: 'in', attribute: '_key', value: uniqueKeys },
+    limit: Math.min(uniqueKeys.length, ctx.config.maxLimit),
+  };
+
+  try {
+    const paged = await (ctx.client as unknown as ClientWithPaged).queryOncePaged(map, filter);
+    for (const item of paged.items) {
+      const { _key, ...value } = item;
+      bodies.set(_key, value);
+    }
+    return bodies;
   } catch (error) {
     if (error instanceof QueryOnceUnsettledError) {
       throw new ServerReadUnsettledError(error.reason, map);

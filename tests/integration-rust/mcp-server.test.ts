@@ -635,4 +635,188 @@ describe('Integration: MCP tools against a real Rust server (cold cache)', () =>
       await mcpClient.close().catch(() => {});
     }
   }, 30_000);
+
+  // F6 — topgun_search must hydrate hit bodies SERVER-AUTHORITATIVELY. hybridSearch
+  // ranks keys on the server but returns no bodies; the MCP process's local CRDT
+  // replica is cold for any record it did not write itself. The pre-fix tool read
+  // the body from that cold replica, so every hit rendered "(record body not
+  // available locally)" against real server data. We seed FTS-indexable docs from a
+  // SEPARATE client over the wire, then search from a COLD MCP client and assert the
+  // real server body text appears — the only configuration that exposes the bug.
+  //
+  // hybrid search additionally gates on the map having a registered index registry
+  // (the real "index registry not found" path); we register it via the admin
+  // index endpoint so the fullText (tantivy) leg actually returns ranked hits.
+  test('search hydrates hit bodies from the server, not the cold local replica (F6)', async () => {
+    const server = await spawnRustServer();
+    const seeder = await createRustTestClient(server.port, {
+      userId: 'mcp-seeder',
+      roles: ['ADMIN'],
+    });
+    const mcpClient = makeClient(server.port, 'mcp-searcher');
+    const mcp = new TopGunMCPServer({ client: mcpClient });
+
+    try {
+      await seeder.waitForMessage('AUTH_ACK', 10_000);
+      await mcpClient.start();
+      await waitForState(mcpClient, SyncState.CONNECTED);
+
+      // Seed articles with distinctive, FTS-indexable body text over the wire.
+      const mapName = `mcp_search_${Date.now()}`;
+      const articles: Array<{ key: string; title: string; body: string }> = [
+        {
+          key: 'art-1',
+          title: 'Introduction to Machine Learning',
+          body: 'Machine learning is a subset of artificial intelligence.',
+        },
+        {
+          key: 'art-2',
+          title: 'Deep Learning Fundamentals',
+          body: 'Deep learning uses neural networks with many layers.',
+        },
+        {
+          key: 'art-3',
+          title: 'Advanced Machine Learning Techniques',
+          body: 'Covers advanced machine learning algorithms and optimization.',
+        },
+      ];
+      for (const art of articles) {
+        seeder.messages.length = 0;
+        seeder.send({
+          type: 'CLIENT_OP',
+          payload: {
+            id: `seed-${art.key}`,
+            mapName,
+            opType: 'PUT',
+            key: art.key,
+            record: createLWWRecord({ id: art.key, title: art.title, body: art.body }),
+          },
+        });
+        await seeder.waitForMessage('OP_ACK', 10_000);
+      }
+
+      // Register the map's index registry so hybrid search clears its
+      // "index registry not found" gate and the tantivy fullText leg runs. Requires
+      // an admin-plane ('admin') JWT — distinct from the data-plane 'ADMIN' role.
+      const adminToken = createTestToken('mcp-index-admin', ['admin']);
+      const createIndexResp = await fetch(`http://localhost:${server.port}/api/admin/indexes`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: JSON.stringify({ mapName, attribute: 'title', indexType: 'inverted' }),
+      });
+      expect(createIndexResp.status).toBe(201);
+
+      // Poll the search until the full-text index has caught up (lazy/batched
+      // indexing). A genuine server-blind read is NOT a "no results" case, so this
+      // loop never masks the negative control: once hits arrive, their bodies must
+      // be the real server bodies.
+      let result: MCPToolResult | undefined;
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline) {
+        await waitForState(mcp.getClient(), SyncState.CONNECTED, 8_000).catch(() => {});
+        result = await mcp.callTool('topgun_search', {
+          map: mapName,
+          query: 'machine learning',
+        });
+        if (!result.isError && /Found \d+ result/.test(text(result))) break;
+        await waitMs(500);
+      }
+
+      expect(result!.isError).toBeFalsy();
+      const out = text(result!);
+      expect(out).toMatch(/Found \d+ result/);
+      // The hit bodies are the REAL server bodies, hydrated server-authoritatively.
+      expect(out).toContain('Machine Learning');
+      expect(out).toMatch(/subset of artificial intelligence|machine learning algorithms/);
+      // Negative control: the pre-fix cold-cache markers must never appear.
+      expect(out).not.toContain('not available locally');
+      expect(out).not.toContain('not available on the server');
+    } finally {
+      await mcp.stop().catch(() => {});
+      await mcpClient.close().catch(() => {});
+      seeder.close();
+      await server.cleanup().catch(() => {});
+    }
+  }, 60_000);
+
+  // F6 — a semantic-only request must be rejected honestly (vector search is dark
+  // on the server), never silently routed to a dead leg.
+  test('search rejects a semantic-only request honestly (F6 semantic dark)', async () => {
+    const server = await spawnRustServer();
+    const mcpClient = makeClient(server.port, 'mcp-semantic');
+    const mcp = new TopGunMCPServer({ client: mcpClient });
+
+    try {
+      await mcpClient.start();
+      await waitForState(mcpClient, SyncState.CONNECTED);
+
+      const result = await mcp.callTool('topgun_search', {
+        map: `mcp_semantic_${Date.now()}`,
+        query: 'anything',
+        methods: ['semantic'],
+      });
+
+      expect(result.isError).toBe(true);
+      expect(text(result)).toMatch(/semantic.*not yet available/i);
+      expect(text(result)).toContain('methods: ["fullText"]');
+    } finally {
+      await mcpClient.close().catch(() => {});
+      await server.cleanup().catch(() => {});
+    }
+  }, 30_000);
+
+  // F7 — topgun_query must NEVER instruct the agent to page with the literal string
+  // "undefined". When the server reports hasMore without a usable cursor token (a
+  // known getPaginationInfo gap), the pre-fix tool rendered `cursor: "undefined"`.
+  // We seed more rows than the page limit and assert the truncation is disclosed but
+  // the "undefined" token never appears.
+  test('query never renders cursor:"undefined" when more rows exist (F7)', async () => {
+    const server = await spawnRustServer();
+    const seeder = await createRustTestClient(server.port, {
+      userId: 'mcp-seeder',
+      roles: ['ADMIN'],
+    });
+    const mcpClient = makeClient(server.port, 'mcp-pager');
+    const mcp = new TopGunMCPServer({ client: mcpClient });
+
+    try {
+      await seeder.waitForMessage('AUTH_ACK', 10_000);
+      await mcpClient.start();
+      await waitForState(mcpClient, SyncState.CONNECTED);
+
+      const mapName = `mcp_page_${Date.now()}`;
+      for (let i = 0; i < RECORD_COUNT; i++) {
+        seeder.messages.length = 0;
+        seeder.send({
+          type: 'CLIENT_OP',
+          payload: {
+            id: `seed-${i}`,
+            mapName,
+            opType: 'PUT',
+            key: `k${i}`,
+            record: createLWWRecord({ id: `k${i}`, title: `doc ${i}`, n: i }),
+          },
+        });
+        await seeder.waitForMessage('OP_ACK', 10_000);
+      }
+
+      // limit:5 over 25 rows → the server reports more rows exist.
+      const result = await callStable(mcp, 'topgun_query', { map: mapName, limit: 5 });
+      expect(result.isError).toBeFalsy();
+      const out = text(result);
+      expect(out).toContain('Found 5 result(s)');
+      // Truncation must be disclosed...
+      expect(out).toContain('More rows match than were returned');
+      // ...but the agent is NEVER handed the string "undefined" as a cursor.
+      expect(out).not.toContain('cursor: "undefined"');
+      expect(out).not.toContain('"undefined"');
+    } finally {
+      await mcpClient.close().catch(() => {});
+      seeder.close();
+      await server.cleanup().catch(() => {});
+    }
+  }, 60_000);
 });
