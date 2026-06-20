@@ -125,6 +125,20 @@ function text(result: { content: Array<{ text?: string }> }): string {
   return (result.content || []).map((c) => c.text ?? '').join('\n');
 }
 
+// Parse the head line of each change the subscribe feed renders, e.g.
+//   "1. [2026-...Z] ADD (entered result set) - live1"
+//   "2. [2026-...Z] REMOVE (deleted / left result set) - k0"
+// JSON body lines (indented) never match, so only one record per delta is counted.
+function parseDeltas(out: string): Array<{ kind: string; key: string }> {
+  const re = /^\s*\d+\.\s+\[[^\]]+\]\s+(ADD|UPDATE|REMOVE)\b.*?-\s+(\S+)\s*$/gm;
+  const deltas: Array<{ kind: string; key: string }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(out)) !== null) {
+    deltas.push({ kind: m[1], key: m[2] });
+  }
+  return deltas;
+}
+
 // Both clients authenticate with a JWT (same pattern the other single-server
 // integration suites use), rather than relying on a NO_AUTH server. The tokenless
 // NO_AUTH path is racy for a second connecting client under CI load (the WS
@@ -400,4 +414,141 @@ describe('Integration: MCP tools against a real Rust server (cold cache)', () =>
       await mcpClient.close().catch(() => {});
     }
   }, 30_000);
+
+  // F3 — topgun_subscribe must be a REAL change feed: one correctly-typed delta
+  // per genuine change, removals included, and NOT a re-dump of the whole
+  // snapshot. The pre-fix tool blocked for the timeout and emitted the full
+  // result set as `UPDATE` "changes" on every membership re-delivery (a 2-record
+  // scenario produced 103 changes, all UPDATE; the real removal was invisible).
+  //
+  // We seed N rows, open the feed (action:'start' — returns at once), then make
+  // exactly two concurrent changes via a SEPARATE client over the wire: one
+  // brand-new key (an ADD) and one removal of a pre-existing key (a REMOVE).
+  // Draining the feed (action:'poll') must yield EXACTLY those two deltas with
+  // the correct types — never the untouched pre-existing rows.
+  test('subscribe is a real change feed: one typed delta per change, removals visible (F3)', async () => {
+    const server = await spawnRustServer();
+    const seeder = await createRustTestClient(server.port, {
+      userId: 'mcp-seeder',
+      roles: ['ADMIN'],
+    });
+    const mcpClient = makeClient(server.port, 'mcp-watcher');
+    const mcp = new TopGunMCPServer({ client: mcpClient });
+
+    try {
+      await seeder.waitForMessage('AUTH_ACK', 10_000);
+      await mcpClient.start();
+      await waitForState(mcpClient, SyncState.CONNECTED);
+
+      // Seed a pre-existing dataset (k0..k9) and wait for each server ACK so the
+      // feed's baseline snapshot already contains all of them — none must later
+      // surface as a "change".
+      const mapName = `mcp_sub_${Date.now()}`;
+      const PRE_COUNT = 10;
+      for (let i = 0; i < PRE_COUNT; i++) {
+        seeder.messages.length = 0;
+        seeder.send({
+          type: 'CLIENT_OP',
+          payload: {
+            id: `seed-${i}`,
+            mapName,
+            opType: 'PUT',
+            key: `k${i}`,
+            record: createLWWRecord({ id: `k${i}`, title: `doc ${i}`, n: i }),
+          },
+        });
+        await seeder.waitForMessage('OP_ACK', 10_000);
+      }
+
+      // Open the change feed. Returns immediately with a subscriptionId (does NOT
+      // block for a timeout) once the server baseline settles.
+      const startRes = await callStable(mcp, 'topgun_subscribe', {
+        action: 'start',
+        map: mapName,
+      });
+      expect(startRes.isError).toBeFalsy();
+      const idMatch = text(startRes).match(/subscriptionId:\s*([0-9a-f-]+)\)/i);
+      expect(idMatch).toBeTruthy();
+      const subscriptionId = idMatch![1];
+
+      // An immediate poll before any change must report nothing — the baseline
+      // snapshot is NOT reported as changes (the core pre-fix defect).
+      const emptyPoll = await mcp.callTool('topgun_subscribe', {
+        action: 'poll',
+        subscriptionId,
+      });
+      expect(emptyPoll.isError).toBeFalsy();
+      expect(text(emptyPoll)).toMatch(/no changes/i);
+
+      // Make EXACTLY two concurrent changes over the wire:
+      //   1. a brand-new key 'live1'  → ADD
+      //   2. a removal of existing 'k0' → REMOVE
+      seeder.messages.length = 0;
+      seeder.send({
+        type: 'CLIENT_OP',
+        payload: {
+          id: 'live-add',
+          mapName,
+          opType: 'PUT',
+          key: 'live1',
+          record: createLWWRecord({ id: 'live1', title: 'fresh', n: 999 }),
+        },
+      });
+      await seeder.waitForMessage('OP_ACK', 10_000);
+
+      seeder.messages.length = 0;
+      seeder.send({
+        type: 'CLIENT_OP',
+        payload: {
+          id: 'live-remove',
+          mapName,
+          opType: 'REMOVE',
+          key: 'k0',
+          record: createLWWRecord(null),
+        },
+      });
+      await seeder.waitForMessage('OP_ACK', 10_000);
+
+      // Drain the feed. Deltas may arrive across more than one server push, so we
+      // poll until both expected changes are seen, then poll a few more times to
+      // prove no EXTRA deltas (e.g. a re-dumped snapshot row) follow.
+      const collected: Array<{ kind: string; key: string }> = [];
+      const deadline = Date.now() + 15_000;
+      let extraPollsAfterComplete = 0;
+      while (Date.now() < deadline) {
+        const poll = await mcp.callTool('topgun_subscribe', { action: 'poll', subscriptionId });
+        expect(poll.isError).toBeFalsy();
+        collected.push(...parseDeltas(text(poll)));
+        if (collected.length >= 2) {
+          // Got the two we expect — confirm the feed is now quiet (no snapshot dump).
+          if (++extraPollsAfterComplete >= 3) break;
+        }
+        await waitMs(400);
+      }
+
+      // EXACTLY two deltas — not 103, not the pre-existing rows re-reported.
+      expect(collected).toHaveLength(2);
+
+      const add = collected.find((c) => c.key === 'live1');
+      const remove = collected.find((c) => c.key === 'k0');
+      expect(add?.kind).toBe('ADD'); // new record entered the result set
+      expect(remove?.kind).toBe('REMOVE'); // removal is VISIBLE as its own delta
+
+      // Negative control: none of the untouched pre-existing rows (k1..k9) are
+      // ever reported — the snapshot is not dumped as "changes".
+      for (let i = 1; i < PRE_COUNT; i++) {
+        expect(collected.some((c) => c.key === `k${i}`)).toBe(false);
+      }
+
+      // Tearing down is explicit and acknowledged.
+      const stopRes = await mcp.callTool('topgun_subscribe', { action: 'stop', subscriptionId });
+      expect(stopRes.isError).toBeFalsy();
+      expect(text(stopRes)).toMatch(/stopped/i);
+    } finally {
+      await mcp.stop().catch(() => {});
+      await mcpClient.close().catch(() => {});
+      seeder.close();
+      await server.cleanup().catch(() => {});
+    }
+  }, 60_000);
 });

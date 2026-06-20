@@ -13,6 +13,7 @@ import type { IStorageAdapter, OpLogEntry, StorageMutation } from '@topgunbuild/
 import type { MCPServerConfig, MCPToolResult, ResolvedMCPServerConfig, ToolContext } from './types';
 import { allTools, toolHandlers } from './tools';
 import { createLogger, type Logger } from './logger';
+import { SubscriptionRegistry } from './subscriptions';
 
 /**
  * Default configuration values
@@ -88,17 +89,20 @@ export class TopGunMCPServer {
       }
     }
 
-    // Create tool context
-    this.toolContext = {
-      client: this.client,
-      config: this.config,
-    };
-
     // Initialize logger
     this.logger = createLogger({
       debug: this.config.debug,
       name: this.config.name,
     });
+
+    // Create tool context
+    this.toolContext = {
+      client: this.client,
+      config: this.config,
+      subscriptions: new SubscriptionRegistry(this.client, (err, subscriptionId) =>
+        this.logger.warn({ err, subscriptionId }, 'subscription teardown failed'),
+      ),
+    };
 
     // Initialize MCP server
     this.server = new Server(
@@ -249,6 +253,10 @@ export class TopGunMCPServer {
    */
   async stop(): Promise<void> {
     if (!this.isStarted) return;
+
+    // Tear down live change-feed subscriptions first so no handle or expiry
+    // timer outlives the server.
+    this.toolContext.subscriptions.teardownAll();
 
     await this.server.close();
 

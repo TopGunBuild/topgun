@@ -107,7 +107,7 @@ await server.start();
 | `enableSubscriptions` | `true` | If `false`, `topgun_subscribe` is unavailable. |
 | `defaultLimit` | `10` | Default page size for `topgun_query`. |
 | `maxLimit` | `100` | Hard cap on requested page size. |
-| `subscriptionTimeoutSeconds` | `60` | Maximum lifetime of a `topgun_subscribe` call. |
+| `subscriptionTimeoutSeconds` | `60` | Default idle lifetime of a `topgun_subscribe` feed; auto-stops after this long without a poll (refreshed on each poll). |
 | `debug` | `false` | Verbose logging. |
 | `client` | none | Pre-built `TopGunClient` instance (overrides `topgunUrl` + `authToken`). |
 
@@ -181,11 +181,26 @@ BM25 full-text search across a map.
 
 ### topgun_subscribe
 
-Subscribe to live updates on a map for a bounded time window. Useful for the assistant to watch for changes during a conversation.
+Watch a map for real-time changes via a **poll cursor**. MCP is a request/response
+protocol, so a tool call cannot stream changes into the assistant's turn; instead the
+feed is drained on demand. Each reported change is a genuine, typed delta (`add` /
+`update` / `remove`) — removals are first-class, and the existing snapshot is never
+re-reported as "changes".
 
-- **Parameters:** `{ map, filter?, durationSeconds? }`
-- **Response:** stream of `{ type: 'add' | 'update' | 'remove', key, value }` until timeout
-- **Security:** requires `enableSubscriptions: true`; capped by `subscriptionTimeoutSeconds`
+- **Parameters:** `{ action: 'start' | 'poll' | 'stop' | 'list', map?, filter?, subscriptionId?, ttlSeconds? }`
+- **Usage:**
+  - `action: 'start'` `{ map, filter? }` — opens a server-backed live query and returns a
+    `subscriptionId` as soon as the server confirms the watch (it does **not** hold the call open
+    for the watch window). Errors if the server cannot deliver an initial baseline (offline /
+    unreachable).
+  - `action: 'poll'` `{ subscriptionId }` — returns the changes observed since the last poll
+    as `{ type, key, value? }`. Refreshes the subscription's idle timer. Reports if the buffer
+    overflowed (changes dropped).
+  - `action: 'stop'` `{ subscriptionId }` — ends the subscription.
+  - `action: 'list'` — shows active subscriptions.
+- **Lifetime:** an unpolled subscription auto-stops after `ttlSeconds` (defaults to
+  `subscriptionTimeoutSeconds`); each poll refreshes it.
+- **Security:** requires `enableSubscriptions: true`
 
 ### topgun_schema
 

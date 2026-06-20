@@ -3,6 +3,7 @@
  */
 
 import type { ToolContext, ResolvedMCPServerConfig } from '../types';
+import { SubscriptionRegistry } from '../subscriptions';
 import { QueryOnceUnsettledError } from '@topgunbuild/client';
 import { handleQuery } from '../tools/query';
 import { handleMutate } from '../tools/mutate';
@@ -182,8 +183,10 @@ class MockTopGunClient {
 }
 
 function createTestContext(config?: Partial<ResolvedMCPServerConfig>): ToolContext {
+  const client = new MockTopGunClient() as unknown as ToolContext['client'];
   return {
-    client: new MockTopGunClient() as unknown as ToolContext['client'],
+    client,
+    subscriptions: new SubscriptionRegistry(client),
     config: {
       name: 'topgun-server',
       version: '1.0.0',

@@ -90,12 +90,34 @@ export type SearchArgs = z.infer<typeof SearchArgsSchema>;
 // ============================================
 
 export const SubscribeArgsSchema = z.object({
-  map: z.string().describe("Name of the map to watch (e.g., 'tasks', 'notifications')"),
+  action: z
+    .enum(['start', 'poll', 'stop', 'list'])
+    .optional()
+    .default('start')
+    .describe(
+      "What to do: 'start' opens a live change-feed on a map and returns a subscriptionId as " +
+        'soon as the server confirms the watch (it does NOT hold the call open for the watch ' +
+        "window); 'poll' drains the changes buffered since the last poll; 'stop' ends a " +
+        "subscription; 'list' shows active subscriptions.",
+    ),
+  map: z.string().optional().describe("Name of the map to watch (required for action 'start')"),
   filter: z
     .record(z.string(), z.unknown())
     .optional()
-    .describe('Filter criteria - only report changes matching these conditions'),
-  timeout: z.number().optional().default(60).describe('How long to watch for changes (in seconds)'),
+    .describe('Filter criteria - only report changes to records matching these conditions'),
+  subscriptionId: z
+    .string()
+    .optional()
+    .describe("Subscription id returned by 'start' (required for 'poll' and 'stop')"),
+  ttlSeconds: z
+    .number()
+    .positive()
+    .optional()
+    .describe(
+      'Idle lifetime of the subscription in seconds; refreshed on each poll. ' +
+        'Defaults to the server subscriptionTimeoutSeconds. After it elapses with no poll, ' +
+        'the subscription auto-stops.',
+    ),
 });
 
 export type SubscribeArgs = z.infer<typeof SubscribeArgsSchema>;
@@ -246,22 +268,37 @@ export const toolSchemas = {
   subscribe: {
     type: 'object',
     properties: {
+      action: {
+        type: 'string',
+        enum: ['start', 'poll', 'stop', 'list'],
+        description:
+          "What to do: 'start' opens a live change-feed on a map and returns a subscriptionId " +
+          'as soon as the server confirms the watch (it does NOT hold the call open for the watch ' +
+          "window); 'poll' drains the changes buffered since the last poll; " +
+          "'stop' ends a subscription; 'list' shows active subscriptions. Defaults to 'start'.",
+        default: 'start',
+      },
       map: {
         type: 'string',
-        description: "Name of the map to watch (e.g., 'tasks', 'notifications')",
+        description: "Name of the map to watch (required for action 'start')",
       },
       filter: {
         type: 'object',
-        description: 'Filter criteria - only report changes matching these conditions',
+        description: 'Filter criteria - only report changes to records matching these conditions',
         additionalProperties: true,
       },
-      timeout: {
+      subscriptionId: {
+        type: 'string',
+        description: "Subscription id returned by 'start' (required for 'poll' and 'stop')",
+      },
+      ttlSeconds: {
         type: 'number',
-        description: 'How long to watch for changes (in seconds)',
-        default: 60,
+        description:
+          'Idle lifetime of the subscription in seconds; refreshed on each poll. Defaults to the ' +
+          'server subscriptionTimeoutSeconds. After it elapses with no poll, the subscription auto-stops.',
       },
     },
-    required: ['map'],
+    required: [],
   },
   schema: {
     type: 'object',
