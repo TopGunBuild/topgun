@@ -1270,6 +1270,11 @@ fn build_embedding_setup() -> EmbeddingSetup {
             std::process::exit(1);
         }),
     };
+    if dimension == 0 {
+        // A zero dimension would panic the bucketing math and produce empty vectors.
+        eprintln!("FATAL: TOPGUN_EMBEDDING_DIMENSION must be greater than 0");
+        std::process::exit(1);
+    }
 
     let model = std::env::var("TOPGUN_EMBEDDING_MODEL").ok();
     let base_url = std::env::var("TOPGUN_EMBEDDING_BASE_URL").ok();

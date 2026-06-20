@@ -117,7 +117,7 @@ pub struct OllamaConfig {
     pub dimension: u16,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HttpProviderConfig {
     pub base_url: String,
@@ -125,6 +125,19 @@ pub struct HttpProviderConfig {
     pub api_key: Option<String>,
     pub model: String,
     pub dimension: u16,
+}
+
+// Manual Debug that redacts `api_key` so a bearer token never reaches logs via
+// `{:?}` on the (Arc-shared) provider config.
+impl std::fmt::Debug for HttpProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpProviderConfig")
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("model", &self.model)
+            .field("dimension", &self.dimension)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

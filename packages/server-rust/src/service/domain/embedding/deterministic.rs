@@ -65,7 +65,9 @@ impl EmbeddingProvider for DeterministicEmbeddingProvider {
         let dim = self.dimension as usize;
         let mut vec = vec![0.0f32; dim];
 
+        let mut token_count = 0usize;
         for token in Self::tokenize(text) {
+            token_count += 1;
             let h = Self::fnv1a(&token);
             // Bucket the term, and use a second hash bit to assign a sign so that
             // distinct tokens colliding into the same bucket do not always add
@@ -76,9 +78,19 @@ impl EmbeddingProvider for DeterministicEmbeddingProvider {
             vec[bucket] += sign;
         }
 
-        // L2-normalize so cosine similarity is well-defined. Empty / token-less
-        // text yields a zero vector (the write-path hook skips empty text, and a
-        // zero query vector simply matches nothing rather than erroring).
+        // Non-empty text that tokenizes to nothing (e.g. only punctuation) would
+        // otherwise produce a zero vector, which yields NaN cosine distances once
+        // indexed in HNSW. Fall back to hashing the raw text so the vector is
+        // always non-zero for non-empty input.
+        if token_count == 0 && !text.trim().is_empty() {
+            let h = Self::fnv1a(text.trim());
+            let bucket = usize::try_from(h % dim as u64).unwrap_or(0);
+            vec[bucket] = 1.0;
+        }
+
+        // L2-normalize so cosine similarity is well-defined. Genuinely empty text
+        // yields a zero vector (the write-path hook skips empty text, and a zero
+        // query vector simply matches nothing rather than erroring).
         let norm: f32 = vec.iter().map(|v| v * v).sum::<f32>().sqrt();
         if norm > 0.0 {
             for v in &mut vec {
@@ -143,5 +155,15 @@ mod tests {
         let p = DeterministicEmbeddingProvider::new(16);
         let v = p.embed("").await.unwrap();
         assert!(v.iter().all(|&x| x == 0.0));
+    }
+
+    #[tokio::test]
+    async fn punctuation_only_text_is_nonzero_unit_vector() {
+        // Non-empty but token-less text must not produce a zero vector (which would
+        // yield NaN cosine distances in the HNSW index).
+        let p = DeterministicEmbeddingProvider::new(16);
+        let v = p.embed("!!! ??? ...").await.unwrap();
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-4, "expected unit norm, got {norm}");
     }
 }
