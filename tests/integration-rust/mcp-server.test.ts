@@ -144,6 +144,16 @@ const OPEN_COUNT = 10; // records 0..9 are status:'open', 10..24 are status:'don
 // is NOT a transient error, so it is never retried — the negative control still
 // fails fast against the unfixed tools.
 const TRANSIENT = /unreachable|not settled|did not settle|client offline/i;
+function isTransientConnectivity(result: MCPToolResult): boolean {
+  const out = text(result);
+  // queryOncePaged-backed tools (query/schema/explain) surface offline/unsettled
+  // as an isError result — gate on isError so a SUCCESSFUL response whose record
+  // content merely contains one of these words is never retried.
+  if (result.isError && TRANSIENT.test(out)) return true;
+  // topgun_stats stays isError=false and instead degrades only its per-map line;
+  // match that exact marker so an unreachable stats read is retried too.
+  return /Records: unavailable \(server unreachable/i.test(out);
+}
 async function callStable(
   mcp: TopGunMCPServer,
   name: string,
@@ -153,7 +163,7 @@ async function callStable(
   for (let attempt = 0; attempt < 6; attempt++) {
     await waitForState(mcp.getClient(), SyncState.CONNECTED, 8_000).catch(() => {});
     last = await mcp.callTool(name, args);
-    if (!TRANSIENT.test(text(last))) return last;
+    if (!isTransientConnectivity(last)) return last;
     await waitMs(500);
   }
   return last!;
