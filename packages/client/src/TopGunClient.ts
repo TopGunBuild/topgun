@@ -186,6 +186,14 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
   private readonly authProvider?: AuthProvider;
 
   /**
+   * The single-server WebSocket URL this client was configured with, retained so
+   * callers (e.g. the MCP server's map-enumeration tool) can derive the matching
+   * HTTP control-plane base. `undefined` in cluster or local-only mode, where no
+   * single authoritative URL exists.
+   */
+  private readonly serverUrl?: string;
+
+  /**
    * Most-recent in-flight op promise per `${map}:${key}`, set synchronously by the
    * getMap set/remove wrappers. {@link confirmWrite} awaits the op id from this
    * promise, then waits for the server ack — letting a write be reported as durable
@@ -251,6 +259,9 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
       logger.info({ seeds: this.clusterConfig.seeds }, 'TopGunClient initialized in cluster mode');
     } else if (config.serverUrl) {
       // Single-server mode: create SingleServerProvider from serverUrl
+      // Retain the URL so getServerUrl() can expose it without reaching into the
+      // connection provider.
+      this.serverUrl = config.serverUrl;
       // Map BackoffConfig to SingleServerProviderConfig for unified retry behavior
       const singleServerProvider = new SingleServerProvider({
         url: config.serverUrl,
@@ -944,6 +955,28 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
    */
   public getConnectionState(): SyncState {
     return this.syncEngine.getConnectionState();
+  }
+
+  /**
+   * The single-server WebSocket URL this client was configured with, or
+   * `undefined` in cluster / local-only mode. Exposed so callers that need to
+   * reach the server's HTTP control plane (e.g. the MCP map-enumeration tool)
+   * can derive the matching base URL rather than guessing a default.
+   */
+  public getServerUrl(): string | undefined {
+    return this.serverUrl;
+  }
+
+  /**
+   * Resolve the auth token currently used to authenticate with the server,
+   * whether it was set directly via {@link setAuthToken} or supplied by a token
+   * provider (config.auth / {@link setAuthTokenProvider}). Returns `null` when no
+   * credentials are configured. Exposed for callers that must authenticate a
+   * side-channel request to the server (e.g. the MCP map-enumeration tool calling
+   * the HTTP control plane).
+   */
+  public getAuthToken(): Promise<string | null> {
+    return this.syncEngine.getResolvedToken();
   }
 
   /**
