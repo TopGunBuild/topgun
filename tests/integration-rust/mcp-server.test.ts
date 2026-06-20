@@ -152,16 +152,33 @@ describe('Integration: MCP tools against a real Rust server (cold cache)', () =>
   let mcp: TopGunMCPServer | null = null;
   let mapName = '';
 
-  beforeEach(async () => {
+  // Connect BOTH clients up front against the still-idle server (so each
+  // completes its AUTH handshake fast), THEN seed. A client that connects LATER —
+  // while the seeder is mid-Merkle-sync — can miss its AUTH_ACK inside the SDK's
+  // 15 s connection-establishment window under CI load and stall at
+  // AUTHENTICATING; connecting before any load avoids that race (the pattern
+  // live-query-limit-clamp.test.ts uses). The data must stay on the server, so
+  // the seeder stays connected for the suite's lifetime (the null in-memory
+  // backend keeps a map's rows only while it is live, not after the writer
+  // disconnects). The MCP client is still a genuinely COLD reader: it never
+  // mutates and queryOncePaged does not hydrate the persistent replica, so its
+  // local CRDT map stays empty for every read — exactly the configuration that
+  // exposes a server-blind read. We inject the client (rather than letting the
+  // MCP server build one) so it carries its own auth, and start it directly
+  // instead of via mcp.start(), which would attach a stdio transport that
+  // consumes the Jest process's stdin; callTool() only needs it connected.
+  beforeAll(async () => {
     server = await spawnRustServer();
 
-    // 1. Seeder client — writes data the MCP process's cache has NEVER seen.
     seeder = makeClient(server.port, 'mcp-seeder');
-    await seeder.start();
-    await waitForState(seeder, SyncState.CONNECTED);
+    const mcpClient = makeClient(server.port, 'mcp-reader');
+    mcp = new TopGunMCPServer({ client: mcpClient });
 
-    // Unique map per test so the null in-memory backend never bleeds rows across
-    // runs and every seeded row is unambiguously part of this test's dataset.
+    await seeder.start();
+    await mcpClient.start();
+    await waitForState(seeder, SyncState.CONNECTED);
+    await waitForState(mcpClient, SyncState.CONNECTED);
+
     mapName = `mcp_e2e_${Date.now()}`;
     const m = seeder.getMap<string, Record<string, unknown>>(mapName);
     for (let i = 0; i < RECORD_COUNT; i++) {
@@ -173,19 +190,9 @@ describe('Integration: MCP tools against a real Rust server (cold cache)', () =>
       });
     }
     await waitForSynced(seeder);
-
-    // 2. MCP server driving a SEPARATE, freshly-built client (cold cache) → same
-    // server. We inject the client so it carries its own auth, and start it
-    // directly rather than via mcp.start() (which would attach a stdio transport
-    // that consumes the Jest process's stdin); callTool() only needs the client
-    // connected.
-    const mcpClient = makeClient(server.port, 'mcp-reader');
-    mcp = new TopGunMCPServer({ client: mcpClient });
-    await mcpClient.start();
-    await waitForState(mcpClient, SyncState.CONNECTED);
   }, 60_000);
 
-  afterEach(async () => {
+  afterAll(async () => {
     if (mcp) {
       await mcp
         .getClient()
