@@ -1433,13 +1433,30 @@ export class SyncEngine {
     timeoutMs: number,
   ): Promise<'synced' | 'offline' | 'timeout'> {
     const deadline = Date.now() + timeoutMs;
-    // Absent from opLog ⇒ already acked + compacted out. Present + synced ⇒ acked.
-    const isSynced = (): boolean => {
-      const op = this.opLog.find((o) => o.id === opId);
-      return !op || op.synced === true;
-    };
 
-    while (!isSynced()) {
+    // Capture the op object ONCE by id, then poll ITS `synced` flag — do NOT
+    // re-find by id each tick. The distinction matters for correctness:
+    //
+    //   - On ack, handleOpAck flips `synced = true` on this exact object BEFORE
+    //     compacting it out of the array, so the captured reference observes the
+    //     ack even after the splice.
+    //   - When an op leaves opLog UNACKED — backpressure drop-oldest evicting an
+    //     unsynced op, or the opLog being cleared and rebuilt from storage on
+    //     reconnect (`opLog.length = 0`) — its `synced` flag stays false on this
+    //     captured object. So we correctly report timeout/offline, never a false
+    //     'synced'. A re-find-by-id would instead see the op ABSENT and wrongly
+    //     conclude it was acked — reporting a write as durable that the server
+    //     never confirmed.
+    //
+    // If the op is already absent at this first lookup, it was acked + compacted
+    // in the brief gap since recordOperation appended it (the fast-ack path — the
+    // only way an op leaves opLog between append and this immediate check, since
+    // drop/reset require backpressure buildup or a reconnect that cannot occur in
+    // that window). That is a genuine ack ⇒ 'synced'.
+    const op = this.opLog.find((o) => o.id === opId);
+    if (!op) return 'synced';
+
+    while (op.synced !== true) {
       // Fail fast when offline with the op still pending: it will only sync on a
       // future reconnect, so there is nothing to wait for here.
       if (!this.isOnline()) return 'offline';

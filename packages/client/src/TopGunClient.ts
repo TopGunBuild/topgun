@@ -1002,7 +1002,8 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
    *   will sync on reconnect, but is NOT yet durable on the server.
    * - `'timeout'` — connected, but the server did not acknowledge within
    *   `timeoutMs`; the write is not yet confirmed durable.
-   * - `'failed'` — the local op could not be recorded (commit/storage failure).
+   * - `'failed'` — there was no recordable write to confirm (no tracked op, or
+   *   the local op could not be committed).
    *
    * This is the honest "did the server take my write?" answer that callers
    * mutating a database (e.g. the MCP `mutate` tool) need before reporting
@@ -1015,23 +1016,32 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
   ): Promise<WriteConfirmation> {
     const writeKey = `${name}:${key}`;
     const opPromise = this.inFlightWrites.get(writeKey);
-    // No tracked write ⇒ nothing to confirm; callers always write before
-    // confirming, so this only guards misuse.
-    if (!opPromise) return 'synced';
+    // No tracked write ⇒ we have nothing to confirm. NEVER assume success here:
+    // returning 'synced' for an unknown write would violate the core contract
+    // (report only server-confirmed state). Callers always write before
+    // confirming, so this only fires on misuse — fail closed, not open.
+    if (!opPromise) return 'failed';
 
     let opId: string;
     try {
       opId = await opPromise;
     } catch {
-      return 'failed';
-    } finally {
-      // Only clear if this is still the latest in-flight write for the key.
       if (this.inFlightWrites.get(writeKey) === opPromise) {
         this.inFlightWrites.delete(writeKey);
       }
+      return 'failed';
     }
 
-    return this.syncEngine.waitForOpSynced(opId, timeoutMs);
+    const outcome = await this.syncEngine.waitForOpSynced(opId, timeoutMs);
+    // Forget the in-flight write ONLY once the server has confirmed it. On
+    // offline/timeout we keep the entry so a later retry re-waits on the same op
+    // instead of hitting the no-tracked-write path above and reporting a false
+    // result. A subsequent write to the same key overwrites the entry, so this
+    // never grows unbounded.
+    if (outcome === 'synced' && this.inFlightWrites.get(writeKey) === opPromise) {
+      this.inFlightWrites.delete(writeKey);
+    }
+    return outcome;
   }
 
   // ============================================
