@@ -1409,6 +1409,64 @@ export class SyncEngine {
   }
 
   /**
+   * Wait until a specific local op has been confirmed applied by the server.
+   *
+   * Resolves `'synced'` once the op identified by `opId` is acknowledged (the
+   * server applied it). Acknowledged ops are flipped `synced=true` and then
+   * spliced out of the in-memory `opLog` (see {@link handleOpAck}); therefore an
+   * op that is **absent** from `opLog` has already been acked — that is treated
+   * as `'synced'`, not as "unknown".
+   *
+   * Resolves `'offline'` the moment the client is not online with the op still
+   * pending — so a caller (e.g. the MCP `mutate` tool) can fail fast with an
+   * honest "queued locally, not yet durable" instead of blocking for the whole
+   * timeout. Resolves `'timeout'` if the op stays pending past `timeoutMs` while
+   * online (server slow / unreachable mid-flight).
+   *
+   * This is the authoritative "did the server take my write?" signal for plain
+   * map writes. Per-op Write Concern promises only resolve when the server
+   * returns per-op `results`, which the single-server OP_BATCH path does not — so
+   * this op-log/ACK projection is the correct primitive for confirming a write.
+   */
+  public async waitForOpSynced(
+    opId: string,
+    timeoutMs: number,
+  ): Promise<'synced' | 'offline' | 'timeout'> {
+    const deadline = Date.now() + timeoutMs;
+
+    // Capture the op object ONCE by id, then poll ITS `synced` flag — do NOT
+    // re-find by id each tick. The distinction matters for correctness:
+    //
+    //   - On ack, handleOpAck flips `synced = true` on this exact object BEFORE
+    //     compacting it out of the array, so the captured reference observes the
+    //     ack even after the splice.
+    //   - When an op leaves opLog UNACKED — backpressure drop-oldest evicting an
+    //     unsynced op, or the opLog being cleared and rebuilt from storage on
+    //     reconnect (`opLog.length = 0`) — its `synced` flag stays false on this
+    //     captured object. So we correctly report timeout/offline, never a false
+    //     'synced'. A re-find-by-id would instead see the op ABSENT and wrongly
+    //     conclude it was acked — reporting a write as durable that the server
+    //     never confirmed.
+    //
+    // If the op is already absent at this first lookup, it was acked + compacted
+    // in the brief gap since recordOperation appended it (the fast-ack path — the
+    // only way an op leaves opLog between append and this immediate check, since
+    // drop/reset require backpressure buildup or a reconnect that cannot occur in
+    // that window). That is a genuine ack ⇒ 'synced'.
+    const op = this.opLog.find((o) => o.id === opId);
+    if (!op) return 'synced';
+
+    while (op.synced !== true) {
+      // Fail fast when offline with the op still pending: it will only sync on a
+      // future reconnect, so there is nothing to wait for here.
+      if (!this.isOnline()) return 'offline';
+      if (Date.now() >= deadline) return 'timeout';
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return 'synced';
+  }
+
+  /**
    * Get the current backpressure status.
    * Delegates to BackpressureController.
    */

@@ -568,4 +568,52 @@ describe('TopGunClient', () => {
       await expect(tempClient.close()).resolves.not.toThrow();
     });
   });
+
+  describe('confirmWrite — server-confirmed write contract', () => {
+    // A local-only client (no serverUrl/cluster) is deterministically offline:
+    // its NullConnectionProvider never connects, so a tracked write can never be
+    // server-acked. This is the cleanest harness for the "never report a write as
+    // durable that the server did not confirm" contract.
+    function makeLocalOnlyClient(): TopGunClient {
+      const c = new TopGunClient({ storage: new MemoryStorageAdapter() });
+      extraClients.push(c);
+      return c;
+    }
+
+    test('returns "failed" (never "synced") when there is no tracked write to confirm', async () => {
+      const c = makeLocalOnlyClient();
+      // Nothing was ever written for this (map, key): confirmWrite must fail
+      // closed, never assume success.
+      await expect(c.confirmWrite('nomap', 'nokey')).resolves.toBe('failed');
+    });
+
+    test('never reports a tracked-but-unconfirmed write as "synced" (no server ack)', async () => {
+      const c = makeLocalOnlyClient();
+      c.getMap<string, { v: number }>('m').set('k', { v: 1 });
+
+      // No server ⇒ the op is never acked. A short timeout keeps the test fast.
+      // The outcome MUST be a not-durable signal ('timeout' here; 'offline' on a
+      // truly disconnected transport) — never 'synced', and never 'failed' (a
+      // write WAS recorded).
+      const outcome = await c.confirmWrite('m', 'k', 100);
+      expect(['offline', 'timeout']).toContain(outcome);
+      expect(outcome).not.toBe('synced');
+      expect(outcome).not.toBe('failed');
+    });
+
+    test('retains the in-flight write on a non-synced outcome so a retry re-waits (not a false "synced"/"failed")', async () => {
+      const c = makeLocalOnlyClient();
+      c.getMap<string, { v: number }>('m').set('k', { v: 1 });
+
+      const first = await c.confirmWrite('m', 'k', 100);
+      // Retry WITHOUT a new write: the entry must still be tracked, so we re-wait
+      // on the SAME op and return the same not-durable signal — crucially NOT
+      // 'synced' (the pre-fix no-tracked-write default) and NOT 'failed' (which
+      // would mean the entry had been dropped).
+      const second = await c.confirmWrite('m', 'k', 100);
+      expect(second).toBe(first);
+      expect(second).not.toBe('synced');
+      expect(second).not.toBe('failed');
+    });
+  });
 });

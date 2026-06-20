@@ -205,7 +205,7 @@ describe('TopGunMCPServer', () => {
   });
 
   describe('mutations', () => {
-    it('should allow mutations when enabled', async () => {
+    it('should allow mutations when enabled (gated on server confirmation)', async () => {
       const server = makeServer({ enableMutations: true });
 
       const result = await server.callTool('topgun_mutate', {
@@ -215,9 +215,17 @@ describe('TopGunMCPServer', () => {
         data: { title: 'Test' },
       });
 
-      expect((result as { isError?: boolean }).isError).toBeUndefined();
-      expect((result as { content: Array<{ text: string }> }).content[0].text).toContain(
-        'Successfully created',
+      // Mutations are NOT blocked (no "disabled" error) — they reach the write
+      // path. With no reachable server in this harness the write cannot be
+      // confirmed durable, so the tool honestly reports a not-durable error rather
+      // than a false "Successfully created". Server-confirmed success is proven by
+      // the real-server integration harness.
+      expect((result as { content: Array<{ text: string }> }).content[0].text).not.toContain(
+        'disabled',
+      );
+      expect((result as { isError?: boolean }).isError).toBe(true);
+      expect((result as { content: Array<{ text: string }> }).content[0].text).toMatch(
+        /not yet.*durable/i,
       );
     });
 

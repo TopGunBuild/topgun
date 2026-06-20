@@ -64,12 +64,26 @@ class MockTopGunClient {
   // Override hasMore/cursor returned by queryOncePaged for pagination tests.
   queryOncePagedHasMore = false;
   queryOncePagedCursor: string | undefined = undefined;
+  // Outcome confirmWrite resolves with — defaults to a server-confirmed write so
+  // the happy path needs no setup; override to exercise offline/timeout/failed.
+  confirmWriteOutcome: 'synced' | 'offline' | 'timeout' | 'failed' = 'synced';
+  // Records (map, key) pairs confirmWrite was asked to confirm, for assertions.
+  confirmWriteCalls: Array<{ map: string; key: string }> = [];
 
   getMap(name: string): MockLWWMap {
     if (!this.maps.has(name)) {
       this.maps.set(name, new MockLWWMap());
     }
     return this.maps.get(name)!;
+  }
+
+  async confirmWrite(
+    map: string,
+    key: string,
+    _timeoutMs?: number,
+  ): Promise<'synced' | 'offline' | 'timeout' | 'failed'> {
+    this.confirmWriteCalls.push({ map, key });
+    return this.confirmWriteOutcome;
   }
 
   getConnectionState() {
@@ -405,8 +419,9 @@ describe('MCP Tools', () => {
   });
 
   describe('handleMutate', () => {
-    it('should create a new record', async () => {
+    it('should save a record only after the server confirms it', async () => {
       const ctx = createTestContext();
+      const mockClient = ctx.client as unknown as MockTopGunClient;
 
       const result = await handleMutate(
         {
@@ -419,11 +434,15 @@ describe('MCP Tools', () => {
       );
 
       expect(result.isError).toBeUndefined();
-      expect(result.content[0].text).toContain('Successfully created');
+      // Upsert wording — never claims create-vs-update (cold cache can't tell).
+      expect(result.content[0].text).toContain('Successfully saved');
+      expect(result.content[0].text).toContain('confirmed on server');
       expect(result.content[0].text).toContain('task1');
+      // The success was gated on a server confirmation for this exact (map, key).
+      expect(mockClient.confirmWriteCalls).toEqual([{ map: 'tasks', key: 'task1' }]);
     });
 
-    it('should update an existing record', async () => {
+    it('should use upsert wording for an existing record too', async () => {
       const ctx = createTestContext();
       const map = (ctx.client as unknown as MockTopGunClient).getMap('tasks');
       map.set('task1', { title: 'Old Title', status: 'todo' });
@@ -439,10 +458,44 @@ describe('MCP Tools', () => {
       );
 
       expect(result.isError).toBeUndefined();
-      expect(result.content[0].text).toContain('Successfully updated');
+      expect(result.content[0].text).toContain('Successfully saved');
     });
 
-    it('should remove a record', async () => {
+    it('should NOT report success when a set is not confirmed (offline)', async () => {
+      const ctx = createTestContext();
+      const mockClient = ctx.client as unknown as MockTopGunClient;
+      mockClient.confirmWriteOutcome = 'offline';
+
+      const result = await handleMutate(
+        {
+          map: 'tasks',
+          operation: 'set',
+          key: 'task1',
+          data: { title: 'Unsynced', status: 'todo' },
+        },
+        ctx,
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('NOT yet durable');
+      expect(result.content[0].text).not.toContain('Successfully');
+    });
+
+    it('should report an error when a set times out without server confirmation', async () => {
+      const ctx = createTestContext();
+      const mockClient = ctx.client as unknown as MockTopGunClient;
+      mockClient.confirmWriteOutcome = 'timeout';
+
+      const result = await handleMutate(
+        { map: 'tasks', operation: 'set', key: 'task1', data: { title: 'Slow' } },
+        ctx,
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('NOT yet confirmed durable');
+    });
+
+    it('should remove a record once the server confirms it', async () => {
       const ctx = createTestContext();
       const map = (ctx.client as unknown as MockTopGunClient).getMap('tasks');
       map.set('task1', { title: 'To Delete', status: 'todo' });
@@ -458,22 +511,45 @@ describe('MCP Tools', () => {
 
       expect(result.isError).toBeUndefined();
       expect(result.content[0].text).toContain('Successfully removed');
+      expect(result.content[0].text).toContain('confirmed on server');
     });
 
-    it('should warn when removing non-existent record', async () => {
+    it('should issue a server-authoritative remove for a key absent from the local cache', async () => {
+      // F5: the record exists on the server but is NOT in the cold MCP cache. The
+      // remove must still be issued (server-authoritative) and reported as done —
+      // never silently no-op'd with a false "does not exist".
       const ctx = createTestContext();
+      const mockClient = ctx.client as unknown as MockTopGunClient;
+      const removeSpy = jest.spyOn(mockClient.getMap('tasks'), 'remove');
 
       const result = await handleMutate(
         {
           map: 'tasks',
           operation: 'remove',
-          key: 'nonexistent',
+          key: 'server-only-key',
         },
         ctx,
       );
 
       expect(result.isError).toBeUndefined();
-      expect(result.content[0].text).toContain('does not exist');
+      expect(result.content[0].text).toContain('Successfully removed');
+      expect(result.content[0].text).not.toContain('does not exist');
+      // The tombstone was actually written (not short-circuited on cold cache)...
+      expect(removeSpy).toHaveBeenCalledWith('server-only-key');
+      // ...and success was gated on a server confirmation.
+      expect(mockClient.confirmWriteCalls).toEqual([{ map: 'tasks', key: 'server-only-key' }]);
+    });
+
+    it('should NOT report a remove as done when it is not confirmed (offline)', async () => {
+      const ctx = createTestContext();
+      const mockClient = ctx.client as unknown as MockTopGunClient;
+      mockClient.confirmWriteOutcome = 'offline';
+
+      const result = await handleMutate({ map: 'tasks', operation: 'remove', key: 'task1' }, ctx);
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('NOT yet durable');
+      expect(result.content[0].text).not.toContain('Successfully');
     });
 
     it('should error when mutations are disabled', async () => {
