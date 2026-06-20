@@ -13,6 +13,7 @@ import type { IStorageAdapter, OpLogEntry, StorageMutation } from '@topgunbuild/
 import type { MCPServerConfig, MCPToolResult, ResolvedMCPServerConfig, ToolContext } from './types';
 import { allTools, toolHandlers } from './tools';
 import { createLogger, type Logger } from './logger';
+import { SubscriptionRegistry } from './subscriptions';
 
 /**
  * Default configuration values
@@ -92,6 +93,7 @@ export class TopGunMCPServer {
     this.toolContext = {
       client: this.client,
       config: this.config,
+      subscriptions: new SubscriptionRegistry(this.client),
     };
 
     // Initialize logger
@@ -249,6 +251,10 @@ export class TopGunMCPServer {
    */
   async stop(): Promise<void> {
     if (!this.isStarted) return;
+
+    // Tear down live change-feed subscriptions first so no handle or expiry
+    // timer outlives the server.
+    this.toolContext.subscriptions.teardownAll();
 
     await this.server.close();
 

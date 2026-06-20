@@ -78,7 +78,7 @@ Cursor's MCP config lives at `~/.cursor/mcp.json` (project-scoped: `.cursor/mcp.
 | `topgun_query` | Run a query (filter + sort + limit) over a map. |
 | `topgun_mutate` | Set or delete records. |
 | `topgun_search` | BM25 full-text search across indexed maps. |
-| `topgun_subscribe` | Streaming subscription to map changes. |
+| `topgun_subscribe` | Poll-based change feed: `start` a live watch, `poll` for typed add/update/remove deltas, `stop` when done. |
 | `topgun_schema` | Read the Zod-derived schema for a map. |
 | `topgun_stats` | Map size, record count, last-modified. |
 | `topgun_explain` | Show the query plan for a given filter. |

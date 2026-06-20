@@ -3,6 +3,7 @@
  */
 
 import type { TopGunClient } from '@topgunbuild/client';
+import type { SubscriptionRegistry } from './subscriptions';
 
 /**
  * Configuration for the MCP server
@@ -162,9 +163,11 @@ export interface SearchToolArgs {
  * Subscribe tool arguments
  */
 export interface SubscribeToolArgs {
-  map: string;
+  action?: 'start' | 'poll' | 'stop' | 'list';
+  map?: string;
   filter?: Record<string, unknown>;
-  timeout?: number;
+  subscriptionId?: string;
+  ttlSeconds?: number;
 }
 
 /**
@@ -200,4 +203,6 @@ export type ListMapsToolArgs = Record<never, never>;
 export interface ToolContext {
   client: TopGunClient;
   config: ResolvedMCPServerConfig;
+  /** Live change-feed subscriptions backing `topgun_subscribe` (poll contract). */
+  subscriptions: SubscriptionRegistry;
 }

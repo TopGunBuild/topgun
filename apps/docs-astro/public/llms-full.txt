@@ -1377,6 +1377,20 @@ TopGun reads only the `sub` and `roles` claims from the JWT payload:
 
 TopGun enforces **per-collection, per-operation** access control on the server. A Tower middleware layer checks every client read, write, and remove against a policy store before the operation reaches the domain services. This is shipped and active today — you do **not** need to re-implement authorization in your application code. App-layer claim checks are fine as optional defense-in-depth, but server-side enforcement is the authoritative gate.
 
+## Two server-side gates: admission, then authorization
+
+Every client operation passes through two distinct server-side gates, in order. They answer different questions, and only the second one is authorization:
+
+1. **Admission** — a cheap, identity-agnostic integrity and quota gate at the edge. It does not decide *who may touch which collection*; it only rejects malformed or unauthenticated traffic before any policy is consulted. Its responsibilities are: enforce the authentication baseline (`require_auth`), deny anonymous writes, cap payloads at the value-size limit (`max_value_bytes`), sanitize incoming HLC timestamps, and route by trusted origin.
+2. **Authorization** — **RBAC is the sole authorization layer**, and it is the policy engine described in the rest of this page. Once a request clears admission, RBAC is the only thing that decides whether a given principal may `read`, `write`, or `remove` a given collection.
+
+| Gate | Question it answers | Identity-aware? | Mechanism |
+|------|---------------------|-----------------|-----------|
+| Admission | Is this request well-formed, authenticated, and within limits? | No | `require_auth`, deny-anonymous-writes, `max_value_bytes`, HLC sanitization, trusted-origin routing |
+| Authorization | May *this principal* perform *this action* on *this collection*? | Yes | RBAC policies (this page) |
+
+There is exactly one authorization layer — RBAC. Admission is a guard, not a second set of permissions, so there is no per-map ACL or any other authorization mechanism to configure alongside it.
+
 ## How evaluation works
 
 Authorization runs on every client operation (`read`, `write`, `remove`):
@@ -1536,7 +1550,7 @@ new TopGunClient<TSchema>(config: TopGunClientConfig)
 | `serverUrl` | `string` | Optional. WebSocket URL for single-server mode. Mutually exclusive with `cluster`. |
 | `cluster` | `TopGunClusterConfig` | Optional. Cluster configuration. Mutually exclusive with `serverUrl`. |
 | `nodeId` | `string` | Optional. Auto-generated UUID if omitted. |
-| `backoff` | `Partial<BackoffConfig>` | Optional. Reconnect backoff tuning. |
+| `backoff` | `Partial<BackoffConfig>` | Optional. Reconnect backoff tuning (see [Reconnection & offline recovery](#reconnection--offline-recovery)). |
 | `backpressure` | `Partial<BackpressureConfig>` | Optional. Backpressure thresholds and strategy. |
 | `auth` | `AuthProvider` | Optional. Pluggable auth provider (Clerk, Firebase, BetterAuth, Custom). |
 
@@ -2005,7 +2019,12 @@ const handle = client.hybridQuery<Article>('articles', {
 public getConnectionState(): SyncState
 ```
 
-Returns the current state from the connection state machine (e.g., `OFFLINE`, `CONNECTING`, `AUTHENTICATING`, `READY`).
+Returns the current state from the connection state machine. `SyncState` is one of
+`INITIAL`, `CONNECTING`, `AUTHENTICATING`, `SYNCING`, `CONNECTED`, `DISCONNECTED`, `BACKOFF`, or
+`ERROR`. During a network outage the client cycles through `DISCONNECTED` (and reconnect backoff),
+returning to `CONNECTED` when the server is reachable again — see
+[Reconnection & offline recovery](#reconnection--offline-recovery). `ERROR` is reached only when a
+caller opted into a finite reconnect budget (`backoff.maxRetries`) and it was exhausted.
 
 ### `onConnectionStateChange(listener)`
 
@@ -2036,6 +2055,54 @@ public resetConnection(): void
 ```
 
 Reset the connection and state machine. Use after fatal errors to start fresh.
+
+## Reconnection & offline recovery
+
+TopGun is offline-first: a server that is briefly gone — a deploy window, a laptop waking from
+sleep, or even a client that starts *before* the server — is the normal case, not a terminal one.
+
+**By default the client reconnects indefinitely.** When the connection drops (or never came up), the
+client retries with exponential backoff and jitter, capped at a maximum interval, **forever**, until
+the server is reachable again. It never silently gives up. The capped interval bounds the retry rate
+(roughly one attempt per `maxDelayMs`), so unbounded retries do not hammer the server. This holds in
+both the browser and Node/SSR; in the browser a network-return (`online`) event additionally triggers
+an immediate reconnect instead of waiting for the next backoff tick.
+
+Tune it with the `backoff` config:
+
+```typescript
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080',
+  storage: new IDBAdapter(),
+  backoff: {
+    initialDelayMs: 1000, // first retry delay (default 1000)
+    maxDelayMs: 30000,    // backoff cap (default 30000)
+    multiplier: 2,        // exponential factor (default 2)
+    jitter: true,         // randomize delay 0.5x–1.5x (default true)
+    maxRetries: Infinity, // give-up budget (default Infinity = never give up)
+  },
+});
+```
+
+### Bounded retry (opt-in)
+
+Set `backoff.maxRetries` to a finite number if you want the client to stop after a fixed number of
+failed attempts. On exhaustion the client transitions to `SyncState.ERROR` and fires
+`onConnectionStateChange` with that terminal state — an explicit, honest "I have stopped trying"
+signal (never a silent stall). Recover from `ERROR` by calling [`resetConnection()`](#resetconnection),
+which starts a fresh connection with a full retry budget.
+
+```typescript
+client.onConnectionStateChange((event) => {
+  if (event.to === 'ERROR') {
+    // Reconnect budget exhausted — surface to the user and/or retry.
+    client.resetConnection();
+  }
+});
+```
+
+With the default `maxRetries: Infinity`, `SyncState.ERROR` is never reached for transient/network
+failures — the client simply keeps cycling through `DISCONNECTED` and reconnecting.
 
 ## Backpressure
 

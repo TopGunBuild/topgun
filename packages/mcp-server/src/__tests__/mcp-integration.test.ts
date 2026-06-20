@@ -215,14 +215,51 @@ describe('MCP Integration', () => {
       expect(result.content[0].text).toBeDefined();
     });
 
-    it('should execute topgun_subscribe', async () => {
-      const result = await server.callTool('topgun_subscribe', {
-        map: 'tasks',
-        timeout: 1,
-      });
+    // topgun_subscribe is now a poll-cursor change feed (action: start/poll/stop/
+    // list), not a blocking wait. The session-management actions (list/poll/stop)
+    // are server-independent, so they are exercised here against the mock; the
+    // start → live-delta path needs a real server and is covered by the
+    // integration-rust harness (F3).
+    it('topgun_subscribe action:list reports no active subscriptions', async () => {
+      const result = await server.callTool('topgun_subscribe', { action: 'list' });
 
       expect(result).toBeDefined();
       expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('No active subscriptions');
+    });
+
+    it('topgun_subscribe action:poll requires a subscriptionId', async () => {
+      const result = await server.callTool('topgun_subscribe', { action: 'poll' });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('subscriptionId');
+    });
+
+    it('topgun_subscribe action:poll on an unknown id is an explicit error', async () => {
+      const result = await server.callTool('topgun_subscribe', {
+        action: 'poll',
+        subscriptionId: 'does-not-exist',
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/no active subscription/i);
+    });
+
+    it('topgun_subscribe action:stop on an unknown id reports nothing to stop', async () => {
+      const result = await server.callTool('topgun_subscribe', {
+        action: 'stop',
+        subscriptionId: 'does-not-exist',
+      });
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toMatch(/no active subscription/i);
+    });
+
+    it('topgun_subscribe action:start requires a map', async () => {
+      const result = await server.callTool('topgun_subscribe', { action: 'start' });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("'map' is required");
     });
 
     it('should return error for invalid arguments', async () => {
