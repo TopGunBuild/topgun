@@ -4,6 +4,7 @@
 
 import type { MCPTool, MCPToolResult, ToolContext } from '../types';
 import { SchemaArgsSchema, toolSchemas, type SchemaArgs } from '../schemas';
+import { fetchServerRecords, ServerReadUnsettledError } from './serverRead';
 
 export const schemaTool: MCPTool = {
   name: 'topgun_schema',
@@ -89,14 +90,29 @@ export async function handleSchema(rawArgs: unknown, ctx: ToolContext): Promise<
   }
 
   try {
-    const lwwMap = ctx.client.getMap<string, Record<string, unknown>>(map);
+    // Read the records from the SERVER (settled, authoritative) rather than the
+    // MCP process's local replica, which is empty for any data this process did
+    // not write itself. The schema is inferred from this sample.
+    let records;
+    let hasMore: boolean;
+    try {
+      ({ records, hasMore } = await fetchServerRecords(ctx, map));
+    } catch (error) {
+      if (error instanceof ServerReadUnsettledError) {
+        return {
+          content: [{ type: 'text', text: error.message }],
+          isError: true,
+        };
+      }
+      throw error;
+    }
 
     // Collect field information from all entries
     const fieldTypes: Map<string, Set<string>> = new Map();
     const fieldValues: Map<string, unknown[]> = new Map();
     let recordCount = 0;
 
-    for (const [, value] of lwwMap.entries()) {
+    for (const { value } of records) {
       if (value !== null && typeof value === 'object') {
         recordCount++;
         for (const [fieldName, fieldValue] of Object.entries(value)) {
@@ -161,15 +177,23 @@ export async function handleSchema(rawArgs: unknown, ctx: ToolContext): Promise<
       .map(([name, type]) => `  - ${name}: ${type}`)
       .join('\n');
 
+    // When the map holds more rows than the sample ceiling, the schema is
+    // inferred from the first `maxLimit` records — say so, so a field that only
+    // appears later is not mistaken for "the whole schema".
+    const sampleNote = hasMore
+      ? `\n\nNote: schema inferred from a sample of the first ${ctx.config.maxLimit} server ` +
+        `records; the map holds more rows.`
+      : '';
+
     return {
       content: [
         {
           type: 'text',
           text:
             `Schema for map '${map}':\n\n` +
-            `Records: ${recordCount}\n\n` +
+            `Records${hasMore ? ' (sampled)' : ''}: ${recordCount}\n\n` +
             `Fields:\n${fieldsFormatted}\n\n` +
-            `Raw schema:\n${JSON.stringify(schemaOutput, null, 2)}`,
+            `Raw schema:\n${JSON.stringify(schemaOutput, null, 2)}${sampleNote}`,
         },
       ],
     };

@@ -15,6 +15,7 @@ on:
       - 'packages/core/**'
       - 'packages/server-rust/**'
       - 'packages/core-rust/**'
+      - 'packages/mcp-server/**'
       - 'tests/integration-rust/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -28,6 +29,7 @@ on:
       - 'packages/core/**'
       - 'packages/server-rust/**'
       - 'packages/core-rust/**'
+      - 'packages/mcp-server/**'
       - 'tests/integration-rust/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -116,8 +118,9 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run integration tests (single-server suites)
-        # ts-jest compiles @topgunbuild/{core,client} from source via the config's
-        # moduleNameMapper, so no package build is needed. RUST_SERVER_BINARY points
+        # ts-jest compiles @topgunbuild/{core,client,mcp-server} from source via the
+        # config's moduleNameMapper, so no package build is needed (the MCP harness
+        # drives the workspace source, not a stale published dist). RUST_SERVER_BINARY points
         # spawnRustServer() at the prebuilt binary (skips cargo). --runInBand keeps
         # per-file fixtures from contending on the fixed server ports (CLAUDE.md).
         # cluster-routing is excluded here and gated separately (non-blocking) below.

@@ -4,6 +4,7 @@
 
 import type { MCPTool, MCPToolResult, ToolContext } from '../types';
 import { StatsArgsSchema, toolSchemas, type StatsArgs } from '../schemas';
+import { fetchServerRecords, ServerReadUnsettledError } from './serverRead';
 
 export const statsTool: MCPTool = {
   name: 'topgun_stats',
@@ -55,7 +56,10 @@ export async function handleStats(rawArgs: unknown, ctx: ToolContext): Promise<M
       maps: Array<{
         name: string;
         recordCount: number;
-        tombstoneCount: number;
+        // The sample hit the ceiling — `recordCount` is a lower bound.
+        sampled: boolean;
+        // Server could not be reached for this map's record count.
+        unreachable: boolean;
       }>;
       cluster?: {
         nodes: string[];
@@ -81,26 +85,26 @@ export async function handleStats(rawArgs: unknown, ctx: ToolContext): Promise<M
       };
     }
 
-    // Get map stats
+    // Get map stats from the SERVER (settled, authoritative) rather than the MCP
+    // process's local replica, which is empty for any data this process did not
+    // write itself. The connection block above is always reported; an unreachable
+    // server degrades only the per-map count, never the whole call.
     if (map) {
-      // Single map stats
-      const lwwMap = ctx.client.getMap<string, unknown>(map);
-      let recordCount = 0;
-      let tombstoneCount = 0;
-
-      for (const [, value] of lwwMap.entries()) {
-        if (value === null || value === undefined) {
-          tombstoneCount++;
+      try {
+        const { records, hasMore } = await fetchServerRecords(ctx, map);
+        stats.maps.push({
+          name: map,
+          recordCount: records.length,
+          sampled: hasMore,
+          unreachable: false,
+        });
+      } catch (error) {
+        if (error instanceof ServerReadUnsettledError) {
+          stats.maps.push({ name: map, recordCount: 0, sampled: false, unreachable: true });
         } else {
-          recordCount++;
+          throw error;
         }
       }
-
-      stats.maps.push({
-        name: map,
-        recordCount,
-        tombstoneCount,
-      });
     }
 
     // Format output
@@ -122,11 +126,11 @@ export async function handleStats(rawArgs: unknown, ctx: ToolContext): Promise<M
       stats.maps.length > 0
         ? `\n\nMap Statistics:\n` +
           stats.maps
-            .map(
-              (m) =>
-                `  ${m.name}:\n` +
-                `    - Records: ${m.recordCount}\n` +
-                `    - Tombstones: ${m.tombstoneCount}`,
+            .map((m) =>
+              m.unreachable
+                ? `  ${m.name}:\n` + `    - Records: unavailable (server unreachable — NOT empty)`
+                : `  ${m.name}:\n` +
+                  `    - Records${m.sampled ? ' (sampled, at least)' : ''}: ${m.recordCount}`,
             )
             .join('\n')
         : map

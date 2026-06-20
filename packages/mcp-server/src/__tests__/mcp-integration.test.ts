@@ -169,7 +169,13 @@ describe('MCP Integration', () => {
       const result = await server.callTool('topgun_schema', { map: 'tasks' });
 
       expect(result).toBeDefined();
-      expect(result.isError).toBeUndefined();
+      // schema is now server-authoritative (reads via queryOncePaged, not the
+      // local replica). With no reachable server in this harness the read cannot
+      // settle, so the tool reports an explicit not-settled error rather than a
+      // false "empty" answer. Real schema inference is covered by the unit suite
+      // (mock client returns rows) and the real-server integration harness.
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('NOT an empty result');
     });
 
     it('should execute topgun_stats', async () => {
@@ -186,8 +192,11 @@ describe('MCP Integration', () => {
       });
 
       expect(result).toBeDefined();
-      expect(result.isError).toBeUndefined();
-      expect(result.content[0].text).toContain('Query Plan');
+      // explain is now server-authoritative: it estimates the plan over a settled
+      // server sample, not the empty local replica. No reachable server here means
+      // the read cannot settle, so the tool surfaces the not-settled path.
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('NOT an empty result');
     });
 
     it('should execute topgun_search', async () => {
@@ -304,8 +313,8 @@ describe('MCP Integration', () => {
       expect(result.content[0].text).toContain('not settled');
     });
 
-    it('should show correct field types via topgun_schema', async () => {
-      // Write structured data
+    it('should not infer schema from local-only writes (server-authoritative)', async () => {
+      // Write structured data locally (server unreachable in this harness).
       await server.callTool('topgun_mutate', {
         map: 'records',
         operation: 'set',
@@ -318,17 +327,15 @@ describe('MCP Integration', () => {
         },
       });
 
-      // Get schema
+      // schema reads the SERVER, not the local replica these writes landed in.
+      // With no reachable server it cannot settle — and must NOT echo the local
+      // write back as if it were the map's schema. This is the core F1 fix: a
+      // local-only write is not authoritative schema. (Real inference over server
+      // data is proven by the real-server integration harness.)
       const schemaResult = await server.callTool('topgun_schema', { map: 'records' });
 
-      expect(schemaResult.isError).toBeUndefined();
-      const text = schemaResult.content[0].text;
-
-      // Schema should detect field types
-      expect(text).toContain('name');
-      expect(text).toContain('age');
-      expect(text).toContain('active');
-      expect(text).toContain('tags');
+      expect(schemaResult.isError).toBe(true);
+      expect(schemaResult.content[0].text).toContain('NOT an empty result');
     });
 
     it('should return connection info via topgun_stats', async () => {
@@ -339,16 +346,18 @@ describe('MCP Integration', () => {
       expect(statsResult.content[0].text).toContain('Status');
     });
 
-    it('should show query plan via topgun_explain', async () => {
+    it('should report not-settled for explain when server is unreachable', async () => {
       const explainResult = await server.callTool('topgun_explain', {
         map: 'tasks',
         filter: { status: 'active', priority: 'high' },
       });
 
-      expect(explainResult.isError).toBeUndefined();
-      expect(explainResult.content[0].text).toContain('Query Plan');
-      expect(explainResult.content[0].text).toContain('map');
+      // explain estimates over a settled server sample; with no reachable server
+      // the read cannot settle, so it surfaces the not-settled path (it must not
+      // present a plan computed over the empty local replica as if it were truth).
+      expect(explainResult.isError).toBe(true);
       expect(explainResult.content[0].text).toContain('tasks');
+      expect(explainResult.content[0].text).toContain('NOT an empty result');
     });
 
     it('should handle remove operation correctly', async () => {
