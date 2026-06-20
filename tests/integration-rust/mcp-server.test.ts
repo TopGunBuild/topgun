@@ -27,7 +27,7 @@ import type { IStorageAdapter, OpLogEntry } from '@topgunbuild/client';
 import { TopGunMCPServer } from '@topgunbuild/mcp-server';
 import type { MCPToolResult } from '@topgunbuild/mcp-server';
 
-import { spawnRustServer, createTestToken } from './helpers';
+import { spawnRustServer, createRustTestClient, createTestToken, createLWWRecord } from './helpers';
 
 // In-memory storage adapter so the SDK runs headless in Node (no IndexedDB).
 class MemoryStorageAdapter implements IStorageAdapter {
@@ -115,16 +115,6 @@ async function waitForState(
   throw new Error(`Timed out waiting for ${state}; last = ${client.getConnectionState()}`);
 }
 
-/** Resolves once every optimistic local write has round-tripped and been ACKed. */
-async function waitForSynced(client: TopGunClient, timeoutMs = 20_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (client.getPendingOpsCount() === 0) return;
-    await waitMs(25);
-  }
-  throw new Error(`Timed out waiting to drain; pending = ${client.getPendingOpsCount()}`);
-}
-
 function text(result: { content: Array<{ text?: string }> }): string {
   return (result.content || []).map((c) => c.text ?? '').join('\n');
 }
@@ -170,48 +160,60 @@ async function callStable(
 }
 
 describe('Integration: MCP tools against a real Rust server (cold cache)', () => {
-  // One self-contained test that boots the server, connects both clients, seeds,
-  // and runs every read back-to-back. Doing the whole scenario inline keeps it
-  // FAST (a few seconds) — well inside the SDK's 15 s heartbeat-timeout window —
-  // so neither client churns mid-suite, the failure mode that flaked a
-  // beforeAll + per-test layout under CI load. This mirrors the lifecycle of the
-  // other reliably-green single-server suites (queries/live-query): server +
-  // client(s) + assertions all in one test body.
+  // One self-contained test that boots the server, seeds, and runs every read
+  // back-to-back. Doing the whole scenario inline keeps it FAST (a few seconds),
+  // the lifecycle the reliably-green single-server suites use.
   //
-  // BOTH clients connect up front against the still-idle server (each AUTH
-  // handshake completes fast — a client connecting later, while the seeder is
-  // mid-Merkle-sync, can miss its AUTH_ACK and stall at AUTHENTICATING). The
-  // seeder stays connected for the test's lifetime because the null in-memory
-  // backend keeps a map's rows only while a client holds it live. The MCP client
-  // is still a genuinely COLD reader: it never mutates and queryOncePaged does
-  // not hydrate the persistent replica, so its local CRDT map stays empty for
-  // every read — exactly the configuration that exposes a server-blind read. We
-  // inject the client so it carries its own auth, and start it directly rather
-  // than via mcp.start() (which would attach a stdio transport that consumes the
-  // Jest process's stdin); callTool() only needs it connected.
+  // The SEEDER is the raw standalone test-client (CLIENT_OP over the wire), NOT a
+  // second TopGunClient. Two TopGunClients each run heartbeat + Merkle-sync and an
+  // aggressive auto-reconnect; under CI load a single blip cascaded into a non-101
+  // reconnect storm that left the reader offline for the rest of the suite. The
+  // raw client has no reconnect/sync machinery (it just PINGs to stay past the
+  // server idle reaper), so it holds a stable connection with no storm — and it
+  // keeps the map's rows live on the null in-memory backend (which drops them once
+  // no client holds the map). Seeding over the wire also never touches the MCP
+  // client's local replica, so the reader stays genuinely COLD: it never mutates
+  // and queryOncePaged does not hydrate the persistent replica, so its local CRDT
+  // map is empty for every read — exactly the configuration that exposes a
+  // server-blind read. We inject the reader client so it carries its own auth, and
+  // start it directly rather than via mcp.start() (which would attach a stdio
+  // transport that consumes the Jest process's stdin); callTool() only needs it
+  // connected.
   test('cold MCP read tools reflect real server data, not an empty local replica (F1)', async () => {
     const server = await spawnRustServer();
-    const seeder = makeClient(server.port, 'mcp-seeder');
+    const seeder = await createRustTestClient(server.port, {
+      userId: 'mcp-seeder',
+      roles: ['ADMIN'],
+    });
     const mcpClient = makeClient(server.port, 'mcp-reader');
     const mcp = new TopGunMCPServer({ client: mcpClient });
 
     try {
-      await seeder.start();
+      await seeder.waitForMessage('AUTH_ACK', 10_000);
       await mcpClient.start();
-      await waitForState(seeder, SyncState.CONNECTED);
       await waitForState(mcpClient, SyncState.CONNECTED);
 
+      // Seed over the wire (raw CLIENT_OP PUTs), waiting for each server ACK.
       const mapName = `mcp_e2e_${Date.now()}`;
-      const m = seeder.getMap<string, Record<string, unknown>>(mapName);
       for (let i = 0; i < RECORD_COUNT; i++) {
-        m.set(`k${i}`, {
-          id: `k${i}`,
-          title: `doc ${i}`,
-          status: i < OPEN_COUNT ? 'open' : 'done',
-          n: i,
+        seeder.messages.length = 0;
+        seeder.send({
+          type: 'CLIENT_OP',
+          payload: {
+            id: `seed-${i}`,
+            mapName,
+            opType: 'PUT',
+            key: `k${i}`,
+            record: createLWWRecord({
+              id: `k${i}`,
+              title: `doc ${i}`,
+              status: i < OPEN_COUNT ? 'open' : 'done',
+              n: i,
+            }),
+          },
         });
+        await seeder.waitForMessage('OP_ACK', 10_000);
       }
-      await waitForSynced(seeder);
 
       // Sanity: topgun_query (already server-authoritative) returns the rows.
       const query = await callStable(mcp, 'topgun_query', { map: mapName, limit: 5 });
@@ -252,7 +254,7 @@ describe('Integration: MCP tools against a real Rust server (cold cache)', () =>
       expect(text(schemaAfter)).toContain('Records: 25');
     } finally {
       await mcpClient.close().catch(() => {});
-      await seeder.close().catch(() => {});
+      seeder.close();
       await server.cleanup().catch(() => {});
     }
   }, 60_000);
