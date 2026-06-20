@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+pub mod deterministic;
 pub mod hook;
 pub mod http;
 pub mod noop;
@@ -81,6 +82,7 @@ impl VectorConfig {
             EmbeddingProviderConfig::Ollama(c) => c.dimension,
             EmbeddingProviderConfig::Http(c) => c.dimension,
             EmbeddingProviderConfig::Noop(c) => c.dimension,
+            EmbeddingProviderConfig::Deterministic(c) => c.dimension,
         };
         for (map_name, map_cfg) in &self.maps {
             if map_cfg.dimension != provider_dim {
@@ -100,6 +102,9 @@ pub enum EmbeddingProviderConfig {
     Ollama(OllamaConfig),
     Http(HttpProviderConfig),
     Noop(NoopConfig),
+    /// Stable hashed bag-of-words embeddings for deterministic CI tests.
+    /// Not a real model — see [`deterministic::DeterministicEmbeddingProvider`].
+    Deterministic(DeterministicConfig),
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -112,7 +117,7 @@ pub struct OllamaConfig {
     pub dimension: u16,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HttpProviderConfig {
     pub base_url: String,
@@ -122,9 +127,28 @@ pub struct HttpProviderConfig {
     pub dimension: u16,
 }
 
+// Manual Debug that redacts `api_key` so a bearer token never reaches logs via
+// `{:?}` on the (Arc-shared) provider config.
+impl std::fmt::Debug for HttpProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpProviderConfig")
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("model", &self.model)
+            .field("dimension", &self.dimension)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoopConfig {
+    pub dimension: u16,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeterministicConfig {
     pub dimension: u16,
 }
 

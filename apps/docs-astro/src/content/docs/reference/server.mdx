@@ -86,6 +86,28 @@ All variables below correspond to direct `std::env::var(...)` reads or `tracing-
 | `TOPGUN_INDEX_PATH` | path | none | `bin/topgun_server.rs:516`, `network/module.rs:316`, `network/handlers/admin.rs:1078` | Directory holding the BM25 full-text-search index. |
 | `TOPGUN_VECTOR_INDEX_PATH` | path | none | `network/module.rs:286`, `network/handlers/admin.rs:1139` | Directory holding the HNSW vector index. |
 
+### Embeddings and semantic search
+
+Semantic / vector / hybrid search requires a configured embedding provider. When
+`TOPGUN_EMBEDDING_PROVIDER` is unset, the `'semantic'` method is **disabled** and
+returns an explicit error instead of empty or meaningless results — `'exact'` and
+`'fullText'` are unaffected. The server logs the active provider, dimension, and
+auto-embedded maps in a single config line at startup.
+
+| Variable | Type | Default | Notes |
+|---|---|---|---|
+| `TOPGUN_EMBEDDING_PROVIDER` | string | unset (disabled) | One of `ollama`, `openai` (alias `http`), `deterministic`, `noop`. Unset / `none` disables semantic search. |
+| `TOPGUN_EMBEDDING_MODEL` | string | provider default | Embedding model name. Ollama default: `nomic-embed-text`. Required for `openai`/`http`. |
+| `TOPGUN_EMBEDDING_BASE_URL` | string | provider default | Endpoint base URL. Ollama default: `http://localhost:11434`. Required for `openai`/`http`. |
+| `TOPGUN_EMBEDDING_API_KEY` | string | none | Bearer token for `openai`/`http` providers. |
+| `TOPGUN_EMBEDDING_DIMENSION` | u16 | provider default | Output vector dimension; must match the model. Defaults: `ollama` 768, `deterministic` 256, `noop` 4. Required for `openai`/`http`. |
+| `TOPGUN_VECTOR_MAPS` | JSON | none | Maps auto-vectorized on write: `{"docs":{"fields":["title","body"],"dimension":768}}`. Each map's `dimension` must equal the provider dimension. |
+
+`deterministic` produces stable hashed bag-of-words vectors with no external
+dependency — intended for tests and local experiments, not production semantics.
+`noop` returns all-zero vectors and logs a loud warning; it is a development-only
+mode and never the default. Use `ollama` or `openai` for real semantic search.
+
 ### Observability
 
 | Variable | Type | Default | Consumer | Notes |

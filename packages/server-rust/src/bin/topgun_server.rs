@@ -55,8 +55,11 @@ use topgun_server::service::domain::coordination::CoordinationService;
 use topgun_server::service::domain::counter::CounterRegistry;
 use topgun_server::service::domain::crdt::CrdtService;
 use topgun_server::service::domain::embedding::{
-    noop::NoopEmbeddingProvider, EmbeddingConfig, EmbeddingObserverFactory, EmbeddingProvider,
-    EmbeddingProviderConfig, NoopConfig, VectorConfig as EmbeddingVectorConfig,
+    deterministic::DeterministicEmbeddingProvider, http::HttpEmbeddingProvider,
+    noop::NoopEmbeddingProvider, ollama::OllamaEmbeddingProvider, DeterministicConfig,
+    EmbeddingConfig, EmbeddingObserverFactory, EmbeddingProvider, EmbeddingProviderConfig,
+    HttpProviderConfig, MapVectorConfig, NoopConfig, OllamaConfig,
+    VectorConfig as EmbeddingVectorConfig,
 };
 use topgun_server::service::domain::index::IndexObserverFactory;
 use topgun_server::service::domain::journal::JournalStore;
@@ -1178,6 +1181,210 @@ type ClusterParams = (
 /// Domain services are `Arc`-wrapped and shared across all worker pipelines.
 /// Each worker gets its own `OperationRouter` + `OperationPipeline` via a
 /// factory closure passed to `PartitionDispatcher::new()`.
+/// Resolved server-side embedding / vector-search configuration, built from
+/// environment variables. See [`build_embedding_setup`].
+struct EmbeddingSetup {
+    /// Provider config + per-map field config consumed by the write-path
+    /// `EmbeddingObserverFactory`. `maps` is empty when semantic search is disabled.
+    vector_config: Arc<EmbeddingVectorConfig>,
+    /// Provider instance used by the write-path auto-embed observer. A harmless
+    /// Noop placeholder when disabled (no maps means it is never invoked).
+    write_provider: Arc<dyn EmbeddingProvider>,
+    /// Provider wired into the query-path `HybridSearchEngine`. `None` when no
+    /// provider is configured, so `semantic` queries return an explicit
+    /// "no embedding provider configured" error instead of silent empty results.
+    query_provider: Option<Arc<dyn EmbeddingProvider>>,
+    /// `(map_name, dimension)` pairs to register an `_embedding` HNSW vector
+    /// index for, so auto-embedded vectors are indexed and queryable.
+    vector_indexes: Vec<(String, u16)>,
+    /// Human-readable provider label for the startup config line ("none" when disabled).
+    provider_label: String,
+    /// Effective embedding dimension, when a provider is configured.
+    dimension: Option<u16>,
+}
+
+/// Reads the embedding provider + vector-map configuration from the environment.
+///
+/// Recognized variables:
+/// - `TOPGUN_EMBEDDING_PROVIDER`: `ollama` | `openai` (alias `http`) | `deterministic`
+///   | `noop`. Unset / empty / `none` disables semantic search.
+/// - `TOPGUN_EMBEDDING_MODEL`, `TOPGUN_EMBEDDING_BASE_URL`, `TOPGUN_EMBEDDING_API_KEY`,
+///   `TOPGUN_EMBEDDING_DIMENSION`: provider connection + output dimension.
+/// - `TOPGUN_VECTOR_MAPS`: JSON object mapping map name to `{ "fields": [...],
+///   "dimension": N }`, declaring which maps/fields are auto-vectorized on write.
+///
+/// Honesty contract: when no provider is configured, the query path provider is
+/// `None` (semantic → explicit error) and no maps are auto-embedded. `noop` is an
+/// explicit, loudly-warned development mode — never a silent default.
+///
+/// On a malformed configuration (bad dimension, invalid JSON, dimension mismatch)
+/// the process aborts with a descriptive message rather than serving a silently
+/// broken semantic surface.
+#[allow(clippy::too_many_lines)]
+fn build_embedding_setup() -> EmbeddingSetup {
+    let disabled = || EmbeddingSetup {
+        vector_config: Arc::new(EmbeddingVectorConfig {
+            provider: EmbeddingProviderConfig::Noop(NoopConfig { dimension: 1 }),
+            maps: std::collections::HashMap::new(),
+        }),
+        write_provider: Arc::new(NoopEmbeddingProvider::new(&NoopConfig { dimension: 1 })),
+        query_provider: None,
+        vector_indexes: Vec::new(),
+        provider_label: "none".to_string(),
+        dimension: None,
+    };
+
+    let kind = std::env::var("TOPGUN_EMBEDDING_PROVIDER")
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+
+    if kind.is_empty() || kind == "none" {
+        if std::env::var("TOPGUN_VECTOR_MAPS").is_ok() {
+            tracing::warn!(
+                "TOPGUN_VECTOR_MAPS is set but TOPGUN_EMBEDDING_PROVIDER is unset — \
+                 no fields will be auto-embedded and semantic search stays disabled. \
+                 Set TOPGUN_EMBEDDING_PROVIDER to enable vector/hybrid search."
+            );
+        }
+        return disabled();
+    }
+
+    // Per-provider default dimension; overridable via TOPGUN_EMBEDDING_DIMENSION.
+    let default_dim: Option<u16> = match kind.as_str() {
+        "ollama" => Some(768),
+        "deterministic" => Some(256),
+        "noop" => Some(4),
+        _ => None, // openai/http: model-specific, must be explicit
+    };
+    let dimension: u16 = match std::env::var("TOPGUN_EMBEDDING_DIMENSION") {
+        Ok(raw) => raw.trim().parse().unwrap_or_else(|_| {
+            eprintln!("FATAL: TOPGUN_EMBEDDING_DIMENSION='{raw}' is not a valid u16");
+            std::process::exit(1);
+        }),
+        Err(_) => default_dim.unwrap_or_else(|| {
+            eprintln!(
+                "FATAL: TOPGUN_EMBEDDING_PROVIDER='{kind}' requires TOPGUN_EMBEDDING_DIMENSION \
+                 (the embedding model's output size, e.g. 1536 for text-embedding-3-small)"
+            );
+            std::process::exit(1);
+        }),
+    };
+    if dimension == 0 {
+        // A zero dimension would panic the bucketing math and produce empty vectors.
+        eprintln!("FATAL: TOPGUN_EMBEDDING_DIMENSION must be greater than 0");
+        std::process::exit(1);
+    }
+
+    let model = std::env::var("TOPGUN_EMBEDDING_MODEL").ok();
+    let base_url = std::env::var("TOPGUN_EMBEDDING_BASE_URL").ok();
+    let api_key = std::env::var("TOPGUN_EMBEDDING_API_KEY").ok();
+
+    let (provider_config, provider): (EmbeddingProviderConfig, Arc<dyn EmbeddingProvider>) =
+        match kind.as_str() {
+            "ollama" => {
+                let cfg = OllamaConfig {
+                    base_url: base_url.unwrap_or_else(|| "http://localhost:11434".to_string()),
+                    model: model.unwrap_or_else(|| "nomic-embed-text".to_string()),
+                    dimension,
+                };
+                (
+                    EmbeddingProviderConfig::Ollama(cfg.clone()),
+                    Arc::new(OllamaEmbeddingProvider::new(cfg)),
+                )
+            }
+            "openai" | "http" => {
+                let base_url = base_url.unwrap_or_else(|| {
+                    eprintln!(
+                        "FATAL: TOPGUN_EMBEDDING_PROVIDER='{kind}' requires TOPGUN_EMBEDDING_BASE_URL \
+                         (e.g. https://api.openai.com)"
+                    );
+                    std::process::exit(1);
+                });
+                let model = model.unwrap_or_else(|| {
+                    eprintln!(
+                        "FATAL: TOPGUN_EMBEDDING_PROVIDER='{kind}' requires TOPGUN_EMBEDDING_MODEL \
+                         (e.g. text-embedding-3-small)"
+                    );
+                    std::process::exit(1);
+                });
+                let cfg = HttpProviderConfig {
+                    base_url,
+                    api_key,
+                    model,
+                    dimension,
+                };
+                (
+                    EmbeddingProviderConfig::Http(cfg.clone()),
+                    Arc::new(HttpEmbeddingProvider::new(cfg)),
+                )
+            }
+            "deterministic" => (
+                EmbeddingProviderConfig::Deterministic(DeterministicConfig { dimension }),
+                Arc::new(DeterministicEmbeddingProvider::new(dimension)),
+            ),
+            "noop" => {
+                tracing::warn!(
+                    "TOPGUN_EMBEDDING_PROVIDER=noop — embeddings are ALL-ZERO vectors with no \
+                     semantic meaning. Vector/hybrid 'semantic' results are NOT meaningful. \
+                     This is a development-only mode; use 'ollama' or 'openai' in production."
+                );
+                (
+                    EmbeddingProviderConfig::Noop(NoopConfig { dimension }),
+                    Arc::new(NoopEmbeddingProvider::new(&NoopConfig { dimension })),
+                )
+            }
+            other => {
+                eprintln!(
+                    "FATAL: unknown TOPGUN_EMBEDDING_PROVIDER='{other}' \
+                     (expected: ollama | openai | deterministic | noop)"
+                );
+                std::process::exit(1);
+            }
+        };
+
+    // Parse per-map auto-embed config. Absent => provider is configured but no
+    // maps are vectorized (semantic queries embed but find an empty index).
+    let maps: std::collections::HashMap<String, MapVectorConfig> =
+        if let Ok(raw) = std::env::var("TOPGUN_VECTOR_MAPS") {
+            serde_json::from_str(&raw).unwrap_or_else(|e| {
+                eprintln!("FATAL: TOPGUN_VECTOR_MAPS is not valid JSON: {e}");
+                std::process::exit(1);
+            })
+        } else {
+            tracing::warn!(
+                "TOPGUN_EMBEDDING_PROVIDER='{kind}' is set but TOPGUN_VECTOR_MAPS is empty — \
+                 no maps will be auto-embedded. Set TOPGUN_VECTOR_MAPS to a JSON object like \
+                 '{{\"docs\":{{\"fields\":[\"title\",\"body\"],\"dimension\":{dimension}}}}}'."
+            );
+            std::collections::HashMap::new()
+        };
+
+    let vector_config = EmbeddingVectorConfig {
+        provider: provider_config,
+        maps,
+    };
+    if let Err(e) = vector_config.validate() {
+        eprintln!("FATAL: invalid TOPGUN_VECTOR_MAPS configuration: {e}");
+        std::process::exit(1);
+    }
+
+    let vector_indexes: Vec<(String, u16)> = vector_config
+        .maps
+        .iter()
+        .map(|(map_name, cfg)| (map_name.clone(), cfg.dimension))
+        .collect();
+
+    EmbeddingSetup {
+        vector_config: Arc::new(vector_config),
+        write_provider: Arc::clone(&provider),
+        query_provider: Some(provider),
+        vector_indexes,
+        provider_label: kind,
+        dimension: Some(dimension),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn build_services(
     node_id: String,
@@ -1239,22 +1446,45 @@ fn build_services(
         Arc::new(MerkleObserverFactory::new(Arc::clone(&merkle_manager)));
 
     // Phase 1: construct the embedding observer factory before RecordStoreFactory exists.
-    // Uses a noop provider for the test server (no real embedding service dependency).
-    // The maps config is empty so no observer is registered for any map by default;
-    // integration tests that need embedding can wire a custom VectorConfig.
-    let embedding_vector_config = Arc::new(EmbeddingVectorConfig {
-        provider: EmbeddingProviderConfig::Noop(NoopConfig { dimension: 4 }),
-        maps: std::collections::HashMap::new(),
-    });
-    let embedding_provider: Arc<dyn EmbeddingProvider> =
-        Arc::new(NoopEmbeddingProvider::new(&NoopConfig { dimension: 4 }));
+    // Provider + per-map field config are resolved from the environment
+    // (TOPGUN_EMBEDDING_PROVIDER / TOPGUN_VECTOR_MAPS). When no provider is
+    // configured the maps config is empty, so no auto-embed observer is registered
+    // and the query path stays honest (semantic → explicit "not configured" error).
+    let embedding_setup = build_embedding_setup();
     let embedding_factory = Arc::new(EmbeddingObserverFactory::new(
         EmbeddingConfig::default(),
-        embedding_vector_config,
-        embedding_provider,
+        Arc::clone(&embedding_setup.vector_config),
+        Arc::clone(&embedding_setup.write_provider),
     ));
 
     let index_observer_factory = Arc::new(IndexObserverFactory::new());
+
+    // Register an `_embedding` HNSW vector index for every auto-embedded map so the
+    // vectors written back by the embedding hook are indexed and queryable. Both
+    // the write path (IndexMutationObserver) and the query path (HybridSearchEngine)
+    // read this same per-map IndexRegistry, so registering here wires both ends.
+    for (map_name, dim) in &embedding_setup.vector_indexes {
+        let registry = index_observer_factory.register_map(map_name.clone());
+        registry.add_vector_index(
+            "_embedding",
+            *dim,
+            topgun_core::vector::DistanceMetric::Cosine,
+        );
+    }
+
+    // Single operator-facing line so the active embedding provider, dimension, and
+    // auto-embedded maps can be confirmed from logs (mirrors the eviction/WAL line).
+    tracing::info!(
+        embedding_provider = %embedding_setup.provider_label,
+        embedding_dimension = ?embedding_setup.dimension,
+        semantic_search_enabled = embedding_setup.query_provider.is_some(),
+        vectorized_maps = ?embedding_setup
+            .vector_indexes
+            .iter()
+            .map(|(m, _)| m.as_str())
+            .collect::<Vec<_>>(),
+        "embedding / vector-search configuration initialized"
+    );
 
     #[allow(unused_mut)]
     let mut observer_factories: Vec<Arc<dyn ObserverFactory>> = vec![
@@ -1370,10 +1600,13 @@ fn build_services(
     // tasks can be spawned when observers are created for each map.
     search_observer_factory.init_search_service(Arc::clone(&search_svc));
     // Two-phase OnceLock wiring: construct engine after search_svc, then set it.
+    // The query-path embedding provider (if configured) lets `semantic` queries
+    // auto-embed their query text; `None` makes them return an explicit
+    // "no embedding provider configured" error rather than silent empty results.
     let hybrid_engine = topgun_server::service::domain::search::HybridSearchEngine::new(
         Arc::clone(&search_svc),
         Arc::clone(&record_store_factory),
-        None,
+        embedding_setup.query_provider.clone(),
     );
     search_svc.set_hybrid_engine(Arc::new(hybrid_engine));
     let persistence_svc = Arc::new(PersistenceService::new(
