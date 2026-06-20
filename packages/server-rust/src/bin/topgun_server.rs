@@ -944,6 +944,14 @@ async fn main() -> anyhow::Result<()> {
     // All routes that admin_routes() already provides (/ws, /health, /sync,
     // /api/admin/*, /api/auth/*, /api/status) MUST NOT be re-declared here —
     // axum panics at startup on duplicate paths.
+    // Capture reaper inputs before `state` is moved into `.with_state()`.
+    // This binary hand-builds its own router (it does NOT go through
+    // NetworkModule::serve), so the connection reaper must be spawned here too —
+    // otherwise idle/half-open and never-authed connections leak in the real
+    // server while only the NetworkModule path is protected.
+    let reaper_registry = Arc::clone(&state.registry);
+    let reaper_config = topgun_server::network::ReaperConfig::from(&state.config.connection);
+
     let app = topgun_server::network::module::admin_routes(
         state.config.rate_limit_per_ip,
         state.config.rate_limit_burst,
@@ -965,6 +973,14 @@ async fn main() -> anyhow::Result<()> {
 
     // Mark the server as ready
     shutdown.set_ready();
+
+    // Start the connection reaper: closes idle/half-open connections (by
+    // last-heartbeat) and never-authenticated connections past the auth
+    // deadline (slowloris), so connection slots and per-connection resources do
+    // not leak. Aborted after the serve loop returns so it never outlives the
+    // server.
+    let reaper_handle =
+        topgun_server::network::spawn_connection_reaper(reaper_registry, reaper_config);
 
     // Hand the controller a second handle so the graceful-shutdown closure
     // can flip /health to draining the moment SIGTERM lands, while the
@@ -992,6 +1008,9 @@ async fn main() -> anyhow::Result<()> {
         let _ = shutdown_tx.send(true);
     })
     .await?;
+
+    // The HTTP server has stopped accepting; stop the reaper before draining.
+    reaper_handle.abort();
 
     // After Hyper graceful shutdown returns, wait for any still-running
     // request handlers (tracked via ShutdownController::in_flight_guard) to
