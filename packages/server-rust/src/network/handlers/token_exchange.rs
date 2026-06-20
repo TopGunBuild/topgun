@@ -152,8 +152,13 @@ pub async fn token_exchange_handler(
                 // defense-in-depth at the untrusted mint boundary.
                 let mut roles = external_claims.roles;
                 let before = roles.len();
+                // Case-insensitive: an IdP returning "Admin"/"ADMIN" must be
+                // stripped too, so a self-granted role cannot satisfy a policy
+                // condition that compares roles case-insensitively.
                 roles.retain(|r| {
-                    !crate::service::policy::RESERVED_PRIVILEGED_ROLES.contains(&r.as_str())
+                    !crate::service::policy::RESERVED_PRIVILEGED_ROLES
+                        .iter()
+                        .any(|reserved| r.eq_ignore_ascii_case(reserved))
                 });
                 if roles.len() != before {
                     tracing::warn!(
@@ -425,6 +430,48 @@ mod tests {
             roles.contains(&"editor".to_string()),
             "non-reserved roles must be preserved, got {roles:?}"
         );
+    }
+
+    /// F5 hardening: reserved-role stripping is case-insensitive, so a
+    /// mixed-case "Admin" claim is also removed.
+    #[tokio::test]
+    async fn reserved_admin_role_strip_is_case_insensitive() {
+        use jsonwebtoken::{DecodingKey, Validation};
+
+        const SECRET: &str = "exchange-secret";
+        let provider: Arc<dyn AuthProvider> = Arc::new(AlwaysSucceed {
+            name: "idp".to_string(),
+            sub: "attacker".to_string(),
+            roles: vec![
+                "Admin".to_string(),
+                "ADMIN".to_string(),
+                "viewer".to_string(),
+            ],
+        });
+        let app = make_app(make_state(vec![provider], Some(SECRET)));
+        let (status, body) = post_exchange(app, json!({ "token": "any" })).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let minted = body["token"].as_str().unwrap();
+        let mut validation = Validation::default();
+        validation.validate_aud = false;
+        let decoded = jsonwebtoken::decode::<Value>(
+            minted,
+            &DecodingKey::from_secret(SECRET.as_bytes()),
+            &validation,
+        )
+        .unwrap();
+        let roles: Vec<String> = decoded.claims["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_lowercase())
+            .collect();
+        assert!(
+            !roles.iter().any(|r| r == "admin"),
+            "any case of admin must be stripped, got {roles:?}"
+        );
+        assert!(roles.contains(&"viewer".to_string()));
     }
 
     #[tokio::test]

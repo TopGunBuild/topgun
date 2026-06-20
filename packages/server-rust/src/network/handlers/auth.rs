@@ -62,13 +62,16 @@ pub(crate) fn apply_iss_aud_validation(
     issuer: Option<&str>,
     audience: Option<&str>,
 ) {
+    // Build the required-spec-claims set so any enforced claim must be PRESENT,
+    // not merely consistent-if-present. jsonwebtoken lists only `exp` by default,
+    // so without this a token omitting `aud`/`iss` would slip past an enforced
+    // check. `exp` is always kept (token-expiry enforcement).
+    let mut required: Vec<&str> = vec!["exp"];
+
     if let Some(aud) = audience {
         validation.set_audience(&[aud]);
         validation.validate_aud = true;
-        // Require the `aud` claim to be present: jsonwebtoken does not list `aud`
-        // in its default required-spec-claims, so a token with no audience would
-        // otherwise slip past an enforced-audience check. Keep `exp` required too.
-        validation.set_required_spec_claims(&["exp", "aud"]);
+        required.push("aud");
     } else {
         // No configured audience: keep audience validation off (TopGun tokens
         // carry no `aud`). jsonwebtoken would otherwise reject a missing `aud`.
@@ -76,6 +79,11 @@ pub(crate) fn apply_iss_aud_validation(
     }
     if let Some(iss) = issuer {
         validation.set_issuer(&[iss]);
+        required.push("iss");
+    }
+
+    if required.len() > 1 {
+        validation.set_required_spec_claims(&required);
     }
 }
 
@@ -768,6 +776,16 @@ RQIDAQAB
             .with_issuer_audience(Some("https://idp.example".to_string()), None);
         let token = make_token_aud_iss("u1", None, Some("https://idp.example"));
         assert!(run_auth(&handler, token).await.is_ok());
+    }
+
+    // F7: configured issuer rejects a token with no `iss` claim (claim must be
+    // present when enforced — symmetric with the audience requirement).
+    #[tokio::test]
+    async fn iss_configured_rejects_missing_issuer() {
+        let handler = AuthHandler::new(TEST_SECRET.to_owned(), None)
+            .with_issuer_audience(Some("https://idp.example".to_string()), None);
+        let token = make_token_aud_iss("u1", None, None);
+        assert!(run_auth(&handler, token).await.is_err());
     }
 
     // F7 negative control / backward-compat: when neither iss nor aud is
