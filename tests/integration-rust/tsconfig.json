@@ -13,7 +13,8 @@
     "baseUrl": "../..",
     "paths": {
       "@topgunbuild/core": ["packages/core/src"],
-      "@topgunbuild/client": ["packages/client/src"]
+      "@topgunbuild/client": ["packages/client/src"],
+      "@topgunbuild/mcp-server": ["packages/mcp-server/src"]
     }
   },
   "include": ["./**/*.ts"],

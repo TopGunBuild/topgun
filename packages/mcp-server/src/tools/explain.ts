@@ -4,6 +4,7 @@
 
 import type { MCPTool, MCPToolResult, ToolContext } from '../types';
 import { ExplainArgsSchema, toolSchemas, type ExplainArgs } from '../schemas';
+import { fetchServerRecords, ServerReadUnsettledError } from './serverRead';
 
 export const explainTool: MCPTool = {
   name: 'topgun_explain',
@@ -44,13 +45,30 @@ export async function handleExplain(rawArgs: unknown, ctx: ToolContext): Promise
   }
 
   try {
-    const lwwMap = ctx.client.getMap<string, Record<string, unknown>>(map);
+    // Read records from the SERVER (settled, authoritative) rather than the MCP
+    // process's local replica, which is empty for any data this process did not
+    // write itself. Fetch UNFILTERED so we have both the total and can compute the
+    // matching subset over the same sample; pushing the filter to the server would
+    // lose the total-records denominator the plan/selectivity needs.
+    let records;
+    let hasMore: boolean;
+    try {
+      ({ records, hasMore } = await fetchServerRecords(ctx, map));
+    } catch (error) {
+      if (error instanceof ServerReadUnsettledError) {
+        return {
+          content: [{ type: 'text', text: error.message }],
+          isError: true,
+        };
+      }
+      throw error;
+    }
 
-    // Count total records
+    // Count total + matching records over the server sample
     let totalRecords = 0;
     let matchingRecords = 0;
 
-    for (const [, value] of lwwMap.entries()) {
+    for (const { value } of records) {
       if (value !== null && typeof value === 'object') {
         totalRecords++;
 
@@ -136,6 +154,14 @@ export async function handleExplain(rawArgs: unknown, ctx: ToolContext): Promise
         ? `\n\nRecommendations:\n${plan.recommendations.map((r) => `  - ${r}`).join('\n')}`
         : '';
 
+    // When the map holds more rows than the sample ceiling, the plan is estimated
+    // over the first `maxLimit` server records — say so, so the counts/selectivity
+    // are read as estimates from a sample, not exact totals.
+    const sampleNote = hasMore
+      ? `\n\nNote: estimated from a sample of the first ${ctx.config.maxLimit} server ` +
+        `records; the map holds more rows, so totals are a lower bound.`
+      : '';
+
     return {
       content: [
         {
@@ -145,10 +171,11 @@ export async function handleExplain(rawArgs: unknown, ctx: ToolContext): Promise
             `Strategy: ${plan.strategy}\n\n` +
             `Execution Steps:\n${stepsFormatted}\n\n` +
             `Statistics:\n` +
-            `  - Total Records: ${plan.totalRecords}\n` +
+            `  - Total Records${hasMore ? ' (sampled)' : ''}: ${plan.totalRecords}\n` +
             `  - Estimated Results: ${plan.estimatedResults}\n` +
             `  - Selectivity: ${(plan.selectivity * 100).toFixed(1)}%` +
-            recommendationsFormatted,
+            recommendationsFormatted +
+            sampleNote,
         },
       ],
     };

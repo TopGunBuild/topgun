@@ -11,7 +11,11 @@ module.exports = {
   ],
   moduleNameMapper: {
     '^@topgunbuild/core$': '<rootDir>/../../packages/core/src/index.ts',
-    '^@topgunbuild/client$': '<rootDir>/../../packages/client/src/index.ts'
+    '^@topgunbuild/client$': '<rootDir>/../../packages/client/src/index.ts',
+    // Compile the MCP server from source (its deps resolve from
+    // packages/mcp-server/node_modules under pnpm) so the real-server MCP
+    // harness drives the workspace source, not a stale published dist.
+    '^@topgunbuild/mcp-server$': '<rootDir>/../../packages/mcp-server/src/index.ts'
   },
   transform: {
     '^.+\\.ts$': ['ts-jest', {
