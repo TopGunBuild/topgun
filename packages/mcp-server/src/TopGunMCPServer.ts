@@ -89,18 +89,20 @@ export class TopGunMCPServer {
       }
     }
 
-    // Create tool context
-    this.toolContext = {
-      client: this.client,
-      config: this.config,
-      subscriptions: new SubscriptionRegistry(this.client),
-    };
-
     // Initialize logger
     this.logger = createLogger({
       debug: this.config.debug,
       name: this.config.name,
     });
+
+    // Create tool context
+    this.toolContext = {
+      client: this.client,
+      config: this.config,
+      subscriptions: new SubscriptionRegistry(this.client, (err, subscriptionId) =>
+        this.logger.warn({ err, subscriptionId }, 'subscription teardown failed'),
+      ),
+    };
 
     // Initialize MCP server
     this.server = new Server(

@@ -19,12 +19,16 @@ import { SubscribeArgsSchema, toolSchemas } from '../schemas';
 import type { ActiveSubscription, DeltaRecord } from '../subscriptions';
 import { MAX_BUFFERED_DELTAS } from '../subscriptions';
 
+/** Lower bound on a subscription's idle TTL, so it always outlives a poll cycle. */
+const MIN_TTL_MS = 1000;
+
 export const subscribeTool: MCPTool = {
   name: 'topgun_subscribe',
   description:
     'Watch a TopGun map for real-time changes. This is a poll-based change feed, not a ' +
     'blocking wait: call with action:"start" {map} to open a feed (returns a subscriptionId ' +
-    'right away), then call action:"poll" {subscriptionId} as often as you like to receive the ' +
+    'as soon as the server confirms the watch — it does not hold the call open for the watch ' +
+    'window), then call action:"poll" {subscriptionId} as often as you like to receive the ' +
     'changes that happened since your last poll. Each change is typed (add = entered the result ' +
     'set, update = changed, remove = deleted / left the result set) — only real changes are ' +
     'reported, never the existing snapshot. Call action:"stop" {subscriptionId} when done.',
@@ -86,7 +90,9 @@ export async function handleSubscribe(rawArgs: unknown, ctx: ToolContext): Promi
   }
 
   const { action, map, filter, subscriptionId, ttlSeconds } = parseResult.data;
-  const ttlMs = (ttlSeconds ?? ctx.config.subscriptionTimeoutSeconds) * 1000;
+  // Floor the idle TTL so a tiny value (the schema rejects <= 0, but e.g. 0.1s is
+  // valid) cannot expire the subscription before the agent can poll it.
+  const ttlMs = Math.max((ttlSeconds ?? ctx.config.subscriptionTimeoutSeconds) * 1000, MIN_TTL_MS);
 
   switch (action) {
     case 'start':
@@ -120,17 +126,16 @@ async function handleStart(
     );
   }
 
-  if (ctx.subscriptions.atCapacity()) {
-    return textResult(
-      `Error: too many active subscriptions (${ctx.subscriptions.size}). ` +
-        `Stop one with action:'stop' before starting another.`,
-      true,
-    );
-  }
-
   try {
-    const sub = await ctx.subscriptions.start(map, filter ?? {}, ttlMs);
-    if (!sub) {
+    const result = await ctx.subscriptions.start(map, filter ?? {}, ttlMs);
+    if (!result.ok && result.reason === 'capacity') {
+      return textResult(
+        `Error: too many active subscriptions (${ctx.subscriptions.size}). ` +
+          `Stop one with action:'stop' before starting another.`,
+        true,
+      );
+    }
+    if (!result.ok) {
       // The server never delivered the baseline snapshot — do not pretend to be
       // watching. Mirrors the mutate tool's honesty about an unconfirmed write.
       return textResult(
@@ -140,6 +145,7 @@ async function handleStart(
         true,
       );
     }
+    const { sub } = result;
     return textResult(
       `Started change feed on map '${map}' (subscriptionId: ${sub.id}).\n` +
         `Call topgun_subscribe with action:'poll' and this subscriptionId to receive changes ` +

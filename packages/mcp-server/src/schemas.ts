@@ -95,9 +95,10 @@ export const SubscribeArgsSchema = z.object({
     .optional()
     .default('start')
     .describe(
-      "What to do: 'start' opens a live change-feed on a map and returns a subscriptionId " +
-        "immediately (does NOT block); 'poll' drains the changes buffered since the last poll; " +
-        "'stop' ends a subscription; 'list' shows active subscriptions.",
+      "What to do: 'start' opens a live change-feed on a map and returns a subscriptionId as " +
+        'soon as the server confirms the watch (it does NOT hold the call open for the watch ' +
+        "window); 'poll' drains the changes buffered since the last poll; 'stop' ends a " +
+        "subscription; 'list' shows active subscriptions.",
     ),
   map: z.string().optional().describe("Name of the map to watch (required for action 'start')"),
   filter: z
@@ -110,6 +111,7 @@ export const SubscribeArgsSchema = z.object({
     .describe("Subscription id returned by 'start' (required for 'poll' and 'stop')"),
   ttlSeconds: z
     .number()
+    .positive()
     .optional()
     .describe(
       'Idle lifetime of the subscription in seconds; refreshed on each poll. ' +
@@ -271,8 +273,8 @@ export const toolSchemas = {
         enum: ['start', 'poll', 'stop', 'list'],
         description:
           "What to do: 'start' opens a live change-feed on a map and returns a subscriptionId " +
-          'immediately (does NOT block); ' +
-          "'poll' drains the changes buffered since the last poll; " +
+          'as soon as the server confirms the watch (it does NOT hold the call open for the watch ' +
+          "window); 'poll' drains the changes buffered since the last poll; " +
           "'stop' ends a subscription; 'list' shows active subscriptions. Defaults to 'start'.",
         default: 'start',
       },

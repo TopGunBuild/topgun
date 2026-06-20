@@ -190,8 +190,9 @@ re-reported as "changes".
 - **Parameters:** `{ action: 'start' | 'poll' | 'stop' | 'list', map?, filter?, subscriptionId?, ttlSeconds? }`
 - **Usage:**
   - `action: 'start'` `{ map, filter? }` — opens a server-backed live query and returns a
-    `subscriptionId` immediately (it does **not** block). Errors if the server cannot deliver
-    an initial baseline (offline / unreachable).
+    `subscriptionId` as soon as the server confirms the watch (it does **not** hold the call open
+    for the watch window). Errors if the server cannot deliver an initial baseline (offline /
+    unreachable).
   - `action: 'poll'` `{ subscriptionId }` — returns the changes observed since the last poll
     as `{ type, key, value? }`. Refreshes the subscription's idle timer. Reports if the buffer
     overflowed (changes dropped).

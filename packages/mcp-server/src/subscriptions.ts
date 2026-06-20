@@ -8,8 +8,9 @@
  * which mis-reported every snapshot row as a change and made removals invisible.
  *
  * The honest design for a request/response transport is an explicit poll cursor:
- * `start` opens a long-lived live query in the MCP process (returning at once),
- * the genuine per-record deltas it receives buffer here, and `poll` drains them.
+ * `start` opens a long-lived live query in the MCP process (returning as soon as
+ * the server confirms the baseline, not after the watch window), the genuine
+ * per-record deltas it receives buffer here, and `poll` drains them.
  * Deltas are computed by the client's `ChangeTracker` (via `QueryHandle.onDelta`),
  * so each one carries a real `add | update | remove` type and removals are
  * first-class — never a row that silently vanishes from a re-emitted snapshot.
@@ -55,6 +56,15 @@ export interface ActiveSubscription {
   totalObserved: number;
 }
 
+/**
+ * Outcome of `start`: the subscription, or a typed reason it could not open, so
+ * the tool can tell the agent precisely what happened (offline vs. at capacity)
+ * rather than collapsing both into one vague error.
+ */
+export type StartResult =
+  | { ok: true; sub: ActiveSubscription }
+  | { ok: false; reason: 'offline' | 'capacity' };
+
 interface InternalSubscription extends ActiveSubscription {
   handle: QueryHandle<Record<string, unknown>>;
   /** Set true only after the server baseline settles, so the initial snapshot's
@@ -76,7 +86,16 @@ function nowIso(): string {
 export class SubscriptionRegistry {
   private readonly subs = new Map<string, InternalSubscription>();
 
-  constructor(private readonly client: TopGunClient) {}
+  /**
+   * @param client TopGun client whose live queries back the feeds.
+   * @param onTeardownError optional sink for cleanup failures so a throwing
+   *   unsubscribe (which could leave a server-side live query open) is surfaced
+   *   rather than silently swallowed.
+   */
+  constructor(
+    private readonly client: TopGunClient,
+    private readonly onTeardownError?: (err: unknown, subscriptionId: string) => void,
+  ) {}
 
   get size(): number {
     return this.subs.size;
@@ -88,15 +107,17 @@ export class SubscriptionRegistry {
 
   /**
    * Open a live query, wait for the server to deliver its authoritative baseline,
-   * then begin recording genuine deltas. Resolves to the subscription, or `null`
-   * if the server never settled the query within the timeout (offline /
-   * unreachable) — in which case nothing is registered and no handle leaks.
+   * then begin recording genuine deltas. Returns `{ ok: false }` (registering
+   * nothing, leaking no handle) when the server never settles the query within
+   * the timeout (`offline`) or the active-subscription cap is reached
+   * (`capacity`). The cap is re-checked AFTER the await so concurrent starts can
+   * never push the registry past MAX_ACTIVE_SUBSCRIPTIONS.
    */
-  async start(
-    map: string,
-    filter: Record<string, unknown>,
-    ttlMs: number,
-  ): Promise<ActiveSubscription | null> {
+  async start(map: string, filter: Record<string, unknown>, ttlMs: number): Promise<StartResult> {
+    if (this.subs.size >= MAX_ACTIVE_SUBSCRIPTIONS) {
+      return { ok: false, reason: 'capacity' };
+    }
+
     const id = randomUUID();
     const handle = this.client.query<Record<string, unknown>>(map, filter);
 
@@ -145,15 +166,22 @@ export class SubscriptionRegistry {
     if (!settled) {
       // Could not establish a server baseline — do not register a half-open
       // subscription that would feed the agent local-only or empty data.
-      sub.offDelta();
-      sub.unsubscribe();
-      return null;
+      this.teardown(sub);
+      return { ok: false, reason: 'offline' };
+    }
+
+    // Re-check the cap after awaiting: a burst of concurrent starts each passed
+    // the synchronous fast-path check before any of them registered, so enforce
+    // the ceiling here where the registration actually happens.
+    if (this.subs.size >= MAX_ACTIVE_SUBSCRIPTIONS) {
+      this.teardown(sub);
+      return { ok: false, reason: 'capacity' };
     }
 
     sub.recording = true;
     this.subs.set(id, sub);
     this.resetExpiry(sub, ttlMs);
-    return sub;
+    return { ok: true, sub };
   }
 
   /**
@@ -183,14 +211,16 @@ export class SubscriptionRegistry {
     return true;
   }
 
-  /** Snapshot of the active subscriptions (no internal handles exposed). */
+  /** Snapshot of the active subscriptions (no internal handles or live state
+   *  exposed — `buffer`/`filter` are copied so callers cannot mutate registry
+   *  internals or race a concurrent delta callback). */
   list(): ActiveSubscription[] {
     return Array.from(this.subs.values()).map((s) => ({
       id: s.id,
       map: s.map,
-      filter: s.filter,
+      filter: { ...s.filter },
       createdAt: s.createdAt,
-      buffer: s.buffer,
+      buffer: [...s.buffer],
       dropped: s.dropped,
       totalObserved: s.totalObserved,
     }));
@@ -233,15 +263,18 @@ export class SubscriptionRegistry {
       clearTimeout(sub.expiryTimer);
       sub.expiryTimer = null;
     }
+    // Teardown must never throw (it runs in stop / expiry / error paths), but a
+    // cleanup failure is reported, not swallowed: a throwing unsubscribe can
+    // leave a server-side live query open, which the operator needs to see.
     try {
       sub.offDelta();
-    } catch {
-      // listener removal must never throw out of teardown
+    } catch (err) {
+      this.onTeardownError?.(err, sub.id);
     }
     try {
       sub.unsubscribe();
-    } catch {
-      // unsubscribe must never throw out of teardown
+    } catch (err) {
+      this.onTeardownError?.(err, sub.id);
     }
   }
 }
