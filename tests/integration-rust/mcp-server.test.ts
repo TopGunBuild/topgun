@@ -144,8 +144,8 @@ function parseDeltas(out: string): Array<{ kind: string; key: string }> {
 // NO_AUTH path is racy for a second connecting client under CI load (the WS
 // upgrade intermittently fails before the grace window resolves); explicit auth
 // is the deterministic, CI-proven path.
-function makeClient(port: number, userId: string): TopGunClient {
-  const token = createTestToken(userId, ['ADMIN']);
+function makeClient(port: number, userId: string, roles: string[] = ['ADMIN']): TopGunClient {
+  const token = createTestToken(userId, roles);
   return new TopGunClient({
     serverUrl: `ws://localhost:${port}/ws`,
     storage: new MemoryStorageAdapter(),
@@ -551,4 +551,88 @@ describe('Integration: MCP tools against a real Rust server (cold cache)', () =>
       await server.cleanup().catch(() => {});
     }
   }, 60_000);
+
+  // F4 — topgun_list_maps must reflect the REAL server catalog, never fabricated
+  // "common patterns". A separate seeder creates two distinctly-named maps over
+  // the wire; list_maps (server-authoritative, via the admin map-enumeration
+  // endpoint) must return exactly those names with their entry counts — and never
+  // the retired boilerplate ('users'/'tasks'/'posts'/'products' as examples). The
+  // MCP client carries both the data-plane 'ADMIN' role (to connect) and the
+  // admin-plane 'admin' role (the HTTP control plane requires it).
+  test('list_maps reflects the real server catalog, not fabricated names (F4)', async () => {
+    const server = await spawnRustServer();
+    const seeder = await createRustTestClient(server.port, {
+      userId: 'mcp-seeder',
+      roles: ['ADMIN'],
+    });
+    const mcpClient = makeClient(server.port, 'mcp-lister', ['ADMIN', 'admin']);
+    const mcp = new TopGunMCPServer({ client: mcpClient });
+
+    try {
+      await seeder.waitForMessage('AUTH_ACK', 10_000);
+      await mcpClient.start();
+      await waitForState(mcpClient, SyncState.CONNECTED);
+
+      // Seed two distinctly-named maps (one row each) over the wire. The unique
+      // suffix keeps the assertion robust against any residue from other suites.
+      const suffix = Date.now();
+      const mapA = `mcp_catalog_a_${suffix}`;
+      const mapB = `mcp_catalog_b_${suffix}`;
+      for (const map of [mapA, mapB]) {
+        seeder.messages.length = 0;
+        seeder.send({
+          type: 'CLIENT_OP',
+          payload: {
+            id: `seed-${map}`,
+            mapName: map,
+            opType: 'PUT',
+            key: 'k0',
+            record: createLWWRecord({ id: 'k0', title: 'row' }),
+          },
+        });
+        await seeder.waitForMessage('OP_ACK', 10_000);
+      }
+
+      const result = await callStable(mcp, 'topgun_list_maps', {});
+      expect(result.isError).toBeFalsy();
+      const out = text(result);
+
+      // The real, server-resident maps are listed, with entry counts.
+      expect(out).toContain(mapA);
+      expect(out).toContain(mapB);
+      expect(out).toMatch(new RegExp(`${mapA}\\s*\\(1 entry`));
+
+      // Negative control: the pre-fix fabricated "common patterns" are gone. The
+      // server never created these names, so a server-authoritative answer for a
+      // catalog made only of mapA/mapB can never mention them.
+      expect(out).not.toMatch(/common (map )?pattern/i);
+      expect(out).not.toContain('Blog posts');
+      expect(out).not.toContain('E-commerce products');
+    } finally {
+      await mcp.stop().catch(() => {});
+      await mcpClient.close().catch(() => {});
+      seeder.close();
+      await server.cleanup().catch(() => {});
+    }
+  }, 60_000);
+
+  // F4 negative control — with no reachable server, list_maps must say so
+  // honestly (DISCONNECTED), never emit a cheerful fabricated catalog.
+  test('list_maps reports DISCONNECTED honestly when the server is unreachable (F4 negative control)', async () => {
+    const deadPort = 59_241;
+    const mcpClient = makeClient(deadPort, 'mcp-list-offline', ['ADMIN', 'admin']);
+    const mcp = new TopGunMCPServer({ client: mcpClient });
+
+    try {
+      await mcpClient.start();
+
+      const result = await mcp.callTool('topgun_list_maps', {});
+      expect(result.isError).toBe(true);
+      expect(text(result)).toMatch(/not connected|NOT an empty/i);
+      expect(text(result)).not.toContain('Blog posts');
+      expect(text(result)).not.toMatch(/common (map )?pattern/i);
+    } finally {
+      await mcpClient.close().catch(() => {});
+    }
+  }, 30_000);
 });

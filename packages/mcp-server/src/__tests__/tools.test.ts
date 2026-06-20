@@ -91,6 +91,14 @@ class MockTopGunClient {
     return 'CONNECTED';
   }
 
+  getServerUrl() {
+    return 'ws://localhost:8080/ws';
+  }
+
+  async getAuthToken() {
+    return 'mock-token';
+  }
+
   isCluster() {
     return false;
   }
@@ -204,10 +212,17 @@ function createTestContext(config?: Partial<ResolvedMCPServerConfig>): ToolConte
 
 describe('MCP Tools', () => {
   describe('handleListMaps', () => {
-    it('should list allowed maps when configured', async () => {
+    const realFetch = global.fetch;
+    afterEach(() => {
+      global.fetch = realFetch;
+    });
+
+    it('returns the configured allow-list without a server round-trip', async () => {
       const ctx = createTestContext({
         allowedMaps: ['tasks', 'users', 'products'],
       });
+      const fetchSpy = jest.fn();
+      global.fetch = fetchSpy as unknown as typeof fetch;
 
       const result = await handleListMaps({}, ctx);
 
@@ -215,15 +230,73 @@ describe('MCP Tools', () => {
       expect(result.content[0].text).toContain('tasks');
       expect(result.content[0].text).toContain('users');
       expect(result.content[0].text).toContain('products');
+      // The allow-list IS the authoritative scope — no server enumeration needed.
+      expect(fetchSpy).not.toHaveBeenCalled();
     });
 
-    it('should indicate no restrictions when allowedMaps not set', async () => {
+    it('returns the real server catalog from the admin endpoint, never fabricated names', async () => {
       const ctx = createTestContext();
+      const fetchSpy = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          maps: [
+            { name: 'orders', entryCount: 3 },
+            { name: 'customers', entryCount: 1 },
+          ],
+        }),
+      });
+      global.fetch = fetchSpy as unknown as typeof fetch;
 
       const result = await handleListMaps({}, ctx);
 
       expect(result.isError).toBeUndefined();
-      expect(result.content[0].text).toContain('all maps');
+      const text = result.content[0].text ?? '';
+      // Hits the derived HTTP control-plane URL with the client's bearer token.
+      expect(fetchSpy).toHaveBeenCalledWith(
+        'http://localhost:8080/api/admin/maps',
+        expect.objectContaining({
+          headers: { Authorization: 'Bearer mock-token' },
+        }),
+      );
+      expect(text).toContain('orders');
+      expect(text).toContain('3 entries');
+      expect(text).toContain('customers');
+      expect(text).toContain('1 entry');
+      // Negative control: the retired fabricated "common patterns" must be gone.
+      expect(text).not.toMatch(/common (map )?pattern/i);
+      expect(text).not.toContain('Blog posts');
+    });
+
+    it('reports DISCONNECTED honestly and does not guess', async () => {
+      const ctx = createTestContext();
+      (ctx.client as unknown as { getConnectionState: () => string }).getConnectionState = () =>
+        'DISCONNECTED';
+      const fetchSpy = jest.fn();
+      global.fetch = fetchSpy as unknown as typeof fetch;
+
+      const result = await handleListMaps({}, ctx);
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/not connected/i);
+      expect(result.content[0].text).toMatch(/NOT an empty/i);
+      // Never fabricates and never round-trips while offline.
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('reports an explicit error when the token lacks admin access, not example names', async () => {
+      const ctx = createTestContext();
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        text: async () => 'forbidden',
+      }) as unknown as typeof fetch;
+
+      const result = await handleListMaps({}, ctx);
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/admin-scoped token/i);
+      expect(result.content[0].text).not.toContain('Blog posts');
     });
   });
 

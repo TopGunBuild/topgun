@@ -776,6 +776,26 @@ export class SyncEngine {
     }
   }
 
+  /**
+   * Resolve the token currently in effect: the one set directly via
+   * {@link setAuthToken}, else the value produced by the configured token
+   * provider, else `null`. Does not mutate connection state — it is a read used
+   * by callers that need to authenticate a side-channel request with the same
+   * credentials the WebSocket uses.
+   *
+   * If a token provider is configured and rejects, this rejects too: a provider
+   * failure (OAuth down, expired refresh) is distinct from "no credentials
+   * configured" (null) and callers must be able to tell them apart rather than
+   * silently degrade to an unauthenticated request.
+   */
+  public async getResolvedToken(): Promise<string | null> {
+    if (this.authToken) return this.authToken;
+    if (this.tokenProvider) {
+      return await this.tokenProvider();
+    }
+    return null;
+  }
+
   public setTokenProvider(provider: () => Promise<string | null>): void {
     this.tokenProvider = provider;
     const state = this.stateMachine.getState();
