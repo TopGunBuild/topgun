@@ -235,6 +235,7 @@ async fn main() {
                 store_factory: None,
                 server_config: None,
                 policy_store: None,
+                admin_subjects: Arc::new(std::collections::HashSet::new()),
                 auth_providers: Arc::new(vec![]),
                 refresh_grant_store: None,
                 auth_validator: None,

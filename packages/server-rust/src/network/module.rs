@@ -755,6 +755,21 @@ fn build_app(
     // without requiring secret injection through application code paths.
     let jwt_secret = std::env::var("JWT_SECRET").ok().filter(|s| !s.is_empty());
 
+    // Server-trusted admin-subject allow-list for the RBAC admin bypass (see
+    // PolicyEvaluator). Anchors privilege to operator config, never to JWT roles.
+    let admin_subjects: Arc<std::collections::HashSet<String>> = Arc::new(
+        std::env::var("TOPGUN_ADMIN_SUBJECTS")
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    );
+
     // Refuse to start when auth is required but no secret is configured.
     // Only enforced when server_config is Some (production paths). Unit tests
     // and the load harness construct AppState directly with server_config: None
@@ -846,6 +861,7 @@ fn build_app(
         store_factory,
         server_config,
         policy_store,
+        admin_subjects,
         auth_providers: Arc::new(auth_providers),
         refresh_grant_store: None,
         auth_validator: None,

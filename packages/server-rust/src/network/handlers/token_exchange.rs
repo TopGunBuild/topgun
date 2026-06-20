@@ -141,9 +141,32 @@ pub async fn token_exchange_handler(
                     .as_secs();
                 let exp = now + 3600;
 
+                // Strip server-reserved privileged roles from the external claims
+                // before minting. An external provider's roles are attacker-
+                // influenced (a deployment may map a user-settable IdP profile
+                // field to its roles claim), so copying a reserved role like
+                // "admin" verbatim would let a user self-grant a privileged role
+                // that could satisfy a policy condition referencing $auth.roles.
+                // The RBAC admin bypass itself is already server-anchored to an
+                // allow-list of subjects, never roles; stripping here is
+                // defense-in-depth at the untrusted mint boundary.
+                let mut roles = external_claims.roles;
+                let before = roles.len();
+                roles.retain(|r| {
+                    !crate::service::policy::RESERVED_PRIVILEGED_ROLES.contains(&r.as_str())
+                });
+                if roles.len() != before {
+                    tracing::warn!(
+                        sub = %external_claims.sub,
+                        provider = provider.name(),
+                        "stripped reserved privileged role(s) from exchanged external token; \
+                         reserved roles cannot be self-granted via token exchange"
+                    );
+                }
+
                 let claims = ExchangeJwtClaims {
                     sub: external_claims.sub,
-                    roles: external_claims.roles,
+                    roles,
                     exp,
                     iat: now,
                 };
@@ -358,6 +381,50 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(body["token"].as_str().is_some());
         assert!(body["expiresAt"].as_u64().is_some());
+    }
+
+    /// F5 negative control: a reserved privileged role ("admin") present in the
+    /// external provider's claims must be stripped from the minted `TopGun` token,
+    /// so a user cannot self-grant admin via token exchange. A non-reserved role
+    /// is preserved.
+    #[tokio::test]
+    async fn reserved_admin_role_is_stripped_from_minted_token() {
+        use jsonwebtoken::{DecodingKey, Validation};
+
+        const SECRET: &str = "exchange-secret";
+        let provider: Arc<dyn AuthProvider> = Arc::new(AlwaysSucceed {
+            name: "idp".to_string(),
+            sub: "attacker".to_string(),
+            roles: vec!["admin".to_string(), "editor".to_string()],
+        });
+        let app = make_app(make_state(vec![provider], Some(SECRET)));
+        let (status, body) = post_exchange(app, json!({ "token": "any" })).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let minted = body["token"].as_str().expect("minted token present");
+        let mut validation = Validation::default(); // HS256
+        validation.validate_aud = false;
+        let decoded = jsonwebtoken::decode::<Value>(
+            minted,
+            &DecodingKey::from_secret(SECRET.as_bytes()),
+            &validation,
+        )
+        .expect("minted token must verify with the signing secret");
+
+        let roles: Vec<String> = decoded.claims["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            !roles.contains(&"admin".to_string()),
+            "reserved admin role must be stripped, got {roles:?}"
+        );
+        assert!(
+            roles.contains(&"editor".to_string()),
+            "non-reserved roles must be preserved, got {roles:?}"
+        );
     }
 
     #[tokio::test]

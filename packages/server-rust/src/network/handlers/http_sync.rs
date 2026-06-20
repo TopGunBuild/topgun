@@ -152,7 +152,13 @@ impl OptionalFromRequestParts<AppState> for ClientClaims {
             return Ok(None);
         };
         let mut validation = Validation::new(algorithm);
-        validation.validate_aud = false;
+        // Apply optional issuer/audience checks (off unless configured) so the
+        // HTTP request path enforces the same iss/aud as the WS handshake.
+        super::auth::apply_iss_aud_validation(
+            &mut validation,
+            state.config.jwt_issuer.as_deref(),
+            state.config.jwt_audience.as_deref(),
+        );
         validation.leeway = state.config.jwt_clock_skew_secs;
 
         // Decode into serde_json::Value to obtain raw_claims for AuthValidationContext.
@@ -367,15 +373,18 @@ async fn dispatch_queries(
     store_factory: &RecordStoreFactory,
     principal: Option<&topgun_core::Principal>,
     policy_store: Option<&Arc<dyn PolicyStore>>,
+    admin_subjects: &Arc<std::collections::HashSet<String>>,
     response: &mut HttpSyncResponse,
 ) {
     for q in queries {
         let map_name = q.map_name.clone();
 
-        // RBAC map-level read access check. Constructing PolicyEvaluator inline
-        // keeps all changes within this file (no AppState field changes needed).
+        // RBAC map-level read access check. The admin bypass is anchored to the
+        // server-trusted admin-subject allow-list (never to a roles claim), so the
+        // evaluator is built with the same allow-list the middleware uses.
         if let Some(store) = policy_store {
-            let evaluator = PolicyEvaluator::new(Arc::clone(store));
+            let evaluator =
+                PolicyEvaluator::with_admin_subjects(Arc::clone(store), Arc::clone(admin_subjects));
             // Single fail-closed gate shared with the authorization middleware.
             // AllowAll = never-configured store (allow the read for backward
             // compat); Evaluate = configured store, enforce policy (default-deny
@@ -679,6 +688,7 @@ pub async fn http_sync_handler(
                 store_factory,
                 principal.as_ref(),
                 state.policy_store.as_ref(),
+                &state.admin_subjects,
                 &mut http_response,
             )
             .await;
@@ -1117,6 +1127,7 @@ mod tests {
                 sf,
                 None,
                 state.policy_store.as_ref(),
+                &state.admin_subjects,
                 &mut response,
             )
             .await;

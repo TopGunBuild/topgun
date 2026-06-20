@@ -4,6 +4,7 @@
 //! read/write/remove access per map, with optional predicate conditions
 //! evaluated against auth context and record data.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -19,6 +20,20 @@ pub mod durable;
 pub mod expr_parser;
 
 pub use durable::DurablePolicyStore;
+
+/// Role name with a hardcoded privileged meaning in the policy engine.
+///
+/// A principal is only granted the RBAC admin bypass when its subject is on the
+/// server-configured admin allow-list (see [`PolicyEvaluator`]) — never by
+/// carrying this role in a JWT claim. The string is still reserved so that
+/// untrusted mint paths (token exchange) strip it before signing, preventing a
+/// self-granted `admin` role from satisfying a policy condition that references
+/// `$auth.roles`.
+pub const RESERVED_ADMIN_ROLE: &str = "admin";
+
+/// Roles that an external/untrusted token must never be able to inject. Stripped
+/// at every mint boundary that copies attacker-influenced claims (token exchange).
+pub const RESERVED_PRIVILEGED_ROLES: &[&str] = &[RESERVED_ADMIN_ROLE];
 
 // ---------------------------------------------------------------------------
 // Permission types
@@ -137,11 +152,19 @@ pub trait PolicyStore: Send + Sync {
 
 /// Matches a glob pattern against an input string using dot-separated segments.
 ///
-/// A lone `"*"` pattern matches any input. Otherwise each dot-separated
-/// segment must match exactly or be `"*"` (matching exactly one segment).
-/// Segment count must be equal for non-lone-star patterns.
+/// Segment semantics:
+/// - A lone `"*"` matches any input (historical "match everything" behavior).
+/// - `"*"` as a segment matches exactly one segment (`users.*` ⇒ `users.profiles`
+///   but not `users` or `users.a.b`).
+/// - `"**"` matches zero or more segments (recursive namespace lock). A trailing
+///   `"**"` therefore locks an entire namespace: `users.**` matches `users`,
+///   `users.profiles`, and `users.a.b.c`. This is the namespace-isolation form an
+///   operator reaches for; single-segment `*` does NOT lock nested keys, so a deny
+///   on `users.*` alone could be dodged by choosing a shallower/deeper map name.
+/// - Any other segment matches literally.
 fn glob_matches(pattern: &str, input: &str) -> bool {
-    // A lone "*" matches everything.
+    // A lone "*" matches everything (equivalent to "**"), kept as a fast path and
+    // for backward compatibility with existing allow/deny-all policies.
     if pattern == "*" {
         return true;
     }
@@ -149,14 +172,32 @@ fn glob_matches(pattern: &str, input: &str) -> bool {
     let pat_segs: Vec<&str> = pattern.split('.').collect();
     let inp_segs: Vec<&str> = input.split('.').collect();
 
-    if pat_segs.len() != inp_segs.len() {
-        return false;
-    }
+    glob_match_segments(&pat_segs, &inp_segs)
+}
 
-    pat_segs
-        .iter()
-        .zip(inp_segs.iter())
-        .all(|(p, i)| *p == "*" || p == i)
+/// Recursive segment matcher backing [`glob_matches`].
+///
+/// `**` matches zero or more input segments; `*` matches exactly one; every other
+/// pattern segment must equal the corresponding input segment.
+fn glob_match_segments(pat: &[&str], inp: &[&str]) -> bool {
+    match pat.first() {
+        // Pattern exhausted: match iff input is also exhausted.
+        None => inp.is_empty(),
+        Some(&"**") => {
+            // Try consuming 0, 1, 2, ... input segments against the remaining
+            // pattern. Zero-consumption first so `users.**` matches `users`.
+            for skip in 0..=inp.len() {
+                if glob_match_segments(&pat[1..], &inp[skip..]) {
+                    return true;
+                }
+            }
+            false
+        }
+        // `*` consumes exactly one input segment.
+        Some(&"*") => !inp.is_empty() && glob_match_segments(&pat[1..], &inp[1..]),
+        // Literal segment must match exactly.
+        Some(seg) => !inp.is_empty() && *seg == inp[0] && glob_match_segments(&pat[1..], &inp[1..]),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -236,17 +277,47 @@ impl PolicyStore for InMemoryPolicyStore {
 /// Evaluates permission policies for a given principal, action, and map.
 ///
 /// Uses deny-wins semantics: if any matching policy denies, the result is
-/// `Deny` regardless of allow policies. Principals with role "admin" bypass
-/// all policy checks.
+/// `Deny` regardless of allow policies.
+///
+/// The admin RBAC bypass is **server-anchored**: a principal bypasses policy
+/// checks only when its subject (`Principal.id`) is on the `admin_subjects`
+/// allow-list, which is sourced exclusively from server-trusted configuration
+/// (e.g. `TOPGUN_ADMIN_SUBJECTS`). A `roles: ["admin"]` claim in a JWT — whether
+/// minted by an app, copied from an external `IdP` via token exchange, or issued by
+/// the operator console — does **not** grant the bypass. This closes the
+/// transitive-trust / self-grant footgun where a user-controllable `IdP` field
+/// mapped to a roles claim could escalate to full RBAC bypass.
 pub struct PolicyEvaluator {
     store: Arc<dyn PolicyStore>,
+    /// Subjects (`Principal.id`) granted the unconditional RBAC bypass. Sourced
+    /// only from server-trusted config; empty by default (no data-plane admin).
+    admin_subjects: Arc<HashSet<String>>,
 }
 
 impl PolicyEvaluator {
-    /// Creates a new evaluator backed by the given policy store.
+    /// Creates a new evaluator backed by the given policy store with no admin
+    /// subjects configured (no principal receives the RBAC bypass).
     #[must_use]
     pub fn new(store: Arc<dyn PolicyStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            admin_subjects: Arc::new(HashSet::new()),
+        }
+    }
+
+    /// Creates an evaluator with a server-trusted admin-subject allow-list.
+    ///
+    /// Only subjects in `admin_subjects` receive the RBAC admin bypass; the set
+    /// must come from server configuration, never from token claims.
+    #[must_use]
+    pub fn with_admin_subjects(
+        store: Arc<dyn PolicyStore>,
+        admin_subjects: Arc<HashSet<String>>,
+    ) -> Self {
+        Self {
+            store,
+            admin_subjects,
+        }
     }
 
     /// Returns true if the store contains at least one policy.
@@ -300,9 +371,12 @@ impl PolicyEvaluator {
     ) -> PolicyDecision {
         use crate::service::domain::predicate::{evaluate_predicate, EvalContext};
 
-        // Admin principals bypass all policy checks.
+        // Admin bypass is server-anchored: only subjects on the configured
+        // allow-list bypass policy checks. A `roles: ["admin"]` JWT claim is
+        // deliberately NOT sufficient — privilege must originate from server
+        // configuration, not from a (possibly self-granted) token claim.
         if let Some(p) = principal {
-            if p.roles.iter().any(|r| r == "admin") {
+            if self.admin_subjects.contains(&p.id) {
                 return PolicyDecision::Allow;
             }
         }
@@ -402,6 +476,45 @@ mod tests {
         assert!(!glob_matches("users.*.settings", "users.settings"));
     }
 
+    // F6: recursive `**` locks an entire namespace — covers the base segment and
+    // any depth beneath it. This is the namespace-isolation form single-segment
+    // `*` could not express.
+    #[test]
+    fn glob_double_star_locks_namespace() {
+        assert!(glob_matches("users.**", "users")); // base segment
+        assert!(glob_matches("users.**", "users.profiles")); // one deeper
+        assert!(glob_matches("users.**", "users.a.b.c")); // arbitrarily deep
+                                                          // Does not leak into a sibling namespace.
+        assert!(!glob_matches("users.**", "posts"));
+        assert!(!glob_matches("users.**", "usersX.a"));
+    }
+
+    // F6 negative control (crafted-key bypass): with the OLD single-segment glob,
+    // a deny on `users.*` could be dodged by choosing a map name at a different
+    // depth (`users`, `users.a.b`). A `users.**` deny must catch every such
+    // crafted name so the namespace lock cannot be escaped.
+    #[test]
+    fn glob_double_star_blocks_crafted_key_bypass() {
+        for crafted in [
+            "users",
+            "users.public",
+            "users.private.secret",
+            "users.a.b.c.d",
+        ] {
+            assert!(
+                glob_matches("users.**", crafted),
+                "namespace lock users.** must match crafted name {crafted}"
+            );
+        }
+    }
+
+    // F6: `**` alone matches everything (recursive equivalent of lone `*`).
+    #[test]
+    fn glob_double_star_alone_matches_all() {
+        assert!(glob_matches("**", "users"));
+        assert!(glob_matches("**", "a.b.c.d"));
+    }
+
     // -- InMemoryPolicyStore --
 
     #[tokio::test]
@@ -498,12 +611,18 @@ mod tests {
         }
     }
 
+    fn admin_subjects(subs: &[&str]) -> Arc<HashSet<String>> {
+        Arc::new(subs.iter().map(|s| (*s).to_string()).collect())
+    }
+
+    // A subject on the server-trusted allow-list bypasses all policy checks,
+    // even with no matching policies (which would otherwise default-deny).
     #[tokio::test]
-    async fn admin_always_allowed() {
+    async fn allow_listed_subject_bypasses_policies() {
         let store = make_store_with(vec![]);
-        let eval = PolicyEvaluator::new(store);
+        let eval = PolicyEvaluator::with_admin_subjects(store, admin_subjects(&["admin1"]));
         let data = rmpv::Value::Nil;
-        let principal = admin_principal();
+        let principal = admin_principal(); // id == "admin1"
         let decision = eval
             .evaluate(
                 Some(&principal),
@@ -513,6 +632,49 @@ mod tests {
             )
             .await;
         assert_eq!(decision, PolicyDecision::Allow);
+    }
+
+    // F5 negative control / regression: a principal carrying `roles: ["admin"]`
+    // whose subject is NOT on the server allow-list must NOT receive the bypass.
+    // This is the self-grant vector (token-exchange / app-minted claims) — it
+    // must default-deny, not escalate.
+    #[tokio::test]
+    async fn admin_role_claim_alone_does_not_bypass() {
+        // Empty allow-list: even via `new` (no admin subjects), an admin-role
+        // claim cannot escalate.
+        let store = make_store_with(vec![]);
+        let eval = PolicyEvaluator::new(store);
+        let data = rmpv::Value::Nil;
+        let principal = admin_principal(); // roles: ["admin"], id "admin1"
+        let decision = eval
+            .evaluate(
+                Some(&principal),
+                PermissionAction::Write,
+                "users.profiles",
+                &data,
+            )
+            .await;
+        assert_eq!(
+            decision,
+            PolicyDecision::Deny,
+            "a roles:[\"admin\"] claim must not grant the RBAC bypass; only server-configured \
+             admin subjects do"
+        );
+    }
+
+    // F5: the allow-list is keyed on subject, not role. A different subject that
+    // also happens to claim the admin role is still denied.
+    #[tokio::test]
+    async fn admin_subject_match_is_by_id_not_role() {
+        let store = make_store_with(vec![]);
+        let eval = PolicyEvaluator::with_admin_subjects(store, admin_subjects(&["ops-root"]));
+        let data = rmpv::Value::Nil;
+        // user1 with roles:["user"] is not "ops-root" -> denied.
+        let principal = user_principal();
+        let decision = eval
+            .evaluate(Some(&principal), PermissionAction::Read, "users.x", &data)
+            .await;
+        assert_eq!(decision, PolicyDecision::Deny);
     }
 
     #[tokio::test]

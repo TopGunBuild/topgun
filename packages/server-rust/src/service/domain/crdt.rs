@@ -198,7 +198,21 @@ impl CrdtService {
                 .admit_write(ctx, &metadata_snapshot, &op.map_name, value_size)?;
             self.validate_schema_for_op(op)?;
             Some(self.write_validator.sanitize_hlc())
+        } else if ctx.caller_origin == CallerOrigin::Anonymous {
+            // Anonymous HTTP /sync write (no connection_id, no JWT identity).
+            // Auth admission for this path is enforced at the HTTP handler
+            // (require_auth / enforce_auth) BEFORE dispatch, so admit_write is not
+            // re-run here — it would unconditionally reject Anonymous and break the
+            // no-auth dev/demo tier. The HLC, however, is still client-supplied and
+            // MUST be re-stamped: otherwise a forged millis:u64::MAX wins
+            // Last-Write-Wins forever and survives a later auth upgrade. HLC
+            // re-stamp is an integrity control gated on transport (client/http),
+            // not on auth state.
+            self.validate_schema_for_op(op)?;
+            Some(self.write_validator.sanitize_hlc())
         } else {
+            // Genuine internal/system/forwarded call (trusted origin) — preserve
+            // the caller's HLC so cross-node convergence is not perturbed.
             None
         };
 
@@ -329,8 +343,38 @@ impl CrdtService {
                     last_id = id.clone();
                 }
             }
+        } else if ctx.caller_origin == CallerOrigin::Anonymous {
+            // Anonymous HTTP /sync batch (no connection_id, no JWT identity). Auth
+            // admission is enforced at the HTTP handler before dispatch, so
+            // admit_write is not re-run here (it would reject Anonymous and break
+            // the no-auth tier). Every op's client-supplied HLC is still re-stamped
+            // so a forged timestamp cannot win Last-Write-Wins — integrity gated on
+            // transport, not auth.
+            for op in ops {
+                self.validate_schema_for_op(op)?;
+            }
+            for op in ops {
+                let sanitized_ts = self.write_validator.sanitize_hlc();
+                let partition_id = hash_to_partition(&op.key);
+                let old_rmpv_value = self
+                    .read_old_value_for_queries(&op.map_name, &op.key, partition_id)
+                    .await;
+                let event_payload = self
+                    .apply_single_op(op, partition_id, Some(&sanitized_ts))
+                    .await?;
+                self.broadcast_event(&event_payload, ctx.connection_id)?;
+                self.broadcast_query_updates(
+                    &event_payload,
+                    old_rmpv_value.as_ref(),
+                    ctx.connection_id,
+                );
+                if let Some(id) = &op.id {
+                    last_id = id.clone();
+                }
+            }
         } else {
-            // Internal/system call (no connection_id) — skip validation.
+            // Genuine internal/system/forwarded call (trusted origin) — preserve
+            // the caller's HLC so cross-node convergence is not perturbed.
             for op in ops {
                 let partition_id = hash_to_partition(&op.key);
                 // Read old value before mutation for query broadcast filtering.
@@ -3316,5 +3360,213 @@ mod tests {
             vec!["drop-b"],
             "the removed tag must be tombstoned verbatim (no sanitization)"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Anonymous HTTP /sync HLC re-stamp (audit F3 / TODO-485).
+    //
+    // Under the default no-auth posture, an anonymous HTTP write reaches the
+    // CRDT service with caller_origin = Anonymous, connection_id = None, and no
+    // principal. Before the fix this landed in the trusted "internal/system"
+    // branch and the client HLC was stored verbatim — a forged millis:u64::MAX
+    // would win Last-Write-Wins forever. The anonymous arm must re-stamp the HLC
+    // exactly like the authenticated HttpClient arm, while genuine internal
+    // (System/Forwarded) origins must still preserve their timestamp.
+    // -----------------------------------------------------------------------
+
+    /// Builds an anonymous-HTTP-origin context (caller_origin = Anonymous,
+    /// connection_id = None, no principal) routed to the key's hash partition.
+    fn make_anon_http_ctx_for_key(key: &str) -> OperationContext {
+        let mut ctx = OperationContext::new(1, service_names::CRDT, make_timestamp(), 5000);
+        ctx.caller_origin = CallerOrigin::Anonymous;
+        ctx.connection_id = None;
+        ctx.principal = None;
+        ctx.partition_id = Some(hash_to_partition(key));
+        ctx
+    }
+
+    // F3: anonymous HTTP LWW PUT with a forged timestamp is re-stamped in both the
+    // stored record and the broadcast event — closing the no-auth LWW-poison hole.
+    #[tokio::test]
+    async fn anon_http_lww_put_restamps_forged_timestamp() {
+        let factory = make_factory();
+        let conn_registry = Arc::new(ConnectionRegistry::new());
+        let query_registry = Arc::new(QueryRegistry::new());
+        let svc = Arc::new(CrdtService::new(
+            Arc::clone(&factory),
+            Arc::clone(&conn_registry),
+            make_validator(),
+            Arc::clone(&query_registry),
+            Arc::new(SchemaService::new()),
+        ));
+
+        let key = "anon-1";
+        let mut listener = subscribe_listener(&conn_registry, &query_registry, "users");
+
+        let record = topgun_core::LWWRecord {
+            value: Some(rmpv::Value::String("Mallory".into())),
+            timestamp: forged_timestamp(),
+            ttl_ms: None,
+        };
+        let op = Operation::ClientOp {
+            ctx: make_anon_http_ctx_for_key(key),
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some("anon-put".to_string()),
+                    map_name: "users".to_string(),
+                    key: key.to_string(),
+                    op_type: None,
+                    record: Some(Some(record)),
+                    or_record: None,
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+
+        svc.clone().oneshot(op).await.unwrap();
+
+        let stored = read_lww_timestamp(&factory, "users", key)
+            .await
+            .expect("LWW record must be stored");
+        assert_eq!(
+            stored.node_id, SERVER_NODE_ID,
+            "stored timestamp must carry the server node_id, not the forged one"
+        );
+        assert_ne!(
+            stored.millis, FORGED_MILLIS,
+            "anonymous HTTP write must NOT keep the forged u64::MAX millis"
+        );
+
+        let events = drain_server_events(&mut listener);
+        let put_event = events
+            .iter()
+            .find(|e| e.event_type == ServerEventType::PUT)
+            .expect("a PUT ServerEvent must be broadcast");
+        let broadcast_ts = &put_event
+            .record
+            .as_ref()
+            .expect("PUT event must carry the record")
+            .timestamp;
+        assert_ne!(
+            broadcast_ts.millis, FORGED_MILLIS,
+            "broadcast timestamp must NOT keep the forged millis"
+        );
+    }
+
+    // F3: same protection on the batch path (anonymous OpBatch re-stamps each op).
+    #[tokio::test]
+    async fn anon_http_op_batch_restamps_forged_timestamp() {
+        let factory = make_factory();
+        let conn_registry = Arc::new(ConnectionRegistry::new());
+        let query_registry = Arc::new(QueryRegistry::new());
+        let svc = Arc::new(CrdtService::new(
+            Arc::clone(&factory),
+            Arc::clone(&conn_registry),
+            make_validator(),
+            Arc::clone(&query_registry),
+            Arc::new(SchemaService::new()),
+        ));
+
+        let key = "anon-batch-1";
+        let record = topgun_core::LWWRecord {
+            value: Some(rmpv::Value::String("Trudy".into())),
+            timestamp: forged_timestamp(),
+            ttl_ms: None,
+        };
+        let mut ctx = make_anon_http_ctx_for_key(key);
+        // OpBatch ctx carries no single partition_id (keys span partitions).
+        ctx.partition_id = None;
+        let op = Operation::OpBatch {
+            ctx,
+            payload: topgun_core::messages::sync::OpBatchMessage {
+                payload: topgun_core::messages::sync::OpBatchPayload {
+                    ops: vec![topgun_core::messages::base::ClientOp {
+                        id: Some("anon-batch-put".to_string()),
+                        map_name: "users".to_string(),
+                        key: key.to_string(),
+                        op_type: None,
+                        record: Some(Some(record)),
+                        or_record: None,
+                        or_tag: None,
+                        write_concern: None,
+                        timeout: None,
+                    }],
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+
+        svc.clone().oneshot(op).await.unwrap();
+
+        let stored = read_lww_timestamp(&factory, "users", key)
+            .await
+            .expect("LWW record must be stored");
+        assert_ne!(
+            stored.millis, FORGED_MILLIS,
+            "anonymous batch write must NOT keep the forged u64::MAX millis"
+        );
+        assert_eq!(stored.node_id, SERVER_NODE_ID);
+    }
+
+    // F3 negative control: a GENUINE internal/system origin (System) still has its
+    // client-supplied timestamp preserved verbatim — the re-stamp is gated on the
+    // untrusted client/http transports, not on every connection-less call. This
+    // guards the cross-node convergence path that broke in earlier re-stamp work.
+    #[tokio::test]
+    async fn internal_system_origin_preserves_timestamp() {
+        let factory = make_factory();
+        let conn_registry = Arc::new(ConnectionRegistry::new());
+        let query_registry = Arc::new(QueryRegistry::new());
+        let svc = Arc::new(CrdtService::new(
+            Arc::clone(&factory),
+            Arc::clone(&conn_registry),
+            make_validator(),
+            Arc::clone(&query_registry),
+            Arc::new(SchemaService::new()),
+        ));
+
+        let key = "system-1";
+        let mut ctx = OperationContext::new(1, service_names::CRDT, make_timestamp(), 5000);
+        ctx.caller_origin = CallerOrigin::System;
+        ctx.connection_id = None;
+        ctx.principal = None;
+        ctx.partition_id = Some(hash_to_partition(key));
+
+        let record = topgun_core::LWWRecord {
+            value: Some(rmpv::Value::String("from-peer".into())),
+            timestamp: forged_timestamp(),
+            ttl_ms: None,
+        };
+        let op = Operation::ClientOp {
+            ctx,
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some("system-put".to_string()),
+                    map_name: "users".to_string(),
+                    key: key.to_string(),
+                    op_type: None,
+                    record: Some(Some(record)),
+                    or_record: None,
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+
+        svc.clone().oneshot(op).await.unwrap();
+
+        let stored = read_lww_timestamp(&factory, "users", key)
+            .await
+            .expect("LWW record must be stored");
+        assert_eq!(
+            stored.millis, FORGED_MILLIS,
+            "genuine internal/system origin must preserve the caller-supplied HLC \
+             (convergence path), not re-stamp it"
+        );
+        assert_eq!(stored.node_id, FORGED_NODE_ID);
     }
 }
