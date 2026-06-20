@@ -27,7 +27,7 @@ import type { IStorageAdapter, OpLogEntry } from '@topgunbuild/client';
 import { TopGunMCPServer } from '@topgunbuild/mcp-server';
 import type { MCPToolResult } from '@topgunbuild/mcp-server';
 
-import { spawnRustServer, createTestToken, SpawnedServer } from './helpers';
+import { spawnRustServer, createTestToken } from './helpers';
 
 // In-memory storage adapter so the SDK runs headless in Node (no IndexedDB).
 class MemoryStorageAdapter implements IStorageAdapter {
