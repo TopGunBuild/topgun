@@ -26,7 +26,7 @@ import { TopGunClient, SyncState } from '@topgunbuild/client';
 import type { IStorageAdapter, OpLogEntry } from '@topgunbuild/client';
 import { TopGunMCPServer } from '@topgunbuild/mcp-server';
 
-import { spawnRustServer, SpawnedServer } from './helpers';
+import { spawnRustServer, createTestToken, SpawnedServer } from './helpers';
 
 // In-memory storage adapter so the SDK runs headless in Node (no IndexedDB).
 class MemoryStorageAdapter implements IStorageAdapter {
@@ -128,10 +128,20 @@ function text(result: { content: Array<{ text?: string }> }): string {
   return (result.content || []).map((c) => c.text ?? '').join('\n');
 }
 
-// NO_AUTH so both the seeder and the MCP server's own client connect tokenless
-// against the loopback ephemeral-port server (the documented zero-config local
-// posture); auth is exercised separately by connection-auth.test.ts.
-const SERVER_ENV = { TOPGUN_NO_AUTH: '1' };
+// Both clients authenticate with a JWT (same pattern the other single-server
+// integration suites use), rather than relying on a NO_AUTH server. The tokenless
+// NO_AUTH path is racy for a second connecting client under CI load (the WS
+// upgrade intermittently fails before the grace window resolves); explicit auth
+// is the deterministic, CI-proven path.
+function makeClient(port: number, userId: string): TopGunClient {
+  const token = createTestToken(userId, ['ADMIN']);
+  return new TopGunClient({
+    serverUrl: `ws://localhost:${port}/ws`,
+    storage: new MemoryStorageAdapter(),
+    auth: { getToken: async () => token },
+    backoff: { initialDelayMs: 200, maxDelayMs: 400, jitter: true },
+  });
+}
 
 const RECORD_COUNT = 25;
 const OPEN_COUNT = 10; // records 0..9 are status:'open', 10..24 are status:'done'
@@ -143,14 +153,10 @@ describe('Integration: MCP tools against a real Rust server (cold cache)', () =>
   let mapName = '';
 
   beforeEach(async () => {
-    server = await spawnRustServer({ env: SERVER_ENV });
+    server = await spawnRustServer();
 
     // 1. Seeder client — writes data the MCP process's cache has NEVER seen.
-    seeder = new TopGunClient({
-      serverUrl: `ws://localhost:${server.port}/ws`,
-      storage: new MemoryStorageAdapter(),
-      backoff: { initialDelayMs: 200, maxDelayMs: 400, jitter: true },
-    });
+    seeder = makeClient(server.port, 'mcp-seeder');
     await seeder.start();
     await waitForState(seeder, SyncState.CONNECTED);
 
@@ -168,12 +174,13 @@ describe('Integration: MCP tools against a real Rust server (cold cache)', () =>
     }
     await waitForSynced(seeder);
 
-    // 2. MCP server with its OWN fresh client (cold cache) → same server.
-    mcp = new TopGunMCPServer({ topgunUrl: `ws://localhost:${server.port}/ws` });
-    const mcpClient = mcp.getClient();
-    // Start the client directly (not mcp.start(), which would attach a stdio
-    // transport that consumes the Jest process's stdin); callTool() only needs
-    // the client connected.
+    // 2. MCP server driving a SEPARATE, freshly-built client (cold cache) → same
+    // server. We inject the client so it carries its own auth, and start it
+    // directly rather than via mcp.start() (which would attach a stdio transport
+    // that consumes the Jest process's stdin); callTool() only needs the client
+    // connected.
+    const mcpClient = makeClient(server.port, 'mcp-reader');
+    mcp = new TopGunMCPServer({ client: mcpClient });
     await mcpClient.start();
     await waitForState(mcpClient, SyncState.CONNECTED);
   }, 60_000);
