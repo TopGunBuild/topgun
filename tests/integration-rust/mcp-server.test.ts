@@ -25,6 +25,7 @@
 import { TopGunClient, SyncState } from '@topgunbuild/client';
 import type { IStorageAdapter, OpLogEntry } from '@topgunbuild/client';
 import { TopGunMCPServer } from '@topgunbuild/mcp-server';
+import type { MCPToolResult } from '@topgunbuild/mcp-server';
 
 import { spawnRustServer, createTestToken, SpawnedServer } from './helpers';
 
@@ -146,127 +147,113 @@ function makeClient(port: number, userId: string): TopGunClient {
 const RECORD_COUNT = 25;
 const OPEN_COUNT = 10; // records 0..9 are status:'open', 10..24 are status:'done'
 
+// Retry transient connectivity failures (NOT content mismatches): the read tools
+// go through queryOncePaged, which rejects if the client is momentarily
+// reconnecting. Re-confirm CONNECTED and retry, so a brief blip never reds the
+// suite. A genuine server-blind read (the pre-fix "Map is empty" / "Records: 0")
+// is NOT a transient error, so it is never retried — the negative control still
+// fails fast against the unfixed tools.
+const TRANSIENT = /unreachable|not settled|did not settle|client offline/i;
+async function callStable(
+  mcp: TopGunMCPServer,
+  name: string,
+  args: unknown,
+): Promise<MCPToolResult> {
+  let last: MCPToolResult | undefined;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    await waitForState(mcp.getClient(), SyncState.CONNECTED, 8_000).catch(() => {});
+    last = await mcp.callTool(name, args);
+    if (!TRANSIENT.test(text(last))) return last;
+    await waitMs(500);
+  }
+  return last!;
+}
+
 describe('Integration: MCP tools against a real Rust server (cold cache)', () => {
-  let server: SpawnedServer | null = null;
-  let seeder: TopGunClient | null = null;
-  let mcp: TopGunMCPServer | null = null;
-  let mapName = '';
-
-  // Connect BOTH clients up front against the still-idle server (so each
-  // completes its AUTH handshake fast), THEN seed. A client that connects LATER —
-  // while the seeder is mid-Merkle-sync — can miss its AUTH_ACK inside the SDK's
-  // 15 s connection-establishment window under CI load and stall at
-  // AUTHENTICATING; connecting before any load avoids that race (the pattern
-  // live-query-limit-clamp.test.ts uses). The data must stay on the server, so
-  // the seeder stays connected for the suite's lifetime (the null in-memory
-  // backend keeps a map's rows only while it is live, not after the writer
-  // disconnects). The MCP client is still a genuinely COLD reader: it never
-  // mutates and queryOncePaged does not hydrate the persistent replica, so its
-  // local CRDT map stays empty for every read — exactly the configuration that
-  // exposes a server-blind read. We inject the client (rather than letting the
-  // MCP server build one) so it carries its own auth, and start it directly
-  // instead of via mcp.start(), which would attach a stdio transport that
-  // consumes the Jest process's stdin; callTool() only needs it connected.
-  beforeAll(async () => {
-    server = await spawnRustServer();
-
-    seeder = makeClient(server.port, 'mcp-seeder');
-    const mcpClient = makeClient(server.port, 'mcp-reader');
-    mcp = new TopGunMCPServer({ client: mcpClient });
-
-    await seeder.start();
-    await mcpClient.start();
-    await waitForState(seeder, SyncState.CONNECTED);
-    await waitForState(mcpClient, SyncState.CONNECTED);
-
-    mapName = `mcp_e2e_${Date.now()}`;
-    const m = seeder.getMap<string, Record<string, unknown>>(mapName);
-    for (let i = 0; i < RECORD_COUNT; i++) {
-      m.set(`k${i}`, {
-        id: `k${i}`,
-        title: `doc ${i}`,
-        status: i < OPEN_COUNT ? 'open' : 'done',
-        n: i,
-      });
-    }
-    await waitForSynced(seeder);
-  }, 60_000);
-
-  afterAll(async () => {
-    if (mcp) {
-      await mcp
-        .getClient()
-        .close()
-        .catch(() => {});
-      mcp = null;
-    }
-    if (seeder) {
-      await seeder.close().catch(() => {});
-      seeder = null;
-    }
-    if (server) {
-      await server.cleanup().catch(() => {});
-      server = null;
-    }
-  });
-
-  test('topgun_query returns the seeded rows (server-authoritative sanity)', async () => {
-    const result = await mcp!.callTool('topgun_query', { map: mapName, limit: 5 });
-    expect(result.isError).toBeFalsy();
-    const out = text(result);
-    expect(out).toContain('Found 5 result(s)');
-    expect(out).toContain('doc');
-  });
-
-  // --- F1: server-blind read divergence is gone (the negative control) -------
+  // One self-contained test that boots the server, connects both clients, seeds,
+  // and runs every read back-to-back. Doing the whole scenario inline keeps it
+  // FAST (a few seconds) — well inside the SDK's 15 s heartbeat-timeout window —
+  // so neither client churns mid-suite, the failure mode that flaked a
+  // beforeAll + per-test layout under CI load. This mirrors the lifecycle of the
+  // other reliably-green single-server suites (queries/live-query): server +
+  // client(s) + assertions all in one test body.
   //
-  // Each of these reads happens on a COLD MCP client with NO prior topgun_mutate
-  // or topgun_query in this process — so the local replica is empty. A correct
-  // (server-authoritative) tool still sees all 25 seeded rows; the pre-fix
-  // local-replica reads would report empty/0 here and fail.
+  // BOTH clients connect up front against the still-idle server (each AUTH
+  // handshake completes fast — a client connecting later, while the seeder is
+  // mid-Merkle-sync, can miss its AUTH_ACK and stall at AUTHENTICATING). The
+  // seeder stays connected for the test's lifetime because the null in-memory
+  // backend keeps a map's rows only while a client holds it live. The MCP client
+  // is still a genuinely COLD reader: it never mutates and queryOncePaged does
+  // not hydrate the persistent replica, so its local CRDT map stays empty for
+  // every read — exactly the configuration that exposes a server-blind read. We
+  // inject the client so it carries its own auth, and start it directly rather
+  // than via mcp.start() (which would attach a stdio transport that consumes the
+  // Jest process's stdin); callTool() only needs it connected.
+  test('cold MCP read tools reflect real server data, not an empty local replica (F1)', async () => {
+    const server = await spawnRustServer();
+    const seeder = makeClient(server.port, 'mcp-seeder');
+    const mcpClient = makeClient(server.port, 'mcp-reader');
+    const mcp = new TopGunMCPServer({ client: mcpClient });
 
-  test('topgun_schema (cold) reflects the 25 server records, not an empty map', async () => {
-    const result = await mcp!.callTool('topgun_schema', { map: mapName });
-    expect(result.isError).toBeFalsy();
-    const out = text(result);
-    expect(out).not.toMatch(/is empty/i);
-    expect(out).toContain('Records: 25');
-    // Fields inferred from real server rows.
-    expect(out).toContain('title');
-    expect(out).toContain('status');
-    expect(out).toContain('n');
-  });
+    try {
+      await seeder.start();
+      await mcpClient.start();
+      await waitForState(seeder, SyncState.CONNECTED);
+      await waitForState(mcpClient, SyncState.CONNECTED);
 
-  test('topgun_stats (cold) reports the 25-record server count', async () => {
-    const result = await mcp!.callTool('topgun_stats', { map: mapName });
-    expect(result.isError).toBeFalsy();
-    const out = text(result);
-    expect(out).toContain(mapName);
-    expect(out).toContain('Records: 25');
-  });
+      const mapName = `mcp_e2e_${Date.now()}`;
+      const m = seeder.getMap<string, Record<string, unknown>>(mapName);
+      for (let i = 0; i < RECORD_COUNT; i++) {
+        m.set(`k${i}`, {
+          id: `k${i}`,
+          title: `doc ${i}`,
+          status: i < OPEN_COUNT ? 'open' : 'done',
+          n: i,
+        });
+      }
+      await waitForSynced(seeder);
 
-  test('topgun_explain (cold) plans over real server totals and selectivity', async () => {
-    const result = await mcp!.callTool('topgun_explain', {
-      map: mapName,
-      filter: { status: 'open' },
-    });
-    expect(result.isError).toBeFalsy();
-    const out = text(result);
-    expect(out).toContain('Total Records: 25');
-    expect(out).toContain(`Estimated Results: ${OPEN_COUNT}`);
-    expect(out).toContain('Selectivity: 40.0%');
-  });
+      // Sanity: topgun_query (already server-authoritative) returns the rows.
+      const query = await callStable(mcp, 'topgun_query', { map: mapName, limit: 5 });
+      expect(query.isError).toBeFalsy();
+      expect(text(query)).toContain('Found 5 result(s)');
+      expect(text(query)).toContain('doc');
 
-  test('cold schema sees server data BEFORE any query hydrates the local cache', async () => {
-    // The pre-fix bug persisted even AFTER a query (queryOncePaged never wrote the
-    // persistent replica). Here we prove the stronger property: the very FIRST
-    // read on a cold process already reflects the server, with no warm-up.
-    const schema = await mcp!.callTool('topgun_schema', { map: mapName });
-    expect(text(schema)).toContain('Records: 25');
+      // F1 — each read runs on a COLD MCP client (no prior mutate/query in this
+      // process, so the local replica is empty). A correct server-authoritative
+      // tool still sees all 25 seeded rows; the pre-fix local-replica reads would
+      // report "empty / 0" here and fail (the negative control).
+      const schema = await callStable(mcp, 'topgun_schema', { map: mapName });
+      expect(schema.isError).toBeFalsy();
+      expect(text(schema)).not.toMatch(/is empty/i);
+      expect(text(schema)).toContain('Records: 25');
+      expect(text(schema)).toContain('title');
+      expect(text(schema)).toContain('status');
+      expect(text(schema)).toContain('n');
 
-    // And it stays consistent after a query, too.
-    await mcp!.callTool('topgun_query', { map: mapName, limit: 5 });
-    const schemaAfter = await mcp!.callTool('topgun_schema', { map: mapName });
-    expect(text(schemaAfter)).toContain('Records: 25');
-  });
+      const stats = await callStable(mcp, 'topgun_stats', { map: mapName });
+      expect(stats.isError).toBeFalsy();
+      expect(text(stats)).toContain(mapName);
+      expect(text(stats)).toContain('Records: 25');
+
+      const explain = await callStable(mcp, 'topgun_explain', {
+        map: mapName,
+        filter: { status: 'open' },
+      });
+      expect(explain.isError).toBeFalsy();
+      expect(text(explain)).toContain('Total Records: 25');
+      expect(text(explain)).toContain(`Estimated Results: ${OPEN_COUNT}`);
+      expect(text(explain)).toContain('Selectivity: 40.0%');
+
+      // A query does not hydrate the persistent replica these tools read (that
+      // was the bug), so schema stays correct (server-derived) after one.
+      await callStable(mcp, 'topgun_query', { map: mapName, limit: 5 });
+      const schemaAfter = await callStable(mcp, 'topgun_schema', { map: mapName });
+      expect(text(schemaAfter)).toContain('Records: 25');
+    } finally {
+      await mcpClient.close().catch(() => {});
+      await seeder.close().catch(() => {});
+      await server.cleanup().catch(() => {});
+    }
+  }, 60_000);
 });
