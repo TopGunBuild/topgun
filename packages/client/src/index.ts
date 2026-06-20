@@ -150,6 +150,7 @@ export type {
   TopGunClientConfig,
   QueryOnceOptions,
   QueryOncePagedResult,
+  WriteConfirmation,
 } from './TopGunClient';
 export { DEFAULT_QUERY_ONCE_TIMEOUT_MS } from './TopGunClient';
 

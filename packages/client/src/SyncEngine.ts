@@ -1409,6 +1409,47 @@ export class SyncEngine {
   }
 
   /**
+   * Wait until a specific local op has been confirmed applied by the server.
+   *
+   * Resolves `'synced'` once the op identified by `opId` is acknowledged (the
+   * server applied it). Acknowledged ops are flipped `synced=true` and then
+   * spliced out of the in-memory `opLog` (see {@link handleOpAck}); therefore an
+   * op that is **absent** from `opLog` has already been acked — that is treated
+   * as `'synced'`, not as "unknown".
+   *
+   * Resolves `'offline'` the moment the client is not online with the op still
+   * pending — so a caller (e.g. the MCP `mutate` tool) can fail fast with an
+   * honest "queued locally, not yet durable" instead of blocking for the whole
+   * timeout. Resolves `'timeout'` if the op stays pending past `timeoutMs` while
+   * online (server slow / unreachable mid-flight).
+   *
+   * This is the authoritative "did the server take my write?" signal for plain
+   * map writes. Per-op Write Concern promises only resolve when the server
+   * returns per-op `results`, which the single-server OP_BATCH path does not — so
+   * this op-log/ACK projection is the correct primitive for confirming a write.
+   */
+  public async waitForOpSynced(
+    opId: string,
+    timeoutMs: number,
+  ): Promise<'synced' | 'offline' | 'timeout'> {
+    const deadline = Date.now() + timeoutMs;
+    // Absent from opLog ⇒ already acked + compacted out. Present + synced ⇒ acked.
+    const isSynced = (): boolean => {
+      const op = this.opLog.find((o) => o.id === opId);
+      return !op || op.synced === true;
+    };
+
+    while (!isSynced()) {
+      // Fail fast when offline with the op still pending: it will only sync on a
+      // future reconnect, so there is nothing to wait for here.
+      if (!this.isOnline()) return 'offline';
+      if (Date.now() >= deadline) return 'timeout';
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return 'synced';
+  }
+
+  /**
    * Get the current backpressure status.
    * Delegates to BackpressureController.
    */

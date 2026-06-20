@@ -153,7 +153,7 @@ describe('MCP Integration', () => {
       expect(result.content[0].text).not.toContain('No results found');
     });
 
-    it('should execute topgun_mutate', async () => {
+    it('should execute topgun_mutate (unconfirmed without a reachable server)', async () => {
       const result = await server.callTool('topgun_mutate', {
         map: 'tasks',
         operation: 'set',
@@ -161,8 +161,11 @@ describe('MCP Integration', () => {
         data: { title: 'Test Task' },
       });
 
-      expect(result.isError).toBeUndefined();
-      expect(result.content[0].text).toContain('Successfully created');
+      // mutate now confirms the write against the server before reporting success.
+      // No reachable server here ⇒ honest not-durable error, never a false success.
+      // Server-confirmed success is proven by the real-server integration harness.
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/not yet.*durable/i);
     });
 
     it('should execute topgun_schema', async () => {
@@ -267,8 +270,10 @@ describe('MCP Integration', () => {
       await server.getClient().start();
     });
 
-    it('should write data via topgun_mutate; offline read is not-settled, not silent empty', async () => {
-      // Write data (local write succeeds even while the server is unreachable).
+    it('should write data via topgun_mutate; offline write/read are honest errors, not silent success/empty', async () => {
+      // The write is queued locally, but with no reachable server it cannot be
+      // confirmed durable — so mutate reports a not-durable error rather than a
+      // false "Successfully created".
       const writeResult = await server.callTool('topgun_mutate', {
         map: 'products',
         operation: 'set',
@@ -276,8 +281,8 @@ describe('MCP Integration', () => {
         data: { name: 'Widget', price: 9.99 },
       });
 
-      expect(writeResult.isError).toBeUndefined();
-      expect(writeResult.content[0].text).toContain('Successfully created');
+      expect(writeResult.isError).toBe(true);
+      expect(writeResult.content[0].text).toMatch(/not yet.*durable/i);
 
       // Read back. queryOnce is server-truth: with no reachable server it cannot
       // settle, so the tool reports an explicit not-settled message and never
@@ -289,23 +294,9 @@ describe('MCP Integration', () => {
       expect(readResult.content[0].text).not.toContain('No results found');
     });
 
-    it('should accept multiple local mutations; offline query is not-settled', async () => {
-      // Create
-      await server.callTool('topgun_mutate', {
-        map: 'items',
-        operation: 'set',
-        key: 'item1',
-        data: { title: 'First' },
-      });
-
-      // Update
-      await server.callTool('topgun_mutate', {
-        map: 'items',
-        operation: 'set',
-        key: 'item1',
-        data: { title: 'Updated' },
-      });
-
+    it('offline query is not-settled, never silent stale local data', async () => {
+      // No seeding mutations: without a reachable server they cannot be confirmed
+      // (each would block the confirm timeout) and add nothing to this assertion.
       // Query — offline, so server-truth queryOnce cannot settle.
       const result = await server.callTool('topgun_query', { map: 'items' });
 
@@ -373,15 +364,15 @@ describe('MCP Integration', () => {
       let queryResult = await server.callTool('topgun_query', { map: 'temp' });
       expect(queryResult.content[0].text).toContain('not settled');
 
-      // Remove
+      // Remove — server-authoritative, but unconfirmed without a reachable server.
       const removeResult = await server.callTool('topgun_mutate', {
         map: 'temp',
         operation: 'remove',
         key: 'temp1',
       });
 
-      expect(removeResult.isError).toBeUndefined();
-      expect(removeResult.content[0].text).toContain('Successfully removed');
+      expect(removeResult.isError).toBe(true);
+      expect(removeResult.content[0].text).toMatch(/not yet.*durable/i);
 
       // Offline read-back cannot settle under server-truth queryOnce.
       queryResult = await server.callTool('topgun_query', { map: 'temp' });
@@ -421,19 +412,11 @@ describe('MCP Integration', () => {
     it('should respect defaultLimit configuration', async () => {
       server = new TopGunMCPServer({ defaultLimit: 5 });
 
-      // Create more records than default limit
-      for (let i = 1; i <= 10; i++) {
-        await server.callTool('topgun_mutate', {
-          map: 'limited',
-          operation: 'set',
-          key: `item${i}`,
-          data: { index: i },
-        });
-      }
-
-      // Query without specifying limit. Offline server-truth queryOnce cannot
-      // settle, so we assert the tool executes and surfaces the not-settled path
-      // rather than verifying server-applied limit counts (which require a server).
+      // No seeding loop: writes can no longer be confirmed without a reachable
+      // server (each would block the full confirm timeout), and the query below
+      // cannot settle anyway. Server-applied limit counts are covered by the
+      // real-server integration harness; here we only assert the access/not-settled
+      // path for the configured limit.
       const result = await server.callTool('topgun_query', { map: 'limited' });
 
       const text = result.content[0].text;
@@ -445,25 +428,15 @@ describe('MCP Integration', () => {
     it('should respect maxLimit configuration', async () => {
       server = new TopGunMCPServer({ maxLimit: 3 });
 
-      // Create records
-      for (let i = 1; i <= 10; i++) {
-        await server.callTool('topgun_mutate', {
-          map: 'maxed',
-          operation: 'set',
-          key: `item${i}`,
-          data: { index: i },
-        });
-      }
-
-      // Query with limit exceeding maxLimit
+      // Query with limit exceeding maxLimit. No seeding loop (see defaultLimit
+      // test): offline server-truth queryOnce cannot settle, so we assert the tool
+      // executes and surfaces the not-settled path rather than server-applied counts.
       const result = await server.callTool('topgun_query', {
         map: 'maxed',
         limit: 100,
       });
 
       const text = result.content[0].text;
-      // Offline server-truth queryOnce cannot settle; assert the tool executes and
-      // surfaces the not-settled path rather than verifying server-applied counts.
       expect(result.isError).toBe(true);
       expect(text).toContain('not settled');
       expect(text).toContain('maxed');

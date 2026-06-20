@@ -27,7 +27,13 @@ import type { IStorageAdapter, OpLogEntry } from '@topgunbuild/client';
 import { TopGunMCPServer } from '@topgunbuild/mcp-server';
 import type { MCPToolResult } from '@topgunbuild/mcp-server';
 
-import { spawnRustServer, createRustTestClient, createTestToken, createLWWRecord } from './helpers';
+import {
+  spawnRustServer,
+  createRustTestClient,
+  createTestToken,
+  createLWWRecord,
+  completeMerkleSync,
+} from './helpers';
 
 // In-memory storage adapter so the SDK runs headless in Node (no IndexedDB).
 class MemoryStorageAdapter implements IStorageAdapter {
@@ -268,4 +274,130 @@ describe('Integration: MCP tools against a real Rust server (cold cache)', () =>
       await server.cleanup().catch(() => {});
     }
   }, 60_000);
+
+  // F2 — topgun_mutate{set} must reflect SERVER-confirmed state, never an
+  // optimistic local echo. We assert the write is reported successful only after
+  // the server applied it, and prove that by reading it back from a SEPARATE
+  // client (the raw seeder, over the wire) — the MCP process's own local replica
+  // is irrelevant to whether the data is durable on the server.
+  //
+  // F5 — topgun_mutate{remove} must be server-authoritative: it deletes a record
+  // that exists on the server but is absent from the cold MCP cache, and the
+  // deletion is visible to a subsequent server read. Against the pre-fix code the
+  // remove short-circuited on the empty local cache ("does not exist, no action"),
+  // so the record survived — these assertions are the negative control for that.
+  test('mutate is server-confirmed (F2) and remove is server-authoritative (F5)', async () => {
+    const server = await spawnRustServer();
+    const seeder = await createRustTestClient(server.port, {
+      userId: 'mcp-seeder',
+      roles: ['ADMIN'],
+    });
+    const mcpClient = makeClient(server.port, 'mcp-writer');
+    const mcp = new TopGunMCPServer({ client: mcpClient });
+
+    try {
+      await seeder.waitForMessage('AUTH_ACK', 10_000);
+      await mcpClient.start();
+      await waitForState(mcpClient, SyncState.CONNECTED);
+
+      // ---- F2: set, confirmed on the server, visible to a separate client ----
+      const writeMap = `mcp_write_${Date.now()}`;
+      const setRes = await callStable(mcp, 'topgun_mutate', {
+        map: writeMap,
+        operation: 'set',
+        key: 'w1',
+        data: { title: 'hello', n: 1 },
+      });
+      expect(setRes.isError).toBeFalsy();
+      expect(text(setRes)).toContain('Successfully saved');
+      expect(text(setRes)).toContain('confirmed on server');
+
+      // A SEPARATE client pulls the map from the server via Merkle sync and sees
+      // the record — proof the write is durable server-side, not local-only.
+      const seenAfterSet = await completeMerkleSync(seeder, writeMap);
+      expect(seenAfterSet.has('w1')).toBe(true);
+      expect(seenAfterSet.get('w1')?.value?.title).toBe('hello');
+
+      // ---- F5: remove a server-resident key that is COLD to the MCP cache ----
+      const removeMap = `mcp_remove_${Date.now()}`;
+      // Seed two keys over the wire (server-resident; the MCP client never wrote
+      // them, so they are absent from its local replica). 'keep1' is a sentinel to
+      // prove the remove is targeted, not a blanket wipe.
+      for (const [k, title] of [
+        ['doomed', 'delete me'],
+        ['keep1', 'survivor'],
+      ]) {
+        seeder.messages.length = 0;
+        seeder.send({
+          type: 'CLIENT_OP',
+          payload: {
+            id: `seed-${removeMap}-${k}`,
+            mapName: removeMap,
+            opType: 'PUT',
+            key: k,
+            record: createLWWRecord({ id: k, title }),
+          },
+        });
+        await seeder.waitForMessage('OP_ACK', 10_000);
+      }
+
+      // The MCP client has never cached 'doomed' — a pre-fix remove would no-op
+      // with "does not exist". The fix issues the tombstone server-authoritatively.
+      const removeRes = await callStable(mcp, 'topgun_mutate', {
+        map: removeMap,
+        operation: 'remove',
+        key: 'doomed',
+      });
+      expect(removeRes.isError).toBeFalsy();
+      expect(text(removeRes)).toContain('Successfully removed');
+      expect(text(removeRes)).toContain('confirmed on server');
+      expect(text(removeRes)).not.toMatch(/does not exist/i);
+
+      // Server-authoritative read-back: 'doomed' is gone, 'keep1' remains.
+      const query = await callStable(mcp, 'topgun_query', { map: removeMap, limit: 50 });
+      expect(query.isError).toBeFalsy();
+      expect(text(query)).toContain('survivor');
+      expect(text(query)).not.toContain('delete me');
+    } finally {
+      await mcpClient.close().catch(() => {});
+      seeder.close();
+      await server.cleanup().catch(() => {});
+    }
+  }, 60_000);
+
+  // Negative control for F2: with no reachable server, a mutate must NOT report
+  // success. The pre-fix tool answered "Successfully created" optimistically (and
+  // the InMemory adapter then lost the write on exit); the fix returns an explicit
+  // not-durable error for both set and remove.
+  test('mutate returns an explicit not-durable error when the server is unreachable (F2 negative control)', async () => {
+    // Point at a port with nothing listening so the client never connects.
+    const deadPort = 59_237;
+    const mcpClient = makeClient(deadPort, 'mcp-offline');
+    const mcp = new TopGunMCPServer({ client: mcpClient });
+
+    try {
+      await mcpClient.start();
+
+      const setRes = await mcp.callTool('topgun_mutate', {
+        map: 'offline_map',
+        operation: 'set',
+        key: 'k1',
+        data: { x: 1 },
+      });
+      expect(setRes.isError).toBe(true);
+      expect(text(setRes)).toMatch(/not yet.*durable/i);
+      expect(text(setRes)).not.toContain('Successfully');
+
+      const removeRes = await mcp.callTool('topgun_mutate', {
+        map: 'offline_map',
+        operation: 'remove',
+        key: 'k1',
+      });
+      expect(removeRes.isError).toBe(true);
+      expect(text(removeRes)).toMatch(/not yet.*durable/i);
+      expect(text(removeRes)).not.toContain('Successfully');
+    } finally {
+      await mcpClient.close().catch(() => {});
+    }
+  }, 30_000);
 });

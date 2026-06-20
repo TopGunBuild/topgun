@@ -103,6 +103,14 @@ export const DEFAULT_CLUSTER_CONFIG: Required<Omit<TopGunClusterConfig, 'seeds'>
 export const DEFAULT_QUERY_ONCE_TIMEOUT_MS = 5000;
 
 /**
+ * Outcome of {@link TopGunClient.confirmWrite}: whether a local write was
+ * confirmed applied by the server (`'synced'`) or could not be confirmed —
+ * because the client is offline (`'offline'`), the server did not acknowledge in
+ * time (`'timeout'`), or the local op could not be recorded (`'failed'`).
+ */
+export type WriteConfirmation = 'synced' | 'offline' | 'timeout' | 'failed';
+
+/**
  * Options for {@link TopGunClient.queryOnce}, a one-shot read that resolves with
  * authoritative server data (or rejects rather than returning stale local data).
  */
@@ -176,6 +184,16 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     seeds: string[];
   };
   private readonly authProvider?: AuthProvider;
+
+  /**
+   * Most-recent in-flight op promise per `${map}:${key}`, set synchronously by the
+   * getMap set/remove wrappers. {@link confirmWrite} awaits the op id from this
+   * promise, then waits for the server ack — letting a write be reported as durable
+   * only once the server has actually applied it. Entries are deleted once
+   * confirmed. Keyed by the latest write to a (map,key); serial callers (the MCP
+   * mutate tool) never overlap two writes to one key.
+   */
+  private readonly inFlightWrites: Map<string, Promise<string>> = new Map();
 
   constructor(config: TopGunClientConfig) {
     // Supplying both serverUrl and cluster is ambiguous — fail early
@@ -653,15 +671,14 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
       const mutations: StorageMutation[] = [
         { store: 'kv', type: 'put', key: `${name}:${key}`, value: record },
       ];
-      this.syncEngine
-        .recordOperation(
-          name,
-          'PUT',
-          String(key),
-          { record, timestamp: record.timestamp },
-          mutations,
-        )
-        .catch((err) => logger.error({ err }, 'Failed to commit PUT op'));
+      const opPromise = this.syncEngine.recordOperation(
+        name,
+        'PUT',
+        String(key),
+        { record, timestamp: record.timestamp },
+        mutations,
+      );
+      this.trackInFlightWrite(name, String(key), opPromise, 'PUT');
       return record;
     };
 
@@ -672,15 +689,14 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
       const mutations: StorageMutation[] = [
         { store: 'kv', type: 'put', key: `${name}:${key}`, value: tombstone },
       ];
-      this.syncEngine
-        .recordOperation(
-          name,
-          'REMOVE',
-          String(key),
-          { record: tombstone, timestamp: tombstone.timestamp },
-          mutations,
-        )
-        .catch((err) => logger.error({ err }, 'Failed to commit REMOVE op'));
+      const opPromise = this.syncEngine.recordOperation(
+        name,
+        'REMOVE',
+        String(key),
+        { record: tombstone, timestamp: tombstone.timestamp },
+        mutations,
+      );
+      this.trackInFlightWrite(name, String(key), opPromise, 'REMOVE');
       return tombstone;
     };
 
@@ -953,6 +969,69 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
    */
   public resetConnection(): void {
     this.syncEngine.resetConnection();
+  }
+
+  // ============================================
+  // Write confirmation API
+  // ============================================
+
+  /**
+   * Record the in-flight op promise for the latest write to a (map, key), so
+   * {@link confirmWrite} can await its server ack. Attaches a `.catch` so an
+   * unawaited commit failure never becomes an unhandled rejection, and clears the
+   * entry once the op id resolves or rejects (the ack itself is then awaited via
+   * the op id, independent of this map).
+   */
+  private trackInFlightWrite(
+    name: string,
+    key: string,
+    opPromise: Promise<string>,
+    opType: 'PUT' | 'REMOVE',
+  ): void {
+    const writeKey = `${name}:${key}`;
+    this.inFlightWrites.set(writeKey, opPromise);
+    opPromise.catch((err) => logger.error({ err, name, key }, `Failed to commit ${opType} op`));
+  }
+
+  /**
+   * Wait until the latest local write to `(map, key)` has been confirmed applied
+   * by the server, or report that it could not be confirmed.
+   *
+   * - `'synced'` — the server acknowledged the write; it is durable server-side.
+   * - `'offline'` — the client is not connected; the write is queued locally and
+   *   will sync on reconnect, but is NOT yet durable on the server.
+   * - `'timeout'` — connected, but the server did not acknowledge within
+   *   `timeoutMs`; the write is not yet confirmed durable.
+   * - `'failed'` — the local op could not be recorded (commit/storage failure).
+   *
+   * This is the honest "did the server take my write?" answer that callers
+   * mutating a database (e.g. the MCP `mutate` tool) need before reporting
+   * success — never an optimistic local-only echo.
+   */
+  public async confirmWrite(
+    name: string,
+    key: string,
+    timeoutMs = 5000,
+  ): Promise<WriteConfirmation> {
+    const writeKey = `${name}:${key}`;
+    const opPromise = this.inFlightWrites.get(writeKey);
+    // No tracked write ⇒ nothing to confirm; callers always write before
+    // confirming, so this only guards misuse.
+    if (!opPromise) return 'synced';
+
+    let opId: string;
+    try {
+      opId = await opPromise;
+    } catch {
+      return 'failed';
+    } finally {
+      // Only clear if this is still the latest in-flight write for the key.
+      if (this.inFlightWrites.get(writeKey) === opPromise) {
+        this.inFlightWrites.delete(writeKey);
+      }
+    }
+
+    return this.syncEngine.waitForOpSynced(opId, timeoutMs);
   }
 
   // ============================================
