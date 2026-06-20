@@ -189,16 +189,31 @@ Records are auto-vectorized on write — no separate indexing pipeline is needed
 
 ### Server configuration
 
-`VectorConfig` is a **Rust server-side struct** (`provider` + per-map dimension config). Configure it via server environment variables; it is not a TypeScript client import.
+The embedding provider and which maps are auto-vectorized are configured entirely through **server environment variables** — there is no TypeScript client import. Set the provider, its dimension, and the maps/fields to embed, then start the server:
 
 ```bash
-# Path where the HNSW index is persisted
+# --- Local Ollama (zero egress) ---
+TOPGUN_EMBEDDING_PROVIDER=ollama
+TOPGUN_EMBEDDING_MODEL=nomic-embed-text
+TOPGUN_EMBEDDING_DIMENSION=768
+
+# --- OR any OpenAI-compatible endpoint ---
+# TOPGUN_EMBEDDING_PROVIDER=openai
+# TOPGUN_EMBEDDING_BASE_URL=https://api.openai.com
+# TOPGUN_EMBEDDING_API_KEY=sk-...
+# TOPGUN_EMBEDDING_MODEL=text-embedding-3-small
+# TOPGUN_EMBEDDING_DIMENSION=1536
+
+# Which maps/fields to auto-embed on write (dimension must match the provider)
+TOPGUN_VECTOR_MAPS='{"products":{"fields":["title","description"],"dimension":768}}'
+
+# Optional: directory where the HNSW index is persisted across restarts
 TOPGUN_VECTOR_INDEX_PATH=./data/vectors
 ```
 
-For the full `VectorConfig` struct (provider type, model, endpoint, dimensions per map) see the [Server reference](/docs/reference/server).
+On startup the server logs a single line showing the active provider, dimension, and the maps it will auto-embed, so you can confirm the configuration from the logs. For the full variable reference see the [Server reference](/docs/reference/server).
 
-<AlertBox variant="info" title="Semantic search requires server-side config" text="The 'exact' and 'fullText' methods work fully offline against local data. The 'semantic' method requires a running server with VectorConfig set (provider + TOPGUN_VECTOR_INDEX_PATH). Calls that include 'semantic' while offline gracefully fall back to the remaining methods." />
+<AlertBox variant="info" title="Semantic search requires an embedding provider" text="The 'exact' and 'fullText' methods work fully offline against local data. The 'semantic' method requires a running server with TOPGUN_EMBEDDING_PROVIDER configured. Without a provider, 'semantic' returns an explicit error rather than empty or meaningless results — it never silently fakes a ranking. Offline clients that include 'semantic' gracefully fall back to the remaining methods." />
 
 ---
 

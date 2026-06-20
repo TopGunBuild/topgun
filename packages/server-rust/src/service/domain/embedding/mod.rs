@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+pub mod deterministic;
 pub mod hook;
 pub mod http;
 pub mod noop;
@@ -81,6 +82,7 @@ impl VectorConfig {
             EmbeddingProviderConfig::Ollama(c) => c.dimension,
             EmbeddingProviderConfig::Http(c) => c.dimension,
             EmbeddingProviderConfig::Noop(c) => c.dimension,
+            EmbeddingProviderConfig::Deterministic(c) => c.dimension,
         };
         for (map_name, map_cfg) in &self.maps {
             if map_cfg.dimension != provider_dim {
@@ -100,6 +102,9 @@ pub enum EmbeddingProviderConfig {
     Ollama(OllamaConfig),
     Http(HttpProviderConfig),
     Noop(NoopConfig),
+    /// Stable hashed bag-of-words embeddings for deterministic CI tests.
+    /// Not a real model — see [`deterministic::DeterministicEmbeddingProvider`].
+    Deterministic(DeterministicConfig),
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -125,6 +130,12 @@ pub struct HttpProviderConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoopConfig {
+    pub dimension: u16,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeterministicConfig {
     pub dimension: u16,
 }
 

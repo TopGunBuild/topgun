@@ -346,8 +346,13 @@ async fn flush_batch(
             }
         };
 
-        // Serialize the embedding as a MsgPack binary blob (Vec<f32> via rmp_serde).
-        let embedding_bytes = match rmp_serde::to_vec_named(&embedding) {
+        // Serialize the embedding in the canonical `Vector` wire form
+        // (`{"type":"f32","data":<LE bytes>}`) so the vector index's
+        // `decode_vector_from_record` can read it back. A bare `Vec<f32>` would
+        // serialize as a plain MsgPack array and silently fail to decode as a
+        // `Vector`, leaving the HNSW index empty.
+        let embedding_vector = topgun_core::vector::Vector::F32(embedding);
+        let embedding_bytes = match rmp_serde::to_vec_named(&embedding_vector) {
             Ok(b) => b,
             Err(err) => {
                 tracing::warn!(
@@ -781,16 +786,20 @@ mod tests {
                 "record should have _embedding field after write-back; got keys: {:?}",
                 m.keys().collect::<Vec<_>>()
             );
-            // Verify the embedding field contains a binary blob (MsgPack-encoded Vec<f32>).
+            // Verify the embedding field contains the canonical `Vector` wire
+            // form so the vector index can decode it (not a bare Vec<f32>).
             if let Some(Value::Bytes(ref bytes)) = m.get("_embedding") {
-                let decoded: Vec<f32> = rmp_serde::from_slice(bytes).unwrap();
+                let decoded: topgun_core::vector::Vector = rmp_serde::from_slice(bytes).unwrap();
                 assert_eq!(
-                    decoded.len(),
+                    decoded.dimension(),
                     4,
                     "embedding should have 4 dimensions (noop provider)"
                 );
+                let topgun_core::vector::Vector::F32(ref floats) = decoded else {
+                    panic!("noop provider should produce an F32 vector");
+                };
                 assert!(
-                    decoded.iter().all(|&v| v == 0.0f32),
+                    floats.iter().all(|&v| v == 0.0f32),
                     "noop provider should return zero vectors"
                 );
             } else {
