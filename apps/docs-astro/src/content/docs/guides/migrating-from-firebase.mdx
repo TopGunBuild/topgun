@@ -71,8 +71,8 @@ This guide is for Firestore users, Firebase Realtime Database users, and anyone 
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Realtime Database <code>ref.on('value')</code></td>
-        <td className="py-3 px-4 text-foreground"><code>client.getMap(name).onChange(callback)</code></td>
-        <td className="py-3 px-4 text-neutral-500">Local LWWMap change notification — fires on any write to the map (local or synced); callback receives no arguments, caller reads <code>getMap().get(key)</code> for current value</td>
+        <td className="py-3 px-4 text-foreground"><code>client.getMap(name).subscribe(callback)</code></td>
+        <td className="py-3 px-4 text-neutral-500">Local LWWMap change notification — fires on any write to the map (local or synced); callback receives the current <code>[key, value]</code> snapshot, caller reads <code>getMap().get(key)</code> for a single value</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Presence (<code>onDisconnect</code>)</td>
@@ -223,16 +223,17 @@ const unsub = query.subscribe((results) => {
 // const results = useQuery('users', { where: ... });
 
 // Raw local-change notifications (no filter):
-const unsubLocal = client.getMap('users').onChange(() => {
-  const record = client.getMap('users').get(userId);
-  console.log(record);
+const unsubLocal = client.getMap('users').subscribe((entries) => {
+  // Fires on any write to the local LWWMap; `entries` is the current
+  // [key, value] snapshot. Look up a single record with `.get(userId)`.
+  console.log(entries.length, client.getMap('users').get(userId));
 });
 ```
 
   </div>
 </div>
 
-TopGun reads and writes are **synchronous** because data lives in local memory first. The `SyncEngine` syncs changes to the server in the background. The `client.query().subscribe()` path delivers server-pushed, filter-aware deltas — the closest equivalent to Firestore's `onSnapshot` query listener. `client.getMap().onChange()` is a lower-level notification that fires on any write to the local LWWMap (local or synced), with no filter; the callback receives no arguments and the caller reads the current value by calling `get()`.
+TopGun reads and writes are **synchronous** because data lives in local memory first. The `SyncEngine` syncs changes to the server in the background. The `client.query().subscribe()` path delivers server-pushed, filter-aware deltas — the closest equivalent to Firestore's `onSnapshot` query listener. `client.getMap().subscribe()` is a lower-level notification that fires on any write to the local LWWMap (local or synced), with no filter; the callback receives the current `[key, value]` snapshot, and a single record can be read with `get()`.
 
 #### If you're using React
 

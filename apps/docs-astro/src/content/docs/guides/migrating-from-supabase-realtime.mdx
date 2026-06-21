@@ -202,8 +202,9 @@ topic.publish({ text: 'hello' });
 
 // CRDT-backed query subscription
 // Server-pushed deltas via WebSocket; emitted from
-// CRDT merge, not from Postgres WAL.
-const query = client.query('todos');
+// CRDT merge, not from Postgres WAL. Pass `{}` to watch
+// the whole map (or a filter to scope it server-side).
+const query = client.query('todos', {});
 
 const unsubQuery = query.subscribe((results) => {
   console.log('todos', results);
@@ -259,7 +260,7 @@ client.getMap('users').set('alice', {
 
 // Listen via the same query subscription; merges
 // from this client and others both arrive here.
-const query = client.query('users');
+const query = client.query('users', {});
 const unsub = query.subscribe((results) => {
   console.log('users', results);
 });

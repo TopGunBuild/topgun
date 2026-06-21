@@ -170,6 +170,7 @@ Working around a failure by narrowing scope (`pnpm --filter "./packages/*"` inst
 
 - Rust server tests: `SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) cargo test --release -p topgun-server`
 - Integration tests (TS client to Rust server): `pnpm test:integration-rust`
+- Doc tests (G2 gate — every doc snippet run against the real server / type-checked against real types / explicitly skipped with a reason): `pnpm test:docs` (set `RUST_SERVER_BINARY` to a prebuilt binary to skip cargo). Authoring contract: `tests/doc-tests/README.md`. New snippets are picked up automatically — no allowlist; to exclude a block add an explicit `doctest skip reason="…"` directive.
 - Run TS tests sequentially in CI to avoid port conflicts: `pnpm test -- --runInBand`
 
 ## Production Defaults (Memory + Persistence)

@@ -1,0 +1,129 @@
+name: Doc tests (executable documentation — G2 gate)
+
+# Extracts every code snippet from the published docs (README + apps/docs-astro)
+# and exercises it against reality: TS executed against a live Rust server or
+# type-checked against the real package types, bash run if hermetic-safe, and
+# everything else explicitly skipped with a visible reason. New snippets are
+# picked up automatically (no allowlist). This is the stabilization program's
+# G2 gate — it stops the docs from drifting out of sync with the code.
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'README.md'
+      - 'apps/docs-astro/**'
+      - 'packages/core/**'
+      - 'packages/client/**'
+      - 'packages/react/**'
+      - 'packages/adapters/**'
+      - 'packages/server-rust/**'
+      - 'packages/core-rust/**'
+      - 'tests/doc-tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/doc-tests.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'README.md'
+      - 'apps/docs-astro/**'
+      - 'packages/core/**'
+      - 'packages/client/**'
+      - 'packages/react/**'
+      - 'packages/adapters/**'
+      - 'packages/server-rust/**'
+      - 'packages/core-rust/**'
+      - 'tests/doc-tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/doc-tests.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-server:
+    name: Build server binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-doctests-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-doctests-
+            ${{ runner.os }}-cargo-integration-
+            ${{ runner.os }}-cargo-
+
+      - name: Build topgun-server (release)
+        run: cargo build --release --bin topgun-server
+
+      - name: Upload server binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: topgun-server-doctests
+          path: target/release/topgun-server
+          retention-days: 1
+          if-no-files-found: error
+
+  # BLOCKING gate. Runs the full doc-test suite (typecheck + run-against-server +
+  # bash + negative control) against the prebuilt binary.
+  doc-tests:
+    name: Doc tests (blocking)
+    needs: [build-server]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download server binary
+        uses: actions/download-artifact@v4
+        with:
+          name: topgun-server-doctests
+          path: target/release
+
+      - name: Make server binary executable
+        run: chmod +x target/release/topgun-server
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.13.1 --activate
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Run doc tests (snippets against the real server)
+        # ts-jest compiles @topgunbuild/{core,client,react,adapters} from source
+        # via moduleNameMapper, so no package build is needed. RUST_SERVER_BINARY
+        # points the run tier at the prebuilt binary (skips cargo). --runInBand
+        # keeps the spawned server's fixed-port lifecycle deterministic.
+        env:
+          RUST_SERVER_BINARY: ${{ github.workspace }}/target/release/topgun-server
+        run: pnpm test:docs

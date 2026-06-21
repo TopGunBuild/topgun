@@ -11,6 +11,7 @@
     "test:sim": "cargo test --profile ci-sim --features simulation -p topgun-server -- sim",
     "test:cli": "pnpm --filter @topgunbuild/cli test",
     "test:integration-rust": "jest --config tests/integration-rust/jest.config.js",
+    "test:docs": "jest --config tests/doc-tests/jest.config.js --runInBand",
     "test:coverage": "pnpm -r test:coverage",
     "test:coverage:core": "pnpm --filter @topgunbuild/core test:coverage",
     "test:coverage:client": "pnpm --filter @topgunbuild/client test:coverage",

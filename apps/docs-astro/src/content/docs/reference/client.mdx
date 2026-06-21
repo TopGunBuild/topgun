@@ -645,8 +645,11 @@ public onBackpressure(
 Subscribe to backpressure transitions.
 
 ```typescript
-client.onBackpressure('backpressure:high', ({ pending, max }) => {
-  console.warn(`Warning: ${pending}/${max} pending ops`);
+client.onBackpressure('backpressure:high', (e) => {
+  // Threshold events carry `pending` / `max` counts.
+  if (e && 'pending' in e) {
+    console.warn(`Warning: ${e.pending}/${e.max} pending ops`);
+  }
 });
 client.onBackpressure('backpressure:paused', () => showLoadingSpinner());
 client.onBackpressure('backpressure:resumed', () => hideLoadingSpinner());

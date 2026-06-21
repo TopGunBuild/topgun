@@ -319,7 +319,7 @@ Combine FTS predicates with traditional filter predicates (`where`/`sort`/`limit
 import { useHybridQuery } from '@topgunbuild/react';
 import { Predicates } from '@topgunbuild/core';
 
-const { data } = useHybridQuery<Article>('articles', {
+const { results } = useHybridQuery<Article>('articles', {
   predicate: Predicates.and(
     Predicates.match('body', 'machine learning'),
     Predicates.equal('category', 'tech')
