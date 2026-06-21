@@ -20,6 +20,9 @@ export const SqlQueryRespPayloadSchema = z.object({
   columns: z.array(z.string()),
   rows: z.array(z.array(z.unknown())),
   error: z.string().optional(),
+  // Machine-distinguishable error class when `error` is set (e.g. 'FEATURE_DISABLED'
+  // when the server has no SQL/DataFusion backend). Absent on success.
+  code: z.string().optional(),
 });
 export type SqlQueryRespPayload = z.infer<typeof SqlQueryRespPayloadSchema>;
 

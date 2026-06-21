@@ -428,17 +428,40 @@ const unsubscribe = handle.subscribe((results) => setResults(results));
 handle.dispose();
 ```
 
-### `sql(query)` — opt-in, server-feature-gated
+### `sql(query)` — not yet available (preview API)
 
 ```typescript
 public async sql(query: string): Promise<SqlQueryResult>
 ```
 
-Execute a one-shot SQL query server-side via the DataFusion engine. Map names are used as table names; the server must have schemas registered for them.
+:::caution[Not functional yet]
+SQL is **not wired into the server today** — calling `client.sql()` against any current build (including one compiled with `--features datafusion`) rejects with a `SqlError` whose `code` is `'FEATURE_DISABLED'`. The method and its types ship so the surface is stable for early adopters, but the server-side query engine is not yet connected. Enablement (plus per-table authorization for SQL) is tracked in the roadmap; until then, use the structured query API.
+:::
 
-**Off by default.** The server's DataFusion feature is a compile-time opt-in (`--features datafusion`). The default server build (`default = ["redb"]`) does NOT include DataFusion. If you send a SQL query to a server built without this feature, the server returns an error.
+When it lands, `client.sql()` will execute a one-shot SQL query server-side via the DataFusion engine — an **opt-in, compile-time-gated** feature (`--features datafusion`; the default build is `default = ["redb"]` and does not include it). Map names are used as table names.
 
-**Niche — use only for what the structured query API cannot express.** `client.sql()` exists for queries that genuinely require SQL: multi-map **joins**, **window functions**, **HAVING** clauses, and **DISTINCT** aggregation. For everything else — filtering, sorting, full-text search, group-by, aggregate functions — use the structured query API (`client.query()`, `client.queryOnce()`, `client.queryOncePaged()`) backed by the canonical DAG engine. Reaching for SQL when the structured API suffices adds a server-side dependency and bypasses the local-first offline path.
+**Niche — only for what the structured query API cannot express.** SQL is intended for queries that genuinely require it: multi-map **joins**, **window functions**, **HAVING** clauses, and **DISTINCT** aggregation. For everything else — filtering, sorting, full-text search, group-by, aggregate functions — use the structured query API (`client.query()`, `client.queryOnce()`, `client.queryOncePaged()`) backed by the canonical DAG engine, which keeps the local-first offline path.
+
+Detect a server without SQL enabled by checking the error `code`:
+
+```typescript
+import { SqlError } from '@topgunbuild/client';
+
+try {
+  const result = await client.sql('SELECT 1');
+  console.log(result.columns, result.rows);
+} catch (err) {
+  if (err instanceof SqlError && err.code === 'FEATURE_DISABLED') {
+    // This server build has no SQL engine — fall back to client.query().
+  } else {
+    throw err;
+  }
+}
+```
+
+The intended shape once enabled (cross-map join, illustrative):
+
+{/* doctest skip reason="SQL is not yet wired into the server (returns FEATURE_DISABLED); shown as the planned API surface" */}
 
 ```typescript
 // Only appropriate for cross-map joins or window/HAVING/DISTINCT queries

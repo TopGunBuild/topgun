@@ -86,6 +86,7 @@ export interface ManagerDelegates {
       columns: string[];
       rows: unknown[][];
       error?: string;
+      code?: string;
     }): void;
   };
   vectorSearchClient: {

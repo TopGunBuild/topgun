@@ -193,6 +193,13 @@ pub struct SqlQueryRespPayload {
     /// Error message if the query failed; `None` on success.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub error: Option<String>,
+    /// Machine-distinguishable error class when `error` is set; `None` on success.
+    ///
+    /// Lets a client tell apart, e.g., a disabled server feature
+    /// (`"FEATURE_DISABLED"`) from a query/execution failure (no code) without
+    /// string-matching the human-readable `error` message.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub code: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -595,6 +602,7 @@ mod tests {
                 ],
             ],
             error: None,
+            code: None,
         };
         assert_eq!(roundtrip_named(&payload), payload);
     }
@@ -606,6 +614,19 @@ mod tests {
             columns: vec![],
             rows: vec![],
             error: Some("syntax error near 'SELCT'".to_string()),
+            code: None,
+        };
+        assert_eq!(roundtrip_named(&payload), payload);
+    }
+
+    #[test]
+    fn sql_query_resp_payload_code_roundtrip() {
+        let payload = SqlQueryRespPayload {
+            query_id: "sq-disabled".to_string(),
+            columns: vec![],
+            rows: vec![],
+            error: Some("SQL is not available on this server".to_string()),
+            code: Some("FEATURE_DISABLED".to_string()),
         };
         assert_eq!(roundtrip_named(&payload), payload);
     }
@@ -617,12 +638,15 @@ mod tests {
             columns: vec!["id".to_string()],
             rows: vec![vec![rmpv::Value::Integer(1.into())]],
             error: None,
+            code: None,
         };
         let bytes = rmp_serde::to_vec_named(&payload).expect("serialize");
         let val: rmpv::Value = rmp_serde::from_slice(&bytes).expect("deserialize");
         let map = val.as_map().expect("should be a map");
         let has_error = map.iter().any(|(k, _)| k.as_str() == Some("error"));
         assert!(!has_error, "error field should be omitted when None");
+        let has_code = map.iter().any(|(k, _)| k.as_str() == Some("code"));
+        assert!(!has_code, "code field should be omitted when None");
     }
 
     #[test]
@@ -632,6 +656,7 @@ mod tests {
             columns: vec![],
             rows: vec![],
             error: None,
+            code: None,
         };
         let bytes = rmp_serde::to_vec_named(&payload).expect("serialize");
         let val: rmpv::Value = rmp_serde::from_slice(&bytes).expect("deserialize");

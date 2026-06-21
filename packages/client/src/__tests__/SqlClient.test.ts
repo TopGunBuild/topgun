@@ -8,6 +8,7 @@ import { SyncEngine } from '../SyncEngine';
 import { TopGunClient } from '../TopGunClient';
 import { SyncState } from '../SyncState';
 import { SingleServerProvider } from '../connection/SingleServerProvider';
+import { SqlError } from '../errors/SqlError';
 import type { SqlQueryResult } from '../sync/types';
 
 // Mock storage adapter
@@ -133,6 +134,52 @@ describe('Client SQL', () => {
       });
 
       await expect(sqlPromise).rejects.toThrow('Table not found: nonexistent');
+    });
+
+    it('should reject a query error as SqlError without a code', async () => {
+      (syncEngine as any).stateMachine.state = SyncState.CONNECTED;
+
+      const sqlPromise = syncEngine.sql('SELECT * FROM nonexistent');
+
+      const sentMessage = mockSendMessage.mock.calls[0][0];
+      (syncEngine as any).handleServerMessage({
+        type: 'SQL_QUERY_RESP',
+        payload: {
+          queryId: sentMessage.payload.queryId,
+          columns: [],
+          rows: [],
+          error: 'Table not found: nonexistent',
+        },
+      });
+
+      const err = await sqlPromise.catch((e) => e);
+      expect(err).toBeInstanceOf(SqlError);
+      expect((err as SqlError).code).toBeUndefined();
+    });
+
+    it('should surface FEATURE_DISABLED as a typed, machine-distinguishable SqlError', async () => {
+      (syncEngine as any).stateMachine.state = SyncState.CONNECTED;
+
+      const sqlPromise = syncEngine.sql('SELECT * FROM users');
+
+      const sentMessage = mockSendMessage.mock.calls[0][0];
+      // Server built without the datafusion feature replies promptly with a typed
+      // code instead of leaving the request to hang until the 30s timeout.
+      (syncEngine as any).handleServerMessage({
+        type: 'SQL_QUERY_RESP',
+        payload: {
+          queryId: sentMessage.payload.queryId,
+          columns: [],
+          rows: [],
+          error: 'SQL is not available: this server was built without the datafusion feature',
+          code: 'FEATURE_DISABLED',
+        },
+      });
+
+      const err = await sqlPromise.catch((e) => e);
+      expect(err).toBeInstanceOf(SqlError);
+      expect((err as SqlError).code).toBe('FEATURE_DISABLED');
+      expect((err as SqlError).message).toContain('datafusion');
     });
 
     it('should timeout if no response', async () => {

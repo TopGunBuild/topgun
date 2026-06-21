@@ -158,6 +158,10 @@ export { DEFAULT_QUERY_ONCE_TIMEOUT_MS } from './TopGunClient';
 export { QueryOnceUnsettledError, QueryOnceLocalError } from './errors/QueryOnceError';
 export type { QueryOnceUnsettledReason } from './errors/QueryOnceError';
 
+// Server SQL query error (carries a machine-distinguishable `code`, e.g. FEATURE_DISABLED)
+export { SqlError } from './errors/SqlError';
+export type { SqlErrorCode } from './errors/SqlError';
+
 // Auth provider exports
 export { ClerkAuthProvider } from './auth/ClerkAuthProvider';
 export { FirebaseAuthProvider } from './auth/FirebaseAuthProvider';

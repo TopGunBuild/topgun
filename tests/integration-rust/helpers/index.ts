@@ -309,6 +309,7 @@ function makeCleanup(proc: child_process.ChildProcess): () => Promise<void> {
     });
 }
 
+export { MemoryStorageAdapter } from './memory-storage';
 export { TestClient } from './test-client';
 export {
   createTestToken,
