@@ -1174,8 +1174,21 @@ export class SyncEngine {
     const localMap = this.maps.get(mapName);
     if (localMap) {
       if (localMap instanceof LWWMap && record) {
-        localMap.merge(key, record);
-        await this.storageAdapter.put(`${mapName}:${key}`, record);
+        const accepted = localMap.merge(key, record);
+        if (accepted) {
+          // Server record won LWW: memory now holds it — persist so disk matches.
+          await this.storageAdapter.put(`${mapName}:${key}`, record);
+        } else if (localMap.adoptServerEcho(key, record)) {
+          // Echo of our own optimistic write that the server re-stamped with a
+          // timestamp our clock had briefly outrun. The value is unchanged, so
+          // adopt the server's authoritative timestamp to converge memory, the
+          // Merkle tree, and disk with the server instead of re-requesting
+          // buckets forever (the memory/disk HLC skew this used to create).
+          await this.storageAdapter.put(`${mapName}:${key}`, record);
+        }
+        // else: a strictly newer local write supersedes the echo. Keep memory
+        // and disk as-is (both carry the local write); do NOT persist the stale
+        // server record — that unconditional put was the F8 skew bug.
       } else if (localMap instanceof ORMap) {
         if (eventType === 'OR_ADD' && orRecord) {
           localMap.apply(key, orRecord);

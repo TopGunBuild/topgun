@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useClient } from './useClient';
+import { useExternalStore } from './internal/useExternalStore';
 
 /**
  * Result type for usePNCounter hook.
@@ -78,24 +79,33 @@ export interface UsePNCounterResult {
  */
 export function usePNCounter(name: string): UsePNCounterResult {
   const client = useClient();
-  const [value, setValue] = useState(0);
+
+  // Get or create counter handle - memoized by name (render purity).
+  const counter = useMemo(() => client.getPNCounter(name), [client, name]);
+
+  // Value is read from the handle's external store. `get()` returns a number
+  // primitive, so the snapshot is referentially stable by value.
+  const subscribe = useCallback(
+    (onChange: () => void) => counter.subscribe(() => onChange()),
+    [counter],
+  );
+  const getSnapshot = useCallback(() => counter.get(), [counter]);
+  const value = useExternalStore(subscribe, getSnapshot);
+
+  // `loading` is "true until the first value is observed". Track it with a tiny
+  // effect that flips false once the counter notifies (mirrors the previous
+  // behaviour without an isMounted ref — effect cleanup handles unmount).
   const [loading, setLoading] = useState(true);
-
-  // Get or create counter handle - memoized by name
-  const counter = useMemo(() => {
-    return client.getPNCounter(name);
-  }, [client, name]);
-
   useEffect(() => {
-    // Reset state when counter changes
     setLoading(true);
-
-    const unsubscribe = counter.subscribe((newValue) => {
-      setValue(newValue);
-      setLoading(false);
+    let active = true;
+    const unsubscribe = counter.subscribe(() => {
+      if (active) setLoading(false);
     });
-
-    return unsubscribe;
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, [counter]);
 
   const increment = useCallback(() => {

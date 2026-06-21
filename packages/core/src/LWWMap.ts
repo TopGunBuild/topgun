@@ -12,6 +12,41 @@ export interface LWWRecord<V> {
 }
 
 /**
+ * Structural equality for record values, used to decide whether a rejected
+ * server echo is a pure re-stamp of the same data (safe to adopt) or a
+ * genuinely different (newer local) write that must be preserved. Order-stable
+ * over object keys so two structurally-equal values that survived a serialize/
+ * deserialize round-trip compare equal regardless of key insertion order.
+ */
+function valuesEqual(a: unknown, b: unknown, depth = 0): boolean {
+  if (a === b) return true;
+  if (a === null || b === null || a === undefined || b === undefined) {
+    return a === b;
+  }
+  if (typeof a !== 'object' || typeof b !== 'object') return false;
+
+  // Depth guard: record values reach this only via the server-echo reconcile
+  // path and normally round-trip through msgpack (which rejects cycles), but a
+  // pathological or cyclic in-memory value must not stack-overflow the sync
+  // handler. Treat over-deep structures as "not equal" → conservatively skip
+  // adoption rather than crash.
+  if (depth > 64) return false;
+
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((item, i) => valuesEqual(item, b[i], depth + 1));
+  }
+
+  const aObj = a as Record<string, unknown>;
+  const bObj = b as Record<string, unknown>;
+  const aKeys = Object.keys(aObj);
+  const bKeys = Object.keys(bObj);
+  if (aKeys.length !== bKeys.length) return false;
+  const hasOwn = Object.prototype.hasOwnProperty;
+  return aKeys.every((k) => hasOwn.call(bObj, k) && valuesEqual(aObj[k], bObj[k], depth + 1));
+}
+
+/**
  * Last-Write-Wins Map Implementation.
  * This structure guarantees convergence by always keeping the entry with the highest timestamp.
  */
@@ -143,6 +178,49 @@ export class LWWMap<K, V> {
     }
 
     return false;
+  }
+
+  /**
+   * Reconciles the server's authoritative re-stamp of one of this client's own
+   * optimistic writes.
+   *
+   * Optimistic writes are stamped with the client's HLC; the server re-stamps
+   * with its own arrival-order HLC and echoes the record back. When the client
+   * clock briefly outran the server, the echo's timestamp is ≤ the local one,
+   * so {@link merge} rejects it and memory keeps the client timestamp. Because
+   * the Merkle tree hashes only `key:timestamp` (not the value), that leaves the
+   * client's Merkle root permanently diverged from the server's — the same value
+   * under two different timestamps — defeating the "root-equal ⇒ in-sync" fast
+   * path and forcing endless bucket re-requests until a reload re-hydrates from
+   * disk.
+   *
+   * Adopting the server's record aligns memory, the Merkle tree, and (via the
+   * caller's persistence) disk with the server. This is only safe when the local
+   * value is unchanged: if it differs, the client holds a strictly newer write
+   * the server has not seen yet, which must be preserved (no data loss).
+   *
+   * Call this only after {@link merge} has returned `false` for a server echo.
+   *
+   * @returns `true` if the server record was adopted (the caller should persist
+   *   it so disk matches memory); `false` if a newer local write supersedes the
+   *   echo (the caller must NOT persist the stale server record).
+   */
+  public adoptServerEcho(key: K, serverRecord: LWWRecord<V>): boolean {
+    const localRecord = this.data.get(key);
+    if (!localRecord || !valuesEqual(localRecord.value, serverRecord.value)) {
+      return false;
+    }
+    // Defensive precondition: this path only reconciles an echo that LWW
+    // rejected because the server timestamp is ≤ ours. If the server record is
+    // strictly newer, plain `merge` already wins it — never downgrade a newer
+    // record through here (guards against misuse if merge semantics change).
+    if (HLC.compare(serverRecord.timestamp, localRecord.timestamp) > 0) {
+      return false;
+    }
+    this.data.set(key, serverRecord);
+    this.merkleTree.update(String(key), serverRecord);
+    this.notify();
+    return true;
   }
 
   /**

@@ -193,6 +193,10 @@ export class QueryManager implements IQueryManager {
     filter: QueryFilter,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- local query returns raw record values whose type is unknown at the query manager level; callers cast to T
   ): Promise<{ key: string; value: any }[]> {
+    // Fail loudly on clauses we cannot evaluate offline instead of silently
+    // returning results that differ from the server.
+    this.assertOfflineSupported(filter);
+
     // Retrieve all keys for the map
     const keys = await this.config.storageAdapter.getAllKeys();
     const mapKeys = keys.filter((k) => k.startsWith(mapName + ':'));
@@ -229,7 +233,71 @@ export class QueryManager implements IQueryManager {
         }
       }
     }
+
+    // Apply the same ordering + windowing the server would, so an offline
+    // `query`/`queryOnce({ allowLocal: true })` returns results shaped like the
+    // online answer instead of an unsorted, unlimited set.
+    if (filter.sort) {
+      const sort = filter.sort;
+      results.sort((a, b) => this.compareBySort(a, b, sort));
+    }
+    if (filter.limit) {
+      return results.slice(0, filter.limit);
+    }
     return results;
+  }
+
+  /**
+   * Clauses the offline local query engine cannot faithfully evaluate. Rather
+   * than silently drop them — returning results that diverge from the server's —
+   * reject explicitly so the caller knows the query needs a server connection.
+   * (`sort` and `limit` ARE applied offline; only these remain server-only.)
+   */
+  private assertOfflineSupported(filter: QueryFilter): void {
+    const unsupported: string[] = [];
+    if (filter.cursor) unsupported.push('cursor');
+    if (filter.groupBy && filter.groupBy.length > 0) unsupported.push('groupBy');
+    if (filter.aggregations && filter.aggregations.length > 0) unsupported.push('aggregations');
+    if (unsupported.length > 0) {
+      throw new Error(
+        `Offline query does not support ${unsupported.join(', ')}: ` +
+          'these clauses require a server connection. Run the query online, or ' +
+          'remove them for offline use.',
+      );
+    }
+  }
+
+  /**
+   * Sort comparator shared by the offline standard and hybrid local query
+   * engines so the two cannot diverge. Honors the `_score` and `_key`
+   * pseudo-fields (score defaults to 0 for the non-hybrid path).
+   */
+  private compareBySort<R extends { key: string; value: unknown; score?: number }>(
+    a: R,
+    b: R,
+    sort: Record<string, 'asc' | 'desc'>,
+  ): number {
+    for (const [field, direction] of Object.entries(sort)) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic field access by runtime sort field name
+      let valA: any;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic field access by runtime sort field name
+      let valB: any;
+      if (field === '_score') {
+        valA = a.score ?? 0;
+        valB = b.score ?? 0;
+      } else if (field === '_key') {
+        valA = a.key;
+        valB = b.key;
+      } else {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic field access on typed value
+        valA = (a.value as any)[field];
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic field access on typed value
+        valB = (b.value as any)[field];
+      }
+      if (valA < valB) return direction === 'asc' ? -1 : 1;
+      if (valA > valB) return direction === 'asc' ? 1 : -1;
+    }
+    return 0;
   }
 
   /**
@@ -291,33 +359,10 @@ export class QueryManager implements IQueryManager {
       });
     }
 
-    // Sort results
+    // Sort results (shared comparator with the standard offline path)
     if (filter.sort) {
-      results.sort((a, b) => {
-        for (const [field, direction] of Object.entries(filter.sort!)) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- sort comparator accesses dynamic field keys on typed results; any is used to index by runtime field name
-          let valA: any;
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- sort comparator accesses dynamic field keys on typed results
-          let valB: any;
-
-          if (field === '_score') {
-            valA = a.score ?? 0;
-            valB = b.score ?? 0;
-          } else if (field === '_key') {
-            valA = a.key;
-            valB = b.key;
-          } else {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic field access on typed value; sort field name is a runtime string
-            valA = (a.value as any)[field];
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic field access on typed value; sort field name is a runtime string
-            valB = (b.value as any)[field];
-          }
-
-          if (valA < valB) return direction === 'asc' ? -1 : 1;
-          if (valA > valB) return direction === 'asc' ? 1 : -1;
-        }
-        return 0;
-      });
+      const sort = filter.sort;
+      results.sort((a, b) => this.compareBySort(a, b, sort));
     }
 
     // Apply limit (cursor filtering is done server-side)

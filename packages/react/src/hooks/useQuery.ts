@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   QueryFilter,
   QueryResultItem,
@@ -9,8 +9,10 @@ import {
 } from '@topgunbuild/client';
 import type { RecordSyncState } from '@topgunbuild/client';
 import { useClient } from './useClient';
+import { useExternalStore } from './internal/useExternalStore';
 
 const EMPTY_SYNC_STATE: ReadonlyMap<string, RecordSyncState> = new Map();
+const EMPTY_DATA: QueryResultItem<unknown>[] = [];
 
 /**
  * Options for useQuery change callbacks.
@@ -126,148 +128,215 @@ export function useQuery<T = any>(
   options?: UseQueryOptions<T>,
 ): UseQueryResult<T> {
   const client = useClient();
-  const [data, setData] = useState<QueryResultItem<T>[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
 
+  // We serialize the query to use it as a stable dependency.
+  const queryJson = JSON.stringify(query);
+
+  // Construct the handle in render, memoized by [client, mapName, queryJson].
+  // client.query() is a pure constructor — it only news up a QueryHandle; the
+  // server subscription is activated by handle.subscribe(), which runs inside
+  // useExternalStore's subscribe. Memoizing keeps the handle identity stable so
+  // the store subscription is not torn down on unrelated re-renders. A throw
+  // during construction is captured (not propagated) and surfaced as `error`,
+  // matching the prior effect-based error contract.
+  const { handle, constructError } = useMemo<{
+    handle: QueryHandle<T> | null;
+    constructError: Error | null;
+  }>(
+    () => {
+      try {
+        return { handle: client.query<T>(mapName, query), constructError: null };
+      } catch (err) {
+        return {
+          handle: null,
+          constructError: err instanceof Error ? err : new Error(String(err)),
+        };
+      }
+    },
+    // queryJson is the serialized form of `query`; depending on the `query`
+    // object identity would re-create the handle every render.
+    [client, mapName, queryJson],
+  );
+
+  // ---- data + loading via useSyncExternalStore ----------------------------
+  // The handle exposes synchronous, referentially-stable accessors
+  // (getSnapshot / getSnapshotMeta). When present, the first render returns the
+  // currently-cached results with loading derived synchronously — no
+  // {loading:true, data:[]} flash when local data already exists. A
+  // hook-local cache mirrors the handle for the rare path where a handle does
+  // not expose getSnapshot (kept referentially stable to satisfy the
+  // useSyncExternalStore contract).
+  const dataCacheRef = useRef<{ value: QueryResultItem<T>[]; settled: boolean; emitted: boolean }>({
+    value: EMPTY_DATA as QueryResultItem<T>[],
+    settled: false,
+    emitted: false,
+  });
+  // Reset the local cache when the handle identity changes (new query).
+  const lastHandleRef = useRef<QueryHandle<T> | null>(null);
+  if (lastHandleRef.current !== handle) {
+    lastHandleRef.current = handle;
+    dataCacheRef.current = {
+      value: EMPTY_DATA as QueryResultItem<T>[],
+      settled: false,
+      emitted: false,
+    };
+  }
+
+  const subscribeData = useCallback(
+    (onChange: () => void) => {
+      // handle.subscribe both activates the server subscription and delivers
+      // the latest sorted results. We mirror them into the local cache (for
+      // handles without getSnapshot) and notify React.
+      if (!handle) return () => {};
+      return handle.subscribe((results, meta) => {
+        dataCacheRef.current = {
+          value: results as QueryResultItem<T>[],
+          settled: meta?.settled ?? dataCacheRef.current.settled,
+          emitted: true,
+        };
+        onChange();
+      });
+    },
+    [handle],
+  );
+
+  const getData = useCallback((): QueryResultItem<T>[] => {
+    if (handle && typeof handle.getSnapshot === 'function') {
+      return handle.getSnapshot() as QueryResultItem<T>[];
+    }
+    return dataCacheRef.current.value;
+  }, [handle]);
+
+  const data = useExternalStore(subscribeData, getData);
+
+  const loading = useMemo(() => {
+    if (constructError) return false;
+    if (handle && typeof handle.getSnapshotMeta === 'function') {
+      return !handle.getSnapshotMeta().hasEmitted;
+    }
+    return !dataCacheRef.current.emitted;
+    // `data` is included so loading re-derives after each emission for the
+    // fallback path; the getSnapshotMeta path is also re-read per render.
+  }, [handle, constructError, data]);
+
+  // ---- error: construction errors surface synchronously; runtime errors
+  // (if any) could be added to a state slot. We track a state slot for parity
+  // and OR it with the synchronous construction error.
+  const [runtimeError, setRuntimeError] = useState<Error | null>(null);
+  const error = constructError ?? runtimeError;
+
+  // ---- change accumulation (genuine reducer over a push stream) -----------
   const [changes, setChanges] = useState<ChangeEvent<T>[]>([]);
   const [lastChange, setLastChange] = useState<ChangeEvent<T> | null>(null);
 
+  // ---- pagination ----------------------------------------------------------
   const [paginationInfo, setPaginationInfo] = useState<PaginationInfo>({
     hasMore: false,
     cursorStatus: 'none',
   });
 
+  // ---- per-record sync state ----------------------------------------------
   const [syncState, setSyncState] =
     useState<ReadonlyMap<string, RecordSyncState>>(EMPTY_SYNC_STATE);
-
-  // Use a ref to track if the component is mounted to avoid state updates on unmounted components
-  const isMounted = useRef(true);
-
-  // Store handle ref for cleanup
-  const handleRef = useRef<QueryHandle<T> | null>(null);
-
-  // We serialize the query to use it as a stable dependency for the effect
-  const queryJson = JSON.stringify(query);
 
   const clearChanges = useCallback(() => {
     setChanges([]);
     setLastChange(null);
   }, []);
 
-  // Stable reference: the underlying handle can change across query-filter changes,
-  // but this ref-based callback always routes to the current handle without
-  // creating a new function identity on every render.
+  // Stable loadMore that always routes to the current handle.
   const loadMore = useCallback((): Promise<void> => {
-    const handle = handleRef.current;
-    if (!handle || !paginationInfo.hasMore) {
+    if (!handle || !paginationInfo.hasMore || typeof handle.loadMore !== 'function') {
       return Promise.resolve();
     }
     return handle.loadMore();
-  }, [paginationInfo.hasMore]);
+  }, [handle, paginationInfo.hasMore]);
 
-  // Memoize options callbacks to avoid unnecessary effect runs
+  // Keep latest options in a ref so the side-effect wiring does not re-run when
+  // only callback identities change.
   const optionsRef = useRef(options);
   optionsRef.current = options;
 
+  // Side-effecting extras: change accumulation, pagination, options callbacks,
+  // and per-record sync state. These are genuine side effects (accumulation /
+  // external callbacks) so they remain effect-based; useExternalStore handles
+  // unmount safety, so there is no isMounted ref. Re-runs only on handle change.
   useEffect(() => {
-    isMounted.current = true;
-    setLoading(true);
-
-    // Reset changes when query changes
+    // Reset accumulation when the query (handle) changes.
     setChanges([]);
     setLastChange(null);
+    setRuntimeError(null);
 
-    try {
-      const handle = client.query<T>(mapName, query);
-      handleRef.current = handle;
+    if (!handle) return;
 
-      // Subscribe to data updates
-      const unsubscribeData = handle.subscribe((results) => {
-        if (isMounted.current) {
-          setData(results);
-          setLoading(false);
+    const noop = () => {};
+    const unsubscribeChanges = handle.onDelta((newChanges) => {
+      const maxChanges = optionsRef.current?.maxChanges ?? 1000;
+
+      setChanges((prev) => {
+        const combined = [...prev, ...newChanges];
+        if (combined.length > maxChanges) {
+          return combined.slice(-maxChanges);
         }
+        return combined;
       });
 
-      const unsubscribeChanges = handle.onDelta((newChanges) => {
-        if (!isMounted.current) return;
-
-        const maxChanges = optionsRef.current?.maxChanges ?? 1000;
-
-        // Accumulate changes with rotation to prevent memory leaks
-        setChanges((prev) => {
-          const combined = [...prev, ...newChanges];
-          // Rotate oldest changes if exceeding limit
-          if (combined.length > maxChanges) {
-            return combined.slice(-maxChanges);
-          }
-          return combined;
-        });
-
-        // Track last change
-        if (newChanges.length > 0) {
-          setLastChange(newChanges[newChanges.length - 1]);
-        }
-
-        // Invoke callbacks from options
-        const opts = optionsRef.current;
-        if (opts) {
-          for (const change of newChanges) {
-            opts.onChange?.(change);
-
-            switch (change.type) {
-              case 'add':
-                if (change.value !== undefined) {
-                  opts.onAdd?.(change.key, change.value);
-                }
-                break;
-              case 'update':
-                if (change.value !== undefined && change.previousValue !== undefined) {
-                  opts.onUpdate?.(change.key, change.value, change.previousValue);
-                }
-                break;
-              case 'remove':
-                if (change.previousValue !== undefined) {
-                  opts.onRemove?.(change.key, change.previousValue);
-                }
-                break;
-            }
-          }
-        }
-      });
-
-      const unsubscribePagination = handle.onPaginationChange((info) => {
-        if (isMounted.current) {
-          setPaginationInfo(info);
-        }
-      });
-
-      const unsubscribeSyncState = handle.onSyncStateChange((snapshot) => {
-        if (isMounted.current) {
-          setSyncState(snapshot);
-        }
-      });
-
-      return () => {
-        isMounted.current = false;
-        unsubscribeData();
-        unsubscribeChanges();
-        unsubscribePagination();
-        unsubscribeSyncState();
-        handleRef.current = null;
-      };
-    } catch (err) {
-      if (isMounted.current) {
-        setError(err instanceof Error ? err : new Error(String(err)));
-        setLoading(false);
+      if (newChanges.length > 0) {
+        setLastChange(newChanges[newChanges.length - 1]);
       }
-      return () => {
-        isMounted.current = false;
-        handleRef.current = null;
-      };
-    }
-  }, [client, mapName, queryJson]);
+
+      const opts = optionsRef.current;
+      if (opts) {
+        for (const change of newChanges) {
+          opts.onChange?.(change);
+
+          switch (change.type) {
+            case 'add':
+              if (change.value !== undefined) {
+                opts.onAdd?.(change.key, change.value);
+              }
+              break;
+            case 'update':
+              if (change.value !== undefined && change.previousValue !== undefined) {
+                opts.onUpdate?.(change.key, change.value, change.previousValue);
+              }
+              break;
+            case 'remove':
+              if (change.previousValue !== undefined) {
+                opts.onRemove?.(change.key, change.previousValue);
+              }
+              break;
+          }
+        }
+      }
+    });
+
+    // onPaginationChange / onSyncStateChange always exist on the real
+    // QueryHandle; guard for partial test handles that omit them.
+    const unsubscribePagination =
+      typeof handle.onPaginationChange === 'function'
+        ? handle.onPaginationChange((info) => {
+            setPaginationInfo(info);
+          })
+        : noop;
+
+    const unsubscribeSyncState =
+      typeof handle.onSyncStateChange === 'function'
+        ? handle.onSyncStateChange((snapshot) => {
+            setSyncState(snapshot);
+          })
+        : noop;
+
+    return () => {
+      unsubscribeChanges();
+      unsubscribePagination();
+      unsubscribeSyncState();
+    };
+    // mapName + queryJson are included so the change-accumulation reset fires
+    // whenever the query identity changes — even if a (test) client reuses the
+    // same handle object across queries. A real client returns a fresh handle,
+    // so `handle` alone would also suffice there.
+  }, [handle, mapName, queryJson]);
 
   return useMemo(
     () => ({

@@ -75,6 +75,19 @@ export class QueryHandle<T> {
   // otherwise accumulated pages beyond `limit` would be hidden.
   private _paginated: boolean = false;
 
+  // Cached sorted-results snapshot for synchronous external-store reads
+  // (useSyncExternalStore.getSnapshot). Rebuilt lazily only when the result
+  // set actually changes (the dirty flag flips on every notify()). Returning a
+  // referentially-stable array between mutations is what keeps React's
+  // useSyncExternalStore from looping; building a fresh array on every read
+  // would.
+  private resultsSnapshot: (T & { _key: string })[] = [];
+  private resultsSnapshotDirty: boolean = true;
+  // True once the handle has produced ANY result emission (local or server) —
+  // lets a synchronous consumer derive `loading` without waiting for the first
+  // async notify.
+  private hasEmitted: boolean = false;
+
   // Change tracking for delta notifications
   private changeTracker = new ChangeTracker<T>();
   private pendingChanges: ChangeEvent<T>[] = [];
@@ -121,14 +134,21 @@ export class QueryHandle<T> {
     // [FIX]: Attempt to load local results immediately if available
     // This ensures that if data is already in storage but sync hasn't happened,
     // we still show something.
-    this.loadInitialLocalData().then((data) => {
-      // If we haven't received server results yet (currentResults empty),
-      // and we have local data OR it's just the initial load, we should notify.
-      // Even if data is empty, we might want to tell the subscriber "nothing here yet".
-      if (this.currentResults.size === 0) {
-        this.onResult(data, 'local');
-      }
-    });
+    this.loadInitialLocalData()
+      .then((data) => {
+        // If we haven't received server results yet (currentResults empty),
+        // and we have local data OR it's just the initial load, we should notify.
+        // Even if data is empty, we might want to tell the subscriber "nothing here yet".
+        if (this.currentResults.size === 0) {
+          this.onResult(data, 'local');
+        }
+      })
+      .catch((err) => {
+        // Best-effort pre-load. Some clauses (groupBy/aggregations/cursor) cannot
+        // be evaluated offline and reject by design — skip the local snapshot and
+        // let the authoritative server result settle the query.
+        logger.debug({ err }, 'local query pre-load skipped (not available offline)');
+      });
 
     return () => {
       this.listeners.delete(callback);
@@ -368,6 +388,10 @@ export class QueryHandle<T> {
   }
 
   private notify() {
+    // The result set changed — invalidate the cached snapshot so the next
+    // getSnapshot() rebuilds it, and record that we have emitted at least once.
+    this.resultsSnapshotDirty = true;
+    this.hasEmitted = true;
     const results = this.getSortedResults();
     // Snapshot the latch once per emission so every subscriber in this pass
     // observes the same settled value.
@@ -421,6 +445,36 @@ export class QueryHandle<T> {
     }
 
     return results;
+  }
+
+  /**
+   * Synchronous, referentially-stable snapshot of the current sorted result
+   * set. Designed for React 18 `useSyncExternalStore(subscribe, getSnapshot)`:
+   * the returned array identity only changes when the result set actually
+   * changes (tracked via the dirty flag flipped in notify()), so a render that
+   * reads this between mutations gets the same array and React does not loop.
+   *
+   * Returns whatever the handle currently holds — including any local
+   * pre-loaded rows — so the FIRST render after subscribing reflects cached
+   * data instead of an empty array. (loadInitialLocalData runs on subscribe;
+   * if data is already cached it is reflected on the next getSnapshot.)
+   */
+  public getSnapshot(): (T & { _key: string })[] {
+    if (this.resultsSnapshotDirty) {
+      this.resultsSnapshot = this.getSortedResults();
+      this.resultsSnapshotDirty = false;
+    }
+    return this.resultsSnapshot;
+  }
+
+  /**
+   * Synchronous metadata for deriving `loading` without an async round-trip.
+   * `settled` is the server-answered latch; `hasEmitted` is true once any
+   * result (local or server) has been delivered. A consumer can show data
+   * immediately when `hasEmitted` is true even before the server settles.
+   */
+  public getSnapshotMeta(): { settled: boolean; hasEmitted: boolean } {
+    return { settled: this.settled, hasEmitted: this.hasEmitted };
   }
 
   public getFilter(): QueryFilter {

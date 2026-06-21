@@ -1,35 +1,24 @@
-import { useState, useEffect, useRef } from 'react';
+import { useCallback, useMemo } from 'react';
 import { ORMap } from '@topgunbuild/core';
 import type { RecordSyncState } from '@topgunbuild/client';
 import { useClient } from './useClient';
+import { useStoreVersion } from './internal/useExternalStore';
+import { useTrackerMapSnapshot } from './internal/useTrackerMapSnapshot';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- V defaults to any so callers without a schema type still get a usable ORMap; narrowed via generic at call site
 export function useORMap<K = string, V = any>(mapName: string): ORMap<K, V> {
   const client = useClient();
-  const map = client.getORMap<K, V>(mapName);
+  // Memoize the lookup by [client, name] so we do not create/register a fresh
+  // handle during every render (render-purity).
+  const map = useMemo(() => client.getORMap<K, V>(mapName), [client, mapName]);
 
-  const [, setTick] = useState(0);
-  const isMounted = useRef(true);
-
-  useEffect(() => {
-    isMounted.current = true;
-
-    const unsubscribe = map.subscribe(() => {
-      if (isMounted.current) {
-        setTick((t) => t + 1);
-      }
-    });
-
-    return () => {
-      isMounted.current = false;
-      unsubscribe();
-    };
-  }, [map]);
+  // Stable subscribe keyed by the map identity; re-renders via version counter.
+  // The returned ORMap stays the same mutable object.
+  const subscribe = useCallback((onChange: () => void) => map.subscribe(onChange), [map]);
+  useStoreVersion(subscribe);
 
   return map;
 }
-
-const EMPTY_OR_SYNC_STATE: ReadonlyMap<string, RecordSyncState> = new Map();
 
 /**
  * Companion to `useORMap` — returns the underlying ORMap alongside a
@@ -42,36 +31,12 @@ export function useORMapWithSyncState<K = string, V = any>(
   mapName: string,
 ): { map: ORMap<K, V>; syncState: ReadonlyMap<string, RecordSyncState> } {
   const client = useClient();
-  const map = client.getORMap<K, V>(mapName);
+  const map = useMemo(() => client.getORMap<K, V>(mapName), [client, mapName]);
 
-  const [, setTick] = useState(0);
-  const [syncState, setSyncState] =
-    useState<ReadonlyMap<string, RecordSyncState>>(EMPTY_OR_SYNC_STATE);
-  const isMounted = useRef(true);
+  const subscribe = useCallback((onChange: () => void) => map.subscribe(onChange), [map]);
+  useStoreVersion(subscribe);
 
-  useEffect(() => {
-    isMounted.current = true;
-
-    const unsubscribeMap = map.subscribe(() => {
-      if (isMounted.current) {
-        setTick((t) => t + 1);
-      }
-    });
-
-    const tracker = client.getRecordSyncStateTracker();
-    setSyncState(tracker.getMapSnapshot(mapName));
-    const unsubscribeSync = tracker.onChange(mapName, (snapshot) => {
-      if (isMounted.current) {
-        setSyncState(snapshot);
-      }
-    });
-
-    return () => {
-      isMounted.current = false;
-      unsubscribeMap();
-      unsubscribeSync();
-    };
-  }, [client, map, mapName]);
+  const syncState = useTrackerMapSnapshot(mapName);
 
   return { map, syncState };
 }

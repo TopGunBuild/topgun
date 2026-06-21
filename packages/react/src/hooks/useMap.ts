@@ -1,38 +1,25 @@
-import { useState, useEffect, useRef } from 'react';
+import { useCallback, useMemo } from 'react';
 import { LWWMap } from '@topgunbuild/core';
 import type { RecordSyncState } from '@topgunbuild/client';
 import { useClient } from './useClient';
+import { useStoreVersion } from './internal/useExternalStore';
+import { useTrackerMapSnapshot } from './internal/useTrackerMapSnapshot';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- V defaults to any so callers without a schema type still get a usable map; narrowed via generic at call site
 export function useMap<K = string, V = any>(mapName: string): LWWMap<K, V> {
   const client = useClient();
-  // Get the map instance. This is stable for the same mapName.
-  const map = client.getMap<K, V>(mapName);
+  // Memoize the lookup by [client, name] so we do not create/register a fresh
+  // handle during every render (render-purity: the first getMap call news up
+  // the CRDT + kicks an async restore).
+  const map = useMemo(() => client.getMap<K, V>(mapName), [client, mapName]);
 
-  // We use a dummy state to trigger re-renders when the map changes
-  const [, setTick] = useState(0);
-  const isMounted = useRef(true);
-
-  useEffect(() => {
-    isMounted.current = true;
-
-    // Subscribe to map changes
-    const unsubscribe = map.subscribe(() => {
-      if (isMounted.current) {
-        setTick((t) => t + 1);
-      }
-    });
-
-    return () => {
-      isMounted.current = false;
-      unsubscribe();
-    };
-  }, [map]);
+  // Stable subscribe keyed by the map identity. Drives re-renders via a version
+  // counter snapshot — the returned LWWMap stays the same mutable object.
+  const subscribe = useCallback((onChange: () => void) => map.subscribe(onChange), [map]);
+  useStoreVersion(subscribe);
 
   return map;
 }
-
-const EMPTY_SYNC_STATE: ReadonlyMap<string, RecordSyncState> = new Map();
 
 /**
  * Companion to `useMap` — returns the underlying LWWMap alongside a
@@ -55,38 +42,12 @@ export function useMapWithSyncState<K = string, V = any>(
   mapName: string,
 ): { map: LWWMap<K, V>; syncState: ReadonlyMap<string, RecordSyncState> } {
   const client = useClient();
-  const map = client.getMap<K, V>(mapName);
+  const map = useMemo(() => client.getMap<K, V>(mapName), [client, mapName]);
 
-  const [, setTick] = useState(0);
-  const [syncState, setSyncState] =
-    useState<ReadonlyMap<string, RecordSyncState>>(EMPTY_SYNC_STATE);
-  const isMounted = useRef(true);
+  const subscribe = useCallback((onChange: () => void) => map.subscribe(onChange), [map]);
+  useStoreVersion(subscribe);
 
-  useEffect(() => {
-    isMounted.current = true;
-
-    const unsubscribeMap = map.subscribe(() => {
-      if (isMounted.current) {
-        setTick((t) => t + 1);
-      }
-    });
-
-    const tracker = client.getRecordSyncStateTracker();
-    // Seed with current snapshot so the first render reflects any
-    // pre-existing tracker state for this map name.
-    setSyncState(tracker.getMapSnapshot(mapName));
-    const unsubscribeSync = tracker.onChange(mapName, (snapshot) => {
-      if (isMounted.current) {
-        setSyncState(snapshot);
-      }
-    });
-
-    return () => {
-      isMounted.current = false;
-      unsubscribeMap();
-      unsubscribeSync();
-    };
-  }, [client, map, mapName]);
+  const syncState = useTrackerMapSnapshot(mapName);
 
   return { map, syncState };
 }

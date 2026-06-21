@@ -1,7 +1,10 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import type { SearchHandle, SearchResult } from '@topgunbuild/client';
 import type { SearchOptions } from '@topgunbuild/core';
 import { useClient } from './useClient';
+import { useLocalStore } from './internal/useExternalStore';
+
+const EMPTY_SEARCH_RESULTS: SearchResult<unknown>[] = [];
 
 /**
  * Extended search options for useSearch hook.
@@ -96,12 +99,16 @@ export function useSearch<T = unknown>(
   options?: UseSearchOptions,
 ): UseSearchResult<T> {
   const client = useClient();
-  const [results, setResults] = useState<SearchResult<T>[]>([]);
+
+  // Results live in a ref and are read through useSyncExternalStore for
+  // tearing-/unmount-safety (no isMounted ref). The ref holds a
+  // referentially-stable array between notifies; notify() schedules re-renders.
+  const resultsRef = useRef<SearchResult<T>[]>(EMPTY_SEARCH_RESULTS as SearchResult<T>[]);
+  const getResultsSnapshot = useCallback(() => resultsRef.current, []);
+  const [results, notifyResults] = useLocalStore(getResultsSnapshot);
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
-
-  // Track if component is mounted
-  const isMounted = useRef(true);
 
   // Store handle ref for reuse
   const handleRef = useRef<SearchHandle<T> | null>(null);
@@ -138,12 +145,12 @@ export function useSearch<T = unknown>(
       }
 
       debounceTimeoutRef.current = setTimeout(() => {
-        if (isMounted.current) {
-          setDebouncedQuery(query);
-        }
+        setDebouncedQuery(query);
       }, debounceMs);
 
       return () => {
+        // Clearing the pending timeout on unmount/dep-change prevents a
+        // setState after unmount — no isMounted ref needed.
         if (debounceTimeoutRef.current) {
           clearTimeout(debounceTimeoutRef.current);
         }
@@ -156,12 +163,11 @@ export function useSearch<T = unknown>(
 
   // Effect for creating/disposing handle when mapName changes
   useEffect(() => {
-    isMounted.current = true;
     isFirstQuery.current = true;
 
-    // Cleanup on mapName change or unmount
+    // Cleanup on mapName change or unmount. useSyncExternalStore handles
+    // unmount safety for the results read, so no isMounted ref is needed.
     return () => {
-      isMounted.current = false;
       if (unsubscribeRef.current) {
         unsubscribeRef.current();
         unsubscribeRef.current = null;
@@ -177,7 +183,8 @@ export function useSearch<T = unknown>(
   useEffect(() => {
     // Don't subscribe for empty queries
     if (!debouncedQuery.trim()) {
-      setResults([]);
+      resultsRef.current = EMPTY_SEARCH_RESULTS as SearchResult<T>[];
+      notifyResults();
       setLoading(false);
       setError(null);
       return;
@@ -207,24 +214,24 @@ export function useSearch<T = unknown>(
         // Flag to track if we've received initial results
         let hasReceivedResults = false;
 
-        // Subscribe to result updates
+        // Subscribe to result updates. The handle delivers a sorted array;
+        // prefer its cached getSnapshot() for referential stability when
+        // available, falling back to the delivered array.
         unsubscribeRef.current = handle.subscribe((newResults) => {
-          if (isMounted.current) {
-            setResults(newResults);
-            if (!hasReceivedResults) {
-              hasReceivedResults = true;
-              setLoading(false);
-            }
+          resultsRef.current =
+            typeof handle.getSnapshot === 'function' ? handle.getSnapshot() : newResults;
+          notifyResults();
+          if (!hasReceivedResults) {
+            hasReceivedResults = true;
+            setLoading(false);
           }
         });
       }
     } catch (err) {
-      if (isMounted.current) {
-        setError(err instanceof Error ? err : new Error(String(err)));
-        setLoading(false);
-      }
+      setError(err instanceof Error ? err : new Error(String(err)));
+      setLoading(false);
     }
-  }, [client, mapName, debouncedQuery, searchOptions]);
+  }, [client, mapName, debouncedQuery, searchOptions, notifyResults]);
 
   // Effect for handling options changes (use setOptions)
   useEffect(() => {

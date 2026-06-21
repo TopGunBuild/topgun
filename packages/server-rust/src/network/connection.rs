@@ -10,9 +10,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use topgun_core::{Principal, Timestamp};
+use tracing::warn;
 
 use super::config::ConnectionConfig;
 
@@ -49,6 +51,27 @@ pub enum SendError {
     Full,
 }
 
+/// Outcome of a best-effort broadcast send to a (possibly slow) consumer.
+///
+/// Distinguishes the three states a live-event push can land in so the caller
+/// (and metrics) can tell "kept up" from "fell behind" from "gave up", instead
+/// of the old binary `is_ok()` that hid silent divergence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BroadcastOutcome {
+    /// The event was enqueued; the consumer is keeping up.
+    Sent,
+    /// The channel was full and the event was dropped, but the consecutive-drop
+    /// count is still under the disconnect threshold. The connection survives;
+    /// the per-connection dropped-event counter was incremented.
+    Dropped,
+    /// The consecutive-drop count crossed the threshold: the connection was
+    /// cancelled to force a reconnect + Merkle resync rather than let it diverge
+    /// silently. Only client connections are disconnected this way.
+    Disconnected,
+    /// The receiver is gone (connection already closed).
+    Closed,
+}
+
 /// Handle to a single connection, providing send capabilities and metadata access.
 ///
 /// Each connection gets a bounded mpsc channel for backpressure. The receiver
@@ -72,6 +95,18 @@ pub struct ConnectionHandle {
     /// run its normal cleanup path. The reaper cancels this to evict stale or
     /// never-authenticated connections.
     pub cancel: CancellationToken,
+    /// Number of consecutive live-event broadcasts dropped because the outbound
+    /// channel was full. Reset to 0 on the next successful broadcast. When this
+    /// crosses `slow_consumer_drop_threshold` the connection is cancelled
+    /// (forcing reconnect + resync) instead of diverging silently.
+    consecutive_drops: AtomicU64,
+    /// Cumulative count of live-event broadcasts dropped over the connection's
+    /// lifetime. Surfaced as a slow-consumer metric; never reset.
+    dropped_broadcasts: AtomicU64,
+    /// Consecutive-drop count at which a slow client connection is disconnected
+    /// to force resync. 0 disables the disconnect behavior (pure best-effort
+    /// drop, the legacy semantics).
+    slow_consumer_drop_threshold: u64,
 }
 
 impl ConnectionHandle {
@@ -82,6 +117,66 @@ impl ConnectionHandle {
     #[must_use]
     pub fn try_send(&self, msg: OutboundMessage) -> bool {
         self.tx.try_send(msg).is_ok()
+    }
+
+    /// Best-effort send of a live-event broadcast to a possibly-slow consumer.
+    ///
+    /// Unlike [`try_send`](Self::try_send), this tracks slow-consumer state so a
+    /// subscriber that persistently fails to drain its channel does not diverge
+    /// silently. On a full channel the event is dropped (the channel stays
+    /// memory-bounded), the cumulative drop metric is incremented, and the
+    /// consecutive-drop counter advances; once it reaches
+    /// `slow_consumer_drop_threshold` the connection is cancelled so the client
+    /// reconnects and re-syncs via the Merkle tree. A successful send resets the
+    /// consecutive-drop counter.
+    ///
+    /// Only `Client` connections are disconnected on threshold; cluster peers
+    /// fall back to plain best-effort drop because their liveness is governed by
+    /// the cluster failure detector, not this idle/slow heuristic.
+    #[must_use]
+    pub fn try_send_broadcast(&self, msg: OutboundMessage) -> BroadcastOutcome {
+        match self.tx.try_send(msg) {
+            Ok(()) => {
+                self.consecutive_drops.store(0, Ordering::Relaxed);
+                BroadcastOutcome::Sent
+            }
+            Err(TrySendError::Closed(_)) => BroadcastOutcome::Closed,
+            Err(TrySendError::Full(_)) => {
+                // Relaxed ordering is sufficient: concurrent broadcasts to one
+                // connection can in principle race the success-reset against a
+                // drop-increment at the exact threshold boundary, disconnecting a
+                // connection one event early. That is a SAFE failure mode — the
+                // disconnect just forces the reconnect + Merkle resync this whole
+                // path exists to trigger, with no data loss — so it does not
+                // warrant a compare-exchange loop on the hot broadcast path.
+                self.dropped_broadcasts.fetch_add(1, Ordering::Relaxed);
+                let consecutive = self.consecutive_drops.fetch_add(1, Ordering::Relaxed) + 1;
+                let should_disconnect = self.kind == ConnectionKind::Client
+                    && self.slow_consumer_drop_threshold != 0
+                    && consecutive >= self.slow_consumer_drop_threshold
+                    && !self.cancel.is_cancelled();
+                if should_disconnect {
+                    warn!(
+                        conn_id = ?self.id,
+                        consecutive_drops = consecutive,
+                        dropped_total = self.dropped_broadcasts.load(Ordering::Relaxed),
+                        "slow consumer exceeded broadcast drop threshold; \
+                         disconnecting to force reconnect + resync"
+                    );
+                    self.cancel();
+                    BroadcastOutcome::Disconnected
+                } else {
+                    BroadcastOutcome::Dropped
+                }
+            }
+        }
+    }
+
+    /// Cumulative number of live-event broadcasts dropped to this connection
+    /// because its outbound channel was full (slow-consumer metric).
+    #[must_use]
+    pub fn dropped_broadcasts(&self) -> u64 {
+        self.dropped_broadcasts.load(Ordering::Relaxed)
     }
 
     /// Sends a message with a timeout.
@@ -221,6 +316,9 @@ impl ConnectionRegistry {
             connected_at: Instant::now(),
             kind,
             cancel: CancellationToken::new(),
+            consecutive_drops: AtomicU64::new(0),
+            dropped_broadcasts: AtomicU64::new(0),
+            slow_consumer_drop_threshold: config.slow_consumer_drop_threshold,
         });
 
         self.connections.insert(id, Arc::clone(&handle));
@@ -264,29 +362,31 @@ impl ConnectionRegistry {
             .collect()
     }
 
-    /// Sends a binary message to all connections of a given kind.
+    /// Sends a binary live-event message to all connections of a given kind.
     ///
-    /// Uses non-blocking `try_send` so a single slow connection cannot
-    /// block the broadcast. Full channels are silently skipped.
+    /// Uses non-blocking [`try_send_broadcast`](ConnectionHandle::try_send_broadcast)
+    /// so a single slow connection cannot block the broadcast. A full channel
+    /// drops the event (bounded memory) and advances that connection's
+    /// slow-consumer state; a persistently-slow client is disconnected to force
+    /// reconnect + resync rather than diverging silently.
     pub fn broadcast(&self, msg_bytes: &[u8], kind: ConnectionKind) {
         for entry in &self.connections {
             let handle = entry.value();
             if handle.kind == kind {
-                // Intentionally ignore the result: broadcast skips full channels
-                let _ = handle.try_send(OutboundMessage::Binary(msg_bytes.to_vec()));
+                let _ = handle.try_send_broadcast(OutboundMessage::Binary(msg_bytes.to_vec()));
             }
         }
     }
 
-    /// Sends a binary message to a specific set of connection IDs.
+    /// Sends a binary live-event message to a specific set of connection IDs.
     ///
-    /// Uses non-blocking `try_send` so a single slow connection cannot
-    /// block the caller. Missing connections and full channels are silently
-    /// skipped (same semantics as `broadcast`).
+    /// Same slow-consumer semantics as [`broadcast`](Self::broadcast): missing
+    /// connections are skipped, a full channel drops the event and advances the
+    /// target's slow-consumer state (disconnecting a persistently-slow client).
     pub fn send_to_connections(&self, ids: &HashSet<ConnectionId>, msg_bytes: &[u8]) {
         for id in ids {
             if let Some(handle) = self.get(*id) {
-                let _ = handle.try_send(OutboundMessage::Binary(msg_bytes.to_vec()));
+                let _ = handle.try_send_broadcast(OutboundMessage::Binary(msg_bytes.to_vec()));
             }
         }
     }
@@ -627,5 +727,196 @@ mod tests {
 
         // Should not block or panic when channel is full
         registry.send_to_connections(&ids, &[3]);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Slow-consumer broadcast backpressure (F4 / TODO-509)
+    //
+    // A persistently-slow subscriber used to be dropped silently (no error, no
+    // Close, no counter) and diverge until it independently reconnected. The
+    // fix counts consecutive drops and, past a threshold, disconnects the
+    // connection to force reconnect + Merkle resync, while exposing a drop
+    // metric. These tests assert the new contract *and* carry the pre-fix
+    // negative controls (draining consumer / cluster peer never disconnected).
+    // ---------------------------------------------------------------------------
+
+    fn slow_consumer_config(capacity: usize, threshold: u64) -> ConnectionConfig {
+        ConnectionConfig {
+            outbound_channel_capacity: capacity,
+            slow_consumer_drop_threshold: threshold,
+            ..ConnectionConfig::default()
+        }
+    }
+
+    #[test]
+    fn slow_client_disconnected_after_consecutive_drop_threshold() {
+        // Reproduces the F4 scenario: a client whose channel stays full. Before
+        // the fix it silently dropped forever and stayed connected; now it is
+        // disconnected once consecutive drops reach the threshold.
+        let config = slow_consumer_config(2, 3);
+        let registry = ConnectionRegistry::new();
+        let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
+
+        // Fill the channel (capacity 2) so every subsequent broadcast drops.
+        assert_eq!(
+            handle.try_send_broadcast(OutboundMessage::Binary(vec![1])),
+            BroadcastOutcome::Sent
+        );
+        assert_eq!(
+            handle.try_send_broadcast(OutboundMessage::Binary(vec![2])),
+            BroadcastOutcome::Sent
+        );
+
+        // Drops 1 and 2 are under threshold (3): event lost but connection lives.
+        assert_eq!(
+            handle.try_send_broadcast(OutboundMessage::Binary(vec![3])),
+            BroadcastOutcome::Dropped
+        );
+        assert!(!handle.is_cancelled());
+        assert_eq!(
+            handle.try_send_broadcast(OutboundMessage::Binary(vec![4])),
+            BroadcastOutcome::Dropped
+        );
+        assert!(!handle.is_cancelled());
+
+        // Drop 3 hits the threshold: disconnect to force resync.
+        assert_eq!(
+            handle.try_send_broadcast(OutboundMessage::Binary(vec![5])),
+            BroadcastOutcome::Disconnected
+        );
+        assert!(
+            handle.is_cancelled(),
+            "slow client must be cancelled past the drop threshold, not diverge silently"
+        );
+        assert_eq!(
+            handle.dropped_broadcasts(),
+            3,
+            "drop metric must count losses"
+        );
+    }
+
+    #[test]
+    fn draining_consumer_is_never_disconnected() {
+        // Negative control: a consumer that drains its channel resets the
+        // consecutive-drop counter on each successful send and is never
+        // disconnected, even across far more than `threshold` broadcasts.
+        let config = slow_consumer_config(2, 3);
+        let registry = ConnectionRegistry::new();
+        let (handle, mut rx) = registry.register(ConnectionKind::Client, &config);
+
+        for i in 0..100u8 {
+            let outcome = handle.try_send_broadcast(OutboundMessage::Binary(vec![i]));
+            assert_eq!(outcome, BroadcastOutcome::Sent);
+            // Drain immediately so the channel never fills.
+            assert!(rx.try_recv().is_ok());
+        }
+
+        assert!(!handle.is_cancelled(), "a draining consumer must survive");
+        assert_eq!(handle.dropped_broadcasts(), 0);
+    }
+
+    #[test]
+    fn successful_broadcast_resets_consecutive_drops() {
+        // A few drops followed by a successful send must reset the streak, so a
+        // connection that occasionally falls behind but recovers is not reaped.
+        let config = slow_consumer_config(1, 3);
+        let registry = ConnectionRegistry::new();
+        let (handle, mut rx) = registry.register(ConnectionKind::Client, &config);
+
+        // Fill (cap 1), then two drops (under threshold 3).
+        assert_eq!(
+            handle.try_send_broadcast(OutboundMessage::Binary(vec![1])),
+            BroadcastOutcome::Sent
+        );
+        assert_eq!(
+            handle.try_send_broadcast(OutboundMessage::Binary(vec![2])),
+            BroadcastOutcome::Dropped
+        );
+        assert_eq!(
+            handle.try_send_broadcast(OutboundMessage::Binary(vec![3])),
+            BroadcastOutcome::Dropped
+        );
+
+        // Drain, then a successful send resets the streak.
+        assert!(rx.try_recv().is_ok());
+        assert_eq!(
+            handle.try_send_broadcast(OutboundMessage::Binary(vec![4])),
+            BroadcastOutcome::Sent
+        );
+
+        // Now the channel is full again; it takes another full `threshold` drops
+        // (not just one) to disconnect — proving the reset took effect.
+        assert_eq!(
+            handle.try_send_broadcast(OutboundMessage::Binary(vec![5])),
+            BroadcastOutcome::Dropped
+        );
+        assert_eq!(
+            handle.try_send_broadcast(OutboundMessage::Binary(vec![6])),
+            BroadcastOutcome::Dropped
+        );
+        assert!(!handle.is_cancelled());
+        assert_eq!(
+            handle.try_send_broadcast(OutboundMessage::Binary(vec![7])),
+            BroadcastOutcome::Disconnected
+        );
+        assert!(handle.is_cancelled());
+    }
+
+    #[test]
+    fn cluster_peer_is_not_disconnected_on_drops() {
+        // Negative control: cluster peers fall back to best-effort drop; their
+        // liveness is the cluster failure detector's job, not this heuristic.
+        let config = slow_consumer_config(1, 1);
+        let registry = ConnectionRegistry::new();
+        let (handle, _rx) = registry.register(ConnectionKind::ClusterPeer, &config);
+
+        assert_eq!(
+            handle.try_send_broadcast(OutboundMessage::Binary(vec![1])),
+            BroadcastOutcome::Sent
+        );
+        for _ in 0..10 {
+            assert_eq!(
+                handle.try_send_broadcast(OutboundMessage::Binary(vec![2])),
+                BroadcastOutcome::Dropped
+            );
+        }
+        assert!(
+            !handle.is_cancelled(),
+            "cluster peer must never be disconnected by the slow-consumer heuristic"
+        );
+        assert_eq!(handle.dropped_broadcasts(), 10);
+    }
+
+    #[test]
+    fn broadcast_outcome_closed_when_receiver_gone() {
+        let config = slow_consumer_config(2, 3);
+        let registry = ConnectionRegistry::new();
+        let (handle, rx) = registry.register(ConnectionKind::Client, &config);
+        drop(rx);
+
+        assert_eq!(
+            handle.try_send_broadcast(OutboundMessage::Binary(vec![1])),
+            BroadcastOutcome::Closed
+        );
+    }
+
+    #[test]
+    fn threshold_zero_disables_disconnect() {
+        // threshold = 0 preserves the legacy pure best-effort drop semantics.
+        let config = slow_consumer_config(1, 0);
+        let registry = ConnectionRegistry::new();
+        let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
+
+        assert_eq!(
+            handle.try_send_broadcast(OutboundMessage::Binary(vec![1])),
+            BroadcastOutcome::Sent
+        );
+        for _ in 0..50 {
+            assert_eq!(
+                handle.try_send_broadcast(OutboundMessage::Binary(vec![2])),
+                BroadcastOutcome::Dropped
+            );
+        }
+        assert!(!handle.is_cancelled());
     }
 }

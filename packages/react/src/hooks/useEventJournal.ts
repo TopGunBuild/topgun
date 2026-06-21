@@ -2,6 +2,9 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import type { JournalEvent, JournalEventType } from '@topgunbuild/core';
 import type { EventJournalReader, JournalSubscribeOptions } from '@topgunbuild/client';
 import { useClient } from './useClient';
+import { useLocalStore } from './internal/useExternalStore';
+
+const EMPTY_EVENTS: JournalEvent[] = [];
 
 /**
  * Options for useEventJournal hook.
@@ -100,11 +103,16 @@ export interface UseEventJournalResult {
  */
 export function useEventJournal(options: UseEventJournalOptions = {}): UseEventJournalResult {
   const client = useClient();
-  const [events, setEvents] = useState<JournalEvent[]>([]);
+
+  // Events accumulate in a ref read through useSyncExternalStore (no isMounted
+  // ref). The ref holds a referentially-stable array between notifies.
+  const eventsRef = useRef<JournalEvent[]>(EMPTY_EVENTS);
+  const getEventsSnapshot = useCallback(() => eventsRef.current, []);
+  const [events, notifyEvents] = useLocalStore(getEventsSnapshot);
+
   const [lastEvent, setLastEvent] = useState<JournalEvent | null>(null);
   const [isSubscribed, setIsSubscribed] = useState(false);
 
-  const isMounted = useRef(true);
   const journalRef = useRef<EventJournalReader | null>(null);
 
   const maxEvents = options.maxEvents ?? 100;
@@ -115,9 +123,10 @@ export function useEventJournal(options: UseEventJournalOptions = {}): UseEventJ
 
   // Clear events callback
   const clearEvents = useCallback(() => {
-    setEvents([]);
+    eventsRef.current = EMPTY_EVENTS;
+    notifyEvents();
     setLastEvent(null);
-  }, []);
+  }, [notifyEvents]);
 
   // Read historical events
   const readFrom = useCallback(
@@ -151,8 +160,6 @@ export function useEventJournal(options: UseEventJournalOptions = {}): UseEventJ
   );
 
   useEffect(() => {
-    isMounted.current = true;
-
     // Don't subscribe if paused
     if (options.paused) {
       setIsSubscribed(false);
@@ -169,16 +176,12 @@ export function useEventJournal(options: UseEventJournalOptions = {}): UseEventJ
     };
 
     const unsubscribe = journal.subscribe((event) => {
-      if (!isMounted.current) return;
-
-      // Add to events with rotation
-      setEvents((prev) => {
-        const newEvents = [...prev, event];
-        if (newEvents.length > maxEvents) {
-          return newEvents.slice(-maxEvents);
-        }
-        return newEvents;
-      });
+      // Append with rotation into the ref, then notify React. No isMounted
+      // guard needed — the effect cleanup unsubscribes before unmount.
+      const prev = eventsRef.current;
+      const newEvents = [...prev, event];
+      eventsRef.current = newEvents.length > maxEvents ? newEvents.slice(-maxEvents) : newEvents;
+      notifyEvents();
 
       setLastEvent(event);
 
@@ -189,11 +192,12 @@ export function useEventJournal(options: UseEventJournalOptions = {}): UseEventJ
     setIsSubscribed(true);
 
     return () => {
-      isMounted.current = false;
       setIsSubscribed(false);
       unsubscribe();
     };
-  }, [client, filterKey, maxEvents]);
+    // filterKey is the serialized form of the filter options (mapName/types/
+    // fromSequence/paused); the raw option fields are intentionally not listed.
+  }, [client, filterKey, maxEvents, notifyEvents]);
 
   return useMemo(
     () => ({

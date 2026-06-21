@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   HybridQueryHandle,
   HybridResultItem,
@@ -7,6 +7,9 @@ import type {
   PaginationInfo,
 } from '@topgunbuild/client';
 import { useClient } from './useClient';
+import { useExternalStore } from './internal/useExternalStore';
+
+const EMPTY_HYBRID_RESULTS: HybridResultItem<unknown>[] = [];
 
 /**
  * Extended options for useHybridQuery hook.
@@ -129,120 +132,108 @@ export function useHybridQuery<T = unknown>(
   options?: UseHybridQueryOptions,
 ): UseHybridQueryResult<T> {
   const client = useClient();
-  const [results, setResults] = useState<HybridResultItem<T>[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
 
+  // Skip option
+  const skip = options?.skip ?? false;
+
+  // Stable filter dependency key.
+  const filterKey = JSON.stringify({
+    predicate: filter.predicate,
+    where: filter.where,
+    sort: filter.sort,
+    limit: filter.limit,
+    cursor: filter.cursor,
+  });
+
+  // Construct the handle in render, memoized by [client, mapName, filterKey,
+  // skip]. client.hybridQuery() is a pure constructor — subscription activates
+  // on handle.subscribe() inside useExternalStore. When skipped, no handle is
+  // created. Construction throws are captured and surfaced as `error`.
+  const { handle, constructError } = useMemo<{
+    handle: HybridQueryHandle<T> | null;
+    constructError: Error | null;
+  }>(
+    () => {
+      if (skip) return { handle: null, constructError: null };
+      try {
+        return { handle: client.hybridQuery<T>(mapName, filter), constructError: null };
+      } catch (err) {
+        return {
+          handle: null,
+          constructError: err instanceof Error ? err : new Error(String(err)),
+        };
+      }
+    },
+    // filterKey is the serialized form of `filter`; depending on the `filter`
+    // object identity would re-create the handle every render.
+    [client, mapName, filterKey, skip],
+  );
+
+  // ---- results via useSyncExternalStore -----------------------------------
+  const cacheRef = useRef<{ value: HybridResultItem<T>[]; emitted: boolean }>({
+    value: EMPTY_HYBRID_RESULTS as HybridResultItem<T>[],
+    emitted: false,
+  });
+  const lastHandleRef = useRef<HybridQueryHandle<T> | null>(null);
+  if (lastHandleRef.current !== handle) {
+    lastHandleRef.current = handle;
+    cacheRef.current = { value: EMPTY_HYBRID_RESULTS as HybridResultItem<T>[], emitted: false };
+  }
+
+  const subscribeResults = useCallback(
+    (onChange: () => void) => {
+      if (!handle) return () => {};
+      return handle.subscribe((newResults) => {
+        cacheRef.current = { value: newResults, emitted: true };
+        onChange();
+      });
+    },
+    [handle],
+  );
+
+  const getResults = useCallback((): HybridResultItem<T>[] => {
+    if (handle && typeof handle.getSnapshot === 'function') {
+      return handle.getSnapshot() as HybridResultItem<T>[];
+    }
+    return cacheRef.current.value;
+  }, [handle]);
+
+  const results = useExternalStore(subscribeResults, getResults);
+
+  const loading = useMemo(() => {
+    if (skip || constructError) return false;
+    if (handle && typeof handle.getSnapshotMeta === 'function') {
+      return !handle.getSnapshotMeta().hasEmitted;
+    }
+    return !cacheRef.current.emitted;
+    // `results` is included so loading re-derives after each emission.
+  }, [handle, skip, constructError, results]);
+
+  // ---- pagination (effect-driven) -----------------------------------------
   const [paginationInfo, setPaginationInfo] = useState<PaginationInfo>({
     hasMore: false,
     cursorStatus: 'none',
   });
 
-  // Track if component is mounted
-  const isMounted = useRef(true);
-
-  // Store handle ref
-  const handleRef = useRef<HybridQueryHandle<T> | null>(null);
-
-  // Store unsubscribe function
-  const unsubscribeRef = useRef<(() => void) | null>(null);
-
-  // Memoize filter to avoid unnecessary re-renders
-  const memoizedFilter = useMemo(
-    () => filter,
-    [
-      JSON.stringify(filter.predicate),
-      JSON.stringify(filter.where),
-      JSON.stringify(filter.sort),
-      filter.limit,
-      filter.cursor,
-    ],
-  );
-
-  // Skip option
-  const skip = options?.skip ?? false;
-
-  // Effect for creating/disposing handle
   useEffect(() => {
-    isMounted.current = true;
-
-    // Don't subscribe if skip is true
-    if (skip) {
-      setResults([]);
-      setLoading(false);
-      setError(null);
+    if (!handle) {
+      setPaginationInfo({ hasMore: false, cursorStatus: 'none' });
       return;
     }
-
-    setLoading(true);
-    setError(null);
-
-    try {
-      // Cleanup old handle if exists
-      if (handleRef.current) {
-        if (unsubscribeRef.current) {
-          unsubscribeRef.current();
-          unsubscribeRef.current = null;
-        }
-      }
-
-      // Create new handle
-      const handle = client.hybridQuery<T>(mapName, memoizedFilter);
-      handleRef.current = handle;
-
-      // Flag to track if we've received initial results
-      let hasReceivedResults = false;
-
-      // Subscribe to result updates
-      unsubscribeRef.current = handle.subscribe((newResults) => {
-        if (isMounted.current) {
-          setResults(newResults);
-          if (!hasReceivedResults) {
-            hasReceivedResults = true;
-            setLoading(false);
-          }
-        }
-      });
-
-      const unsubscribePagination = handle.onPaginationChange((info) => {
-        if (isMounted.current) {
-          setPaginationInfo(info);
-        }
-      });
-
-      // Store combined unsubscribe function
-      const originalUnsubscribe = unsubscribeRef.current;
-      unsubscribeRef.current = () => {
-        originalUnsubscribe?.();
-        unsubscribePagination();
-      };
-    } catch (err) {
-      if (isMounted.current) {
-        setError(err instanceof Error ? err : new Error(String(err)));
-        setLoading(false);
-      }
-    }
-
-    // Cleanup on unmount or dependency change
-    return () => {
-      isMounted.current = false;
-      if (unsubscribeRef.current) {
-        unsubscribeRef.current();
-        unsubscribeRef.current = null;
-      }
-      handleRef.current = null;
-    };
-  }, [client, mapName, memoizedFilter, skip]);
+    return handle.onPaginationChange((info) => {
+      setPaginationInfo(info);
+    });
+  }, [handle]);
 
   return useMemo(
     () => ({
       results,
       loading,
-      error,
+      error: constructError,
       nextCursor: paginationInfo.nextCursor,
       hasMore: paginationInfo.hasMore,
       cursorStatus: paginationInfo.cursorStatus,
     }),
-    [results, loading, error, paginationInfo],
+    [results, loading, constructError, paginationInfo],
   );
 }

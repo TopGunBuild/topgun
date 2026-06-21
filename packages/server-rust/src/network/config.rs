@@ -140,6 +140,26 @@ pub struct ConnectionConfig {
     /// Maximum size in bytes of a single inbound WebSocket frame (a message may
     /// span multiple frames). Defaults to 2 MB.
     pub ws_max_frame_size: usize,
+    /// Consecutive live-event broadcasts dropped (outbound channel full) before
+    /// a slow client connection is disconnected to force reconnect + Merkle
+    /// resync, instead of letting it diverge silently. Reset on any successful
+    /// broadcast, so a connection that drains at all is never disconnected by
+    /// this — only one stuck for `threshold` events in a row. 0 disables the
+    /// disconnect (pure best-effort drop). Defaults to 256 (one full outbound
+    /// buffer's worth of consecutive misses).
+    pub slow_consumer_drop_threshold: u64,
+    /// Sustained inbound op-rate ceiling, in ops/second, applied per WebSocket
+    /// connection on the data plane (Phase-2 ops). Layered on top of aggregate
+    /// load shedding so a single abusive peer cannot saturate the in-flight
+    /// pipeline for everyone; over-rate ops get a 429 back-off without tearing
+    /// the connection down. 0 disables per-connection limiting. The default
+    /// (20 000) leaves large headroom over realistic client and benchmark
+    /// per-connection rates while still bounding a flood.
+    pub data_plane_max_ops_per_sec: u32,
+    /// Burst capacity for the per-connection inbound op-rate limiter (the most
+    /// ops acceptable instantaneously after an idle period). Defaults to 40 000
+    /// (2× the sustained rate).
+    pub data_plane_ops_burst: u32,
 }
 
 impl Default for ConnectionConfig {
@@ -154,6 +174,9 @@ impl Default for ConnectionConfig {
             ws_max_write_buffer_size: 524_288,    // 512 KB
             ws_max_message_size: 2 * 1024 * 1024, // 2 MB — matches HTTP /sync body limit
             ws_max_frame_size: 2 * 1024 * 1024,   // 2 MB
+            slow_consumer_drop_threshold: 256,    // == default outbound capacity
+            data_plane_max_ops_per_sec: 20_000,   // generous; bounds a flooding peer
+            data_plane_ops_burst: 40_000,         // 2× sustained
         }
     }
 }
@@ -194,6 +217,9 @@ mod tests {
         assert_eq!(config.ws_max_write_buffer_size, 524_288);
         assert_eq!(config.ws_max_message_size, 2 * 1024 * 1024);
         assert_eq!(config.ws_max_frame_size, 2 * 1024 * 1024);
+        assert_eq!(config.slow_consumer_drop_threshold, 256);
+        assert_eq!(config.data_plane_max_ops_per_sec, 20_000);
+        assert_eq!(config.data_plane_ops_burst, 40_000);
     }
 
     #[test]

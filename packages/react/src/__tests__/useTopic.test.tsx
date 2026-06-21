@@ -154,4 +154,67 @@ describe('useTopic', () => {
     });
     expect(callback2).toHaveBeenCalledWith({ msg: 'second' }, { timestamp: 2 });
   });
+
+  // TODO-516 regression: previously the subscription effect depended on
+  // [topic, callback], so a fresh inline callback every render tore down and
+  // re-created the subscription on EVERY render — the callbackRef indirection
+  // was dead code. The migration keys the subscription only on topic identity
+  // (callback presence, not identity), so a changing inline callback must NOT
+  // re-subscribe, and the latest callback must still receive messages.
+  it('does NOT re-subscribe when only the inline callback identity changes (TODO-516)', () => {
+    // Render with a NEW inline callback every render — the common
+    // useTopic('chat', d => …) usage. We capture the latest closure so we can
+    // assert the most recent one still fires.
+    const received: any[] = [];
+    const { rerender } = renderHook(
+      // Intentionally a fresh inline callback per render to exercise the churn fix.
+      ({ tag }: { tag: number }) =>
+        useTopic('test-topic', (data: any) => {
+          received.push({ tag, data });
+        }),
+      { wrapper, initialProps: { tag: 0 } },
+    );
+
+    // Exactly one subscribe across the initial render(s).
+    expect(mockTopicHandle.subscribe).toHaveBeenCalledTimes(1);
+    expect(mockTopicHandle._getListenerCount()).toBe(1);
+
+    // Force several rerenders, each with a brand-new inline callback identity.
+    rerender({ tag: 1 });
+    rerender({ tag: 2 });
+    rerender({ tag: 3 });
+
+    // STILL exactly one subscribe — no churn.
+    expect(mockTopicHandle.subscribe).toHaveBeenCalledTimes(1);
+    expect(mockTopicHandle._getListenerCount()).toBe(1);
+
+    // The LATEST callback (tag 3) must receive the message.
+    act(() => {
+      mockTopicHandle._triggerMessage({ msg: 'hello' }, { timestamp: 9 });
+    });
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual({ tag: 3, data: { msg: 'hello' } });
+  });
+
+  it('StrictMode double-invoke leaves no leaked topic listener', () => {
+    const callback = jest.fn();
+
+    const StrictWrapper = ({ children }: { children: React.ReactNode }) => (
+      <React.StrictMode>
+        <TopGunProvider client={mockClient}>{children}</TopGunProvider>
+      </React.StrictMode>
+    );
+
+    const { unmount } = renderHook(() => useTopic('test-topic', callback), {
+      wrapper: StrictWrapper,
+    });
+
+    // After mount (even with StrictMode's mount→unmount→mount), exactly one
+    // live listener remains.
+    expect(mockTopicHandle._getListenerCount()).toBe(1);
+
+    unmount();
+    // Net-zero: no leaked listener.
+    expect(mockTopicHandle._getListenerCount()).toBe(0);
+  });
 });

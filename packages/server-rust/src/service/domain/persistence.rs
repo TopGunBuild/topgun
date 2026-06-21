@@ -288,8 +288,10 @@ impl PersistenceService {
                 continue;
             }
             if let Some(handle) = self.connection_registry.get(sub_conn_id) {
-                // Best-effort delivery: skip full channels.
-                let _ = handle.try_send(OutboundMessage::Binary(bytes.clone()));
+                // Best-effort live delivery: a full channel drops the event and
+                // advances the target's slow-consumer state (force-resync on a
+                // persistently-slow client) rather than diverging silently.
+                let _ = handle.try_send_broadcast(OutboundMessage::Binary(bytes.clone()));
             }
         }
 
