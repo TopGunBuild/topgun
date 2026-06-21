@@ -374,7 +374,23 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run simulation tests
-        run: cargo test --profile ci-sim --features simulation -p topgun-server -- sim
+        # Run the simulation + sim_smoke integration binaries IN FULL so EVERY
+        # hand-written sim module gates merges. The previous `-- sim` substring
+        # filter only matched test PATHS containing "sim" — that caught
+        # proptest_sim::*, the sim_smoke `sim_*` names, and the src::sim lib
+        # paths, but silently SKIPPED the crdt_convergence::*, merkle_sync::*,
+        # cluster_membership::*, and event_journal::* modules. Those are the
+        # convergence/durability/journal correctness gates (G3/G4a) that MUST
+        # block; an under-selecting filter is a silent gate hole, the same
+        # "test exists but isn't in the gate" class that let the F2 convergence
+        # regression slip. Selecting the binaries by name (rather than dropping
+        # the filter entirely) keeps the job scoped to simulation tests and out
+        # of the unrelated, non-feature-gated integration binaries.
+        run: |
+          cargo test --profile ci-sim --features simulation -p topgun-server --test simulation --test sim_smoke
+          # The SimCluster/SimNetwork harness's own unit tests live in the lib
+          # target (src/sim/*); keep them gating via the path filter.
+          cargo test --profile ci-sim --features simulation -p topgun-server --lib -- sim
 
   audit:
     name: Cargo Audit (RustSec advisories)
