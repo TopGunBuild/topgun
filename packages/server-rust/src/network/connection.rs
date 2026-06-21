@@ -142,6 +142,13 @@ impl ConnectionHandle {
             }
             Err(TrySendError::Closed(_)) => BroadcastOutcome::Closed,
             Err(TrySendError::Full(_)) => {
+                // Relaxed ordering is sufficient: concurrent broadcasts to one
+                // connection can in principle race the success-reset against a
+                // drop-increment at the exact threshold boundary, disconnecting a
+                // connection one event early. That is a SAFE failure mode — the
+                // disconnect just forces the reconnect + Merkle resync this whole
+                // path exists to trigger, with no data loss — so it does not
+                // warrant a compare-exchange loop on the hot broadcast path.
                 self.dropped_broadcasts.fetch_add(1, Ordering::Relaxed);
                 let consecutive = self.consecutive_drops.fetch_add(1, Ordering::Relaxed) + 1;
                 let should_disconnect = self.kind == ConnectionKind::Client

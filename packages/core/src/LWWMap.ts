@@ -18,16 +18,23 @@ export interface LWWRecord<V> {
  * over object keys so two structurally-equal values that survived a serialize/
  * deserialize round-trip compare equal regardless of key insertion order.
  */
-function valuesEqual(a: unknown, b: unknown): boolean {
+function valuesEqual(a: unknown, b: unknown, depth = 0): boolean {
   if (a === b) return true;
   if (a === null || b === null || a === undefined || b === undefined) {
     return a === b;
   }
   if (typeof a !== 'object' || typeof b !== 'object') return false;
 
+  // Depth guard: record values reach this only via the server-echo reconcile
+  // path and normally round-trip through msgpack (which rejects cycles), but a
+  // pathological or cyclic in-memory value must not stack-overflow the sync
+  // handler. Treat over-deep structures as "not equal" → conservatively skip
+  // adoption rather than crash.
+  if (depth > 64) return false;
+
   if (Array.isArray(a) || Array.isArray(b)) {
     if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
-    return a.every((item, i) => valuesEqual(item, b[i]));
+    return a.every((item, i) => valuesEqual(item, b[i], depth + 1));
   }
 
   const aObj = a as Record<string, unknown>;
@@ -36,7 +43,7 @@ function valuesEqual(a: unknown, b: unknown): boolean {
   const bKeys = Object.keys(bObj);
   if (aKeys.length !== bKeys.length) return false;
   const hasOwn = Object.prototype.hasOwnProperty;
-  return aKeys.every((k) => hasOwn.call(bObj, k) && valuesEqual(aObj[k], bObj[k]));
+  return aKeys.every((k) => hasOwn.call(bObj, k) && valuesEqual(aObj[k], bObj[k], depth + 1));
 }
 
 /**
@@ -201,6 +208,13 @@ export class LWWMap<K, V> {
   public adoptServerEcho(key: K, serverRecord: LWWRecord<V>): boolean {
     const localRecord = this.data.get(key);
     if (!localRecord || !valuesEqual(localRecord.value, serverRecord.value)) {
+      return false;
+    }
+    // Defensive precondition: this path only reconciles an echo that LWW
+    // rejected because the server timestamp is ≤ ours. If the server record is
+    // strictly newer, plain `merge` already wins it — never downgrade a newer
+    // record through here (guards against misuse if merge semantics change).
+    if (HLC.compare(serverRecord.timestamp, localRecord.timestamp) > 0) {
       return false;
     }
     this.data.set(key, serverRecord);

@@ -338,7 +338,13 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         },
                     };
                     if let Ok(bytes) = rmp_serde::to_vec_named(&err_msg) {
-                        let _ = handle.tx.send(OutboundMessage::Binary(bytes)).await;
+                        // Best-effort, non-blocking: a flooding client is by
+                        // definition behind on its outbound channel, so awaiting
+                        // here would stall this read loop on the very connection
+                        // we are throttling (and would gate its own recovery
+                        // tokens). If the channel is full, dropping the 429 is
+                        // fine — the client is already getting backpressure.
+                        let _ = handle.try_send(OutboundMessage::Binary(bytes));
                     }
                     continue;
                 }
