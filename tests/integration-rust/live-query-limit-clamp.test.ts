@@ -17,14 +17,25 @@
  * window slice composes with those deltas so the FINAL rendered set nets to exactly
  * N in sort order. This mirrors the AC1/AC2/AC3 unit scenarios at integration scale.
  *
- * Determinism: the writer's `set()` calls are optimistic and batched, so the seed
- * is gated behind waitForSynced(writer) — the QUERY_SUB is sent only once all seed
- * writes have drained and been APPLIED on the server. Without this gate the
- * subscriber's QUERY_SUB can race ahead of the seed reaching the server, and on a
- * cold first spawn a seed write can land in the gap between the server taking the
- * snapshot and activating the live subscription — surfacing in neither the snapshot
- * nor a delta. That race (not a client replay gap — the server replays pre-seeded
- * data on subscribe, verified independently) was the intermittent PR #65 red.
+ * Determinism (startup-speed independent): the writer's `set()` calls are
+ * optimistic and batched, so the seed is first gated behind waitForSynced(writer)
+ * — every seed op has drained and been OP_ACKed. But OP_ACK only proves the op was
+ * accepted, not that it is already VISIBLE to a query scan: on a cold/slow start
+ * the per-record apply into the partition RecordStore can lag the ack, and
+ * `handle_query_subscribe` scans the snapshot BEFORE it registers the subscription
+ * — so a not-yet-applied seed can land in the gap and surface in neither the
+ * initial snapshot nor a delta, freezing a live handle at an incomplete window
+ * forever (the intermittent PR #65 red: got `[]`, or `["a"]` after the first fix).
+ *
+ * The fix gates the real subscribe on the seed being CONFIRMED QUERY-VISIBLE via
+ * waitForServerQuery(): a poll loop over `queryOnce`, which opens a FRESH server
+ * subscription each call, waits for the authoritative QUERY_RESP, reads it, and
+ * auto-unsubscribes. Because every poll is a new server-side scan (not a frozen
+ * snapshot), it converges to the full seed set as soon as the writes are stably
+ * applied — independent of how slow the server started. Once the top-2 is
+ * server-visible the store is stable, so the subsequent live subscribe's initial
+ * snapshot is deterministically `[a, b]`. (This is not a client replay gap — the
+ * server replays pre-seeded data on subscribe, verified independently.)
  *
  * Scope note (honesty): against the real server, every observed path is already
  * net-N correct on its own — the initial QUERY_RESP is itself limit-clamped to N,
@@ -44,7 +55,7 @@
  */
 
 import { TopGunClient, SyncState } from '@topgunbuild/client';
-import type { IStorageAdapter, OpLogEntry } from '@topgunbuild/client';
+import type { IStorageAdapter, OpLogEntry, QueryFilter } from '@topgunbuild/client';
 
 import { spawnRustServer, createTestToken, SpawnedServer } from './helpers';
 
@@ -165,6 +176,44 @@ async function waitForSynced(client: TopGunClient, timeoutMs = 20_000): Promise<
   );
 }
 
+/**
+ * Deterministically waits until the SERVER's query result for (mapName, filter)
+ * satisfies `predicate`, independent of server startup speed.
+ *
+ * Each poll issues a fresh `queryOnce` — which opens a new server subscription,
+ * waits for the AUTHORITATIVE QUERY_RESP, reads the snapshot, then
+ * auto-unsubscribes. A live QueryHandle freezes its first snapshot and can never
+ * recover if a seed write lands in the server's scan-vs-subscription-activation
+ * gap on a cold start; re-scanning with a fresh subscription each poll sidesteps
+ * that entirely, converging as soon as the seed writes are stably applied. Once
+ * this resolves, the store is stable, so a subsequent live subscribe sees a
+ * complete, deterministic initial snapshot.
+ */
+async function waitForServerQuery<T>(
+  client: TopGunClient,
+  mapName: string,
+  filter: QueryFilter,
+  predicate: (rows: Array<T & { _key: string }>) => boolean,
+  describe: () => string,
+  timeoutMs = 20_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastSeen = '<none>';
+  while (Date.now() < deadline) {
+    try {
+      const rows = (await client.queryOnce<T>(mapName, filter, {
+        timeoutMs: 5_000,
+      })) as Array<T & { _key: string }>;
+      if (predicate(rows)) return;
+      lastSeen = JSON.stringify(rows.map((r) => r._key));
+    } catch {
+      // Offline / settle timeout on this poll — retry until the outer deadline.
+    }
+    await waitMs(100);
+  }
+  throw new Error(`Timed out waiting for server query: ${describe()}; last = ${lastSeen}`);
+}
+
 function makeClient(port: number, userId: string): TopGunClient {
   const token = createTestToken(userId, ['ADMIN']);
   return new TopGunClient({
@@ -222,10 +271,23 @@ describe('Integration: live top-N clamp end-to-end (client <-> Rust server)', ()
     writerMap.set('d', { n: 3 });
 
     // Gate the subscribe on the writer fully draining its pending ops, so all
-    // three seed rows are APPLIED server-side BEFORE the QUERY_SUB. This removes
-    // the snapshot-vs-write race that otherwise lets the subscriber observe an
-    // empty initial window on a cold spawn (the original flake on PR #65).
+    // three seed rows are OP_ACKed server-side BEFORE the QUERY_SUB.
     await waitForSynced(writer);
+
+    // OP_ACK proves acceptance, not query-visibility: on a cold/slow start the
+    // per-record apply can lag the ack, and a seed could land in the server's
+    // scan-vs-activation gap, freezing a live handle at an incomplete window.
+    // Confirm the over-full seed is CONFIRMED QUERY-VISIBLE (top-2 clamped to
+    // [a, b], with d below the window) by re-scanning the server until it
+    // converges. After this the store is stable, so the live subscribe below is
+    // deterministic at any startup speed.
+    await waitForServerQuery<{ n: number }>(
+      subscriber,
+      mapName,
+      { limit: 2, sort: { n: 'asc' } },
+      (rows) => rows.length === 2 && rows[0]?._key === 'a' && rows[1]?._key === 'b',
+      () => 'seed top-2 [a, b] server-visible before live subscribe',
+    );
 
     // Capture the latest emitted (rendered) result set from the live subscription.
     let last: Array<{ n: number; _key: string }> = [];

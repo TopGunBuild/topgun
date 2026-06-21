@@ -14,7 +14,9 @@ pub mod http;
 pub mod noop;
 pub mod ollama;
 
-pub use hook::{EmbeddingConfig, EmbeddingObserverFactory};
+pub use hook::{
+    EmbeddingConfig, EmbeddingHealth, EmbeddingHealthSnapshot, EmbeddingObserverFactory,
+};
 
 // ---------------------------------------------------------------------------
 // Trait

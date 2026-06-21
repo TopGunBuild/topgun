@@ -10,6 +10,7 @@
 //! `SearchMutationObserver` in `search.rs`, swapping tantivy indexing for
 //! embedding generation and `RecordStore` write-back.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -50,6 +51,143 @@ impl Default for EmbeddingConfig {
         Self {
             batch_interval_ms: 100,
             batch_flush_threshold: 500,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EmbeddingHealth — observable degraded state
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default)]
+struct EmbeddingHealthInner {
+    batches_ok: AtomicU64,
+    batches_failed: AtomicU64,
+    records_embedded: AtomicU64,
+    records_skipped: AtomicU64,
+    records_writeback_failed: AtomicU64,
+    consecutive_batch_failures: AtomicU64,
+}
+
+/// Shared, cloneable handle to the embedding write-back health counters.
+///
+/// Makes provider degradation observable as STATE, not just a log line. When the
+/// configured embedding provider fails at runtime (e.g. Ollama down, HTTP
+/// timeout) the affected records are still persisted — `OP_ACK` is returned
+/// before write-back runs — but receive no `_embedding`, so semantic search
+/// silently loses coverage for them. These counters let an operator (or a test)
+/// detect and quantify that coverage gap rather than inferring it from logs.
+///
+/// **Write-back failure semantics: mark-and-skip (no retry/backoff).** A failed
+/// `batch_embed` call drops only the `_embedding` write-back for that batch; the
+/// records remain acknowledged and durable. We deliberately do NOT retry: a retry loop
+/// against a down provider would either block the write path or grow unbounded
+/// in-memory work, trading a silent-coverage gap for a liveness/OOM risk. The
+/// affected records stay un-embedded until the provider recovers AND those
+/// records are written again (which re-enqueues them through the observer). The
+/// degraded state is surfaced via these counters plus a transition `warn!`.
+#[derive(Clone, Debug)]
+pub struct EmbeddingHealth {
+    inner: Arc<EmbeddingHealthInner>,
+}
+
+/// Point-in-time snapshot of the embedding write-back health counters.
+///
+/// The counters are read with independent `Relaxed` loads, so the snapshot is
+/// eventually-consistent ACROSS fields: a reader can observe a sub-millisecond
+/// window where, say, `batches_failed` has incremented but
+/// `consecutive_batch_failures` has not yet. Each individual counter is always
+/// monotonic and exact; only cross-field invariants are approximate, and they
+/// self-correct on the next poll. Treat `is_degraded()` as a sampled signal, not
+/// a transactional one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbeddingHealthSnapshot {
+    /// Batches whose `batch_embed` call succeeded.
+    pub batches_ok: u64,
+    /// Batches whose `batch_embed` call failed (the whole batch's write-back skipped).
+    pub batches_failed: u64,
+    /// Records that received an `_embedding` write-back.
+    pub records_embedded: u64,
+    /// Records dropped from write-back because the PROVIDER call failed — these
+    /// are persisted WITHOUT an `_embedding` and are invisible to semantic search.
+    pub records_skipped: u64,
+    /// Records whose write-back failed for a NON-provider reason after a healthy
+    /// `batch_embed` (record store read/serialize/put error). Like `records_skipped`
+    /// these leave the record without an `_embedding`, but the provider itself is up,
+    /// so they do not flip `is_degraded`. A record that simply no longer exists at
+    /// write-back time is NOT counted here (nothing to embed — not a coverage gap).
+    pub records_writeback_failed: u64,
+    /// Consecutive failed batches with no intervening success. `0` means the last
+    /// batch succeeded (or none has run); `>0` means the provider is currently degraded.
+    pub consecutive_batch_failures: u64,
+}
+
+impl EmbeddingHealthSnapshot {
+    /// True when the most recent batch flush failed — i.e. the provider is
+    /// currently unable to embed and write-backs are being dropped.
+    #[must_use]
+    pub fn is_degraded(&self) -> bool {
+        self.consecutive_batch_failures > 0
+    }
+}
+
+impl EmbeddingHealth {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(EmbeddingHealthInner::default()),
+        }
+    }
+
+    /// Records a successful batch flush that embedded `records` write-backs.
+    /// Returns the consecutive-failure count that preceded this success — a
+    /// non-zero value means the provider just RECOVERED.
+    fn record_success(&self, records: u64) -> u64 {
+        self.inner.batches_ok.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .records_embedded
+            .fetch_add(records, Ordering::Relaxed);
+        self.inner
+            .consecutive_batch_failures
+            .swap(0, Ordering::Relaxed)
+    }
+
+    /// Records `n` per-record write-back failures that occurred AFTER a healthy
+    /// `batch_embed` (record store errors, not a provider outage). Does not touch
+    /// the provider-degraded streak — the provider is up.
+    fn record_writeback_failures(&self, n: u64) {
+        if n > 0 {
+            self.inner
+                .records_writeback_failed
+                .fetch_add(n, Ordering::Relaxed);
+        }
+    }
+
+    /// Records a failed batch flush that skipped `records` write-backs. Returns
+    /// the new consecutive-failure count (`1` means the provider just STARTED degrading).
+    fn record_failure(&self, records: u64) -> u64 {
+        self.inner.batches_failed.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .records_skipped
+            .fetch_add(records, Ordering::Relaxed);
+        self.inner
+            .consecutive_batch_failures
+            .fetch_add(1, Ordering::Relaxed)
+            + 1
+    }
+
+    /// Returns a snapshot of the current counters.
+    #[must_use]
+    pub fn snapshot(&self) -> EmbeddingHealthSnapshot {
+        EmbeddingHealthSnapshot {
+            batches_ok: self.inner.batches_ok.load(Ordering::Relaxed),
+            batches_failed: self.inner.batches_failed.load(Ordering::Relaxed),
+            records_embedded: self.inner.records_embedded.load(Ordering::Relaxed),
+            records_skipped: self.inner.records_skipped.load(Ordering::Relaxed),
+            records_writeback_failed: self.inner.records_writeback_failed.load(Ordering::Relaxed),
+            consecutive_batch_failures: self
+                .inner
+                .consecutive_batch_failures
+                .load(Ordering::Relaxed),
         }
     }
 }
@@ -217,6 +355,10 @@ fn extract_fields_text(value: &rmpv::Value, fields: &[String]) -> String {
 /// flushes when `batch_interval` elapses or `batch_flush_threshold` events
 /// have been accumulated, whichever comes first. On shutdown signal, drains
 /// remaining events and processes them before exiting.
+// Task-plumbing fn: each arg is an independent shared dependency injected at
+// spawn time (mirrors `run_batch_processor` in search/mod.rs, which carries the
+// same allow for the same reason).
+#[allow(clippy::too_many_arguments)]
 async fn run_embedding_batch_processor(
     mut event_rx: mpsc::UnboundedReceiver<EmbeddingEvent>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
@@ -225,6 +367,7 @@ async fn run_embedding_batch_processor(
     batch_interval: Duration,
     batch_flush_threshold: usize,
     in_flight: Arc<DashSet<(String, String)>>,
+    health: EmbeddingHealth,
 ) {
     let mut batch: Vec<EmbeddingEvent> = Vec::new();
 
@@ -241,7 +384,7 @@ async fn run_embedding_batch_processor(
                             batch.push(evt);
                         }
                         if !batch.is_empty() {
-                            flush_batch(batch, &provider, &record_store_factory, &in_flight).await;
+                            flush_batch(batch, &provider, &record_store_factory, &in_flight, &health).await;
                         }
                         return;
                     }
@@ -278,7 +421,7 @@ async fn run_embedding_batch_processor(
                                 batch.push(evt);
                             }
                             if !batch.is_empty() {
-                                flush_batch(batch, &provider, &record_store_factory, &in_flight).await;
+                                flush_batch(batch, &provider, &record_store_factory, &in_flight, &health).await;
                             }
                             return;
                         }
@@ -294,7 +437,14 @@ async fn run_embedding_batch_processor(
 
         if !batch.is_empty() {
             let current_batch = std::mem::take(&mut batch);
-            flush_batch(current_batch, &provider, &record_store_factory, &in_flight).await;
+            flush_batch(
+                current_batch,
+                &provider,
+                &record_store_factory,
+                &in_flight,
+                &health,
+            )
+            .await;
         }
     }
 }
@@ -310,111 +460,191 @@ async fn flush_batch(
     provider: &Arc<dyn EmbeddingProvider>,
     record_store_factory: &Arc<RecordStoreFactory>,
     in_flight: &Arc<DashSet<(String, String)>>,
+    health: &EmbeddingHealth,
 ) {
     let texts: Vec<String> = batch.iter().map(|e| e.text.clone()).collect();
+    let batch_len = batch.len() as u64;
 
     let embeddings = match provider.batch_embed(&texts).await {
         Ok(v) => v,
         Err(err) => {
-            tracing::warn!("embedding batch failed: {err}");
+            // Mark-and-skip: the records are already ACKed and persisted; we drop
+            // only the `_embedding` write-back (no retry — see `EmbeddingHealth`
+            // docs for why). Record the failure so the degraded state is observable
+            // beyond this log line, and emit a transition `warn!` the first time the
+            // provider goes down (and one per subsequent failed batch, bounded by
+            // batch cadence, so a sustained outage stays visible without spamming).
+            let consecutive = health.record_failure(batch_len);
+            if consecutive == 1 {
+                tracing::warn!(
+                    skipped_records = batch_len,
+                    "embedding provider degraded: batch_embed failed, write-back skipped — \
+                     {batch_len} record(s) persisted WITHOUT _embedding; semantic search \
+                     coverage is now incomplete until the provider recovers and the \
+                     record(s) are re-written (mark-and-skip, no automatic retry). error: {err}"
+                );
+            } else {
+                tracing::warn!(
+                    consecutive_batch_failures = consecutive,
+                    skipped_records = batch_len,
+                    "embedding provider still degraded: batch_embed failed again. error: {err}"
+                );
+            }
             return;
         }
     };
 
+    let mut records_embedded: u64 = 0;
+    let mut writeback_failed: u64 = 0;
     for (evt, embedding) in batch.into_iter().zip(embeddings.into_iter()) {
-        let store = record_store_factory.get_or_create(&evt.map_name, evt.partition_id);
+        match write_back_one_embedding(&evt, embedding, record_store_factory, in_flight).await {
+            WriteBackOutcome::Embedded => records_embedded += 1,
+            WriteBackOutcome::Failed => writeback_failed += 1,
+            WriteBackOutcome::Skipped => {}
+        }
+    }
 
-        // Read existing record to perform a complete read-modify-write.
-        // Write-back must preserve all existing user fields.
-        let existing = match store.get(&evt.key, false).await {
-            Ok(Some(record)) => record,
-            Ok(None) => {
-                tracing::warn!(
-                    "embedding write-back skipped for {}/{}: record not found",
-                    evt.map_name,
-                    evt.key
-                );
-                continue;
-            }
-            Err(err) => {
-                tracing::warn!(
-                    "embedding write-back failed for {}/{}: read error: {err}",
-                    evt.map_name,
-                    evt.key
-                );
-                continue;
-            }
-        };
+    // Per-record write-back errors after a healthy batch_embed (store read/put
+    // errors) still leave records without an `_embedding`, so count them — but
+    // they do NOT mean the provider is down, so they go to a separate counter and
+    // never flip is_degraded().
+    health.record_writeback_failures(writeback_failed);
 
-        // Serialize the embedding in the canonical `Vector` wire form
-        // (`{"type":"f32","data":<LE bytes>}`) so the vector index's
-        // `decode_vector_from_record` can read it back. A bare `Vec<f32>` would
-        // serialize as a plain MsgPack array and silently fail to decode as a
-        // `Vector`, leaving the HNSW index empty.
-        let embedding_vector = topgun_core::vector::Vector::F32(embedding);
-        let embedding_bytes = match rmp_serde::to_vec_named(&embedding_vector) {
-            Ok(b) => b,
-            Err(err) => {
-                tracing::warn!(
-                    "embedding write-back failed for {}/{}: serialize error: {err}",
-                    evt.map_name,
-                    evt.key
-                );
-                continue;
-            }
-        };
+    // The provider call succeeded for this batch, so the provider is healthy even
+    // if some individual write-backs failed for non-provider reasons (record gone,
+    // serialize error). Reset the consecutive-failure streak and, if we were
+    // degraded, log the recovery so the transition is operator-visible.
+    let recovered_after = health.record_success(records_embedded);
+    if recovered_after > 0 {
+        tracing::info!(
+            recovered_after_failed_batches = recovered_after,
+            records_embedded,
+            "embedding provider recovered: write-back resumed"
+        );
+    }
+}
 
-        // Merge `_embedding` into the existing Value::Map.
-        let merged_value = if let RecordValue::Lww { value, .. } = existing.value {
-            merge_embedding_into_value(value, embedding_bytes)
-        } else {
+/// Outcome of a single record's `_embedding` write-back, so the caller can keep
+/// the health counters honest: a genuine error (`Failed`) is a coverage gap worth
+/// surfacing, whereas a record that simply no longer exists (`Skipped`) is a
+/// legitimate no-op, not a gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteBackOutcome {
+    /// `_embedding` was written.
+    Embedded,
+    /// Nothing to do — the record was gone or not an LWW value at write-back time.
+    Skipped,
+    /// Write-back failed on a real error (read / serialize / put) — the record is
+    /// left without an `_embedding` despite a healthy provider.
+    Failed,
+}
+
+/// Writes one record's `_embedding` back via read-modify-write, preserving all
+/// existing user fields. Inserts `(map_name, key)` into `in_flight` around the
+/// write so the observer's re-entrancy guard fires for the hook's own write.
+async fn write_back_one_embedding(
+    evt: &EmbeddingEvent,
+    embedding: Vec<f32>,
+    record_store_factory: &Arc<RecordStoreFactory>,
+    in_flight: &Arc<DashSet<(String, String)>>,
+) -> WriteBackOutcome {
+    let store = record_store_factory.get_or_create(&evt.map_name, evt.partition_id);
+
+    // Read existing record to perform a complete read-modify-write.
+    // Write-back must preserve all existing user fields.
+    let existing = match store.get(&evt.key, false).await {
+        Ok(Some(record)) => record,
+        Ok(None) => {
             tracing::warn!(
-                "embedding write-back skipped for {}/{}: non-LWW record",
+                "embedding write-back skipped for {}/{}: record not found",
                 evt.map_name,
                 evt.key
             );
-            continue;
-        };
+            return WriteBackOutcome::Skipped;
+        }
+        Err(err) => {
+            tracing::warn!(
+                "embedding write-back failed for {}/{}: read error: {err}",
+                evt.map_name,
+                evt.key
+            );
+            return WriteBackOutcome::Failed;
+        }
+    };
 
-        // Construct a synthetic timestamp for the write-back.
-        // Truncation from u128 to u64 is acceptable: ms since epoch fits in u64 until year 584,542,046.
-        #[allow(clippy::cast_possible_truncation)]
-        let now_millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+    // Serialize the embedding in the canonical `Vector` wire form
+    // (`{"type":"f32","data":<LE bytes>}`) so the vector index's
+    // `decode_vector_from_record` can read it back. A bare `Vec<f32>` would
+    // serialize as a plain MsgPack array and silently fail to decode as a
+    // `Vector`, leaving the HNSW index empty.
+    let embedding_vector = topgun_core::vector::Vector::F32(embedding);
+    let embedding_bytes = match rmp_serde::to_vec_named(&embedding_vector) {
+        Ok(b) => b,
+        Err(err) => {
+            tracing::warn!(
+                "embedding write-back failed for {}/{}: serialize error: {err}",
+                evt.map_name,
+                evt.key
+            );
+            return WriteBackOutcome::Failed;
+        }
+    };
 
-        let record_value = RecordValue::Lww {
-            value: merged_value,
-            timestamp: Timestamp {
-                millis: now_millis,
-                counter: 0,
-                node_id: "_embedding_hook".to_string(),
-            },
-        };
+    // Merge `_embedding` into the existing Value::Map.
+    let merged_value = if let RecordValue::Lww { value, .. } = existing.value {
+        merge_embedding_into_value(value, embedding_bytes)
+    } else {
+        tracing::warn!(
+            "embedding write-back skipped for {}/{}: non-LWW record",
+            evt.map_name,
+            evt.key
+        );
+        return WriteBackOutcome::Skipped;
+    };
 
-        // Mark in-flight before write so the observer's re-entrancy guard fires.
-        in_flight.insert((evt.map_name.clone(), evt.key.clone()));
+    // Construct a synthetic timestamp for the write-back.
+    // Truncation from u128 to u64 is acceptable: ms since epoch fits in u64 until year 584,542,046.
+    #[allow(clippy::cast_possible_truncation)]
+    let now_millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
 
-        if let Err(err) = store
-            .put(
-                &evt.key,
-                record_value,
-                ExpiryPolicy::NONE,
-                CallerProvenance::CrdtMerge,
-            )
-            .await
-        {
+    let record_value = RecordValue::Lww {
+        value: merged_value,
+        timestamp: Timestamp {
+            millis: now_millis,
+            counter: 0,
+            node_id: "_embedding_hook".to_string(),
+        },
+    };
+
+    // Mark in-flight before write so the observer's re-entrancy guard fires.
+    in_flight.insert((evt.map_name.clone(), evt.key.clone()));
+
+    let outcome = match store
+        .put(
+            &evt.key,
+            record_value,
+            ExpiryPolicy::NONE,
+            CallerProvenance::CrdtMerge,
+        )
+        .await
+    {
+        Ok(_) => WriteBackOutcome::Embedded,
+        Err(err) => {
             tracing::warn!(
                 "embedding write-back failed for {}/{}: put error: {err}",
                 evt.map_name,
                 evt.key
             );
+            WriteBackOutcome::Failed
         }
+    };
 
-        // Always remove from in-flight even on error to prevent permanent block.
-        in_flight.remove(&(evt.map_name.clone(), evt.key.clone()));
-    }
+    // Always remove from in-flight even on error to prevent permanent block.
+    in_flight.remove(&(evt.map_name.clone(), evt.key.clone()));
+    outcome
 }
 
 /// Merges the `_embedding` bytes into an existing `Value::Map`.
@@ -464,6 +694,9 @@ pub struct EmbeddingObserverFactory {
     event_rx: Mutex<Option<mpsc::UnboundedReceiver<EmbeddingEvent>>>,
     shutdown_tx: Arc<tokio::sync::watch::Sender<bool>>,
     in_flight: Arc<DashSet<(String, String)>>,
+    /// Shared write-back health counters; surfaced via [`Self::health`] so a
+    /// provider outage is observable as state, not just a log line.
+    health: EmbeddingHealth,
     /// Set during `init()`. Panics on double-init.
     record_store_factory: OnceLock<Arc<RecordStoreFactory>>,
 }
@@ -490,8 +723,20 @@ impl EmbeddingObserverFactory {
             event_rx: Mutex::new(Some(event_rx)),
             shutdown_tx: Arc::new(shutdown_tx),
             in_flight: Arc::new(DashSet::new()),
+            health: EmbeddingHealth::new(),
             record_store_factory: OnceLock::new(),
         }
+    }
+
+    /// Returns a snapshot of the embedding write-back health counters.
+    ///
+    /// Operators and tests use this to detect a degraded embedding provider:
+    /// when the provider is failing, `batches_failed` / `records_skipped` climb
+    /// and [`EmbeddingHealthSnapshot::is_degraded`] is `true` while records are
+    /// still being persisted (without `_embedding`).
+    #[must_use]
+    pub fn health(&self) -> EmbeddingHealthSnapshot {
+        self.health.snapshot()
     }
 
     /// Phase 2: post-wiring init.
@@ -524,6 +769,7 @@ impl EmbeddingObserverFactory {
             Duration::from_millis(self.config.batch_interval_ms),
             self.config.batch_flush_threshold,
             Arc::clone(&self.in_flight),
+            self.health.clone(),
         ));
     }
 
@@ -581,6 +827,36 @@ mod tests {
 
     fn make_noop_provider(dim: u16) -> Arc<dyn EmbeddingProvider> {
         Arc::new(NoopEmbeddingProvider::new(&NoopConfig { dimension: dim }))
+    }
+
+    /// Always-failing provider, simulating a down/timed-out embedding backend
+    /// (e.g. Ollama killed). Every `batch_embed`/`embed` call returns `Err`.
+    struct FailingProvider {
+        dimension: u16,
+    }
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for FailingProvider {
+        fn name(&self) -> &'static str {
+            "failing"
+        }
+        fn dimension(&self) -> u16 {
+            self.dimension
+        }
+        async fn embed(
+            &self,
+            _text: &str,
+        ) -> Result<Vec<f32>, crate::service::domain::embedding::EmbeddingError> {
+            Err(
+                crate::service::domain::embedding::EmbeddingError::Unavailable(
+                    "provider is down (test)".to_string(),
+                ),
+            )
+        }
+    }
+
+    fn make_failing_provider(dim: u16) -> Arc<dyn EmbeddingProvider> {
+        Arc::new(FailingProvider { dimension: dim })
     }
 
     fn make_vector_config(map_name: &str, fields: Vec<String>) -> Arc<VectorConfig> {
@@ -883,5 +1159,199 @@ mod tests {
                 panic!("record value should be a LWW Map");
             }
         }
+    }
+
+    // --- Degraded-state honesty: provider outage is observable, not silent ---
+
+    /// Behavioral test (TODO-526): when the embedding provider is DOWN, the write
+    /// still succeeds and persists, but the record gets NO `_embedding` AND the
+    /// factory's health surface reports the degradation — not just a log line.
+    #[tokio::test]
+    async fn provider_outage_persists_write_and_surfaces_degraded_state() {
+        let vector_config = make_vector_config("docs", vec!["title".to_string()]);
+        let provider = make_failing_provider(4);
+
+        let embedding_factory = Arc::new(EmbeddingObserverFactory::new(
+            EmbeddingConfig {
+                batch_interval_ms: 50,
+                batch_flush_threshold: 500,
+            },
+            Arc::clone(&vector_config),
+            Arc::clone(&provider),
+        ));
+
+        let record_store_factory = Arc::new(
+            RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::new(NullDataStore),
+                Vec::new(),
+            )
+            .with_observer_factories(vec![embedding_factory.clone() as Arc<dyn ObserverFactory>]),
+        );
+        embedding_factory.init(Arc::clone(&record_store_factory));
+
+        // Health is clean before any write.
+        let before = embedding_factory.health();
+        assert!(
+            !before.is_degraded(),
+            "should not be degraded before any batch"
+        );
+        assert_eq!(before.batches_failed, 0);
+
+        // Write a record to a configured map — this is ACKed/persisted regardless
+        // of the embedding provider's health.
+        let store = record_store_factory.get_or_create("docs", 0);
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "title".to_string(),
+            Value::String("hello world".to_string()),
+        );
+        let record_value = RecordValue::Lww {
+            value: Value::Map(fields),
+            timestamp: Timestamp {
+                millis: 1_000_000,
+                counter: 0,
+                node_id: "client".to_string(),
+            },
+        };
+        store
+            .put(
+                "doc1",
+                record_value,
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
+            .await
+            .unwrap();
+
+        // Let the batch processor run and FAIL against the down provider.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // 1. The write survived: record still present.
+        let record = store.get("doc1", false).await.unwrap();
+        assert!(
+            record.is_some(),
+            "write must persist even when the provider is down"
+        );
+
+        // 2. But it carries NO embedding (write-back was skipped).
+        if let RecordValue::Lww {
+            value: Value::Map(ref m),
+            ..
+        } = record.unwrap().value
+        {
+            assert!(
+                !m.contains_key("_embedding"),
+                "record must NOT have _embedding when the provider failed"
+            );
+            assert!(m.contains_key("title"), "user fields must be preserved");
+        } else {
+            panic!("record value should be a LWW Map");
+        }
+
+        // 3. The degraded state is OBSERVABLE — the whole point of this fix.
+        let after = embedding_factory.health();
+        assert!(
+            after.is_degraded(),
+            "health must report degraded after a provider failure; got {after:?}"
+        );
+        assert!(
+            after.batches_failed >= 1,
+            "failed batch must be counted; got {after:?}"
+        );
+        assert!(
+            after.records_skipped >= 1,
+            "skipped record must be counted; got {after:?}"
+        );
+        assert_eq!(
+            after.records_embedded, 0,
+            "nothing should embed while down; got {after:?}"
+        );
+        assert!(after.consecutive_batch_failures >= 1, "got {after:?}");
+        // A provider outage routes to records_skipped, NOT the non-provider
+        // per-record write-back-failure counter.
+        assert_eq!(
+            after.records_writeback_failed, 0,
+            "provider outage must not count as a per-record write-back failure; got {after:?}"
+        );
+    }
+
+    /// Negative control (TODO-526): a HEALTHY provider must NOT report degraded
+    /// state — proving `is_degraded`/the counters track real failures, not noise.
+    #[tokio::test]
+    async fn healthy_provider_reports_clean_health() {
+        let vector_config = make_vector_config("docs", vec!["title".to_string()]);
+        let provider = make_noop_provider(4);
+
+        let embedding_factory = Arc::new(EmbeddingObserverFactory::new(
+            EmbeddingConfig {
+                batch_interval_ms: 50,
+                batch_flush_threshold: 500,
+            },
+            Arc::clone(&vector_config),
+            Arc::clone(&provider),
+        ));
+
+        let record_store_factory = Arc::new(
+            RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::new(NullDataStore),
+                Vec::new(),
+            )
+            .with_observer_factories(vec![embedding_factory.clone() as Arc<dyn ObserverFactory>]),
+        );
+        embedding_factory.init(Arc::clone(&record_store_factory));
+
+        let store = record_store_factory.get_or_create("docs", 0);
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "title".to_string(),
+            Value::String("hello world".to_string()),
+        );
+        let record_value = RecordValue::Lww {
+            value: Value::Map(fields),
+            timestamp: Timestamp {
+                millis: 1_000_000,
+                counter: 0,
+                node_id: "client".to_string(),
+            },
+        };
+        store
+            .put(
+                "doc1",
+                record_value,
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let health = embedding_factory.health();
+        assert!(
+            !health.is_degraded(),
+            "healthy provider must not be degraded; got {health:?}"
+        );
+        assert_eq!(
+            health.batches_failed, 0,
+            "no failures expected; got {health:?}"
+        );
+        assert_eq!(
+            health.records_skipped, 0,
+            "no skips expected; got {health:?}"
+        );
+        assert!(
+            health.batches_ok >= 1,
+            "a batch should have succeeded; got {health:?}"
+        );
+        assert!(
+            health.records_embedded >= 1,
+            "the record should have been embedded; got {health:?}"
+        );
+        assert_eq!(
+            health.records_writeback_failed, 0,
+            "a successful write-back must not be counted as a failure; got {health:?}"
+        );
     }
 }
