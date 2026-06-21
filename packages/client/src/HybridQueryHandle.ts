@@ -89,6 +89,16 @@ export class HybridQueryHandle<T> {
   // Track server data reception
   private hasReceivedServerData: boolean = false;
 
+  // Cached sorted-results snapshot for synchronous external-store reads
+  // (useSyncExternalStore.getSnapshot). Rebuilt lazily only when the result
+  // set actually changes; a referentially-stable array between mutations is
+  // what keeps React's useSyncExternalStore from looping.
+  private resultsSnapshot: HybridResultItem<T>[] = [];
+  private resultsSnapshotDirty: boolean = true;
+  // True once any result emission (local or server) has occurred — lets a
+  // synchronous consumer derive `loading` without waiting for the first notify.
+  private hasEmitted: boolean = false;
+
   // Pagination info
   private _paginationInfo: PaginationInfo = { hasMore: false, cursorStatus: 'none' };
   private paginationListeners: Set<(info: PaginationInfo) => void> = new Set();
@@ -275,10 +285,35 @@ export class HybridQueryHandle<T> {
   }
 
   private notify(): void {
+    // Result set changed — invalidate the cached snapshot and record emission.
+    this.resultsSnapshotDirty = true;
+    this.hasEmitted = true;
     const results = this.getSortedResults();
     for (const listener of this.listeners) {
       listener(results);
     }
+  }
+
+  /**
+   * Synchronous, referentially-stable snapshot of the current sorted result
+   * set for React 18 `useSyncExternalStore`. The array identity only changes
+   * when the result set changes (dirty flag flipped in notify()), preventing
+   * render loops.
+   */
+  public getSnapshot(): HybridResultItem<T>[] {
+    if (this.resultsSnapshotDirty) {
+      this.resultsSnapshot = this.getSortedResults();
+      this.resultsSnapshotDirty = false;
+    }
+    return this.resultsSnapshot;
+  }
+
+  /**
+   * Synchronous metadata for deriving `loading`. `hasEmitted` is true once any
+   * result (local or server) has been delivered.
+   */
+  public getSnapshotMeta(): { hasEmitted: boolean } {
+    return { hasEmitted: this.hasEmitted };
   }
 
   /**

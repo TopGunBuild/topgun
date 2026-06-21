@@ -283,6 +283,17 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         meta.principal.clone()
     };
 
+    // Per-connection inbound op-rate limiter (data-plane fairness). Aggregate
+    // load shedding (MAX_IN_FLIGHT + worker-inbox Overloaded) bounds total work
+    // but not a single abusive peer; this token bucket caps one connection's op
+    // rate so a flood is throttled (429 back-off) without starving others or
+    // tearing the connection down. Owned solely by this read loop — no locking.
+    let mut rate_limiter = crate::network::rate_limit::TokenBucket::new(
+        state.config.connection.data_plane_max_ops_per_sec,
+        state.config.connection.data_plane_ops_burst,
+        std::time::Instant::now(),
+    );
+
     // Phase 2: pipeline mode — each binary frame is dispatched concurrently.
     // The reader continues immediately after spawning, so multiple frames
     // can be in-flight simultaneously up to MAX_IN_FLIGHT.
@@ -307,6 +318,30 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         continue;
                     }
                 };
+
+                // Per-connection inbound op-rate limit. Cost = number of ops the
+                // frame carries (a batch counts as its op count) so one peer's
+                // flood is throttled fairly. On exceed we send a 429 back-off and
+                // drop the frame — the connection stays up and recovers as tokens
+                // refill (отбой, не падение).
+                let op_cost = inbound_op_cost(&tg_msg);
+                if !rate_limiter.try_consume(op_cost) {
+                    debug!(
+                        "rate limit exceeded for {:?} (op_cost={}); backing off",
+                        conn_id, op_cost
+                    );
+                    let err_msg = TopGunMessage::Error {
+                        payload: ErrorPayload {
+                            code: 429,
+                            message: "rate limit exceeded, slow down".to_string(),
+                            details: None,
+                        },
+                    };
+                    if let Ok(bytes) = rmp_serde::to_vec_named(&err_msg) {
+                        let _ = handle.tx.send(OutboundMessage::Binary(bytes)).await;
+                    }
+                    continue;
+                }
 
                 // Acquire a permit before spawning; if the semaphore is closed
                 // (shutdown signal), exit the reader loop.
@@ -414,6 +449,21 @@ fn release_session_state(state: &AppState, conn_id: ConnectionId) {
 /// individually. Non-BATCH messages are classified, have `connection_id`
 /// and `principal` set, and are routed through the pipeline. Each
 /// `OperationResponse` variant is mapped to the appropriate outbound message(s).
+/// Cost, in op-rate-limiter tokens, of an inbound frame.
+///
+/// A frame's cost is the number of individual ops it carries so a single peer
+/// cannot evade the per-connection rate limit by packing many ops into one
+/// `OpBatch`/`Batch` frame. Non-batch messages cost one token. Always at least
+/// 1 so an empty batch still consumes a token (and cannot be used to spin).
+fn inbound_op_cost(msg: &TopGunMessage) -> u32 {
+    let count = match msg {
+        TopGunMessage::OpBatch(b) => b.payload.ops.len(),
+        TopGunMessage::Batch(b) => b.count as usize,
+        _ => 1,
+    };
+    u32::try_from(count.max(1)).unwrap_or(u32::MAX)
+}
+
 async fn dispatch_message(
     tg_msg: TopGunMessage,
     conn_id: ConnectionId,
@@ -878,6 +928,43 @@ mod tests {
     use dashmap::DashSet;
     use topgun_core::messages::base::Query;
     use topgun_core::messages::search::SearchOptions;
+    use topgun_core::messages::{BatchMessage, ClientOp, OpBatchMessage, OpBatchPayload};
+
+    /// The op-rate limiter charges a frame by the number of ops it carries, so a
+    /// peer cannot evade the per-connection cap by packing ops into one batch.
+    #[test]
+    fn inbound_op_cost_counts_batch_ops() {
+        // A non-batch message costs one token.
+        let ping = TopGunMessage::Ping(topgun_core::messages::PingData { timestamp: 0 });
+        assert_eq!(inbound_op_cost(&ping), 1);
+
+        // An OpBatch costs its op count.
+        let three_ops = TopGunMessage::OpBatch(OpBatchMessage {
+            payload: OpBatchPayload {
+                ops: vec![
+                    ClientOp::default(),
+                    ClientOp::default(),
+                    ClientOp::default(),
+                ],
+                write_concern: None,
+                timeout: None,
+            },
+        });
+        assert_eq!(inbound_op_cost(&three_ops), 3);
+
+        // An empty batch still costs one token (cannot be used to spin for free).
+        let empty = TopGunMessage::OpBatch(OpBatchMessage {
+            payload: OpBatchPayload::default(),
+        });
+        assert_eq!(inbound_op_cost(&empty), 1);
+
+        // A transport Batch costs its declared message count.
+        let batch = TopGunMessage::Batch(BatchMessage {
+            count: 5,
+            data: vec![],
+        });
+        assert_eq!(inbound_op_cost(&batch), 5);
+    }
 
     /// Disconnect cleanup must drain a connection's standing subscriptions from
     /// every registry wired into `AppState`, not just lock/topic/counter. This

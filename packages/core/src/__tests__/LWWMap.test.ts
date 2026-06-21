@@ -150,3 +150,83 @@ describe('LWWMap (Last-Write-Wins CRDT)', () => {
     jest.restoreAllMocks();
   });
 });
+
+describe('LWWMap.adoptServerEcho (optimistic re-stamp reconciliation, F8)', () => {
+  // Same key + value under two timestamps: the client's optimistic HLC (which
+  // briefly outran the server) and the server's authoritative arrival-order HLC.
+  const key = 'doc';
+  const value = { title: 'hello', n: 1 };
+  const clientStamp = { millis: 2000, counter: 0, nodeId: 'client' };
+  const serverStamp = { millis: 1000, counter: 0, nodeId: 'server' };
+
+  function clientMapWithOptimisticWrite() {
+    const map = new LWWMap<string, typeof value>(new HLC('client'));
+    // Optimistic local write carrying the (ahead-of-server) client timestamp.
+    map.merge(key, { value, timestamp: clientStamp });
+    return map;
+  }
+
+  function serverMerkleRoot() {
+    const server = new LWWMap<string, typeof value>(new HLC('server'));
+    server.merge(key, { value, timestamp: serverStamp });
+    return server.getMerkleTree().getRootHash();
+  }
+
+  test('rejected echo of our own write diverges the Merkle root (the F8 bug)', () => {
+    // Negative control: without adoption, the old unconditional-merge behavior
+    // leaves the client on the client timestamp while the server is on the
+    // server timestamp — the Merkle roots disagree even though the value is
+    // identical, which is exactly the perpetual bucket-re-request bug.
+    const client = clientMapWithOptimisticWrite();
+    const accepted = client.merge(key, { value, timestamp: serverStamp });
+    expect(accepted).toBe(false); // server ts < client ts → rejected
+    expect(client.getMerkleTree().getRootHash()).not.toBe(serverMerkleRoot());
+  });
+
+  test('adopting the rejected echo converges the Merkle root with the server', () => {
+    const client = clientMapWithOptimisticWrite();
+    const accepted = client.merge(key, { value, timestamp: serverStamp });
+    expect(accepted).toBe(false);
+
+    const adopted = client.adoptServerEcho(key, { value, timestamp: serverStamp });
+    expect(adopted).toBe(true);
+
+    // Memory now carries the server's authoritative timestamp...
+    expect(client.getRecord(key)?.timestamp).toEqual(serverStamp);
+    // ...and the value is unchanged...
+    expect(client.get(key)).toEqual(value);
+    // ...so the Merkle root matches the server's after a single round-trip.
+    expect(client.getMerkleTree().getRootHash()).toBe(serverMerkleRoot());
+  });
+
+  test('does NOT adopt when a newer local write supersedes the echo (no data loss)', () => {
+    const client = clientMapWithOptimisticWrite();
+    // A second, newer local write changes the value before the first echo lands.
+    const newerValue = { title: 'hello', n: 2 };
+    const newerStamp = { millis: 3000, counter: 0, nodeId: 'client' };
+    client.merge(key, { value: newerValue, timestamp: newerStamp });
+
+    // The stale echo of the FIRST write arrives and is rejected by LWW...
+    expect(client.merge(key, { value, timestamp: serverStamp })).toBe(false);
+    // ...and must not be adopted, because its value differs from the live one.
+    expect(client.adoptServerEcho(key, { value, timestamp: serverStamp })).toBe(false);
+
+    // The newer local write is preserved intact.
+    expect(client.get(key)).toEqual(newerValue);
+    expect(client.getRecord(key)?.timestamp).toEqual(newerStamp);
+  });
+
+  test('returns false when there is no local record for the key', () => {
+    const client = new LWWMap<string, typeof value>(new HLC('client'));
+    expect(client.adoptServerEcho(key, { value, timestamp: serverStamp })).toBe(false);
+  });
+
+  test('reconciles a rejected tombstone echo (REMOVE) by adopting the server ts', () => {
+    const client = new LWWMap<string, typeof value>(new HLC('client'));
+    // Local optimistic delete at an ahead-of-server timestamp.
+    client.merge(key, { value: null, timestamp: clientStamp });
+    expect(client.merge(key, { value: null, timestamp: serverStamp })).toBe(false);
+    expect(client.adoptServerEcho(key, { value: null, timestamp: serverStamp })).toBe(true);
+    expect(client.getRecord(key)?.timestamp).toEqual(serverStamp);
+  });
+});

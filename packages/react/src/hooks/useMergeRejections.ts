@@ -1,6 +1,9 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useClient } from './useClient';
+import { useLocalStore } from './internal/useExternalStore';
 import type { MergeRejection } from '@topgunbuild/core';
+
+const EMPTY_REJECTIONS: MergeRejection[] = [];
 
 /**
  * Options for useMergeRejections hook.
@@ -80,7 +83,12 @@ export function useMergeRejections(
   const client = useClient();
   const { mapName, maxHistory = 100 } = options;
 
-  const [rejections, setRejections] = useState<MergeRejection[]>([]);
+  // Rejections accumulate in a ref read through useSyncExternalStore (tearing-/
+  // unmount-safe). The ref holds a referentially-stable array between notifies.
+  const rejectionsRef = useRef<MergeRejection[]>(EMPTY_REJECTIONS);
+  const getRejectionsSnapshot = useCallback(() => rejectionsRef.current, []);
+  const [rejections, notifyRejections] = useLocalStore(getRejectionsSnapshot);
+
   const [lastRejection, setLastRejection] = useState<MergeRejection | null>(null);
 
   useEffect(() => {
@@ -93,23 +101,19 @@ export function useMergeRejections(
       }
 
       setLastRejection(rejection);
-      setRejections((prev) => {
-        const next = [...prev, rejection];
-        // Limit history size
-        if (next.length > maxHistory) {
-          return next.slice(-maxHistory);
-        }
-        return next;
-      });
+      const next = [...rejectionsRef.current, rejection];
+      rejectionsRef.current = next.length > maxHistory ? next.slice(-maxHistory) : next;
+      notifyRejections();
     });
 
     return unsubscribe;
-  }, [client, mapName, maxHistory]);
+  }, [client, mapName, maxHistory, notifyRejections]);
 
   const clear = useCallback(() => {
-    setRejections([]);
+    rejectionsRef.current = EMPTY_REJECTIONS;
+    notifyRejections();
     setLastRejection(null);
-  }, []);
+  }, [notifyRejections]);
 
   return {
     rejections,

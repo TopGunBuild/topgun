@@ -219,6 +219,61 @@ describe('QueryManager', () => {
       expect(results[0].value.price).toBe(150);
       expect(results[1].value.price).toBe(200);
     });
+
+    // F11 (TODO-501): offline parity — the local engine used to ignore
+    // sort/limit and silently dropped cursor/groupBy/aggregations, so offline
+    // results diverged from the server's.
+    describe('offline parity: sort / limit / unsupported clauses (F11)', () => {
+      beforeEach(() => {
+        mockStorage.getAllKeys.mockResolvedValue(['items:1', 'items:2', 'items:3']);
+        mockStorage.get.mockImplementation(async (key: string) => {
+          const data: Record<string, any> = {
+            'items:1': { value: { name: 'b', price: 20 } },
+            'items:2': { value: { name: 'a', price: 30 } },
+            'items:3': { value: { name: 'c', price: 10 } },
+          };
+          return data[key];
+        });
+      });
+
+      it('applies sort offline (ascending) instead of returning storage order', async () => {
+        const results = await queryManager.runLocalQuery('items', { sort: { price: 'asc' } });
+        expect(results.map((r) => r.value.price)).toEqual([10, 20, 30]);
+      });
+
+      it('applies sort offline (descending)', async () => {
+        const results = await queryManager.runLocalQuery('items', { sort: { name: 'desc' } });
+        expect(results.map((r) => r.value.name)).toEqual(['c', 'b', 'a']);
+      });
+
+      it('clamps to limit offline after sorting (server-shaped top-N)', async () => {
+        const results = await queryManager.runLocalQuery('items', {
+          sort: { price: 'asc' },
+          limit: 2,
+        });
+        expect(results.map((r) => r.value.price)).toEqual([10, 20]);
+      });
+
+      it('rejects groupBy offline instead of silently ignoring it', async () => {
+        await expect(queryManager.runLocalQuery('items', { groupBy: ['name'] })).rejects.toThrow(
+          /offline query does not support groupBy/i,
+        );
+      });
+
+      it('rejects aggregations offline', async () => {
+        await expect(
+          queryManager.runLocalQuery('items', {
+            aggregations: [{ func: 'sum', field: 'price' } as any],
+          }),
+        ).rejects.toThrow(/aggregations/i);
+      });
+
+      it('rejects cursor offline', async () => {
+        await expect(queryManager.runLocalQuery('items', { cursor: 'abc' })).rejects.toThrow(
+          /cursor/i,
+        );
+      });
+    });
   });
 
   describe('runLocalHybridQuery', () => {

@@ -1,10 +1,13 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import type {
   HybridSearchHandle,
   HybridSearchHandleResult,
   HybridSearchSubscribeOptions,
 } from '@topgunbuild/client';
 import { useClient } from './useClient';
+import { useLocalStore } from './internal/useExternalStore';
+
+const EMPTY_HYBRID_SEARCH_RESULTS: HybridSearchHandleResult<unknown>[] = [];
 
 /**
  * Options for the useHybridSearchSubscribe hook.
@@ -82,12 +85,16 @@ export function useHybridSearchSubscribe<T = unknown>(
   options?: UseHybridSearchSubscribeOptions,
 ): UseHybridSearchSubscribeResult<T> {
   const client = useClient();
-  const [results, setResults] = useState<HybridSearchHandleResult<T>[]>([]);
+
+  // Results live in a ref read through useSyncExternalStore (no isMounted ref).
+  const resultsRef = useRef<HybridSearchHandleResult<T>[]>(
+    EMPTY_HYBRID_SEARCH_RESULTS as HybridSearchHandleResult<T>[],
+  );
+  const getResultsSnapshot = useCallback(() => resultsRef.current, []);
+  const [results, notifyResults] = useLocalStore(getResultsSnapshot);
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
-
-  // Track mount state to suppress state updates after unmount
-  const isMounted = useRef(true);
 
   // Store HybridSearchHandle for reuse across query/options changes
   const handleRef = useRef<HybridSearchHandle<T> | null>(null);
@@ -140,11 +147,11 @@ export function useHybridSearchSubscribe<T = unknown>(
         clearTimeout(debounceTimeoutRef.current);
       }
       debounceTimeoutRef.current = setTimeout(() => {
-        if (isMounted.current) {
-          setDebouncedQueryText(queryText);
-        }
+        setDebouncedQueryText(queryText);
       }, debounceMs);
       return () => {
+        // Clearing the pending timer on unmount/dep-change prevents a setState
+        // after unmount — no isMounted ref needed.
         if (debounceTimeoutRef.current) {
           clearTimeout(debounceTimeoutRef.current);
         }
@@ -155,12 +162,10 @@ export function useHybridSearchSubscribe<T = unknown>(
     }
   }, [queryText, debounceMs]);
 
-  // Effect 1 — handle lifecycle: dispose and reset on mapName/client change or unmount
+  // Effect 1 — handle lifecycle: dispose and reset on mapName/client change or
+  // unmount. useSyncExternalStore handles unmount safety for the results read.
   useEffect(() => {
-    isMounted.current = true;
-
     return () => {
-      isMounted.current = false;
       if (unsubscribeRef.current) {
         unsubscribeRef.current();
         unsubscribeRef.current = null;
@@ -186,7 +191,8 @@ export function useHybridSearchSubscribe<T = unknown>(
         handleRef.current.dispose();
         handleRef.current = null;
       }
-      setResults([]);
+      resultsRef.current = EMPTY_HYBRID_SEARCH_RESULTS as HybridSearchHandleResult<T>[];
+      notifyResults();
       setLoading(false);
       setError(null);
       return;
@@ -208,22 +214,20 @@ export function useHybridSearchSubscribe<T = unknown>(
         let hasReceivedFirstData = false;
 
         unsubscribeRef.current = handle.subscribe((newResults) => {
-          if (isMounted.current) {
-            setResults(newResults);
-            if (!hasReceivedFirstData) {
-              hasReceivedFirstData = true;
-              setLoading(false);
-            }
+          resultsRef.current =
+            typeof handle.getSnapshot === 'function' ? handle.getSnapshot() : newResults;
+          notifyResults();
+          if (!hasReceivedFirstData) {
+            hasReceivedFirstData = true;
+            setLoading(false);
           }
         });
       }
     } catch (err) {
-      if (isMounted.current) {
-        setError(err instanceof Error ? err : new Error(String(err)));
-        setLoading(false);
-      }
+      setError(err instanceof Error ? err : new Error(String(err)));
+      setLoading(false);
     }
-  }, [client, mapName, debouncedQueryText, searchOptions, enabled]);
+  }, [client, mapName, debouncedQueryText, searchOptions, enabled, notifyResults]);
 
   return useMemo(() => ({ results, loading, error }), [results, loading, error]);
 }

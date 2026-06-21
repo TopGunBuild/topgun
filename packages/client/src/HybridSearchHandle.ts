@@ -99,6 +99,13 @@ export class HybridSearchHandle<T = unknown> {
   /** Whether the handle has been disposed */
   private disposed = false;
 
+  // Cached sorted-results snapshot for synchronous external-store reads
+  // (useSyncExternalStore.getSnapshot). Rebuilt lazily only when results change
+  // (dirty flag flipped in notifyListeners). A referentially-stable array
+  // between mutations is what keeps React's useSyncExternalStore from looping.
+  private resultsSnapshot: HybridSearchHandleResult<T>[] = [];
+  private resultsSnapshotDirty = true;
+
   /** Reference to SyncEngine */
   private syncEngine: SyncEngine;
 
@@ -266,6 +273,20 @@ export class HybridSearchHandle<T = unknown> {
   }
 
   /**
+   * Synchronous, referentially-stable snapshot of the current sorted results
+   * for React 18 `useSyncExternalStore`. The array identity only changes when
+   * results change (dirty flag flipped in notifyListeners), preventing render
+   * loops.
+   */
+  getSnapshot(): HybridSearchHandleResult<T>[] {
+    if (this.resultsSnapshotDirty) {
+      this.resultsSnapshot = this.getResults();
+      this.resultsSnapshotDirty = false;
+    }
+    return this.resultsSnapshot;
+  }
+
+  /**
    * Update the search query text.
    * Sends HYBRID_SEARCH_UNSUB for the current subscriptionId, clears local results,
    * regenerates subscriptionId, then sends a fresh HYBRID_SEARCH_SUB.
@@ -393,6 +414,8 @@ export class HybridSearchHandle<T = unknown> {
    * misbehaving listener cannot silence the rest.
    */
   private notifyListeners(): void {
+    // Results changed — invalidate the cached snapshot for getSnapshot().
+    this.resultsSnapshotDirty = true;
     const results = this.getResults();
     for (const listener of this.listeners) {
       try {

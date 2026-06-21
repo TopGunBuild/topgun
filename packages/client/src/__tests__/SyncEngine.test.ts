@@ -772,6 +772,85 @@ describe('SyncEngine', () => {
       );
     });
 
+    test('adopts a rejected echo of our own write so disk matches memory (F8)', async () => {
+      // The client writes optimistically with a timestamp ahead of the server.
+      // The server re-stamps with a lower (arrival-order) timestamp and echoes
+      // the same value back. The echo loses LWW, but the old code persisted it
+      // unconditionally — disk got the server ts while memory kept the client ts
+      // (Merkle skew). The fix adopts the server record so memory AND disk land
+      // on the server timestamp.
+      syncEngine = new SyncEngine(config);
+      const hlc = syncEngine.getHLC();
+      const lwwMap = new LWWMap<string, any>(hlc);
+      syncEngine.registerMap('users', lwwMap);
+      await jest.runAllTimersAsync();
+
+      const value = { name: 'Alice' };
+      // Optimistic local write with a timestamp far ahead of the server.
+      lwwMap.merge('user1', {
+        value,
+        timestamp: { millis: 9_000_000, counter: 0, nodeId: 'client' },
+      });
+      mockStorage.put.mockClear();
+
+      const serverStamp = { millis: 1_000_000, counter: 0, nodeId: 'server' };
+      const ws = MockWebSocket.getLastInstance()!;
+      ws.simulateMessage({
+        type: 'SERVER_EVENT',
+        payload: {
+          mapName: 'users',
+          eventType: 'PUT',
+          key: 'user1',
+          record: { value, timestamp: serverStamp },
+        },
+      });
+      await jest.runAllTimersAsync();
+
+      // Memory adopted the server's authoritative timestamp (converged)...
+      expect(lwwMap.getRecord('user1')?.timestamp).toEqual(serverStamp);
+      // ...and disk was written with the same server record (no skew).
+      expect(mockStorage.put).toHaveBeenCalledWith(
+        'users:user1',
+        expect.objectContaining({ timestamp: serverStamp }),
+      );
+    });
+
+    test('does NOT persist a stale echo superseded by a newer local write (F8 no data loss)', async () => {
+      syncEngine = new SyncEngine(config);
+      const hlc = syncEngine.getHLC();
+      const lwwMap = new LWWMap<string, any>(hlc);
+      syncEngine.registerMap('users', lwwMap);
+      await jest.runAllTimersAsync();
+
+      // A newer local write the server hasn't seen yet.
+      const newer = { name: 'Bob' };
+      lwwMap.merge('user1', {
+        value: newer,
+        timestamp: { millis: 9_000_000, counter: 0, nodeId: 'client' },
+      });
+      mockStorage.put.mockClear();
+
+      // A stale echo of an OLDER write (different value, lower ts) arrives.
+      const ws = MockWebSocket.getLastInstance()!;
+      ws.simulateMessage({
+        type: 'SERVER_EVENT',
+        payload: {
+          mapName: 'users',
+          eventType: 'PUT',
+          key: 'user1',
+          record: {
+            value: { name: 'Alice' },
+            timestamp: { millis: 1_000_000, counter: 0, nodeId: 'server' },
+          },
+        },
+      });
+      await jest.runAllTimersAsync();
+
+      // The newer local write is preserved, and the stale echo was NOT persisted.
+      expect(lwwMap.get('user1')).toEqual(newer);
+      expect(mockStorage.put).not.toHaveBeenCalled();
+    });
+
     test('should handle SERVER_EVENT for ORMap add', async () => {
       syncEngine = new SyncEngine(config);
       const hlc = syncEngine.getHLC();

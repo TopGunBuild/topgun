@@ -68,6 +68,13 @@ export class SearchHandle<T = unknown> {
   /** Whether the handle has been disposed */
   private disposed = false;
 
+  // Cached sorted-results snapshot for synchronous external-store reads
+  // (useSyncExternalStore.getSnapshot). Rebuilt lazily only when results change
+  // (dirty flag flipped in notifyListeners). A referentially-stable array
+  // between mutations is what keeps React's useSyncExternalStore from looping.
+  private resultsSnapshot: SearchResult<T>[] = [];
+  private resultsSnapshotDirty = true;
+
   /** Reference to SyncEngine */
   private syncEngine: SyncEngine;
 
@@ -152,6 +159,21 @@ export class SearchHandle<T = unknown> {
     }
 
     return sorted;
+  }
+
+  /**
+   * Synchronous, referentially-stable snapshot of the current sorted results
+   * for React 18 `useSyncExternalStore`. The array identity only changes when
+   * results change (dirty flag flipped in notifyListeners), preventing render
+   * loops. Reflects whatever results are currently cached, so the first render
+   * after subscribing shows them synchronously.
+   */
+  getSnapshot(): SearchResult<T>[] {
+    if (this.resultsSnapshotDirty) {
+      this.resultsSnapshot = this.getResults();
+      this.resultsSnapshotDirty = false;
+    }
+    return this.resultsSnapshot;
   }
 
   /**
@@ -346,6 +368,8 @@ export class SearchHandle<T = unknown> {
    * Notify all listeners of result changes.
    */
   private notifyListeners(): void {
+    // Results changed — invalidate the cached snapshot for getSnapshot().
+    this.resultsSnapshotDirty = true;
     const results = this.getResults();
     for (const listener of this.listeners) {
       try {

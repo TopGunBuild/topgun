@@ -250,7 +250,7 @@ impl QueryMutationObserver {
         let msg = Message::QueryUpdate { payload };
         if let Ok(bytes) = rmp_serde::to_vec_named(&msg) {
             if let Some(handle) = self.connection_registry.get(sub.connection_id) {
-                let _ = handle.try_send(OutboundMessage::Binary(bytes));
+                let _ = handle.try_send_broadcast(OutboundMessage::Binary(bytes));
             }
         }
     }
