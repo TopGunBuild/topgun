@@ -7,9 +7,9 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
 
 use dashmap::DashMap;
+use parking_lot::RwLock;
 
 use topgun_core::messages::{JournalEventData, JournalEventType};
 
@@ -95,20 +95,20 @@ impl JournalStore {
     /// If the buffer is at capacity, the oldest event is evicted.
     ///
     /// Returns the assigned sequence number.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal `RwLock` is poisoned.
     pub fn append(&self, mut event: JournalEventData) -> u64 {
         // Disabled journal: never allocate or take the write lock. Keeps the
         // write path free of journal cost when an operator opts out.
         if !self.enabled {
             return 0;
         }
+        // Assign the sequence INSIDE the lock so sequence order and storage order
+        // can never diverge. With fetch_add outside the lock, two concurrent
+        // worker pipelines could take seq N and N+1 and then push in the opposite
+        // order, leaving the ring buffer (and every reader/subscriber) observing
+        // non-monotonic sequences. Holding the lock makes assign+insert atomic.
+        let mut events = self.events.write();
         let seq = self.next_sequence.fetch_add(1, Ordering::Relaxed);
         event.sequence = seq.to_string();
-
-        let mut events = self.events.write().expect("journal lock poisoned");
         if events.len() >= self.capacity {
             events.pop_front();
         }
@@ -187,10 +187,6 @@ impl JournalStore {
     ///
     /// Returns a tuple of `(events, has_more)` where `has_more` indicates
     /// whether additional events exist beyond the requested page.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal `RwLock` is poisoned.
     #[must_use]
     pub fn read(
         &self,
@@ -198,7 +194,7 @@ impl JournalStore {
         limit: u32,
         map_name: Option<&str>,
     ) -> (Vec<JournalEventData>, bool) {
-        let events = self.events.read().expect("journal lock poisoned");
+        let events = self.events.read();
 
         let filtered: Vec<JournalEventData> = events
             .iter()
@@ -344,6 +340,45 @@ mod tests {
         let (events, has_more) = store.read(0, 100, None);
         assert!(events.is_empty());
         assert!(!has_more);
+    }
+
+    #[test]
+    fn concurrent_appends_preserve_monotonic_storage_order() {
+        use std::sync::Arc;
+        use std::thread;
+
+        // Many threads append concurrently. Storage order must match sequence
+        // order: assigning the sequence outside the write lock would let a higher
+        // sequence land before a lower one in the deque. Guards that regression.
+        let store = Arc::new(JournalStore::new(100_000));
+        let threads = 8;
+        let per_thread = 2_000;
+
+        let handles: Vec<_> = (0..threads)
+            .map(|t| {
+                let store = Arc::clone(&store);
+                thread::spawn(move || {
+                    for i in 0..per_thread {
+                        store.append(make_event("m", &format!("{t}-{i}"), JournalEventType::PUT));
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("append thread panicked");
+        }
+
+        let (events, _) = store.read(0, u32::MAX, None);
+        assert_eq!(events.len(), threads * per_thread);
+        let mut prev = 0u64;
+        for e in &events {
+            let seq: u64 = e.sequence.parse().expect("sequence parses");
+            assert!(
+                seq > prev,
+                "storage order must be strictly increasing: {seq} after {prev}"
+            );
+            prev = seq;
+        }
     }
 
     #[test]

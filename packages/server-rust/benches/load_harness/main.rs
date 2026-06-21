@@ -641,9 +641,14 @@ fn build_services() -> (
 
     // Shared Event Journal store, default-on (mirrors production build_services)
     // so the harness measures the real journal-on write-path cost rather than a
-    // journal-off configuration that would never ship.
-    let journal_store =
-        Arc::new(topgun_server::service::domain::journal::JournalStore::new(10_000));
+    // journal-off configuration that would never ship. TOPGUN_JOURNAL_ENABLED=false
+    // toggles it off for an apples-to-apples on/off perf comparison.
+    let journal_enabled = std::env::var("TOPGUN_JOURNAL_ENABLED")
+        .map(|v| !matches!(v.trim().to_lowercase().as_str(), "false" | "0" | "no" | "off"))
+        .unwrap_or(true);
+    let journal_store = Arc::new(
+        topgun_server::service::domain::journal::JournalStore::with_enabled(10_000, journal_enabled),
+    );
     let crdt_svc = Arc::new(
         CrdtService::new(
             Arc::clone(&record_store_factory),

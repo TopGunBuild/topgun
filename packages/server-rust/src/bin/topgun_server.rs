@@ -1570,7 +1570,12 @@ fn build_services(
     // its per-write cost with TOPGUN_JOURNAL_ENABLED=false (reads then observe an
     // empty buffer — an explicit, startup-logged opt-out).
     let journal_enabled = std::env::var("TOPGUN_JOURNAL_ENABLED")
-        .map(|v| !matches!(v.to_lowercase().as_str(), "false" | "0"))
+        .map(|v| {
+            !matches!(
+                v.trim().to_lowercase().as_str(),
+                "false" | "0" | "no" | "off"
+            )
+        })
         .unwrap_or(true);
     let journal_capacity = std::env::var("TOPGUN_JOURNAL_CAPACITY")
         .ok()

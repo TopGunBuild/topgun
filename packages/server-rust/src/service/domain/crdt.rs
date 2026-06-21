@@ -680,6 +680,10 @@ impl CrdtService {
     /// A no-op when no journal is attached (unit tests) or the journal is
     /// disabled via `TOPGUN_JOURNAL_ENABLED=false`.
     ///
+    /// Push delivery is best-effort (at-most-once): a subscriber on a closed or
+    /// backpressured channel may miss the live event. The event is still in the
+    /// ring buffer, so subscribers recover gaps via `JournalRead`/`readFrom`.
+    ///
     /// `value` is captured from the applied record; `previous_value` is not yet
     /// populated (reserved — capturing it requires a dedicated pre-read on the
     /// hot path, tracked as a follow-up). Event type collapses the CRDT op kind

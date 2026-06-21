@@ -688,6 +688,7 @@ The server records every applied mutation (`PUT`/`OR_ADD` → `PUT`, `REMOVE`/`O
 
 - **In-memory, capped.** The buffer holds the most recent `TOPGUN_JOURNAL_CAPACITY` events (default 10,000); older events are evicted and the journal is not durable across a server restart.
 - **`previousValue` is not yet populated.** Events carry the new `value`; capturing the prior value on the hot path is a planned follow-up.
+- **Live push is best-effort (at-most-once).** A subscriber that is briefly disconnected or backpressured may miss a live event; use `readFrom`/`getLatestSequence` to backfill gaps from the buffer.
 - **Opt-out.** Set `TOPGUN_JOURNAL_ENABLED=false` on the server to disable capture; reads then return no events.
 
 ## Conflict Resolvers
