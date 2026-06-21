@@ -110,13 +110,14 @@ Prometheus metrics endpoint and structured-log hooks are planned.
 
 **Client wiring (both paths):**
 
+<!-- doctest run reason="flagship wiring — executed against the live server in CI" -->
 ```typescript
 import { TopGunClient } from '@topgunbuild/client';
 import { IDBAdapter } from '@topgunbuild/adapters';
 
 const client = new TopGunClient({
   serverUrl: 'ws://localhost:8080',  // optional — omit for local-only
-  storage: new IDBAdapter('my-app'),
+  storage: new IDBAdapter(),
 });
 client.start();
 

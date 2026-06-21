@@ -60,8 +60,8 @@ This guide is for Y.js users who want a server-backed, offline-first data layer 
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground"><code>doc.observe()</code> / <code>map.observe()</code></td>
-        <td className="py-3 px-4 text-foreground"><code>client.getMap(name).onChange(callback)</code> or <code>client.query(name, filter).subscribe(callback)</code></td>
-        <td className="py-3 px-4 text-neutral-500">Use <code>onChange</code> for raw local notifications; use <code>query().subscribe()</code> for filter-aware server-pushed deltas</td>
+        <td className="py-3 px-4 text-foreground"><code>client.getMap(name).subscribe(callback)</code> or <code>client.query(name, filter).subscribe(callback)</code></td>
+        <td className="py-3 px-4 text-neutral-500">Use <code>subscribe</code> for raw local notifications; use <code>query().subscribe()</code> for filter-aware server-pushed deltas</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground"><code>Y.transact(() =&gt; {"{...}"})</code></td>
@@ -204,9 +204,10 @@ client.getMap('todos').set('todo-1', {
 });
 
 // Raw local-change notifications (no filter):
-const unsubLocal = client.getMap('todos').onChange(() => {
+const unsubLocal = client.getMap('todos').subscribe((entries) => {
+  // `entries` is the current [key, value] snapshot on any local write.
   const todo = client.getMap('todos').get('todo-1');
-  console.log(todo);
+  console.log(entries.length, todo);
 });
 
 // Filter-aware server-pushed deltas:
@@ -221,7 +222,7 @@ const unsub = query.subscribe((results) => {
   </div>
 </div>
 
-`yMap.observe` and `client.getMap().onChange()` are the closest match — both fire on any write to the local map. For filter-aware deltas (e.g. "only show open todos"), use `client.query().subscribe()`, which Y.js does not provide because all filtering in Y.js is client-side over the full document.
+`yMap.observe` and `client.getMap().subscribe()` are the closest match — both fire on any write to the local map. For filter-aware deltas (e.g. "only show open todos"), use `client.query().subscribe()`, which Y.js does not provide because all filtering in Y.js is client-side over the full document.
 
 #### If you're using React
 
@@ -291,7 +292,7 @@ For a first migration, start on single-node. The partition-routed cluster mode w
 2. Cross-reference each against the Concept Mapping table above; mark mappings vs. gaps.
 3. Flag any feature that maps to a "Not supported" or "Roadmap" cell — those need an explicit decision (drop, work around, or wait for the roadmap item).
 4. Port the provider layer: replace `Y.Doc + WebsocketProvider + IndexeddbPersistence` with `new TopGunClient({ serverUrl, storage: new IDBAdapter() })` and `client.setAuthToken(jwt)`.
-5. Port reads/writes/observes one map at a time: replace `yMap.set` / `yMap.get` / `yMap.observe` with `client.getMap().set` / `.get` / `.onChange` (and `client.query().subscribe` for filter-aware server-pushed deltas).
+5. Port reads/writes/observes one map at a time: replace `yMap.set` / `yMap.get` / `yMap.observe` with `client.getMap().set` / `.get` / `.subscribe` (and `client.query().subscribe` for filter-aware server-pushed deltas).
 6. Backfill data: write a one-time migration script that reads from your Y.js persistence (e.g. y-leveldb / y-redis / y-mongodb) and writes to TopGun via the client SDK or directly to Postgres.
 
 <div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">

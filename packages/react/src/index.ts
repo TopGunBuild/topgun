@@ -9,6 +9,9 @@ export * from './hooks/useTopic';
 
 // Per-record sync-state type re-export from @topgunbuild/client
 export type { RecordSyncState } from '@topgunbuild/client';
+// Query result item type — the element type of `useQuery().data` (`T & { _key }`).
+// Re-exported so apps can annotate component props with the hook's own item type.
+export type { QueryResultItem } from '@topgunbuild/client';
 export * from './hooks/usePNCounter';
 export * from './hooks/useEventJournal';
 

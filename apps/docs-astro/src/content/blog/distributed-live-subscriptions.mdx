@@ -230,7 +230,6 @@ Distributed live subscriptions unlock patterns that weren't practical before:
 // Monitor orders across all regions
 const handle = client.searchSubscribe('orders', 'status:pending', {
   limit: 100,
-  sort: { createdAt: 'desc' }
 });
 
 handle.subscribe((orders) => {

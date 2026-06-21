@@ -244,10 +244,12 @@ const remote: Timestamp = {
 };
 ```
 
-TopGun detects this with a drift threshold:
+TopGun detects this with a configurable drift ceiling — the `maxDriftMs` option
+on the HLC (default `60_000` ms):
 
 ```typescript
-if (remote.millis > systemTime + HLC.MAX_DRIFT) {
+const maxDriftMs = 60_000; // HLC option, default 60s
+if (remote.millis > systemTime + maxDriftMs) {
   console.warn(`Clock drift detected: Remote ${remote.millis} ahead of local ${systemTime}`);
 }
 ```

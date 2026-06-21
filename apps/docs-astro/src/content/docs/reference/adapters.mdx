@@ -121,15 +121,34 @@ An at-rest-encryption wrapper around any `IStorageAdapter`. Exported from `@topg
 import { TopGunClient, EncryptedStorageAdapter } from '@topgunbuild/client';
 import { IDBAdapter } from '@topgunbuild/adapters';
 
-const encrypted = new EncryptedStorageAdapter(
-  new IDBAdapter(),
-  { passphrase: 'user-provided-secret' }
+// EncryptedStorageAdapter takes a pre-derived AES-GCM CryptoKey. Derive one
+// from a user passphrase with PBKDF2 (Web Crypto). Persist `salt` with your app
+// config — the same salt must be reused to unseal on the next session.
+const salt = crypto.getRandomValues(new Uint8Array(16));
+const baseKey = await crypto.subtle.importKey(
+  'raw',
+  new TextEncoder().encode('user-provided-secret'),
+  'PBKDF2',
+  false,
+  ['deriveKey'],
 );
+const key = await crypto.subtle.deriveKey(
+  { name: 'PBKDF2', salt, iterations: 600_000, hash: 'SHA-256' },
+  baseKey,
+  { name: 'AES-GCM', length: 256 },
+  false,
+  ['encrypt', 'decrypt'],
+);
+
+const encrypted = new EncryptedStorageAdapter(new IDBAdapter(), key);
 
 const client = new TopGunClient({
   storage: encrypted,
 });
 ```
+
+> A `fromPassphrase()` convenience that performs this derivation for you is on
+> the roadmap — see TODO-527.
 
 Values are AES-GCM-encrypted before they hit the underlying adapter. Keys and metadata stay plaintext so the sync engine and Merkle tree can still iterate without unsealing every record.
 
