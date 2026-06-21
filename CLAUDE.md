@@ -184,8 +184,10 @@ The server reads the following environment variables at startup. Defaults are tu
 - `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` (default: `1000`) — how often the write-behind buffer flushes to the durable backend.
 - `TOPGUN_WRITEBEHIND_BATCH_SIZE` (default: `100`) — maximum records flushed per write-behind tick.
 - `TOPGUN_WRITEBEHIND_CAPACITY` (default: `10000`) — bounded buffer size; once full, writes apply pressure to the producer rather than allocating without limit.
+- `TOPGUN_JOURNAL_ENABLED` (default: `true`) — Event Journal capture. When `true`, every applied mutation is appended to an in-memory ring buffer and pushed to matching `JournalSubscribe` connections (powers `getEventJournal`/`useEventJournal`). Set `false` to shed the per-write journal cost; reads then observe an empty buffer — an explicit, startup-logged opt-out, not a silent dark feature.
+- `TOPGUN_JOURNAL_CAPACITY` (default: `10000`) — Event Journal ring-buffer size. Oldest events are evicted once full. The journal is in-memory only and not durable across restart.
 
-At startup the server emits a single `tracing::info!` line containing the effective `max_ram_mb`, water marks, eviction interval, and `write_behind_enabled` so operators can confirm the active configuration without reading source.
+At startup the server emits a single `tracing::info!` line containing the effective `max_ram_mb`, water marks, eviction interval, and `write_behind_enabled` so operators can confirm the active configuration without reading source. A second `event journal initialized` line reports the effective `journal_enabled` and `journal_capacity`.
 
 Note: Write-Behind buffers acked writes for ~1s before persisting to disk. Acceptable for the demo server tier; crash-safe shutdown drain + WAL recovery land separately (TODO-339, post-HN). Until that lands, an unclean shutdown can lose buffered writes that have not yet been flushed.
 

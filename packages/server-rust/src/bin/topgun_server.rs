@@ -64,7 +64,7 @@ use topgun_server::service::domain::embedding::{
 use topgun_server::service::domain::index::IndexObserverFactory;
 use topgun_server::service::domain::journal::JournalStore;
 use topgun_server::service::domain::messaging::{MessagingService, TopicRegistry};
-use topgun_server::service::domain::persistence::PersistenceService;
+use topgun_server::service::domain::persistence::{PersistenceService, DEFAULT_JOURNAL_CAPACITY};
 use topgun_server::service::domain::query::{QueryRegistry, QueryService};
 use topgun_server::service::domain::schema::SchemaService;
 use topgun_server::service::domain::search::{
@@ -1564,14 +1564,45 @@ fn build_services(
         ))
     };
 
-    // Arc-wrap all domain services so they can be shared across N+1 worker pipelines.
-    let crdt_svc = Arc::new(CrdtService::new(
-        Arc::clone(&record_store_factory),
-        Arc::clone(&connection_registry),
-        write_validator,
-        Arc::clone(&query_registry),
-        Arc::new(SchemaService::new()),
+    // Event Journal: one shared ring buffer, written by the CRDT mutation path
+    // and read/subscribed by the persistence service. Enabled by default so
+    // getEventJournal/useEventJournal work out of the box; an operator can shed
+    // its per-write cost with TOPGUN_JOURNAL_ENABLED=false (reads then observe an
+    // empty buffer — an explicit, startup-logged opt-out).
+    let journal_enabled = std::env::var("TOPGUN_JOURNAL_ENABLED")
+        .map(|v| {
+            !matches!(
+                v.trim().to_lowercase().as_str(),
+                "false" | "0" | "no" | "off"
+            )
+        })
+        .unwrap_or(true);
+    let journal_capacity = std::env::var("TOPGUN_JOURNAL_CAPACITY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|c| *c > 0)
+        .unwrap_or(DEFAULT_JOURNAL_CAPACITY);
+    let journal_store = Arc::new(JournalStore::with_enabled(
+        journal_capacity,
+        journal_enabled,
     ));
+    tracing::info!(
+        journal_enabled,
+        journal_capacity,
+        "event journal initialized"
+    );
+
+    // Arc-wrap all domain services so they can be shared across N+1 worker pipelines.
+    let crdt_svc = Arc::new(
+        CrdtService::new(
+            Arc::clone(&record_store_factory),
+            Arc::clone(&connection_registry),
+            write_validator,
+            Arc::clone(&query_registry),
+            Arc::new(SchemaService::new()),
+        )
+        .with_journal(Arc::clone(&journal_store)),
+    );
     let sync_svc = Arc::new(SyncService::new(
         merkle_manager,
         Arc::clone(&record_store_factory),
@@ -1647,15 +1678,16 @@ fn build_services(
         embedding_setup.query_provider.clone(),
     );
     search_svc.set_hybrid_engine(Arc::new(hybrid_engine));
-    let persistence_svc = Arc::new(PersistenceService::new(
+    let persistence_svc = Arc::new(PersistenceService::with_journal_store(
         Arc::clone(&connection_registry),
         node_id,
+        Arc::clone(&journal_store),
     ));
     // Capture Arc<CounterRegistry> before persistence_svc is moved into the closure.
     let counter_registry_arc = persistence_svc.counter_registry_arc();
-    // Capture Arc<JournalStore> before persistence_svc is moved into the closure,
-    // so disconnect cleanup can prune journal subscriptions held per connection.
-    let journal_store_arc = persistence_svc.journal_store_arc();
+    // The CRDT write path and persistence read/subscribe path share this store;
+    // reuse it for disconnect cleanup (pruning per-connection journal subscriptions).
+    let journal_store_arc = Arc::clone(&journal_store);
 
     // Factory closure: creates a fresh OperationRouter + pipeline per worker.
     // Domain services are Arc-cloned (cheap reference count bump), while

@@ -75,13 +75,12 @@ pub use client_events::{
 pub use messaging::{
     ConflictResolver, CounterRequestPayload, CounterStatePayload, EntryProcessBatchData,
     EntryProcessBatchResponseData, EntryProcessData, EntryProcessKeyResult,
-    EntryProcessResponseData, EntryProcessor, JournalEventData, JournalEventMessageData,
-    JournalEventType, JournalReadData, JournalReadResponseData, JournalSubscribeData,
-    JournalUnsubscribeData, ListResolversData, ListResolversResponseData, LockReleasePayload,
-    LockRequestPayload, MergeRejectedData, PNCounterState, PingData, PongData,
-    RegisterResolverData, RegisterResolverResponseData, ResolverInfo, TopicMessageEventPayload,
-    TopicPubPayload, TopicSubPayload, TopicUnsubPayload, UnregisterResolverData,
-    UnregisterResolverResponseData,
+    EntryProcessResponseData, EntryProcessor, JournalEventData, JournalEventType, JournalReadData,
+    JournalReadResponseData, JournalSubscribeData, JournalUnsubscribeData, ListResolversData,
+    ListResolversResponseData, LockReleasePayload, LockRequestPayload, MergeRejectedData,
+    PNCounterState, PingData, PongData, RegisterResolverData, RegisterResolverResponseData,
+    ResolverInfo, TopicMessageEventPayload, TopicPubPayload, TopicSubPayload, TopicUnsubPayload,
+    UnregisterResolverData, UnregisterResolverResponseData,
 };
 
 pub use http_sync::{
@@ -403,7 +402,7 @@ pub enum Message {
 
     /// Server delivers a journal event (uses `event` key, not `payload`).
     #[serde(rename = "JOURNAL_EVENT")]
-    JournalEvent { event: JournalEventMessageData },
+    JournalEvent { event: JournalEventData },
 
     /// Client reads journal entries.
     #[serde(rename = "JOURNAL_READ")]
@@ -1362,14 +1361,14 @@ mod messaging_tests {
     use super::messaging::{
         ConflictResolver, CounterRequestPayload, CounterStatePayload, EntryProcessBatchData,
         EntryProcessBatchResponseData, EntryProcessData, EntryProcessKeyResult,
-        EntryProcessResponseData, EntryProcessor, JournalEventData, JournalEventMessageData,
-        JournalEventType, JournalReadData, JournalReadResponseData, JournalSubscribeData,
-        JournalUnsubscribeData, ListResolversData, ListResolversResponseData, LockReleasePayload,
-        LockRequestPayload, MergeRejectedData, PNCounterState, PingData, PongData,
-        RegisterResolverData, RegisterResolverResponseData, ResolverInfo, TopicMessageEventPayload,
-        TopicPubPayload, TopicSubPayload, TopicUnsubPayload, UnregisterResolverData,
-        UnregisterResolverResponseData,
+        EntryProcessResponseData, EntryProcessor, JournalEventData, JournalEventType,
+        JournalReadData, JournalReadResponseData, JournalSubscribeData, JournalUnsubscribeData,
+        ListResolversData, ListResolversResponseData, LockReleasePayload, LockRequestPayload,
+        MergeRejectedData, PNCounterState, PingData, PongData, RegisterResolverData,
+        RegisterResolverResponseData, ResolverInfo, TopicMessageEventPayload, TopicPubPayload,
+        TopicSubPayload, TopicUnsubPayload, UnregisterResolverData, UnregisterResolverResponseData,
     };
+    use super::Message;
 
     // ---- Topic payloads ----
 
@@ -1823,27 +1822,49 @@ mod messaging_tests {
     }
 
     #[test]
-    fn journal_event_message_data_roundtrip() {
-        let data = JournalEventMessageData {
-            event: JournalEventData {
-                sequence: "seq-050".into(),
-                event_type: JournalEventType::UPDATE,
-                map_name: "orders".into(),
-                key: "order-7".into(),
-                value: Some(rmpv::Value::String("shipped".into())),
-                previous_value: Some(rmpv::Value::String("pending".into())),
-                timestamp: Timestamp {
-                    millis: 1_700_000_000_100,
-                    counter: 3,
-                    node_id: "node-1".into(),
-                },
+    fn journal_event_message_wire_shape() {
+        // Contract: JOURNAL_EVENT serializes as { type, event: <JournalEventData> }
+        // (single-nested), matching JournalEventMessageSchema in messaging-schemas.ts
+        // and the client's EventJournalReader (reads `message.event` directly). A
+        // prior intermediate wrapper double-nested this (`event.event`); guard against
+        // regressing to that shape.
+        let event = JournalEventData {
+            sequence: "50".into(),
+            event_type: JournalEventType::UPDATE,
+            map_name: "orders".into(),
+            key: "order-7".into(),
+            value: Some(rmpv::Value::String("shipped".into())),
+            previous_value: Some(rmpv::Value::String("pending".into())),
+            timestamp: Timestamp {
+                millis: 1_700_000_000_100,
+                counter: 3,
                 node_id: "node-1".into(),
-                metadata: None,
             },
+            node_id: "node-1".into(),
+            metadata: None,
         };
-        let bytes = rmp_serde::to_vec_named(&data).expect("serialize");
-        let decoded: JournalEventMessageData = rmp_serde::from_slice(&bytes).expect("deserialize");
-        assert_eq!(data, decoded);
+        let msg = Message::JournalEvent {
+            event: event.clone(),
+        };
+
+        // Round-trips through the Message enum unchanged.
+        let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
+        let decoded: Message = rmp_serde::from_slice(&bytes).expect("deserialize");
+        assert_eq!(msg, decoded);
+
+        // `event` is the JournalEventData itself, not a nested wrapper.
+        let as_value: rmpv::Value = rmp_serde::from_slice(&bytes).expect("to value");
+        let map = as_value.as_map().expect("message is a map");
+        let event_field = map
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("event"))
+            .map(|(_, v)| v)
+            .expect("event field present");
+        let event_map = event_field.as_map().expect("event is a map");
+        assert!(
+            event_map.iter().any(|(k, _)| k.as_str() == Some("sequence")),
+            "event must carry JournalEventData fields directly (single-nested), got {event_field:?}"
+        );
     }
 
     #[test]
