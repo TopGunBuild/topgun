@@ -794,6 +794,7 @@ export interface ISqlClient {
     columns: string[];
     rows: unknown[][];
     error?: string;
+    code?: string;
   }): void;
 
   /**

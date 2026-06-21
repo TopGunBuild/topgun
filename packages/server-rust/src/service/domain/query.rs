@@ -46,6 +46,11 @@ use crate::storage::mutation_observer::MutationObserver;
 use crate::storage::record::{Record, RecordValue};
 use crate::storage::RecordStoreFactory;
 
+/// Machine-distinguishable `SqlQueryResp.code` returned when SQL is unavailable
+/// (the `datafusion` feature is compiled out, or compiled in without a wired
+/// backend). Clients match on this code rather than the human-readable message.
+pub const SQL_FEATURE_DISABLED_CODE: &str = "FEATURE_DISABLED";
+
 // ---------------------------------------------------------------------------
 // QuerySubscription
 // ---------------------------------------------------------------------------
@@ -1009,17 +1014,29 @@ impl QueryService {
     ///
     /// When the `datafusion` feature is enabled and a `SqlQueryBackend` is
     /// configured, executes the SQL string and converts Arrow `RecordBatch`es
-    /// to `rmpv::Value` rows for wire transport. Without the feature or backend,
-    /// returns an error indicating SQL is not available.
+    /// to `rmpv::Value` rows for wire transport.
+    ///
+    /// When SQL is not available — the `datafusion` feature is compiled out, or
+    /// it is compiled in but no `SqlQueryBackend` is wired — this returns a
+    /// `SqlQueryResp` carrying `code = FEATURE_DISABLED` rather than an
+    /// `OperationError`. That distinction matters: a single-message dispatch
+    /// error is logged and dropped (the client would hang until its request
+    /// timeout, indistinguishable from a network stall), whereas a `SqlQueryResp`
+    /// is correlated back to the caller by `query_id` and surfaces immediately as
+    /// a machine-distinguishable "feature disabled" signal — not an opaque
+    /// "internal error".
     #[cfg(feature = "datafusion")]
     async fn handle_sql_query(
         &self,
         _ctx: &crate::service::operation::OperationContext,
         payload: &topgun_core::messages::query::SqlQueryPayload,
     ) -> Result<OperationResponse, OperationError> {
-        let sql_backend = self.sql_query_backend.as_ref().ok_or_else(|| {
-            OperationError::Internal(anyhow::anyhow!("SQL requires datafusion feature"))
-        })?;
+        let Some(sql_backend) = self.sql_query_backend.as_ref() else {
+            return Ok(Self::sql_feature_disabled_resp(
+                &payload.query_id,
+                "SQL is not available: the DataFusion backend is not configured on this server",
+            ));
+        };
 
         match sql_backend.execute_sql(&payload.sql).await {
             Ok(batches) => {
@@ -1029,6 +1046,7 @@ impl QueryService {
                     columns,
                     rows,
                     error: None,
+                    code: None,
                 };
                 Ok(OperationResponse::Message(Box::new(
                     Message::SqlQueryResp {
@@ -1042,6 +1060,7 @@ impl QueryService {
                     columns: vec![],
                     rows: vec![],
                     error: Some(e.to_string()),
+                    code: None,
                 };
                 Ok(OperationResponse::Message(Box::new(
                     Message::SqlQueryResp {
@@ -1053,16 +1072,36 @@ impl QueryService {
     }
 
     /// Handles a `SqlQuery` operation when the `datafusion` feature is disabled.
+    ///
+    /// Returns a `SqlQueryResp` with `code = FEATURE_DISABLED` (see the
+    /// feature-enabled variant for why this is a response, not an error).
     #[cfg(not(feature = "datafusion"))]
     #[allow(clippy::unused_async)]
     async fn handle_sql_query(
         &self,
         _ctx: &crate::service::operation::OperationContext,
-        _payload: &topgun_core::messages::query::SqlQueryPayload,
+        payload: &topgun_core::messages::query::SqlQueryPayload,
     ) -> Result<OperationResponse, OperationError> {
-        Err(OperationError::Internal(anyhow::anyhow!(
-            "SQL requires datafusion feature"
-        )))
+        Ok(Self::sql_feature_disabled_resp(
+            &payload.query_id,
+            "SQL is not available: this server was built without the datafusion feature",
+        ))
+    }
+
+    /// Builds a `SqlQueryResp` signalling that SQL is unavailable, tagged with the
+    /// machine-distinguishable `FEATURE_DISABLED` code so the client can tell a
+    /// disabled feature apart from a query/execution failure without string
+    /// matching the human-readable message.
+    fn sql_feature_disabled_resp(query_id: &str, message: &str) -> OperationResponse {
+        OperationResponse::Message(Box::new(Message::SqlQueryResp {
+            payload: topgun_core::messages::query::SqlQueryRespPayload {
+                query_id: query_id.to_string(),
+                columns: vec![],
+                rows: vec![],
+                error: Some(message.to_string()),
+                code: Some(SQL_FEATURE_DISABLED_CODE.to_string()),
+            },
+        }))
     }
 
     /// Handles a `VectorSearch` operation.
@@ -2014,6 +2053,53 @@ mod tests {
             None,
         );
         assert_eq!(svc.name(), "query");
+    }
+
+    /// SQL is not wired by default (no `SqlQueryBackend`), and the default build
+    /// has the `datafusion` feature compiled out. Either way `handle_sql_query`
+    /// must return a `SqlQueryResp` tagged `FEATURE_DISABLED` — correlated by
+    /// `query_id` — rather than an `OperationError` that single-message dispatch
+    /// would silently drop (leaving the client to hang until its timeout).
+    #[tokio::test]
+    async fn sql_query_unavailable_returns_feature_disabled_resp() {
+        let registry = Arc::new(QueryRegistry::new());
+        let factory = make_factory();
+        let conn_registry = Arc::new(ConnectionRegistry::new());
+        let svc = QueryService::new(
+            registry,
+            factory,
+            conn_registry,
+            None,
+            10_000,
+            None,
+            #[cfg(feature = "datafusion")]
+            None,
+        );
+
+        let ctx = make_ctx(None);
+        let payload = topgun_core::messages::query::SqlQueryPayload {
+            sql: "SELECT * FROM users".to_string(),
+            query_id: "sq-test-1".to_string(),
+        };
+
+        let resp = svc
+            .handle_sql_query(&ctx, &payload)
+            .await
+            .expect("unavailable SQL must be a response, not an error");
+
+        match resp {
+            OperationResponse::Message(msg) => match *msg {
+                Message::SqlQueryResp { payload: p } => {
+                    assert_eq!(p.query_id, "sq-test-1");
+                    assert!(p.columns.is_empty());
+                    assert!(p.rows.is_empty());
+                    assert_eq!(p.code.as_deref(), Some(SQL_FEATURE_DISABLED_CODE));
+                    assert!(p.error.is_some(), "human-readable message must be set");
+                }
+                other => panic!("expected SqlQueryResp, got: {other:?}"),
+            },
+            other => panic!("expected a single Message response, got: {other:?}"),
+        }
     }
 
     #[tokio::test]

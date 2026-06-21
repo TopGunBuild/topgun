@@ -8,6 +8,7 @@
  * - Cleanup on close
  */
 
+import { SqlError } from '../errors/SqlError';
 import { logger } from '../utils/logger';
 import type { ISqlClient, SqlClientConfig, SqlQueryResult } from './types';
 
@@ -107,13 +108,17 @@ export class SqlClient implements ISqlClient {
     columns: string[];
     rows: unknown[][];
     error?: string;
+    code?: string;
   }): void {
     const pending = this.pendingSqlRequests.get(payload.queryId);
     if (pending) {
       this.pendingSqlRequests.delete(payload.queryId);
 
       if (payload.error) {
-        pending.reject(new Error(payload.error));
+        // Surface the server's machine-distinguishable code (e.g. FEATURE_DISABLED
+        // when the server has no SQL backend) so callers can branch on err.code
+        // instead of string-matching the message.
+        pending.reject(new SqlError(payload.error, payload.code));
       } else {
         pending.resolve({ columns: payload.columns, rows: payload.rows });
       }
