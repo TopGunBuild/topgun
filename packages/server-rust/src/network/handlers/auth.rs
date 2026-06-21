@@ -49,6 +49,44 @@ pub(crate) fn decode_jwt_key(secret: &str) -> Result<(Algorithm, DecodingKey), S
     }
 }
 
+/// Applies optional issuer/audience validation to a JWT `Validation`.
+///
+/// When `issuer`/`audience` are configured (operator sets `TOPGUN_JWT_ISSUER` /
+/// `TOPGUN_JWT_AUDIENCE`), the request path enforces them — closing the gap where
+/// a token minted by a different issuer or for a different audience was accepted
+/// whenever `jwt_secret` was pointed at a shared `IdP` key. When unset, the prior
+/// behavior (no `iss`/`aud` check) is preserved so TopGun-minted tokens keep
+/// working. `exp` enforcement (the default required claim) is untouched.
+pub(crate) fn apply_iss_aud_validation(
+    validation: &mut Validation,
+    issuer: Option<&str>,
+    audience: Option<&str>,
+) {
+    // Build the required-spec-claims set so any enforced claim must be PRESENT,
+    // not merely consistent-if-present. jsonwebtoken lists only `exp` by default,
+    // so without this a token omitting `aud`/`iss` would slip past an enforced
+    // check. `exp` is always kept (token-expiry enforcement).
+    let mut required: Vec<&str> = vec!["exp"];
+
+    if let Some(aud) = audience {
+        validation.set_audience(&[aud]);
+        validation.validate_aud = true;
+        required.push("aud");
+    } else {
+        // No configured audience: keep audience validation off (TopGun tokens
+        // carry no `aud`). jsonwebtoken would otherwise reject a missing `aud`.
+        validation.validate_aud = false;
+    }
+    if let Some(iss) = issuer {
+        validation.set_issuer(&[iss]);
+        required.push("iss");
+    }
+
+    if required.len() > 1 {
+        validation.set_required_spec_claims(&required);
+    }
+}
+
 /// Errors that can occur during authentication.
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
@@ -90,16 +128,37 @@ pub struct AuthHandler {
     /// Optional custom post-JWT-verification validator.
     /// `None` means accept all valid JWTs (default behavior).
     auth_validator: Option<Arc<dyn AuthValidator>>,
+    /// Expected JWT issuer; `None` disables issuer checking (default).
+    issuer: Option<String>,
+    /// Expected JWT audience; `None` disables audience checking (default).
+    audience: Option<String>,
 }
 
 impl AuthHandler {
     /// Create a new `AuthHandler` with the given JWT secret and optional validator.
+    /// Issuer/audience validation are disabled until set via
+    /// [`AuthHandler::with_issuer_audience`].
     #[must_use]
     pub fn new(jwt_secret: String, auth_validator: Option<Arc<dyn AuthValidator>>) -> Self {
         Self {
             jwt_secret,
             auth_validator,
+            issuer: None,
+            audience: None,
         }
+    }
+
+    /// Enables request-path issuer/audience validation (audit F7). Each is
+    /// independently optional; `None` leaves that check disabled.
+    #[must_use]
+    pub fn with_issuer_audience(
+        mut self,
+        issuer: Option<String>,
+        audience: Option<String>,
+    ) -> Self {
+        self.issuer = issuer;
+        self.audience = audience;
+        self
     }
 
     /// Send `AUTH_REQUIRED` message to the client.
@@ -154,10 +213,14 @@ impl AuthHandler {
         let (algorithm, key) = decode_jwt_key(&self.jwt_secret)
             .map_err(|reason| AuthError::InvalidToken { reason })?;
         let mut validation = Validation::new(algorithm);
-        // Disable audience/issuer checks since TopGun tokens do not use them.
-        // Do NOT clear required_spec_claims: the jsonwebtoken crate defaults to
-        // requiring `exp`, which enforces token expiry validation.
-        validation.validate_aud = false;
+        // Apply optional issuer/audience checks (off unless configured). Do NOT
+        // clear required_spec_claims: the jsonwebtoken crate defaults to requiring
+        // `exp`, which enforces token expiry validation.
+        apply_iss_aud_validation(
+            &mut validation,
+            self.issuer.as_deref(),
+            self.audience.as_deref(),
+        );
         validation.leeway = leeway;
 
         match jsonwebtoken::decode::<serde_json::Value>(&auth_msg.token, &key, &validation) {
@@ -622,6 +685,117 @@ RQIDAQAB
         } else {
             panic!("expected AuthFail message");
         }
+    }
+
+    // ── F7: request-path issuer/audience validation ──────────────────────────
+
+    /// Claims carrying optional `aud`/`iss` for iss/aud validation tests.
+    #[derive(Serialize)]
+    struct ClaimsAudIss {
+        sub: String,
+        exp: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        aud: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        iss: Option<String>,
+    }
+
+    fn make_token_aud_iss(sub: &str, aud: Option<&str>, iss: Option<&str>) -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = ClaimsAudIss {
+            sub: sub.to_owned(),
+            exp: now + 3600,
+            aud: aud.map(str::to_owned),
+            iss: iss.map(str::to_owned),
+        };
+        jsonwebtoken::encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(TEST_SECRET.as_bytes()),
+        )
+        .unwrap()
+    }
+
+    async fn run_auth(handler: &AuthHandler, token: String) -> Result<Principal, AuthError> {
+        let (tx, _rx) = mpsc::channel(8);
+        let auth_msg = AuthMessage {
+            token,
+            protocol_version: None,
+        };
+        handler.handle_auth(&auth_msg, &tx, 60, false).await
+    }
+
+    // Configured audience accepts a matching `aud`.
+    #[tokio::test]
+    async fn aud_configured_accepts_matching() {
+        let handler = AuthHandler::new(TEST_SECRET.to_owned(), None)
+            .with_issuer_audience(None, Some("topgun".to_string()));
+        let token = make_token_aud_iss("u1", Some("topgun"), None);
+        assert!(run_auth(&handler, token).await.is_ok());
+    }
+
+    // F7 core: configured audience rejects a token minted for a different audience.
+    #[tokio::test]
+    async fn aud_configured_rejects_wrong_audience() {
+        let handler = AuthHandler::new(TEST_SECRET.to_owned(), None)
+            .with_issuer_audience(None, Some("topgun".to_string()));
+        let token = make_token_aud_iss("u1", Some("some-other-app"), None);
+        assert!(
+            run_auth(&handler, token).await.is_err(),
+            "token for a different audience must be rejected when aud is enforced"
+        );
+    }
+
+    // F7: configured audience rejects a token with no `aud` claim at all.
+    #[tokio::test]
+    async fn aud_configured_rejects_missing_audience() {
+        let handler = AuthHandler::new(TEST_SECRET.to_owned(), None)
+            .with_issuer_audience(None, Some("topgun".to_string()));
+        let token = make_token_aud_iss("u1", None, None);
+        assert!(run_auth(&handler, token).await.is_err());
+    }
+
+    // F7: configured issuer rejects a token from a different issuer.
+    #[tokio::test]
+    async fn iss_configured_rejects_wrong_issuer() {
+        let handler = AuthHandler::new(TEST_SECRET.to_owned(), None)
+            .with_issuer_audience(Some("https://idp.example".to_string()), None);
+        let token = make_token_aud_iss("u1", None, Some("https://evil.example"));
+        assert!(
+            run_auth(&handler, token).await.is_err(),
+            "token from a different issuer must be rejected when iss is enforced"
+        );
+    }
+
+    #[tokio::test]
+    async fn iss_configured_accepts_matching_issuer() {
+        let handler = AuthHandler::new(TEST_SECRET.to_owned(), None)
+            .with_issuer_audience(Some("https://idp.example".to_string()), None);
+        let token = make_token_aud_iss("u1", None, Some("https://idp.example"));
+        assert!(run_auth(&handler, token).await.is_ok());
+    }
+
+    // F7: configured issuer rejects a token with no `iss` claim (claim must be
+    // present when enforced — symmetric with the audience requirement).
+    #[tokio::test]
+    async fn iss_configured_rejects_missing_issuer() {
+        let handler = AuthHandler::new(TEST_SECRET.to_owned(), None)
+            .with_issuer_audience(Some("https://idp.example".to_string()), None);
+        let token = make_token_aud_iss("u1", None, None);
+        assert!(run_auth(&handler, token).await.is_err());
+    }
+
+    // F7 negative control / backward-compat: when neither iss nor aud is
+    // configured, a token carrying ANY audience is still accepted (TopGun-minted
+    // token model unchanged).
+    #[tokio::test]
+    async fn unconfigured_accepts_any_audience() {
+        let handler = AuthHandler::new(TEST_SECRET.to_owned(), None);
+        let token = make_token_aud_iss("u1", Some("whatever"), Some("whoever"));
+        assert!(run_auth(&handler, token).await.is_ok());
     }
 
     // normalize_pem replaces escaped backslash-n with real newlines.

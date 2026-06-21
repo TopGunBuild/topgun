@@ -464,7 +464,33 @@ async fn main() -> anyhow::Result<()> {
         }
         StorageBackend::Null => Arc::new(InMemoryPolicyStore::new()),
     };
-    let policy_evaluator = Arc::new(PolicyEvaluator::new(Arc::clone(&policy_store)));
+    // Server-trusted admin-subject allow-list. Only subjects listed here receive
+    // the RBAC admin bypass; a `roles:["admin"]` JWT claim never does. This anchors
+    // privilege to operator configuration rather than to (possibly self-granted)
+    // token claims. Empty by default => no data-plane admin bypass.
+    let admin_subjects: Arc<std::collections::HashSet<String>> = Arc::new(
+        std::env::var("TOPGUN_ADMIN_SUBJECTS")
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    );
+    if !admin_subjects.is_empty() {
+        tracing::info!(
+            count = admin_subjects.len(),
+            "RBAC admin bypass anchored to {} server-configured admin subject(s)",
+            admin_subjects.len()
+        );
+    }
+    let policy_evaluator = Arc::new(PolicyEvaluator::with_admin_subjects(
+        Arc::clone(&policy_store),
+        Arc::clone(&admin_subjects),
+    ));
 
     // Counts for the boot summary so operators can confirm RBAC survived restart.
     let policies_loaded: usize = policy_store
@@ -825,6 +851,15 @@ async fn main() -> anyhow::Result<()> {
         .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"))
         .unwrap_or(false);
 
+    // Optional request-path JWT issuer/audience enforcement (audit F7). Unset =>
+    // not checked (TopGun-minted tokens). Set these when jwt_secret is an IdP key.
+    let jwt_issuer = std::env::var("TOPGUN_JWT_ISSUER")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let jwt_audience = std::env::var("TOPGUN_JWT_AUDIENCE")
+        .ok()
+        .filter(|s| !s.is_empty());
+
     // Comma-separated list of allowed CORS origins. Empty (the default) rejects
     // all cross-origin browser requests, which is the safe default but means
     // browser SDKs hosted on a different origin than the server cannot connect
@@ -868,6 +903,8 @@ async fn main() -> anyhow::Result<()> {
         config: Arc::new(NetworkConfig {
             insecure_forward_auth_errors,
             cors_origins,
+            jwt_issuer,
+            jwt_audience,
             ..NetworkConfig::default()
         }),
         start_time: Instant::now(),
@@ -882,6 +919,7 @@ async fn main() -> anyhow::Result<()> {
             ..ServerConfig::default()
         }))),
         policy_store: Some(policy_store),
+        admin_subjects: Arc::clone(&admin_subjects),
         auth_providers: Arc::new(vec![]),
         refresh_grant_store: None,
         auth_validator: None,

@@ -104,6 +104,11 @@ pub struct AppState {
     /// Policy store for permission policy CRUD and evaluation.
     /// `None` when policy engine is not configured.
     pub policy_store: Option<Arc<dyn PolicyStore>>,
+    /// Subjects (`Principal.id`) granted the RBAC admin bypass, sourced only from
+    /// server-trusted configuration (`TOPGUN_ADMIN_SUBJECTS`). Used to build the
+    /// HTTP read-path `PolicyEvaluator` so a `roles:["admin"]` claim cannot grant
+    /// the bypass — privilege is anchored to this allow-list. Empty by default.
+    pub admin_subjects: Arc<std::collections::HashSet<String>>,
     /// External auth providers for token exchange at POST /api/auth/token.
     /// Empty when token exchange is not configured (endpoint returns 404).
     pub auth_providers: Arc<Vec<Arc<dyn AuthProvider>>>,
@@ -190,6 +195,7 @@ impl AppState {
             store_factory: None,
             server_config: None,
             policy_store: None,
+            admin_subjects: Arc::new(std::collections::HashSet::new()),
             // Empty slice because tests that need auth providers supply them
             // explicitly via struct-update syntax.
             auth_providers: Arc::new(vec![]),

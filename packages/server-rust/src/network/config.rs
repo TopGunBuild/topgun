@@ -51,6 +51,18 @@ pub struct NetworkConfig {
     /// Defaults to `false` (production-safe: generic "Authentication failed" is returned).
     /// Set `INSECURE_FORWARD_AUTH_ERRORS=true` in the environment for development debugging.
     pub insecure_forward_auth_errors: bool,
+    /// Expected JWT `iss` (issuer) for request-path token validation. When `Some`,
+    /// the WS handshake and HTTP `/sync` extractor reject tokens whose `iss` does
+    /// not match. When `None` (default), issuer is not checked — correct for
+    /// TopGun-minted tokens. Set `TOPGUN_JWT_ISSUER` to enforce, which is required
+    /// when `jwt_secret` is pointed at a shared `IdP` key (otherwise that `IdP`'s
+    /// tokens for any audience are accepted — audit F7).
+    pub jwt_issuer: Option<String>,
+    /// Expected JWT `aud` (audience) for request-path token validation. When
+    /// `Some`, the WS handshake and HTTP `/sync` extractor reject tokens whose
+    /// `aud` does not match and require the claim to be present. When `None`
+    /// (default), audience is not checked. Set `TOPGUN_JWT_AUDIENCE` to enforce.
+    pub jwt_audience: Option<String>,
 }
 
 impl Default for NetworkConfig {
@@ -70,6 +82,8 @@ impl Default for NetworkConfig {
             rate_limit_burst: 50,
             auth_providers: vec![],
             insecure_forward_auth_errors: false,
+            jwt_issuer: None,
+            jwt_audience: None,
         }
     }
 }

@@ -167,7 +167,13 @@ describe('Integration: RBAC Policy Enforcement (Rust Server)', () => {
   let server: SpawnedServer;
 
   beforeAll(async () => {
-    server = await spawnRustServer();
+    // The data-plane RBAC admin bypass is server-anchored: only subjects listed
+    // in TOPGUN_ADMIN_SUBJECTS receive it, never a roles:["admin"] JWT claim. The
+    // legitimate admin subjects exercised by Test 3 / Test 8 are configured here;
+    // a roles:["admin"] token whose subject is NOT listed is denied (Test 3b).
+    server = await spawnRustServer({
+      env: { TOPGUN_ADMIN_SUBJECTS: 'admin-1,admin-owner-test' },
+    });
     const { port } = server;
 
     // Seed policies used across test cases.
@@ -257,12 +263,13 @@ describe('Integration: RBAC Policy Enforcement (Rust Server)', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Test 3: Principal with "admin" role bypasses all policy checks
+  // Test 3: A server-configured admin SUBJECT bypasses all policy checks
   // -------------------------------------------------------------------------
-  test('Test 3: "admin" role bypasses all policies regardless of map', async () => {
+  test('Test 3: server-configured admin subject bypasses all policies regardless of map', async () => {
     const adminClient = await createRustTestClient(server.port, {
+      // 'admin-1' is in TOPGUN_ADMIN_SUBJECTS (server-trusted). The bypass is
+      // anchored to the subject, not the role claim.
       userId: 'admin-1',
-      // "admin" (lowercase) matches the PolicyEvaluator admin bypass check.
       roles: ['admin'],
     });
 
@@ -275,6 +282,30 @@ describe('Integration: RBAC Policy Enforcement (Rust Server)', () => {
       expect(resp.type).toBe('OP_ACK');
     } finally {
       adminClient.close();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 3b (F5 negative control): a roles:["admin"] JWT whose subject is NOT
+  // on the server allow-list must NOT receive the bypass — this is the
+  // self-grant vector (an attacker minting/exchanging a token with an admin
+  // role claim). It must be denied on an uncovered map.
+  // -------------------------------------------------------------------------
+  test('Test 3b: roles:["admin"] claim alone does NOT bypass (self-grant blocked)', async () => {
+    const fakeAdmin = await createRustTestClient(server.port, {
+      userId: 'not-allow-listed-admin',
+      roles: ['admin'],
+    });
+
+    try {
+      await fakeAdmin.waitForMessage('AUTH_ACK', 8000);
+
+      // Same uncovered map as Test 3 — but this subject is not server-trusted,
+      // so default-deny applies despite the admin role claim.
+      const resp = await writeAndWaitForResponse(fakeAdmin, 'no-policy-map', 'forged-admin-key');
+      expect(resp.type).toBe('ERROR');
+    } finally {
+      fakeAdmin.close();
     }
   });
 
@@ -394,10 +425,11 @@ describe('Integration: RBAC Policy Enforcement (Rust Server)', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Test 8: Admin bypasses record-level conditions
+  // Test 8: A server-configured admin subject bypasses record-level conditions
   // -------------------------------------------------------------------------
-  test('Test 8: admin bypasses record-level conditions', async () => {
-    // Reuses the "owned-docs" policy from Test 6.
+  test('Test 8: admin subject bypasses record-level conditions', async () => {
+    // Reuses the "owned-docs" policy from Test 6. 'admin-owner-test' is in
+    // TOPGUN_ADMIN_SUBJECTS, so the bypass applies regardless of the condition.
     const adminClient = await createRustTestClient(server.port, {
       userId: 'admin-owner-test',
       roles: ['admin'],
