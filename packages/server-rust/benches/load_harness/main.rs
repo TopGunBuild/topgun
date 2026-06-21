@@ -644,10 +644,18 @@ fn build_services() -> (
     // journal-off configuration that would never ship. TOPGUN_JOURNAL_ENABLED=false
     // toggles it off for an apples-to-apples on/off perf comparison.
     let journal_enabled = std::env::var("TOPGUN_JOURNAL_ENABLED")
-        .map(|v| !matches!(v.trim().to_lowercase().as_str(), "false" | "0" | "no" | "off"))
+        .map(|v| {
+            !matches!(
+                v.trim().to_lowercase().as_str(),
+                "false" | "0" | "no" | "off"
+            )
+        })
         .unwrap_or(true);
     let journal_store = Arc::new(
-        topgun_server::service::domain::journal::JournalStore::with_enabled(10_000, journal_enabled),
+        topgun_server::service::domain::journal::JournalStore::with_enabled(
+            10_000,
+            journal_enabled,
+        ),
     );
     let crdt_svc = Arc::new(
         CrdtService::new(
