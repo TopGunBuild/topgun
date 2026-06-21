@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use tower::Service;
 
 use topgun_core::messages::{
-    ClientOp, ClientOpMessage, Message, OpAckMessage, OpAckPayload, OpBatchMessage,
-    ServerEventPayload, ServerEventType, WriteConcern,
+    ClientOp, ClientOpMessage, JournalEventData, JournalEventType, Message, OpAckMessage,
+    OpAckPayload, OpBatchMessage, ServerEventPayload, ServerEventType, WriteConcern,
 };
 use topgun_core::types::Value;
 use topgun_core::{hash_to_partition, LWWRecord, Timestamp};
@@ -22,6 +22,7 @@ use topgun_core::{hash_to_partition, LWWRecord, Timestamp};
 use tracing::Instrument;
 
 use crate::network::connection::{ConnectionId, ConnectionMetadata, ConnectionRegistry};
+use crate::service::domain::journal::JournalStore;
 use crate::service::domain::predicate::{
     evaluate_predicate, evaluate_where, value_to_rmpv, EvalContext,
 };
@@ -71,6 +72,12 @@ pub struct CrdtService {
     write_validator: Arc<WriteAdmission>,
     query_registry: Arc<QueryRegistry>,
     schema_provider: Arc<dyn SchemaProvider>,
+    /// Optional Event Journal sink. When present (production wiring), every
+    /// applied mutation is appended to the shared `JournalStore` and pushed to
+    /// matching `JournalSubscribe` connections as a `JOURNAL_EVENT`. `None` in
+    /// unit tests that do not exercise the journal — `record_journal` is then a
+    /// no-op, so the journal never perturbs CRDT-only test behaviour.
+    journal: Option<Arc<JournalStore>>,
 }
 
 impl CrdtService {
@@ -89,7 +96,18 @@ impl CrdtService {
             write_validator,
             query_registry,
             schema_provider,
+            journal: None,
         }
+    }
+
+    /// Attaches the shared Event Journal sink, enabling write-path journaling.
+    ///
+    /// Production wiring calls this with the same `Arc<JournalStore>` held by the
+    /// `PersistenceService` so appended events are readable via `JournalRead`.
+    #[must_use]
+    pub fn with_journal(mut self, journal: Arc<JournalStore>) -> Self {
+        self.journal = Some(journal);
+        self
     }
 }
 
@@ -227,6 +245,7 @@ impl CrdtService {
 
         self.broadcast_event(&event_payload, ctx.connection_id)?;
         self.broadcast_query_updates(&event_payload, old_rmpv_value.as_ref(), ctx.connection_id);
+        self.record_journal(&event_payload, sanitized_ts.as_ref());
 
         let last_id = op.id.clone().unwrap_or_else(|| "unknown".to_string());
         Ok(OperationResponse::Message(Box::new(Message::OpAck(
@@ -281,20 +300,8 @@ impl CrdtService {
             // partition_id=None because the batch contains keys for many partitions).
             for op in ops {
                 let sanitized_ts = self.write_validator.sanitize_hlc();
-                let partition_id = hash_to_partition(&op.key);
-                // Read old value before mutation for query broadcast filtering.
-                let old_rmpv_value = self
-                    .read_old_value_for_queries(&op.map_name, &op.key, partition_id)
-                    .await;
-                let event_payload = self
-                    .apply_single_op(op, partition_id, Some(&sanitized_ts))
+                self.apply_batch_op(op, Some(&sanitized_ts), ctx.connection_id)
                     .await?;
-                self.broadcast_event(&event_payload, ctx.connection_id)?;
-                self.broadcast_query_updates(
-                    &event_payload,
-                    old_rmpv_value.as_ref(),
-                    ctx.connection_id,
-                );
                 if let Some(id) = &op.id {
                     last_id = id.clone();
                 }
@@ -325,20 +332,8 @@ impl CrdtService {
             // All ops validated — apply them sequentially with sanitized timestamps.
             for op in ops {
                 let sanitized_ts = self.write_validator.sanitize_hlc();
-                let partition_id = hash_to_partition(&op.key);
-                // Read old value before mutation for query broadcast filtering.
-                let old_rmpv_value = self
-                    .read_old_value_for_queries(&op.map_name, &op.key, partition_id)
-                    .await;
-                let event_payload = self
-                    .apply_single_op(op, partition_id, Some(&sanitized_ts))
+                self.apply_batch_op(op, Some(&sanitized_ts), ctx.connection_id)
                     .await?;
-                self.broadcast_event(&event_payload, ctx.connection_id)?;
-                self.broadcast_query_updates(
-                    &event_payload,
-                    old_rmpv_value.as_ref(),
-                    ctx.connection_id,
-                );
                 if let Some(id) = &op.id {
                     last_id = id.clone();
                 }
@@ -355,19 +350,8 @@ impl CrdtService {
             }
             for op in ops {
                 let sanitized_ts = self.write_validator.sanitize_hlc();
-                let partition_id = hash_to_partition(&op.key);
-                let old_rmpv_value = self
-                    .read_old_value_for_queries(&op.map_name, &op.key, partition_id)
-                    .await;
-                let event_payload = self
-                    .apply_single_op(op, partition_id, Some(&sanitized_ts))
+                self.apply_batch_op(op, Some(&sanitized_ts), ctx.connection_id)
                     .await?;
-                self.broadcast_event(&event_payload, ctx.connection_id)?;
-                self.broadcast_query_updates(
-                    &event_payload,
-                    old_rmpv_value.as_ref(),
-                    ctx.connection_id,
-                );
                 if let Some(id) = &op.id {
                     last_id = id.clone();
                 }
@@ -376,18 +360,7 @@ impl CrdtService {
             // Genuine internal/system/forwarded call (trusted origin) — preserve
             // the caller's HLC so cross-node convergence is not perturbed.
             for op in ops {
-                let partition_id = hash_to_partition(&op.key);
-                // Read old value before mutation for query broadcast filtering.
-                let old_rmpv_value = self
-                    .read_old_value_for_queries(&op.map_name, &op.key, partition_id)
-                    .await;
-                let event_payload = self.apply_single_op(op, partition_id, None).await?;
-                self.broadcast_event(&event_payload, ctx.connection_id)?;
-                self.broadcast_query_updates(
-                    &event_payload,
-                    old_rmpv_value.as_ref(),
-                    ctx.connection_id,
-                );
+                self.apply_batch_op(op, None, ctx.connection_id).await?;
                 if let Some(id) = &op.id {
                     last_id = id.clone();
                 }
@@ -666,6 +639,121 @@ impl CrdtService {
             .map_err(|e| OperationError::Internal(anyhow::anyhow!("serialize error: {e}")))?;
         self.connection_registry.send_to_connections(&ids, &bytes);
         Ok(())
+    }
+
+    /// Applies one op from an `OpBatch` and runs the standard write fanout:
+    /// server-event broadcast, live-query updates, and journal recording.
+    ///
+    /// Partition is derived from the key because a batch spans many partitions.
+    /// Centralizes what were four byte-identical loop bodies (one per caller
+    /// origin); the per-origin validation that precedes the apply loop stays at
+    /// the call site.
+    async fn apply_batch_op(
+        &self,
+        op: &ClientOp,
+        sanitized_ts: Option<&Timestamp>,
+        exclude_connection_id: Option<ConnectionId>,
+    ) -> Result<(), OperationError> {
+        let partition_id = hash_to_partition(&op.key);
+        // Read old value before mutation for query broadcast filtering.
+        let old_rmpv_value = self
+            .read_old_value_for_queries(&op.map_name, &op.key, partition_id)
+            .await;
+        let event_payload = self.apply_single_op(op, partition_id, sanitized_ts).await?;
+        self.broadcast_event(&event_payload, exclude_connection_id)?;
+        self.broadcast_query_updates(
+            &event_payload,
+            old_rmpv_value.as_ref(),
+            exclude_connection_id,
+        );
+        self.record_journal(&event_payload, sanitized_ts);
+        Ok(())
+    }
+
+    /// Appends an applied mutation to the Event Journal and pushes a
+    /// `JOURNAL_EVENT` to every matching `JournalSubscribe` connection.
+    ///
+    /// Called on the write path immediately after `apply_single_op`, in apply
+    /// order, so the journal's monotonic sequence reflects mutation order. The
+    /// append always happens (so `JournalRead` sees history even with no live
+    /// subscribers); serialization + push happen only when subscribers exist.
+    /// A no-op when no journal is attached (unit tests) or the journal is
+    /// disabled via `TOPGUN_JOURNAL_ENABLED=false`.
+    ///
+    /// `value` is captured from the applied record; `previous_value` is not yet
+    /// populated (reserved — capturing it requires a dedicated pre-read on the
+    /// hot path, tracked as a follow-up). Event type collapses the CRDT op kind
+    /// to the journal's coarser vocabulary: `PUT`/`OR_ADD` → `PUT`,
+    /// `REMOVE`/`OR_REMOVE` → `DELETE`.
+    fn record_journal(&self, event_payload: &ServerEventPayload, sanitized_ts: Option<&Timestamp>) {
+        let Some(journal) = self.journal.as_ref() else {
+            return;
+        };
+        if !journal.is_enabled() {
+            return;
+        }
+
+        let event_type = match event_payload.event_type {
+            ServerEventType::PUT | ServerEventType::OR_ADD => JournalEventType::PUT,
+            ServerEventType::REMOVE | ServerEventType::OR_REMOVE => JournalEventType::DELETE,
+        };
+
+        let (value, ts) = match event_payload.event_type {
+            ServerEventType::PUT => (
+                event_payload.record.as_ref().and_then(|r| r.value.clone()),
+                event_payload.record.as_ref().map(|r| r.timestamp.clone()),
+            ),
+            ServerEventType::OR_ADD => (
+                event_payload.or_record.as_ref().map(|r| r.value.clone()),
+                event_payload
+                    .or_record
+                    .as_ref()
+                    .map(|r| r.timestamp.clone()),
+            ),
+            ServerEventType::REMOVE | ServerEventType::OR_REMOVE => (None, None),
+        };
+
+        // Prefer the stored record's HLC; fall back to the sanitized server HLC
+        // (removes carry no record); last-resort zero stamp for trusted internal
+        // removes that supply neither.
+        let timestamp = ts.or_else(|| sanitized_ts.cloned()).unwrap_or(Timestamp {
+            millis: 0,
+            counter: 0,
+            node_id: String::new(),
+        });
+        let node_id = timestamp.node_id.clone();
+
+        let mut entry = JournalEventData {
+            sequence: String::new(),
+            event_type: event_type.clone(),
+            map_name: event_payload.map_name.clone(),
+            key: event_payload.key.clone(),
+            value,
+            previous_value: None,
+            timestamp,
+            node_id,
+            metadata: None,
+        };
+
+        let seq = journal.append(entry.clone());
+
+        let subscribers = journal.subscribers_for(&event_payload.map_name, &event_type);
+        if subscribers.is_empty() {
+            return;
+        }
+
+        entry.sequence = seq.to_string();
+        let msg = Message::JournalEvent { event: entry };
+        match rmp_serde::to_vec_named(&msg) {
+            Ok(bytes) => {
+                let ids: std::collections::HashSet<ConnectionId> =
+                    subscribers.into_iter().collect();
+                self.connection_registry.send_to_connections(&ids, &bytes);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to serialize JOURNAL_EVENT");
+            }
+        }
     }
 
     /// Reads the old record value for a key before mutation, for query broadcast filtering.
@@ -1035,6 +1123,24 @@ mod tests {
         ))
     }
 
+    fn make_service_with_journal() -> (Arc<CrdtService>, Arc<JournalStore>) {
+        let factory = make_factory();
+        let registry = Arc::new(ConnectionRegistry::new());
+        let query_registry = Arc::new(QueryRegistry::new());
+        let journal = Arc::new(JournalStore::new(100));
+        let svc = Arc::new(
+            CrdtService::new(
+                factory,
+                registry,
+                make_validator(),
+                query_registry,
+                Arc::new(SchemaService::new()),
+            )
+            .with_journal(Arc::clone(&journal)),
+        );
+        (svc, journal)
+    }
+
     fn make_timestamp() -> Timestamp {
         Timestamp {
             millis: 1_700_000_000_000,
@@ -1095,6 +1201,95 @@ mod tests {
         assert!(
             matches!(resp, OperationResponse::Message(ref msg) if matches!(**msg, Message::OpAck(_))),
             "expected OpAck, got {resp:?}"
+        );
+    }
+
+    // -- Event Journal: write path appends --
+
+    #[tokio::test]
+    async fn write_path_appends_to_journal() {
+        let (svc, journal) = make_service_with_journal();
+        let record = topgun_core::LWWRecord {
+            value: Some(rmpv::Value::String("Alice".into())),
+            timestamp: make_timestamp(),
+            ttl_ms: None,
+        };
+        let put = Operation::ClientOp {
+            ctx: make_ctx(),
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some("op-1".to_string()),
+                    map_name: "users".to_string(),
+                    key: "user-1".to_string(),
+                    op_type: None,
+                    record: Some(Some(record)),
+                    or_record: None,
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+        svc.clone().oneshot(put).await.unwrap();
+
+        let remove = Operation::ClientOp {
+            ctx: make_ctx(),
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some("op-2".to_string()),
+                    map_name: "users".to_string(),
+                    key: "user-1".to_string(),
+                    op_type: None,
+                    record: Some(None), // tombstone
+                    or_record: None,
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+        svc.oneshot(remove).await.unwrap();
+
+        let (events, _) = journal.read(0, 100, None);
+        assert_eq!(events.len(), 2, "both writes recorded in the journal");
+        assert_eq!(events[0].event_type, JournalEventType::PUT);
+        assert_eq!(events[0].map_name, "users");
+        assert_eq!(events[0].key, "user-1");
+        assert_eq!(events[1].event_type, JournalEventType::DELETE);
+        // Sequences are monotonic in apply order.
+        assert_eq!(events[0].sequence, "1");
+        assert_eq!(events[1].sequence, "2");
+    }
+
+    #[tokio::test]
+    async fn write_path_without_journal_is_noop() {
+        // A service built without `.with_journal` must apply writes normally and
+        // never touch a journal — guards the Option<journal> no-op branch.
+        let svc = make_service();
+        let record = topgun_core::LWWRecord {
+            value: Some(rmpv::Value::String("Bob".into())),
+            timestamp: make_timestamp(),
+            ttl_ms: None,
+        };
+        let put = Operation::ClientOp {
+            ctx: make_ctx(),
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some("op-1".to_string()),
+                    map_name: "users".to_string(),
+                    key: "user-2".to_string(),
+                    op_type: None,
+                    record: Some(Some(record)),
+                    or_record: None,
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+        let resp = svc.oneshot(put).await.unwrap();
+        assert!(
+            matches!(resp, OperationResponse::Message(ref msg) if matches!(**msg, Message::OpAck(_))),
         );
     }
 

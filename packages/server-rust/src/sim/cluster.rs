@@ -143,6 +143,9 @@ pub struct SimNode {
     pub completion_registry: Arc<DashMap<String, oneshot::Sender<DagCompletePayload>>>,
     /// Coordinator for distributed GROUP BY queries.
     pub coordinator: Arc<ClusterQueryCoordinator>,
+    /// Shared Event Journal store, written by the CRDT path and read/subscribed
+    /// by the persistence service. Exposed so sim tests can read appended events.
+    pub journal_store: Arc<crate::service::domain::journal::JournalStore>,
     /// Handle for the dispatch loop background task. Aborted on `kill()`.
     dispatch_handle: tokio::task::JoinHandle<()>,
     /// Whether this node is currently alive.
@@ -201,14 +204,21 @@ impl SimNode {
 
         let query_registry = Arc::new(QueryRegistry::new());
 
+        // Shared Event Journal store: the CRDT write path appends to it, the
+        // persistence service reads/subscribes from it. Same Arc handed to both.
+        let journal_store = Arc::new(crate::service::domain::journal::JournalStore::new(10_000));
+
         // Build all 7 domain services.
-        let crdt_service = Arc::new(CrdtService::new(
-            Arc::clone(&record_store_factory),
-            Arc::clone(&connection_registry),
-            write_validator,
-            Arc::clone(&query_registry),
-            Arc::new(SchemaService::new()),
-        ));
+        let crdt_service = Arc::new(
+            CrdtService::new(
+                Arc::clone(&record_store_factory),
+                Arc::clone(&connection_registry),
+                write_validator,
+                Arc::clone(&query_registry),
+                Arc::new(SchemaService::new()),
+            )
+            .with_journal(Arc::clone(&journal_store)),
+        );
 
         let mut router = OperationRouter::new();
 
@@ -272,9 +282,10 @@ impl SimNode {
 
         router.register(
             service_names::PERSISTENCE,
-            Arc::new(PersistenceService::new(
+            Arc::new(PersistenceService::with_journal_store(
                 Arc::clone(&connection_registry),
                 node_id.clone(),
+                Arc::clone(&journal_store),
             )),
         );
 
@@ -316,6 +327,7 @@ impl SimNode {
             inbound_tx,
             completion_registry,
             coordinator,
+            journal_store,
             dispatch_handle,
             alive: true,
         })

@@ -421,19 +421,6 @@ pub struct JournalUnsubscribeData {
     pub subscription_id: String,
 }
 
-/// Flat fields for `JOURNAL_EVENT` wire message (minus the `type` discriminant).
-///
-/// Wraps a single `JournalEventData`. Named `JournalEventMessageData` to avoid
-/// collision with the `JournalEventData` sub-type.
-///
-/// Maps to `JournalEventMessageSchema` in `messaging-schemas.ts`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct JournalEventMessageData {
-    /// The journal event.
-    pub event: JournalEventData,
-}
-
 /// Flat fields for `JOURNAL_READ` message (minus the `type` discriminant).
 ///
 /// Maps to `JournalReadRequestSchema` in `messaging-schemas.ts`.

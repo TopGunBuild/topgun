@@ -48,18 +48,41 @@ pub struct JournalStore {
     capacity: usize,
     /// Active subscriptions keyed by subscription ID.
     subscriptions: DashMap<String, JournalSubscription>,
+    /// When `false`, `append` is a no-op and no events are ever stored or
+    /// pushed. Lets an operator turn the journal off (`TOPGUN_JOURNAL_ENABLED=false`)
+    /// to shed its per-write cost. Subscriptions and reads still function; reads
+    /// simply observe an empty buffer (an explicit operator opt-out, surfaced at
+    /// startup, not a silent dark feature).
+    enabled: bool,
 }
 
 impl JournalStore {
-    /// Creates a new journal store with the given capacity.
+    /// Creates a new enabled journal store with the given capacity.
     #[must_use]
     pub fn new(capacity: usize) -> Self {
+        Self::with_enabled(capacity, true)
+    }
+
+    /// Creates a journal store with the given capacity and enabled flag.
+    ///
+    /// Production wiring reads the flag from `TOPGUN_JOURNAL_ENABLED` (default
+    /// `true`) so the Event Journal works out of the box while remaining cheap
+    /// to disable.
+    #[must_use]
+    pub fn with_enabled(capacity: usize, enabled: bool) -> Self {
         Self {
             events: RwLock::new(VecDeque::with_capacity(capacity)),
             next_sequence: AtomicU64::new(1),
             capacity,
             subscriptions: DashMap::new(),
+            enabled,
         }
+    }
+
+    /// Returns whether this journal is enabled (appends are recorded).
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Appends an event to the ring buffer, assigning it a monotonic sequence
@@ -77,6 +100,11 @@ impl JournalStore {
     ///
     /// Panics if the internal `RwLock` is poisoned.
     pub fn append(&self, mut event: JournalEventData) -> u64 {
+        // Disabled journal: never allocate or take the write lock. Keeps the
+        // write path free of journal cost when an operator opts out.
+        if !self.enabled {
+            return 0;
+        }
         let seq = self.next_sequence.fetch_add(1, Ordering::Relaxed);
         event.sequence = seq.to_string();
 
@@ -102,6 +130,44 @@ impl JournalStore {
     pub fn unsubscribe_by_connection(&self, conn_id: ConnectionId) {
         self.subscriptions
             .retain(|_, sub| sub.connection_id != conn_id);
+    }
+
+    /// Returns the deduplicated connection IDs whose subscriptions match the
+    /// given map name and event type.
+    ///
+    /// A subscription matches when its `map_name` filter is absent or equal to
+    /// `map_name`, and its `types` filter is absent or contains `event_type`.
+    /// One connection may hold several subscriptions; each ID appears once so
+    /// the caller pushes a single `JOURNAL_EVENT` per connection (the client
+    /// re-applies per-listener filters on receipt).
+    #[must_use]
+    pub fn subscribers_for(
+        &self,
+        map_name: &str,
+        event_type: &JournalEventType,
+    ) -> Vec<ConnectionId> {
+        let mut ids: Vec<ConnectionId> = self
+            .subscriptions
+            .iter()
+            .filter(|entry| {
+                let sub = entry.value();
+                if let Some(ref m) = sub.map_name {
+                    if m != map_name {
+                        return false;
+                    }
+                }
+                if let Some(ref types) = sub.types {
+                    if !types.contains(event_type) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .map(|entry| entry.value().connection_id)
+            .collect();
+        ids.sort_unstable_by_key(|c| c.0);
+        ids.dedup();
+        ids
     }
 
     /// Returns the number of subscriptions held by the given connection.
@@ -266,6 +332,87 @@ mod tests {
         let (events, _) = store.read(1, 100, Some("users"));
         assert_eq!(events.len(), 2);
         assert!(events.iter().all(|e| e.map_name == "users"));
+    }
+
+    #[test]
+    fn disabled_store_append_is_noop() {
+        let store = JournalStore::with_enabled(100, false);
+        assert!(!store.is_enabled());
+        let seq = store.append(make_event("m1", "k1", JournalEventType::PUT));
+        // Disabled append assigns no sequence and stores nothing.
+        assert_eq!(seq, 0);
+        let (events, has_more) = store.read(0, 100, None);
+        assert!(events.is_empty());
+        assert!(!has_more);
+    }
+
+    #[test]
+    fn new_store_is_enabled_by_default() {
+        let store = JournalStore::new(100);
+        assert!(store.is_enabled());
+        let seq = store.append(make_event("m1", "k1", JournalEventType::PUT));
+        assert_eq!(seq, 1);
+    }
+
+    // --- subscribers_for ---
+
+    fn make_sub(
+        conn: u64,
+        map_name: Option<&str>,
+        types: Option<Vec<JournalEventType>>,
+    ) -> JournalSubscription {
+        JournalSubscription {
+            connection_id: ConnectionId(conn),
+            map_name: map_name.map(str::to_string),
+            types,
+        }
+    }
+
+    #[test]
+    fn subscribers_for_matches_unfiltered_subscription() {
+        let store = JournalStore::new(100);
+        store.subscribe("s1".to_string(), make_sub(1, None, None));
+
+        let ids = store.subscribers_for("users", &JournalEventType::PUT);
+        assert_eq!(ids, vec![ConnectionId(1)]);
+    }
+
+    #[test]
+    fn subscribers_for_applies_map_filter() {
+        let store = JournalStore::new(100);
+        store.subscribe("s1".to_string(), make_sub(1, Some("users"), None));
+        store.subscribe("s2".to_string(), make_sub(2, Some("orders"), None));
+
+        let ids = store.subscribers_for("users", &JournalEventType::PUT);
+        assert_eq!(ids, vec![ConnectionId(1)]);
+    }
+
+    #[test]
+    fn subscribers_for_applies_type_filter() {
+        let store = JournalStore::new(100);
+        store.subscribe(
+            "s1".to_string(),
+            make_sub(1, None, Some(vec![JournalEventType::DELETE])),
+        );
+
+        assert!(store
+            .subscribers_for("users", &JournalEventType::PUT)
+            .is_empty());
+        assert_eq!(
+            store.subscribers_for("users", &JournalEventType::DELETE),
+            vec![ConnectionId(1)]
+        );
+    }
+
+    #[test]
+    fn subscribers_for_dedups_connection_with_multiple_subscriptions() {
+        let store = JournalStore::new(100);
+        // Same connection, two subscriptions both matching the event.
+        store.subscribe("s1".to_string(), make_sub(1, None, None));
+        store.subscribe("s2".to_string(), make_sub(1, Some("users"), None));
+
+        let ids = store.subscribers_for("users", &JournalEventType::PUT);
+        assert_eq!(ids, vec![ConnectionId(1)]);
     }
 
     #[test]

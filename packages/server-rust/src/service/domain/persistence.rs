@@ -40,7 +40,7 @@ const WASM_SANDBOX_ERROR: &str = "Entry processing not available: WASM sandbox r
 const WASM_RESOLVER_ERROR: &str = "Conflict resolvers not available: WASM sandbox required";
 
 /// Default journal ring buffer capacity.
-const DEFAULT_JOURNAL_CAPACITY: usize = 10_000;
+pub const DEFAULT_JOURNAL_CAPACITY: usize = 10_000;
 
 // ---------------------------------------------------------------------------
 // PersistenceService
@@ -57,12 +57,36 @@ pub struct PersistenceService {
 }
 
 impl PersistenceService {
-    /// Creates a new `PersistenceService` with its required dependencies.
+    /// Creates a new `PersistenceService` with a default-capacity, enabled
+    /// journal store.
+    ///
+    /// Production wiring uses [`PersistenceService::with_journal_store`] instead
+    /// so the journal `Arc` is shared with the CRDT write path (which appends
+    /// events) and configured from the environment. This constructor is retained
+    /// for tests and embedded callers that do not exercise the journal.
     #[must_use]
     pub fn new(connection_registry: Arc<ConnectionRegistry>, node_id: String) -> Self {
+        Self::with_journal_store(
+            connection_registry,
+            node_id,
+            Arc::new(JournalStore::new(DEFAULT_JOURNAL_CAPACITY)),
+        )
+    }
+
+    /// Creates a new `PersistenceService` sharing the given journal store.
+    ///
+    /// The same `Arc<JournalStore>` is handed to the CRDT service so writes
+    /// appended on the mutation path are visible to `JournalRead`/`JournalSubscribe`
+    /// served here.
+    #[must_use]
+    pub fn with_journal_store(
+        connection_registry: Arc<ConnectionRegistry>,
+        node_id: String,
+        journal_store: Arc<JournalStore>,
+    ) -> Self {
         Self {
             counter_registry: Arc::new(CounterRegistry::new(node_id)),
-            journal_store: Arc::new(JournalStore::new(DEFAULT_JOURNAL_CAPACITY)),
+            journal_store,
             connection_registry,
         }
     }

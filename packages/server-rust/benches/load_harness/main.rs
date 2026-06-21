@@ -639,13 +639,21 @@ fn build_services() -> (
         ))
     };
 
-    let crdt_svc = Arc::new(CrdtService::new(
-        Arc::clone(&record_store_factory),
-        Arc::clone(&connection_registry),
-        write_validator,
-        Arc::clone(&query_registry),
-        Arc::new(SchemaService::new()),
-    ));
+    // Shared Event Journal store, default-on (mirrors production build_services)
+    // so the harness measures the real journal-on write-path cost rather than a
+    // journal-off configuration that would never ship.
+    let journal_store =
+        Arc::new(topgun_server::service::domain::journal::JournalStore::new(10_000));
+    let crdt_svc = Arc::new(
+        CrdtService::new(
+            Arc::clone(&record_store_factory),
+            Arc::clone(&connection_registry),
+            write_validator,
+            Arc::clone(&query_registry),
+            Arc::new(SchemaService::new()),
+        )
+        .with_journal(Arc::clone(&journal_store)),
+    );
     let sync_svc = Arc::new(SyncService::new(
         merkle_manager,
         Arc::clone(&record_store_factory),
@@ -680,9 +688,10 @@ fn build_services() -> (
         Arc::clone(&index_observer_factory),
     ));
     search_observer_factory.init_search_service(Arc::clone(&search_svc));
-    let persistence_svc = Arc::new(PersistenceService::new(
+    let persistence_svc = Arc::new(PersistenceService::with_journal_store(
         Arc::clone(&connection_registry),
         config.node_id.clone(),
+        Arc::clone(&journal_store),
     ));
 
     let pipeline_factory = move || {
