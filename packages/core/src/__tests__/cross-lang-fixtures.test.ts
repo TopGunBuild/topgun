@@ -624,17 +624,19 @@ describe('Cross-language fixture generation', () => {
   test('JOURNAL_EVENT', () => {
     writeFixture('JOURNAL_EVENT', {
       type: 'JOURNAL_EVENT',
+      // Single-nested per JournalEventMessageSchema: `event` IS the JournalEventData.
+      // (Previously double-nested `event.event`, which matched neither the schema nor
+      // the client EventJournalReader; the Rust side was symmetrically wrong, hiding
+      // the mismatch from cross-lang validation.)
       event: {
-        event: {
-          sequence: 'seq-050',
-          type: 'UPDATE',
-          mapName: 'orders',
-          key: 'order-7',
-          value: 'shipped',
-          previousValue: 'pending',
-          timestamp,
-          nodeId: 'node-1',
-        },
+        sequence: 'seq-050',
+        type: 'UPDATE',
+        mapName: 'orders',
+        key: 'order-7',
+        value: 'shipped',
+        previousValue: 'pending',
+        timestamp,
+        nodeId: 'node-1',
       },
     });
   });
