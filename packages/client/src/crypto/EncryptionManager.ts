@@ -1,5 +1,6 @@
 import { serialize, deserialize } from '@topgunbuild/core';
 import { logger } from '../utils/logger';
+import { getWebCrypto } from './webcrypto';
 
 export class EncryptionManager {
   private static ALGORITHM = 'AES-GCM';
@@ -12,12 +13,13 @@ export class EncryptionManager {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- encrypt accepts any serialisable value; the adapter is encryption-layer agnostic about the value schema
   static async encrypt(key: CryptoKey, data: any): Promise<{ iv: Uint8Array; data: Uint8Array }> {
     const encoded = serialize(data);
+    const webcrypto = getWebCrypto();
 
-    // Generate IV
-    const iv = window.crypto.getRandomValues(new Uint8Array(EncryptionManager.IV_LENGTH));
+    // Generate a fresh random IV for every write (AES-GCM nonce must never repeat under one key).
+    const iv = webcrypto.getRandomValues(new Uint8Array(EncryptionManager.IV_LENGTH));
 
     // Encrypt
-    const ciphertext = await window.crypto.subtle.encrypt(
+    const ciphertext = await webcrypto.subtle.encrypt(
       {
         name: EncryptionManager.ALGORITHM,
         iv: iv,
@@ -40,7 +42,8 @@ export class EncryptionManager {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- decrypt returns a deserialized msgpack value; the concrete type is known only to the caller who originally encrypted it
   static async decrypt(key: CryptoKey, record: { iv: Uint8Array; data: Uint8Array }): Promise<any> {
     try {
-      const plaintextBuffer = await window.crypto.subtle.decrypt(
+      const webcrypto = getWebCrypto();
+      const plaintextBuffer = await webcrypto.subtle.decrypt(
         {
           name: EncryptionManager.ALGORITHM,
           // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SubtleCrypto IV param expects BufferSource; Uint8Array satisfies that but requires cast for strict lib typings

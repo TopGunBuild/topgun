@@ -1516,12 +1516,22 @@ export class SyncEngine {
   }
 
   /**
-   * Subscribe to backpressure events.
-   * Delegates to BackpressureController.
-   * @param event Event name: 'backpressure:high', 'backpressure:low', 'backpressure:paused', 'backpressure:resumed', 'operation:dropped'
-   * @param listener Callback function
+   * Subscribe to backpressure events. Delegates to BackpressureController.
+   * The listener type narrows by event name (see overloads).
    * @returns Unsubscribe function
    */
+  public onBackpressure(
+    event: 'backpressure:high' | 'backpressure:low',
+    listener: (event: BackpressureThresholdEvent) => void,
+  ): () => void;
+  public onBackpressure(
+    event: 'operation:dropped',
+    listener: (event: OperationDroppedEvent) => void,
+  ): () => void;
+  public onBackpressure(
+    event: 'backpressure:paused' | 'backpressure:resumed',
+    listener: () => void,
+  ): () => void;
   public onBackpressure(
     event:
       | 'backpressure:high'
@@ -1529,9 +1539,11 @@ export class SyncEngine {
       | 'backpressure:paused'
       | 'backpressure:resumed'
       | 'operation:dropped',
-    listener: (data?: BackpressureThresholdEvent | OperationDroppedEvent) => void,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- implementation signature must be broad enough to cover all narrowing overloads
+    listener: (event?: any) => void,
   ): () => void {
-    return this.backpressureController.onBackpressure(event, listener);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- delegating across the overloaded boundary; runtime dispatch is purely by event string
+    return this.backpressureController.onBackpressure(event as any, listener as any);
   }
 
   // ============================================

@@ -166,11 +166,24 @@ export class BackpressureController implements IBackpressureController {
   // ============================================
 
   /**
-   * Subscribe to backpressure events.
-   * @param event Event name: 'backpressure:high', 'backpressure:low', 'backpressure:paused', 'backpressure:resumed', 'operation:dropped'
-   * @param listener Callback function
+   * Subscribe to backpressure events. The listener type narrows by event name:
+   * threshold events ('backpressure:high'/'backpressure:low') carry
+   * `{ pending, max }`, 'operation:dropped' carries the dropped-op descriptor,
+   * and the paused/resumed transitions carry no payload.
    * @returns Unsubscribe function
    */
+  public onBackpressure(
+    event: 'backpressure:high' | 'backpressure:low',
+    listener: (event: BackpressureThresholdEvent) => void,
+  ): () => void;
+  public onBackpressure(
+    event: 'operation:dropped',
+    listener: (event: OperationDroppedEvent) => void,
+  ): () => void;
+  public onBackpressure(
+    event: 'backpressure:paused' | 'backpressure:resumed',
+    listener: () => void,
+  ): () => void;
   public onBackpressure(
     event:
       | 'backpressure:high'
@@ -178,7 +191,8 @@ export class BackpressureController implements IBackpressureController {
       | 'backpressure:paused'
       | 'backpressure:resumed'
       | 'operation:dropped',
-    listener: (data?: BackpressureThresholdEvent | OperationDroppedEvent) => void,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- implementation signature must be broad enough to cover all narrowing overloads (required-param listeners are not assignable to an optional-union listener)
+    listener: (event?: any) => void,
   ): () => void {
     if (!this.backpressureListeners.has(event)) {
       this.backpressureListeners.set(event, new Set());
