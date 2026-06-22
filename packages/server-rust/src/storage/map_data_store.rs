@@ -8,6 +8,7 @@
 use async_trait::async_trait;
 
 use super::record::RecordValue;
+use topgun_core::hash::fnv1a_hash;
 
 /// Which CRDT-kind tree a durable leaf belongs to.
 ///
@@ -41,6 +42,50 @@ pub struct MerkleLeaf {
     pub kind: MerkleLeafKind,
     /// `u32` leaf hash over the persisted value (matches in-memory leaf hash).
     pub leaf_hash: u32,
+}
+
+/// Compute the Merkle leaf coordinate (CRDT kind + `u32` leaf hash) for a
+/// record value — the single source of truth shared by the write-path observer
+/// and every durable enumeration backend.
+///
+/// LWW leaves hash `"{key}:{millis}:{counter}:{node_id}"`; OR-Map leaves hash
+/// the sorted active + tombstone tag sets (`"key:{key}|{tags}#{tombs}"`), so a
+/// removal still changes the leaf and peers can observe a tombstone-only delta.
+/// Returns `None` for `OrTombstones`: the write path removes such keys from the
+/// OR-Map tree rather than contributing a leaf, so enumeration must likewise
+/// emit no leaf to keep a rebuilt root identical to the live one.
+///
+/// Keeping this in one place is load-bearing: a Merkle root rebuilt from
+/// persistence must be byte-identical to the live root, so this formula must
+/// never drift between the observer and the storage backends. Callers that
+/// fold leaves into per-CRDT trees route on the returned [`MerkleLeafKind`].
+#[must_use]
+pub fn merkle_leaf_hash(key: &str, value: &RecordValue) -> Option<(MerkleLeafKind, u32)> {
+    match value {
+        RecordValue::Lww { timestamp, .. } => Some((
+            MerkleLeafKind::Lww,
+            fnv1a_hash(&format!(
+                "{key}:{}:{}:{}",
+                timestamp.millis, timestamp.counter, timestamp.node_id
+            )),
+        )),
+        RecordValue::OrMap {
+            records,
+            tombstones,
+        } => {
+            let mut tags: Vec<&str> = records.iter().map(|r| r.tag.as_str()).collect();
+            tags.sort_unstable();
+            let joined = tags.join("|");
+            let mut tomb_tags: Vec<&str> = tombstones.iter().map(String::as_str).collect();
+            tomb_tags.sort_unstable();
+            let joined_tombs = tomb_tags.join("|");
+            Some((
+                MerkleLeafKind::OrMap,
+                fnv1a_hash(&format!("key:{key}|{joined}#{joined_tombs}")),
+            ))
+        }
+        RecordValue::OrTombstones { .. } => None,
+    }
 }
 
 /// A bounded batch of fully-loaded durable records produced by a value-streamed

@@ -53,15 +53,13 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::storage::map_data_store::{
+    merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
+};
+use crate::storage::record::RecordValue;
 use anyhow::bail;
 use async_trait::async_trait;
 use redb::{ReadableTable, TableDefinition, TableHandle};
-use topgun_core::hash::fnv1a_hash;
-
-use crate::storage::map_data_store::{
-    LeafSink, MapDataStore, MerkleLeaf, MerkleLeafKind, ScanBatch, ScanCursor,
-};
-use crate::storage::record::RecordValue;
 
 /// Number of leaves accumulated before invoking the sink once.
 ///
@@ -79,45 +77,6 @@ const LEAF_BATCH_SIZE: usize = 1024;
 /// `ScanCursor` until the map is exhausted, so this only caps one batch, not
 /// the total scanned volume.
 const DEFAULT_SCAN_BATCH_COST: u64 = 8 * 1024 * 1024;
-
-/// Compute the Merkle leaf hash for a persisted `RecordValue`, byte-identical
-/// to the in-memory write-path observer in `merkle_sync.rs`.
-///
-/// LWW leaves hash `"{key}:{millis}:{counter}:{node_id}"`; OR-Map leaves hash
-/// the sorted active + tombstone tag sets so a removal still changes the leaf.
-/// Returns `None` for `OrTombstones`: the write-path observer removes such keys
-/// from the OR-Map tree rather than contributing a leaf, so enumeration must
-/// likewise emit no leaf to keep the rebuilt root identical.
-///
-/// The returned `MerkleLeafKind` is what lets the rebuild sink route the leaf
-/// to the matching per-CRDT tree, mirroring the write-path observer's split.
-fn leaf_hash_for(key: &str, value: &RecordValue) -> Option<(MerkleLeafKind, u32)> {
-    match value {
-        RecordValue::Lww { timestamp, .. } => Some((
-            MerkleLeafKind::Lww,
-            fnv1a_hash(&format!(
-                "{key}:{}:{}:{}",
-                timestamp.millis, timestamp.counter, timestamp.node_id
-            )),
-        )),
-        RecordValue::OrMap {
-            records,
-            tombstones,
-        } => {
-            let mut tags: Vec<&str> = records.iter().map(|r| r.tag.as_str()).collect();
-            tags.sort_unstable();
-            let joined = tags.join("|");
-            let mut tomb_tags: Vec<&str> = tombstones.iter().map(String::as_str).collect();
-            tomb_tags.sort_unstable();
-            let joined_tombs = tomb_tags.join("|");
-            Some((
-                MerkleLeafKind::OrMap,
-                fnv1a_hash(&format!("key:{key}|{joined}#{joined_tombs}")),
-            ))
-        }
-        RecordValue::OrTombstones { .. } => None,
-    }
-}
 
 /// Validate that a map name matches `^[a-zA-Z_][a-zA-Z0-9_]*$`.
 ///
@@ -538,7 +497,7 @@ impl MapDataStore for RedbDataStore {
             let (key_guard, val_guard) = entry?;
             let value: RecordValue = rmp_serde::from_slice(val_guard.value())?;
             let key = key_guard.value().to_string();
-            if let Some((kind, leaf_hash)) = leaf_hash_for(&key, &value) {
+            if let Some((kind, leaf_hash)) = merkle_leaf_hash(&key, &value) {
                 batch.push(MerkleLeaf {
                     key,
                     kind,
@@ -998,7 +957,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(sink.leaves.len(), 1, "exactly one durable leaf");
-        let expected = fnv1a_hash(&format!(
+        let expected = topgun_core::hash::fnv1a_hash(&format!(
             "{}:{}:{}:{}",
             "alice", ts.millis, ts.counter, ts.node_id
         ));

@@ -10,12 +10,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::Mutex;
-use topgun_core::hash::{combine_hashes, fnv1a_hash};
+use topgun_core::hash::combine_hashes;
 use topgun_core::hash_to_partition;
 use topgun_core::merkle::{MerkleTree, ORMapMerkleTree};
 
 use super::factory::ObserverFactory;
-use super::map_data_store::{LeafSink, MapDataStore, MerkleLeaf, MerkleLeafKind};
+use super::map_data_store::{merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, MerkleLeafKind};
 use super::mutation_observer::MutationObserver;
 use super::record::{Record, RecordValue};
 
@@ -258,12 +258,12 @@ impl MerkleSyncManager {
     /// the persisted leaf set in any order yields the identical partition root,
     /// and the cross-partition aggregate matches the live root.
     ///
-    /// Both CRDT kinds are rebuilt here. The datastore computes the LWW leaf
-    /// hash with `fnv1a_hash("{key}:{millis}:{counter}:{node_id}")` (matching
-    /// `compute_lww_hash`) and the OR-Map leaf hash over the sorted active +
-    /// tombstone tag sets (matching `compute_ormap_hash`), tagging each leaf with
-    /// its kind so the rebuild routes it to the matching tree — never polluting
-    /// the LWW tree with OR-Map leaves or leaving the OR-Map tree empty.
+    /// Both CRDT kinds are rebuilt here. The datastore derives each leaf via the
+    /// shared `merkle_leaf_hash` helper — the same function the write-path
+    /// observer uses — hashing LWW leaves over `"{key}:{millis}:{counter}:{node_id}"`
+    /// and OR-Map leaves over the sorted active + tombstone tag sets, tagging
+    /// each leaf with its kind so the rebuild routes it to the matching tree —
+    /// never polluting the LWW tree with OR-Map leaves or leaving it empty.
     ///
     /// Memory is bounded by the datastore's batch size: only `(key, u32)` pairs
     /// cross the boundary, never values, so peak cost is independent of map size.
@@ -366,38 +366,6 @@ impl ObserverFactory for MerkleObserverFactory {
 }
 
 // ---------------------------------------------------------------------------
-// Hash computation helpers
-// ---------------------------------------------------------------------------
-
-/// Computes the item hash for a LWW record, matching the TS MerkleTree.update pattern.
-///
-/// Uses `fnv1a_hash` on `"key:millis:counter:node_id"` to produce a hash that
-/// is consistent across Rust and TypeScript clients.
-fn compute_lww_hash(key: &str, millis: u64, counter: u32, node_id: &str) -> u32 {
-    fnv1a_hash(&format!("{key}:{millis}:{counter}:{node_id}"))
-}
-
-/// Computes the entry hash for an OR-Map record.
-///
-/// Sorts active tags and tombstone tags independently for determinism, then
-/// hashes `"key:tag1|tag2|...#tomb1|tomb2|..."`. Tombstones are folded in so the
-/// hash changes when a tag is removed — otherwise peers cannot observe a
-/// tombstone-only delta and remove-wins suppression would not replicate.
-fn compute_ormap_hash(
-    key: &str,
-    records: &[super::record::OrMapEntry],
-    tombstones: &[String],
-) -> u32 {
-    let mut tags: Vec<&str> = records.iter().map(|r| r.tag.as_str()).collect();
-    tags.sort_unstable();
-    let joined = tags.join("|");
-    let mut tomb_tags: Vec<&str> = tombstones.iter().map(String::as_str).collect();
-    tomb_tags.sort_unstable();
-    let joined_tombs = tomb_tags.join("|");
-    fnv1a_hash(&format!("key:{key}|{joined}#{joined_tombs}"))
-}
-
-// ---------------------------------------------------------------------------
 // MerkleMutationObserver
 // ---------------------------------------------------------------------------
 
@@ -431,22 +399,18 @@ impl MerkleMutationObserver {
     /// `aggregate_ormap_root_hash()`, eliminating the Mutex contention on a shared
     /// partition 0 that previously bottlenecked concurrent writes.
     fn update_tree(&self, key: &str, value: &RecordValue) {
-        match value {
-            RecordValue::Lww { timestamp, .. } => {
-                let hash =
-                    compute_lww_hash(key, timestamp.millis, timestamp.counter, &timestamp.node_id);
+        // Route on the shared leaf-hash helper so the live write path and the
+        // durable enumeration rebuild always agree on the leaf hash and kind.
+        match merkle_leaf_hash(key, value) {
+            Some((MerkleLeafKind::Lww, hash)) => {
                 self.manager
                     .update_lww(&self.map_name, self.partition_id, key, hash);
             }
-            RecordValue::OrMap {
-                records,
-                tombstones,
-            } => {
-                let hash = compute_ormap_hash(key, records, tombstones);
+            Some((MerkleLeafKind::OrMap, hash)) => {
                 self.manager
                     .update_ormap(&self.map_name, self.partition_id, key, hash);
             }
-            RecordValue::OrTombstones { .. } => {
+            None => {
                 // Tombstones represent deletions — remove from OR-Map tree.
                 self.manager
                     .remove_ormap(&self.map_name, self.partition_id, key);
@@ -1052,10 +1016,12 @@ mod rebuild_tests {
     use topgun_core::hlc::Timestamp;
     use topgun_core::types::Value;
 
-    use super::{compute_lww_hash, compute_ormap_hash, MerkleObserverFactory, MerkleSyncManager};
+    use super::{MerkleObserverFactory, MerkleSyncManager};
     use crate::storage::datastores::RedbDataStore;
     use crate::storage::factory::ObserverFactory;
-    use crate::storage::map_data_store::{LeafSink, MapDataStore, MerkleLeaf, MerkleLeafKind};
+    use crate::storage::map_data_store::{
+        merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, MerkleLeafKind,
+    };
     use crate::storage::record::{OrMapEntry, Record, RecordMetadata, RecordValue};
     use topgun_core::hash_to_partition;
 
@@ -1516,32 +1482,54 @@ mod rebuild_tests {
         );
     }
 
-    // Cross-check: the manually-computed write-path hashes match what the
-    // datastore stores, so the parity tests above are not accidentally testing
-    // a hash both sides happen to share by coincidence.
+    // Pins the canonical leaf-hash formula that both the write-path observer
+    // and every durable enumeration backend now share through `merkle_leaf_hash`.
+    // The parity tests above prove rebuilt roots equal live roots; this pins the
+    // exact byte formula so a future edit cannot silently shift both sides in
+    // lockstep and still pass the (relative) parity assertions.
     #[test]
-    fn leaf_hash_helpers_match_write_path_formula() {
-        let lww = compute_lww_hash("alice", 111, 0, "n1");
+    fn merkle_leaf_hash_matches_documented_formula() {
+        let lww_value = RecordValue::Lww {
+            value: Value::String("v".to_string()),
+            timestamp: Timestamp {
+                millis: 111,
+                counter: 0,
+                node_id: "n1".to_string(),
+            },
+        };
+        let (lww_kind, lww) = merkle_leaf_hash("alice", &lww_value).expect("LWW yields a leaf");
+        assert_eq!(lww_kind, MerkleLeafKind::Lww);
         assert_eq!(
             lww,
             topgun_core::hash::fnv1a_hash("alice:111:0:n1"),
-            "compute_lww_hash must equal fnv1a(key:millis:counter:node_id)"
+            "LWW leaf must equal fnv1a(key:millis:counter:node_id)"
         );
-        let entries = vec![OrMapEntry {
-            value: Value::String("v".to_string()),
-            tag: "tagA".to_string(),
-            timestamp: Timestamp {
-                millis: 1,
-                counter: 0,
-                node_id: "n".to_string(),
-            },
-        }];
-        let ormap = compute_ormap_hash("t1", &entries, &[]);
+
+        let ormap_value = RecordValue::OrMap {
+            records: vec![OrMapEntry {
+                value: Value::String("v".to_string()),
+                tag: "tagA".to_string(),
+                timestamp: Timestamp {
+                    millis: 1,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
+            }],
+            tombstones: vec![],
+        };
+        let (or_kind, ormap) = merkle_leaf_hash("t1", &ormap_value).expect("OR-Map yields a leaf");
+        assert_eq!(or_kind, MerkleLeafKind::OrMap);
         assert_eq!(
             ormap,
             topgun_core::hash::fnv1a_hash("key:t1|tagA#"),
-            "compute_ormap_hash must equal the sorted active#tombstone formula"
+            "OR-Map leaf must equal the sorted active#tombstone formula"
         );
-        let _ = MerkleLeafKind::Lww;
+
+        // OrTombstones contribute no leaf — the write path removes the key from
+        // the OR-Map tree instead, so enumeration must mirror that with `None`.
+        assert!(
+            merkle_leaf_hash("gone", &RecordValue::OrTombstones { tags: vec![] }).is_none(),
+            "OrTombstones must yield no leaf"
+        );
     }
 }
