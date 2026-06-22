@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use dashmap::DashMap;
 use tokio::sync::mpsc::error::TrySendError;
@@ -38,17 +38,6 @@ pub enum OutboundMessage {
     Binary(Vec<u8>),
     /// A close frame with an optional reason.
     Close(Option<String>),
-}
-
-/// Error returned when sending a message to a connection fails.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SendError {
-    /// The send operation timed out (channel is full and remained full).
-    Timeout,
-    /// The connection has been closed; the receiver was dropped.
-    Disconnected,
-    /// The channel is full (non-blocking `try_send` only).
-    Full,
 }
 
 /// Outcome of a best-effort broadcast send to a (possibly slow) consumer.
@@ -177,25 +166,6 @@ impl ConnectionHandle {
     #[must_use]
     pub fn dropped_broadcasts(&self) -> u64 {
         self.dropped_broadcasts.load(Ordering::Relaxed)
-    }
-
-    /// Sends a message with a timeout.
-    ///
-    /// # Errors
-    ///
-    /// Returns `SendError::Timeout` if the channel remains full for the
-    /// entire timeout duration. Returns `SendError::Disconnected` if the
-    /// receiver has been dropped (connection closed).
-    pub async fn send_timeout(
-        &self,
-        msg: OutboundMessage,
-        timeout: Duration,
-    ) -> Result<(), SendError> {
-        match tokio::time::timeout(timeout, self.tx.send(msg)).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(_)) => Err(SendError::Disconnected),
-            Err(_) => Err(SendError::Timeout),
-        }
     }
 
     /// Checks whether the connection is still open.
@@ -564,37 +534,6 @@ mod tests {
 
         drop(rx);
         assert!(!handle.is_connected());
-    }
-
-    #[tokio::test]
-    async fn connection_handle_send_timeout_success() {
-        let config = test_config();
-        let registry = ConnectionRegistry::new();
-        let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
-
-        let result = handle
-            .send_timeout(
-                OutboundMessage::Binary(vec![1, 2, 3]),
-                Duration::from_secs(1),
-            )
-            .await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn connection_handle_send_timeout_disconnected() {
-        let config = test_config();
-        let registry = ConnectionRegistry::new();
-        let (handle, rx) = registry.register(ConnectionKind::Client, &config);
-        drop(rx);
-
-        let result = handle
-            .send_timeout(
-                OutboundMessage::Binary(vec![1, 2, 3]),
-                Duration::from_secs(1),
-            )
-            .await;
-        assert_eq!(result, Err(SendError::Disconnected));
     }
 
     #[test]

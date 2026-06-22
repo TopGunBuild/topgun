@@ -851,6 +851,13 @@ async fn main() -> anyhow::Result<()> {
         .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"))
         .unwrap_or(false);
 
+    // Trust reverse-proxy forwarding headers when keying the admin/login rate
+    // limiter. Off by default: a client can forge X-Forwarded-For, so enable only
+    // when a trusted proxy that overwrites the header sits in front (audit F8).
+    let trust_forwarded_for = std::env::var("TOPGUN_TRUSTED_PROXY")
+        .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"))
+        .unwrap_or(false);
+
     // Optional request-path JWT issuer/audience enforcement (audit F7). Unset =>
     // not checked (TopGun-minted tokens). Set these when jwt_secret is an IdP key.
     let jwt_issuer = std::env::var("TOPGUN_JWT_ISSUER")
@@ -905,6 +912,7 @@ async fn main() -> anyhow::Result<()> {
             cors_origins,
             jwt_issuer,
             jwt_audience,
+            trust_forwarded_for,
             ..NetworkConfig::default()
         }),
         start_time: Instant::now(),
@@ -936,6 +944,11 @@ async fn main() -> anyhow::Result<()> {
         search_registry: Some(search_registry),
         hybrid_search_registry: Some(hybrid_search_registry),
         admin_enabled,
+        // Resolve the vector-index sidecar path from env once here, at the
+        // construction boundary, so request handlers stay env-free.
+        vector_index_path: Some(
+            topgun_server::network::handlers::admin::vector_index_path_from_env(),
+        ),
     };
 
     // Mirror NetworkModule::serve()'s scalar index rebuild for the topgun_server
@@ -997,6 +1010,7 @@ async fn main() -> anyhow::Result<()> {
         state.config.rate_limit_per_ip,
         state.config.rate_limit_burst,
         mount_admin,
+        state.config.trust_forwarded_for,
     )
     // Browser WS dual-mount: /ws is already in admin_routes(); / is the
     // binary-only extra for clients that connect to the root path.
