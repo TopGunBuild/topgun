@@ -61,14 +61,21 @@ pub fn assess(
     ceiling_mb: f64,
 ) -> MemoryAssessment {
     if samples.is_empty() {
+        // Zero samples over a real run means the monitor was BLIND (ps failing or
+        // the server pid never resolved) — a leak would be invisible. Fail rather
+        // than silently pass: an assertion that cannot observe must not report ok.
         return MemoryAssessment {
             samples: 0,
             first_mb: 0.0,
             peak_mb: 0.0,
             last_mb: 0.0,
             slope_mb_per_hour: 0.0,
-            passed: true,
-            reason: None,
+            passed: false,
+            reason: Some(
+                "no RSS samples collected — memory monitoring was blind (ps failed or server \
+                 pid never available); cannot assert bounded memory"
+                    .to_string(),
+            ),
         };
     }
 
