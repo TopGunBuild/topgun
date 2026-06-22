@@ -31,6 +31,78 @@ mod tests {
     }
 }
 
+/// Regression guard against process-global env mutation creeping back into the
+/// codebase.
+///
+/// `std::env::set_var` mutates shared process state; Rust runs unit tests in one
+/// process in parallel, so a test that sets an env var can be observed by an
+/// unrelated test calling `from_env()` mid-run (a real latent flake source). The
+/// project policy is: parse config from an injected source (`from_source` seam /
+/// an `AppState` field) and never `set_var` in a handler/config path. The only
+/// sanctioned exceptions are the two wiring-only smoke tests that prove the
+/// `from_env` → `std::env` seam itself works, each gated with `#[serial]`.
+///
+/// This test scans the crate source and fails if a `set_var` call appears
+/// anywhere outside that allow-list, so new code cannot silently reintroduce
+/// the anti-pattern. The allow-listed files must keep their `#[serial]` gate.
+#[cfg(test)]
+mod env_isolation_guard {
+    use std::path::{Path, PathBuf};
+
+    /// Files permitted to call `std::env::set_var`, by path suffix. Both are the
+    /// single `#[serial]` `from_env_reads_process_environment` smoke tests.
+    const ALLOWLIST: &[&str] = &[
+        "storage/eviction_config.rs",
+        "storage/datastores/write_behind.rs",
+    ];
+
+    fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir)
+            .expect("src dir is readable")
+            .flatten()
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn no_set_var_outside_allowlist() {
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        collect_rs_files(&src, &mut files);
+
+        let mut offenders = Vec::new();
+        for file in &files {
+            let rel = file.strip_prefix(&src).unwrap_or(file);
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            let allowed = ALLOWLIST.iter().any(|a| rel_str.ends_with(a));
+            let contents = std::fs::read_to_string(file).expect("source file is readable");
+            // Match the call form (name followed by an open paren) so prose
+            // mentions of the bare name in comments/docs do not trip the guard.
+            // The needle is assembled at runtime so this guard's own source does
+            // not contain the literal pattern it scans for.
+            let needle = concat!("set_var", "(");
+            if contents.contains(needle) && !allowed {
+                offenders.push(rel_str);
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "std::env::set_var found outside the sanctioned #[serial] from_env smoke \
+             tests: {offenders:?}. Inject config via an injected source (from_source / \
+             an AppState field) instead of mutating process-global env; if a real \
+             from_env seam smoke test is unavoidable, gate it with #[serial] and add \
+             the file to ALLOWLIST in this guard."
+        );
+    }
+}
+
 /// Integration tests for the full operation pipeline.
 ///
 /// Tests the end-to-end flow: Message -> classify -> pipeline -> router -> stub -> response.

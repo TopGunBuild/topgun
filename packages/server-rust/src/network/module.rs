@@ -33,7 +33,7 @@ use axum::routing::{delete, get, post};
 use axum::Router;
 use tokio::net::TcpListener;
 use tower_governor::governor::GovernorConfigBuilder;
-use tower_governor::key_extractor::PeerIpKeyExtractor;
+use tower_governor::key_extractor::{KeyExtractor, PeerIpKeyExtractor};
 use tower_governor::GovernorLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{info, warn};
@@ -541,6 +541,73 @@ struct AppServices {
     >,
 }
 
+/// Extracts the client IP a trusted proxy attributed to the request, reading
+/// the **rightmost** `X-Forwarded-For` entry (then `X-Real-IP`).
+///
+/// This is the security-critical detail. A reverse proxy that appends to XFF
+/// (nginx's `$proxy_add_x_forwarded_for`) produces
+/// `<client-forgeable values…>, <real peer the proxy saw>`: the entry the
+/// closest trusted proxy appended is the **last** one, and the client controls
+/// only the entries to its left. Reading the rightmost entry therefore bounds an
+/// attacker — they cannot move their own request into another IP's bucket or
+/// spin up fresh buckets by rotating a forged value, because anything they put
+/// in the header lands to the left of the proxy's appended IP and is ignored.
+/// (`tower_governor`'s `SmartIpKeyExtractor` reads the *leftmost* entry, which is
+/// exactly the forgeable position, so it is unsafe for rate-limit keying behind
+/// an appending proxy — hence this bespoke extractor.)
+///
+/// Returns `None` when no forwarding header carries a parseable IP, so the
+/// caller falls back to the socket peer address.
+fn trusted_forwarded_ip<T>(req: &http::Request<T>) -> Option<std::net::IpAddr> {
+    let headers = req.headers();
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        // rsplit → rightmost parseable entry (appended by the closest proxy).
+        .and_then(|s| s.rsplit(',').find_map(|p| p.trim().parse().ok()))
+        .or_else(|| {
+            // X-Real-IP is a single value the proxy overwrites, not a client-
+            // appendable list, so it is safe to take as-is when present.
+            headers
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse().ok())
+        })
+}
+
+/// Governor rate-limit key extractor that is aware of reverse-proxy headers
+/// only when the operator asserts a trusted proxy sits in front.
+///
+/// When `trust_forwarded_for` is `false` the key is the socket peer address
+/// (`PeerIpKeyExtractor` behaviour) and any client-supplied `X-Forwarded-For` is
+/// ignored — otherwise an attacker could forge that header to dodge their own
+/// rate bucket or exhaust someone else's. When `true` (operator-configured
+/// trusted proxy) it keys on the rightmost forwarded IP (see
+/// [`trusted_forwarded_ip`]), falling back to the peer address when no
+/// forwarding header is present, so each real client behind the proxy is
+/// bucketed independently instead of all sharing the proxy's IP.
+#[derive(Debug, Clone, Copy)]
+struct ProxyAwareIpKeyExtractor {
+    trust_forwarded_for: bool,
+}
+
+impl KeyExtractor for ProxyAwareIpKeyExtractor {
+    type Key = std::net::IpAddr;
+
+    fn extract<T>(
+        &self,
+        req: &http::Request<T>,
+    ) -> Result<Self::Key, tower_governor::GovernorError> {
+        if self.trust_forwarded_for {
+            if let Some(ip) = trusted_forwarded_ip(req) {
+                return Ok(ip);
+            }
+        }
+        // Untrusted, or trusted but no forwarding header: key on the socket peer.
+        PeerIpKeyExtractor.extract(req)
+    }
+}
+
 /// Single source of truth for the `topgun-server` HTTP route set.
 ///
 /// Returns a generic `Router<AppState>` with state NOT yet applied, so any
@@ -564,6 +631,15 @@ struct AppServices {
 ///   they return 404 instead of exposing an unauthenticated superuser on a public
 ///   no-auth bind. The data plane (`/health` + probes, `/ws`, `/sync`,
 ///   `/metrics`, `/api/status`, `/api/auth/status`, `OpenAPI`) is always mounted.
+/// - `trust_forwarded_for`: when `true`, the rate-limit key is derived from the
+///   rightmost `X-Forwarded-For` entry (then `X-Real-IP`), falling back to the
+///   socket peer when absent, so clients behind a trusted reverse proxy are
+///   bucketed by their real IP instead of all sharing the proxy's. When `false`
+///   (the default) the socket peer address is used and forwarded headers are
+///   ignored — a client could otherwise spoof `X-Forwarded-For` to evade or
+///   poison another IP's rate bucket, so this must only be enabled when a
+///   trusted proxy that appends/overwrites the header sits in front of the
+///   server.
 ///
 /// Neither rate-limit parameter has an internal default: callers pass the values
 /// they read from their own `NetworkConfig` so the production rate-limit policy is
@@ -578,6 +654,7 @@ pub fn admin_routes(
     rate_limit_per_ip: u32,
     rate_limit_burst: u32,
     mount_admin: bool,
+    trust_forwarded_for: bool,
 ) -> Router<AppState> {
     // Build a per-IP rate limiter for admin and login endpoints.
     // Replenishment interval derived from rate_limit_per_ip: for 100 req/s the
@@ -622,7 +699,9 @@ pub fn admin_routes(
         // operation-level load shedding instead of HTTP-layer rate limiting.
         let replenish_interval_ms = (1000 / u64::from(rate_limit_per_ip).max(1)).max(1);
         let governor_config = GovernorConfigBuilder::default()
-            .key_extractor(PeerIpKeyExtractor)
+            .key_extractor(ProxyAwareIpKeyExtractor {
+                trust_forwarded_for,
+            })
             .per_millisecond(replenish_interval_ms)
             .burst_size(rate_limit_burst)
             .finish()
@@ -795,6 +874,7 @@ fn build_app(
     // Extract rate limit config before config is moved into Arc<AppState>.
     let rate_limit_per_ip = config.rate_limit_per_ip;
     let rate_limit_burst = config.rate_limit_burst;
+    let trust_forwarded_for = config.trust_forwarded_for;
 
     // Build a single shared HTTP client for all JWKS/OIDC providers so that
     // connection pooling is shared rather than fragmented across providers.
@@ -879,6 +959,9 @@ fn build_app(
         // This NetworkModule-managed path always mounts the admin plane and
         // enforces auth, so the extractor guard is enabled to match.
         admin_enabled: true,
+        // Resolve the vector-index sidecar path from env once here, at the
+        // construction boundary, so request handlers stay env-free.
+        vector_index_path: Some(crate::network::handlers::admin::vector_index_path_from_env()),
     };
 
     // Delegate all route wiring to admin_routes() — the single source of truth
@@ -889,9 +972,14 @@ fn build_app(
     // decision (the listener is bound elsewhere), so it always mounts the admin
     // plane; auth is enforced on this path, so the admin routes are JWT-protected.
     // The binary serve path computes posture and passes the gated flag itself.
-    admin_routes(rate_limit_per_ip, rate_limit_burst, true)
-        .layer(layers)
-        .with_state(state)
+    admin_routes(
+        rate_limit_per_ip,
+        rate_limit_burst,
+        true,
+        trust_forwarded_for,
+    )
+    .layer(layers)
+    .with_state(state)
 }
 
 /// Serves plain HTTP/WS connections using axum's built-in server.
@@ -992,6 +1080,128 @@ async fn drain_connections(
 mod tests {
     use super::*;
     use crate::network::HealthState;
+
+    // ── Proxy-aware rate-limit key extractor (audit F8 / TODO-513) ────
+
+    /// Builds a request carrying a `ConnectInfo` peer address and an optional
+    /// `X-Forwarded-For` header, mirroring what the governor layer sees.
+    fn request_with(peer: std::net::IpAddr, xff: Option<&str>) -> http::Request<()> {
+        let mut req = http::Request::new(());
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+                peer, 5000,
+            )));
+        if let Some(value) = xff {
+            req.headers_mut()
+                .insert("x-forwarded-for", value.parse().unwrap());
+        }
+        req
+    }
+
+    /// Untrusted (default): a spoofable `X-Forwarded-For` is ignored and the key
+    /// is the socket peer address. This is the security-critical negative
+    /// control — without it, any client could forge XFF to dodge or poison
+    /// another IP's rate bucket.
+    #[test]
+    fn proxy_aware_extractor_ignores_forwarded_header_when_untrusted() {
+        let peer = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1));
+        let req = request_with(peer, Some("203.0.113.7"));
+        let key = ProxyAwareIpKeyExtractor {
+            trust_forwarded_for: false,
+        }
+        .extract(&req)
+        .expect("peer addr is present");
+        assert_eq!(
+            key, peer,
+            "untrusted mode must key on the socket peer, not XFF"
+        );
+    }
+
+    /// Trusted proxy configured: distinct `X-Forwarded-For` values key into
+    /// distinct buckets, so clients behind the proxy are throttled
+    /// independently instead of all sharing the proxy's single IP.
+    #[test]
+    fn proxy_aware_extractor_uses_forwarded_header_when_trusted() {
+        let proxy = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1));
+        let extractor = ProxyAwareIpKeyExtractor {
+            trust_forwarded_for: true,
+        };
+
+        let client_a = extractor
+            .extract(&request_with(proxy, Some("203.0.113.7")))
+            .expect("XFF present");
+        let client_b = extractor
+            .extract(&request_with(proxy, Some("198.51.100.9")))
+            .expect("XFF present");
+
+        assert_eq!(
+            client_a,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 7))
+        );
+        assert_eq!(
+            client_b,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 9))
+        );
+        assert_ne!(
+            client_a, client_b,
+            "two clients behind the same proxy must land in separate buckets"
+        );
+    }
+
+    /// Trusted mode still falls back to the peer address when no forwarding
+    /// header is present (direct connection to a proxy-configured server).
+    #[test]
+    fn proxy_aware_extractor_trusted_falls_back_to_peer_without_header() {
+        let peer = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2));
+        let key = ProxyAwareIpKeyExtractor {
+            trust_forwarded_for: true,
+        }
+        .extract(&request_with(peer, None))
+        .expect("peer addr is present");
+        assert_eq!(key, peer);
+    }
+
+    /// Security-critical: with an appending proxy (`$proxy_add_x_forwarded_for`),
+    /// the header is `<client-forgeable…>, <real peer>`. The extractor must key
+    /// on the **rightmost** entry (appended by the trusted proxy), not the
+    /// leftmost (attacker-controlled). Two attackers forging different leftmost
+    /// values but routed through the same proxy hop must collapse into the SAME
+    /// bucket — otherwise rate limiting is trivially evaded by rotating the
+    /// forged value, and another IP's bucket can be poisoned.
+    #[test]
+    fn proxy_aware_extractor_keys_on_rightmost_forwarded_entry() {
+        let proxy = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1));
+        let extractor = ProxyAwareIpKeyExtractor {
+            trust_forwarded_for: true,
+        };
+        let real_client = std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 9));
+
+        // Attacker forges a different leftmost value on each request; the proxy
+        // appends the same real peer IP on the right.
+        let key1 = extractor
+            .extract(&request_with(proxy, Some("203.0.113.7, 198.51.100.9")))
+            .expect("XFF present");
+        let key2 = extractor
+            .extract(&request_with(proxy, Some("8.8.8.8, 198.51.100.9")))
+            .expect("XFF present");
+
+        assert_eq!(key1, real_client, "must key on the rightmost (proxy) entry");
+        assert_eq!(key2, real_client, "must key on the rightmost (proxy) entry");
+        assert_eq!(
+            key1, key2,
+            "rotating the forged leftmost value must not create fresh buckets"
+        );
+
+        // Poisoning attempt: attacker tries to bill a victim by forging the
+        // victim's IP on the left — still ignored in favour of the proxy entry.
+        let victim_forge = extractor
+            .extract(&request_with(proxy, Some("192.0.2.123, 198.51.100.9")))
+            .expect("XFF present");
+        assert_eq!(
+            victim_forge, real_client,
+            "a forged leftmost victim IP must not move the request into the victim's bucket"
+        );
+    }
 
     // ── Test helper ───────────────────────────────────────────────────
 

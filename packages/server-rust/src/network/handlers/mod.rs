@@ -159,6 +159,12 @@ pub struct AppState {
     /// future route-mounting regression cannot re-expose the unauthenticated
     /// admin control plane on a non-loopback bind.
     pub admin_enabled: bool,
+    /// Filesystem path of the vector-index descriptor sidecar JSON, resolved
+    /// from `TOPGUN_VECTOR_INDEX_PATH` once at the construction boundary so the
+    /// admin handlers never read process-global env directly. `None` falls back
+    /// to the default `./vector_indexes.json`; tests inject a temp path here
+    /// instead of mutating the process environment (test-isolation seam).
+    pub vector_index_path: Option<std::path::PathBuf>,
 }
 
 impl AppState {
@@ -214,6 +220,9 @@ impl AppState {
             // Default-safe: tests exercise the admin plane as enabled unless they
             // explicitly override this to assert the disabled-plane guard.
             admin_enabled: true,
+            // None → default path. Tests that persist descriptors override this
+            // with a temp path instead of mutating TOPGUN_VECTOR_INDEX_PATH.
+            vector_index_path: None,
         }
     }
 }

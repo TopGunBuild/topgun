@@ -41,6 +41,19 @@ pub struct NetworkConfig {
     /// `rate_limit_burst` requests in a short window before throttling.
     /// Defaults to 50.
     pub rate_limit_burst: u32,
+    /// Whether to trust reverse-proxy forwarding headers (rightmost
+    /// `X-Forwarded-For` entry, then `X-Real-IP`) when keying the admin/login
+    /// rate limiter.
+    ///
+    /// When `false` (default), the rate-limit bucket is keyed on the socket peer
+    /// address and forwarded headers are ignored — the safe default, since any
+    /// client can forge `X-Forwarded-For` to evade or poison rate buckets. When
+    /// `true`, each real client behind a trusted reverse proxy is bucketed by the
+    /// rightmost forwarded IP (the entry the closest proxy appended, which the
+    /// client cannot forge) instead of all clients sharing the proxy's single IP.
+    /// Enable (`TOPGUN_TRUSTED_PROXY=1`) only when a trusted proxy that
+    /// appends/overwrites the forwarding header sits in front of the server.
+    pub trust_forwarded_for: bool,
     /// External auth providers for token exchange at POST /api/auth/token.
     /// An empty list disables the endpoint (returns 404 on all requests).
     /// Constructed programmatically from environment variables or config in
@@ -80,6 +93,7 @@ impl Default for NetworkConfig {
             jwt_clock_skew_secs: 60,
             rate_limit_per_ip: 100,
             rate_limit_burst: 50,
+            trust_forwarded_for: false,
             auth_providers: vec![],
             insecure_forward_auth_errors: false,
             jwt_issuer: None,
@@ -106,8 +120,6 @@ pub struct TlsConfig {
 pub struct ConnectionConfig {
     /// Bounded mpsc channel capacity for outbound messages per connection.
     pub outbound_channel_capacity: usize,
-    /// Maximum time to wait when sending a message to a connection.
-    pub send_timeout: Duration,
     /// Duration after which an idle connection is considered stale.
     ///
     /// Enforced by the connection reaper: an authenticated connection whose
@@ -166,7 +178,6 @@ impl Default for ConnectionConfig {
     fn default() -> Self {
         Self {
             outbound_channel_capacity: 256,
-            send_timeout: Duration::from_secs(5),
             idle_timeout: Duration::from_secs(60),
             auth_timeout: Duration::from_secs(10),
             reaper_interval: Duration::from_secs(10),
@@ -201,6 +212,9 @@ mod tests {
         assert_eq!(config.jwt_clock_skew_secs, 60);
         assert_eq!(config.rate_limit_per_ip, 100);
         assert_eq!(config.rate_limit_burst, 50);
+        // Default is false — forwarded headers are not trusted unless an operator
+        // asserts a trusted proxy via TOPGUN_TRUSTED_PROXY (anti-spoof default).
+        assert!(!config.trust_forwarded_for);
         // Default is false — production-safe by default.
         assert!(!config.insecure_forward_auth_errors);
     }
@@ -209,7 +223,6 @@ mod tests {
     fn connection_config_defaults() {
         let config = ConnectionConfig::default();
         assert_eq!(config.outbound_channel_capacity, 256);
-        assert_eq!(config.send_timeout, Duration::from_secs(5));
         assert_eq!(config.idle_timeout, Duration::from_secs(60));
         assert_eq!(config.auth_timeout, Duration::from_secs(10));
         assert_eq!(config.reaper_interval, Duration::from_secs(10));

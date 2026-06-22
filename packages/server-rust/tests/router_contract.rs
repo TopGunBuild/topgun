@@ -77,6 +77,7 @@ fn build_binary_router(mount_admin: bool) -> axum::Router {
         default_config.rate_limit_per_ip,
         default_config.rate_limit_burst,
         mount_admin,
+        default_config.trust_forwarded_for,
     )
     // Browser WS dual-mount: the binary's only extra route beyond admin_routes().
     .route(

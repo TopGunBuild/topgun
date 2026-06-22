@@ -1163,14 +1163,36 @@ pub fn save_scalar_descriptors(
 
 // ── Vector index descriptor persistence ──────────────────────────────────────
 
-/// Path for the vector index descriptor sidecar JSON file.
+/// Default vector-index descriptor sidecar path used when none is configured.
+const DEFAULT_VECTOR_INDEX_PATH: &str = "./vector_indexes.json";
+
+/// Resolves the vector-index descriptor sidecar path from the environment at the
+/// construction boundary.
+///
+/// Production `AppState` wiring calls this once (`module.rs`, `topgun_server.rs`,
+/// the load harness) and stores the result in `AppState::vector_index_path`, so
+/// the request handlers themselves never touch process-global env — that keeps
+/// them testable by direct field injection rather than `set_var`.
 ///
 /// Configured via `TOPGUN_VECTOR_INDEX_PATH`; defaults to `./vector_indexes.json`.
-fn descriptor_path() -> std::path::PathBuf {
+#[must_use]
+pub fn vector_index_path_from_env() -> std::path::PathBuf {
     std::path::PathBuf::from(
         std::env::var("TOPGUN_VECTOR_INDEX_PATH")
-            .unwrap_or_else(|_| "./vector_indexes.json".to_string()),
+            .unwrap_or_else(|_| DEFAULT_VECTOR_INDEX_PATH.to_string()),
     )
+}
+
+/// Path for the vector index descriptor sidecar JSON file for this request.
+///
+/// Reads the injected `AppState::vector_index_path` (resolved from env at the
+/// construction boundary), falling back to the default when unset. No env read
+/// happens here so the path is fully determined by the injected state.
+fn descriptor_path(state: &AppState) -> std::path::PathBuf {
+    state
+        .vector_index_path
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_VECTOR_INDEX_PATH))
 }
 
 /// Loads all persisted `VectorIndexDescriptor` entries from the sidecar JSON file.
@@ -1313,7 +1335,7 @@ pub async fn create_vector_index(
     );
 
     // Persist the descriptor so startup rebuild can re-register this index.
-    let path = descriptor_path();
+    let path = descriptor_path(&state);
     let mut descriptors = load_vector_descriptors(&path);
     let now_iso = {
         let secs = SystemTime::now()
@@ -1440,7 +1462,7 @@ pub async fn remove_vector_index_handler(
     let _ = registry.remove_index(&attribute);
 
     // Remove from persistent descriptor file.
-    let path = descriptor_path();
+    let path = descriptor_path(&state);
     let mut descriptors = load_vector_descriptors(&path);
     descriptors.retain(|d| !(d.map_name == map_name && d.index_name == index_name));
     save_vector_descriptors(&path, &descriptors);
@@ -1816,10 +1838,14 @@ mod vector_admin_tests {
     #[tokio::test]
     async fn create_vector_index_201_on_valid_request() {
         // Use temp dir for descriptor file to avoid polluting the workspace.
+        // Inject the path via AppState instead of mutating process env, so this
+        // test cannot race a parallel test reading TOPGUN_VECTOR_INDEX_PATH.
         let tmp = std::env::temp_dir().join(format!("vi_test_{}.json", uuid::Uuid::new_v4()));
-        std::env::set_var("TOPGUN_VECTOR_INDEX_PATH", tmp.to_str().unwrap());
 
-        let state = make_state_with_factory();
+        let state = AppState {
+            vector_index_path: Some(tmp.clone()),
+            ..make_state_with_factory()
+        };
         let req = CreateVectorIndexRequest {
             map_name: "users".to_string(),
             attribute: "_embedding".to_string(),
@@ -1839,15 +1865,16 @@ mod vector_admin_tests {
 
         // Clean up temp file.
         let _ = std::fs::remove_file(&tmp);
-        std::env::remove_var("TOPGUN_VECTOR_INDEX_PATH");
     }
 
     #[tokio::test]
     async fn create_vector_index_409_on_duplicate() {
         let tmp = std::env::temp_dir().join(format!("vi_test_{}.json", uuid::Uuid::new_v4()));
-        std::env::set_var("TOPGUN_VECTOR_INDEX_PATH", tmp.to_str().unwrap());
 
-        let state = make_state_with_factory();
+        let state = AppState {
+            vector_index_path: Some(tmp.clone()),
+            ..make_state_with_factory()
+        };
         let req = CreateVectorIndexRequest {
             map_name: "users".to_string(),
             attribute: "_embedding".to_string(),
@@ -1866,7 +1893,6 @@ mod vector_admin_tests {
         assert_eq!(code, StatusCode::CONFLICT);
 
         let _ = std::fs::remove_file(&tmp);
-        std::env::remove_var("TOPGUN_VECTOR_INDEX_PATH");
     }
 
     #[tokio::test]
@@ -1893,9 +1919,11 @@ mod vector_admin_tests {
         use crate::service::domain::index::Index;
 
         let tmp = std::env::temp_dir().join(format!("vi_list_{}.json", uuid::Uuid::new_v4()));
-        std::env::set_var("TOPGUN_VECTOR_INDEX_PATH", tmp.to_str().unwrap());
 
-        let state = make_state_with_factory();
+        let state = AppState {
+            vector_index_path: Some(tmp.clone()),
+            ..make_state_with_factory()
+        };
         let req = CreateVectorIndexRequest {
             map_name: "users".to_string(),
             attribute: "_embedding".to_string(),
@@ -1931,7 +1959,6 @@ mod vector_admin_tests {
         assert_eq!(indexes[0]["vectorCount"].as_u64().unwrap(), 1);
 
         let _ = std::fs::remove_file(&tmp);
-        std::env::remove_var("TOPGUN_VECTOR_INDEX_PATH");
     }
 
     #[tokio::test]
@@ -2050,9 +2077,11 @@ mod vector_admin_tests {
     #[tokio::test]
     async fn optimize_vector_index_202_happy_path() {
         let tmp = std::env::temp_dir().join(format!("vi_opt_{}.json", uuid::Uuid::new_v4()));
-        std::env::set_var("TOPGUN_VECTOR_INDEX_PATH", tmp.to_str().unwrap());
 
-        let state = make_state_with_factory();
+        let state = AppState {
+            vector_index_path: Some(tmp.clone()),
+            ..make_state_with_factory()
+        };
         // First create the index.
         let req = CreateVectorIndexRequest {
             map_name: "users".to_string(),
@@ -2085,15 +2114,15 @@ mod vector_admin_tests {
         );
 
         let _ = std::fs::remove_file(&tmp);
-        std::env::remove_var("TOPGUN_VECTOR_INDEX_PATH");
     }
 
     // ── cancel_vector_index_optimize_handler tests ──────────────────────────────
 
+    /// Creates an index and starts an optimize against the descriptor path
+    /// already injected into `state` (`state.vector_index_path`), returning the
+    /// optimization id. Callers inject a temp path so no two parallel tests share
+    /// a descriptor file; the temp file is cleaned up here.
     async fn setup_index_with_optimize(state: &AppState) -> String {
-        let tmp = std::env::temp_dir().join(format!("vi_cancel_{}.json", uuid::Uuid::new_v4()));
-        std::env::set_var("TOPGUN_VECTOR_INDEX_PATH", tmp.to_str().unwrap());
-
         let req = CreateVectorIndexRequest {
             map_name: "users".to_string(),
             attribute: "_embedding".to_string(),
@@ -2113,7 +2142,9 @@ mod vector_admin_tests {
         .await
         .expect("optimize should succeed");
         let (_, Json(resp)) = result;
-        let _ = std::fs::remove_file(tmp);
+        if let Some(path) = &state.vector_index_path {
+            let _ = std::fs::remove_file(path);
+        }
         resp.optimization_id
     }
 
@@ -2138,9 +2169,11 @@ mod vector_admin_tests {
     #[tokio::test]
     async fn cancel_optimize_409_when_no_in_flight_optimize() {
         let tmp = std::env::temp_dir().join(format!("vi_409_{}.json", uuid::Uuid::new_v4()));
-        std::env::set_var("TOPGUN_VECTOR_INDEX_PATH", tmp.to_str().unwrap());
 
-        let state = make_state_with_factory();
+        let state = AppState {
+            vector_index_path: Some(tmp.clone()),
+            ..make_state_with_factory()
+        };
         // Create index but do NOT start an optimize.
         let req = CreateVectorIndexRequest {
             map_name: "users".to_string(),
@@ -2168,12 +2201,15 @@ mod vector_admin_tests {
         assert_eq!(code, StatusCode::CONFLICT);
 
         let _ = std::fs::remove_file(tmp);
-        std::env::remove_var("TOPGUN_VECTOR_INDEX_PATH");
     }
 
     #[tokio::test]
     async fn cancel_optimize_404_when_mismatched_optimization_id() {
-        let state = make_state_with_factory();
+        let tmp = std::env::temp_dir().join(format!("vi_c404_{}.json", uuid::Uuid::new_v4()));
+        let state = AppState {
+            vector_index_path: Some(tmp.clone()),
+            ..make_state_with_factory()
+        };
         let _ = setup_index_with_optimize(&state).await;
 
         // Use a wrong optimization_id.
@@ -2194,7 +2230,11 @@ mod vector_admin_tests {
 
     #[tokio::test]
     async fn cancel_optimize_200_happy_path_and_idempotent() {
-        let state = make_state_with_factory();
+        let tmp = std::env::temp_dir().join(format!("vi_c200_{}.json", uuid::Uuid::new_v4()));
+        let state = AppState {
+            vector_index_path: Some(tmp.clone()),
+            ..make_state_with_factory()
+        };
         let optimization_id = setup_index_with_optimize(&state).await;
 
         // First cancel — should return 200.

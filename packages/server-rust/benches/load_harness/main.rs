@@ -250,6 +250,8 @@ async fn main() {
                 search_registry: None,
                 hybrid_search_registry: None,
                 admin_enabled: true,
+                // Load harness never creates vector indexes; default path is fine.
+                vector_index_path: None,
             };
 
             let ws_handler = get(topgun_server::network::handlers::ws_upgrade_handler);
