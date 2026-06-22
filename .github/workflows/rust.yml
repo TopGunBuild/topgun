@@ -392,6 +392,82 @@ jobs:
           # target (src/sim/*); keep them gating via the path filter.
           cargo test --profile ci-sim --features simulation -p topgun-server --lib -- sim
 
+  soak-smoke:
+    name: Soak Harness Smoke (G4b)
+    needs: [check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # Blocking: the soak harness (TODO-484) must keep compiling AND its fault
+    # detection must keep working. We run the two negative controls (which MUST
+    # go RED) plus a short no-crash convergence/churn/memory soak (which MUST be
+    # green). The full 72h crash-loop soak runs on a Hetzner scratch box, not in
+    # CI. The crash-loop path is also currently RED by design against TODO-530
+    # (post-restart rehydration gap), so CI deliberately exercises the no-crash
+    # mode here — see packages/server-rust/benches/soak_harness/README.md.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-soak-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-soak-
+            ${{ runner.os }}-cargo-
+
+      - name: Build server binary + soak bench
+        run: cargo build --bin topgun-server --bench soak_harness
+
+      - name: Locate soak bench binary
+        id: soak
+        run: |
+          BIN=$(ls -t target/debug/deps/soak_harness-* | grep -vE '\.(d|o|rcgu)' | head -1)
+          test -x "$BIN" || { echo "soak bench binary not found"; exit 1; }
+          echo "bin=$BIN" >> "$GITHUB_OUTPUT"
+
+      - name: Negative control — divergence must go RED
+        run: |
+          set +e
+          OUT=$(${{ steps.soak.outputs.bin }} --inject-divergence); CODE=$?
+          echo "$OUT"
+          if [ "$CODE" -eq 0 ]; then echo "FAIL: divergence control did not go RED"; exit 1; fi
+          echo "$OUT" | grep -q "divergence correctly detected" || { echo "FAIL: wrong divergence outcome (code $CODE)"; exit 1; }
+          echo "OK: divergence detection RED as required (exit $CODE)"
+
+      - name: Negative control — panic must go RED
+        run: |
+          set +e
+          OUT=$(${{ steps.soak.outputs.bin }} --inject-panic); CODE=$?
+          echo "$OUT"
+          if [ "$CODE" -eq 0 ]; then echo "FAIL: panic control did not go RED"; exit 1; fi
+          echo "$OUT" | grep -q "panic correctly captured" || { echo "FAIL: wrong panic outcome (code $CODE)"; exit 1; }
+          echo "OK: panic detection RED as required (exit $CODE)"
+
+      - name: Short no-crash soak must be GREEN
+        run: |
+          ${{ steps.soak.outputs.bin }} \
+            --duration 25 --crash-interval 0 --steady-interval 6 \
+            --churn-clients 6 --keyspace 48 --quiesce 3 \
+            --json-output soak-smoke.json
+          jq -e '.passed == true' soak-smoke.json >/dev/null \
+            || { echo "FAIL: no-crash soak did not pass"; cat soak-smoke.json; exit 1; }
+          echo "OK: no-crash soak passed"
+
+      - name: Upload soak smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-smoke-${{ github.run_id }}
+          path: soak-smoke.json
+          retention-days: 30
+
   audit:
     name: Cargo Audit (RustSec advisories)
     runs-on: ubuntu-latest
