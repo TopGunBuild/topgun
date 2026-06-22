@@ -1112,6 +1112,10 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
    * - 'backpressure:resumed': Emitted when writes resume after being paused
    * - 'operation:dropped': Emitted when an operation is dropped (drop-oldest strategy)
    *
+   * The listener type narrows by event name: threshold events carry
+   * `{ pending, max }`, `'operation:dropped'` carries the dropped-op descriptor,
+   * and the paused/resumed transitions carry no payload.
+   *
    * @param event Event name
    * @param listener Callback function
    * @returns Unsubscribe function
@@ -1120,6 +1124,10 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
    * ```typescript
    * client.onBackpressure('backpressure:high', ({ pending, max }) => {
    *   console.warn(`Warning: ${pending}/${max} pending ops`);
+   * });
+   *
+   * client.onBackpressure('operation:dropped', ({ mapName, key }) => {
+   *   console.warn(`Dropped ${mapName}:${key} under backpressure`);
    * });
    *
    * client.onBackpressure('backpressure:paused', () => {
@@ -1132,15 +1140,29 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
    * ```
    */
   public onBackpressure(
+    event: 'backpressure:high' | 'backpressure:low',
+    listener: (event: BackpressureThresholdEvent) => void,
+  ): () => void;
+  public onBackpressure(
+    event: 'operation:dropped',
+    listener: (event: OperationDroppedEvent) => void,
+  ): () => void;
+  public onBackpressure(
+    event: 'backpressure:paused' | 'backpressure:resumed',
+    listener: () => void,
+  ): () => void;
+  public onBackpressure(
     event:
       | 'backpressure:high'
       | 'backpressure:low'
       | 'backpressure:paused'
       | 'backpressure:resumed'
       | 'operation:dropped',
-    listener: (data?: BackpressureThresholdEvent | OperationDroppedEvent) => void,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- implementation signature must be broad enough to cover all narrowing overloads
+    listener: (event?: any) => void,
   ): () => void {
-    return this.syncEngine.onBackpressure(event, listener);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- delegating across the overloaded boundary; runtime dispatch is purely by event string
+    return this.syncEngine.onBackpressure(event as any, listener as any);
   }
 
   // ============================================
@@ -1150,8 +1172,9 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
   /**
    * Perform a one-shot BM25 search on the server.
    *
-   * Searches the specified map using BM25 ranking algorithm.
-   * Requires FTS to be enabled for the map on the server.
+   * Searches the specified map using the BM25 ranking algorithm. Every map is
+   * full-text indexed automatically on the server — there is no per-map enable
+   * flag to set.
    *
    * @param mapName Name of the map to search
    * @param query Search query text

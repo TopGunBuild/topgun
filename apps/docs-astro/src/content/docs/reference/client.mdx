@@ -659,20 +659,21 @@ True when the writer is currently paused under the pause strategy.
 ### `onBackpressure(event, listener)`
 
 ```typescript
-public onBackpressure(
-  event: 'backpressure:high' | 'backpressure:low' | 'backpressure:paused' | 'backpressure:resumed' | 'operation:dropped',
-  listener: (data?: BackpressureThresholdEvent | OperationDroppedEvent) => void
-): () => void
+public onBackpressure(event: 'backpressure:high' | 'backpressure:low', listener: (event: BackpressureThresholdEvent) => void): () => void
+public onBackpressure(event: 'operation:dropped', listener: (event: OperationDroppedEvent) => void): () => void
+public onBackpressure(event: 'backpressure:paused' | 'backpressure:resumed', listener: () => void): () => void
 ```
 
 Subscribe to backpressure transitions.
 
+The listener type narrows by event name — threshold events carry `{ pending, max }`, `'operation:dropped'` carries the dropped-op descriptor, and the paused/resumed transitions carry no payload:
+
 ```typescript
-client.onBackpressure('backpressure:high', (e) => {
-  // Threshold events carry `pending` / `max` counts.
-  if (e && 'pending' in e) {
-    console.warn(`Warning: ${e.pending}/${e.max} pending ops`);
-  }
+client.onBackpressure('backpressure:high', ({ pending, max }) => {
+  console.warn(`Warning: ${pending}/${max} pending ops`);
+});
+client.onBackpressure('operation:dropped', ({ mapName, key }) => {
+  console.warn(`Dropped ${mapName}:${key} under backpressure`);
 });
 client.onBackpressure('backpressure:paused', () => showLoadingSpinner());
 client.onBackpressure('backpressure:resumed', () => hideLoadingSpinner());
