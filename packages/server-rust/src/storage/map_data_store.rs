@@ -188,6 +188,28 @@ pub trait MapDataStore: Send + Sync {
     /// Remove all specified keys from the backing store.
     async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()>;
 
+    /// List the names of every map that has durable (primary) records in this
+    /// backend, regardless of whether any of those records are currently
+    /// resident in memory.
+    ///
+    /// This is the residency-independent map source the startup Merkle-index
+    /// seed iterates: it lets the server rebuild each persisted map's Merkle
+    /// root from durable keys+hashes alone, so a map that survived a restart but
+    /// has not yet been touched in memory still answers `SYNC_INIT` with the
+    /// correct (non-zero, pre-crash-equal) root. Only primary partitions are
+    /// listed — backup partitions are not part of the `SYNC_INIT` root path.
+    ///
+    /// Unlike [`enumerate_leaves`](MapDataStore::enumerate_leaves), this has a
+    /// default body returning an empty list: a backend that holds no durable
+    /// maps (the null / in-memory test stores) correctly contributes nothing to
+    /// seed, and the durable backends (redb / Postgres / write-behind) override
+    /// it. An empty default here cannot couple correctness to residency the way
+    /// an empty `enumerate_leaves` would — at worst the seed is a no-op and the
+    /// map's trees stay empty (the pre-existing behavior), never wrong leaves.
+    async fn list_maps(&self) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
     /// Check if a key is safe to load (not queued for write-behind).
     ///
     /// For write-through implementations, always returns `true`.

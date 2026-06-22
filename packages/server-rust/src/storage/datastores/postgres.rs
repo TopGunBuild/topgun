@@ -430,6 +430,19 @@ impl MapDataStore for PostgresDataStore {
         Ok(())
     }
 
+    async fn list_maps(&self) -> anyhow::Result<Vec<String>> {
+        // Distinct primary map names straight from the catalog so the startup
+        // seed discovers persisted-but-non-resident maps. Backup partitions
+        // (is_backup = true) are excluded — they are not on the SYNC_INIT root
+        // path.
+        let query = format!(
+            "SELECT DISTINCT map_name FROM {} WHERE is_backup = false ORDER BY map_name ASC",
+            self.table_name
+        );
+        let rows: Vec<(String,)> = sqlx::query_as(&query).fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(|(name,)| name).collect())
+    }
+
     async fn enumerate_leaves(
         &self,
         map: &str,

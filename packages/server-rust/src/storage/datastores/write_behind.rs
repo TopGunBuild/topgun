@@ -928,6 +928,15 @@ impl MapDataStore for WriteBehindDataStore {
         Ok(())
     }
 
+    async fn list_maps(&self) -> anyhow::Result<Vec<String>> {
+        // Delegate to the durable backend so the startup seed sees the same
+        // durable map catalog the rest of the server persists to. Maps that
+        // exist only as still-buffered staging writes are necessarily also
+        // resident in the in-memory engine, so the durable catalog is the
+        // correct source for the residency-independent seed.
+        self.inner.list_maps().await
+    }
+
     async fn enumerate_leaves(
         &self,
         map: &str,

@@ -490,6 +490,27 @@ impl MapDataStore for RedbDataStore {
         Ok(())
     }
 
+    async fn list_maps(&self) -> anyhow::Result<Vec<String>> {
+        // Derive the durable map set from the redb table catalog rather than
+        // any in-memory cache, so a map that was persisted before a restart but
+        // is not yet resident is still discovered. Only primary tables
+        // (`map__{name}`) feed the SYNC_INIT root; backup tables
+        // (`map__{name}__backup`) are deliberately skipped.
+        let read_txn = self.db.begin_read()?;
+        let mut names: Vec<String> = Vec::new();
+        for handle in read_txn.list_tables()? {
+            let table = handle.name();
+            if let Some(rest) = table.strip_prefix("map__") {
+                if !rest.ends_with("__backup") {
+                    names.push(rest.to_string());
+                }
+            }
+        }
+        names.sort();
+        names.dedup();
+        Ok(names)
+    }
+
     async fn enumerate_leaves(
         &self,
         map: &str,
