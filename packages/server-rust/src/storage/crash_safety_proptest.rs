@@ -35,7 +35,7 @@ use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
 
 use crate::storage::datastores::{WalBootstrap, WriteBehindConfig, WriteBehindDataStore};
-use crate::storage::map_data_store::MapDataStore;
+use crate::storage::map_data_store::{LeafSink, MapDataStore, ScanBatch, ScanCursor};
 use crate::storage::record::RecordValue;
 use crate::storage::wal::{Wal, WalFsyncPolicy, WalRecovery, WalWriter};
 
@@ -149,6 +149,37 @@ impl MapDataStore for RetainingStore {
             guard.insert((map.to_string(), key.clone()), None);
         }
         Ok(())
+    }
+
+    async fn enumerate_leaves(
+        &self,
+        _map: &str,
+        _is_backup: bool,
+        _sink: &mut dyn LeafSink,
+    ) -> anyhow::Result<()> {
+        // This store is only used as a WAL-recovery sink; the crash-safety
+        // proptests never enumerate leaves from it, so an explicit empty
+        // enumeration is the correct conscious body.
+        Ok(())
+    }
+
+    async fn scan_values(
+        &self,
+        _map: &str,
+        _is_backup: bool,
+        _max_batch_cost: u64,
+    ) -> anyhow::Result<ScanBatch> {
+        Ok(ScanBatch::default())
+    }
+
+    async fn scan_values_batched(
+        &self,
+        _map: &str,
+        _is_backup: bool,
+        _cursor: ScanCursor,
+        _max_batch_cost: u64,
+    ) -> anyhow::Result<ScanBatch> {
+        Ok(ScanBatch::default())
     }
 
     fn is_loadable(&self, _key: &str) -> bool {

@@ -9,8 +9,50 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 
 use crate::network::handlers::{RefreshGrant, RefreshGrantStore};
-use crate::storage::map_data_store::MapDataStore;
+use crate::storage::map_data_store::{LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor};
 use crate::storage::record::RecordValue;
+
+/// Rows fetched per page during keyset-paginated enumeration / scans.
+///
+/// Bounds peak memory: enumeration decodes one page at a time to derive leaf
+/// hashes, never the whole map. Scans further cap a returned batch by summed
+/// byte cost, but still page the underlying query so the SQL result set itself
+/// stays bounded.
+const PG_PAGE_ROWS: i64 = 1024;
+
+/// `PG_PAGE_ROWS` as a `usize` for short-page (exhausted) comparisons.
+const PG_PAGE_ROWS_USIZE: usize = 1024;
+
+/// Default per-batch resident byte budget for `scan_values` when the caller
+/// passes `max_batch_cost == 0`. Mirrors the redb backend's default.
+const PG_DEFAULT_SCAN_BATCH_COST: u64 = 8 * 1024 * 1024;
+
+/// Compute the Merkle leaf hash for a persisted `RecordValue`, byte-identical
+/// to the in-memory write-path observer. See the redb backend for the
+/// authoritative documentation of the formula; both backends share the same
+/// `fnv1a` derivation so a map rebuilt from either yields an identical root.
+fn pg_leaf_hash_for(key: &str, value: &RecordValue) -> Option<u32> {
+    use topgun_core::hash::fnv1a_hash;
+    match value {
+        RecordValue::Lww { timestamp, .. } => Some(fnv1a_hash(&format!(
+            "{key}:{}:{}:{}",
+            timestamp.millis, timestamp.counter, timestamp.node_id
+        ))),
+        RecordValue::OrMap {
+            records,
+            tombstones,
+        } => {
+            let mut tags: Vec<&str> = records.iter().map(|r| r.tag.as_str()).collect();
+            tags.sort_unstable();
+            let joined = tags.join("|");
+            let mut tomb_tags: Vec<&str> = tombstones.iter().map(String::as_str).collect();
+            tomb_tags.sort_unstable();
+            let joined_tombs = tomb_tags.join("|");
+            Some(fnv1a_hash(&format!("key:{key}|{joined}#{joined_tombs}")))
+        }
+        RecordValue::OrTombstones { .. } => None,
+    }
+}
 
 /// Write-through `PostgreSQL` persistence backend.
 ///
@@ -114,6 +156,77 @@ impl PostgresDataStore {
             .await?;
 
         Ok(rows.into_iter().map(|(key,)| key).collect())
+    }
+
+    /// Load one bounded `(key, value)` batch in key order, resuming strictly
+    /// after `start_after_key` (empty string for the first batch).
+    ///
+    /// Uses keyset pagination (`key > $cursor ORDER BY key`) rather than
+    /// `OFFSET` so resume cost stays constant regardless of how far the scan has
+    /// progressed. Accumulates rows until the summed value byte cost reaches the
+    /// budget, then returns a cursor for the next batch (`None` once drained).
+    async fn scan_from(
+        &self,
+        map: &str,
+        is_backup: bool,
+        start_after_key: String,
+        max_batch_cost: u64,
+    ) -> anyhow::Result<ScanBatch> {
+        let budget = if max_batch_cost == 0 {
+            PG_DEFAULT_SCAN_BATCH_COST
+        } else {
+            max_batch_cost
+        };
+        let query = format!(
+            "SELECT key, value FROM {} \
+             WHERE map_name = $1 AND is_backup = $2 AND key > $3 \
+             ORDER BY key ASC LIMIT $4",
+            self.table_name
+        );
+
+        let mut records: Vec<(String, RecordValue)> = Vec::new();
+        let mut accumulated: u64 = 0;
+        let mut last_key = start_after_key;
+
+        // Page the query until the byte budget is met; a final short page (fewer
+        // than PG_PAGE_ROWS) means the table is exhausted.
+        loop {
+            let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(&query)
+                .bind(map)
+                .bind(is_backup)
+                .bind(&last_key)
+                .bind(PG_PAGE_ROWS)
+                .fetch_all(&self.pool)
+                .await?;
+            if rows.is_empty() {
+                break;
+            }
+            let page_len = rows.len();
+            for (key, bytes) in rows {
+                accumulated += u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                let value: RecordValue = rmp_serde::from_slice(&bytes)?;
+                last_key.clone_from(&key);
+                records.push((key, value));
+                if accumulated >= budget {
+                    // Budget reached mid-page: more rows may remain, so emit a
+                    // resume cursor at the last record returned.
+                    return Ok(ScanBatch {
+                        records,
+                        next_cursor: Some(ScanCursor(last_key.into_bytes())),
+                    });
+                }
+            }
+            if page_len < PG_PAGE_ROWS_USIZE {
+                break;
+            }
+            // Full page consumed without hitting the budget: another page may
+            // exist; keep paging within this same batch from `last_key`.
+        }
+
+        Ok(ScanBatch {
+            records,
+            next_cursor: None,
+        })
     }
 }
 
@@ -307,6 +420,78 @@ impl MapDataStore for PostgresDataStore {
             .await?;
 
         Ok(())
+    }
+
+    async fn enumerate_leaves(
+        &self,
+        map: &str,
+        is_backup: bool,
+        sink: &mut dyn LeafSink,
+    ) -> anyhow::Result<()> {
+        // Keyset-paginate (key, value) in key order so the SQL result set never
+        // materializes the whole map. Each page is decoded only far enough to
+        // derive the leaf hash; values are dropped before the next page.
+        let query = format!(
+            "SELECT key, value FROM {} \
+             WHERE map_name = $1 AND is_backup = $2 AND key > $3 \
+             ORDER BY key ASC LIMIT $4",
+            self.table_name
+        );
+        let mut last_key = String::new();
+        loop {
+            let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(&query)
+                .bind(map)
+                .bind(is_backup)
+                .bind(&last_key)
+                .bind(PG_PAGE_ROWS)
+                .fetch_all(&self.pool)
+                .await?;
+            if rows.is_empty() {
+                break;
+            }
+            let page_len = rows.len();
+            let mut batch: Vec<MerkleLeaf> = Vec::with_capacity(page_len);
+            for (key, bytes) in rows {
+                let value: RecordValue = rmp_serde::from_slice(&bytes)?;
+                if let Some(leaf_hash) = pg_leaf_hash_for(&key, &value) {
+                    batch.push(MerkleLeaf {
+                        key: key.clone(),
+                        leaf_hash,
+                    });
+                }
+                last_key = key;
+            }
+            if !batch.is_empty() {
+                sink.consume(batch).await?;
+            }
+            if page_len < PG_PAGE_ROWS_USIZE {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    async fn scan_values(
+        &self,
+        map: &str,
+        is_backup: bool,
+        max_batch_cost: u64,
+    ) -> anyhow::Result<ScanBatch> {
+        self.scan_from(map, is_backup, String::new(), max_batch_cost)
+            .await
+    }
+
+    async fn scan_values_batched(
+        &self,
+        map: &str,
+        is_backup: bool,
+        cursor: ScanCursor,
+        max_batch_cost: u64,
+    ) -> anyhow::Result<ScanBatch> {
+        let last_key = String::from_utf8(cursor.0)
+            .map_err(|e| anyhow::anyhow!("scan cursor is not valid UTF-8: {e}"))?;
+        self.scan_from(map, is_backup, last_key, max_batch_cost)
+            .await
     }
 
     fn is_loadable(&self, _key: &str) -> bool {

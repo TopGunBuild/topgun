@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 
-use crate::storage::map_data_store::MapDataStore;
+use crate::storage::map_data_store::{LeafSink, MapDataStore, ScanBatch, ScanCursor};
 use crate::storage::record::RecordValue;
 
 /// No-op `MapDataStore` for testing and ephemeral data.
@@ -62,6 +62,38 @@ impl MapDataStore for NullDataStore {
 
     async fn remove_all(&self, _map: &str, _keys: &[String]) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    async fn enumerate_leaves(
+        &self,
+        _map: &str,
+        _is_backup: bool,
+        _sink: &mut dyn LeafSink,
+    ) -> anyhow::Result<()> {
+        // No persistence: a null store holds zero durable leaves, so the sink is
+        // never invoked. This is a conscious empty enumeration, not a default.
+        Ok(())
+    }
+
+    async fn scan_values(
+        &self,
+        _map: &str,
+        _is_backup: bool,
+        _max_batch_cost: u64,
+    ) -> anyhow::Result<ScanBatch> {
+        // Nothing is persisted: return an already-exhausted empty batch.
+        Ok(ScanBatch::default())
+    }
+
+    async fn scan_values_batched(
+        &self,
+        _map: &str,
+        _is_backup: bool,
+        _cursor: ScanCursor,
+        _max_batch_cost: u64,
+    ) -> anyhow::Result<ScanBatch> {
+        // No durable rows to resume into.
+        Ok(ScanBatch::default())
     }
 
     fn is_loadable(&self, _key: &str) -> bool {

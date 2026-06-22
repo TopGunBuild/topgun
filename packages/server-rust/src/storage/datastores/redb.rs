@@ -55,10 +55,58 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::bail;
 use async_trait::async_trait;
-use redb::{TableDefinition, TableHandle};
+use redb::{ReadableTable, TableDefinition, TableHandle};
+use topgun_core::hash::fnv1a_hash;
 
-use crate::storage::map_data_store::MapDataStore;
+use crate::storage::map_data_store::{LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor};
 use crate::storage::record::RecordValue;
+
+/// Number of leaves accumulated before invoking the sink once.
+///
+/// Bounds the producer's peak memory during enumeration: only this many
+/// `(key, u32)` pairs are held at a time, never the whole map. Values are
+/// never materialized — each row is decoded only far enough to derive its
+/// leaf hash, then dropped.
+const LEAF_BATCH_SIZE: usize = 1024;
+
+/// Default per-batch resident byte budget for value-streamed scans when the
+/// caller passes `max_batch_cost == 0`.
+///
+/// Conservative fraction of the `TOPGUN_MAX_RAM_MB` ceiling (default 1 GiB)
+/// so a single batch never dominates the record cache. A scan resumes via its
+/// `ScanCursor` until the map is exhausted, so this only caps one batch, not
+/// the total scanned volume.
+const DEFAULT_SCAN_BATCH_COST: u64 = 8 * 1024 * 1024;
+
+/// Compute the Merkle leaf hash for a persisted `RecordValue`, byte-identical
+/// to the in-memory write-path observer in `merkle_sync.rs`.
+///
+/// LWW leaves hash `"{key}:{millis}:{counter}:{node_id}"`; OR-Map leaves hash
+/// the sorted active + tombstone tag sets so a removal still changes the leaf.
+/// Returns `None` for `OrTombstones`: the write-path observer removes such keys
+/// from the OR-Map tree rather than contributing a leaf, so enumeration must
+/// likewise emit no leaf to keep the rebuilt root identical.
+fn leaf_hash_for(key: &str, value: &RecordValue) -> Option<u32> {
+    match value {
+        RecordValue::Lww { timestamp, .. } => Some(fnv1a_hash(&format!(
+            "{key}:{}:{}:{}",
+            timestamp.millis, timestamp.counter, timestamp.node_id
+        ))),
+        RecordValue::OrMap {
+            records,
+            tombstones,
+        } => {
+            let mut tags: Vec<&str> = records.iter().map(|r| r.tag.as_str()).collect();
+            tags.sort_unstable();
+            let joined = tags.join("|");
+            let mut tomb_tags: Vec<&str> = tombstones.iter().map(String::as_str).collect();
+            tomb_tags.sort_unstable();
+            let joined_tombs = tomb_tags.join("|");
+            Some(fnv1a_hash(&format!("key:{key}|{joined}#{joined_tombs}")))
+        }
+        RecordValue::OrTombstones { .. } => None,
+    }
+}
 
 /// Validate that a map name matches `^[a-zA-Z_][a-zA-Z0-9_]*$`.
 ///
@@ -180,6 +228,82 @@ impl RedbDataStore {
     #[allow(clippy::unused_async)]
     pub async fn close(&self) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    /// Load one bounded batch of `(key, value)` pairs, optionally resuming
+    /// strictly after `start_after_key`, returning a cursor for the next batch.
+    ///
+    /// Accumulates rows until the summed serialized byte cost reaches
+    /// `max_batch_cost` (or `DEFAULT_SCAN_BATCH_COST` when `0`), then stops so a
+    /// single batch never exceeds the resident-memory budget. The returned
+    /// `next_cursor` is `None` once the table is fully drained.
+    fn scan_from(
+        &self,
+        map: &str,
+        is_backup: bool,
+        start_after_key: Option<&str>,
+        max_batch_cost: u64,
+    ) -> anyhow::Result<ScanBatch> {
+        if !is_valid_map_name(map) {
+            bail!("Invalid map name '{map}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
+        }
+        let budget = if max_batch_cost == 0 {
+            DEFAULT_SCAN_BATCH_COST
+        } else {
+            max_batch_cost
+        };
+        let table_name = table_name_for(map, is_backup);
+        let def = table_def(&table_name);
+        let txn = self.db.begin_read()?;
+        let table = match txn.open_table(def) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(ScanBatch::default()),
+            Err(e) => return Err(e.into()),
+        };
+
+        // redb ranges are inclusive of the lower bound, so resume by skipping a
+        // leading row whose key equals the cursor marker.
+        let range_iter = match start_after_key {
+            Some(k) => table.range(k..)?,
+            None => table.iter()?,
+        };
+
+        let mut records: Vec<(String, RecordValue)> = Vec::new();
+        let mut accumulated: u64 = 0;
+        let mut more_rows_pending = false;
+
+        for entry in range_iter {
+            let (key_guard, val_guard) = entry?;
+            let key = key_guard.value().to_string();
+            if let Some(after) = start_after_key {
+                if key == after {
+                    // Inclusive lower bound: skip the cursor row itself.
+                    continue;
+                }
+            }
+            // If we already have a full batch, the presence of another row means
+            // the scan is not exhausted -- emit a cursor and stop.
+            if !records.is_empty() && accumulated >= budget {
+                more_rows_pending = true;
+                break;
+            }
+            let bytes = val_guard.value();
+            accumulated += u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            let value: RecordValue = rmp_serde::from_slice(bytes)?;
+            records.push((key, value));
+        }
+
+        let next_cursor = if more_rows_pending {
+            records
+                .last()
+                .map(|(k, _)| ScanCursor(k.clone().into_bytes()))
+        } else {
+            None
+        };
+        Ok(ScanBatch {
+            records,
+            next_cursor,
+        })
     }
 }
 
@@ -353,6 +477,71 @@ impl MapDataStore for RedbDataStore {
         }
         txn.commit()?;
         Ok(())
+    }
+
+    async fn enumerate_leaves(
+        &self,
+        map: &str,
+        is_backup: bool,
+        sink: &mut dyn LeafSink,
+    ) -> anyhow::Result<()> {
+        if !is_valid_map_name(map) {
+            bail!("Invalid map name '{map}': must match ^[a-zA-Z_][a-zA-Z0-9_]*$");
+        }
+        let table_name = table_name_for(map, is_backup);
+        let def = table_def(&table_name);
+        let txn = self.db.begin_read()?;
+        let table = match txn.open_table(def) {
+            Ok(t) => t,
+            // Never-written table contributes no leaves.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+
+        // Range-scan the whole table in key order, decoding each row only far
+        // enough to derive its leaf hash, then flushing fixed-size batches to
+        // the sink so peak memory stays bounded regardless of map size.
+        let mut batch: Vec<MerkleLeaf> = Vec::with_capacity(LEAF_BATCH_SIZE);
+        for entry in table.iter()? {
+            let (key_guard, val_guard) = entry?;
+            let value: RecordValue = rmp_serde::from_slice(val_guard.value())?;
+            let key = key_guard.value().to_string();
+            if let Some(leaf_hash) = leaf_hash_for(&key, &value) {
+                batch.push(MerkleLeaf { key, leaf_hash });
+            }
+            if batch.len() >= LEAF_BATCH_SIZE {
+                sink.consume(std::mem::take(&mut batch)).await?;
+                batch = Vec::with_capacity(LEAF_BATCH_SIZE);
+            }
+        }
+        if !batch.is_empty() {
+            sink.consume(batch).await?;
+        }
+        Ok(())
+    }
+
+    async fn scan_values(
+        &self,
+        map: &str,
+        is_backup: bool,
+        max_batch_cost: u64,
+    ) -> anyhow::Result<ScanBatch> {
+        // First batch starts from the table's beginning: an empty resume key.
+        self.scan_from(map, is_backup, None, max_batch_cost)
+    }
+
+    async fn scan_values_batched(
+        &self,
+        map: &str,
+        is_backup: bool,
+        cursor: ScanCursor,
+        max_batch_cost: u64,
+    ) -> anyhow::Result<ScanBatch> {
+        // The cursor carries the last key returned by the previous batch (UTF-8
+        // bytes). Resume strictly after it.
+        let last_key = String::from_utf8(cursor.0)
+            .map_err(|e| anyhow::anyhow!("scan cursor is not valid UTF-8: {e}"))?;
+        self.scan_from(map, is_backup, Some(&last_key), max_batch_cost)
     }
 
     fn is_loadable(&self, _key: &str) -> bool {
@@ -735,6 +924,112 @@ mod tests {
         assert!(
             !std::ptr::eq(def1.name(), def3.name()),
             "distinct names must have distinct pointers"
+        );
+    }
+
+    /// Test sink that collects every leaf the enumeration produces.
+    struct CollectingSink {
+        leaves: Vec<MerkleLeaf>,
+    }
+
+    #[async_trait]
+    impl LeafSink for CollectingSink {
+        async fn consume(&mut self, batch: Vec<MerkleLeaf>) -> anyhow::Result<()> {
+            self.leaves.extend(batch);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn enumerate_leaves_hash_matches_write_path_formula() {
+        let (store, _dir) = fresh_store();
+        // A non-zero HLC so millis/counter/node_id all participate in the hash.
+        let ts = Timestamp {
+            millis: 123_456,
+            counter: 7,
+            node_id: "node-A".to_string(),
+        };
+        let value = RecordValue::Lww {
+            value: Value::String("payload".to_string()),
+            timestamp: ts.clone(),
+        };
+        store.add("users", "alice", &value, 0, 1000).await.unwrap();
+
+        let mut sink = CollectingSink { leaves: Vec::new() };
+        store
+            .enumerate_leaves("users", false, &mut sink)
+            .await
+            .unwrap();
+
+        assert_eq!(sink.leaves.len(), 1, "exactly one durable leaf");
+        let expected = fnv1a_hash(&format!(
+            "{}:{}:{}:{}",
+            "alice", ts.millis, ts.counter, ts.node_id
+        ));
+        assert_eq!(
+            sink.leaves[0].leaf_hash, expected,
+            "redb LWW leaf hash must equal the write-path fnv1a(key:millis:counter:node_id)"
+        );
+        assert_eq!(sink.leaves[0].key, "alice");
+    }
+
+    #[tokio::test]
+    async fn enumerate_leaves_empty_for_never_written_map() {
+        let (store, _dir) = fresh_store();
+        let mut sink = CollectingSink { leaves: Vec::new() };
+        store
+            .enumerate_leaves("never", false, &mut sink)
+            .await
+            .unwrap();
+        assert!(sink.leaves.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scan_values_resumes_via_cursor_and_covers_all_keys() {
+        let (store, _dir) = fresh_store();
+        for i in 0..50 {
+            store
+                .add("m", &format!("k{i:03}"), &dummy_value("v"), 0, 1000)
+                .await
+                .unwrap();
+        }
+
+        // Tiny budget forces multiple batches so the cursor-resume path is exercised.
+        let mut seen: Vec<String> = Vec::new();
+        let mut batch = store.scan_values("m", false, 1).await.unwrap();
+        loop {
+            for (k, _) in &batch.records {
+                seen.push(k.clone());
+            }
+            match batch.next_cursor.take() {
+                Some(cursor) => {
+                    batch = store
+                        .scan_values_batched("m", false, cursor, 1)
+                        .await
+                        .unwrap();
+                }
+                None => break,
+            }
+        }
+        seen.sort();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            50,
+            "every key surfaces exactly once across batches"
+        );
+        assert_eq!(seen.first().map(String::as_str), Some("k000"));
+        assert_eq!(seen.last().map(String::as_str), Some("k049"));
+    }
+
+    #[tokio::test]
+    async fn scan_values_empty_map_is_exhausted() {
+        let (store, _dir) = fresh_store();
+        let batch = store.scan_values("never", false, 0).await.unwrap();
+        assert!(batch.records.is_empty());
+        assert!(
+            batch.next_cursor.is_none(),
+            "empty scan is immediately exhausted"
         );
     }
 }
