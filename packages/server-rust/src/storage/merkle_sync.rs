@@ -7,12 +7,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use topgun_core::hash::{combine_hashes, fnv1a_hash};
+use topgun_core::hash_to_partition;
 use topgun_core::merkle::{MerkleTree, ORMapMerkleTree};
 
 use super::factory::ObserverFactory;
+use super::map_data_store::{LeafSink, MapDataStore, MerkleLeaf};
 use super::mutation_observer::MutationObserver;
 use super::record::{Record, RecordValue};
 
@@ -230,6 +233,78 @@ impl MerkleSyncManager {
             .filter(|entry| entry.key().0 == map_name)
             .map(|entry| entry.key().1)
             .collect()
+    }
+
+    /// (Re)builds `map_name`'s LWW Merkle trees from the durable datastore index.
+    ///
+    /// The write-path observer only ever populates a tree for records that are
+    /// resident in the in-memory engine. After a crash/restart (or once a record
+    /// has been evicted) those leaves are gone, so a `SyncInit` would report root
+    /// `0` and wrongly tell the client it is in sync — even though the data is
+    /// safely persisted. This primitive closes that gap WITHOUT loading any
+    /// values: it streams `(key, leaf_hash)` from `data_store.enumerate_leaves`
+    /// and folds each leaf into the SAME `(map, partition)` LWW tree the write
+    /// path would have written, so a subsequent `SyncInit` produces the correct
+    /// non-zero, pre-crash-equal root.
+    ///
+    /// Routing parity is the load-bearing invariant: each leaf is placed at
+    /// `hash_to_partition(key)` — byte-identical to the write path's
+    /// `RecordStoreFactory::get_or_create(map, hash_to_partition(key))` routing —
+    /// and inserted with the same `MerkleTree::update(key, leaf_hash)` call the
+    /// observer makes. Because the per-partition combine
+    /// (`combine_hashes`/`fnv1a_hash`) is commutative and associative, replaying
+    /// the persisted leaf set in any order yields the identical partition root,
+    /// and the cross-partition aggregate matches the live root.
+    ///
+    /// Scope: this rebuilds the **LWW** trees only. `enumerate_leaves` carries a
+    /// single `u32` leaf hash with no CRDT-kind tag; the datastore computes it
+    /// with the LWW leaf formula (`fnv1a_hash("{key}:{millis}:{counter}:{node_id}")`),
+    /// matching `compute_lww_hash`. OR-Map tree rehydration is intentionally not
+    /// performed here (its leaf hash derives from tags/tombstones, not the LWW
+    /// formula) and is tracked separately.
+    ///
+    /// Memory is bounded by the datastore's batch size: only `(key, u32)` pairs
+    /// cross the boundary, never values, so peak cost is independent of map size.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any error returned by `data_store.enumerate_leaves`.
+    pub async fn rebuild_from_datastore(
+        self: &Arc<Self>,
+        map: &str,
+        data_store: &Arc<dyn MapDataStore>,
+    ) -> anyhow::Result<()> {
+        let mut sink = LwwRebuildSink {
+            manager: Arc::clone(self),
+            map: map.to_string(),
+        };
+        // Backup partitions never participate in client sync, mirroring the
+        // observer's `is_backup` early-returns; rebuild the primary leaves only.
+        data_store.enumerate_leaves(map, false, &mut sink).await
+    }
+}
+
+/// [`LeafSink`] that folds each enumerated durable leaf into the LWW Merkle tree
+/// for its key's partition, reproducing the write-path observer's insertion.
+///
+/// Per batch it routes every `(key, leaf_hash)` to `hash_to_partition(key)` and
+/// calls `MerkleSyncManager::update_lww`, which is the exact tree mutation the
+/// observer performs for an `RecordValue::Lww` put. No values are held; only the
+/// current batch of leaf coordinates is resident.
+struct LwwRebuildSink {
+    manager: Arc<MerkleSyncManager>,
+    map: String,
+}
+
+#[async_trait]
+impl LeafSink for LwwRebuildSink {
+    async fn consume(&mut self, batch: Vec<MerkleLeaf>) -> anyhow::Result<()> {
+        for leaf in batch {
+            let partition_id = hash_to_partition(&leaf.key);
+            self.manager
+                .update_lww(&self.map, partition_id, &leaf.key, leaf.leaf_hash);
+        }
+        Ok(())
     }
 }
 
