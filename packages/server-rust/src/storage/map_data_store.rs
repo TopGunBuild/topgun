@@ -9,17 +9,36 @@ use async_trait::async_trait;
 
 use super::record::RecordValue;
 
-/// A single durable record's Merkle leaf coordinate: its key and the `u32`
-/// leaf hash computed over the persisted value.
+/// Which CRDT-kind tree a durable leaf belongs to.
+///
+/// The write path keeps a SEPARATE Merkle tree per CRDT kind — LWW leaves in
+/// the LWW tree, OR-Map leaves in the OR-Map tree. The rebuild consumer must
+/// reproduce that split exactly, but a bare `u32` leaf hash carries no kind
+/// information. This discriminator lets the rebuild sink route each enumerated
+/// leaf to the same tree the write-path observer would have written, so the
+/// rebuilt roots match the pre-crash roots for maps that mix both kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MerkleLeafKind {
+    /// Last-Write-Wins record — routes to the LWW tree.
+    Lww,
+    /// Observed-Remove Map record — routes to the OR-Map tree.
+    OrMap,
+}
+
+/// A single durable record's Merkle leaf coordinate: its key, CRDT kind, and
+/// the `u32` leaf hash computed over the persisted value.
 ///
 /// `leaf_hash` is the same `u32` space as the in-memory Merkle leaf hash
 /// (`fnv1a`-derived); enumerating it from the durable store lets the Merkle
 /// root be rebuilt from persistence WITHOUT loading full record values into
-/// memory.
+/// memory. `kind` tells the rebuild consumer which per-CRDT tree to fold the
+/// leaf into, mirroring the write-path observer's per-kind tree separation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MerkleLeaf {
     /// Record key within the map.
     pub key: String,
+    /// CRDT kind, selecting the LWW vs OR-Map tree on rebuild.
+    pub kind: MerkleLeafKind,
     /// `u32` leaf hash over the persisted value (matches in-memory leaf hash).
     pub leaf_hash: u32,
 }

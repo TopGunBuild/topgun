@@ -58,7 +58,9 @@ use async_trait::async_trait;
 use redb::{ReadableTable, TableDefinition, TableHandle};
 use topgun_core::hash::fnv1a_hash;
 
-use crate::storage::map_data_store::{LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor};
+use crate::storage::map_data_store::{
+    LeafSink, MapDataStore, MerkleLeaf, MerkleLeafKind, ScanBatch, ScanCursor,
+};
 use crate::storage::record::RecordValue;
 
 /// Number of leaves accumulated before invoking the sink once.
@@ -86,12 +88,18 @@ const DEFAULT_SCAN_BATCH_COST: u64 = 8 * 1024 * 1024;
 /// Returns `None` for `OrTombstones`: the write-path observer removes such keys
 /// from the OR-Map tree rather than contributing a leaf, so enumeration must
 /// likewise emit no leaf to keep the rebuilt root identical.
-fn leaf_hash_for(key: &str, value: &RecordValue) -> Option<u32> {
+///
+/// The returned `MerkleLeafKind` is what lets the rebuild sink route the leaf
+/// to the matching per-CRDT tree, mirroring the write-path observer's split.
+fn leaf_hash_for(key: &str, value: &RecordValue) -> Option<(MerkleLeafKind, u32)> {
     match value {
-        RecordValue::Lww { timestamp, .. } => Some(fnv1a_hash(&format!(
-            "{key}:{}:{}:{}",
-            timestamp.millis, timestamp.counter, timestamp.node_id
-        ))),
+        RecordValue::Lww { timestamp, .. } => Some((
+            MerkleLeafKind::Lww,
+            fnv1a_hash(&format!(
+                "{key}:{}:{}:{}",
+                timestamp.millis, timestamp.counter, timestamp.node_id
+            )),
+        )),
         RecordValue::OrMap {
             records,
             tombstones,
@@ -102,7 +110,10 @@ fn leaf_hash_for(key: &str, value: &RecordValue) -> Option<u32> {
             let mut tomb_tags: Vec<&str> = tombstones.iter().map(String::as_str).collect();
             tomb_tags.sort_unstable();
             let joined_tombs = tomb_tags.join("|");
-            Some(fnv1a_hash(&format!("key:{key}|{joined}#{joined_tombs}")))
+            Some((
+                MerkleLeafKind::OrMap,
+                fnv1a_hash(&format!("key:{key}|{joined}#{joined_tombs}")),
+            ))
         }
         RecordValue::OrTombstones { .. } => None,
     }
@@ -506,8 +517,12 @@ impl MapDataStore for RedbDataStore {
             let (key_guard, val_guard) = entry?;
             let value: RecordValue = rmp_serde::from_slice(val_guard.value())?;
             let key = key_guard.value().to_string();
-            if let Some(leaf_hash) = leaf_hash_for(&key, &value) {
-                batch.push(MerkleLeaf { key, leaf_hash });
+            if let Some((kind, leaf_hash)) = leaf_hash_for(&key, &value) {
+                batch.push(MerkleLeaf {
+                    key,
+                    kind,
+                    leaf_hash,
+                });
             }
             if batch.len() >= LEAF_BATCH_SIZE {
                 sink.consume(std::mem::take(&mut batch)).await?;

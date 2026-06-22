@@ -15,7 +15,7 @@ use topgun_core::hash_to_partition;
 use topgun_core::merkle::{MerkleTree, ORMapMerkleTree};
 
 use super::factory::ObserverFactory;
-use super::map_data_store::{LeafSink, MapDataStore, MerkleLeaf};
+use super::map_data_store::{LeafSink, MapDataStore, MerkleLeaf, MerkleLeafKind};
 use super::mutation_observer::MutationObserver;
 use super::record::{Record, RecordValue};
 
@@ -235,33 +235,35 @@ impl MerkleSyncManager {
             .collect()
     }
 
-    /// (Re)builds `map_name`'s LWW Merkle trees from the durable datastore index.
+    /// (Re)builds `map_name`'s LWW and OR-Map Merkle trees from the durable
+    /// datastore index.
     ///
     /// The write-path observer only ever populates a tree for records that are
     /// resident in the in-memory engine. After a crash/restart (or once a record
     /// has been evicted) those leaves are gone, so a `SyncInit` would report root
     /// `0` and wrongly tell the client it is in sync — even though the data is
     /// safely persisted. This primitive closes that gap WITHOUT loading any
-    /// values: it streams `(key, leaf_hash)` from `data_store.enumerate_leaves`
-    /// and folds each leaf into the SAME `(map, partition)` LWW tree the write
-    /// path would have written, so a subsequent `SyncInit` produces the correct
-    /// non-zero, pre-crash-equal root.
+    /// values: it streams `(key, kind, leaf_hash)` from
+    /// `data_store.enumerate_leaves` and folds each leaf into the SAME
+    /// `(map, partition)` tree the write path would have written, so a subsequent
+    /// `SyncInit` produces the correct non-zero, pre-crash-equal root.
     ///
     /// Routing parity is the load-bearing invariant: each leaf is placed at
     /// `hash_to_partition(key)` — byte-identical to the write path's
     /// `RecordStoreFactory::get_or_create(map, hash_to_partition(key))` routing —
-    /// and inserted with the same `MerkleTree::update(key, leaf_hash)` call the
-    /// observer makes. Because the per-partition combine
+    /// and inserted with the same per-CRDT tree mutation the observer makes
+    /// (`update_lww` for LWW leaves, `update_ormap` for OR-Map leaves), selected
+    /// by the leaf's `MerkleLeafKind`. Because the per-partition combine
     /// (`combine_hashes`/`fnv1a_hash`) is commutative and associative, replaying
     /// the persisted leaf set in any order yields the identical partition root,
     /// and the cross-partition aggregate matches the live root.
     ///
-    /// Scope: this rebuilds the **LWW** trees only. `enumerate_leaves` carries a
-    /// single `u32` leaf hash with no CRDT-kind tag; the datastore computes it
-    /// with the LWW leaf formula (`fnv1a_hash("{key}:{millis}:{counter}:{node_id}")`),
-    /// matching `compute_lww_hash`. OR-Map tree rehydration is intentionally not
-    /// performed here (its leaf hash derives from tags/tombstones, not the LWW
-    /// formula) and is tracked separately.
+    /// Both CRDT kinds are rebuilt here. The datastore computes the LWW leaf
+    /// hash with `fnv1a_hash("{key}:{millis}:{counter}:{node_id}")` (matching
+    /// `compute_lww_hash`) and the OR-Map leaf hash over the sorted active +
+    /// tombstone tag sets (matching `compute_ormap_hash`), tagging each leaf with
+    /// its kind so the rebuild routes it to the matching tree — never polluting
+    /// the LWW tree with OR-Map leaves or leaving the OR-Map tree empty.
     ///
     /// Memory is bounded by the datastore's batch size: only `(key, u32)` pairs
     /// cross the boundary, never values, so peak cost is independent of map size.
@@ -274,7 +276,7 @@ impl MerkleSyncManager {
         map: &str,
         data_store: &Arc<dyn MapDataStore>,
     ) -> anyhow::Result<()> {
-        let mut sink = LwwRebuildSink {
+        let mut sink = MerkleRebuildSink {
             manager: Arc::clone(self),
             map: map.to_string(),
         };
@@ -284,25 +286,38 @@ impl MerkleSyncManager {
     }
 }
 
-/// [`LeafSink`] that folds each enumerated durable leaf into the LWW Merkle tree
-/// for its key's partition, reproducing the write-path observer's insertion.
+/// [`LeafSink`] that folds each enumerated durable leaf into the Merkle tree
+/// for its key's partition AND CRDT kind, reproducing the write-path observer's
+/// per-kind insertion exactly.
 ///
-/// Per batch it routes every `(key, leaf_hash)` to `hash_to_partition(key)` and
-/// calls `MerkleSyncManager::update_lww`, which is the exact tree mutation the
-/// observer performs for an `RecordValue::Lww` put. No values are held; only the
-/// current batch of leaf coordinates is resident.
-struct LwwRebuildSink {
+/// Per batch it routes every leaf to `hash_to_partition(key)` (the same key
+/// partition function the write path uses for both CRDT kinds) and dispatches
+/// on `leaf.kind`: LWW leaves call `MerkleSyncManager::update_lww` (the observer's
+/// `RecordValue::Lww` mutation) and OR-Map leaves call `update_ormap` (the
+/// observer's `RecordValue::OrMap` mutation). Routing on kind is what keeps the
+/// rebuilt LWW and OR-Map roots byte-identical to the pre-crash roots for maps
+/// that mix both kinds. No values are held; only the current batch of leaf
+/// coordinates is resident.
+struct MerkleRebuildSink {
     manager: Arc<MerkleSyncManager>,
     map: String,
 }
 
 #[async_trait]
-impl LeafSink for LwwRebuildSink {
+impl LeafSink for MerkleRebuildSink {
     async fn consume(&mut self, batch: Vec<MerkleLeaf>) -> anyhow::Result<()> {
         for leaf in batch {
             let partition_id = hash_to_partition(&leaf.key);
-            self.manager
-                .update_lww(&self.map, partition_id, &leaf.key, leaf.leaf_hash);
+            match leaf.kind {
+                MerkleLeafKind::Lww => {
+                    self.manager
+                        .update_lww(&self.map, partition_id, &leaf.key, leaf.leaf_hash);
+                }
+                MerkleLeafKind::OrMap => {
+                    self.manager
+                        .update_ormap(&self.map, partition_id, &leaf.key, leaf.leaf_hash);
+                }
+            }
         }
         Ok(())
     }

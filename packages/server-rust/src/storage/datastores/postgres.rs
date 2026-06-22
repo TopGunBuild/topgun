@@ -9,7 +9,9 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 
 use crate::network::handlers::{RefreshGrant, RefreshGrantStore};
-use crate::storage::map_data_store::{LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor};
+use crate::storage::map_data_store::{
+    LeafSink, MapDataStore, MerkleLeaf, MerkleLeafKind, ScanBatch, ScanCursor,
+};
 use crate::storage::record::RecordValue;
 
 /// Rows fetched per page during keyset-paginated enumeration / scans.
@@ -31,13 +33,16 @@ const PG_DEFAULT_SCAN_BATCH_COST: u64 = 8 * 1024 * 1024;
 /// to the in-memory write-path observer. See the redb backend for the
 /// authoritative documentation of the formula; both backends share the same
 /// `fnv1a` derivation so a map rebuilt from either yields an identical root.
-fn pg_leaf_hash_for(key: &str, value: &RecordValue) -> Option<u32> {
+fn pg_leaf_hash_for(key: &str, value: &RecordValue) -> Option<(MerkleLeafKind, u32)> {
     use topgun_core::hash::fnv1a_hash;
     match value {
-        RecordValue::Lww { timestamp, .. } => Some(fnv1a_hash(&format!(
-            "{key}:{}:{}:{}",
-            timestamp.millis, timestamp.counter, timestamp.node_id
-        ))),
+        RecordValue::Lww { timestamp, .. } => Some((
+            MerkleLeafKind::Lww,
+            fnv1a_hash(&format!(
+                "{key}:{}:{}:{}",
+                timestamp.millis, timestamp.counter, timestamp.node_id
+            )),
+        )),
         RecordValue::OrMap {
             records,
             tombstones,
@@ -48,7 +53,10 @@ fn pg_leaf_hash_for(key: &str, value: &RecordValue) -> Option<u32> {
             let mut tomb_tags: Vec<&str> = tombstones.iter().map(String::as_str).collect();
             tomb_tags.sort_unstable();
             let joined_tombs = tomb_tags.join("|");
-            Some(fnv1a_hash(&format!("key:{key}|{joined}#{joined_tombs}")))
+            Some((
+                MerkleLeafKind::OrMap,
+                fnv1a_hash(&format!("key:{key}|{joined}#{joined_tombs}")),
+            ))
         }
         RecordValue::OrTombstones { .. } => None,
     }
@@ -453,9 +461,10 @@ impl MapDataStore for PostgresDataStore {
             let mut batch: Vec<MerkleLeaf> = Vec::with_capacity(page_len);
             for (key, bytes) in rows {
                 let value: RecordValue = rmp_serde::from_slice(&bytes)?;
-                if let Some(leaf_hash) = pg_leaf_hash_for(&key, &value) {
+                if let Some((kind, leaf_hash)) = pg_leaf_hash_for(&key, &value) {
                     batch.push(MerkleLeaf {
                         key: key.clone(),
+                        kind,
                         leaf_hash,
                     });
                 }
