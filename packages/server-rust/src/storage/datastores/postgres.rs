@@ -262,6 +262,9 @@ impl MapDataStore for PostgresDataStore {
         expiration_time: i64,
         now: i64,
     ) -> anyhow::Result<()> {
+        // Guarded at the creation/write boundary: a map cannot be brought into
+        // existence under a reserved name, so reads/removes/scans of such a name
+        // can only ever hit a non-existent map (empty) — no data can live there.
         reject_reserved_map_name(map)?;
         let bytes = rmp_serde::to_vec_named(value)?;
 

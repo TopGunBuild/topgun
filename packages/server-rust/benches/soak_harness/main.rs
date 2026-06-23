@@ -752,10 +752,11 @@ async fn recovery_checkpoint(
     // engine only, which is empty for durable-but-non-resident records after a
     // restart until the datastore-backed full-scan lands. A mismatch is EXPECTED
     // here and does not fail the run; it is tracked so the gap stays visible.
-    // If it ever matches, 322b's capability is present — promote to a HARD
+    // If it ever matches (with a non-empty pre-crash state, so the match is not
+    // the trivial empty==empty), 322b's capability is present — promote to a HARD
     // failure so the gate is flipped to required and cannot silently regress.
     let query_diffs = compare(&pre_lww, &post_query);
-    if query_diffs.is_empty() {
+    if query_diffs.is_empty() && !pre_lww.is_empty() {
         out.hard.push(
             "QUERY-path read-back recovered across restart — SPEC-322b appears to have \
              landed. Promote this pending gate to a required HARD assertion (delete this \
