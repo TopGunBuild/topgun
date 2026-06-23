@@ -429,4 +429,45 @@ mod tests {
         let d5 = w.apply_mutation("b", Some(&rec("score", 20)), false);
         assert_eq!(events(&d5), vec![("b".to_string(), ChangeEventType::LEAVE)]);
     }
+
+    /// Returns the value the window currently holds for `key`, if any.
+    fn value_of(w: &LiveWindow, key: &str) -> Option<rmpv::Value> {
+        let state = w.state.lock();
+        state.iter().find(|r| r.key == key).map(|r| r.value.clone())
+    }
+
+    /// AC7b(iii): a cross-batch value-skew (a stale value read in one batch while
+    /// a fresher value of the SAME key landed in another) is transient and
+    /// self-heals — the NEXT per-key delta carries the LWW value and the window
+    /// converges to it, emitting a single UPDATE the client keyed-map reconcile
+    /// applies. We do NOT assert cross-batch atomicity (intentionally not
+    /// provided); we assert convergence.
+    #[test]
+    fn cross_batch_value_skew_converges_on_next_delta() {
+        let w = LiveWindow::new(sort_asc("score"), Some(3));
+
+        // A full-scan batch seeds a STALE value for "k" (the skew: a concurrent
+        // fresher write of the same key was observed in a different batch's
+        // snapshot, so the result page carried the older value).
+        let seed = w.apply_mutation("k", Some(&rec("score", 10)), true);
+        assert!(has(&seed, "k", &ChangeEventType::ENTER));
+        assert_eq!(value_of(&w, "k"), Some(rec("score", 10)));
+
+        // The next per-key delta (the SyncEngine per-key UPDATE the client
+        // reconcile consumes) carries the converged LWW value.
+        let converge = w.apply_mutation("k", Some(&rec("score", 42)), true);
+        assert_eq!(
+            events(&converge),
+            vec![("k".to_string(), ChangeEventType::UPDATE)]
+        );
+        assert_eq!(
+            value_of(&w, "k"),
+            Some(rec("score", 42)),
+            "skewed value converges to the LWW value on the next per-key delta"
+        );
+        // The converging delta itself carries the LWW value (what the client
+        // keyed-map writes), so no persistent wrong answer survives.
+        let delta = converge.iter().find(|d| d.key == "k").unwrap();
+        assert_eq!(delta.value, rec("score", 42));
+    }
 }
