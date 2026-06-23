@@ -26,8 +26,9 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use topgun_core::hlc::{LWWRecord, ORMapRecord, Timestamp};
 use topgun_core::messages::{
-    AuthMessage, ClientOp, Message, OpBatchMessage, OpBatchPayload, Query, QuerySubMessage,
-    QuerySubPayload, QueryUnsubMessage, QueryUnsubPayload, SyncInitMessage, WriteConcern,
+    AuthMessage, ClientOp, MerkleReqBucketMessage, MerkleReqBucketPayload, Message, OpBatchMessage,
+    OpBatchPayload, Query, QuerySubMessage, QuerySubPayload, QueryUnsubMessage, QueryUnsubPayload,
+    SyncInitMessage, WriteConcern,
 };
 
 type Ws = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -218,6 +219,68 @@ impl SoakClient {
         });
         let _ = send_encoded(&mut self.ws, &unsub).await;
 
+        Ok(out)
+    }
+
+    /// Reconstruct every LWW key→value pair for `map` by walking the server's
+    /// Merkle tree the way a reconnecting delta-sync client does: `SYNC_INIT`
+    /// root → `MerkleReqBucket` drill-down → `SYNC_RESP_LEAF`. Each leaf record
+    /// is served by the server via the single-key lazy-load in
+    /// `RecordStore::get`, so this reads back durable-but-non-resident records
+    /// **without** the full-scan query path (`read_all`).
+    ///
+    /// This is the read path the persistent Merkle index makes correct after a
+    /// restart: with the index seeded from the datastore, the tree exposes the
+    /// durable leaves and each leaf fetch lazy-loads its value from redb. It is
+    /// the machine check for the convergence claim — a matching root hash alone
+    /// does not prove the values can actually be pulled back.
+    pub async fn delta_sync_all(&mut self, map: &str) -> Result<HashMap<String, i64>> {
+        let mut out = HashMap::new();
+
+        // An empty map answers `MerkleReqBucket("")` with no message (the server
+        // returns `Empty`), which would wedge the walk on the request timeout.
+        // Root 0 ⇒ no leaves to pull, so return early.
+        if self.merkle_root(map).await? == 0 {
+            return Ok(out);
+        }
+
+        // Aggregate-mode DFS. In aggregate mode the server returns single-char
+        // trie children, so the next path is `path + child`; we never send a
+        // partition-prefixed path, so the server stays in aggregate mode and a
+        // non-empty subtree always answers with buckets or a leaf (never the
+        // hang-inducing empty response).
+        let mut stack = vec![String::new()];
+        let mut visited = 0usize;
+        while let Some(path) = stack.pop() {
+            visited += 1;
+            if visited > 100_000 {
+                bail!("delta-sync walk for '{map}' exceeded 100k nodes — aborting");
+            }
+            let req = Message::MerkleReqBucket(MerkleReqBucketMessage {
+                payload: MerkleReqBucketPayload {
+                    map_name: map.to_string(),
+                    path: path.clone(),
+                },
+            });
+            send_encoded(&mut self.ws, &req).await?;
+            match recv_decoded(&mut self.ws, "SYNC_RESP_BUCKETS|SYNC_RESP_LEAF").await? {
+                Message::SyncRespBuckets(b) => {
+                    for child in b.payload.buckets.keys() {
+                        stack.push(format!("{path}{child}"));
+                    }
+                }
+                Message::SyncRespLeaf(l) => {
+                    for rec in l.payload.records {
+                        if let Some(v) = rec.record.value.as_ref().and_then(extract_v) {
+                            out.insert(rec.key, v);
+                        }
+                    }
+                }
+                other => {
+                    bail!("delta-sync: expected SYNC_RESP_BUCKETS or SYNC_RESP_LEAF, got {other:?}")
+                }
+            }
+        }
         Ok(out)
     }
 
