@@ -198,6 +198,11 @@ impl RecordStoreFactory {
     /// durable state.
     ///
     /// A no-op for null / in-memory datastores (nothing durable to surface).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying datastore scan fails (e.g. a backend
+    /// I/O error or a malformed resume cursor).
     pub async fn hydrate_non_resident_for_scan(&self, map_name: &str) -> anyhow::Result<()> {
         if self.data_store.is_null() {
             return Ok(());
@@ -482,16 +487,11 @@ mod tests {
     /// Build a factory over a fresh redb file, returning the shared data store so
     /// the test can write durable records "out of band" (simulating data that is
     /// durable on disk but not resident in any in-memory engine).
-    fn redb_factory() -> (
-        RecordStoreFactory,
-        Arc<RedbDataStore>,
-        tempfile::TempDir,
-    ) {
+    fn redb_factory() -> (RecordStoreFactory, Arc<RedbDataStore>, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("scan.redb");
         let store = Arc::new(RedbDataStore::new(&path).expect("redb open"));
-        let factory =
-            RecordStoreFactory::new(StorageConfig::default(), store.clone(), Vec::new());
+        let factory = RecordStoreFactory::new(StorageConfig::default(), store.clone(), Vec::new());
         (factory, store, dir)
     }
 
@@ -518,7 +518,11 @@ mod tests {
         factory.hydrate_non_resident_for_scan("m").await.unwrap();
 
         let keys = scan_resident_keys(&factory, "m");
-        assert_eq!(keys.len(), 30, "every durable key is surfaced post-hydration");
+        assert_eq!(
+            keys.len(),
+            30,
+            "every durable key is surfaced post-hydration"
+        );
         assert_eq!(keys.first().map(String::as_str), Some("k000"));
         assert_eq!(keys.last().map(String::as_str), Some("k029"));
     }
@@ -549,7 +553,10 @@ mod tests {
     async fn evicted_record_reappears_after_rehydration() {
         let (factory, data_store, _dir) = redb_factory();
         for k in ["a", "b", "c"] {
-            data_store.add("m", k, &make_value("v"), 0, 1000).await.unwrap();
+            data_store
+                .add("m", k, &make_value("v"), 0, 1000)
+                .await
+                .unwrap();
         }
         factory.hydrate_non_resident_for_scan("m").await.unwrap();
         assert_eq!(scan_resident_keys(&factory, "m").len(), 3);
@@ -659,8 +666,11 @@ mod tests {
             "the stably-present key past the cursor is never skipped by a concurrent insert behind the cursor"
         );
         // All originally-seeded keys must still appear exactly once.
-        let mut originals: Vec<String> =
-            seen.iter().filter(|k| k.as_str() != "k000z").cloned().collect();
+        let mut originals: Vec<String> = seen
+            .iter()
+            .filter(|k| k.as_str() != "k000z")
+            .cloned()
+            .collect();
         originals.sort();
         originals.dedup();
         assert_eq!(originals.len(), 20, "no original key missed or duplicated");

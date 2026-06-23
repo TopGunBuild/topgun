@@ -1241,7 +1241,13 @@ mod tests {
 
         for i in 0..20 {
             store
-                .add(map, &format!("k{i:03}"), &test_lww_value("payload"), 0, 1000)
+                .add(
+                    map,
+                    &format!("k{i:03}"),
+                    &test_lww_value("payload"),
+                    0,
+                    1000,
+                )
                 .await
                 .unwrap();
         }

@@ -1075,7 +1075,7 @@ mod tests {
     }
 
     /// AC5: strict check-before-push — a batch never includes the row that
-    /// would cross the budget, so peak resident batch byte cost <= max_batch_cost.
+    /// would cross the budget, so peak resident batch byte cost <= `max_batch_cost`.
     #[tokio::test]
     async fn scan_from_strict_byte_budget_never_overshoots() {
         let (store, _dir) = fresh_store();
@@ -1092,11 +1092,7 @@ mod tests {
 
         let mut batch = store.scan_values("m", false, budget).await.unwrap();
         loop {
-            let batch_cost: u64 = batch
-                .records
-                .iter()
-                .map(|(_, v)| record_byte_cost(v))
-                .sum();
+            let batch_cost: u64 = batch.records.iter().map(|(_, v)| record_byte_cost(v)).sum();
             assert!(
                 batch_cost <= budget,
                 "batch byte cost {batch_cost} must not exceed budget {budget}"
@@ -1116,7 +1112,7 @@ mod tests {
 
     /// AC5 degenerate carve-out: a single record larger than the whole budget is
     /// admitted whole (one record cannot be split), so the bound for that case is
-    /// <= max_batch_cost + one max-record. WHY: progress must be guaranteed; an
+    /// <= `max_batch_cost` + one max-record. WHY: progress must be guaranteed; an
     /// empty batch with a remaining cursor would livelock the scan.
     #[tokio::test]
     async fn scan_from_admits_single_oversized_record_whole() {
