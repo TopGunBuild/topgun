@@ -654,6 +654,18 @@ impl QueryService {
         let query = payload.payload.query.clone();
         let fields = payload.payload.fields.clone();
 
+        // Surface persisted-but-non-resident records (after restart or eviction)
+        // before the scan so the full-scan QUERY reflects durable state regardless
+        // of residency. Streams the datastore in bounded byte batches within the
+        // RAM ceiling and hydrates each non-resident record into its partition
+        // store; a no-op for null / in-memory datastores. Done before
+        // get_all_for_map so the cache is populated for partitions that had only
+        // durable (non-resident) data.
+        self.record_store_factory
+            .hydrate_non_resident_for_scan(&map_name)
+            .await
+            .map_err(OperationError::Internal)?;
+
         // Scan ALL partitions for this map to aggregate entries and Merkle key-hash pairs.
         // Keys are deterministically mapped to partitions via hash_to_partition,
         // so there is no risk of duplicates across partitions.

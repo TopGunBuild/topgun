@@ -149,6 +149,20 @@ pub trait RecordStore: Send + Sync {
     /// instead of generic `F: FnMut` for `Box<dyn RecordStore>` compatibility.
     fn for_each_boxed(&self, consumer: &mut dyn FnMut(&str, &Record), is_backup: bool);
 
+    /// Materialize a durable-but-non-resident record into the in-memory engine,
+    /// but ONLY if the key is currently absent.
+    ///
+    /// This generalizes the single-key lazy-load in [`get()`](RecordStore::get)
+    /// to the full-scan path: a record streamed from the datastore is made
+    /// resident so the synchronous `for_each_boxed` scan (and the DAG scan) sees
+    /// it, surfacing persisted-but-non-resident keys (after restart or eviction)
+    /// to a full-scan QUERY. It MUST NOT overwrite a resident value — an
+    /// in-memory record reflects the live (possibly fresher) write-path state,
+    /// and clobbering it with a stale durable read would lose an unflushed or
+    /// concurrently-merged update. Returns `true` if the record was inserted,
+    /// `false` if a resident copy already existed.
+    fn hydrate_loaded(&self, key: &str, value: RecordValue) -> bool;
+
     // --- Size and cost ---
 
     /// Number of entries in the record store.

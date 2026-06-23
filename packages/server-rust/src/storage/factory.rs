@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
+use topgun_core::hash_to_partition;
+
 use crate::storage::engines::HashMapStorage;
 use crate::storage::impls::{DefaultRecordStore, StorageConfig};
 use crate::storage::map_data_store::MapDataStore;
@@ -173,6 +175,57 @@ impl RecordStoreFactory {
             .filter(|entry| entry.key().0 == map_name)
             .map(|entry| Arc::clone(entry.value()))
             .collect()
+    }
+
+    /// Stream every durable record of `map_name` from the datastore and make
+    /// any persisted-but-non-resident record resident, in bounded batches.
+    ///
+    /// This is the datastore-aware async scan entrypoint for the full-scan QUERY
+    /// path. After a restart (no rehydration) or after eviction (records dropped
+    /// from the in-memory engine under `TOPGUN_MAX_RAM_MB` pressure), durable
+    /// records exist on disk but not in memory, so the synchronous
+    /// `for_each_boxed` scan (and the DAG scan) would silently omit them. This
+    /// method generalizes the single-key lazy-load in `RecordStore::get` to the
+    /// whole map: it pages the datastore via `scan_values` / `scan_values_batched`
+    /// (byte-bounded by `max_batch_cost`, so a single batch never exceeds the RAM
+    /// ceiling) and hydrates each record into its partition store via
+    /// `hydrate_loaded`, which never clobbers a resident (possibly fresher) value.
+    ///
+    /// Key-ordered datastore paging (redb ordered `table.range`, postgres keyset
+    /// `key > last_key ORDER BY key`) guarantees a stably-present key is never
+    /// missed or duplicated across batch boundaries regardless of snapshot
+    /// strategy — the load-bearing invariant against silent divergence from
+    /// durable state.
+    ///
+    /// A no-op for null / in-memory datastores (nothing durable to surface).
+    pub async fn hydrate_non_resident_for_scan(&self, map_name: &str) -> anyhow::Result<()> {
+        if self.data_store.is_null() {
+            return Ok(());
+        }
+
+        // `0` requests the backend's default per-batch byte budget, a
+        // conservative fraction of TOPGUN_MAX_RAM_MB. Each scan_* call observes
+        // one per-batch snapshot; we do not hold a cross-batch session.
+        let batch_cost: u64 = 0;
+        let mut batch = self
+            .data_store
+            .scan_values(map_name, false, batch_cost)
+            .await?;
+        loop {
+            for (key, value) in batch.records {
+                let partition_id = hash_to_partition(&key);
+                let store = self.get_or_create(map_name, partition_id);
+                store.hydrate_loaded(&key, value);
+            }
+            let Some(cursor) = batch.next_cursor else {
+                break;
+            };
+            batch = self
+                .data_store
+                .scan_values_batched(map_name, false, cursor, batch_cost)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Returns a snapshot of all live stores across all maps and partitions.
