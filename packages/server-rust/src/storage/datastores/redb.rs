@@ -13,6 +13,18 @@
 //! against `^[a-zA-Z_][a-zA-Z0-9_]*$` before use to prevent table-name
 //! collisions via metacharacters (parity with `PostgresDataStore`).
 //!
+//! The `__backup` suffix is **reserved**: a map name ending in `__backup` is
+//! rejected by [`is_valid_map_name`]. Without this, a primary map literally
+//! named `foo__backup` would encode to table `map__foo__backup` — byte-identical
+//! to the backup partition of map `foo` — so `list_maps` (which derives the
+//! durable map set from the table catalog and skips `__backup` tables) would
+//! silently drop it, leaving its post-restart Merkle root at 0. That is exactly
+//! the durable-but-invisible silent-divergence class this index exists to
+//! close, so the ambiguity is forbidden at the validation boundary rather than
+//! papered over at enumeration. Postgres stores `is_backup` as a key column
+//! (not in the name) and so never had this collision; reserving the suffix in
+//! both validators keeps the accepted-name set identical across backends.
+//!
 //! Values are msgpack-serialized [`RecordValue`] (via
 //! [`rmp_serde::to_vec_named`]), matching the on-disk format the Postgres
 //! backend uses for its `value BYTEA` column. This preserves byte-level
@@ -78,14 +90,22 @@ const LEAF_BATCH_SIZE: usize = 1024;
 /// the total scanned volume.
 const DEFAULT_SCAN_BATCH_COST: u64 = 8 * 1024 * 1024;
 
-/// Validate that a map name matches `^[a-zA-Z_][a-zA-Z0-9_]*$`.
+/// Validate that a map name matches `^[a-zA-Z_][a-zA-Z0-9_]*$` and does not end
+/// in the reserved `__backup` suffix.
 ///
 /// Map names are interpolated into redb table-definition strings via
 /// `format!("map__{name}")`; rejecting metacharacters prevents collision
-/// between user-supplied maps and reserved table names. Mirrors the
-/// `is_valid_table_name` check in `PostgresDataStore`.
+/// between user-supplied maps and reserved table names. The `__backup` suffix
+/// is reserved because `table_name_for` encodes `is_backup` into the name —
+/// a primary map named `foo__backup` would be indistinguishable from the
+/// backup partition of map `foo`, so `list_maps` would silently drop it and
+/// serve Merkle root 0 for durable data. Mirrors the `is_valid_table_name`
+/// check in `PostgresDataStore` so both backends accept the same name set.
 fn is_valid_map_name(name: &str) -> bool {
     if name.is_empty() {
+        return false;
+    }
+    if name.ends_with("__backup") {
         return false;
     }
     let mut chars = name.chars();
@@ -900,6 +920,20 @@ mod tests {
         assert!(!is_valid_map_name("foo bar"));
         assert!(!is_valid_map_name("foo;DROP"));
         assert!(!is_valid_map_name("foo--backup"));
+    }
+
+    #[test]
+    fn is_valid_map_name_rejects_reserved_backup_suffix() {
+        // A primary map named `foo__backup` would encode to table
+        // `map__foo__backup`, indistinguishable from the backup partition of
+        // map `foo`, so `list_maps` would silently drop it and serve Merkle
+        // root 0 for durable data. The suffix must be reserved at the
+        // validation boundary.
+        assert!(!is_valid_map_name("foo__backup"));
+        assert!(!is_valid_map_name("__backup"));
+        // But `__backup` elsewhere in the name is fine — only the suffix is reserved.
+        assert!(is_valid_map_name("__backup_data"));
+        assert!(is_valid_map_name("backup"));
     }
 
     #[test]

@@ -205,6 +205,22 @@ impl PostgresDataStore {
     }
 }
 
+/// Reject map names ending in the reserved `__backup` suffix.
+///
+/// Postgres stores `is_backup` as a key column (not in the name), so it does
+/// not itself collide on a map named `foo__backup` the way the redb backend's
+/// name-encoded tables do. This guard exists for **cross-backend parity**: the
+/// accepted map-name set must be identical regardless of `STORAGE_BACKEND`, so
+/// a name that redb must reject (to avoid silently dropping a durable map from
+/// its Merkle-index rebuild) is rejected here too. Mirrors the `__backup`
+/// reservation in the redb `is_valid_map_name` check.
+fn reject_reserved_map_name(map: &str) -> anyhow::Result<()> {
+    if map.ends_with("__backup") {
+        bail!("Invalid map name '{map}': the '__backup' suffix is reserved");
+    }
+    Ok(())
+}
+
 /// Validate that a table name matches `^[a-zA-Z_][a-zA-Z0-9_]*$`.
 ///
 /// This prevents SQL injection since table names are interpolated via `format!()`.
@@ -246,6 +262,7 @@ impl MapDataStore for PostgresDataStore {
         expiration_time: i64,
         now: i64,
     ) -> anyhow::Result<()> {
+        reject_reserved_map_name(map)?;
         let bytes = rmp_serde::to_vec_named(value)?;
 
         let query = format!(
@@ -732,6 +749,19 @@ mod tests {
         assert!(!is_valid_table_name("table.name"));
         assert!(!is_valid_table_name("table;drop"));
         assert!(!is_valid_table_name("Robert'); DROP TABLE students;--"));
+    }
+
+    #[test]
+    fn reject_reserved_map_name_enforces_backup_suffix_parity() {
+        // Cross-backend parity with redb: the `__backup` suffix is reserved so
+        // the accepted map-name set is identical regardless of backend, even
+        // though postgres stores `is_backup` as a column and would not itself
+        // collide.
+        assert!(reject_reserved_map_name("foo__backup").is_err());
+        assert!(reject_reserved_map_name("__backup").is_err());
+        assert!(reject_reserved_map_name("users").is_ok());
+        assert!(reject_reserved_map_name("backup").is_ok());
+        assert!(reject_reserved_map_name("__backup_data").is_ok());
     }
 
     #[test]
