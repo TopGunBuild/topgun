@@ -271,14 +271,19 @@ impl RedbDataStore {
                     continue;
                 }
             }
-            // If we already have a full batch, the presence of another row means
-            // the scan is not exhausted -- emit a cursor and stop.
-            if !records.is_empty() && accumulated >= budget {
+            let bytes = val_guard.value();
+            let row_cost = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            // Strict check-before-push: account for the prospective row's byte
+            // cost BEFORE admitting it, so a batch never includes the row that
+            // would cross the budget (peak resident batch cost stays <= budget).
+            // The empty-batch carve-out admits a single oversized record whole
+            // because one record cannot be split — for that degenerate case the
+            // bound is <= budget + one max-record.
+            if !records.is_empty() && accumulated.saturating_add(row_cost) > budget {
                 more_rows_pending = true;
                 break;
             }
-            let bytes = val_guard.value();
-            accumulated += u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            accumulated += row_cost;
             let value: RecordValue = rmp_serde::from_slice(bytes)?;
             records.push((key, value));
         }

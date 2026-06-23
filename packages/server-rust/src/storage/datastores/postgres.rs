@@ -163,41 +163,60 @@ impl PostgresDataStore {
         let mut accumulated: u64 = 0;
         let mut last_key = start_after_key;
 
+        // Wrap every internal page of THIS scan_from call in a single
+        // REPEATABLE READ transaction so the batch observes ONE consistent
+        // snapshot. Without it the multiple autocommit fetches below could each
+        // see a different point in time, yielding a within-call torn read under
+        // concurrent writes. This is a per-batch (per-scan_from-call) envelope:
+        // the txn lives entirely inside this call and is NOT threaded across
+        // scan_values_batched resume calls (the ScanCursor carries no txn).
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *tx)
+            .await?;
+
         // Page the query until the byte budget is met; a final short page (fewer
         // than PG_PAGE_ROWS) means the table is exhausted.
-        loop {
+        'paging: loop {
             let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(&query)
                 .bind(map)
                 .bind(is_backup)
                 .bind(&last_key)
                 .bind(PG_PAGE_ROWS)
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *tx)
                 .await?;
             if rows.is_empty() {
                 break;
             }
             let page_len = rows.len();
             for (key, bytes) in rows {
-                accumulated += u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-                let value: RecordValue = rmp_serde::from_slice(&bytes)?;
-                last_key.clone_from(&key);
-                records.push((key, value));
-                if accumulated >= budget {
-                    // Budget reached mid-page: more rows may remain, so emit a
-                    // resume cursor at the last record returned.
+                let row_cost = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                // Strict check-before-push: account for the prospective row's
+                // byte cost BEFORE admitting it, so a batch never includes the
+                // row that would cross the budget (peak resident batch cost stays
+                // <= budget). The empty-batch carve-out admits a single oversized
+                // record whole because one record cannot be split — for that
+                // degenerate case the bound is <= budget + one max-record.
+                if !records.is_empty() && accumulated.saturating_add(row_cost) > budget {
+                    tx.commit().await?;
                     return Ok(ScanBatch {
                         records,
                         next_cursor: Some(ScanCursor(last_key.into_bytes())),
                     });
                 }
+                accumulated += row_cost;
+                let value: RecordValue = rmp_serde::from_slice(&bytes)?;
+                last_key.clone_from(&key);
+                records.push((key, value));
             }
             if page_len < PG_PAGE_ROWS_USIZE {
-                break;
+                break 'paging;
             }
             // Full page consumed without hitting the budget: another page may
             // exist; keep paging within this same batch from `last_key`.
         }
 
+        tx.commit().await?;
         Ok(ScanBatch {
             records,
             next_cursor: None,
