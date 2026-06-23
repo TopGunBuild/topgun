@@ -15,7 +15,7 @@ use tokio::sync::{watch, Notify};
 use topgun_core::{fnv1a_hash, PARTITION_COUNT};
 use tracing::warn;
 
-use crate::storage::map_data_store::MapDataStore;
+use crate::storage::map_data_store::{LeafSink, MapDataStore, ScanBatch, ScanCursor};
 use crate::storage::record::RecordValue;
 use crate::storage::wal::{Wal, WalEntry, WalFsyncPolicy, WalOp};
 
@@ -928,6 +928,49 @@ impl MapDataStore for WriteBehindDataStore {
         Ok(())
     }
 
+    async fn list_maps(&self) -> anyhow::Result<Vec<String>> {
+        // Delegate to the durable backend so the startup seed sees the same
+        // durable map catalog the rest of the server persists to. Maps that
+        // exist only as still-buffered staging writes are necessarily also
+        // resident in the in-memory engine, so the durable catalog is the
+        // correct source for the residency-independent seed.
+        self.inner.list_maps().await
+    }
+
+    async fn enumerate_leaves(
+        &self,
+        map: &str,
+        is_backup: bool,
+        sink: &mut dyn LeafSink,
+    ) -> anyhow::Result<()> {
+        // Delegate to the durable backend. Records still buffered in staging are
+        // not yet durable; they remain resident in the in-memory engine and
+        // contribute their leaves there, so durable enumeration covers exactly
+        // the flushed set without double-counting.
+        self.inner.enumerate_leaves(map, is_backup, sink).await
+    }
+
+    async fn scan_values(
+        &self,
+        map: &str,
+        is_backup: bool,
+        max_batch_cost: u64,
+    ) -> anyhow::Result<ScanBatch> {
+        self.inner.scan_values(map, is_backup, max_batch_cost).await
+    }
+
+    async fn scan_values_batched(
+        &self,
+        map: &str,
+        is_backup: bool,
+        cursor: ScanCursor,
+        max_batch_cost: u64,
+    ) -> anyhow::Result<ScanBatch> {
+        self.inner
+            .scan_values_batched(map, is_backup, cursor, max_batch_cost)
+            .await
+    }
+
     fn is_loadable(&self, _key: &str) -> bool {
         // Staging area handles consistency, so always loadable
         true
@@ -1271,6 +1314,35 @@ mod tests {
 
         async fn remove_all(&self, _map: &str, _keys: &[String]) -> anyhow::Result<()> {
             Ok(())
+        }
+
+        async fn enumerate_leaves(
+            &self,
+            _map: &str,
+            _is_backup: bool,
+            _sink: &mut dyn LeafSink,
+        ) -> anyhow::Result<()> {
+            // Test spy holds no durable leaves.
+            Ok(())
+        }
+
+        async fn scan_values(
+            &self,
+            _map: &str,
+            _is_backup: bool,
+            _max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            Ok(ScanBatch::default())
+        }
+
+        async fn scan_values_batched(
+            &self,
+            _map: &str,
+            _is_backup: bool,
+            _cursor: ScanCursor,
+            _max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            Ok(ScanBatch::default())
         }
 
         fn is_loadable(&self, _key: &str) -> bool {
@@ -1719,6 +1791,35 @@ mod tests {
 
         async fn remove_all(&self, _map: &str, _keys: &[String]) -> anyhow::Result<()> {
             Ok(())
+        }
+
+        async fn enumerate_leaves(
+            &self,
+            _map: &str,
+            _is_backup: bool,
+            _sink: &mut dyn LeafSink,
+        ) -> anyhow::Result<()> {
+            // Slow test store has no durable leaves to enumerate.
+            Ok(())
+        }
+
+        async fn scan_values(
+            &self,
+            _map: &str,
+            _is_backup: bool,
+            _max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            Ok(ScanBatch::default())
+        }
+
+        async fn scan_values_batched(
+            &self,
+            _map: &str,
+            _is_backup: bool,
+            _cursor: ScanCursor,
+            _max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            Ok(ScanBatch::default())
         }
 
         fn is_loadable(&self, _key: &str) -> bool {

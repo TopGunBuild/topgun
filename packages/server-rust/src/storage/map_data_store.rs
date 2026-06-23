@@ -8,6 +8,121 @@
 use async_trait::async_trait;
 
 use super::record::RecordValue;
+use topgun_core::hash::fnv1a_hash;
+
+/// Which CRDT-kind tree a durable leaf belongs to.
+///
+/// The write path keeps a SEPARATE Merkle tree per CRDT kind — LWW leaves in
+/// the LWW tree, OR-Map leaves in the OR-Map tree. The rebuild consumer must
+/// reproduce that split exactly, but a bare `u32` leaf hash carries no kind
+/// information. This discriminator lets the rebuild sink route each enumerated
+/// leaf to the same tree the write-path observer would have written, so the
+/// rebuilt roots match the pre-crash roots for maps that mix both kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MerkleLeafKind {
+    /// Last-Write-Wins record — routes to the LWW tree.
+    Lww,
+    /// Observed-Remove Map record — routes to the OR-Map tree.
+    OrMap,
+}
+
+/// A single durable record's Merkle leaf coordinate: its key, CRDT kind, and
+/// the `u32` leaf hash computed over the persisted value.
+///
+/// `leaf_hash` is the same `u32` space as the in-memory Merkle leaf hash
+/// (`fnv1a`-derived); enumerating it from the durable store lets the Merkle
+/// root be rebuilt from persistence WITHOUT loading full record values into
+/// memory. `kind` tells the rebuild consumer which per-CRDT tree to fold the
+/// leaf into, mirroring the write-path observer's per-kind tree separation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MerkleLeaf {
+    /// Record key within the map.
+    pub key: String,
+    /// CRDT kind, selecting the LWW vs OR-Map tree on rebuild.
+    pub kind: MerkleLeafKind,
+    /// `u32` leaf hash over the persisted value (matches in-memory leaf hash).
+    pub leaf_hash: u32,
+}
+
+/// Compute the Merkle leaf coordinate (CRDT kind + `u32` leaf hash) for a
+/// record value — the single source of truth shared by the write-path observer
+/// and every durable enumeration backend.
+///
+/// LWW leaves hash `"{key}:{millis}:{counter}:{node_id}"`; OR-Map leaves hash
+/// the sorted active + tombstone tag sets (`"key:{key}|{tags}#{tombs}"`), so a
+/// removal still changes the leaf and peers can observe a tombstone-only delta.
+/// Returns `None` for `OrTombstones`: the write path removes such keys from the
+/// OR-Map tree rather than contributing a leaf, so enumeration must likewise
+/// emit no leaf to keep a rebuilt root identical to the live one.
+///
+/// Keeping this in one place is load-bearing: a Merkle root rebuilt from
+/// persistence must be byte-identical to the live root, so this formula must
+/// never drift between the observer and the storage backends. Callers that
+/// fold leaves into per-CRDT trees route on the returned [`MerkleLeafKind`].
+#[must_use]
+pub fn merkle_leaf_hash(key: &str, value: &RecordValue) -> Option<(MerkleLeafKind, u32)> {
+    match value {
+        RecordValue::Lww { timestamp, .. } => Some((
+            MerkleLeafKind::Lww,
+            fnv1a_hash(&format!(
+                "{key}:{}:{}:{}",
+                timestamp.millis, timestamp.counter, timestamp.node_id
+            )),
+        )),
+        RecordValue::OrMap {
+            records,
+            tombstones,
+        } => {
+            let mut tags: Vec<&str> = records.iter().map(|r| r.tag.as_str()).collect();
+            tags.sort_unstable();
+            let joined = tags.join("|");
+            let mut tomb_tags: Vec<&str> = tombstones.iter().map(String::as_str).collect();
+            tomb_tags.sort_unstable();
+            let joined_tombs = tomb_tags.join("|");
+            Some((
+                MerkleLeafKind::OrMap,
+                fnv1a_hash(&format!("key:{key}|{joined}#{joined_tombs}")),
+            ))
+        }
+        RecordValue::OrTombstones { .. } => None,
+    }
+}
+
+/// A bounded batch of fully-loaded durable records produced by a value-streamed
+/// scan.
+///
+/// Batches are sized so that the resident cost of `records` stays under the
+/// `TOPGUN_MAX_RAM_MB` ceiling; the scan never materializes the whole map at
+/// once. `next_cursor` is `None` once enumeration is exhausted.
+#[derive(Debug, Default)]
+pub struct ScanBatch {
+    /// The records in this batch, as `(key, value)` pairs.
+    pub records: Vec<(String, RecordValue)>,
+    /// Opaque resume token for the next batch, or `None` when exhausted.
+    pub next_cursor: Option<ScanCursor>,
+}
+
+/// Opaque, backend-defined resume token for a value-streamed scan.
+///
+/// The byte payload is interpreted only by the producing backend (e.g. a redb
+/// last-key marker or a Postgres keyset offset). Callers treat it as opaque and
+/// pass it back unchanged to fetch the next [`ScanBatch`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanCursor(pub Vec<u8>);
+
+/// Async sink invoked once per bounded batch of Merkle leaves during
+/// enumeration.
+///
+/// The enumeration drives paging internally and calls [`consume`](LeafSink::consume)
+/// for each batch, so the async caller can `.await` per batch (e.g. fold leaves
+/// into a Merkle tree) WITHOUT the producer ever holding the whole key set in
+/// memory. Implemented as a trait object rather than an async closure because
+/// async closures do not pass cleanly through `#[async_trait]`.
+#[async_trait]
+pub trait LeafSink: Send {
+    /// Consume one bounded batch of leaves. Returning `Err` aborts enumeration.
+    async fn consume(&mut self, batch: Vec<MerkleLeaf>) -> anyhow::Result<()>;
+}
 
 /// External persistence backend for a `RecordStore`.
 ///
@@ -59,8 +174,86 @@ pub trait MapDataStore: Send + Sync {
         keys: &[String],
     ) -> anyhow::Result<Vec<(String, RecordValue)>>;
 
+    /// Stream the `(key, leaf_hash)` of every durable record of `map`, in
+    /// bounded batches, WITHOUT loading full record values.
+    ///
+    /// This is the Merkle leaf source: it lets the sync layer rebuild a map's
+    /// Merkle root from persistence alone, so a record that is persisted but
+    /// not resident in memory still contributes its leaf to the root. The
+    /// producer pages the durable store internally and invokes `sink` once per
+    /// batch, bounding peak memory regardless of map size; only keys and `u32`
+    /// hashes cross the boundary, never values.
+    ///
+    /// Deliberately has NO default body: every backend MUST provide a real
+    /// enumeration. A default empty body would silently yield an empty Merkle
+    /// root for an un-overridden backend, coupling correctness to residency.
+    async fn enumerate_leaves(
+        &self,
+        map: &str,
+        is_backup: bool,
+        sink: &mut dyn LeafSink,
+    ) -> anyhow::Result<()>;
+
+    /// Begin a value-streamed scan of `map`, returning the first bounded
+    /// [`ScanBatch`].
+    ///
+    /// This is the datastore-aware scan entrypoint consumed by the async query
+    /// path: it surfaces persisted-but-non-resident records to full scans
+    /// without requiring the whole map to be in memory. `max_batch_cost` caps
+    /// the resident byte cost of a single batch so the scan honors the
+    /// `TOPGUN_MAX_RAM_MB` ceiling; pass `0` for the backend default.
+    ///
+    /// Deliberately has NO default body so an un-overridden backend cannot
+    /// silently scan only the resident subset.
+    async fn scan_values(
+        &self,
+        map: &str,
+        is_backup: bool,
+        max_batch_cost: u64,
+    ) -> anyhow::Result<ScanBatch>;
+
+    /// Fetch the next bounded [`ScanBatch`] for an in-progress value-streamed
+    /// scan, resuming from `cursor`.
+    ///
+    /// Each call loads at most `max_batch_cost` bytes of records (pass `0` for
+    /// the backend default), keeping the scan within the `TOPGUN_MAX_RAM_MB`
+    /// ceiling. Enumeration is exhausted when the returned batch carries
+    /// `next_cursor == None`.
+    ///
+    /// Deliberately has NO default body for the same residency-correctness
+    /// reason as [`scan_values`](MapDataStore::scan_values).
+    async fn scan_values_batched(
+        &self,
+        map: &str,
+        is_backup: bool,
+        cursor: ScanCursor,
+        max_batch_cost: u64,
+    ) -> anyhow::Result<ScanBatch>;
+
     /// Remove all specified keys from the backing store.
     async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()>;
+
+    /// List the names of every map that has durable (primary) records in this
+    /// backend, regardless of whether any of those records are currently
+    /// resident in memory.
+    ///
+    /// This is the residency-independent map source the startup Merkle-index
+    /// seed iterates: it lets the server rebuild each persisted map's Merkle
+    /// root from durable keys+hashes alone, so a map that survived a restart but
+    /// has not yet been touched in memory still answers `SYNC_INIT` with the
+    /// correct (non-zero, pre-crash-equal) root. Only primary partitions are
+    /// listed — backup partitions are not part of the `SYNC_INIT` root path.
+    ///
+    /// Unlike [`enumerate_leaves`](MapDataStore::enumerate_leaves), this has a
+    /// default body returning an empty list: a backend that holds no durable
+    /// maps (the null / in-memory test stores) correctly contributes nothing to
+    /// seed, and the durable backends (redb / Postgres / write-behind) override
+    /// it. An empty default here cannot couple correctness to residency the way
+    /// an empty `enumerate_leaves` would — at worst the seed is a no-op and the
+    /// map's trees stay empty (the pre-existing behavior), never wrong leaves.
+    async fn list_maps(&self) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 
     /// Check if a key is safe to load (not queued for write-behind).
     ///

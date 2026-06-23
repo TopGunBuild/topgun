@@ -876,6 +876,35 @@ mod tests {
             Ok(())
         }
 
+        async fn enumerate_leaves(
+            &self,
+            _map: &str,
+            _is_backup: bool,
+            _sink: &mut dyn crate::storage::map_data_store::LeafSink,
+        ) -> anyhow::Result<()> {
+            // WAL replay test store records calls only; no durable leaves.
+            Ok(())
+        }
+
+        async fn scan_values(
+            &self,
+            _map: &str,
+            _is_backup: bool,
+            _max_batch_cost: u64,
+        ) -> anyhow::Result<crate::storage::map_data_store::ScanBatch> {
+            Ok(crate::storage::map_data_store::ScanBatch::default())
+        }
+
+        async fn scan_values_batched(
+            &self,
+            _map: &str,
+            _is_backup: bool,
+            _cursor: crate::storage::map_data_store::ScanCursor,
+            _max_batch_cost: u64,
+        ) -> anyhow::Result<crate::storage::map_data_store::ScanBatch> {
+            Ok(crate::storage::map_data_store::ScanBatch::default())
+        }
+
         fn is_loadable(&self, _key: &str) -> bool {
             true
         }

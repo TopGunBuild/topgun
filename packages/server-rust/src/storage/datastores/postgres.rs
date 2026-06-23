@@ -9,8 +9,25 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 
 use crate::network::handlers::{RefreshGrant, RefreshGrantStore};
-use crate::storage::map_data_store::MapDataStore;
+use crate::storage::map_data_store::{
+    merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
+};
 use crate::storage::record::RecordValue;
+
+/// Rows fetched per page during keyset-paginated enumeration / scans.
+///
+/// Bounds peak memory: enumeration decodes one page at a time to derive leaf
+/// hashes, never the whole map. Scans further cap a returned batch by summed
+/// byte cost, but still page the underlying query so the SQL result set itself
+/// stays bounded.
+const PG_PAGE_ROWS: i64 = 1024;
+
+/// `PG_PAGE_ROWS` as a `usize` for short-page (exhausted) comparisons.
+const PG_PAGE_ROWS_USIZE: usize = 1024;
+
+/// Default per-batch resident byte budget for `scan_values` when the caller
+/// passes `max_batch_cost == 0`. Mirrors the redb backend's default.
+const PG_DEFAULT_SCAN_BATCH_COST: u64 = 8 * 1024 * 1024;
 
 /// Write-through `PostgreSQL` persistence backend.
 ///
@@ -115,6 +132,93 @@ impl PostgresDataStore {
 
         Ok(rows.into_iter().map(|(key,)| key).collect())
     }
+
+    /// Load one bounded `(key, value)` batch in key order, resuming strictly
+    /// after `start_after_key` (empty string for the first batch).
+    ///
+    /// Uses keyset pagination (`key > $cursor ORDER BY key`) rather than
+    /// `OFFSET` so resume cost stays constant regardless of how far the scan has
+    /// progressed. Accumulates rows until the summed value byte cost reaches the
+    /// budget, then returns a cursor for the next batch (`None` once drained).
+    async fn scan_from(
+        &self,
+        map: &str,
+        is_backup: bool,
+        start_after_key: String,
+        max_batch_cost: u64,
+    ) -> anyhow::Result<ScanBatch> {
+        let budget = if max_batch_cost == 0 {
+            PG_DEFAULT_SCAN_BATCH_COST
+        } else {
+            max_batch_cost
+        };
+        let query = format!(
+            "SELECT key, value FROM {} \
+             WHERE map_name = $1 AND is_backup = $2 AND key > $3 \
+             ORDER BY key ASC LIMIT $4",
+            self.table_name
+        );
+
+        let mut records: Vec<(String, RecordValue)> = Vec::new();
+        let mut accumulated: u64 = 0;
+        let mut last_key = start_after_key;
+
+        // Page the query until the byte budget is met; a final short page (fewer
+        // than PG_PAGE_ROWS) means the table is exhausted.
+        loop {
+            let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(&query)
+                .bind(map)
+                .bind(is_backup)
+                .bind(&last_key)
+                .bind(PG_PAGE_ROWS)
+                .fetch_all(&self.pool)
+                .await?;
+            if rows.is_empty() {
+                break;
+            }
+            let page_len = rows.len();
+            for (key, bytes) in rows {
+                accumulated += u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                let value: RecordValue = rmp_serde::from_slice(&bytes)?;
+                last_key.clone_from(&key);
+                records.push((key, value));
+                if accumulated >= budget {
+                    // Budget reached mid-page: more rows may remain, so emit a
+                    // resume cursor at the last record returned.
+                    return Ok(ScanBatch {
+                        records,
+                        next_cursor: Some(ScanCursor(last_key.into_bytes())),
+                    });
+                }
+            }
+            if page_len < PG_PAGE_ROWS_USIZE {
+                break;
+            }
+            // Full page consumed without hitting the budget: another page may
+            // exist; keep paging within this same batch from `last_key`.
+        }
+
+        Ok(ScanBatch {
+            records,
+            next_cursor: None,
+        })
+    }
+}
+
+/// Reject map names ending in the reserved `__backup` suffix.
+///
+/// Postgres stores `is_backup` as a key column (not in the name), so it does
+/// not itself collide on a map named `foo__backup` the way the redb backend's
+/// name-encoded tables do. This guard exists for **cross-backend parity**: the
+/// accepted map-name set must be identical regardless of `STORAGE_BACKEND`, so
+/// a name that redb must reject (to avoid silently dropping a durable map from
+/// its Merkle-index rebuild) is rejected here too. Mirrors the `__backup`
+/// reservation in the redb `is_valid_map_name` check.
+fn reject_reserved_map_name(map: &str) -> anyhow::Result<()> {
+    if map.ends_with("__backup") {
+        bail!("Invalid map name '{map}': the '__backup' suffix is reserved");
+    }
+    Ok(())
 }
 
 /// Validate that a table name matches `^[a-zA-Z_][a-zA-Z0-9_]*$`.
@@ -158,6 +262,10 @@ impl MapDataStore for PostgresDataStore {
         expiration_time: i64,
         now: i64,
     ) -> anyhow::Result<()> {
+        // Guarded at the creation/write boundary: a map cannot be brought into
+        // existence under a reserved name, so reads/removes/scans of such a name
+        // can only ever hit a non-existent map (empty) — no data can live there.
+        reject_reserved_map_name(map)?;
         let bytes = rmp_serde::to_vec_named(value)?;
 
         let query = format!(
@@ -307,6 +415,92 @@ impl MapDataStore for PostgresDataStore {
             .await?;
 
         Ok(())
+    }
+
+    async fn list_maps(&self) -> anyhow::Result<Vec<String>> {
+        // Distinct primary map names straight from the catalog so the startup
+        // seed discovers persisted-but-non-resident maps. Backup partitions
+        // (is_backup = true) are excluded — they are not on the SYNC_INIT root
+        // path.
+        let query = format!(
+            "SELECT DISTINCT map_name FROM {} WHERE is_backup = false ORDER BY map_name ASC",
+            self.table_name
+        );
+        let rows: Vec<(String,)> = sqlx::query_as(&query).fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(|(name,)| name).collect())
+    }
+
+    async fn enumerate_leaves(
+        &self,
+        map: &str,
+        is_backup: bool,
+        sink: &mut dyn LeafSink,
+    ) -> anyhow::Result<()> {
+        // Keyset-paginate (key, value) in key order so the SQL result set never
+        // materializes the whole map. Each page is decoded only far enough to
+        // derive the leaf hash; values are dropped before the next page.
+        let query = format!(
+            "SELECT key, value FROM {} \
+             WHERE map_name = $1 AND is_backup = $2 AND key > $3 \
+             ORDER BY key ASC LIMIT $4",
+            self.table_name
+        );
+        let mut last_key = String::new();
+        loop {
+            let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(&query)
+                .bind(map)
+                .bind(is_backup)
+                .bind(&last_key)
+                .bind(PG_PAGE_ROWS)
+                .fetch_all(&self.pool)
+                .await?;
+            if rows.is_empty() {
+                break;
+            }
+            let page_len = rows.len();
+            let mut batch: Vec<MerkleLeaf> = Vec::with_capacity(page_len);
+            for (key, bytes) in rows {
+                let value: RecordValue = rmp_serde::from_slice(&bytes)?;
+                if let Some((kind, leaf_hash)) = merkle_leaf_hash(&key, &value) {
+                    batch.push(MerkleLeaf {
+                        key: key.clone(),
+                        kind,
+                        leaf_hash,
+                    });
+                }
+                last_key = key;
+            }
+            if !batch.is_empty() {
+                sink.consume(batch).await?;
+            }
+            if page_len < PG_PAGE_ROWS_USIZE {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    async fn scan_values(
+        &self,
+        map: &str,
+        is_backup: bool,
+        max_batch_cost: u64,
+    ) -> anyhow::Result<ScanBatch> {
+        self.scan_from(map, is_backup, String::new(), max_batch_cost)
+            .await
+    }
+
+    async fn scan_values_batched(
+        &self,
+        map: &str,
+        is_backup: bool,
+        cursor: ScanCursor,
+        max_batch_cost: u64,
+    ) -> anyhow::Result<ScanBatch> {
+        let last_key = String::from_utf8(cursor.0)
+            .map_err(|e| anyhow::anyhow!("scan cursor is not valid UTF-8: {e}"))?;
+        self.scan_from(map, is_backup, last_key, max_batch_cost)
+            .await
     }
 
     fn is_loadable(&self, _key: &str) -> bool {
@@ -558,6 +752,19 @@ mod tests {
         assert!(!is_valid_table_name("table.name"));
         assert!(!is_valid_table_name("table;drop"));
         assert!(!is_valid_table_name("Robert'); DROP TABLE students;--"));
+    }
+
+    #[test]
+    fn reject_reserved_map_name_enforces_backup_suffix_parity() {
+        // Cross-backend parity with redb: the `__backup` suffix is reserved so
+        // the accepted map-name set is identical regardless of backend, even
+        // though postgres stores `is_backup` as a column and would not itself
+        // collide.
+        assert!(reject_reserved_map_name("foo__backup").is_err());
+        assert!(reject_reserved_map_name("__backup").is_err());
+        assert!(reject_reserved_map_name("users").is_ok());
+        assert!(reject_reserved_map_name("backup").is_ok());
+        assert!(reject_reserved_map_name("__backup_data").is_ok());
     }
 
     #[test]

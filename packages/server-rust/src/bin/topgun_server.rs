@@ -1559,10 +1559,95 @@ fn build_services(
         mgr
     };
 
+    // Keep a handle to the same durable backend the factory consumes so the
+    // Merkle index can be seeded from persistence below. `datastore` is moved
+    // into the factory on the next line, so the clone must be taken first.
+    let datastore_for_merkle_seed: Arc<dyn MapDataStore> = Arc::clone(&datastore);
+
     let record_store_factory = Arc::new(
         RecordStoreFactory::new(StorageConfig::default(), datastore, Vec::new())
             .with_observer_factories(observer_factories),
     );
+
+    // Seed each durably-persisted map's Merkle trees from the backend BEFORE the
+    // server accepts connections, so the first post-restart SYNC_INIT answers
+    // with the correct (non-zero, pre-crash-equal) root instead of an empty one.
+    //
+    // This is an index-only seed: `rebuild_from_datastore` reads keys + u32 leaf
+    // hashes via `enumerate_leaves` and never loads record VALUES, so it is
+    // RAM-ceiling-safe and does NOT rehydrate the in-memory engine — the
+    // residency/eviction story is unchanged. The eager (pre-listener) variant is
+    // chosen over a lazy-on-first-sync hook because it lives entirely in this
+    // binary's startup path: the lazy path would have to reach into the
+    // SyncService SYNC_INIT handler (a different file) and thread a data_store
+    // into it. Eager seeding also makes the root trivially ready inside any
+    // checkpoint quiesce window, since it completes before set_ready().
+    //
+    // CRITICAL: `merkle_manager` here is the exact Arc moved into SyncService
+    // below (line constructing SyncService::new), which is the instance the real
+    // binary's SYNC_INIT path aggregates its root from — not a test-only path.
+    // `datastore_for_merkle_seed` is the same durable backend (write-behind-
+    // wrapped redb/Postgres) every other write goes through. Only primary
+    // partitions are seeded (rebuild_from_datastore uses is_backup=false), which
+    // matches the SYNC_INIT root path (handle_sync_init aggregates the primary
+    // LWW / OR-Map roots); backup partitions are intentionally not on this path.
+    //
+    // `build_services` is synchronous but always runs inside the multi-threaded
+    // `#[tokio::main]` runtime, so the async seed is driven via the
+    // `block_in_place` + `Handle::block_on` bridge (the same pattern the sim
+    // harness uses to run async code from sync contexts). This blocks the
+    // current bootstrap task — acceptable because the seed runs once, before the
+    // listener accepts connections, and reads only keys+hashes.
+    if !datastore_for_merkle_seed.is_null() {
+        let seed_manager = Arc::clone(&merkle_manager);
+        let seed_store = Arc::clone(&datastore_for_merkle_seed);
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                match seed_store.list_maps().await {
+                    Ok(maps) => {
+                        let mut seeded = 0usize;
+                        let total = maps.len();
+                        for map_name in maps.into_iter().filter(|m| !m.starts_with("$sys/")) {
+                            if let Err(err) = seed_manager
+                                .rebuild_from_datastore(&map_name, &seed_store)
+                                .await
+                            {
+                                // A single map's rebuild failure must not abort
+                                // startup: log and continue so the remaining maps
+                                // still answer sync correctly. The unseeded map
+                                // degrades to an empty tree (pre-existing
+                                // behavior), never to wrong leaves.
+                                tracing::warn!(
+                                    map = %map_name,
+                                    error = %err,
+                                    "Merkle index seed: rebuild failed for map; \
+                                     leaving its trees empty (will reseed on next write)"
+                                );
+                            } else {
+                                seeded += 1;
+                            }
+                        }
+                        tracing::info!(
+                            durable_maps = total,
+                            seeded,
+                            "Merkle index seeded from datastore (keys+hashes only, no value load)"
+                        );
+                    }
+                    Err(err) => {
+                        // Enumeration failure is non-fatal: the trees stay empty
+                        // and repopulate lazily as writes arrive. Surfacing it
+                        // lets an operator distinguish "no durable maps" from
+                        // "could not read the catalog".
+                        tracing::warn!(
+                            error = %err,
+                            "Merkle index seed: durable map enumeration failed; \
+                             trees will populate from live writes"
+                        );
+                    }
+                }
+            });
+        });
+    }
 
     // Phase 2: inject the factory Arc and spawn the background embedding task.
     embedding_factory.init(Arc::clone(&record_store_factory));

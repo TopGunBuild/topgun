@@ -41,6 +41,10 @@ pub struct SoakReport {
     pub crashes: u64,
     pub convergence_failures: Vec<String>,
     pub recovery_failures: Vec<String>,
+    /// Expected-fail gates that did NOT fail the run (currently the SPEC-322b
+    /// post-restart QUERY-path read-back). Tracked so the gap stays visible and
+    /// can be promoted to a required gate when its dependency lands.
+    pub pending_gates: Vec<String>,
     pub memory: MemoryReport,
     pub panic_report: Option<String>,
     pub passed: bool,

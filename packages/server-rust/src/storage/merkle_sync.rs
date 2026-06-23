@@ -7,12 +7,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::Mutex;
-use topgun_core::hash::{combine_hashes, fnv1a_hash};
+use topgun_core::hash::combine_hashes;
+use topgun_core::hash_to_partition;
 use topgun_core::merkle::{MerkleTree, ORMapMerkleTree};
 
 use super::factory::ObserverFactory;
+use super::map_data_store::{merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, MerkleLeafKind};
 use super::mutation_observer::MutationObserver;
 use super::record::{Record, RecordValue};
 
@@ -231,6 +234,93 @@ impl MerkleSyncManager {
             .map(|entry| entry.key().1)
             .collect()
     }
+
+    /// (Re)builds `map_name`'s LWW and OR-Map Merkle trees from the durable
+    /// datastore index.
+    ///
+    /// The write-path observer only ever populates a tree for records that are
+    /// resident in the in-memory engine. After a crash/restart (or once a record
+    /// has been evicted) those leaves are gone, so a `SyncInit` would report root
+    /// `0` and wrongly tell the client it is in sync — even though the data is
+    /// safely persisted. This primitive closes that gap WITHOUT loading any
+    /// values: it streams `(key, kind, leaf_hash)` from
+    /// `data_store.enumerate_leaves` and folds each leaf into the SAME
+    /// `(map, partition)` tree the write path would have written, so a subsequent
+    /// `SyncInit` produces the correct non-zero, pre-crash-equal root.
+    ///
+    /// Routing parity is the load-bearing invariant: each leaf is placed at
+    /// `hash_to_partition(key)` — byte-identical to the write path's
+    /// `RecordStoreFactory::get_or_create(map, hash_to_partition(key))` routing —
+    /// and inserted with the same per-CRDT tree mutation the observer makes
+    /// (`update_lww` for LWW leaves, `update_ormap` for OR-Map leaves), selected
+    /// by the leaf's `MerkleLeafKind`. Because the per-partition combine
+    /// (`combine_hashes`/`fnv1a_hash`) is commutative and associative, replaying
+    /// the persisted leaf set in any order yields the identical partition root,
+    /// and the cross-partition aggregate matches the live root.
+    ///
+    /// Both CRDT kinds are rebuilt here. The datastore derives each leaf via the
+    /// shared `merkle_leaf_hash` helper — the same function the write-path
+    /// observer uses — hashing LWW leaves over `"{key}:{millis}:{counter}:{node_id}"`
+    /// and OR-Map leaves over the sorted active + tombstone tag sets, tagging
+    /// each leaf with its kind so the rebuild routes it to the matching tree —
+    /// never polluting the LWW tree with OR-Map leaves or leaving it empty.
+    ///
+    /// Memory is bounded by the datastore's batch size: only `(key, u32)` pairs
+    /// cross the boundary, never values, so peak cost is independent of map size.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any error returned by `data_store.enumerate_leaves`.
+    pub async fn rebuild_from_datastore(
+        self: &Arc<Self>,
+        map: &str,
+        data_store: &Arc<dyn MapDataStore>,
+    ) -> anyhow::Result<()> {
+        let mut sink = MerkleRebuildSink {
+            manager: Arc::clone(self),
+            map: map.to_string(),
+        };
+        // Backup partitions never participate in client sync, mirroring the
+        // observer's `is_backup` early-returns; rebuild the primary leaves only.
+        data_store.enumerate_leaves(map, false, &mut sink).await
+    }
+}
+
+/// [`LeafSink`] that folds each enumerated durable leaf into the Merkle tree
+/// for its key's partition AND CRDT kind, reproducing the write-path observer's
+/// per-kind insertion exactly.
+///
+/// Per batch it routes every leaf to `hash_to_partition(key)` (the same key
+/// partition function the write path uses for both CRDT kinds) and dispatches
+/// on `leaf.kind`: LWW leaves call `MerkleSyncManager::update_lww` (the observer's
+/// `RecordValue::Lww` mutation) and OR-Map leaves call `update_ormap` (the
+/// observer's `RecordValue::OrMap` mutation). Routing on kind is what keeps the
+/// rebuilt LWW and OR-Map roots byte-identical to the pre-crash roots for maps
+/// that mix both kinds. No values are held; only the current batch of leaf
+/// coordinates is resident.
+struct MerkleRebuildSink {
+    manager: Arc<MerkleSyncManager>,
+    map: String,
+}
+
+#[async_trait]
+impl LeafSink for MerkleRebuildSink {
+    async fn consume(&mut self, batch: Vec<MerkleLeaf>) -> anyhow::Result<()> {
+        for leaf in batch {
+            let partition_id = hash_to_partition(&leaf.key);
+            match leaf.kind {
+                MerkleLeafKind::Lww => {
+                    self.manager
+                        .update_lww(&self.map, partition_id, &leaf.key, leaf.leaf_hash);
+                }
+                MerkleLeafKind::OrMap => {
+                    self.manager
+                        .update_ormap(&self.map, partition_id, &leaf.key, leaf.leaf_hash);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for MerkleSyncManager {
@@ -276,38 +366,6 @@ impl ObserverFactory for MerkleObserverFactory {
 }
 
 // ---------------------------------------------------------------------------
-// Hash computation helpers
-// ---------------------------------------------------------------------------
-
-/// Computes the item hash for a LWW record, matching the TS MerkleTree.update pattern.
-///
-/// Uses `fnv1a_hash` on `"key:millis:counter:node_id"` to produce a hash that
-/// is consistent across Rust and TypeScript clients.
-fn compute_lww_hash(key: &str, millis: u64, counter: u32, node_id: &str) -> u32 {
-    fnv1a_hash(&format!("{key}:{millis}:{counter}:{node_id}"))
-}
-
-/// Computes the entry hash for an OR-Map record.
-///
-/// Sorts active tags and tombstone tags independently for determinism, then
-/// hashes `"key:tag1|tag2|...#tomb1|tomb2|..."`. Tombstones are folded in so the
-/// hash changes when a tag is removed — otherwise peers cannot observe a
-/// tombstone-only delta and remove-wins suppression would not replicate.
-fn compute_ormap_hash(
-    key: &str,
-    records: &[super::record::OrMapEntry],
-    tombstones: &[String],
-) -> u32 {
-    let mut tags: Vec<&str> = records.iter().map(|r| r.tag.as_str()).collect();
-    tags.sort_unstable();
-    let joined = tags.join("|");
-    let mut tomb_tags: Vec<&str> = tombstones.iter().map(String::as_str).collect();
-    tomb_tags.sort_unstable();
-    let joined_tombs = tomb_tags.join("|");
-    fnv1a_hash(&format!("key:{key}|{joined}#{joined_tombs}"))
-}
-
-// ---------------------------------------------------------------------------
 // MerkleMutationObserver
 // ---------------------------------------------------------------------------
 
@@ -341,22 +399,18 @@ impl MerkleMutationObserver {
     /// `aggregate_ormap_root_hash()`, eliminating the Mutex contention on a shared
     /// partition 0 that previously bottlenecked concurrent writes.
     fn update_tree(&self, key: &str, value: &RecordValue) {
-        match value {
-            RecordValue::Lww { timestamp, .. } => {
-                let hash =
-                    compute_lww_hash(key, timestamp.millis, timestamp.counter, &timestamp.node_id);
+        // Route on the shared leaf-hash helper so the live write path and the
+        // durable enumeration rebuild always agree on the leaf hash and kind.
+        match merkle_leaf_hash(key, value) {
+            Some((MerkleLeafKind::Lww, hash)) => {
                 self.manager
                     .update_lww(&self.map_name, self.partition_id, key, hash);
             }
-            RecordValue::OrMap {
-                records,
-                tombstones,
-            } => {
-                let hash = compute_ormap_hash(key, records, tombstones);
+            Some((MerkleLeafKind::OrMap, hash)) => {
                 self.manager
                     .update_ormap(&self.map_name, self.partition_id, key, hash);
             }
-            RecordValue::OrTombstones { .. } => {
+            None => {
                 // Tombstones represent deletions — remove from OR-Map tree.
                 self.manager
                     .remove_ormap(&self.map_name, self.partition_id, key);
@@ -940,5 +994,542 @@ mod tests {
         assert_eq!(h1, 0, "partition (users, 0) should be cleared");
         assert_eq!(h2, 0, "partition (users, 1) should be cleared");
         assert_eq!(h3, 0, "partition (tags, 0) should be cleared");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Index-sourced rebuild: recovery, leaf-hash parity, eviction, RAM ceiling.
+//
+// These bind the durable-but-non-resident Merkle invariant: after a crash /
+// restart, or after a record is evicted from the in-memory engine, the map's
+// Merkle root must still reflect the persisted record so `SyncInit` does not
+// wrongly tell a reconnecting client it is in sync. The pre-fix behavior
+// sourced leaves only from the in-memory write path, so any non-resident
+// record vanished from the root. Every test here uses a real redb datastore
+// (tempfile) so `enumerate_leaves` runs the true range-scan path; asserting
+// against an empty mock would be vacuous.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod rebuild_tests {
+    use std::sync::Arc;
+
+    use topgun_core::hlc::Timestamp;
+    use topgun_core::types::Value;
+
+    use super::{MerkleObserverFactory, MerkleSyncManager};
+    use crate::storage::datastores::RedbDataStore;
+    use crate::storage::factory::ObserverFactory;
+    use crate::storage::map_data_store::{
+        merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, MerkleLeafKind,
+    };
+    use crate::storage::record::{OrMapEntry, Record, RecordMetadata, RecordValue};
+    use topgun_core::hash_to_partition;
+
+    /// Build a fresh tempdir-backed redb store as an `Arc<dyn MapDataStore>`.
+    fn fresh_redb() -> (Arc<dyn MapDataStore>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rebuild.redb");
+        let store = RedbDataStore::new(&path).expect("redb open");
+        (Arc::new(store), dir)
+    }
+
+    fn lww_value(key: &str, millis: u64, counter: u32, node_id: &str) -> RecordValue {
+        RecordValue::Lww {
+            value: Value::String(key.to_string()),
+            timestamp: Timestamp {
+                millis,
+                counter,
+                node_id: node_id.to_string(),
+            },
+        }
+    }
+
+    fn ormap_value(key: &str, tag: &str, millis: u64) -> RecordValue {
+        RecordValue::OrMap {
+            records: vec![OrMapEntry {
+                value: Value::String(key.to_string()),
+                tag: tag.to_string(),
+                timestamp: Timestamp {
+                    millis,
+                    counter: 0,
+                    node_id: "node-1".to_string(),
+                },
+            }],
+            tombstones: vec![],
+        }
+    }
+
+    fn lww_record(key: &str, millis: u64, counter: u32, node_id: &str) -> Record {
+        Record {
+            value: lww_value(key, millis, counter, node_id),
+            #[allow(clippy::cast_possible_wrap)]
+            metadata: RecordMetadata::new(millis as i64, 64),
+        }
+    }
+
+    fn ormap_record(key: &str, tag: &str, millis: u64) -> Record {
+        Record {
+            value: ormap_value(key, tag, millis),
+            #[allow(clippy::cast_possible_wrap)]
+            metadata: RecordMetadata::new(millis as i64, 64),
+        }
+    }
+
+    /// Datastore decorator that forwards to a real redb store but PANICS if any
+    /// full-value load is attempted, and counts `enumerate_leaves` calls. Lets
+    /// the RAM-ceiling test prove `rebuild_from_datastore` only ever streams
+    /// leaves (keys + `u32` hashes) and never materializes record values.
+    struct SpyStore {
+        inner: RedbDataStore,
+        enumerate_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl MapDataStore for SpyStore {
+        async fn add(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            self.inner.add(map, key, value, expiration_time, now).await
+        }
+        async fn add_backup(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .add_backup(map, key, value, expiration_time, now)
+                .await
+        }
+        async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            self.inner.remove(map, key, now).await
+        }
+        async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            self.inner.remove_backup(map, key, now).await
+        }
+        async fn load(&self, _map: &str, _key: &str) -> anyhow::Result<Option<RecordValue>> {
+            panic!("rebuild must NOT load full values: load() called");
+        }
+        async fn load_all(
+            &self,
+            _map: &str,
+            _keys: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            panic!("rebuild must NOT load full values: load_all() called");
+        }
+        async fn enumerate_leaves(
+            &self,
+            map: &str,
+            is_backup: bool,
+            sink: &mut dyn LeafSink,
+        ) -> anyhow::Result<()> {
+            self.enumerate_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.enumerate_leaves(map, is_backup, sink).await
+        }
+        async fn scan_values(
+            &self,
+            map: &str,
+            is_backup: bool,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<crate::storage::map_data_store::ScanBatch> {
+            self.inner.scan_values(map, is_backup, max_batch_cost).await
+        }
+        async fn scan_values_batched(
+            &self,
+            map: &str,
+            is_backup: bool,
+            cursor: crate::storage::map_data_store::ScanCursor,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<crate::storage::map_data_store::ScanBatch> {
+            self.inner
+                .scan_values_batched(map, is_backup, cursor, max_batch_cost)
+                .await
+        }
+        async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+            self.inner.remove_all(map, keys).await
+        }
+        fn is_loadable(&self, key: &str) -> bool {
+            self.inner.is_loadable(key)
+        }
+        fn pending_operation_count(&self) -> u64 {
+            self.inner.pending_operation_count()
+        }
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            self.inner.soft_flush().await
+        }
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            self.inner.hard_flush().await
+        }
+        async fn flush_key(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            is_backup: bool,
+        ) -> anyhow::Result<()> {
+            self.inner.flush_key(map, key, value, is_backup).await
+        }
+        fn reset(&self) {
+            self.inner.reset();
+        }
+    }
+
+    /// Drive the live write-path observer for one record on a manager, routing
+    /// to the SAME `(map, hash_to_partition(key))` tree the real server uses.
+    /// This is the resident root that a reconnecting client would receive
+    /// before any crash/eviction.
+    fn write_path_put(manager: &Arc<MerkleSyncManager>, map: &str, key: &str, record: &Record) {
+        let factory = MerkleObserverFactory::new(Arc::clone(manager));
+        let partition = hash_to_partition(key);
+        let observer = factory
+            .create_observer(map, partition)
+            .expect("observer for any map");
+        observer.on_put(key, record, None, false);
+    }
+
+    // -----------------------------------------------------------------------
+    // AC2 — recovery: a durable-but-non-resident map has a non-zero root after
+    // rebuild_from_datastore on a FRESH manager. Negative control: without the
+    // rebuild, the same fresh manager reports root 0 (the pre-fix bug).
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn ac2_rebuild_makes_durable_nonresident_root_nonzero() {
+        let (store, _dir) = fresh_redb();
+        // Persist records WITHOUT ever touching an in-memory engine / observer,
+        // i.e. exactly the post-restart state: data on disk, nothing resident.
+        store
+            .add("users", "alice", &lww_value("alice", 111, 0, "n1"), 0, 1)
+            .await
+            .unwrap();
+        store
+            .add("users", "bob", &lww_value("bob", 222, 1, "n2"), 0, 2)
+            .await
+            .unwrap();
+
+        // Negative control: a fresh manager with NO rebuild reports root 0,
+        // reproducing the TODO-530 bug (persisted data invisible to SyncInit).
+        let empty_manager = Arc::new(MerkleSyncManager::default());
+        assert_eq!(
+            empty_manager.aggregate_lww_root_hash("users"),
+            0,
+            "without rebuild, a durable-but-non-resident map must report root 0 (the pre-fix bug)"
+        );
+
+        // The fix: rebuild from the durable index yields a non-zero root.
+        let manager = Arc::new(MerkleSyncManager::default());
+        manager
+            .rebuild_from_datastore("users", &store)
+            .await
+            .unwrap();
+        assert_ne!(
+            manager.aggregate_lww_root_hash("users"),
+            0,
+            "after rebuild_from_datastore the durable-but-non-resident map must have a non-zero root"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AC7 — leaf-hash parity (LWW): the rehydrated root equals the resident
+    // (write-path) root. Proves the durable leaf hash is byte-identical to the
+    // write-path hash AND the rebuild routes to the same (map, partition) tree.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn ac7_lww_rehydrated_root_equals_resident_root() {
+        let (store, _dir) = fresh_redb();
+
+        // Resident root: drive the live write-path observer for each record.
+        let resident = Arc::new(MerkleSyncManager::default());
+        let records = [
+            ("alice", lww_record("alice", 111, 0, "n1")),
+            ("bob", lww_record("bob", 222, 3, "n2")),
+            ("carol", lww_record("carol", 999, 7, "n3")),
+        ];
+        for (key, rec) in &records {
+            write_path_put(&resident, "users", key, rec);
+            // Persist the same record so the durable index matches.
+            store.add("users", key, &rec.value, 0, 1).await.unwrap();
+        }
+        let resident_root = resident.aggregate_lww_root_hash("users");
+        assert_ne!(resident_root, 0, "resident root must be non-zero with data");
+
+        // Drop residency: build a brand-new manager and rebuild from disk only.
+        let rehydrated = Arc::new(MerkleSyncManager::default());
+        rehydrated
+            .rebuild_from_datastore("users", &store)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            rehydrated.aggregate_lww_root_hash("users"),
+            resident_root,
+            "rehydrated LWW root must equal the pre-crash resident root (leaf-hash + routing parity)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AC7 (OR-Map variant) — parity with OR-Map data present, proving the
+    // kind-routing reconcile folds OR-Map leaves into the OR-Map tree (not the
+    // LWW tree). Negative control via the dedicated misroute test below.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn ac7_ormap_rehydrated_root_equals_resident_root() {
+        let (store, _dir) = fresh_redb();
+
+        let resident = Arc::new(MerkleSyncManager::default());
+        let records = [
+            ("t1", ormap_record("t1", "tagA", 100)),
+            ("t2", ormap_record("t2", "tagB", 200)),
+        ];
+        for (key, rec) in &records {
+            write_path_put(&resident, "tags", key, rec);
+            store.add("tags", key, &rec.value, 0, 1).await.unwrap();
+        }
+        let resident_root = resident.aggregate_ormap_root_hash("tags");
+        assert_ne!(resident_root, 0, "resident OR-Map root must be non-zero");
+
+        let rehydrated = Arc::new(MerkleSyncManager::default());
+        rehydrated
+            .rebuild_from_datastore("tags", &store)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            rehydrated.aggregate_ormap_root_hash("tags"),
+            resident_root,
+            "rehydrated OR-Map root must equal the resident OR-Map root (kind-routed correctly)"
+        );
+        // And the OR-Map data must NOT have leaked into the LWW tree.
+        assert_eq!(
+            rehydrated.aggregate_lww_root_hash("tags"),
+            0,
+            "OR-Map leaves must not pollute the LWW tree"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AC7 — negative-control guard for kind routing. A LeafSink that misroutes
+    // OR-Map leaves into the LWW tree (the pre-fix single-tree bug) yields a
+    // root that does NOT match the correctly-routed resident root. This proves
+    // the kind discriminator is load-bearing — neutering it breaks parity.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn ac7_misrouting_ormap_into_lww_tree_breaks_parity() {
+        struct MisroutingSink {
+            manager: Arc<MerkleSyncManager>,
+            map: String,
+        }
+        #[async_trait::async_trait]
+        impl LeafSink for MisroutingSink {
+            async fn consume(&mut self, batch: Vec<MerkleLeaf>) -> anyhow::Result<()> {
+                for leaf in batch {
+                    let partition = hash_to_partition(&leaf.key);
+                    // Deliberately ignore leaf.kind: route everything to LWW.
+                    self.manager
+                        .update_lww(&self.map, partition, &leaf.key, leaf.leaf_hash);
+                }
+                Ok(())
+            }
+        }
+
+        let (store, _dir) = fresh_redb();
+        let resident = Arc::new(MerkleSyncManager::default());
+        for (key, rec) in [
+            ("t1", ormap_record("t1", "tagA", 100)),
+            ("t2", ormap_record("t2", "tagB", 200)),
+        ] {
+            write_path_put(&resident, "tags", key, &rec);
+            store.add("tags", key, &rec.value, 0, 1).await.unwrap();
+        }
+        let correct_root = resident.aggregate_ormap_root_hash("tags");
+
+        let misrouted = Arc::new(MerkleSyncManager::default());
+        let mut sink = MisroutingSink {
+            manager: Arc::clone(&misrouted),
+            map: "tags".to_string(),
+        };
+        store
+            .enumerate_leaves("tags", false, &mut sink)
+            .await
+            .unwrap();
+
+        // The misrouted manager's OR-Map tree is empty; LWW tree holds the leaves.
+        assert_eq!(
+            misrouted.aggregate_ormap_root_hash("tags"),
+            0,
+            "misrouting must leave the OR-Map tree empty (root 0), unlike the correct root"
+        );
+        assert_ne!(
+            correct_root, 0,
+            "the correctly-routed OR-Map root must be non-zero (proves the assertion is not vacuous)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AC-EVICT-MERKLE — a record durable-in-redb but NOT resident in the
+    // in-memory engine still contributes its leaf to the rebuilt root. We model
+    // eviction as: write two records through the live path, then evict one by
+    // building the index-sourced root from the durable store (where both still
+    // live). Negative control: a manager that only ever saw the surviving
+    // resident record (leaf source = in-memory engine only) is MISSING the
+    // evicted record's leaf, so its root differs from the all-durable root.
+    // Lever used: durable-vs-resident leaf-source divergence (the exact property
+    // the eviction-orchestrator path relies on), avoiding the heavy orchestrator.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn ac_evict_merkle_durable_nonresident_leaf_stays_in_root() {
+        let (store, _dir) = fresh_redb();
+        let resident_rec = lww_record("resident", 100, 0, "n1");
+        let evicted_rec = lww_record("evicted", 200, 0, "n2");
+
+        // Both records are durable in redb.
+        store
+            .add("m", "resident", &resident_rec.value, 0, 1)
+            .await
+            .unwrap();
+        store
+            .add("m", "evicted", &evicted_rec.value, 0, 2)
+            .await
+            .unwrap();
+
+        // Negative control: the in-memory engine only retains the resident
+        // record (the evicted one was dropped from memory). With leaves sourced
+        // ONLY from memory, the evicted leaf is absent from the root.
+        let memory_only = Arc::new(MerkleSyncManager::default());
+        write_path_put(&memory_only, "m", "resident", &resident_rec);
+        let memory_only_root = memory_only.aggregate_lww_root_hash("m");
+
+        // The fix: rebuild from the durable index, which still holds BOTH leaves.
+        let durable_sourced = Arc::new(MerkleSyncManager::default());
+        durable_sourced
+            .rebuild_from_datastore("m", &store)
+            .await
+            .unwrap();
+        let durable_root = durable_sourced.aggregate_lww_root_hash("m");
+
+        assert_ne!(
+            durable_root, memory_only_root,
+            "the evicted-but-durable record's leaf must change the root vs the memory-only source"
+        );
+
+        // And the durable-sourced root equals the root that WOULD have been seen
+        // had both records stayed resident — proving the evicted leaf is present.
+        let both_resident = Arc::new(MerkleSyncManager::default());
+        write_path_put(&both_resident, "m", "resident", &resident_rec);
+        write_path_put(&both_resident, "m", "evicted", &evicted_rec);
+        assert_eq!(
+            durable_root,
+            both_resident.aggregate_lww_root_hash("m"),
+            "index-sourced root must include the evicted record's leaf"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AC-RAM-MERKLE — rebuild_from_datastore computes the root by STREAMING
+    // leaves (keys + u32 hashes), never loading full record values. We prove
+    // this with a spying datastore that wraps redb's enumerate_leaves but
+    // PANICS if load / load_all are called during rebuild. The root is computed
+    // over many durable records while resident value memory stays zero.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn ac_ram_merkle_rebuild_streams_leaves_never_loads_values() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let inner = RedbDataStore::new(dir.path().join("ram.redb")).expect("redb open");
+        let enumerate_calls = Arc::new(AtomicUsize::new(0));
+        let spy: Arc<dyn MapDataStore> = Arc::new(SpyStore {
+            inner,
+            enumerate_calls: Arc::clone(&enumerate_calls),
+        });
+        // Seed many durable records through the trait object; if rebuild loaded
+        // values, the spy's load/load_all would panic and fail the test.
+        for i in 0..500u32 {
+            spy.add(
+                "big",
+                &format!("k{i:04}"),
+                &lww_value("v", u64::from(i), i, "n"),
+                0,
+                1,
+            )
+            .await
+            .unwrap();
+        }
+
+        let manager = Arc::new(MerkleSyncManager::default());
+        manager.rebuild_from_datastore("big", &spy).await.unwrap();
+
+        // Rebuild must go through the streaming leaf enumeration, not a value load.
+        let calls = enumerate_calls.load(Ordering::SeqCst);
+        assert!(
+            calls >= 1,
+            "rebuild must drive enumerate_leaves (streaming), got {calls} calls"
+        );
+
+        // Root is non-zero over 500 records, computed WITHOUT any value load
+        // (load/load_all panic), proving resident value memory stays bounded.
+        assert_ne!(
+            manager.aggregate_lww_root_hash("big"),
+            0,
+            "root must be computed over all durable records via streaming leaves"
+        );
+    }
+
+    // Pins the canonical leaf-hash formula that both the write-path observer
+    // and every durable enumeration backend now share through `merkle_leaf_hash`.
+    // The parity tests above prove rebuilt roots equal live roots; this pins the
+    // exact byte formula so a future edit cannot silently shift both sides in
+    // lockstep and still pass the (relative) parity assertions.
+    #[test]
+    fn merkle_leaf_hash_matches_documented_formula() {
+        let lww_value = RecordValue::Lww {
+            value: Value::String("v".to_string()),
+            timestamp: Timestamp {
+                millis: 111,
+                counter: 0,
+                node_id: "n1".to_string(),
+            },
+        };
+        let (lww_kind, lww) = merkle_leaf_hash("alice", &lww_value).expect("LWW yields a leaf");
+        assert_eq!(lww_kind, MerkleLeafKind::Lww);
+        assert_eq!(
+            lww,
+            topgun_core::hash::fnv1a_hash("alice:111:0:n1"),
+            "LWW leaf must equal fnv1a(key:millis:counter:node_id)"
+        );
+
+        let ormap_value = RecordValue::OrMap {
+            records: vec![OrMapEntry {
+                value: Value::String("v".to_string()),
+                tag: "tagA".to_string(),
+                timestamp: Timestamp {
+                    millis: 1,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
+            }],
+            tombstones: vec![],
+        };
+        let (or_kind, ormap) = merkle_leaf_hash("t1", &ormap_value).expect("OR-Map yields a leaf");
+        assert_eq!(or_kind, MerkleLeafKind::OrMap);
+        assert_eq!(
+            ormap,
+            topgun_core::hash::fnv1a_hash("key:t1|tagA#"),
+            "OR-Map leaf must equal the sorted active#tombstone formula"
+        );
+
+        // OrTombstones contribute no leaf — the write path removes the key from
+        // the OR-Map tree instead, so enumeration must mirror that with `None`.
+        assert!(
+            merkle_leaf_hash("gone", &RecordValue::OrTombstones { tags: vec![] }).is_none(),
+            "OrTombstones must yield no leaf"
+        );
     }
 }
