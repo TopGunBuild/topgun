@@ -193,13 +193,14 @@ impl RecordStore for DefaultRecordStore {
             // Mark the record clean only when the value was written to a real
             // persistent store (not a no-op null store). The WAL append + fsync
             // inside add() completes before returning Ok on real backends, so the
-            // record is safely evictable. Re-fetch from the engine rather than
-            // marking the cloned `record` (the engine holds the live copy).
+            // record is safely evictable. Mark in place under the engine's
+            // per-key lock — a get()+put() here would race a concurrent same-key
+            // write (clobbering its value and falsely marking it clean); the
+            // atomic mark only applies when our `now` is not older than the
+            // resident write, so a newer concurrent (still-dirty) value is left
+            // dirty rather than made evictable.
             if !self.data_store.is_null() {
-                if let Some(mut live) = self.engine.get(key) {
-                    live.metadata.on_store(now);
-                    self.engine.put(key, live);
-                }
+                self.engine.mark_stored(key, now);
             }
         }
 

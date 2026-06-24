@@ -54,6 +54,22 @@ pub trait StorageEngine: Send + Sync + 'static {
     /// Retrieve a record by key, or `None` if not present.
     fn get(&self, key: &str) -> Option<Record>;
 
+    /// Atomically mark a resident record as persisted (clean) in place.
+    ///
+    /// Sets `last_stored_time = now` under the engine's per-key write lock,
+    /// so the whole check-and-mutate happens without the read-modify-write
+    /// window of a separate `get()` + `put()` — a concurrent same-key write
+    /// can neither be clobbered nor lost.
+    ///
+    /// The mark is applied only when `last_update_time <= now`, i.e. no newer
+    /// write landed since the caller persisted `now`. This keeps a
+    /// concurrently-written (not-yet-durable) record dirty rather than falsely
+    /// marking it evictable, and never regresses an already-clean newer record.
+    ///
+    /// Returns `true` if a record was found and the mark applied; `false` if
+    /// the key is absent or a newer write superseded it.
+    fn mark_stored(&self, key: &str, now: i64) -> bool;
+
     /// Remove a record by key, returning the removed record.
     fn remove(&self, key: &str) -> Option<Record>;
 
