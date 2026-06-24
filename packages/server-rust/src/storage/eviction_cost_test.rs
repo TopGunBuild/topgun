@@ -319,10 +319,8 @@ mod eviction_cost_tests {
         // --- Part 1: put() over a real datastore → record is clean (evictable) ---
         {
             let data_store = Arc::new(RedbDataStore::new(&path).expect("redb open"));
-            let store = make_store_with_datastore(
-                "ac6_map",
-                data_store.clone() as Arc<dyn MapDataStore>,
-            );
+            let store =
+                make_store_with_datastore("ac6_map", data_store.clone() as Arc<dyn MapDataStore>);
 
             store
                 .put(
@@ -396,10 +394,8 @@ mod eviction_cost_tests {
         {
             // Reopen the redb file written in Part 1. The in-memory engine is empty.
             let data_store = Arc::new(RedbDataStore::new(&path).expect("redb reopen"));
-            let store = make_store_with_datastore(
-                "ac6_map",
-                data_store.clone() as Arc<dyn MapDataStore>,
-            );
+            let store =
+                make_store_with_datastore("ac6_map", data_store.clone() as Arc<dyn MapDataStore>);
 
             // Trigger a lazy-load: get() miss → load from datastore → insert into engine.
             let loaded = store
