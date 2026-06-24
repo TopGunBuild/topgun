@@ -286,8 +286,7 @@ impl Processor for ScanProcessor {
             store.for_each_boxed(
                 &mut |key, record| {
                     if let RecordValue::Lww { value, timestamp } = &record.value {
-                        let rmpv_val =
-                            crate::service::domain::predicate::value_to_rmpv(value);
+                        let rmpv_val = crate::service::domain::predicate::value_to_rmpv(value);
                         let row = inject_key(key, rmpv_val);
                         resident.insert(key.to_string(), (row, timestamp.clone()));
                     }
@@ -315,49 +314,62 @@ impl Processor for ScanProcessor {
             // call. The server runs on a multi-thread tokio runtime so
             // block_in_place is safe and correct; it moves the blocking work to
             // a dedicated thread to avoid starving the async executor.
-            let datastore_records: Vec<(String, RecordValue)> =
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        let mut all_records = Vec::new();
-                        let batch_cost: u64 = 0; // use backend default
-                        let mut batch = data_store
-                            .scan_values(&map_name, false, batch_cost)
-                            .await?;
-                        loop {
-                            all_records.extend(batch.records);
-                            let Some(cursor) = batch.next_cursor else {
-                                break;
+            //
+            // Merge each batch into the resident snapshot as it arrives, then drop
+            // it before fetching the next. Peak heap therefore stays at
+            // O(resident) + one batch — never the whole durable set at once. The
+            // producer already sizes each batch under TOPGUN_MAX_RAM_MB, so
+            // accumulating batches here before merging would defeat that bound and
+            // risk OOM on a map larger than RAM.
+            let scan_result: anyhow::Result<()> = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let batch_cost: u64 = 0; // use backend default
+                    let mut batch = data_store.scan_values(&map_name, false, batch_cost).await?;
+                    loop {
+                        for (key, record_value) in batch.records {
+                            let RecordValue::Lww { value, timestamp } = record_value else {
+                                continue;
                             };
-                            batch = data_store
-                                .scan_values_batched(&map_name, false, cursor, batch_cost)
-                                .await?;
-                        }
-                        anyhow::Ok(all_records)
-                    })
-                })
-                .unwrap_or_default();
-
-            for (key, record_value) in datastore_records {
-                if let RecordValue::Lww { value, timestamp } = record_value {
-                    let rmpv_val = crate::service::domain::predicate::value_to_rmpv(&value);
-                    let row = inject_key(&key, rmpv_val);
-                    match resident.get(&key) {
-                        None => {
-                            // Key is non-resident: the durable record fills the gap.
-                            resident.insert(key, (row, timestamp));
-                        }
-                        Some((_, resident_ts)) => {
-                            // Key is resident: apply HLC-LWW — only replace if the
-                            // durable record is strictly newer (rare during normal
-                            // operation but possible if a write arrived directly from
-                            // a peer into storage before the in-memory engine saw it).
-                            if timestamp > *resident_ts {
-                                resident.insert(key, (row, timestamp));
+                            let rmpv_val = crate::service::domain::predicate::value_to_rmpv(&value);
+                            let row = inject_key(&key, rmpv_val);
+                            match resident.get(&key) {
+                                None => {
+                                    // Non-resident: the durable record fills the gap.
+                                    resident.insert(key, (row, timestamp));
+                                }
+                                Some((_, resident_ts)) => {
+                                    // Resident: apply HLC-LWW — replace only if the
+                                    // durable record is strictly newer (rare during
+                                    // normal operation, but possible if a peer write
+                                    // reached storage before the in-memory engine saw
+                                    // it). Otherwise the resident copy wins.
+                                    if timestamp > *resident_ts {
+                                        resident.insert(key, (row, timestamp));
+                                    }
+                                }
                             }
-                            // Otherwise the resident copy wins; no change needed.
                         }
+                        let Some(cursor) = batch.next_cursor else {
+                            break;
+                        };
+                        batch = data_store
+                            .scan_values_batched(&map_name, false, cursor, batch_cost)
+                            .await?;
                     }
-                }
+                    anyhow::Ok(())
+                })
+            });
+
+            // A datastore scan failure must not crash the query: fall back to the
+            // resident snapshot. Streaming means a mid-scan failure can leave some
+            // durable records merged and some not, so log it rather than swallowing
+            // the gap silently.
+            if let Err(e) = scan_result {
+                tracing::warn!(
+                    map = %map_name,
+                    error = %e,
+                    "datastore scan for full-scan query failed; serving resident snapshot only"
+                );
             }
         }
 
