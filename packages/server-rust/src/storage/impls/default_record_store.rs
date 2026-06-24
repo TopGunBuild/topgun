@@ -129,7 +129,12 @@ impl RecordStore for DefaultRecordStore {
         if !self.data_store.is_null() {
             if let Some(value) = self.data_store.load(&self.name, key).await? {
                 let now = now_millis();
-                let metadata = RecordMetadata::new(now, 0);
+                let cost = crate::storage::record::estimated_cost(&value) + key.len() as u64;
+                // A record loaded from the datastore is already persisted, so it
+                // enters the engine clean (last_stored_time = now) and is
+                // immediately eligible for re-eviction in the evict→reload cycle.
+                let mut metadata = RecordMetadata::new(now, cost);
+                metadata.on_store(now);
                 let record = Record { value, metadata };
                 self.engine.put(key, record.clone());
                 self.observer.on_load(key, &record, false);
@@ -157,8 +162,9 @@ impl RecordStore for DefaultRecordStore {
         // Step 1: Check if key already exists
         let old_record = self.engine.get(key);
 
-        // Step 2: Create metadata
-        let metadata = RecordMetadata::new(now, 0);
+        // Step 2: Create metadata — measure before value is moved into the record
+        let cost = crate::storage::record::estimated_cost(&value) + key.len() as u64;
+        let metadata = RecordMetadata::new(now, cost);
 
         // Step 3: Create record
         let record = Record { value, metadata };
@@ -183,6 +189,31 @@ impl RecordStore for DefaultRecordStore {
             self.data_store
                 .add(&self.name, key, &record.value, expiration_time, now)
                 .await?;
+
+            // Mark the record clean only when the value was written to a real
+            // persistent store (not a no-op null store). The WAL append + fsync
+            // inside add() completes before returning Ok on real backends, so the
+            // value is durable and the record is safely evictable. Mark in place
+            // under the engine's per-key lock (mark_stored) rather than a
+            // get()+put(): the in-place mark never re-puts the value, so a
+            // concurrent same-key write can be neither clobbered nor lost. The
+            // timestamp guard leaves a strictly-newer write dirty, but it is
+            // best-effort, not a per-write identity check — a concurrent same-key
+            // write in the same millisecond may be transiently marked clean
+            // before its own persist completes. That window is bounded and
+            // self-healing (the concurrent persist completes independently of
+            // eviction, and put() acks only after its own persist), so no
+            // acked-durable write is lost.
+            if !self.data_store.is_null() && !self.engine.mark_stored(key, now) {
+                // Record was evicted between the engine put and this mark, or a
+                // strictly-newer write superseded it. Harmless (the value is
+                // durable via add(), or the newer write owns the slot), but worth
+                // a trace to surface write-then-immediately-evict churn.
+                tracing::trace!(
+                    key,
+                    "mark_stored found no eligible record after persist (evicted or superseded)"
+                );
+            }
         }
 
         // Step 7: Return old value
@@ -299,7 +330,12 @@ impl RecordStore for DefaultRecordStore {
             return false;
         }
         let now = now_millis();
-        let metadata = RecordMetadata::new(now, 0);
+        let cost = crate::storage::record::estimated_cost(&value) + key.len() as u64;
+        // A record materialized from the datastore is already persisted, so it
+        // enters the engine clean (last_stored_time = now) and is immediately
+        // eligible for re-eviction — required for the evict→reload steady state.
+        let mut metadata = RecordMetadata::new(now, cost);
+        metadata.on_store(now);
         let record = Record { value, metadata };
         self.engine.put(key, record.clone());
         self.observer.on_load(key, &record, false);
@@ -838,8 +874,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.size(), 2);
-        // Cost is 0 because RecordMetadata::new uses the cost param (which is 0 in put())
-        assert_eq!(store.owned_entry_cost(), 0);
+        assert!(
+            store.owned_entry_cost() > 0,
+            "owned_entry_cost must be non-zero after puts: each record carries \
+             a measured serialized-value cost + key length"
+        );
     }
 
     // --- AC3: clear() fires on_clear observer and empties store ---

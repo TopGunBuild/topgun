@@ -63,6 +63,19 @@ impl StorageEngine for HashMapStorage {
         self.entries.get(key).map(|r| r.clone())
     }
 
+    fn mark_stored(&self, key: &str, now: i64) -> bool {
+        // `get_mut` holds the shard's write lock for the lifetime of the guard,
+        // so the version-by-timestamp check and the mutation are atomic with
+        // respect to any other engine operation on this key.
+        if let Some(mut entry) = self.entries.get_mut(key) {
+            if entry.metadata.last_update_time <= now {
+                entry.metadata.on_store(now);
+                return true;
+            }
+        }
+        false
+    }
+
     fn remove(&self, key: &str) -> Option<Record> {
         self.entries.remove(key).map(|(_, r)| r)
     }
@@ -375,6 +388,42 @@ mod tests {
         let result = storage.fetch_entries(&past_end, 10);
         assert!(result.items.is_empty());
         assert!(result.next_cursor.finished);
+    }
+
+    #[test]
+    fn mark_stored_marks_resident_record_clean() {
+        let storage = HashMapStorage::new();
+        // make_record stamps last_update_time = 0 (RecordMetadata::new), so it
+        // starts dirty (last_update 0 > last_stored 0 is false → actually clean
+        // at 0/0; bump update to force dirty).
+        let mut record = make_record(10);
+        record.metadata.on_update(5);
+        storage.put("a", record);
+        assert!(storage.get("a").unwrap().metadata.is_dirty());
+
+        assert!(storage.mark_stored("a", 5));
+        assert!(!storage.get("a").unwrap().metadata.is_dirty());
+        assert_eq!(storage.get("a").unwrap().metadata.last_stored_time, 5);
+    }
+
+    #[test]
+    fn mark_stored_skips_newer_write() {
+        let storage = HashMapStorage::new();
+        let mut record = make_record(10);
+        record.metadata.on_update(10); // resident write is newer than `now`
+        storage.put("a", record);
+
+        // A stale persistence completion (now = 5) must NOT mark the newer
+        // (still-dirty) resident write clean.
+        assert!(!storage.mark_stored("a", 5));
+        assert!(storage.get("a").unwrap().metadata.is_dirty());
+        assert_eq!(storage.get("a").unwrap().metadata.last_stored_time, 0);
+    }
+
+    #[test]
+    fn mark_stored_absent_key_returns_false() {
+        let storage = HashMapStorage::new();
+        assert!(!storage.mark_stored("missing", 100));
     }
 
     #[test]

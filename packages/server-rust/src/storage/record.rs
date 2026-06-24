@@ -18,6 +18,12 @@ pub const RECENCY_COALESCE_MS: i64 = 100;
 ///
 /// Server-internal -- NOT serialized to the wire protocol.
 /// Tracks version, access statistics, and timestamps for eviction and persistence.
+///
+/// **Non-leakage invariant:** This struct intentionally has NO `Serialize` or
+/// `Deserialize` derive. Only `RecordValue` crosses the wire or reaches the
+/// persistence layer. The `cost` field in particular is a local, never-wire,
+/// never-disk heap-accounting value derived at write time and re-derived on
+/// every load — it must never be serialized.
 #[derive(Debug, Clone, Default)]
 pub struct RecordMetadata {
     /// Record version, incremented on every update.
@@ -33,6 +39,12 @@ pub struct RecordMetadata {
     /// Number of read accesses. Used by LFU eviction.
     pub hits: u32,
     /// Estimated heap cost of this record in bytes.
+    ///
+    /// LOCAL ONLY — never serialized to the wire or persisted to the datastore.
+    /// Set at write time via [`estimated_cost`] + `key.len()`, then summed by
+    /// the eviction orchestrator each tick to compare against the RAM ceiling.
+    /// Re-derived on every load/hydrate so records entering via any path carry
+    /// a real cost (eviction → reload steady state).
     pub cost: u64,
 }
 
@@ -85,6 +97,55 @@ impl RecordMetadata {
     #[must_use]
     pub fn is_dirty(&self) -> bool {
         self.last_update_time > self.last_stored_time
+    }
+}
+
+/// Conservative fallback heap cost (bytes) used when a [`RecordValue`] cannot
+/// be serialized for sizing.
+///
+/// Deliberately moderate, not `u64::MAX`-large: a value that fails to encode
+/// here also cannot be persisted, so it stays dirty and un-evictable regardless.
+/// A huge sentinel would make the orchestrator thrash — evicting innocent
+/// records every tick trying to drop under a ceiling it can never reach, because
+/// the offending record is itself un-evictable. A moderate constant keeps the
+/// orchestrator roughly honest without that collateral damage; the real signal
+/// is the `tracing::warn!` emitted alongside it.
+pub const COST_ESTIMATE_FALLBACK: u64 = 4096;
+
+/// Returns the estimated heap cost of a [`RecordValue`] in bytes.
+///
+/// Serializes the value via `rmp_serde::to_vec_named` (the same encoding used
+/// by the persistence layer) and returns the byte length, floored to `≥ 1`.
+/// The floor prevents empty/`Null` values from contributing zero cost, which
+/// would leave the eviction orchestrator blind to maps of empty values.
+///
+/// This is a deliberate *second* serialization of the value — the persistence
+/// path (`MapDataStore::add`) encodes it again to write it. Reusing the
+/// persisted bytes would require threading the encoded length back out through
+/// the datastore trait (every backend impl), so the estimate stays
+/// self-contained here. The extra encode is bounded by the value size already
+/// paid for the durable write and runs only on the write path (not per eviction
+/// tick), so the cost is acceptable; folding the two encodes into one is a
+/// tracked follow-up optimization.
+///
+/// On serialization failure the fallback is [`COST_ESTIMATE_FALLBACK`] plus a
+/// `tracing::warn!` — never a silent `1`, which would blind the orchestrator to
+/// the record's true size. Panicking on the write path is never acceptable.
+///
+/// **Call sites must add `key.len() as u64`** to capture the key string's heap
+/// contribution alongside the value bytes. The helper stays value-only so that
+/// callers retain the key in scope without the helper needing to take ownership.
+#[must_use]
+pub fn estimated_cost(value: &RecordValue) -> u64 {
+    match rmp_serde::to_vec_named(value) {
+        Ok(bytes) => (bytes.len() as u64).max(1),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "estimated_cost: RecordValue failed to serialize; using fallback cost estimate"
+            );
+            COST_ESTIMATE_FALLBACK
+        }
     }
 }
 

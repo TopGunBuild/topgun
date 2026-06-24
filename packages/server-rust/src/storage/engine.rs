@@ -54,6 +54,36 @@ pub trait StorageEngine: Send + Sync + 'static {
     /// Retrieve a record by key, or `None` if not present.
     fn get(&self, key: &str) -> Option<Record>;
 
+    /// Mark a resident record as persisted (clean) in place.
+    ///
+    /// Sets `last_stored_time = now` under the engine's per-key write lock, so
+    /// the check-and-mutate is atomic with respect to any other engine op on
+    /// this key: there is no read-modify-write window of a separate `get()` +
+    /// `put()`, and the value is never re-put, so a concurrent same-key write
+    /// can be neither clobbered nor lost.
+    ///
+    /// The mark is applied only when `last_update_time <= now`. This is a
+    /// best-effort, timestamp-based guard — NOT a per-write identity check. It
+    /// reliably leaves a *strictly newer* write (`last_update_time > now`)
+    /// dirty, but it does not distinguish the caller's own write from a
+    /// concurrent same-key write carrying an equal-millisecond timestamp. Under
+    /// two concurrent puts to the same key in the same millisecond, this can
+    /// transiently mark the *other* writer's not-yet-durable record clean (hence
+    /// evictable) before that writer's own persist completes.
+    ///
+    /// That window is bounded and self-healing: the other writer's persist runs
+    /// to completion independently of any eviction (eviction only drops the
+    /// in-memory copy, it does not cancel an in-flight write), and
+    /// `RecordStore::put` acks only after its own persist returns — so no
+    /// acked-durable write is ever lost. It is the same class as the engine's
+    /// existing last-writer-wins blind clobber on concurrent same-key writes.
+    /// True per-write identity marking (`mark_stored(key, now, token)`) is left
+    /// to a tracked follow-up.
+    ///
+    /// Returns `true` if a record was found and the mark applied; `false` if
+    /// the key is absent or a strictly-newer write superseded it.
+    fn mark_stored(&self, key: &str, now: i64) -> bool;
+
     /// Remove a record by key, returning the removed record.
     fn remove(&self, key: &str) -> Option<Record>;
 

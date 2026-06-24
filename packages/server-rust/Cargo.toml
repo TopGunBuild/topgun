@@ -79,6 +79,7 @@ hdrhistogram = "7"
 proptest = "1"
 serial_test = "3"
 tempfile = "3"
+static_assertions = "1"
 
 [[bench]]
 name = "load_harness"

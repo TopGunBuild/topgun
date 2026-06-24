@@ -786,4 +786,130 @@ mod tests {
             "evict_lru must not be called when total_record_count == 0 (division-by-zero guard)"
         );
     }
+
+    // ---------------------------------------------------------------------------
+    // AC1 (SPEC-323): eviction fires under real cost pressure (behavioral e2e)
+    //
+    // Drives the REAL private tick() method — not the tick_with_stores helper —
+    // so the `current_ram < high_threshold` branch (the literal dormant-eviction
+    // defect surface) is exercised with a real DefaultRecordStore that carries
+    // non-zero costs stamped by put() via the estimated_cost() helper.
+    // ---------------------------------------------------------------------------
+
+    /// Proves cost-based eviction fires end-to-end: real `put()` → real cost →
+    /// write-through marks record clean → real `tick()` → records evicted.
+    ///
+    /// Uses the real private `tick()` (accessible here because this test lives
+    /// inside `eviction_orchestrator.rs`'s own `cfg(test)` mod).
+    ///
+    /// Eligibility comes from the REAL clean-marking path (R6): `put()` with
+    /// `CallerProvenance::Client` over a real redb datastore writes through AND
+    /// calls `metadata.on_store(now)` after the WAL append succeeds, so records
+    /// are genuinely non-dirty without any manual metadata manipulation.
+    #[tokio::test]
+    async fn ac1_eviction_fires_under_real_cost_pressure() {
+        use tempfile::tempdir;
+        use topgun_core::hlc::Timestamp;
+        use topgun_core::types::Value;
+
+        use crate::storage::datastores::RedbDataStore;
+        use crate::storage::record::RecordValue;
+        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+
+        // Build a factory over a real redb datastore so put() writes through
+        // (records become durable AND marked clean via R6).
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("ac1_eviction.redb");
+        let data_store: Arc<dyn crate::storage::map_data_store::MapDataStore> =
+            Arc::new(RedbDataStore::new(&path).expect("redb open"));
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            data_store,
+            Vec::new(),
+        ));
+
+        // Obtain the real store through the factory so the orchestrator sees
+        // the same Arc when it calls factory.all_stores() during tick().
+        let store = factory.get_or_create("eviction_test", 0);
+
+        // Write enough records so the sum of per-record costs (serialized length +
+        // key length) exceeds a tiny max_ram_bytes ceiling. Each LWW record with
+        // a short string value serializes to ~30–60 bytes. Writing 50 records
+        // with keys like "k000" (4 bytes each) yields ~2 000–3 000 bytes total,
+        // well above the 500-byte ceiling chosen below.
+        //
+        // Critically: put() with CallerProvenance::Client over a real datastore
+        // triggers write-through which calls on_store(now) after add() succeeds,
+        // marking each record clean without any manual manipulation.
+        let value_str = "hello-eviction-test-record-payload";
+        for i in 0..50u32 {
+            let key = format!("k{i:03}");
+            let value = RecordValue::Lww {
+                value: Value::String(value_str.to_string()),
+                timestamp: Timestamp {
+                    millis: u64::from(i) + 1_000_000,
+                    counter: 0,
+                    node_id: "node-ac1".to_string(),
+                },
+            };
+            store
+                .put(&key, value, ExpiryPolicy::NONE, CallerProvenance::Client)
+                .await
+                .expect("put must succeed");
+        }
+
+        // Verify cost is non-zero after puts — proves G2 real cost measurement.
+        let cost_before = store.owned_entry_cost();
+        assert!(
+            cost_before > 0,
+            "owned_entry_cost must be > 0 after puts with real cost measurement; got {cost_before}"
+        );
+
+        // Verify records are clean after puts — proves R6 write-through marking.
+        // dirty_count == 0 means evict_lru candidates are genuinely eligible without
+        // any manual last_stored_time manipulation.
+        assert_eq!(
+            store.dirty_count(),
+            0,
+            "all records must be non-dirty after put() with a real datastore (R6); \
+             dirty_count must be 0 without any manual metadata manipulation"
+        );
+
+        // Configure the orchestrator with a ceiling small enough that the 50
+        // records' real cost sum already exceeds the high-water threshold.
+        // high_threshold = 500 * 80 / 100 = 400 bytes. Any real LWW record
+        // serializes to at least 10 bytes, so 50 records × ~10 bytes = 500 bytes
+        // > 400 bytes → threshold is crossed.
+        let config = EvictionConfig {
+            max_ram_bytes: 500,
+            high_water_pct: 80, // threshold = 400 bytes
+            low_water_pct: 60,  // target   = 300 bytes
+            interval_ms: 1000,
+        };
+
+        let orchestrator = EvictionOrchestrator {
+            config,
+            factory: Arc::clone(&factory),
+            shutdown: watch::channel(false).1,
+        };
+
+        let size_before = store.size();
+
+        // Call the real private tick() — this exercises the literal defect surface:
+        // current_ram < high_threshold branch with real cost values from real puts.
+        orchestrator.tick();
+
+        let size_after = store.size();
+        assert!(
+            size_after < size_before,
+            "tick() must evict at least one record when cost exceeds the high-water \
+             threshold; size_before={size_before}, size_after={size_after}"
+        );
+        assert!(
+            store.owned_entry_cost() < cost_before,
+            "owned_entry_cost must drop after eviction; before={cost_before}, \
+             after={}",
+            store.owned_entry_cost()
+        );
+    }
 }
