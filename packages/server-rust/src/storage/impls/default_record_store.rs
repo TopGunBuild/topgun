@@ -130,7 +130,11 @@ impl RecordStore for DefaultRecordStore {
             if let Some(value) = self.data_store.load(&self.name, key).await? {
                 let now = now_millis();
                 let cost = crate::storage::record::estimated_cost(&value) + key.len() as u64;
-                let metadata = RecordMetadata::new(now, cost);
+                // A record loaded from the datastore is already persisted, so it
+                // enters the engine clean (last_stored_time = now) and is
+                // immediately eligible for re-eviction in the evict→reload cycle.
+                let mut metadata = RecordMetadata::new(now, cost);
+                metadata.on_store(now);
                 let record = Record { value, metadata };
                 self.engine.put(key, record.clone());
                 self.observer.on_load(key, &record, false);
@@ -185,6 +189,18 @@ impl RecordStore for DefaultRecordStore {
             self.data_store
                 .add(&self.name, key, &record.value, expiration_time, now)
                 .await?;
+
+            // Mark the record clean only when the value was written to a real
+            // persistent store (not a no-op null store). The WAL append + fsync
+            // inside add() completes before returning Ok on real backends, so the
+            // record is safely evictable. Re-fetch from the engine rather than
+            // marking the cloned `record` (the engine holds the live copy).
+            if !self.data_store.is_null() {
+                if let Some(mut live) = self.engine.get(key) {
+                    live.metadata.on_store(now);
+                    self.engine.put(key, live);
+                }
+            }
         }
 
         // Step 7: Return old value
@@ -302,7 +318,11 @@ impl RecordStore for DefaultRecordStore {
         }
         let now = now_millis();
         let cost = crate::storage::record::estimated_cost(&value) + key.len() as u64;
-        let metadata = RecordMetadata::new(now, cost);
+        // A record materialized from the datastore is already persisted, so it
+        // enters the engine clean (last_stored_time = now) and is immediately
+        // eligible for re-eviction — required for the evict→reload steady state.
+        let mut metadata = RecordMetadata::new(now, cost);
+        metadata.on_store(now);
         let record = Record { value, metadata };
         self.engine.put(key, record.clone());
         self.observer.on_load(key, &record, false);
