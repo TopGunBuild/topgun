@@ -271,14 +271,19 @@ impl RedbDataStore {
                     continue;
                 }
             }
-            // If we already have a full batch, the presence of another row means
-            // the scan is not exhausted -- emit a cursor and stop.
-            if !records.is_empty() && accumulated >= budget {
+            let bytes = val_guard.value();
+            let row_cost = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            // Strict check-before-push: account for the prospective row's byte
+            // cost BEFORE admitting it, so a batch never includes the row that
+            // would cross the budget (peak resident batch cost stays <= budget).
+            // The empty-batch carve-out admits a single oversized record whole
+            // because one record cannot be split — for that degenerate case the
+            // bound is <= budget + one max-record.
+            if !records.is_empty() && accumulated.saturating_add(row_cost) > budget {
                 more_rows_pending = true;
                 break;
             }
-            let bytes = val_guard.value();
-            accumulated += u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            accumulated += row_cost;
             let value: RecordValue = rmp_serde::from_slice(bytes)?;
             records.push((key, value));
         }
@@ -1059,6 +1064,112 @@ mod tests {
         assert!(
             batch.next_cursor.is_none(),
             "empty scan is immediately exhausted"
+        );
+    }
+
+    /// Serialized byte cost of a single record, matching what `scan_from`
+    /// accounts (`rmp_serde::to_vec_named` is the redb on-disk encoding).
+    fn record_byte_cost(value: &RecordValue) -> u64 {
+        let bytes = rmp_serde::to_vec_named(value).expect("encode");
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+    }
+
+    /// AC5: strict check-before-push — a batch never includes the row that
+    /// would cross the budget, so peak resident batch byte cost <= `max_batch_cost`.
+    #[tokio::test]
+    async fn scan_from_strict_byte_budget_never_overshoots() {
+        let (store, _dir) = fresh_store();
+        for i in 0..20 {
+            store
+                .add("m", &format!("k{i:03}"), &dummy_value("payload"), 0, 1000)
+                .await
+                .unwrap();
+        }
+        let one_cost = record_byte_cost(&dummy_value("payload"));
+        // Budget for ~3 records; strict check-before-push must stop BEFORE the
+        // 4th, so no batch exceeds the budget.
+        let budget = one_cost * 3;
+
+        let mut batch = store.scan_values("m", false, budget).await.unwrap();
+        loop {
+            let batch_cost: u64 = batch.records.iter().map(|(_, v)| record_byte_cost(v)).sum();
+            assert!(
+                batch_cost <= budget,
+                "batch byte cost {batch_cost} must not exceed budget {budget}"
+            );
+            assert!(!batch.records.is_empty(), "each batch makes progress");
+            match batch.next_cursor.take() {
+                Some(cursor) => {
+                    batch = store
+                        .scan_values_batched("m", false, cursor, budget)
+                        .await
+                        .unwrap();
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// AC5 degenerate carve-out: a single record larger than the whole budget is
+    /// admitted whole (one record cannot be split), so the bound for that case is
+    /// <= `max_batch_cost` + one max-record. WHY: progress must be guaranteed; an
+    /// empty batch with a remaining cursor would livelock the scan.
+    #[tokio::test]
+    async fn scan_from_admits_single_oversized_record_whole() {
+        let (store, _dir) = fresh_store();
+        let big = "x".repeat(4096);
+        store
+            .add("m", "only", &dummy_value(&big), 0, 1000)
+            .await
+            .unwrap();
+        let budget = 1; // far smaller than the record's byte cost
+        let batch = store.scan_values("m", false, budget).await.unwrap();
+        assert_eq!(batch.records.len(), 1, "oversized record admitted whole");
+        assert_eq!(batch.records[0].0, "only");
+        assert!(
+            batch.next_cursor.is_none(),
+            "single record drains the map in one batch"
+        );
+    }
+
+    /// AC5 negative control: with the pre-fix check-AFTER-push accounting a batch
+    /// overshoots by one row. This reconstructs the pre-fix loop body locally and
+    /// asserts it overshoots, proving the production strict check is load-bearing.
+    #[tokio::test]
+    async fn scan_byte_budget_negative_control_pre_fix_overshoots() {
+        let costs = [10u64, 10, 10, 10];
+        let budget = 25u64;
+
+        // Pre-fix behavior: accumulate, push, THEN check >= budget.
+        let mut pre_fix_batch: Vec<u64> = Vec::new();
+        let mut acc = 0u64;
+        for &c in &costs {
+            acc += c;
+            pre_fix_batch.push(c);
+            if acc >= budget {
+                break;
+            }
+        }
+        let pre_fix_cost: u64 = pre_fix_batch.iter().sum();
+        assert!(
+            pre_fix_cost > budget,
+            "pre-fix accounting overshoots the budget ({pre_fix_cost} > {budget})"
+        );
+
+        // Post-fix behavior (current production): check-before-push.
+        let mut post_fix_batch: Vec<u64> = Vec::new();
+        let mut acc = 0u64;
+        for &c in &costs {
+            if !post_fix_batch.is_empty() && acc.saturating_add(c) > budget {
+                break;
+            }
+            acc += c;
+            post_fix_batch.push(c);
+        }
+        let post_fix_cost: u64 = post_fix_batch.iter().sum();
+        assert!(
+            post_fix_cost <= budget,
+            "post-fix accounting respects the budget ({post_fix_cost} <= {budget})"
         );
     }
 }

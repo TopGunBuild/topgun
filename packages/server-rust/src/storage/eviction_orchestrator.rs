@@ -359,6 +359,10 @@ mod tests {
 
         fn for_each_boxed(&self, _consumer: &mut dyn FnMut(&str, &Record), _is_backup: bool) {}
 
+        fn hydrate_loaded(&self, _key: &str, _value: crate::storage::record::RecordValue) -> bool {
+            false
+        }
+
         fn has_expired(&self, _key: &str, _now: i64, _is_backup: bool) -> ExpiryReason {
             ExpiryReason::NotExpired
         }

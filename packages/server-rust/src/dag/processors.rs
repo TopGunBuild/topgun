@@ -13,13 +13,15 @@
 //! Each processor has a corresponding supplier (`*ProcessorSupplier`) that
 //! implements `ProcessorSupplier` to create instances for the executor.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use anyhow::Result;
+use topgun_core::hlc::Timestamp;
 use topgun_core::messages::base::{AggFunc, Aggregation, PredicateNode, SortDirection};
 
 use crate::dag::types::{Inbox, Outbox, Processor, ProcessorContext, ProcessorSupplier};
+use crate::query::full_scan_pager::FullScanPager;
 use crate::service::domain::predicate::{evaluate_predicate, EvalContext};
 use crate::storage::factory::RecordStoreFactory;
 use crate::storage::record::RecordValue;
@@ -211,6 +213,32 @@ fn group_key_string(item: &rmpv::Value, group_by: &[String]) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Key injection helper
+// ---------------------------------------------------------------------------
+
+/// Inject the record key as `_key` into an rmpv map value so downstream stages
+/// (`CursorProcessor`'s `last_key` tie-break, `SortProcessor` field access) can reach
+/// it without a separate key channel.
+fn inject_key(key: &str, rmpv_val: rmpv::Value) -> rmpv::Value {
+    match rmpv_val {
+        rmpv::Value::Map(mut pairs) => {
+            pairs.push((
+                rmpv::Value::String("_key".into()),
+                rmpv::Value::String(key.into()),
+            ));
+            rmpv::Value::Map(pairs)
+        }
+        other => rmpv::Value::Map(vec![
+            (
+                rmpv::Value::String("_key".into()),
+                rmpv::Value::String(key.into()),
+            ),
+            (rmpv::Value::String("_value".into()), other),
+        ]),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ScanProcessor
 // ---------------------------------------------------------------------------
 
@@ -226,6 +254,15 @@ pub struct ScanProcessor {
     map_name: String,
     factory: Arc<RecordStoreFactory>,
     partition_ids: Vec<u32>,
+    /// Sort spec when the planner pushed an order-by into the scan (only set on the
+    /// bounded top-N path); empty means key-order.
+    sort_fields: Vec<(String, SortDirection)>,
+    /// When `Some(n)`, the scan emits at most `n + 1` rows (the `+1` is the
+    /// pagination sentinel) using a bounded heap, so a top-N page over a map larger
+    /// than RAM never materialises every non-resident row. The planner only sets
+    /// this when the limit applies directly to the scan output — no filter, cursor,
+    /// or aggregation sits between the scan and the limit.
+    bounded_limit: Option<u32>,
     buffer: Vec<rmpv::Value>,
     cursor: usize,
     initialized: bool,
@@ -233,11 +270,18 @@ pub struct ScanProcessor {
 }
 
 impl ScanProcessor {
-    fn new(map_name: String, factory: Arc<RecordStoreFactory>) -> Self {
+    fn new(
+        map_name: String,
+        factory: Arc<RecordStoreFactory>,
+        sort_fields: Vec<(String, SortDirection)>,
+        bounded_limit: Option<u32>,
+    ) -> Self {
         Self {
             map_name,
             factory,
             partition_ids: Vec::new(),
+            sort_fields,
+            bounded_limit,
             buffer: Vec::new(),
             cursor: 0,
             initialized: false,
@@ -246,46 +290,177 @@ impl ScanProcessor {
     }
 }
 
-impl Processor for ScanProcessor {
-    fn init(&mut self, context: &ProcessorContext) -> Result<()> {
-        self.partition_ids.clone_from(&context.partition_ids);
-        // Pre-load all records from all assigned partitions into the buffer.
+impl ScanProcessor {
+    /// Takes an up-front key-sorted resident snapshot from all assigned partitions.
+    /// The `BTreeMap` gives key-sorted order and deduplication across partitions; the
+    /// timestamp is retained so the datastore merge can apply HLC-LWW. This snapshot
+    /// is O(resident key-set), which the engine already keeps under the RAM ceiling.
+    fn build_resident_snapshot(&self) -> BTreeMap<String, (rmpv::Value, Timestamp)> {
+        let mut resident: BTreeMap<String, (rmpv::Value, Timestamp)> = BTreeMap::new();
         for &pid in &self.partition_ids {
             let store = self.factory.get_or_create(&self.map_name, pid);
             store.for_each_boxed(
                 &mut |key, record| {
-                    // Convert topgun_core::types::Value -> rmpv::Value using the
-                    // canonical untagged converter (the same representation used on
-                    // the wire and by the predicate engine). A serde round-trip would
-                    // produce an externally-tagged form (`Value::Int(30)` -> `{Int:30}`),
-                    // which breaks field access for Filter/Sort and the client result shape.
-                    if let RecordValue::Lww { value, .. } = &record.value {
+                    if let RecordValue::Lww { value, timestamp } = &record.value {
                         let rmpv_val = crate::service::domain::predicate::value_to_rmpv(value);
-                        // Inject the record key as `_key` so downstream stages
-                        // (e.g. CursorProcessor's last_key tie-break) can access
-                        // it without a separate key channel.
-                        let row = match rmpv_val {
-                            rmpv::Value::Map(mut pairs) => {
-                                pairs.push((
-                                    rmpv::Value::String("_key".into()),
-                                    rmpv::Value::String(key.into()),
-                                ));
-                                rmpv::Value::Map(pairs)
-                            }
-                            other => rmpv::Value::Map(vec![
-                                (
-                                    rmpv::Value::String("_key".into()),
-                                    rmpv::Value::String(key.into()),
-                                ),
-                                (rmpv::Value::String("_value".into()), other),
-                            ]),
-                        };
-                        self.buffer.push(row);
+                        let row = inject_key(key, rmpv_val);
+                        resident.insert(key.to_string(), (row, timestamp.clone()));
                     }
                 },
                 false,
             );
         }
+        resident
+    }
+
+    /// BOUNDED top-N path. The planner pushed the limit into the scan because no
+    /// filter/cursor/aggregation sits between the scan and the limit, so the
+    /// top-(limit+1) rows by sort order ARE the page. Feeds resident + streamed
+    /// datastore rows into a capacity-(limit+1) heap: non-resident rows that cannot
+    /// make the page are discarded as they stream, so peak heap stays at
+    /// O(resident) + O(limit) + one batch — NEVER the whole durable map. A map larger
+    /// than RAM no longer materialises every non-resident row to return a small page
+    /// (the SPEC-322c headline bound). Returns up to limit+1 rows (the `+1` is the
+    /// pagination sentinel the downstream `has_more` detection consumes).
+    fn scan_bounded(
+        &self,
+        mut resident: BTreeMap<String, (rmpv::Value, Timestamp)>,
+        limit: u32,
+    ) -> Vec<rmpv::Value> {
+        let mut pager = FullScanPager::new(self.sort_fields.clone(), limit as usize);
+        let data_store = self.factory.data_store();
+        if !data_store.is_null() {
+            let map_name = self.map_name.clone();
+            let scan_result: anyhow::Result<()> = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let batch_cost: u64 = 0; // use backend default
+                    let mut batch = data_store.scan_values(&map_name, false, batch_cost).await?;
+                    loop {
+                        for (key, record_value) in batch.records {
+                            let RecordValue::Lww { value, timestamp } = record_value else {
+                                continue;
+                            };
+                            // Resident copy wins on `>=`; compute the decision before
+                            // mutating the map so the read borrow is released first.
+                            let resident_wins = matches!(
+                                resident.get(&key),
+                                Some((_, resident_ts)) if timestamp <= *resident_ts
+                            );
+                            if resident_wins {
+                                // Leave the resident entry in the map; it is fed to the
+                                // pager after the scan from the surviving set.
+                                continue;
+                            }
+                            // Datastore wins (non-resident, or strictly newer than a
+                            // dirty resident copy). Drop any beaten resident entry so it
+                            // is not also fed, then push the durable row.
+                            resident.remove(&key);
+                            let row = inject_key(
+                                &key,
+                                crate::service::domain::predicate::value_to_rmpv(&value),
+                            );
+                            pager.push(&key, &row);
+                        }
+                        let Some(cursor) = batch.next_cursor else {
+                            break;
+                        };
+                        batch = data_store
+                            .scan_values_batched(&map_name, false, cursor, batch_cost)
+                            .await?;
+                    }
+                    anyhow::Ok(())
+                })
+            });
+            if let Err(e) = scan_result {
+                tracing::warn!(
+                    map = %self.map_name,
+                    error = %e,
+                    "datastore scan for bounded full-scan query failed; serving resident snapshot only"
+                );
+            }
+        }
+        // Feed the surviving resident rows (resident-only, or resident-wins keys).
+        for (key, (row, _)) in resident {
+            pager.push(&key, &row);
+        }
+        pager
+            .into_sorted_rows()
+            .into_iter()
+            .map(|(_, row)| row)
+            .collect()
+    }
+
+    /// UNBOUNDED path (no limit): the caller asked for every matching row, so the
+    /// result is inherently O(result). Merges each streamed batch into the key-sorted
+    /// `BTreeMap` and flattens. Engine residency stays bounded — the datastore scan
+    /// never hydrates the in-memory engine — so only the transient result set, which
+    /// the caller explicitly requested in full, is O(result).
+    fn scan_unbounded(
+        &self,
+        mut resident: BTreeMap<String, (rmpv::Value, Timestamp)>,
+    ) -> Vec<rmpv::Value> {
+        let data_store = self.factory.data_store();
+        if !data_store.is_null() {
+            let map_name = self.map_name.clone();
+            let scan_result: anyhow::Result<()> = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let batch_cost: u64 = 0; // use backend default
+                    let mut batch = data_store.scan_values(&map_name, false, batch_cost).await?;
+                    loop {
+                        for (key, record_value) in batch.records {
+                            let RecordValue::Lww { value, timestamp } = record_value else {
+                                continue;
+                            };
+                            let rmpv_val = crate::service::domain::predicate::value_to_rmpv(&value);
+                            let row = inject_key(&key, rmpv_val);
+                            match resident.get(&key) {
+                                None => {
+                                    resident.insert(key, (row, timestamp));
+                                }
+                                Some((_, resident_ts)) => {
+                                    if timestamp > *resident_ts {
+                                        resident.insert(key, (row, timestamp));
+                                    }
+                                }
+                            }
+                        }
+                        let Some(cursor) = batch.next_cursor else {
+                            break;
+                        };
+                        batch = data_store
+                            .scan_values_batched(&map_name, false, cursor, batch_cost)
+                            .await?;
+                    }
+                    anyhow::Ok(())
+                })
+            });
+            if let Err(e) = scan_result {
+                tracing::warn!(
+                    map = %self.map_name,
+                    error = %e,
+                    "datastore scan for full-scan query failed; serving resident snapshot only"
+                );
+            }
+        }
+        resident.into_values().map(|(row, _)| row).collect()
+    }
+}
+
+impl Processor for ScanProcessor {
+    fn init(&mut self, context: &ProcessorContext) -> Result<()> {
+        self.partition_ids.clone_from(&context.partition_ids);
+
+        // Stream the datastore for persisted-but-non-resident records and merge them
+        // HLC-LWW against the resident snapshot. This surfaces records that are durable
+        // on disk but were evicted from (or never loaded into) the in-memory engine —
+        // the gap that causes silent divergence post-restart or post-eviction. The
+        // resident copy wins on `>=` (the dirty write-behind window means in-memory is
+        // often newer); the durable copy wins only when strictly newer.
+        let resident = self.build_resident_snapshot();
+        self.buffer = match self.bounded_limit {
+            Some(limit) => self.scan_bounded(resident, limit),
+            None => self.scan_unbounded(resident),
+        };
         self.initialized = true;
         Ok(())
     }
@@ -328,6 +503,11 @@ impl Processor for ScanProcessor {
 pub struct ScanProcessorSupplier {
     pub map_name: String,
     pub factory: Arc<RecordStoreFactory>,
+    /// Sort spec for the bounded top-N scan path; empty means key-order.
+    pub sort_fields: Vec<(String, SortDirection)>,
+    /// Bounded page limit when the planner pushed the limit into the scan; `None`
+    /// keeps the unbounded full-result path.
+    pub bounded_limit: Option<u32>,
 }
 
 impl ProcessorSupplier for ScanProcessorSupplier {
@@ -337,6 +517,8 @@ impl ProcessorSupplier for ScanProcessorSupplier {
                 Box::new(ScanProcessor::new(
                     self.map_name.clone(),
                     Arc::clone(&self.factory),
+                    self.sort_fields.clone(),
+                    self.bounded_limit,
                 )) as Box<dyn Processor>
             })
             .collect()
@@ -346,6 +528,8 @@ impl ProcessorSupplier for ScanProcessorSupplier {
         Box::new(ScanProcessorSupplier {
             map_name: self.map_name.clone(),
             factory: Arc::clone(&self.factory),
+            sort_fields: self.sort_fields.clone(),
+            bounded_limit: self.bounded_limit,
         })
     }
 }
@@ -1056,7 +1240,13 @@ impl Processor for SortProcessor {
                     return cmp;
                 }
             }
-            std::cmp::Ordering::Equal
+            // Mandatory total-order tie-break on the injected primary key, always
+            // ascending — matches the bounded scan pager's `_key` tie-break so the two
+            // sort paths cannot disagree on which equal-sort-field rows land at a
+            // top-N page boundary (set-determinism, SPEC-322c AC5).
+            let a_key = get_field(a, "_key").and_then(rmpv::Value::as_str);
+            let b_key = get_field(b, "_key").and_then(rmpv::Value::as_str);
+            a_key.cmp(&b_key)
         });
 
         for item in self.buffer.drain(..) {

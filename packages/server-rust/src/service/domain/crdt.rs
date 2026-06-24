@@ -1853,6 +1853,7 @@ mod tests {
     // Subscription-aware broadcast tests (AC5, AC6, AC7)
     // ---------------------------------------------------------------------------
 
+    use crate::query::delta_buffer::DeltaBuffer;
     use crate::service::domain::query::QuerySubscription;
     use dashmap::DashSet;
     use topgun_core::messages::base::Query;
@@ -1903,6 +1904,7 @@ mod tests {
             previous_result_keys: DashSet::new(),
             live_window: Arc::new(crate::query::window::LiveWindow::new(vec![], None)),
             fields: None,
+            delta_buffer: Arc::new(DeltaBuffer::new(64)),
         });
 
         // conn2 writes to "users" — conn1 should receive, conn2 should NOT
@@ -1974,6 +1976,7 @@ mod tests {
             previous_result_keys: DashSet::new(),
             live_window: Arc::new(crate::query::window::LiveWindow::new(vec![], None)),
             fields: None,
+            delta_buffer: Arc::new(DeltaBuffer::new(64)),
         });
 
         // Write to "users" — conn1 is subscribed to "products", not "users"
@@ -2383,6 +2386,7 @@ mod tests {
             previous_result_keys: DashSet::new(),
             live_window: Arc::new(crate::query::window::LiveWindow::new(vec![], None)),
             fields: Some(vec!["name".to_string()]),
+            delta_buffer: Arc::new(DeltaBuffer::new(64)),
         });
 
         // Writer writes to "users"
@@ -3311,6 +3315,7 @@ mod tests {
             previous_result_keys: DashSet::new(),
             live_window: Arc::new(crate::query::window::LiveWindow::new(vec![], None)),
             fields: None,
+            delta_buffer: Arc::new(DeltaBuffer::new(64)),
         });
         rx
     }

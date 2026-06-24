@@ -549,6 +549,30 @@ pub(crate) async fn run_dag_local(
 // Supplier factory helper
 // ---------------------------------------------------------------------------
 
+/// Parses a `[[field, "asc"|"desc"], ...]` rmpv array into `(field, direction)`
+/// pairs. Shared by the Scan (bounded top-N) and Sort vertex config decoders so the
+/// two cannot drift in how they read the same wire shape.
+fn parse_sort_pairs(
+    arr: &[rmpv::Value],
+) -> Vec<(String, topgun_core::messages::base::SortDirection)> {
+    use topgun_core::messages::base::SortDirection;
+    arr.iter()
+        .filter_map(|entry| {
+            if let rmpv::Value::Array(pair) = entry {
+                if pair.len() == 2 {
+                    let field = pair[0].as_str()?.to_string();
+                    let dir = match pair[1].as_str()? {
+                        "desc" => SortDirection::Desc,
+                        _ => SortDirection::Asc,
+                    };
+                    return Some((field, dir));
+                }
+            }
+            None
+        })
+        .collect()
+}
+
 /// Builds a `ProcessorSupplier` from a `VertexDescriptor` for local bypass execution.
 ///
 /// Maps `ProcessorType` to concrete supplier implementations. Config values are
@@ -567,24 +591,46 @@ pub(crate) fn make_supplier_from_descriptor(
 
     match vd.processor_type {
         ProcessorType::Scan => {
-            let map_name = vd
-                .config
-                .as_ref()
-                .and_then(|c| {
-                    if let rmpv::Value::Map(pairs) = c {
-                        pairs.iter().find_map(|(k, v)| {
-                            if k.as_str() == Some("mapName") {
-                                v.as_str().map(str::to_string)
-                            } else {
-                                None
-                            }
-                        })
-                    } else {
-                        None
-                    }
+            let scan_pairs = match vd.config.as_ref() {
+                Some(rmpv::Value::Map(pairs)) => pairs.as_slice(),
+                _ => &[],
+            };
+            let map_name = scan_pairs
+                .iter()
+                .find_map(|(k, v)| {
+                    (k.as_str() == Some("mapName"))
+                        .then(|| v.as_str().map(str::to_string))
+                        .flatten()
                 })
                 .unwrap_or_default();
-            Ok(Box::new(ScanProcessorSupplier { map_name, factory }))
+
+            // The converter pushes `boundedLimit` + `sortFields` into the scan config
+            // ONLY when the limit applies directly to the scan output (no filter,
+            // cursor, or aggregation in between). When present, the scan emits a
+            // bounded top-(limit+1) page instead of materialising every record.
+            let bounded_limit = scan_pairs.iter().find_map(|(k, v)| {
+                (k.as_str() == Some("boundedLimit"))
+                    .then(|| v.as_u64().and_then(|n| u32::try_from(n).ok()))
+                    .flatten()
+            });
+            let sort_fields: Vec<(String, SortDirection)> = scan_pairs
+                .iter()
+                .find_map(|(k, v)| {
+                    if k.as_str() == Some("sortFields") {
+                        if let rmpv::Value::Array(arr) = v {
+                            return Some(parse_sort_pairs(arr));
+                        }
+                    }
+                    None
+                })
+                .unwrap_or_default();
+
+            Ok(Box::new(ScanProcessorSupplier {
+                map_name,
+                factory,
+                sort_fields,
+                bounded_limit,
+            }))
         }
         ProcessorType::Filter => {
             let predicate = vd
@@ -666,23 +712,7 @@ pub(crate) fn make_supplier_from_descriptor(
                 .as_ref()
                 .and_then(|c| {
                     if let rmpv::Value::Array(arr) = c {
-                        let fields: Vec<(String, SortDirection)> = arr
-                            .iter()
-                            .filter_map(|entry| {
-                                if let rmpv::Value::Array(pair) = entry {
-                                    if pair.len() == 2 {
-                                        let field = pair[0].as_str()?.to_string();
-                                        let dir = match pair[1].as_str()? {
-                                            "desc" => SortDirection::Desc,
-                                            _ => SortDirection::Asc,
-                                        };
-                                        return Some((field, dir));
-                                    }
-                                }
-                                None
-                            })
-                            .collect();
-                        Some(fields)
+                        Some(parse_sort_pairs(arr))
                     } else {
                         None
                     }

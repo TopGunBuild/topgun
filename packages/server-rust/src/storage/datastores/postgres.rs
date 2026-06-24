@@ -163,41 +163,60 @@ impl PostgresDataStore {
         let mut accumulated: u64 = 0;
         let mut last_key = start_after_key;
 
+        // Wrap every internal page of THIS scan_from call in a single
+        // REPEATABLE READ transaction so the batch observes ONE consistent
+        // snapshot. Without it the multiple autocommit fetches below could each
+        // see a different point in time, yielding a within-call torn read under
+        // concurrent writes. This is a per-batch (per-scan_from-call) envelope:
+        // the txn lives entirely inside this call and is NOT threaded across
+        // scan_values_batched resume calls (the ScanCursor carries no txn).
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *tx)
+            .await?;
+
         // Page the query until the byte budget is met; a final short page (fewer
         // than PG_PAGE_ROWS) means the table is exhausted.
-        loop {
+        'paging: loop {
             let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(&query)
                 .bind(map)
                 .bind(is_backup)
                 .bind(&last_key)
                 .bind(PG_PAGE_ROWS)
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *tx)
                 .await?;
             if rows.is_empty() {
                 break;
             }
             let page_len = rows.len();
             for (key, bytes) in rows {
-                accumulated += u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-                let value: RecordValue = rmp_serde::from_slice(&bytes)?;
-                last_key.clone_from(&key);
-                records.push((key, value));
-                if accumulated >= budget {
-                    // Budget reached mid-page: more rows may remain, so emit a
-                    // resume cursor at the last record returned.
+                let row_cost = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                // Strict check-before-push: account for the prospective row's
+                // byte cost BEFORE admitting it, so a batch never includes the
+                // row that would cross the budget (peak resident batch cost stays
+                // <= budget). The empty-batch carve-out admits a single oversized
+                // record whole because one record cannot be split — for that
+                // degenerate case the bound is <= budget + one max-record.
+                if !records.is_empty() && accumulated.saturating_add(row_cost) > budget {
+                    tx.commit().await?;
                     return Ok(ScanBatch {
                         records,
                         next_cursor: Some(ScanCursor(last_key.into_bytes())),
                     });
                 }
+                accumulated += row_cost;
+                let value: RecordValue = rmp_serde::from_slice(&bytes)?;
+                last_key.clone_from(&key);
+                records.push((key, value));
             }
             if page_len < PG_PAGE_ROWS_USIZE {
-                break;
+                break 'paging;
             }
             // Full page consumed without hitting the budget: another page may
             // exist; keep paging within this same batch from `last_key`.
         }
 
+        tx.commit().await?;
         Ok(ScanBatch {
             records,
             next_cursor: None,
@@ -730,6 +749,8 @@ impl RefreshGrantStore for PostgresRefreshGrantStore {
 #[cfg(test)]
 #[allow(clippy::doc_markdown)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use topgun_core::types::Value;
 
@@ -1206,5 +1227,141 @@ mod tests {
         store.remove("map_a", "k", 2000).await.unwrap();
         assert!(store.load("map_a", "k").await.unwrap().is_none());
         assert!(store.load("map_b", "k").await.unwrap().is_some());
+    }
+
+    /// AC5 (postgres): strict check-before-push — a single `scan_from` call never
+    /// returns a batch whose summed value byte cost exceeds `max_batch_cost`.
+    #[tokio::test]
+    async fn scan_byte_budget_never_overshoots() {
+        let pool = require_db!();
+        let store = PostgresDataStore::new(pool, None).unwrap();
+        store.initialize().await.unwrap();
+        // Unique map name per run so prior rows never perturb the assertion.
+        let map = &format!("scan_budget_map_{}", unique_suffix());
+
+        for i in 0..20 {
+            store
+                .add(
+                    map,
+                    &format!("k{i:03}"),
+                    &test_lww_value("payload"),
+                    0,
+                    1000,
+                )
+                .await
+                .unwrap();
+        }
+        let one = rmp_serde::to_vec_named(&test_lww_value("payload"))
+            .unwrap()
+            .len() as u64;
+        let budget = one * 3;
+
+        let mut batch = store.scan_values(map, false, budget).await.unwrap();
+        loop {
+            let cost: u64 = batch
+                .records
+                .iter()
+                .map(|(_, v)| rmp_serde::to_vec_named(v).unwrap().len() as u64)
+                .sum();
+            assert!(
+                cost <= budget,
+                "batch byte cost {cost} must not exceed budget {budget}"
+            );
+            match batch.next_cursor.take() {
+                Some(cursor) => {
+                    batch = store
+                        .scan_values_batched(map, false, cursor, budget)
+                        .await
+                        .unwrap();
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// AC7b(ii): a single `scan_from` call wrapped in ONE REPEATABLE READ
+    /// transaction returns a within-call consistent slice under concurrent
+    /// writes — it never returns a duplicated key (the within-call torn-read
+    /// symptom of the pre-fix per-page autocommit `fetch_all`).
+    ///
+    /// Negative control: the pre-fix code issued an independent autocommit
+    /// `fetch_all(&self.pool)` per internal page, so a key shifted by a
+    /// concurrent insert between two pages of the SAME call could be observed
+    /// twice. The REPEATABLE READ envelope makes every page of one call read the
+    /// same snapshot, so the slice is internally consistent.
+    #[tokio::test]
+    async fn scan_from_single_call_is_internally_consistent_under_writes() {
+        let pool = require_db!();
+        let store = Arc::new(PostgresDataStore::new(pool, None).unwrap());
+        store.initialize().await.unwrap();
+        // Unique map name per run so prior rows never perturb the assertion.
+        let map = format!("scan_consistency_map_{}", unique_suffix());
+
+        // Seed enough rows that a tiny budget forces several internal pages per
+        // scan_from call (so the multi-page within-call window is real).
+        for i in 0..200 {
+            store
+                .add(&map, &format!("k{i:04}"), &test_lww_value("v"), 0, 1000)
+                .await
+                .unwrap();
+        }
+
+        // Concurrent writer: churn rows while scans run.
+        let writer = {
+            let store = Arc::clone(&store);
+            let map = map.clone();
+            tokio::spawn(async move {
+                for round in 0..50u32 {
+                    let key = format!("k{:04}", 50 + (round % 100));
+                    let _ = store
+                        .add(&map, &key, &test_lww_value("churn"), 0, 2000)
+                        .await;
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+
+        // Repeatedly drive full multi-batch scans; assert no single batch ever
+        // duplicates a key (within-call consistency).
+        for _ in 0..30 {
+            let mut batch = store.scan_values(&map, false, 64).await.unwrap();
+            loop {
+                let mut keys: Vec<&str> = batch.records.iter().map(|(k, _)| k.as_str()).collect();
+                let before = keys.len();
+                keys.sort_unstable();
+                keys.dedup();
+                assert_eq!(
+                    keys.len(),
+                    before,
+                    "a single scan_from batch must not contain a duplicated key"
+                );
+                match batch.next_cursor.take() {
+                    Some(cursor) => {
+                        batch = store
+                            .scan_values_batched(&map, false, cursor, 64)
+                            .await
+                            .unwrap();
+                    }
+                    None => break,
+                }
+            }
+        }
+
+        writer.await.unwrap();
+    }
+
+    /// Process-unique suffix for test map names so re-runs against a shared
+    /// database never see each other's rows. Underscore-only to satisfy the
+    /// cross-backend map-name charset.
+    fn unique_suffix() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::{SystemTime, UNIX_EPOCH};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let t = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        format!("{t}_{n}")
     }
 }

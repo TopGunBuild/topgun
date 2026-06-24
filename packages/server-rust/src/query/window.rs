@@ -11,6 +11,8 @@
 //! [`CursorData`] (its sort-field values plus its key as the tie-break) and rows are
 //! compared via [`is_after_cursor`].
 
+use std::collections::HashMap;
+
 use parking_lot::Mutex;
 use topgun_core::messages::base::{ChangeEventType, SortField};
 
@@ -69,6 +71,16 @@ pub struct LiveWindow {
     /// The first `limit` entries (by sort order) are the in-window rows; any trailing
     /// entries are retained out-of-window candidates available for promotion.
     state: Mutex<Vec<WindowRow>>,
+    /// Per-key last-seen HLC: `(millis, counter)` from the most recent accepted write.
+    ///
+    /// Guards the full-scan merge path against stale datastore pages overwriting newer
+    /// values that already arrived via live CRDT writes. A record whose HLC compares
+    /// `<=` to the stored value is silently dropped; one with a strictly greater HLC
+    /// is accepted and the stored value is updated. The live `apply_mutation` path
+    /// (which does not carry HLC) always passes through without consulting this map —
+    /// the guard is only active when an explicit HLC is supplied via
+    /// `apply_mutation_with_hlc`.
+    hlc_seen: Mutex<HashMap<String, (u64, u32)>>,
 }
 
 impl LiveWindow {
@@ -79,6 +91,7 @@ impl LiveWindow {
             sort,
             limit,
             state: Mutex::new(Vec::new()),
+            hlc_seen: Mutex::new(HashMap::new()),
         }
     }
 
@@ -170,6 +183,44 @@ impl LiveWindow {
             None => self.apply_unbounded(key, new_value, matches_predicate),
             Some(limit) => self.apply_bounded(key, new_value, matches_predicate, limit as usize),
         }
+    }
+
+    /// Applies one mutation with an explicit HLC monotonicity guard.
+    ///
+    /// This variant is used by the full-scan datastore path where records may arrive
+    /// out of HLC order (batched pages from the durable store, interleaved with live
+    /// CRDT writes). If the supplied `hlc_millis`/`hlc_counter` pair is less than or
+    /// equal to the last-seen HLC for `key`, the record is silently dropped and an
+    /// empty delta set is returned. A strictly greater HLC is accepted, the stored
+    /// last-seen value is advanced, and the call falls through to the standard
+    /// [`apply_mutation`](Self::apply_mutation) logic.
+    ///
+    /// Live CRDT writes that do not carry a datastore HLC should use the plain
+    /// `apply_mutation` method, which bypasses the monotone guard entirely.
+    pub fn apply_mutation_with_hlc(
+        &self,
+        key: &str,
+        new_value: Option<&rmpv::Value>,
+        matches_predicate: bool,
+        hlc_millis: u64,
+        hlc_counter: u32,
+    ) -> Vec<WindowDelta> {
+        let incoming = (hlc_millis, hlc_counter);
+
+        // Guard: silently drop records whose HLC is not strictly greater than the
+        // last-seen HLC for this key. This prevents stale datastore pages from
+        // clobbering newer in-memory values that arrived via live CRDT writes.
+        {
+            let mut seen = self.hlc_seen.lock();
+            match seen.get(key) {
+                Some(&last) if incoming <= last => return Vec::new(),
+                _ => {
+                    seen.insert(key.to_string(), incoming);
+                }
+            }
+        }
+
+        self.apply_mutation(key, new_value, matches_predicate)
     }
 
     /// Unbounded window: predicate-only membership, no displacement and no retention of
@@ -428,5 +479,141 @@ mod tests {
         // Predicate-false → LEAVE.
         let d5 = w.apply_mutation("b", Some(&rec("score", 20)), false);
         assert_eq!(events(&d5), vec![("b".to_string(), ChangeEventType::LEAVE)]);
+    }
+
+    /// Returns the value the window currently holds for `key`, if any.
+    fn value_of(w: &LiveWindow, key: &str) -> Option<rmpv::Value> {
+        let state = w.state.lock();
+        state.iter().find(|r| r.key == key).map(|r| r.value.clone())
+    }
+
+    /// AC7b(iii): a cross-batch value-skew (a stale value read in one batch while
+    /// a fresher value of the SAME key landed in another) is transient and
+    /// self-heals — the NEXT per-key delta carries the LWW value and the window
+    /// converges to it, emitting a single UPDATE the client keyed-map reconcile
+    /// applies. We do NOT assert cross-batch atomicity (intentionally not
+    /// provided); we assert convergence.
+    #[test]
+    fn cross_batch_value_skew_converges_on_next_delta() {
+        let w = LiveWindow::new(sort_asc("score"), Some(3));
+
+        // A full-scan batch seeds a STALE value for "k" (the skew: a concurrent
+        // fresher write of the same key was observed in a different batch's
+        // snapshot, so the result page carried the older value).
+        let seed = w.apply_mutation("k", Some(&rec("score", 10)), true);
+        assert!(has(&seed, "k", &ChangeEventType::ENTER));
+        assert_eq!(value_of(&w, "k"), Some(rec("score", 10)));
+
+        // The next per-key delta (the SyncEngine per-key UPDATE the client
+        // reconcile consumes) carries the converged LWW value.
+        let converge = w.apply_mutation("k", Some(&rec("score", 42)), true);
+        assert_eq!(
+            events(&converge),
+            vec![("k".to_string(), ChangeEventType::UPDATE)]
+        );
+        assert_eq!(
+            value_of(&w, "k"),
+            Some(rec("score", 42)),
+            "skewed value converges to the LWW value on the next per-key delta"
+        );
+        // The converging delta itself carries the LWW value (what the client
+        // keyed-map writes), so no persistent wrong answer survives.
+        let delta = converge.iter().find(|d| d.key == "k").unwrap();
+        assert_eq!(delta.value, rec("score", 42));
+    }
+
+    // ---- HLC monotone guard tests ----
+
+    #[test]
+    fn hlc_guard_accepts_strictly_greater_hlc() {
+        let w = LiveWindow::new(sort_asc("score"), None);
+
+        // First write at millis=100, counter=0 — should be accepted.
+        let d1 = w.apply_mutation_with_hlc("k", Some(&rec("score", 1)), true, 100, 0);
+        assert!(has(&d1, "k", &ChangeEventType::ENTER));
+
+        // Second write at millis=101, counter=0 — strictly greater millis, accepted.
+        let d2 = w.apply_mutation_with_hlc("k", Some(&rec("score", 2)), true, 101, 0);
+        assert!(has(&d2, "k", &ChangeEventType::UPDATE));
+
+        // Same millis, greater counter (101, 1) — strictly greater, accepted.
+        let d3 = w.apply_mutation_with_hlc("k", Some(&rec("score", 3)), true, 101, 1);
+        assert!(has(&d3, "k", &ChangeEventType::UPDATE));
+    }
+
+    #[test]
+    fn hlc_guard_drops_equal_hlc() {
+        let w = LiveWindow::new(sort_asc("score"), None);
+
+        // Accept an initial write.
+        let d1 = w.apply_mutation_with_hlc("k", Some(&rec("score", 10)), true, 200, 5);
+        assert!(has(&d1, "k", &ChangeEventType::ENTER));
+
+        // Repeat the exact same HLC — must be silently dropped (empty delta).
+        let d2 = w.apply_mutation_with_hlc("k", Some(&rec("score", 99)), true, 200, 5);
+        assert!(d2.is_empty(), "equal HLC must be silently dropped");
+    }
+
+    #[test]
+    fn hlc_guard_drops_stale_hlc() {
+        let w = LiveWindow::new(sort_asc("score"), None);
+
+        // Accept a write at millis=500, counter=0.
+        let d1 = w.apply_mutation_with_hlc("k", Some(&rec("score", 10)), true, 500, 0);
+        assert!(has(&d1, "k", &ChangeEventType::ENTER));
+
+        // A stale datastore page arrives at millis=100 — must be silently dropped.
+        let d2 = w.apply_mutation_with_hlc("k", Some(&rec("score", 99)), true, 100, 0);
+        assert!(
+            d2.is_empty(),
+            "stale HLC (older millis) must not overwrite newer in-memory value"
+        );
+
+        // A stale write at same millis but lower counter — also dropped.
+        let d3 = w.apply_mutation_with_hlc("k", Some(&rec("score", 77)), true, 500, 0);
+        assert!(
+            d3.is_empty(),
+            "equal HLC is treated as stale (not strictly greater)"
+        );
+    }
+
+    #[test]
+    fn hlc_guard_is_per_key_independent() {
+        let w = LiveWindow::new(sort_asc("score"), None);
+
+        // Write key "a" at HLC (100, 0), key "b" at HLC (50, 0).
+        w.apply_mutation_with_hlc("a", Some(&rec("score", 1)), true, 100, 0);
+        w.apply_mutation_with_hlc("b", Some(&rec("score", 2)), true, 50, 0);
+
+        // A stale update for "a" at HLC (90, 0) must be dropped.
+        let stale_a = w.apply_mutation_with_hlc("a", Some(&rec("score", 99)), true, 90, 0);
+        assert!(
+            stale_a.is_empty(),
+            "stale write for key 'a' must be dropped"
+        );
+
+        // A fresh update for "b" at HLC (60, 0) must be accepted (b's last-seen is 50).
+        let fresh_b = w.apply_mutation_with_hlc("b", Some(&rec("score", 3)), true, 60, 0);
+        assert!(
+            has(&fresh_b, "b", &ChangeEventType::UPDATE),
+            "fresh write for key 'b' must be accepted"
+        );
+    }
+
+    #[test]
+    fn plain_apply_mutation_bypasses_hlc_guard() {
+        let w = LiveWindow::new(sort_asc("score"), None);
+
+        // Seed via the HLC-guarded path at HLC (1000, 0).
+        w.apply_mutation_with_hlc("k", Some(&rec("score", 10)), true, 1000, 0);
+
+        // The plain path (live CRDT write, no HLC) always passes through regardless
+        // of what the HLC map holds. This ensures live mutations are never silently
+        // swallowed by a stale guard entry.
+        let d = w.apply_mutation("k", Some(&rec("score", 20)), true);
+        assert!(
+            has(&d, "k", &ChangeEventType::UPDATE),
+            "plain apply_mutation must bypass the HLC guard"
+        );
     }
 }

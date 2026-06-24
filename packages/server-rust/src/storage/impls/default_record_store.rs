@@ -292,6 +292,20 @@ impl RecordStore for DefaultRecordStore {
         }
     }
 
+    fn hydrate_loaded(&self, key: &str, value: RecordValue) -> bool {
+        // Engine-first check mirrors get(): never clobber a resident value, which
+        // may be a fresher unflushed or concurrently-merged write.
+        if self.engine.contains_key(key) {
+            return false;
+        }
+        let now = now_millis();
+        let metadata = RecordMetadata::new(now, 0);
+        let record = Record { value, metadata };
+        self.engine.put(key, record.clone());
+        self.observer.on_load(key, &record, false);
+        true
+    }
+
     // --- Size and cost ---
 
     fn size(&self) -> usize {

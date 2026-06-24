@@ -175,6 +175,16 @@ impl RecordStoreFactory {
             .collect()
     }
 
+    /// Returns a reference to the shared persistence backend.
+    ///
+    /// Exposes the underlying [`MapDataStore`] so callers (e.g. the query scan
+    /// path) can drive datastore-backed streaming scans without going through the
+    /// per-partition hydration loop.
+    #[must_use]
+    pub fn data_store(&self) -> Arc<dyn MapDataStore> {
+        self.data_store.clone()
+    }
+
     /// Returns a snapshot of all live stores across all maps and partitions.
     ///
     /// Allocates a Vec + clones every Arc per call — O(N stores). Negligible at
@@ -407,5 +417,113 @@ mod tests {
         // Different pair: factory fires again
         let _s3 = factory.get_or_create("map", 1);
         assert_eq!(counting.count.load(Ordering::SeqCst), 2);
+    }
+
+    // --- Datastore-backed full-scan (non-resident read-availability) ---
+
+    use crate::storage::datastores::RedbDataStore;
+
+    /// Collect every resident key visible to the full-scan path, exactly as
+    /// `handle_query_subscribe` does: iterate every partition store for the map
+    /// and call `for_each_boxed` (the synchronous in-memory scan).
+    fn scan_resident_keys(factory: &RecordStoreFactory, map: &str) -> Vec<String> {
+        let mut keys = Vec::new();
+        for store in factory.get_all_for_map(map) {
+            store.for_each_boxed(&mut |k, _| keys.push(k.to_string()), false);
+        }
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    /// Build a factory over a fresh redb file, returning the shared data store so
+    /// the test can write durable records "out of band" (simulating data that is
+    /// durable on disk but not resident in any in-memory engine).
+    fn redb_factory() -> (RecordStoreFactory, Arc<RedbDataStore>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.redb");
+        let store = Arc::new(RedbDataStore::new(&path).expect("redb open"));
+        let factory = RecordStoreFactory::new(StorageConfig::default(), store.clone(), Vec::new());
+        (factory, store, dir)
+    }
+
+    /// AC7b(i) negative control: WITHOUT hydration (the pre-fix in-memory-only
+    /// scan) a stably-present durable-but-non-resident key is dropped. Proves the
+    /// datastore-backed scan is load-bearing.
+    #[tokio::test]
+    async fn pre_fix_in_memory_only_scan_drops_non_resident_key() {
+        let (factory, data_store, _dir) = redb_factory();
+        data_store
+            .add("m", "stable", &make_value("v"), 0, 1000)
+            .await
+            .unwrap();
+
+        // No hydration call — this is the pre-fix behavior.
+        let keys = scan_resident_keys(&factory, "m");
+        assert!(
+            keys.is_empty(),
+            "pre-fix scan misses the durable non-resident key"
+        );
+    }
+
+    /// AC7b(i) belt-and-suspenders: a stably-present key is never skipped when a
+    /// concurrent write inserts a DIFFERENT key mid-scan at an ordering position
+    /// that straddles the active cursor. Exercises L4(a)'s "regardless of snapshot
+    /// strategy" claim non-vacuously across a batch boundary (key-ordered paging).
+    #[tokio::test]
+    async fn concurrent_write_mid_scan_does_not_skip_stable_key() {
+        let (_factory, data_store, _dir) = redb_factory();
+        // Seed keys k000..k019. "k010" is the stably-present key under observation.
+        for i in 0..20 {
+            data_store
+                .add("m", &format!("k{i:03}"), &make_value("v"), 0, 1000)
+                .await
+                .unwrap();
+        }
+
+        // Drive a multi-batch scan with a tiny budget so batch boundaries fall
+        // between keys; insert a NEW key behind the cursor mid-scan.
+        let mut seen: Vec<String> = Vec::new();
+        let mut inserted_mid_scan = false;
+        let mut batch = data_store.scan_values("m", false, 1).await.unwrap();
+        loop {
+            for (k, _) in &batch.records {
+                seen.push(k.clone());
+                // After we pass k005 (cursor has advanced past it), insert a key
+                // BELOW the cursor ("k000z" sorts after k000, before k001) — a key
+                // the cursor already moved past. Key-ordered paging must not let
+                // this disturb the still-pending stable key k010.
+                if k == "k005" && !inserted_mid_scan {
+                    data_store
+                        .add("m", "k000z", &make_value("late"), 0, 2000)
+                        .await
+                        .unwrap();
+                    inserted_mid_scan = true;
+                }
+            }
+            match batch.next_cursor.take() {
+                Some(cursor) => {
+                    batch = data_store
+                        .scan_values_batched("m", false, cursor, 1)
+                        .await
+                        .unwrap();
+                }
+                None => break,
+            }
+        }
+
+        assert!(
+            seen.contains(&"k010".to_string()),
+            "the stably-present key past the cursor is never skipped by a concurrent insert behind the cursor"
+        );
+        // All originally-seeded keys must still appear exactly once.
+        let mut originals: Vec<String> = seen
+            .iter()
+            .filter(|k| k.as_str() != "k000z")
+            .cloned()
+            .collect();
+        originals.sort();
+        originals.dedup();
+        assert_eq!(originals.len(), 20, "no original key missed or duplicated");
     }
 }

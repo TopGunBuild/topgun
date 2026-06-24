@@ -13,6 +13,8 @@ use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use dashmap::{DashMap, DashSet};
+use parking_lot::Mutex;
+use topgun_core::HLC;
 use tower::Service;
 
 use topgun_core::messages::base::{ChangeEventType, Query};
@@ -28,6 +30,7 @@ use crate::dag::coordinator::{run_dag_local, ClusterQueryCoordinator};
 use crate::query::cursor::{
     build_next_cursor, classify_cursor_status, cursor_query_hashes, decode_cursor, SortValue,
 };
+use crate::query::delta_buffer::{DeltaBuffer, QUERY_SNAPSHOT_OVERFLOW};
 use crate::query::window::LiveWindow;
 
 use tracing::Instrument;
@@ -81,6 +84,13 @@ pub struct QuerySubscription {
     /// Optional field projection list. When `Some`, only these fields are
     /// included in `QUERY_RESP` and `QUERY_UPDATE` payloads sent to this subscriber.
     pub fields: Option<Vec<String>>,
+    /// Per-subscription delta accumulator that captures concurrent mutations arriving
+    /// during the initial full-scan snapshot window (between registration and drain).
+    ///
+    /// Active only during `handle_query_subscribe`'s scan phase; the observer routes
+    /// incoming mutations through the buffer while it is active so no write races
+    /// the snapshot flip. After drain, subsequent mutations go directly to `send_update`.
+    pub delta_buffer: Arc<DeltaBuffer>,
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +272,14 @@ impl QueryMutationObserver {
 
     /// Common logic for `on_put` and `on_update`: re-evaluates a key against
     /// standing queries and sends appropriate change events.
+    ///
+    /// While the subscription's `DeltaBuffer` is active (during a snapshot scan),
+    /// mutations are routed into the buffer for later drain rather than sent
+    /// directly to the subscriber. This closes the registration-gap race: a write
+    /// that arrives after the subscription was registered but before the snapshot
+    /// is sent is captured and replayed (if post-fence) or suppressed (if pre-fence)
+    /// during `deactivate_and_drain`. After drain, subsequent mutations bypass the
+    /// buffer and apply to the window + send directly.
     fn evaluate_change(&self, key: &str, record: &Record, is_backup: bool) {
         if is_backup {
             return;
@@ -272,10 +290,32 @@ impl QueryMutationObserver {
             return;
         }
 
-        let rmpv_value = extract_rmpv_value(&record.value);
+        // Extract value + HLC timestamp from the record. Skip non-LWW records (not
+        // supported in query evaluation — OrMap/OrTombstones are outside query scope).
+        let (rmpv_value, record_timestamp) = match &record.value {
+            RecordValue::Lww { value, timestamp } => (value_to_rmpv(value), timestamp.clone()),
+            _ => return,
+        };
 
         for sub in &subs {
             let matches_now = Self::matches_query(sub, &rmpv_value);
+
+            // Route into the buffer when the scan window is open. `route` returns
+            // whether the buffer OWNED this mutation (active) under the SAME lock that
+            // records it — so a concurrent drain cannot slip between the active-check
+            // and the insert and cause a post-fence entry to be both drain-replayed and
+            // delivered live (a duplicate delta). When owned, the drain replays it; we
+            // must not also apply it here. When not owned (inactive), fall through to
+            // the normal live window + send path.
+            let captured = sub.delta_buffer.route(
+                key,
+                rmpv_value.clone(),
+                record_timestamp.clone(),
+                matches_now,
+            );
+            if captured {
+                continue;
+            }
 
             // Route the mutation through the single window algorithm. It returns the
             // complete delta set the subscriber must receive — predicate ENTER/UPDATE/LEAVE
@@ -324,17 +364,41 @@ impl MutationObserver for QueryMutationObserver {
         self.evaluate_change(key, record, is_backup);
     }
 
-    fn on_remove(&self, key: &str, _record: &Record, is_backup: bool) {
+    fn on_remove(&self, key: &str, record: &Record, is_backup: bool) {
         if is_backup {
             return;
         }
         let subs = self.registry.get_subscriptions_for_map(&self.map_name);
 
+        // Extract the removed record's timestamp for buffer routing (used to fence
+        // against removes that pre-date the snapshot). Fall back to epoch-zero when
+        // the record has no LWW timestamp (OrMap/OrTombstones): the drain's fence
+        // comparison will always discard it (epoch-zero ≤ any real fence).
+        let record_timestamp = match &record.value {
+            RecordValue::Lww { timestamp, .. } => timestamp.clone(),
+            _ => topgun_core::hlc::Timestamp {
+                millis: 0,
+                counter: 0,
+                node_id: String::new(),
+            },
+        };
+
         for sub in &subs {
+            // Route the remove into the buffer while it is active, so the drain can
+            // replay it correctly. Nil value + matches=false encodes "key was removed".
+            // `route` returns whether the buffer owned it (active) atomically with the
+            // record, so the drain-vs-live duplicate window is closed.
+            let captured =
+                sub.delta_buffer
+                    .route(key, rmpv::Value::Nil, record_timestamp.clone(), false);
+            if captured {
+                continue;
+            }
+
             // A delete routes through the same window algorithm as a mutation: removing a
             // key can both emit a LEAVE for that key and promote a previously-displaced row
             // into the top-N window (an ENTER). The window owns membership; we mirror its
-            // deltas into previous_result_keys so on_clear/on_reset/Merkle stay correct.
+            // deltas into previous_result_keys so on_clear/on_reset stay correct.
             let deltas = sub.live_window.apply_mutation(key, None, false);
             for delta in deltas {
                 match delta.event {
@@ -403,8 +467,8 @@ pub struct QueryService {
     query_registry: Arc<QueryRegistry>,
     record_store_factory: Arc<RecordStoreFactory>,
     /// Retained so `unregister_by_connection` can release standing query
-    /// subscriptions when a client disconnects.
-    #[allow(dead_code)]
+    /// subscriptions when a client disconnects, and so the drain path can
+    /// deliver overflow signals directly to the subscriber's connection.
     connection_registry: Arc<ConnectionRegistry>,
     /// Per-query Merkle manager for delta sync init.
     /// `None` when query Merkle sync is not wired (test ergonomics).
@@ -427,6 +491,15 @@ pub struct QueryService {
     /// the DAG. Set via `with_linear_engine_for_tests()` only where a unit test
     /// must exercise the linear path.
     linear_engine_for_tests: bool,
+    /// Shared server-side Hybrid Logical Clock.
+    ///
+    /// Used to capture a fence timestamp (`hlc.now()`) immediately after
+    /// registration so that the delta-buffer drain can distinguish writes
+    /// that pre-date the snapshot (discarded) from writes that post-date it
+    /// (replayed via the live `send_update` path).
+    ///
+    /// `None` in test call sites that do not exercise the fence/drain lifecycle.
+    hlc: Option<Arc<Mutex<HLC>>>,
 }
 
 /// Maps raw DAG output rows to `QueryResultEntry` values.
@@ -507,7 +580,19 @@ impl QueryService {
             sql_query_backend,
             coordinator: None,
             linear_engine_for_tests: false,
+            hlc: None,
         }
+    }
+
+    /// Attaches a shared HLC for fence-timestamp capture during snapshot scans.
+    ///
+    /// Required for the register-first → fence → drain lifecycle in production.
+    /// Test call sites that do not exercise the fence/drain path may omit this
+    /// (the fence falls back to wall-clock millis when `hlc` is `None`).
+    #[must_use]
+    pub fn with_hlc(mut self, hlc: Arc<Mutex<HLC>>) -> Self {
+        self.hlc = Some(hlc);
+        self
     }
 
     /// Attaches a `ClusterQueryCoordinator` to enable GROUP BY (DAG) queries.
@@ -627,16 +712,15 @@ impl Service<Operation> for Arc<QueryService> {
 impl QueryService {
     /// Handles a `QuerySubscribe` operation.
     ///
-    /// 1. Extracts `connection_id` from context (error if missing).
-    /// 2. Scans all partitions, collecting entries and Merkle key-hash pairs.
-    /// 3. When a coordinator is wired, delegates to the DAG single-node path for
-    ///    filtering, sorting, and limiting. Without a coordinator (tests only),
-    ///    falls back to the predicate engine directly.
-    /// 4. Applies `max_query_records` clamping with `has_more` flag.
-    /// 5. Applies field projection if `fields` is specified.
-    /// 6. Initializes per-query Merkle trees and computes aggregate root hash.
-    /// 7. Registers a standing `QuerySubscription` in the registry.
-    /// 8. Returns `QueryResp` with initial results.
+    /// Lifecycle (register-first → fence → snapshot → seed → `QueryResp` → drain):
+    /// 1. Build an empty `LiveWindow` + inactive `DeltaBuffer`.
+    /// 2. Register the subscription (`DashMap` sync — no `.await` before fence).
+    /// 3. Activate the buffer, then capture `fence = hlc.now()`.
+    /// 4. Stream the snapshot (DAG scan — no per-query Merkle on full-scan path).
+    /// 5. Apply clamping, field projection; seed the `LiveWindow` + prev-keys.
+    /// 6. Send `QueryResp`.
+    /// 7. `deactivate_and_drain` the buffer: replay post-fence entries through the
+    ///    live `send_update` path; on overflow send `QUERY_SNAPSHOT_OVERFLOW`.
     #[allow(clippy::too_many_lines)]
     async fn handle_query_subscribe(
         &self,
@@ -654,57 +738,69 @@ impl QueryService {
         let query = payload.payload.query.clone();
         let fields = payload.payload.fields.clone();
 
-        // Scan ALL partitions for this map to aggregate entries and Merkle key-hash pairs.
-        // Keys are deterministically mapped to partitions via hash_to_partition,
-        // so there is no risk of duplicates across partitions.
-        let stores = self.record_store_factory.get_all_for_map(&map_name);
+        // A value-ORDER-BY without a LIMIT is an in-memory sort over the matched set.
+        // It is O(result) — the same memory profile as a no-LIMIT full scan, which is
+        // allowed — and is soft-capped by `max_query_records`. Rejecting it outright
+        // (while permitting the equally-O(N) no-LIMIT scan) was an asymmetric overreach,
+        // so it is permitted here. The genuine OOM exposure is sorting over a
+        // non-resident / larger-than-RAM match set, which is the streaming-source
+        // problem (TODO-532, the TODO-530 family): the protection belongs there as a
+        // SIZE/RESIDENCY-gated reject, not as a blanket reject of the sort clause. The
+        // `QUERY_UNBOUNDED_SORT` code is retained for that gated reject.
 
-        let mut entries: Vec<(String, rmpv::Value)> = Vec::new();
-        // Collect (partition_id, key, hash) for Merkle tree initialization.
-        let mut key_hash_pairs_by_partition: Vec<(u32, Vec<(String, u32)>)> = Vec::new();
+        // Build an empty window and an inactive buffer BEFORE registration so the
+        // observer can immediately start routing into the buffer once we activate it.
+        let live_window = Arc::new(LiveWindow::new(
+            query.sort.clone().unwrap_or_default(),
+            query.limit,
+        ));
+        // Buffer capacity: 4096 distinct concurrent writes during a scan is a generous
+        // bound; overflow falls back to the client-resubscribe signal (R5).
+        let delta_buffer = Arc::new(DeltaBuffer::new(4096));
 
-        for store in &stores {
-            let partition_id = store.partition_id();
-            let mut partition_hashes: Vec<(String, u32)> = Vec::new();
+        // --- STEP 1: register the subscription (DashMap, sync — no .await) ---
+        // The registration must happen BEFORE the fence so any write that lands after
+        // register goes through the observer and, once the buffer is active, into the buffer.
+        let subscription = QuerySubscription {
+            query_id: query_id.clone(),
+            connection_id,
+            map_name: map_name.clone(),
+            query: query.clone(),
+            previous_result_keys: DashSet::new(),
+            live_window: Arc::clone(&live_window),
+            fields: fields.clone(),
+            delta_buffer: Arc::clone(&delta_buffer),
+        };
+        self.query_registry.register(subscription);
 
-            store.for_each_boxed(
-                &mut |key, record| {
-                    if let RecordValue::Lww {
-                        ref value,
-                        ref timestamp,
-                    } = record.value
-                    {
-                        let rmpv_value = value_to_rmpv(value);
-                        entries.push((key.to_string(), rmpv_value));
+        // --- STEP 2: activate buffer, capture fence ---
+        // Activate first; the fence timestamp is captured right after so any write
+        // that beats the activate still goes into the buffer (route is a no-op when
+        // inactive, so a write before activate is already visible in the scan).
+        delta_buffer.activate();
+        let fence = self.hlc.as_ref().map_or_else(
+            || {
+                let wall_ms: u64 = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+                    .unwrap_or(0);
+                topgun_core::hlc::Timestamp {
+                    millis: wall_ms,
+                    counter: 0,
+                    node_id: String::new(),
+                }
+            },
+            |h| h.lock().now(),
+        );
 
-                        // Compute hash for Merkle tree.
-                        let item_hash = topgun_core::hash::fnv1a_hash(&format!(
-                            "{}:{}:{}:{}",
-                            key, timestamp.millis, timestamp.counter, timestamp.node_id
-                        ));
-                        partition_hashes.push((key.to_string(), item_hash));
-                    }
-                    // Skip OrMap/OrTombstones records for query evaluation
-                },
-                false, // not backup
-            );
-
-            if !partition_hashes.is_empty() {
-                key_hash_pairs_by_partition.push((partition_id, partition_hashes));
-            }
-        }
+        // --- STEP 3: stream the snapshot (no per-query Merkle on the full-scan path) ---
+        // Per-query Merkle is retired for full-scans (SPEC-322c SYNC/QUERY separation).
+        // The map-level Merkle tree-walk SYNC is a separate track.
 
         // Capture cursor-emission inputs before `query` is moved into QuerySubscription.
-        // Hashes are computed via the single authoritative source shared with the
-        // consume-side path in converter.rs, making hash divergence impossible.
         let (predicate_hash, sort_hash) = cursor_query_hashes(&query);
         let query_limit = query.limit;
-        // Decode the incoming cursor (if any) before `query` is moved, so the emission
-        // site can report an accurate cursor_status. Validation reuses the same helpers
-        // the DAG's CursorProcessor runs, against the same hashes computed above — so the
-        // status reported here agrees with the DAG's accept/reject decision by construction.
         let input_cursor = query.cursor.as_deref().and_then(decode_cursor);
-        // Build a sort_values template from the query's sort spec for cursor construction.
         let sort_values_template: Vec<SortValue> = query
             .sort
             .as_ref()
@@ -712,50 +808,47 @@ impl QueryService {
                 sf.iter()
                     .map(|f| SortValue {
                         field: f.field.clone(),
-                        value: serde_json::Value::Null, // placeholder; real values extracted per-entry
+                        value: serde_json::Value::Null,
                         direction: f.direction.clone(),
                     })
                     .collect()
             })
             .unwrap_or_default();
 
-        // `coordinator_has_more` is set by the coordinator branch, which already absorbs
-        // the limit+1 sentinel internally. The local/predicate branches detect has_more
-        // from the raw DAG output length after running with limit+1.
+        let stores = self.record_store_factory.get_all_for_map(&map_name);
+
         let mut coordinator_has_more = false;
-        // For local/predicate branches, track whether more records existed beyond the page.
         let mut local_has_more = false;
 
-        // Canonical single-node engine: run the structured query through the DAG
-        // pipeline locally over this map's partitions (Scan→Filter→Cursor→Sort→Limit,
-        // or group-by aggregate). Multi-field sort, limit, and the cursor stage are
-        // all handled here. No coordinator is required for single-node execution.
-        //
-        // The linear predicate engine remains available behind an explicit
-        // tests-only opt-out (`with_linear_engine_for_tests`) — it supports only
-        // single-field sort, plus index-accelerated narrowing, and is used by unit
-        // tests that target that path directly.
         let mut results: Vec<QueryResultEntry> = if self.linear_engine_for_tests {
-            // Narrow candidate entries using index-accelerated evaluation when an
-            // IndexObserverFactory is wired and the query has a predicate. This
-            // reduces the entries passed to execute_query without altering the
-            // query semantics — the predicate is re-evaluated inside the backend
-            // and inside index_aware_evaluate itself, so no correctness risk.
+            // The linear test engine evaluates predicates directly over a flat
+            // in-memory snapshot. Only this path needs the materialised entry list;
+            // the production DAG and coordinator paths re-scan via the streaming
+            // `ScanProcessor`, so collecting `entries` for them would be a wasted
+            // O(resident) copy.
+            let mut entries: Vec<(String, rmpv::Value)> = Vec::new();
+            for store in &stores {
+                store.for_each_boxed(
+                    &mut |key, record| {
+                        if let RecordValue::Lww { ref value, .. } = record.value {
+                            entries.push((key.to_string(), value_to_rmpv(value)));
+                        }
+                    },
+                    false,
+                );
+            }
             let entries = if let (Some(factory), Some(predicate)) = (
                 self.index_observer_factory.as_ref(),
                 query.predicate.as_ref(),
             ) {
                 if let Some(registry) = factory.get_registry(&map_name) {
-                    // Build a lookup map so the optimizer can fetch record values by key.
                     let entry_map: std::collections::HashMap<&str, &rmpv::Value> =
                         entries.iter().map(|(k, v)| (k.as_str(), v)).collect();
                     let all_keys: Vec<String> = entries.iter().map(|(k, _)| k.clone()).collect();
-
                     let matching_keys =
                         index_aware_evaluate(&registry, predicate, &all_keys, |key| {
                             entry_map.get(key).map(|v| (*v).clone())
                         });
-
                     let matching_set: HashSet<&str> =
                         matching_keys.iter().map(String::as_str).collect();
                     entries
@@ -768,20 +861,12 @@ impl QueryService {
             } else {
                 entries
             };
-
-            // Linear engine does not use the limit+1 sentinel; has_more comes from
-            // max_query_records clamping only for this legacy path.
             predicate_execute_query(entries, &query)
         } else if let Some(ref coordinator) = self.coordinator {
-            // Distributed path: the coordinator fans out to all owning nodes, collects
-            // per-node results, and applies the global sort+limit merge (SPEC-301).
-            // The coordinator's single-node bypass routes back through run_dag_local
-            // when only one member is active, keeping single-node behaviour identical.
             let dist_result = coordinator
                 .execute_distributed(&query, &map_name)
                 .await
                 .map_err(|e| OperationError::Internal(anyhow::anyhow!("{e}")))?;
-
             coordinator_has_more = dist_result.has_more;
             map_dag_rows_to_entries(dist_result.rows)
         } else {
@@ -796,8 +881,6 @@ impl QueryService {
             .await
             .map_err(|e| OperationError::Internal(anyhow::anyhow!("{e}")))?;
 
-            // The DAG ran with limit+1 (converter.rs), so if we got limit+1 rows it
-            // means more records exist. Detect and absorb the sentinel before mapping.
             let (raw_truncated, more) = if let Some(lim) = query_limit {
                 let has_sentinel = raw.len() > lim as usize;
                 let mut r = raw;
@@ -807,16 +890,12 @@ impl QueryService {
                 (raw, false)
             };
             local_has_more = more;
-
             map_dag_rows_to_entries(raw_truncated)
         };
 
-        // Reconcile per-branch has_more signals: coordinator branch already absorbed
-        // its sentinel and set coordinator_has_more; local/predicate branches set
-        // local_has_more from the limit+1 sentinel detection above.
         let page_has_more = coordinator_has_more || local_has_more;
 
-        // Apply max_query_records clamping — both sources of has_more are unified here.
+        // Apply max_query_records clamping.
         let total_count = results.len();
         let max = self.max_query_records as usize;
         let has_more = if total_count > max {
@@ -834,60 +913,31 @@ impl QueryService {
             None
         };
 
-        // Seed the live window from THIS initial DAG result page (before field projection,
-        // so sort-field values are still present for ordering). Membership and ordering are
-        // taken from the page the DAG already produced — we do not recompute. Every page row
-        // matched the predicate by construction, so each seeds as an in-window match.
-        let live_window = Arc::new(LiveWindow::new(
-            query.sort.clone().unwrap_or_default(),
-            query.limit,
-        ));
+        // --- STEP 4: seed the window + prev-keys from the snapshot page ---
+        // Seed before field projection so sort-field values are present for ordering.
         for entry in &results {
             let _ = live_window.apply_mutation(&entry.key, Some(&entry.value), true);
         }
 
-        // Apply field projection if specified
+        // Apply field projection.
         if let Some(ref proj_fields) = fields {
             for entry in &mut results {
                 entry.value = project_fields(proj_fields, &entry.value);
             }
         }
 
-        // Build previous_result_keys from results (after clamping, before Merkle).
-        // The page that seeds previous_result_keys is the same page that seeds the window,
-        // so the two membership views start consistent.
-        let previous_keys = DashSet::new();
-        for entry in &results {
-            previous_keys.insert(entry.key.clone());
-        }
-
-        // Initialize per-query Merkle trees for matching records
-        if let Some(ref merkle) = self.query_merkle_manager {
-            // Only insert keys that are in the result set into Merkle trees.
-            // Build a set of result keys for fast lookup.
-            let result_key_set: HashSet<&str> = results.iter().map(|e| e.key.as_str()).collect();
-
-            for (partition_id, partition_hashes) in &key_hash_pairs_by_partition {
-                let matching: Vec<(String, u32)> = partition_hashes
-                    .iter()
-                    .filter(|(k, _)| result_key_set.contains(k.as_str()))
-                    .cloned()
-                    .collect();
-                if !matching.is_empty() {
-                    merkle.init_tree(&query_id, &map_name, *partition_id, &matching);
+        // Sync prev-keys with the seeded window.
+        {
+            // Look up the registered subscription to update its prev-keys. The
+            // subscription was registered above and is still live.
+            if let Some(sub) = self.query_registry.get_subscription(&query_id) {
+                for entry in &results {
+                    sub.previous_result_keys.insert(entry.key.clone());
                 }
             }
         }
 
-        // Compute aggregate Merkle root hash across all partitions
-        let merkle_root_hash = self
-            .query_merkle_manager
-            .as_ref()
-            .map(|m| m.aggregate_query_root_hash(&query_id, &map_name));
-
-        // Emit a real keyset cursor when the query has a limit, more records exist, and
-        // a sort shape is available to derive a keyset position. The cursor is built from
-        // the last entry in the result page using the single authoritative emission helper.
+        // Cursor emission.
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
@@ -911,12 +961,6 @@ impl QueryService {
             None
         };
 
-        // Reflect the input cursor processing outcome. Re-validate the decoded cursor with
-        // the same checks the DAG's CursorProcessor applies (expiry first, then hash-match
-        // against this query's predicate/sort hashes), so the client can distinguish a stale
-        // token (restart pagination) from genuine exhaustion. This is deterministic — it does
-        // NOT infer rejection from an empty result page, which would mislabel a legitimately
-        // empty final page as expired/invalid.
         let cursor_status = Some(classify_cursor_status(
             input_cursor.as_ref(),
             now_ms,
@@ -924,32 +968,98 @@ impl QueryService {
             sort_hash,
         ));
 
-        // Register standing subscription (with fields for future QUERY_UPDATE projection).
-        // Must happen AFTER hashes are captured (query is moved here).
-        let subscription = QuerySubscription {
-            query_id: query_id.clone(),
-            connection_id,
-            map_name,
-            query,
-            previous_result_keys: previous_keys,
-            live_window,
-            fields,
-        };
-        self.query_registry.register(subscription);
-
-        // Build response
+        // --- STEP 5: send QueryResp (snapshot strictly before drain) ---
         let resp = Message::QueryResp(QueryRespMessage {
             payload: QueryRespPayload {
-                query_id,
+                query_id: query_id.clone(),
                 results,
                 next_cursor,
                 has_more,
                 cursor_status,
-                merkle_root_hash,
+                // Per-query Merkle is retired for full-scans; root hash is omitted.
+                merkle_root_hash: None,
+                ..Default::default()
             },
         });
+        let resp_msg = OperationResponse::Message(Box::new(resp));
 
-        Ok(OperationResponse::Message(Box::new(resp)))
+        // --- STEP 6: deactivate and drain the buffer ---
+        // Drain under the buffer's single lock: entries with ts > fence are
+        // replayed through the live window + send_update path; entries ≤ fence
+        // were already in the snapshot. On overflow, send a QUERY_SNAPSHOT_OVERFLOW
+        // signal so the client knows to resubscribe.
+        match delta_buffer.deactivate_and_drain(&fence) {
+            Ok(post_fence_entries) => {
+                if let Some(sub) = self.query_registry.get_subscription(&query_id) {
+                    for (key, entry) in post_fence_entries {
+                        // Run post-fence buffered mutations through the live window so
+                        // membership is consistent with what the subscriber will observe.
+                        let deltas =
+                            sub.live_window
+                                .apply_mutation(&key, Some(&entry.value), entry.matches);
+                        for delta in deltas {
+                            match delta.event {
+                                ChangeEventType::ENTER | ChangeEventType::UPDATE => {
+                                    sub.previous_result_keys.insert(delta.key.clone());
+                                }
+                                ChangeEventType::LEAVE => {
+                                    sub.previous_result_keys.remove(&delta.key);
+                                }
+                            }
+                            self.send_update_sub(&sub, &delta.key, delta.value, delta.event);
+                        }
+                    }
+                }
+            }
+            Err(()) => {
+                // Buffer overflowed during the scan — too many concurrent writes.
+                // Signal the client to resubscribe from a fresh snapshot.
+                if let Some(handle) = self.connection_registry.get(connection_id) {
+                    let overflow_resp = Message::QueryResp(QueryRespMessage {
+                        payload: QueryRespPayload {
+                            query_id: query_id.clone(),
+                            error: Some(
+                                "Too many concurrent writes during snapshot; \
+                                 please resubscribe to get a fresh snapshot."
+                                    .to_string(),
+                            ),
+                            code: Some(QUERY_SNAPSHOT_OVERFLOW.to_string()),
+                            ..Default::default()
+                        },
+                    });
+                    if let Ok(bytes) = rmp_serde::to_vec_named(&overflow_resp) {
+                        let _ = handle.try_send_broadcast(OutboundMessage::Binary(bytes));
+                    }
+                }
+            }
+        }
+
+        Ok(resp_msg)
+    }
+
+    /// Sends a `QUERY_UPDATE` to a subscriber's connection.
+    ///
+    /// Like the observer's `send_update`, but takes an `Arc<QuerySubscription>` directly
+    /// so the drain path can reuse the same lookup the observer uses.
+    fn send_update_sub(
+        &self,
+        sub: &QuerySubscription,
+        key: &str,
+        value: rmpv::Value,
+        change_type: ChangeEventType,
+    ) {
+        let payload = topgun_core::messages::client_events::QueryUpdatePayload {
+            query_id: sub.query_id.clone(),
+            key: key.to_string(),
+            value,
+            change_type,
+        };
+        let msg = Message::QueryUpdate { payload };
+        if let Ok(bytes) = rmp_serde::to_vec_named(&msg) {
+            if let Some(handle) = self.connection_registry.get(sub.connection_id) {
+                let _ = handle.try_send_broadcast(OutboundMessage::Binary(bytes));
+            }
+        }
     }
 
     /// Handles a `QueryUnsubscribe` operation.
@@ -1459,21 +1569,6 @@ fn arrow_value_to_rmpv(array: &dyn arrow::array::Array, row_idx: usize) -> rmpv:
 }
 
 // ---------------------------------------------------------------------------
-// Helper functions
-// ---------------------------------------------------------------------------
-
-/// Extracts an `rmpv::Value` from a `RecordValue`.
-///
-/// For LWW records, converts the inner `Value` to `rmpv::Value`.
-/// For `OrMap`/`OrTombstones`, returns Nil (not supported in v1.0 query evaluation).
-fn extract_rmpv_value(record_value: &RecordValue) -> rmpv::Value {
-    match record_value {
-        RecordValue::Lww { ref value, .. } => value_to_rmpv(value),
-        RecordValue::OrMap { .. } | RecordValue::OrTombstones { .. } => rmpv::Value::Nil,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Field projection helper
 // ---------------------------------------------------------------------------
 
@@ -1591,6 +1686,13 @@ mod tests {
         window
     }
 
+    /// Returns a new inactive `DeltaBuffer` for test subscriptions that do not
+    /// exercise the register-first → fence → drain lifecycle. The buffer is
+    /// capacity 64 (generous for any in-test write count).
+    fn inactive_buffer() -> Arc<DeltaBuffer> {
+        Arc::new(DeltaBuffer::new(64))
+    }
+
     // ---- QueryRegistry tests ----
 
     #[test]
@@ -1606,6 +1708,7 @@ mod tests {
             query: Query::default(),
             previous_result_keys: DashSet::new(),
             fields: None,
+            delta_buffer: inactive_buffer(),
         };
         registry.register(sub);
         assert_eq!(registry.subscription_count(), 1);
@@ -1622,6 +1725,7 @@ mod tests {
             query: Query::default(),
             previous_result_keys: DashSet::new(),
             fields: None,
+            delta_buffer: inactive_buffer(),
         });
 
         assert!(registry.unregister("q-1"));
@@ -1645,6 +1749,7 @@ mod tests {
             query: Query::default(),
             previous_result_keys: DashSet::new(),
             fields: None,
+            delta_buffer: inactive_buffer(),
         });
         registry.register(QuerySubscription {
             query_id: "q-2".to_string(),
@@ -1654,6 +1759,7 @@ mod tests {
             query: Query::default(),
             previous_result_keys: DashSet::new(),
             fields: None,
+            delta_buffer: inactive_buffer(),
         });
         registry.register(QuerySubscription {
             query_id: "q-3".to_string(),
@@ -1663,6 +1769,7 @@ mod tests {
             query: Query::default(),
             previous_result_keys: DashSet::new(),
             fields: None,
+            delta_buffer: inactive_buffer(),
         });
 
         registry.unregister_by_connection(ConnectionId(1));
@@ -1684,6 +1791,7 @@ mod tests {
             query: Query::default(),
             previous_result_keys: DashSet::new(),
             fields: None,
+            delta_buffer: inactive_buffer(),
         });
         registry.register(QuerySubscription {
             query_id: "q-2".to_string(),
@@ -1693,6 +1801,7 @@ mod tests {
             query: Query::default(),
             previous_result_keys: DashSet::new(),
             fields: None,
+            delta_buffer: inactive_buffer(),
         });
 
         let subs = registry.get_subscriptions_for_map("users");
@@ -1722,6 +1831,7 @@ mod tests {
             query: Query::default(),
             previous_result_keys: prev_keys,
             fields: None,
+            delta_buffer: inactive_buffer(),
         });
 
         let record = make_record(make_value_map(vec![(
@@ -1757,6 +1867,7 @@ mod tests {
             query: Query::default(),
             previous_result_keys: DashSet::new(),
             fields: None,
+            delta_buffer: inactive_buffer(),
         });
 
         let record = make_record(make_value_map(vec![(
@@ -1810,6 +1921,7 @@ mod tests {
             query,
             previous_result_keys: prev_keys,
             fields: None,
+            delta_buffer: inactive_buffer(),
         });
 
         let old_value = RecordValue::Lww {
@@ -1874,6 +1986,7 @@ mod tests {
             query,
             previous_result_keys: prev_keys,
             fields: None,
+            delta_buffer: inactive_buffer(),
         });
 
         // Update to age=10 (no longer matches)
@@ -1922,6 +2035,7 @@ mod tests {
             query,
             previous_result_keys: prev_keys,
             fields: None,
+            delta_buffer: inactive_buffer(),
         });
 
         let record = make_record(make_value_map(vec![(
@@ -1968,6 +2082,7 @@ mod tests {
             query,
             previous_result_keys: prev_keys,
             fields: None,
+            delta_buffer: inactive_buffer(),
         });
 
         observer.on_clear();
@@ -2025,6 +2140,7 @@ mod tests {
             },
             previous_result_keys: DashSet::new(),
             fields: None,
+            delta_buffer: inactive_buffer(),
         });
 
         // Put a record that does NOT match (age=10)
@@ -2282,6 +2398,8 @@ mod tests {
                             direction: SortDirection::Asc,
                         },
                     ]),
+                    // Bounded top-N: a limit exercises the bounded-heap scan path.
+                    limit: Some(100),
                     ..Query::default()
                 },
                 fields: None,
@@ -2318,6 +2436,203 @@ mod tests {
                 other => panic!("expected map value, got: {other:?}"),
             }
         }
+    }
+
+    /// SPEC-322b F1 reproduce / SPEC-322c acceptance guard.
+    ///
+    /// A full-scan QUERY over a map whose durable record set exceeds the in-memory
+    /// RAM ceiling must surface EVERY durable key (the TODO-530 completeness
+    /// invariant) WITHOUT materialising the whole map resident at once (the L2
+    /// RAM-ceiling invariant). The executor now uses `scan_via_datastore` to stream
+    /// records directly from the durable backend without making them resident first,
+    /// so completeness no longer requires full residency. This guard asserts the
+    /// streaming end-state (SPEC-322c): all N keys returned AND peak residency
+    /// bounded well below N.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn full_scan_over_oversized_map_streams_within_ceiling() {
+        use crate::storage::datastores::RedbDataStore;
+        use crate::storage::map_data_store::MapDataStore;
+
+        const N: usize = 400;
+        // "One batch worth" — peak residency must NOT scale with the durable set.
+        const RESIDENT_BOUND: usize = N / 4;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_store =
+            Arc::new(RedbDataStore::new(dir.path().join("oversized.redb")).expect("redb open"));
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            data_store.clone(),
+            Vec::new(),
+        ));
+        let map_name = "oversized";
+
+        // Durable-but-non-resident: written straight to the datastore, not the engine.
+        for i in 0..N {
+            let value = RecordValue::Lww {
+                value: Value::String(format!("v{i:04}")),
+                timestamp: make_timestamp(),
+            };
+            data_store
+                .add(map_name, &format!("k{i:04}"), &value, 0, 1000)
+                .await
+                .expect("durable write");
+        }
+
+        let conn_registry = Arc::new(ConnectionRegistry::new());
+        let config = test_config();
+        let (handle, _rx) = conn_registry.register(ConnectionKind::Client, &config);
+        let conn_id = handle.id;
+
+        let svc = Arc::new(QueryService::new(
+            Arc::new(QueryRegistry::new()),
+            factory.clone(),
+            conn_registry,
+            None,
+            10_000,
+            None,
+            #[cfg(feature = "datafusion")]
+            None,
+        ));
+
+        let ctx = make_ctx(Some(conn_id));
+        let payload = QuerySubMessage {
+            payload: QuerySubPayload {
+                query_id: "oversized-1".to_string(),
+                map_name: map_name.to_string(),
+                query: Query::default(), // full-scan: no predicate, sort, or limit
+                fields: None,
+            },
+        };
+        let op = Operation::QuerySubscribe { ctx, payload };
+        let resp = match svc.oneshot(op).await.unwrap() {
+            OperationResponse::Message(msg) => match *msg {
+                Message::QueryResp(resp) => resp,
+                _ => panic!("expected QueryResp"),
+            },
+            _ => panic!("expected Message response"),
+        };
+
+        // (1) COMPLETENESS — the TODO-530 invariant (holds for both designs).
+        assert_eq!(
+            resp.payload.results.len(),
+            N,
+            "full-scan must surface every durable key"
+        );
+
+        // (2) BOUNDEDNESS — the L2 RAM-ceiling invariant. Surfacing all N keys must
+        // NOT require holding all N resident. hydrate-then-scan FAILS here
+        // (residency == N); a datastore-streaming response (SPEC-322c) keeps peak
+        // residency bounded by one batch.
+        let resident: usize = factory.all_stores().iter().map(|s| s.size()).sum();
+        assert!(
+            resident <= RESIDENT_BOUND,
+            "F1: full-scan made {resident} of {N} records resident — completeness is \
+             coupled to full residency, so the RAM ceiling cannot hold for maps larger \
+             than it. SPEC-322c must stream from the datastore (peak residency <= {RESIDENT_BOUND})."
+        );
+    }
+
+    /// Bounded top-N companion to the AC1 gate: a LIMIT query over a map whose durable
+    /// set is far larger than the page returns the correct page (first `LIMIT` keys in
+    /// ascending key order) sourced from non-resident records, WITHOUT making the whole
+    /// map resident and WITHOUT buffering every non-resident row. The scan feeds the
+    /// streamed datastore rows through a capacity-(limit+1) heap, so the page is
+    /// produced from O(resident)+O(limit)+one batch — never O(durable map). The
+    /// pre-fix behaviour materialised all N rows in the scan buffer to return a 10-row
+    /// page; this test pins the bounded end-state (SPEC-322c C1 / Review v3).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bounded_full_scan_limit_returns_topn_without_full_residency() {
+        use crate::storage::datastores::RedbDataStore;
+        use crate::storage::map_data_store::MapDataStore;
+
+        const N: usize = 400;
+        const LIMIT: u32 = 10;
+        const RESIDENT_BOUND: usize = N / 4;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_store =
+            Arc::new(RedbDataStore::new(dir.path().join("bounded.redb")).expect("redb open"));
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            data_store.clone(),
+            Vec::new(),
+        ));
+        let map_name = "bounded";
+
+        // Durable-but-non-resident records, written straight to the datastore.
+        for i in 0..N {
+            let value = RecordValue::Lww {
+                value: Value::String(format!("v{i:04}")),
+                timestamp: make_timestamp(),
+            };
+            data_store
+                .add(map_name, &format!("k{i:04}"), &value, 0, 1000)
+                .await
+                .expect("durable write");
+        }
+
+        let conn_registry = Arc::new(ConnectionRegistry::new());
+        let config = test_config();
+        let (handle, _rx) = conn_registry.register(ConnectionKind::Client, &config);
+        let conn_id = handle.id;
+
+        let svc = Arc::new(QueryService::new(
+            Arc::new(QueryRegistry::new()),
+            factory.clone(),
+            conn_registry,
+            None,
+            10_000,
+            None,
+            #[cfg(feature = "datafusion")]
+            None,
+        ));
+
+        // LIMIT without sort/filter/cursor → the planner pushes the limit into the
+        // scan (ascending key order).
+        let query = Query {
+            limit: Some(LIMIT),
+            ..Query::default()
+        };
+        let ctx = make_ctx(Some(conn_id));
+        let payload = QuerySubMessage {
+            payload: QuerySubPayload {
+                query_id: "bounded-1".to_string(),
+                map_name: map_name.to_string(),
+                query,
+                fields: None,
+            },
+        };
+        let op = Operation::QuerySubscribe { ctx, payload };
+        let resp = match svc.oneshot(op).await.unwrap() {
+            OperationResponse::Message(msg) => match *msg {
+                Message::QueryResp(resp) => resp,
+                _ => panic!("expected QueryResp"),
+            },
+            _ => panic!("expected Message response"),
+        };
+
+        // (1) PAGE CORRECTNESS — exactly LIMIT rows, the first LIMIT keys ascending.
+        let keys: Vec<String> = resp.payload.results.iter().map(|e| e.key.clone()).collect();
+        let expected: Vec<String> = (0..LIMIT as usize).map(|i| format!("k{i:04}")).collect();
+        assert_eq!(
+            keys, expected,
+            "bounded page must be the first LIMIT keys ascending"
+        );
+        assert_eq!(
+            resp.payload.has_more,
+            Some(true),
+            "more pages exist beyond LIMIT"
+        );
+
+        // (2) BOUNDEDNESS — returning the page did NOT hydrate the whole map; engine
+        // residency stays at one batch, never the full durable set.
+        let resident: usize = factory.all_stores().iter().map(|s| s.size()).sum();
+        assert!(
+            resident <= RESIDENT_BOUND,
+            "bounded top-N page made {resident} of {N} records resident — the page must \
+             stream from the datastore through the bounded heap (peak residency <= {RESIDENT_BOUND})."
+        );
     }
 
     /// The tests-only linear-engine opt-out (`with_linear_engine_for_tests`) routes
@@ -2541,6 +2856,7 @@ mod tests {
             },
             previous_result_keys: DashSet::new(),
             fields: None,
+            delta_buffer: inactive_buffer(),
         });
 
         registry.register(QuerySubscription {
@@ -2559,6 +2875,7 @@ mod tests {
             },
             previous_result_keys: DashSet::new(),
             fields: None,
+            delta_buffer: inactive_buffer(),
         });
 
         let ids = registry.get_subscribed_connection_ids("users");
@@ -2590,6 +2907,7 @@ mod tests {
             },
             previous_result_keys: DashSet::new(),
             fields: None,
+            delta_buffer: inactive_buffer(),
         });
         registry.register(QuerySubscription {
             query_id: "q-2".to_string(),
@@ -2607,6 +2925,7 @@ mod tests {
             },
             previous_result_keys: DashSet::new(),
             fields: None,
+            delta_buffer: inactive_buffer(),
         });
 
         let ids = registry.get_subscribed_connection_ids("users");
@@ -2751,6 +3070,7 @@ mod tests {
             query: Query::default(),
             previous_result_keys: DashSet::new(),
             fields: None,
+            delta_buffer: inactive_buffer(),
         });
 
         // Init a Merkle tree for this query
@@ -2817,6 +3137,7 @@ mod tests {
             query: Query::default(),
             previous_result_keys: DashSet::new(),
             fields: None,
+            delta_buffer: inactive_buffer(),
         });
 
         // Init a Merkle tree
@@ -2861,6 +3182,7 @@ mod tests {
             query: Query::default(),
             previous_result_keys: DashSet::new(),
             fields: Some(vec!["name".to_string()]),
+            delta_buffer: inactive_buffer(),
         });
 
         let sub = registry.get_subscription("q-lookup");

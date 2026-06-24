@@ -1718,7 +1718,8 @@ fn build_services(
         None,
         #[cfg(feature = "datafusion")]
         None,
-    );
+    )
+    .with_hlc(Arc::clone(&hlc));
     // In cluster mode, construct a ClusterQueryCoordinator using the real
     // connection_registry and record_store_factory available here, and wire it
     // into QueryService.  Single-node startup passes None and leaves query_svc

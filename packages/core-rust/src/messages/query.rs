@@ -121,6 +121,16 @@ pub struct QueryRespPayload {
     /// Optional Merkle root hash for delta sync reconnect.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub merkle_root_hash: Option<u32>,
+    /// Human-readable error message when the query could not be fulfilled; `None` on success.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub error: Option<String>,
+    /// Machine-distinguishable error class when `error` is set; `None` on success.
+    ///
+    /// Allows clients to distinguish bounded-sort refusal (`"QUERY_UNBOUNDED_SORT"`) from
+    /// snapshot overflow (`"QUERY_SNAPSHOT_OVERFLOW"`) without string-matching the
+    /// human-readable message.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub code: Option<String>,
 }
 
 /// Query response message containing matching records.
@@ -317,6 +327,7 @@ mod tests {
                 has_more: Some(true),
                 cursor_status: Some(CursorStatus::Valid),
                 merkle_root_hash: None,
+                ..Default::default()
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
@@ -332,6 +343,7 @@ mod tests {
                 has_more: None,
                 cursor_status: None,
                 merkle_root_hash: None,
+                ..Default::default()
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
@@ -349,6 +361,7 @@ mod tests {
                 has_more: None,
                 cursor_status: None,
                 merkle_root_hash: None,
+                ..Default::default()
             },
         };
         let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
@@ -496,6 +509,7 @@ mod tests {
                 has_more: None,
                 cursor_status: None,
                 merkle_root_hash: Some(12345),
+                ..Default::default()
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
@@ -511,6 +525,7 @@ mod tests {
                 has_more: None,
                 cursor_status: None,
                 merkle_root_hash: None,
+                ..Default::default()
             },
         };
         let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
