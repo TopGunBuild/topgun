@@ -15,6 +15,10 @@
 #[cfg(test)]
 mod crash_safety_proptest;
 
+/// Behavioral end-to-end tests for cost-based eviction (AC2–AC4).
+#[cfg(test)]
+mod eviction_cost_test;
+
 pub mod datastores;
 pub mod engine;
 pub mod engines;
