@@ -129,7 +129,8 @@ impl RecordStore for DefaultRecordStore {
         if !self.data_store.is_null() {
             if let Some(value) = self.data_store.load(&self.name, key).await? {
                 let now = now_millis();
-                let metadata = RecordMetadata::new(now, 0);
+                let cost = crate::storage::record::estimated_cost(&value) + key.len() as u64;
+                let metadata = RecordMetadata::new(now, cost);
                 let record = Record { value, metadata };
                 self.engine.put(key, record.clone());
                 self.observer.on_load(key, &record, false);
@@ -157,8 +158,9 @@ impl RecordStore for DefaultRecordStore {
         // Step 1: Check if key already exists
         let old_record = self.engine.get(key);
 
-        // Step 2: Create metadata
-        let metadata = RecordMetadata::new(now, 0);
+        // Step 2: Create metadata — measure before value is moved into the record
+        let cost = crate::storage::record::estimated_cost(&value) + key.len() as u64;
+        let metadata = RecordMetadata::new(now, cost);
 
         // Step 3: Create record
         let record = Record { value, metadata };
@@ -299,7 +301,8 @@ impl RecordStore for DefaultRecordStore {
             return false;
         }
         let now = now_millis();
-        let metadata = RecordMetadata::new(now, 0);
+        let cost = crate::storage::record::estimated_cost(&value) + key.len() as u64;
+        let metadata = RecordMetadata::new(now, cost);
         let record = Record { value, metadata };
         self.engine.put(key, record.clone());
         self.observer.on_load(key, &record, false);
@@ -838,8 +841,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.size(), 2);
-        // Cost is 0 because RecordMetadata::new uses the cost param (which is 0 in put())
-        assert_eq!(store.owned_entry_cost(), 0);
+        assert!(
+            store.owned_entry_cost() > 0,
+            "owned_entry_cost must be non-zero after puts: each record carries \
+             a measured serialized-value cost + key length"
+        );
     }
 
     // --- AC3: clear() fires on_clear observer and empties store ---
