@@ -18,6 +18,12 @@ pub const RECENCY_COALESCE_MS: i64 = 100;
 ///
 /// Server-internal -- NOT serialized to the wire protocol.
 /// Tracks version, access statistics, and timestamps for eviction and persistence.
+///
+/// **Non-leakage invariant:** This struct intentionally has NO `Serialize` or
+/// `Deserialize` derive. Only `RecordValue` crosses the wire or reaches the
+/// persistence layer. The `cost` field in particular is a local, never-wire,
+/// never-disk heap-accounting value derived at write time and re-derived on
+/// every load — it must never be serialized.
 #[derive(Debug, Clone, Default)]
 pub struct RecordMetadata {
     /// Record version, incremented on every update.
@@ -33,6 +39,12 @@ pub struct RecordMetadata {
     /// Number of read accesses. Used by LFU eviction.
     pub hits: u32,
     /// Estimated heap cost of this record in bytes.
+    ///
+    /// LOCAL ONLY — never serialized to the wire or persisted to the datastore.
+    /// Set at write time via [`estimated_cost`] + `key.len()`, then summed by
+    /// the eviction orchestrator each tick to compare against the RAM ceiling.
+    /// Re-derived on every load/hydrate so records entering via any path carry
+    /// a real cost (eviction → reload steady state).
     pub cost: u64,
 }
 
@@ -86,6 +98,27 @@ impl RecordMetadata {
     pub fn is_dirty(&self) -> bool {
         self.last_update_time > self.last_stored_time
     }
+}
+
+/// Returns the estimated heap cost of a [`RecordValue`] in bytes.
+///
+/// Serializes the value via `rmp_serde::to_vec_named` (the same encoding used
+/// by the persistence layer) and returns the byte length, floored to `≥ 1`.
+/// The floor prevents empty/`Null` values from contributing zero cost, which
+/// would leave the eviction orchestrator blind to maps of empty values.
+///
+/// On serialization error the fallback is `1`: a serialize failure here is
+/// benign (the persistence path would surface it separately), and panicking
+/// on the write path is never acceptable.
+///
+/// **Call sites must add `key.len() as u64`** to capture the key string's heap
+/// contribution alongside the value bytes. The helper stays value-only so that
+/// callers retain the key in scope without the helper needing to take ownership.
+pub fn estimated_cost(value: &RecordValue) -> u64 {
+    rmp_serde::to_vec_named(value)
+        .map(|b| b.len() as u64)
+        .unwrap_or(1)
+        .max(1)
 }
 
 /// The value portion of a record, representing the actual CRDT data.
