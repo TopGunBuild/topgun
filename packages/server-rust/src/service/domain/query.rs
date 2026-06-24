@@ -2457,9 +2457,7 @@ mod tests {
     /// so completeness no longer requires full residency. This guard asserts the
     /// streaming end-state (SPEC-322c): all N keys returned AND peak residency
     /// bounded well below N.
-    #[tokio::test]
-    #[ignore = "SPEC-322c acceptance guard: streaming scan must keep peak residency \
-                bounded while returning all keys. Un-ignore when SPEC-322c lands."]
+    #[tokio::test(flavor = "multi_thread")]
     async fn full_scan_over_oversized_map_streams_within_ceiling() {
         use crate::storage::datastores::RedbDataStore;
         use crate::storage::map_data_store::MapDataStore;
