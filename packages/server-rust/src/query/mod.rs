@@ -2,4 +2,5 @@
 
 pub mod cursor;
 pub mod delta_buffer;
+pub mod scan_planner;
 pub mod window;
