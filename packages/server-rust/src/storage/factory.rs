@@ -12,8 +12,6 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use topgun_core::hash_to_partition;
-
 use crate::storage::engines::HashMapStorage;
 use crate::storage::impls::{DefaultRecordStore, StorageConfig};
 use crate::storage::map_data_store::MapDataStore;
@@ -175,62 +173,6 @@ impl RecordStoreFactory {
             .filter(|entry| entry.key().0 == map_name)
             .map(|entry| Arc::clone(entry.value()))
             .collect()
-    }
-
-    /// Stream every durable record of `map_name` from the datastore and make
-    /// any persisted-but-non-resident record resident, in bounded batches.
-    ///
-    /// This is the datastore-aware async scan entrypoint for the full-scan QUERY
-    /// path. After a restart (no rehydration) or after eviction (records dropped
-    /// from the in-memory engine under `TOPGUN_MAX_RAM_MB` pressure), durable
-    /// records exist on disk but not in memory, so the synchronous
-    /// `for_each_boxed` scan (and the DAG scan) would silently omit them. This
-    /// method generalizes the single-key lazy-load in `RecordStore::get` to the
-    /// whole map: it pages the datastore via `scan_values` / `scan_values_batched`
-    /// (byte-bounded by `max_batch_cost`, so a single batch never exceeds the RAM
-    /// ceiling) and hydrates each record into its partition store via
-    /// `hydrate_loaded`, which never clobbers a resident (possibly fresher) value.
-    ///
-    /// Key-ordered datastore paging (redb ordered `table.range`, postgres keyset
-    /// `key > last_key ORDER BY key`) guarantees a stably-present key is never
-    /// missed or duplicated across batch boundaries regardless of snapshot
-    /// strategy — the load-bearing invariant against silent divergence from
-    /// durable state.
-    ///
-    /// A no-op for null / in-memory datastores (nothing durable to surface).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the underlying datastore scan fails (e.g. a backend
-    /// I/O error or a malformed resume cursor).
-    pub async fn hydrate_non_resident_for_scan(&self, map_name: &str) -> anyhow::Result<()> {
-        if self.data_store.is_null() {
-            return Ok(());
-        }
-
-        // `0` requests the backend's default per-batch byte budget, a
-        // conservative fraction of TOPGUN_MAX_RAM_MB. Each scan_* call observes
-        // one per-batch snapshot; we do not hold a cross-batch session.
-        let batch_cost: u64 = 0;
-        let mut batch = self
-            .data_store
-            .scan_values(map_name, false, batch_cost)
-            .await?;
-        loop {
-            for (key, value) in batch.records {
-                let partition_id = hash_to_partition(&key);
-                let store = self.get_or_create(map_name, partition_id);
-                store.hydrate_loaded(&key, value);
-            }
-            let Some(cursor) = batch.next_cursor else {
-                break;
-            };
-            batch = self
-                .data_store
-                .scan_values_batched(map_name, false, cursor, batch_cost)
-                .await?;
-        }
-        Ok(())
     }
 
     /// Returns a reference to the shared persistence backend.
@@ -505,38 +447,6 @@ mod tests {
         (factory, store, dir)
     }
 
-    /// AC-RESTART-QUERY + AC7b(i): after a restart (fresh factory, empty store
-    /// cache) a full-scan over a durable-but-non-resident map surfaces ALL durable
-    /// keys — not an empty map. The records exist only on disk; hydration must
-    /// make them resident.
-    #[tokio::test]
-    async fn hydrate_surfaces_durable_non_resident_keys() {
-        let (factory, data_store, _dir) = redb_factory();
-        for i in 0..30 {
-            data_store
-                .add("m", &format!("k{i:03}"), &make_value("v"), 0, 1000)
-                .await
-                .unwrap();
-        }
-
-        // Pre-hydration: nothing is resident, the in-memory-only scan is empty.
-        assert!(
-            scan_resident_keys(&factory, "m").is_empty(),
-            "fresh factory has no resident records (the pre-fix defect)"
-        );
-
-        factory.hydrate_non_resident_for_scan("m").await.unwrap();
-
-        let keys = scan_resident_keys(&factory, "m");
-        assert_eq!(
-            keys.len(),
-            30,
-            "every durable key is surfaced post-hydration"
-        );
-        assert_eq!(keys.first().map(String::as_str), Some("k000"));
-        assert_eq!(keys.last().map(String::as_str), Some("k029"));
-    }
-
     /// AC7b(i) negative control: WITHOUT hydration (the pre-fix in-memory-only
     /// scan) a stably-present durable-but-non-resident key is dropped. Proves the
     /// datastore-backed scan is load-bearing.
@@ -554,75 +464,6 @@ mod tests {
             keys.is_empty(),
             "pre-fix scan misses the durable non-resident key"
         );
-    }
-
-    /// AC3 (EVICTION, no restart): after a record is dropped from the in-memory
-    /// engine (the eviction lever), a subsequent full-scan re-hydrates it from the
-    /// datastore and remains COMPLETE.
-    #[tokio::test]
-    async fn evicted_record_reappears_after_rehydration() {
-        let (factory, data_store, _dir) = redb_factory();
-        for k in ["a", "b", "c"] {
-            data_store
-                .add("m", k, &make_value("v"), 0, 1000)
-                .await
-                .unwrap();
-        }
-        factory.hydrate_non_resident_for_scan("m").await.unwrap();
-        assert_eq!(scan_resident_keys(&factory, "m").len(), 3);
-
-        // Eviction lever: drop one key from the in-memory engine of its partition.
-        let victim = "b";
-        let pid = hash_to_partition(victim);
-        let store = factory.get_or_create("m", pid);
-        let evicted = store.evict(victim, false);
-        assert!(evicted.is_some(), "victim was resident before eviction");
-        assert!(
-            !scan_resident_keys(&factory, "m").contains(&victim.to_string()),
-            "evicted key is gone from the in-memory scan (the latent defect)"
-        );
-
-        // Re-scan: hydration restores the evicted record from durable storage.
-        factory.hydrate_non_resident_for_scan("m").await.unwrap();
-        let keys = scan_resident_keys(&factory, "m");
-        assert_eq!(keys.len(), 3, "evicted record is re-surfaced");
-        assert!(keys.contains(&victim.to_string()));
-    }
-
-    /// hydrate_loaded must NOT clobber a resident (possibly fresher) value: a
-    /// concurrent/newer in-memory write survives a subsequent hydration of the
-    /// same key from a staler durable copy.
-    #[tokio::test]
-    async fn hydration_never_clobbers_resident_value() {
-        let (factory, data_store, _dir) = redb_factory();
-        // Durable (stale) copy on disk.
-        data_store
-            .add("m", "k", &make_value("stale"), 0, 1000)
-            .await
-            .unwrap();
-        // Fresher resident write lands in the in-memory engine first.
-        let pid = hash_to_partition("k");
-        let store = factory.get_or_create("m", pid);
-        store
-            .put(
-                "k",
-                make_value("fresh"),
-                ExpiryPolicy::NONE,
-                CallerProvenance::Client,
-            )
-            .await
-            .unwrap();
-
-        factory.hydrate_non_resident_for_scan("m").await.unwrap();
-
-        let rec = store.get("k", false).await.unwrap().expect("present");
-        match rec.value {
-            RecordValue::Lww {
-                value: Value::String(s),
-                ..
-            } => assert_eq!(s, "fresh", "resident value must survive hydration"),
-            other => panic!("unexpected value: {other:?}"),
-        }
     }
 
     /// AC7b(i) belt-and-suspenders: a stably-present key is never skipped when a

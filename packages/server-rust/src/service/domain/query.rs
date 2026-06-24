@@ -2452,22 +2452,14 @@ mod tests {
     /// A full-scan QUERY over a map whose durable record set exceeds the in-memory
     /// RAM ceiling must surface EVERY durable key (the TODO-530 completeness
     /// invariant) WITHOUT materialising the whole map resident at once (the L2
-    /// RAM-ceiling invariant). The shipped hydrate-then-scan design couples the
-    /// two: `hydrate_non_resident_for_scan` pages the entire datastore into the
-    /// in-memory engine before the scan, so completeness REQUIRES full residency.
-    /// For a map larger than the ceiling that either busts the ceiling (this
-    /// assertion) or, under active eviction, drops just-hydrated records and
-    /// silently misses them (TODO-530, re-introduced).
-    ///
-    /// This guard asserts the streaming end-state (SPEC-322c): all N keys returned
-    /// AND peak residency bounded well below N. It FAILS on the current
-    /// hydrate-then-scan design (post-call residency == N) and must turn GREEN when
-    /// SPEC-322c streams datastore results into the response instead of hydrating
-    /// the whole map.
+    /// RAM-ceiling invariant). The executor now uses `scan_via_datastore` to stream
+    /// records directly from the durable backend without making them resident first,
+    /// so completeness no longer requires full residency. This guard asserts the
+    /// streaming end-state (SPEC-322c): all N keys returned AND peak residency
+    /// bounded well below N.
     #[tokio::test]
-    #[ignore = "SPEC-322b F1 reproduce / SPEC-322c acceptance guard: hydrate-then-scan \
-                materialises the whole map; streaming must keep peak residency bounded \
-                while returning all keys. Un-ignore when SPEC-322c lands."]
+    #[ignore = "SPEC-322c acceptance guard: streaming scan must keep peak residency \
+                bounded while returning all keys. Un-ignore when SPEC-322c lands."]
     async fn full_scan_over_oversized_map_streams_within_ceiling() {
         use crate::storage::datastores::RedbDataStore;
         use crate::storage::map_data_store::MapDataStore;
