@@ -56,8 +56,8 @@ mod eviction_cost_tests {
     }
 
     /// Write N records to the store, return them non-dirty by re-inserting with
-    /// last_stored_time matching last_update_time (simulating a completed flush
-    /// cycle so evict_lru can select the candidates — never-evict-dirty invariant).
+    /// `last_stored_time` matching `last_update_time` (simulating a completed flush
+    /// cycle so `evict_lru` can select the candidates — never-evict-dirty invariant).
     async fn write_and_flush_records(
         store: &DefaultRecordStore,
         n: usize,
@@ -104,15 +104,20 @@ mod eviction_cost_tests {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("ac2_query.redb");
         let data_store = Arc::new(RedbDataStore::new(&path).expect("redb open"));
-        let store =
-            make_store_with_datastore("evict_query_map", data_store.clone() as Arc<dyn MapDataStore>);
+        let store = make_store_with_datastore(
+            "evict_query_map",
+            data_store.clone() as Arc<dyn MapDataStore>,
+        );
 
         // Write 20 records — write-through persists each to redb.
         let keys = write_and_flush_records(&store, 20, "q").await;
 
         // Evict ALL records to make them non-resident.
         let evicted = store.evict_lru(u32::MAX, false);
-        assert!(evicted > 0, "at least one record must be evicted; got {evicted}");
+        assert!(
+            evicted > 0,
+            "at least one record must be evicted; got {evicted}"
+        );
 
         // Confirm at least one known key is now non-resident.
         let first_key = &keys[0];
@@ -181,10 +186,8 @@ mod eviction_cost_tests {
         // Phase 2: reopen the same redb file with a fresh in-memory engine
         // (all resident state is gone — simulates restart).
         let data_store = Arc::new(RedbDataStore::new(&path).expect("redb reopen"));
-        let new_store = make_store_with_datastore(
-            "restart_map",
-            data_store.clone() as Arc<dyn MapDataStore>,
-        );
+        let new_store =
+            make_store_with_datastore("restart_map", data_store.clone() as Arc<dyn MapDataStore>);
 
         // The fresh engine must be empty — no data was hydrated at restart.
         assert_eq!(
@@ -237,7 +240,10 @@ mod eviction_cost_tests {
         // This call site proves the function signature takes &RecordValue only.
         let val = lww_value("non-leakage-test");
         let cost = estimated_cost(&val);
-        assert!(cost > 0, "estimated_cost must return > 0 for a non-null value");
+        assert!(
+            cost > 0,
+            "estimated_cost must return > 0 for a non-null value"
+        );
 
         // Behavioral: serialize the RecordValue via rmp_serde::to_vec_named
         // and decode it back — the result is a RecordValue with NO cost field.
@@ -263,10 +269,14 @@ mod eviction_cost_tests {
         // (The MapDataStore::add signature takes &RecordValue — verified at compile
         // time; this is the runtime complement.)
         let null_store = Arc::new(NullDataStore);
-        let store =
-            make_store_with_datastore("cost_nonleak", null_store as Arc<dyn MapDataStore>);
+        let store = make_store_with_datastore("cost_nonleak", null_store as Arc<dyn MapDataStore>);
         store
-            .put("k", lww_value("v"), ExpiryPolicy::NONE, CallerProvenance::Client)
+            .put(
+                "k",
+                lww_value("v"),
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
             .await
             .expect("put must succeed");
 
@@ -282,7 +292,10 @@ mod eviction_cost_tests {
         // null datastore returns None (nothing was persisted — correct, since
         // cost metadata was never written). Re-derivation on load is proven by AC1.
         store.evict("k", false);
-        let after_evict = store.get("k", false).await.expect("get after evict must not error");
+        let after_evict = store
+            .get("k", false)
+            .await
+            .expect("get after evict must not error");
         assert!(
             after_evict.is_none(),
             "NullDataStore holds no durable records; cost must not appear \

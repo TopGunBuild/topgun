@@ -796,11 +796,11 @@ mod tests {
     // non-zero costs stamped by put() via the estimated_cost() helper.
     // ---------------------------------------------------------------------------
 
-    /// Proves cost-based eviction fires end-to-end: real put() → real cost →
-    /// real tick() → records evicted.
+    /// Proves cost-based eviction fires end-to-end: real `put()` → real cost →
+    /// real `tick()` → records evicted.
     ///
     /// Uses the real private `tick()` (accessible here because this test lives
-    /// inside eviction_orchestrator.rs's own cfg(test) mod).
+    /// inside `eviction_orchestrator.rs`'s own `cfg(test)` mod).
     #[tokio::test]
     async fn ac1_eviction_fires_under_real_cost_pressure() {
         use tempfile::tempdir;

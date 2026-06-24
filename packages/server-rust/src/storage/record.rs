@@ -114,6 +114,7 @@ impl RecordMetadata {
 /// **Call sites must add `key.len() as u64`** to capture the key string's heap
 /// contribution alongside the value bytes. The helper stays value-only so that
 /// callers retain the key in scope without the helper needing to take ownership.
+#[must_use]
 pub fn estimated_cost(value: &RecordValue) -> u64 {
     rmp_serde::to_vec_named(value)
         .map(|b| b.len() as u64)
