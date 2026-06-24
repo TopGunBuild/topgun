@@ -925,6 +925,7 @@ async fn send_outbound_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::delta_buffer::DeltaBuffer;
     use crate::query::window::LiveWindow;
     use crate::service::domain::journal::{JournalStore, JournalSubscription};
     use crate::service::domain::query::{QueryRegistry, QuerySubscription};
@@ -1001,6 +1002,7 @@ mod tests {
             previous_result_keys: DashSet::new(),
             live_window,
             fields: None,
+            delta_buffer: Arc::new(DeltaBuffer::new(64)),
         });
 
         journal_store.subscribe(

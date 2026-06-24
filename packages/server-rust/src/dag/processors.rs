@@ -216,7 +216,7 @@ fn group_key_string(item: &rmpv::Value, group_by: &[String]) -> String {
 // ---------------------------------------------------------------------------
 
 /// Inject the record key as `_key` into an rmpv map value so downstream stages
-/// (CursorProcessor's last_key tie-break, SortProcessor field access) can reach
+/// (`CursorProcessor`'s `last_key` tie-break, `SortProcessor` field access) can reach
 /// it without a separate key channel.
 fn inject_key(key: &str, rmpv_val: rmpv::Value) -> rmpv::Value {
     match rmpv_val {
