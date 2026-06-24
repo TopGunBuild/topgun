@@ -193,14 +193,26 @@ impl RecordStore for DefaultRecordStore {
             // Mark the record clean only when the value was written to a real
             // persistent store (not a no-op null store). The WAL append + fsync
             // inside add() completes before returning Ok on real backends, so the
-            // record is safely evictable. Mark in place under the engine's
-            // per-key lock — a get()+put() here would race a concurrent same-key
-            // write (clobbering its value and falsely marking it clean); the
-            // atomic mark only applies when our `now` is not older than the
-            // resident write, so a newer concurrent (still-dirty) value is left
-            // dirty rather than made evictable.
-            if !self.data_store.is_null() {
-                self.engine.mark_stored(key, now);
+            // value is durable and the record is safely evictable. Mark in place
+            // under the engine's per-key lock (mark_stored) rather than a
+            // get()+put(): the in-place mark never re-puts the value, so a
+            // concurrent same-key write can be neither clobbered nor lost. The
+            // timestamp guard leaves a strictly-newer write dirty, but it is
+            // best-effort, not a per-write identity check — a concurrent same-key
+            // write in the same millisecond may be transiently marked clean
+            // before its own persist completes. That window is bounded and
+            // self-healing (the concurrent persist completes independently of
+            // eviction, and put() acks only after its own persist), so no
+            // acked-durable write is lost.
+            if !self.data_store.is_null() && !self.engine.mark_stored(key, now) {
+                // Record was evicted between the engine put and this mark, or a
+                // strictly-newer write superseded it. Harmless (the value is
+                // durable via add(), or the newer write owns the slot), but worth
+                // a trace to surface write-then-immediately-evict churn.
+                tracing::trace!(
+                    key,
+                    "mark_stored found no eligible record after persist (evicted or superseded)"
+                );
             }
         }
 
