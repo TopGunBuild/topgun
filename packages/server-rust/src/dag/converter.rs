@@ -139,10 +139,53 @@ impl QueryToDagConverter {
         let mut edge_priority = 0u32;
 
         // --- Step 1: Scan vertex ---
-        let scan_config = rmpv::Value::Map(vec![(
+        // Push the limit into the scan ONLY when it applies directly to the scan
+        // output — i.e. no filter, cursor, or aggregation sits between the scan and
+        // the limit. In that case the top-(limit+1) rows by sort order ARE the page,
+        // so the scan can emit a bounded page via a heap instead of materialising
+        // every record (the headline bound for a top-N page over a >RAM map). With a
+        // filter/cursor/aggregation in the path, pre-limiting the scan would drop rows
+        // that survive the later stage, so the scan stays unbounded there.
+        let scan_has_filter = query.r#where.is_some() || query.predicate.is_some();
+        let scan_has_group_by = query.group_by.as_ref().is_some_and(|v| !v.is_empty());
+        let scan_bounded_limit = match query.limit {
+            Some(limit) if !scan_has_filter && !scan_has_group_by && query.cursor.is_none() => {
+                Some(limit)
+            }
+            _ => None,
+        };
+
+        let mut scan_pairs = vec![(
             rmpv::Value::String("mapName".into()),
             rmpv::Value::String(map_name.into()),
-        )]);
+        )];
+        if let Some(limit) = scan_bounded_limit {
+            scan_pairs.push((
+                rmpv::Value::String("boundedLimit".into()),
+                rmpv::Value::Integer(u64::from(limit).into()),
+            ));
+            if let Some(ref sort_fields) = query.sort {
+                if !sort_fields.is_empty() {
+                    let sort_arr = rmpv::Value::Array(
+                        sort_fields
+                            .iter()
+                            .map(|SortField { field, direction }| {
+                                let dir_str = match direction {
+                                    SortDirection::Asc => "asc",
+                                    SortDirection::Desc => "desc",
+                                };
+                                rmpv::Value::Array(vec![
+                                    rmpv::Value::String(field.clone().into()),
+                                    rmpv::Value::String(dir_str.into()),
+                                ])
+                            })
+                            .collect(),
+                    );
+                    scan_pairs.push((rmpv::Value::String("sortFields".into()), sort_arr));
+                }
+            }
+        }
+        let scan_config = rmpv::Value::Map(scan_pairs);
 
         vertices.push(VertexDescriptor {
             name: "scan".to_string(),

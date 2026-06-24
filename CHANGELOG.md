@@ -10,7 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- fix(query): full-scan pager uses cap=limit+1 for correct pagination + mandatory _key tie-break on sort
+- fix(query): a top-N page (a `limit` with no filter, cursor, or aggregation) over a
+  map larger than RAM now streams the durable records through a bounded `limit+1` heap
+  in the scan itself — it no longer materializes every non-resident row just to return a
+  small page. Peak memory for such a page is O(resident) + O(limit) + one scan batch.
+- fix(query): full-scan pager uses cap=limit+1 for correct pagination + mandatory _key
+  tie-break shared by the scan pager and the sort stage (deterministic top-N boundary)
 - **Behavior change (query result ordering):** sorted queries now break ties on the
   record key (`_key` ascending). Rows that compare equal on the sort field may surface
   in a different order than before, but the order is now deterministic across runs.

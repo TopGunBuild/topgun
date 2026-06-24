@@ -100,25 +100,37 @@ impl DeltaBuffer {
 
     /// Record a mutation for `key`.
     ///
-    /// If the buffer is not active the call is silently ignored — mutations that
-    /// arrive outside the activation window are already visible to the scan or
-    /// will be pushed via the normal live-delta path.
+    /// Returns `true` when the buffer was active and therefore OWNS this mutation
+    /// (the caller must NOT also apply it live — the drain will replay it). Returns
+    /// `false` when the buffer was inactive, meaning the caller should apply the
+    /// mutation through the normal live path.
+    ///
+    /// The active check and the insert happen under a single lock acquisition, so a
+    /// concurrent `deactivate_and_drain` cannot interleave between "is it active?"
+    /// and "record it" — closing the TOCTOU window where a post-fence entry could be
+    /// both drained-and-replayed AND delivered live (a duplicate delta).
     ///
     /// If recording this key would exceed `capacity` the buffer is marked as
-    /// overflowed; subsequent `route` calls are still no-ops (no additional state
-    /// is modified once overflow is set).
-    pub fn route(&self, key: &str, value: rmpv::Value, timestamp: Timestamp, matches: bool) {
+    /// overflowed; subsequent `route` calls record nothing further but still return
+    /// `true` (the window is still active and the drain will signal overflow).
+    pub fn route(
+        &self,
+        key: &str,
+        value: rmpv::Value,
+        timestamp: Timestamp,
+        matches: bool,
+    ) -> bool {
         let mut inner = self.inner.lock();
         if !inner.active {
-            return;
+            return false;
         }
         if inner.overflowed {
-            return;
+            return true;
         }
         // Check capacity before inserting a new key; existing keys update in-place.
         if !inner.entries.contains_key(key) && inner.entries.len() >= self.capacity {
             inner.overflowed = true;
-            return;
+            return true;
         }
         // Per-key LWW: only update if the incoming timestamp is strictly newer than
         // what we already have. This ensures the snapshot correction uses the latest
@@ -137,6 +149,7 @@ impl DeltaBuffer {
                 },
             );
         }
+        true
     }
 
     /// Close the buffer and return all entries whose timestamp is strictly after `fence`.
@@ -157,6 +170,10 @@ impl DeltaBuffer {
         let mut inner = self.inner.lock();
         inner.active = false;
         if inner.overflowed {
+            // Release the buffered entries now rather than holding up to `capacity`
+            // of them until the subscription is dropped — on overflow the caller
+            // signals the client to resubscribe, so these entries are never used.
+            inner.entries.clear();
             return Err(());
         }
         let drained: Vec<(String, DeltaEntry)> = inner
@@ -229,6 +246,25 @@ mod tests {
         buf.route("c", val(3), ts(100), true);
 
         assert!(buf.deactivate_and_drain(&ts(0)).is_err());
+    }
+
+    #[test]
+    fn route_returns_capture_decision_atomically() {
+        let buf = DeltaBuffer::new(2);
+        // Inactive → not captured; caller must apply the mutation live.
+        assert!(!buf.route("k", val(1), ts(100), true));
+
+        buf.activate();
+        // Active → captured; caller must skip the live path (drain will replay).
+        assert!(buf.route("a", val(1), ts(100), true));
+        assert!(buf.route("b", val(2), ts(100), true));
+        // Overflow (3rd distinct key, capacity 2) still reports captured: the window
+        // is active and the drain will signal overflow, so the live path must not run.
+        assert!(buf.route("c", val(3), ts(100), true));
+
+        // After drain the buffer is inactive again → not captured.
+        let _ = buf.deactivate_and_drain(&ts(0));
+        assert!(!buf.route("d", val(4), ts(100), true));
     }
 
     #[test]

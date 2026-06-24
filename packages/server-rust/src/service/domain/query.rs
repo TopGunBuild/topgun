@@ -300,21 +300,20 @@ impl QueryMutationObserver {
         for sub in &subs {
             let matches_now = Self::matches_query(sub, &rmpv_value);
 
-            // Route into the buffer when the scan window is open. `route` is per-key
-            // LWW under a mutex, so concurrent rapid writes never accumulate unboundedly.
-            // The buffer's `route` is a no-op when inactive, so this call is safe to
-            // make unconditionally — it only captures when the scan is in flight.
-            sub.delta_buffer.route(
+            // Route into the buffer when the scan window is open. `route` returns
+            // whether the buffer OWNED this mutation (active) under the SAME lock that
+            // records it — so a concurrent drain cannot slip between the active-check
+            // and the insert and cause a post-fence entry to be both drain-replayed and
+            // delivered live (a duplicate delta). When owned, the drain replays it; we
+            // must not also apply it here. When not owned (inactive), fall through to
+            // the normal live window + send path.
+            let captured = sub.delta_buffer.route(
                 key,
                 rmpv_value.clone(),
                 record_timestamp.clone(),
                 matches_now,
             );
-
-            // When the buffer is active, the delta will be replayed during drain; do
-            // not also apply to the window or send now (drain does both). When inactive,
-            // fall through to the normal live window + send path.
-            if sub.delta_buffer.is_active() {
+            if captured {
                 continue;
             }
 
@@ -387,10 +386,12 @@ impl MutationObserver for QueryMutationObserver {
         for sub in &subs {
             // Route the remove into the buffer while it is active, so the drain can
             // replay it correctly. Nil value + matches=false encodes "key was removed".
-            sub.delta_buffer
-                .route(key, rmpv::Value::Nil, record_timestamp.clone(), false);
-
-            if sub.delta_buffer.is_active() {
+            // `route` returns whether the buffer owned it (active) atomically with the
+            // record, so the drain-vs-live duplicate window is closed.
+            let captured =
+                sub.delta_buffer
+                    .route(key, rmpv::Value::Nil, record_timestamp.clone(), false);
+            if captured {
                 continue;
             }
 
@@ -825,24 +826,28 @@ impl QueryService {
             })
             .unwrap_or_default();
 
-        // Collect in-memory entries from partition stores for the DAG.
         let stores = self.record_store_factory.get_all_for_map(&map_name);
-        let mut entries: Vec<(String, rmpv::Value)> = Vec::new();
-        for store in &stores {
-            store.for_each_boxed(
-                &mut |key, record| {
-                    if let RecordValue::Lww { ref value, .. } = record.value {
-                        entries.push((key.to_string(), value_to_rmpv(value)));
-                    }
-                },
-                false,
-            );
-        }
 
         let mut coordinator_has_more = false;
         let mut local_has_more = false;
 
         let mut results: Vec<QueryResultEntry> = if self.linear_engine_for_tests {
+            // The linear test engine evaluates predicates directly over a flat
+            // in-memory snapshot. Only this path needs the materialised entry list;
+            // the production DAG and coordinator paths re-scan via the streaming
+            // `ScanProcessor`, so collecting `entries` for them would be a wasted
+            // O(resident) copy.
+            let mut entries: Vec<(String, rmpv::Value)> = Vec::new();
+            for store in &stores {
+                store.for_each_boxed(
+                    &mut |key, record| {
+                        if let RecordValue::Lww { ref value, .. } = record.value {
+                            entries.push((key.to_string(), value_to_rmpv(value)));
+                        }
+                    },
+                    false,
+                );
+            }
             let entries = if let (Some(factory), Some(predicate)) = (
                 self.index_observer_factory.as_ref(),
                 query.predicate.as_ref(),
@@ -2536,6 +2541,108 @@ mod tests {
             "F1: full-scan made {resident} of {N} records resident — completeness is \
              coupled to full residency, so the RAM ceiling cannot hold for maps larger \
              than it. SPEC-322c must stream from the datastore (peak residency <= {RESIDENT_BOUND})."
+        );
+    }
+
+    /// Bounded top-N companion to the AC1 gate: a LIMIT query over a map whose durable
+    /// set is far larger than the page returns the correct page (first `LIMIT` keys in
+    /// ascending key order) sourced from non-resident records, WITHOUT making the whole
+    /// map resident and WITHOUT buffering every non-resident row. The scan feeds the
+    /// streamed datastore rows through a capacity-(limit+1) heap, so the page is
+    /// produced from O(resident)+O(limit)+one batch — never O(durable map). The
+    /// pre-fix behaviour materialised all N rows in the scan buffer to return a 10-row
+    /// page; this test pins the bounded end-state (SPEC-322c C1 / Review v3).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bounded_full_scan_limit_returns_topn_without_full_residency() {
+        use crate::storage::datastores::RedbDataStore;
+        use crate::storage::map_data_store::MapDataStore;
+
+        const N: usize = 400;
+        const LIMIT: u32 = 10;
+        const RESIDENT_BOUND: usize = N / 4;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_store =
+            Arc::new(RedbDataStore::new(dir.path().join("bounded.redb")).expect("redb open"));
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            data_store.clone(),
+            Vec::new(),
+        ));
+        let map_name = "bounded";
+
+        // Durable-but-non-resident records, written straight to the datastore.
+        for i in 0..N {
+            let value = RecordValue::Lww {
+                value: Value::String(format!("v{i:04}")),
+                timestamp: make_timestamp(),
+            };
+            data_store
+                .add(map_name, &format!("k{i:04}"), &value, 0, 1000)
+                .await
+                .expect("durable write");
+        }
+
+        let conn_registry = Arc::new(ConnectionRegistry::new());
+        let config = test_config();
+        let (handle, _rx) = conn_registry.register(ConnectionKind::Client, &config);
+        let conn_id = handle.id;
+
+        let svc = Arc::new(QueryService::new(
+            Arc::new(QueryRegistry::new()),
+            factory.clone(),
+            conn_registry,
+            None,
+            10_000,
+            None,
+            #[cfg(feature = "datafusion")]
+            None,
+        ));
+
+        // LIMIT without sort/filter/cursor → the planner pushes the limit into the
+        // scan (ascending key order).
+        let query = Query {
+            limit: Some(LIMIT),
+            ..Query::default()
+        };
+        let ctx = make_ctx(Some(conn_id));
+        let payload = QuerySubMessage {
+            payload: QuerySubPayload {
+                query_id: "bounded-1".to_string(),
+                map_name: map_name.to_string(),
+                query,
+                fields: None,
+            },
+        };
+        let op = Operation::QuerySubscribe { ctx, payload };
+        let resp = match svc.oneshot(op).await.unwrap() {
+            OperationResponse::Message(msg) => match *msg {
+                Message::QueryResp(resp) => resp,
+                _ => panic!("expected QueryResp"),
+            },
+            _ => panic!("expected Message response"),
+        };
+
+        // (1) PAGE CORRECTNESS — exactly LIMIT rows, the first LIMIT keys ascending.
+        let keys: Vec<String> = resp.payload.results.iter().map(|e| e.key.clone()).collect();
+        let expected: Vec<String> = (0..LIMIT as usize).map(|i| format!("k{i:04}")).collect();
+        assert_eq!(
+            keys, expected,
+            "bounded page must be the first LIMIT keys ascending"
+        );
+        assert_eq!(
+            resp.payload.has_more,
+            Some(true),
+            "more pages exist beyond LIMIT"
+        );
+
+        // (2) BOUNDEDNESS — returning the page did NOT hydrate the whole map; engine
+        // residency stays at one batch, never the full durable set.
+        let resident: usize = factory.all_stores().iter().map(|s| s.size()).sum();
+        assert!(
+            resident <= RESIDENT_BOUND,
+            "bounded top-N page made {resident} of {N} records resident — the page must \
+             stream from the datastore through the bounded heap (peak residency <= {RESIDENT_BOUND})."
         );
     }
 

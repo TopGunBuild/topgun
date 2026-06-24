@@ -182,6 +182,26 @@ impl FullScanPager {
         (items, has_more)
     }
 
+    /// Drains the pager into ascending page order (best-first), KEEPING the
+    /// `(limit + 1)`-th sentinel row when the heap is full.
+    ///
+    /// Unlike [`finish`](Self::finish), the sentinel is NOT discarded. The
+    /// streaming `ScanProcessor` source forwards up to `limit + 1` rows so a
+    /// downstream `LimitProcessor` (configured with `limit + 1`) and the query
+    /// emission site detect `has_more` from the row count exactly as they do for
+    /// the in-memory DAG path — the bounded source stays wire-compatible with the
+    /// existing pagination contract instead of inventing a second has-more channel.
+    #[must_use]
+    pub fn into_sorted_rows(mut self) -> Vec<(String, rmpv::Value)> {
+        let mut items: Vec<(String, rmpv::Value)> = Vec::with_capacity(self.heap.len());
+        while let Some(entry) = self.heap.pop() {
+            #[allow(clippy::used_underscore_binding)]
+            items.push((entry.key._key, entry.value));
+        }
+        items.reverse();
+        items
+    }
+
     /// Returns the current number of entries in the heap (for testing and observability).
     #[must_use]
     pub fn len(&self) -> usize {
