@@ -100,13 +100,12 @@ impl ScanPlanner {
             .sort
             .as_ref()
             .and_then(|s| s.first())
-            .map(|sf| {
+            .is_none_or(|sf| {
                 matches!(
                     sf.direction,
                     topgun_core::messages::base::SortDirection::Asc
                 )
-            })
-            .unwrap_or(true);
+            });
 
         // DEVELOPER NOTE — LIMIT without an explicit sort key:
         //
