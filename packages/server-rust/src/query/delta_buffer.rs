@@ -33,8 +33,6 @@ pub const QUERY_SNAPSHOT_OVERFLOW: &str = "QUERY_SNAPSHOT_OVERFLOW";
 // ---------------------------------------------------------------------------
 
 /// A single per-key entry captured by the buffer while the snapshot scan is in flight.
-// Fields are read by the live-query snapshot correction path wired in G3.
-#[allow(dead_code)]
 pub(crate) struct DeltaEntry {
     /// The record value at the time the mutation was routed.
     pub(crate) value: rmpv::Value,
@@ -65,9 +63,6 @@ struct Inner {
 /// 2. Concurrent mutations call `route()` for each affected key.
 /// 3. `deactivate_and_drain(fence)` — close the buffer, discard entries whose timestamp
 ///    is ≤ the fence (they were already captured in the scan), return the rest.
-// The full usage (activate + deactivate_and_drain) is wired in G3's live-query
-// subscription handler.
-#[allow(dead_code)]
 pub struct DeltaBuffer {
     inner: Mutex<Inner>,
     /// Maximum number of distinct keys the buffer will accept before overflowing.
@@ -76,6 +71,7 @@ pub struct DeltaBuffer {
 
 impl DeltaBuffer {
     /// Create a new, inactive buffer with the given key capacity.
+    #[must_use]
     pub fn new(capacity: usize) -> Self {
         Self {
             inner: Mutex::new(Inner {
@@ -93,6 +89,13 @@ impl DeltaBuffer {
     pub fn activate(&self) {
         let mut inner = self.inner.lock();
         inner.active = true;
+    }
+
+    /// Returns `true` if the buffer is currently open (between `activate` and
+    /// `deactivate_and_drain`). Used by the mutation observer to decide whether
+    /// to route deltas through the buffer or send them directly to the subscriber.
+    pub fn is_active(&self) -> bool {
+        self.inner.lock().active
     }
 
     /// Record a mutation for `key`.
@@ -147,11 +150,9 @@ impl DeltaBuffer {
     ///
     /// The deactivation and drain happen under a single lock acquisition so no mutation
     /// can slip in between closing the window and reading the accumulated set.
-    // Called by the live-query snapshot correction path wired in G3.
-    #[allow(dead_code)]
     pub(crate) fn deactivate_and_drain(
         &self,
-        fence: Timestamp,
+        fence: &Timestamp,
     ) -> Result<Vec<(String, DeltaEntry)>, ()> {
         let mut inner = self.inner.lock();
         inner.active = false;
@@ -161,7 +162,7 @@ impl DeltaBuffer {
         let drained: Vec<(String, DeltaEntry)> = inner
             .entries
             .drain()
-            .filter(|(_, entry)| entry.timestamp > fence)
+            .filter(|(_, entry)| &entry.timestamp > fence)
             .collect();
         Ok(drained)
     }
