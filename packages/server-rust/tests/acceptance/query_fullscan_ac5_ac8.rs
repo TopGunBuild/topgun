@@ -410,13 +410,19 @@ fn delta_buffer_remains_active_after_overflow_until_drain() {
 // AC7: Unbounded-sort rejects + QUERY_SNAPSHOT_OVERFLOW code constant
 // ---------------------------------------------------------------------------
 
-/// A `QuerySubscribe` with a non-empty sort spec but no limit must be rejected
-/// with a `QUERY_RESP` whose `code` field equals `"QUERY_UNBOUNDED_SORT"`.
+/// A `QuerySubscribe` with a non-empty sort spec but no limit is ACCEPTED, not
+/// rejected: it is an in-memory sort over the matched set (O(result), the same
+/// memory profile as a no-LIMIT full scan, which is allowed) and is soft-capped by
+/// `max_query_records`. The earlier blanket `QUERY_UNBOUNDED_SORT` reject was an
+/// asymmetric overreach (it rejected sort-without-limit while permitting the
+/// equally-O(N) scan-without-limit) and broke the documented server-side sort API.
 ///
-/// The full-scan path cannot efficiently sort without materialising the full set,
-/// which would OOM for maps larger than the RAM ceiling.
+/// The genuine OOM exposure — sorting over a non-resident / larger-than-RAM match
+/// set — is the streaming-source problem (TODO-532, the TODO-530 family) and the
+/// protection belongs there as a SIZE/RESIDENCY-gated reject. The
+/// `QUERY_UNBOUNDED_SORT` code constant is retained for that future gated reject.
 #[tokio::test(flavor = "multi_thread")]
-async fn unbounded_sort_query_returns_query_unbounded_sort_code() {
+async fn unbounded_sort_query_is_accepted_not_rejected() {
     let dir = tempfile::tempdir().expect("tempdir");
     let data_store = Arc::new(RedbDataStore::new(dir.path().join("ac7a.redb")).expect("redb open"));
     let factory = Arc::new(RecordStoreFactory::new(
@@ -432,7 +438,7 @@ async fn unbounded_sort_query_returns_query_unbounded_sort_code() {
 
     let svc = make_svc(factory, conn_registry);
 
-    // Sort by "score" ASC with NO limit — must be rejected.
+    // Sort by "score" ASC with NO limit — must NOT be rejected.
     let resp = run_subscribe(
         svc,
         conn_id,
@@ -443,24 +449,19 @@ async fn unbounded_sort_query_returns_query_unbounded_sort_code() {
                 field: "score".to_string(),
                 direction: SortDirection::Asc,
             }]),
-            limit: None, // absent limit triggers the rejection
+            limit: None,
             ..Query::default()
         },
     )
     .await;
 
     assert!(
-        resp.payload.results.is_empty(),
-        "rejected query must return an empty result set"
+        resp.payload.error.is_none(),
+        "unbounded sort must NOT carry an error — it is an accepted, O(result) sort"
     );
     assert!(
-        resp.payload.error.is_some(),
-        "rejected query must carry a human-readable error message"
-    );
-    assert_eq!(
-        resp.payload.code.as_deref(),
-        Some("QUERY_UNBOUNDED_SORT"),
-        "rejected query must carry code=QUERY_UNBOUNDED_SORT"
+        resp.payload.code.is_none(),
+        "unbounded sort must NOT carry the QUERY_UNBOUNDED_SORT reject code"
     );
 }
 

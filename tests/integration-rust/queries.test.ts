@@ -1224,9 +1224,12 @@ describe('Integration: Queries (Rust Server)', () => {
         expect(keys).not.toContain('role');
       }
 
-      // Verify a merkleRootHash is returned (server builds Merkle tree for projected queries)
-      expect(response.payload.merkleRootHash).toBeDefined();
-      expect(typeof response.payload.merkleRootHash).toBe('number');
+      // Per-query Merkle is retired on the full-scan path (SPEC-322c SYNC/QUERY
+      // separation). The map-level Merkle tree-walk SYNC is a separate track
+      // (SYNC-treewalk); until it lands, reconnect falls back to a full snapshot,
+      // which the client handles gracefully (merkleRootHash undefined → 0 → full
+      // snapshot). So no merkleRootHash is expected here.
+      expect(response.payload.merkleRootHash).toBeUndefined();
 
       client.close();
     });
@@ -1234,8 +1237,14 @@ describe('Integration: Queries (Rust Server)', () => {
 
   // ========================================
   // Merkle Delta Reconnect (SPEC-144)
+  //
+  // SKIPPED: per-query Merkle is retired on the full-scan path (SPEC-322c SYNC/QUERY
+  // separation). Reconnect now falls back to a full snapshot (correct, less efficient)
+  // until the map-level Merkle tree-walk SYNC lands (SYNC-treewalk track). The client
+  // degrades gracefully: merkleRootHash undefined → defaults to 0 → full snapshot.
+  // Re-enable (rewritten against the tree-walk protocol) when SYNC-treewalk ships.
   // ========================================
-  describe('QUERY_SYNC_INIT Merkle delta reconnect', () => {
+  describe.skip('QUERY_SYNC_INIT Merkle delta reconnect', () => {
     test('reconnect with stored Merkle hash sends QUERY_SYNC_INIT', async () => {
       const mapName = `merkle-reconnect-${Date.now()}`;
 

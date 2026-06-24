@@ -30,7 +30,7 @@ use crate::dag::coordinator::{run_dag_local, ClusterQueryCoordinator};
 use crate::query::cursor::{
     build_next_cursor, classify_cursor_status, cursor_query_hashes, decode_cursor, SortValue,
 };
-use crate::query::delta_buffer::{DeltaBuffer, QUERY_SNAPSHOT_OVERFLOW, QUERY_UNBOUNDED_SORT};
+use crate::query::delta_buffer::{DeltaBuffer, QUERY_SNAPSHOT_OVERFLOW};
 use crate::query::window::LiveWindow;
 
 use tracing::Instrument;
@@ -713,14 +713,13 @@ impl QueryService {
     /// Handles a `QuerySubscribe` operation.
     ///
     /// Lifecycle (register-first → fence → snapshot → seed → `QueryResp` → drain):
-    /// 1. Validate query (unbounded sort reject).
-    /// 2. Build an empty `LiveWindow` + inactive `DeltaBuffer`.
-    /// 3. Register the subscription (`DashMap` sync — no `.await` before fence).
-    /// 4. Activate the buffer, then capture `fence = hlc.now()`.
-    /// 5. Stream the snapshot (DAG scan — no per-query Merkle on full-scan path).
-    /// 6. Apply clamping, field projection; seed the `LiveWindow` + prev-keys.
-    /// 7. Send `QueryResp`.
-    /// 8. `deactivate_and_drain` the buffer: replay post-fence entries through the
+    /// 1. Build an empty `LiveWindow` + inactive `DeltaBuffer`.
+    /// 2. Register the subscription (`DashMap` sync — no `.await` before fence).
+    /// 3. Activate the buffer, then capture `fence = hlc.now()`.
+    /// 4. Stream the snapshot (DAG scan — no per-query Merkle on full-scan path).
+    /// 5. Apply clamping, field projection; seed the `LiveWindow` + prev-keys.
+    /// 6. Send `QueryResp`.
+    /// 7. `deactivate_and_drain` the buffer: replay post-fence entries through the
     ///    live `send_update` path; on overflow send `QUERY_SNAPSHOT_OVERFLOW`.
     #[allow(clippy::too_many_lines)]
     async fn handle_query_subscribe(
@@ -739,25 +738,15 @@ impl QueryService {
         let query = payload.payload.query.clone();
         let fields = payload.payload.fields.clone();
 
-        // Reject an unbounded value-ORDER-BY (sort present, no limit): neither backend can
-        // push an opaque-msgpack sort down without materialising the full set, which would
-        // OOM on a map larger than the RAM ceiling. Clients must add a LIMIT or omit the
-        // sort. Delivered via the additive QueryRespPayload error/code field (R6).
-        if query.sort.as_ref().is_some_and(|s| !s.is_empty()) && query.limit.is_none() {
-            let resp = Message::QueryResp(QueryRespMessage {
-                payload: QueryRespPayload {
-                    query_id,
-                    error: Some(
-                        "Sort without LIMIT is not supported on a full-scan query: \
-                         add a LIMIT or remove the sort."
-                            .to_string(),
-                    ),
-                    code: Some(QUERY_UNBOUNDED_SORT.to_string()),
-                    ..Default::default()
-                },
-            });
-            return Ok(OperationResponse::Message(Box::new(resp)));
-        }
+        // A value-ORDER-BY without a LIMIT is an in-memory sort over the matched set.
+        // It is O(result) — the same memory profile as a no-LIMIT full scan, which is
+        // allowed — and is soft-capped by `max_query_records`. Rejecting it outright
+        // (while permitting the equally-O(N) no-LIMIT scan) was an asymmetric overreach,
+        // so it is permitted here. The genuine OOM exposure is sorting over a
+        // non-resident / larger-than-RAM match set, which is the streaming-source
+        // problem (TODO-532, the TODO-530 family): the protection belongs there as a
+        // SIZE/RESIDENCY-gated reject, not as a blanket reject of the sort clause. The
+        // `QUERY_UNBOUNDED_SORT` code is retained for that gated reject.
 
         // Build an empty window and an inactive buffer BEFORE registration so the
         // observer can immediately start routing into the buffer once we activate it.
@@ -2409,7 +2398,7 @@ mod tests {
                             direction: SortDirection::Asc,
                         },
                     ]),
-                    // Sort requires a limit; QUERY_UNBOUNDED_SORT enforces this.
+                    // Bounded top-N: a limit exercises the bounded-heap scan path.
                     limit: Some(100),
                     ..Query::default()
                 },

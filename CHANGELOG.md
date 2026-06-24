@@ -24,9 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - feat(query): full-scan reads stream durable (non-resident) records and merge them
   HLC-LWW against the in-memory snapshot, so queries see records that were evicted from
   or never loaded into memory — without ever materializing the whole map in RAM.
-- feat(query): new typed response codes `QUERY_UNBOUNDED_SORT` (a sort that cannot be
-  bounded without a `limit` is rejected) and `QUERY_SNAPSHOT_OVERFLOW` (too many
-  concurrent writes during a live snapshot; the client should resubscribe).
+- feat(query): new typed response code `QUERY_SNAPSHOT_OVERFLOW` (too many concurrent
+  writes during a live snapshot; the client should resubscribe). A sort without a `limit`
+  over a resident map is permitted (an O(result) in-memory sort, soft-capped by
+  `max_query_records` — the same profile as a no-`limit` scan); the `QUERY_UNBOUNDED_SORT`
+  code is reserved for a future size/residency-gated reject (sorting over a
+  larger-than-RAM, non-resident match set).
+- note(query): per-query Merkle is retired on the full-scan path (SYNC/QUERY separation);
+  `merkleRootHash` is no longer returned. Reconnect falls back to a full snapshot
+  (correct, less efficient) until the map-level Merkle tree-walk SYNC lands; clients
+  degrade gracefully (`merkleRootHash` undefined → full snapshot).
 
 ## [2.0.0] - 2026-05-23
 
