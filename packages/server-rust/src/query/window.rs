@@ -587,7 +587,10 @@ mod tests {
 
         // A stale update for "a" at HLC (90, 0) must be dropped.
         let stale_a = w.apply_mutation_with_hlc("a", Some(&rec("score", 99)), true, 90, 0);
-        assert!(stale_a.is_empty(), "stale write for key 'a' must be dropped");
+        assert!(
+            stale_a.is_empty(),
+            "stale write for key 'a' must be dropped"
+        );
 
         // A fresh update for "b" at HLC (60, 0) must be accepted (b's last-seen is 50).
         let fresh_b = w.apply_mutation_with_hlc("b", Some(&rec("score", 3)), true, 60, 0);

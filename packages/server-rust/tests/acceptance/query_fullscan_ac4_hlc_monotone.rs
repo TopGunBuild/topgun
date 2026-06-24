@@ -71,9 +71,7 @@ async fn full_scan_accepts_all_records_with_monotone_hlc() {
     const N: usize = 10;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let data_store = Arc::new(
-        RedbDataStore::new(dir.path().join("ac4.redb")).expect("redb open"),
-    );
+    let data_store = Arc::new(RedbDataStore::new(dir.path().join("ac4.redb")).expect("redb open"));
     let factory = Arc::new(RecordStoreFactory::new(
         StorageConfig::default(),
         data_store.clone(),
@@ -179,7 +177,11 @@ fn live_window_stale_hlc_page_does_not_overwrite_fresher_resident() {
         200, // millis
         0,   // counter
     );
-    assert_eq!(deltas_fresh.len(), 1, "fresh write should produce an ENTER delta");
+    assert_eq!(
+        deltas_fresh.len(),
+        1,
+        "fresh write should produce an ENTER delta"
+    );
 
     // Simulate a stale datastore page arriving with millis=100 (before the
     // live write). The monotone guard must drop it: no delta emitted.

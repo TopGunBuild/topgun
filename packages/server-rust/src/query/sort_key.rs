@@ -335,7 +335,10 @@ mod tests {
         let keys: Vec<_> = heap.iter().map(|sk| sk._key.clone()).collect();
         assert!(keys.contains(&"a".to_string()));
         assert!(keys.contains(&"b".to_string()));
-        assert!(!keys.contains(&"c".to_string()), "worst key must be evicted");
+        assert!(
+            !keys.contains(&"c".to_string()),
+            "worst key must be evicted"
+        );
     }
 
     /// `SortFieldValue::extract` handles missing fields gracefully.

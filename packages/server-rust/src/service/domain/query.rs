@@ -14,8 +14,8 @@ use std::task::{Context, Poll};
 use async_trait::async_trait;
 use dashmap::{DashMap, DashSet};
 use parking_lot::Mutex;
-use tower::Service;
 use topgun_core::HLC;
+use tower::Service;
 
 use topgun_core::messages::base::{ChangeEventType, Query};
 use topgun_core::messages::client_events::QueryUpdatePayload;
@@ -304,8 +304,12 @@ impl QueryMutationObserver {
             // LWW under a mutex, so concurrent rapid writes never accumulate unboundedly.
             // The buffer's `route` is a no-op when inactive, so this call is safe to
             // make unconditionally — it only captures when the scan is in flight.
-            sub.delta_buffer
-                .route(key, rmpv_value.clone(), record_timestamp.clone(), matches_now);
+            sub.delta_buffer.route(
+                key,
+                rmpv_value.clone(),
+                record_timestamp.clone(),
+                matches_now,
+            );
 
             // When the buffer is active, the delta will be replayed during drain; do
             // not also apply to the window or send now (drain does both). When inactive,
@@ -383,12 +387,8 @@ impl MutationObserver for QueryMutationObserver {
         for sub in &subs {
             // Route the remove into the buffer while it is active, so the drain can
             // replay it correctly. Nil value + matches=false encodes "key was removed".
-            sub.delta_buffer.route(
-                key,
-                rmpv::Value::Nil,
-                record_timestamp.clone(),
-                false,
-            );
+            sub.delta_buffer
+                .route(key, rmpv::Value::Nil, record_timestamp.clone(), false);
 
             if sub.delta_buffer.is_active() {
                 continue;
@@ -1000,9 +1000,9 @@ impl QueryService {
                     for (key, entry) in post_fence_entries {
                         // Run post-fence buffered mutations through the live window so
                         // membership is consistent with what the subscriber will observe.
-                        let deltas = sub
-                            .live_window
-                            .apply_mutation(&key, Some(&entry.value), entry.matches);
+                        let deltas =
+                            sub.live_window
+                                .apply_mutation(&key, Some(&entry.value), entry.matches);
                         for delta in deltas {
                             match delta.event {
                                 ChangeEventType::ENTER | ChangeEventType::UPDATE => {
@@ -1020,10 +1020,7 @@ impl QueryService {
             Err(()) => {
                 // Buffer overflowed during the scan — too many concurrent writes.
                 // Signal the client to resubscribe from a fresh snapshot.
-                if let Some(handle) = self
-                    .connection_registry
-                    .get(connection_id)
-                {
+                if let Some(handle) = self.connection_registry.get(connection_id) {
                     let overflow_resp = Message::QueryResp(QueryRespMessage {
                         payload: QueryRespPayload {
                             query_id: query_id.clone(),

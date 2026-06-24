@@ -123,8 +123,7 @@ async fn tiebreak_equal_sort_field_produces_deterministic_key_order() {
     const N: usize = 8;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let data_store =
-        Arc::new(RedbDataStore::new(dir.path().join("ac5.redb")).expect("redb open"));
+    let data_store = Arc::new(RedbDataStore::new(dir.path().join("ac5.redb")).expect("redb open"));
     let factory = Arc::new(RecordStoreFactory::new(
         StorageConfig::default(),
         data_store.clone(),
@@ -176,14 +175,7 @@ async fn tiebreak_equal_sort_field_produces_deterministic_key_order() {
         query.clone(),
     )
     .await;
-    let resp2 = run_subscribe(
-        Arc::clone(&svc),
-        conn_id,
-        "ac5-tie-2",
-        map_name,
-        query,
-    )
-    .await;
+    let resp2 = run_subscribe(Arc::clone(&svc), conn_id, "ac5-tie-2", map_name, query).await;
 
     // Both runs must return all N records.
     assert_eq!(
@@ -200,8 +192,18 @@ async fn tiebreak_equal_sort_field_produces_deterministic_key_order() {
     // The key order must match the lexicographic ascending order defined by the
     // _key tie-break.  Since score is equal for every record, the comparator
     // falls through to the key dimension and must produce a, b, c, ... h.
-    let keys1: Vec<&str> = resp1.payload.results.iter().map(|e| e.key.as_str()).collect();
-    let keys2: Vec<&str> = resp2.payload.results.iter().map(|e| e.key.as_str()).collect();
+    let keys1: Vec<&str> = resp1
+        .payload
+        .results
+        .iter()
+        .map(|e| e.key.as_str())
+        .collect();
+    let keys2: Vec<&str> = resp2
+        .payload
+        .results
+        .iter()
+        .map(|e| e.key.as_str())
+        .collect();
 
     let expected: Vec<&str> = {
         let mut sorted = keys.to_vec();
@@ -221,7 +223,10 @@ async fn tiebreak_equal_sort_field_produces_deterministic_key_order() {
     // Set-equality: same keys in both runs (order already verified above).
     let set1: std::collections::BTreeSet<&str> = keys1.iter().copied().collect();
     let set2: std::collections::BTreeSet<&str> = keys2.iter().copied().collect();
-    assert_eq!(set1, set2, "the result key set must be identical across scans");
+    assert_eq!(
+        set1, set2,
+        "the result key set must be identical across scans"
+    );
 }
 
 /// Tie-break with DESC sort field: records still break by key ASC even when the
@@ -230,8 +235,7 @@ async fn tiebreak_equal_sort_field_produces_deterministic_key_order() {
 #[tokio::test(flavor = "multi_thread")]
 async fn tiebreak_equal_sort_field_key_ascending_regardless_of_desc_sort() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let data_store =
-        Arc::new(RedbDataStore::new(dir.path().join("ac5b.redb")).expect("redb open"));
+    let data_store = Arc::new(RedbDataStore::new(dir.path().join("ac5b.redb")).expect("redb open"));
     let factory = Arc::new(RecordStoreFactory::new(
         StorageConfig::default(),
         data_store.clone(),
@@ -280,7 +284,12 @@ async fn tiebreak_equal_sort_field_key_ascending_regardless_of_desc_sort() {
 
     assert_eq!(resp.payload.results.len(), 3);
     // All have same rank (DESC), so _key ASC tie-break applies: a < m < z.
-    let result_keys: Vec<&str> = resp.payload.results.iter().map(|e| e.key.as_str()).collect();
+    let result_keys: Vec<&str> = resp
+        .payload
+        .results
+        .iter()
+        .map(|e| e.key.as_str())
+        .collect();
     assert_eq!(
         result_keys,
         vec!["a_record", "m_record", "z_record"],
@@ -409,8 +418,7 @@ fn delta_buffer_remains_active_after_overflow_until_drain() {
 #[tokio::test(flavor = "multi_thread")]
 async fn unbounded_sort_query_returns_query_unbounded_sort_code() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let data_store =
-        Arc::new(RedbDataStore::new(dir.path().join("ac7a.redb")).expect("redb open"));
+    let data_store = Arc::new(RedbDataStore::new(dir.path().join("ac7a.redb")).expect("redb open"));
     let factory = Arc::new(RecordStoreFactory::new(
         StorageConfig::default(),
         data_store,
@@ -461,8 +469,7 @@ async fn unbounded_sort_query_returns_query_unbounded_sort_code() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sort_with_limit_is_accepted() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let data_store =
-        Arc::new(RedbDataStore::new(dir.path().join("ac7b.redb")).expect("redb open"));
+    let data_store = Arc::new(RedbDataStore::new(dir.path().join("ac7b.redb")).expect("redb open"));
     let factory = Arc::new(RecordStoreFactory::new(
         StorageConfig::default(),
         data_store,
@@ -510,8 +517,7 @@ async fn sort_with_limit_is_accepted() {
 fn query_snapshot_overflow_constant_value() {
     use topgun_server::query::delta_buffer::QUERY_SNAPSHOT_OVERFLOW;
     assert_eq!(
-        QUERY_SNAPSHOT_OVERFLOW,
-        "QUERY_SNAPSHOT_OVERFLOW",
+        QUERY_SNAPSHOT_OVERFLOW, "QUERY_SNAPSHOT_OVERFLOW",
         "QUERY_SNAPSHOT_OVERFLOW constant must match the TS client's expected string"
     );
 }
@@ -522,8 +528,7 @@ fn query_snapshot_overflow_constant_value() {
 fn query_unbounded_sort_constant_value() {
     use topgun_server::query::delta_buffer::QUERY_UNBOUNDED_SORT;
     assert_eq!(
-        QUERY_UNBOUNDED_SORT,
-        "QUERY_UNBOUNDED_SORT",
+        QUERY_UNBOUNDED_SORT, "QUERY_UNBOUNDED_SORT",
         "QUERY_UNBOUNDED_SORT constant must match the TS client's expected string"
     );
 }
@@ -552,8 +557,7 @@ fn query_resp_payload_wire_format_success_no_error_fields() {
     };
 
     let bytes = rmp_serde::to_vec_named(&payload).expect("serialise");
-    let decoded: rmpv::Value =
-        rmpv::decode::read_value(&mut bytes.as_slice()).expect("decode");
+    let decoded: rmpv::Value = rmpv::decode::read_value(&mut bytes.as_slice()).expect("decode");
 
     let map = match &decoded {
         rmpv::Value::Map(m) => m,
@@ -601,8 +605,7 @@ fn query_resp_payload_wire_format_error_includes_code_and_error() {
     };
 
     let bytes = rmp_serde::to_vec_named(&payload).expect("serialise");
-    let decoded: rmpv::Value =
-        rmpv::decode::read_value(&mut bytes.as_slice()).expect("decode");
+    let decoded: rmpv::Value = rmpv::decode::read_value(&mut bytes.as_slice()).expect("decode");
 
     let map = match &decoded {
         rmpv::Value::Map(m) => m,

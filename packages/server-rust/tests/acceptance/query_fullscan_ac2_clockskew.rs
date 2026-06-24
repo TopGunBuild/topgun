@@ -15,17 +15,19 @@ use topgun_core::messages::query::{QuerySubMessage, QuerySubPayload};
 use topgun_core::types::Value;
 use tower::ServiceExt;
 
-use topgun_server::network::connection::{ConnectionKind, ConnectionRegistry};
+use topgun_core::messages::Message;
 use topgun_server::network::config::ConnectionConfig;
+use topgun_server::network::connection::{ConnectionKind, ConnectionRegistry};
+use topgun_server::service::domain::query::QueryRegistry;
 use topgun_server::service::domain::QueryService;
-use topgun_server::service::operation::{service_names, Operation, OperationContext, OperationResponse};
+use topgun_server::service::operation::{
+    service_names, Operation, OperationContext, OperationResponse,
+};
 use topgun_server::storage::datastores::RedbDataStore;
 use topgun_server::storage::impls::StorageConfig;
 use topgun_server::storage::map_data_store::MapDataStore;
 use topgun_server::storage::record::RecordValue;
 use topgun_server::storage::RecordStoreFactory;
-use topgun_server::service::domain::query::QueryRegistry;
-use topgun_core::messages::Message;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -38,8 +40,8 @@ const BASE_MILLIS: u64 = 1_704_067_200_000;
 /// clock skew. Negative offsets represent clocks that are behind the reference.
 fn skewed_ts(offset_ms: i64, counter: u32) -> Timestamp {
     // Clamp to u64 range: a simulated past clock (negative offset) saturates at 0.
-    let millis = u64::try_from(i64::try_from(BASE_MILLIS).unwrap_or(i64::MAX) + offset_ms)
-        .unwrap_or(0);
+    let millis =
+        u64::try_from(i64::try_from(BASE_MILLIS).unwrap_or(i64::MAX) + offset_ms).unwrap_or(0);
     Timestamp {
         millis,
         counter,
@@ -68,9 +70,7 @@ async fn full_scan_returns_all_records_regardless_of_hlc_skew() {
     const N: usize = 30;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let data_store = Arc::new(
-        RedbDataStore::new(dir.path().join("ac2.redb")).expect("redb open"),
-    );
+    let data_store = Arc::new(RedbDataStore::new(dir.path().join("ac2.redb")).expect("redb open"));
     let factory = Arc::new(RecordStoreFactory::new(
         StorageConfig::default(),
         data_store.clone(),
@@ -85,12 +85,12 @@ async fn full_scan_returns_all_records_regardless_of_hlc_skew() {
     for i in 0..N {
         // Cycle: ahead, behind, at-base, ahead-by-more, behind-by-more, …
         let offset_ms: i64 = match i % 6 {
-            0 => 30_000,           // 30 s ahead
-            1 => -30_000,          // 30 s behind
-            2 => 0,                // at reference
-            3 => 120_000,          // 2 min ahead
-            4 => -120_000,         // 2 min behind
-            _ => 5_000,            // 5 s ahead
+            0 => 30_000,   // 30 s ahead
+            1 => -30_000,  // 30 s behind
+            2 => 0,        // at reference
+            3 => 120_000,  // 2 min ahead
+            4 => -120_000, // 2 min behind
+            _ => 5_000,    // 5 s ahead
         };
         let ts = skewed_ts(offset_ms, u32::try_from(i).unwrap_or(u32::MAX));
         let key = format!("sk{i:04}");
