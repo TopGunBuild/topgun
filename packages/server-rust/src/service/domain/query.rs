@@ -958,6 +958,7 @@ impl QueryService {
                 has_more,
                 cursor_status,
                 merkle_root_hash,
+                ..Default::default()
             },
         });
 

@@ -121,6 +121,16 @@ pub struct QueryRespPayload {
     /// Optional Merkle root hash for delta sync reconnect.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub merkle_root_hash: Option<u32>,
+    /// Human-readable error message when the query could not be fulfilled; `None` on success.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub error: Option<String>,
+    /// Machine-distinguishable error class when `error` is set; `None` on success.
+    ///
+    /// Allows clients to distinguish bounded-sort refusal (`"QUERY_UNBOUNDED_SORT"`) from
+    /// snapshot overflow (`"QUERY_SNAPSHOT_OVERFLOW"`) without string-matching the
+    /// human-readable message.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub code: Option<String>,
 }
 
 /// Query response message containing matching records.
