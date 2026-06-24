@@ -327,6 +327,7 @@ mod tests {
                 has_more: Some(true),
                 cursor_status: Some(CursorStatus::Valid),
                 merkle_root_hash: None,
+                ..Default::default()
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
@@ -342,6 +343,7 @@ mod tests {
                 has_more: None,
                 cursor_status: None,
                 merkle_root_hash: None,
+                ..Default::default()
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
@@ -359,6 +361,7 @@ mod tests {
                 has_more: None,
                 cursor_status: None,
                 merkle_root_hash: None,
+                ..Default::default()
             },
         };
         let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
@@ -506,6 +509,7 @@ mod tests {
                 has_more: None,
                 cursor_status: None,
                 merkle_root_hash: Some(12345),
+                ..Default::default()
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
@@ -521,6 +525,7 @@ mod tests {
                 has_more: None,
                 cursor_status: None,
                 merkle_root_hash: None,
+                ..Default::default()
             },
         };
         let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");

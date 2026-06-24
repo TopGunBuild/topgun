@@ -1,6 +1,6 @@
 /// AC3: Full-scan snapshot stability.
 ///
-/// Each call to QuerySubscribe takes a point-in-time snapshot of the map.
+/// Each call to `QuerySubscribe` takes a point-in-time snapshot of the map.
 /// Records inserted after the snapshot is taken must not appear in the response
 /// for that invocation.
 ///

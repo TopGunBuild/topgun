@@ -1,4 +1,4 @@
-/// AC4: HLC-monotone LiveWindow guard — writes with strictly increasing HLC
+/// AC4: HLC-monotone `LiveWindow` guard — writes with strictly increasing HLC
 /// timestamps are all accepted into the result set.
 ///
 /// The `LiveWindow` tracks a per-key last-seen HLC pair `(millis, counter)`.
@@ -85,7 +85,7 @@ async fn full_scan_accepts_all_records_with_monotone_hlc() {
     // durable store (non-resident). The datastore scan path invokes
     // `apply_mutation_with_hlc` on the LiveWindow; with monotone per-key
     // timestamps every record should pass the guard.
-    for i in 0u32..N as u32 {
+    for i in 0u32..u32::try_from(N).expect("N fits in u32") {
         let ts = monotone_ts(i);
         let value = RecordValue::Lww {
             value: Value::String(format!("record-{i}")),
@@ -162,7 +162,7 @@ async fn full_scan_accepts_all_records_with_monotone_hlc() {
 /// than an already-resident value for the same key must NOT clobber the fresher
 /// value. This simulates a stale datastore page racing with a live CRDT write.
 ///
-/// We exercise this via the LiveWindow directly (not through QueryService) to
+/// We exercise this via the `LiveWindow` directly (not through `QueryService`) to
 /// keep the test deterministic without a real concurrent write race.
 #[test]
 fn live_window_stale_hlc_page_does_not_overwrite_fresher_resident() {

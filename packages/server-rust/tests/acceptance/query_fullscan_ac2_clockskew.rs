@@ -37,7 +37,9 @@ const BASE_MILLIS: u64 = 1_704_067_200_000;
 /// Builds a timestamp at `base ± offset_ms` with the given counter, simulating
 /// clock skew. Negative offsets represent clocks that are behind the reference.
 fn skewed_ts(offset_ms: i64, counter: u32) -> Timestamp {
-    let millis = (BASE_MILLIS as i64 + offset_ms) as u64;
+    // Clamp to u64 range: a simulated past clock (negative offset) saturates at 0.
+    let millis = u64::try_from(i64::try_from(BASE_MILLIS).unwrap_or(i64::MAX) + offset_ms)
+        .unwrap_or(0);
     Timestamp {
         millis,
         counter,
@@ -61,6 +63,7 @@ fn make_op_ctx(conn_id: topgun_server::network::connection::ConnectionId) -> Ope
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)] // single behavioural test: setup + assert + teardown are inseparable
 async fn full_scan_returns_all_records_regardless_of_hlc_skew() {
     const N: usize = 30;
 
@@ -89,7 +92,7 @@ async fn full_scan_returns_all_records_regardless_of_hlc_skew() {
             4 => -120_000,         // 2 min behind
             _ => 5_000,            // 5 s ahead
         };
-        let ts = skewed_ts(offset_ms, i as u32);
+        let ts = skewed_ts(offset_ms, u32::try_from(i).unwrap_or(u32::MAX));
         let key = format!("sk{i:04}");
         let value = RecordValue::Lww {
             value: Value::String(format!("val-{i}")),
