@@ -167,3 +167,81 @@ impl DeltaBuffer {
         Ok(drained)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ts(millis: u64) -> Timestamp {
+        Timestamp {
+            millis,
+            counter: 0,
+            node_id: "n1".to_string(),
+        }
+    }
+
+    fn val(n: i64) -> rmpv::Value {
+        rmpv::Value::Integer(n.into())
+    }
+
+    #[test]
+    fn drain_discards_entries_at_or_before_fence_and_keeps_newer() {
+        let buf = DeltaBuffer::new(16);
+        buf.activate();
+        // Pre-fence mutation (already captured by the scan snapshot) must be dropped.
+        buf.route("old", val(1), ts(100), true);
+        // Exactly-at-fence mutation must also be dropped (fence is exclusive-after).
+        buf.route("at-fence", val(2), ts(200), true);
+        // Post-fence mutation must survive the drain.
+        buf.route("new", val(3), ts(300), true);
+
+        let drained = buf.deactivate_and_drain(&ts(200)).expect("no overflow");
+        let keys: Vec<&str> = drained.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, vec!["new"]);
+        assert_eq!(drained[0].1.timestamp, ts(300));
+    }
+
+    #[test]
+    fn route_applies_per_key_lww_newest_wins() {
+        let buf = DeltaBuffer::new(16);
+        buf.activate();
+        buf.route("k", val(1), ts(100), true);
+        // Older write must NOT clobber the newer entry already recorded.
+        buf.route("k", val(2), ts(50), false);
+        // Newer write must replace.
+        buf.route("k", val(3), ts(300), false);
+
+        let drained = buf.deactivate_and_drain(&ts(0)).expect("no overflow");
+        assert_eq!(drained.len(), 1);
+        let (_, entry) = &drained[0];
+        assert_eq!(entry.timestamp, ts(300));
+        assert_eq!(entry.value, val(3));
+        assert!(!entry.matches);
+    }
+
+    #[test]
+    fn overflow_beyond_capacity_returns_err_on_drain() {
+        let buf = DeltaBuffer::new(2);
+        buf.activate();
+        buf.route("a", val(1), ts(100), true);
+        buf.route("b", val(2), ts(100), true);
+        // Third distinct key exceeds capacity → overflow.
+        buf.route("c", val(3), ts(100), true);
+
+        assert!(buf.deactivate_and_drain(&ts(0)).is_err());
+    }
+
+    #[test]
+    fn route_on_inactive_buffer_is_noop() {
+        let buf = DeltaBuffer::new(16);
+        assert!(!buf.is_active());
+        // Mutation before activation must not be recorded.
+        buf.route("k", val(1), ts(300), true);
+
+        buf.activate();
+        assert!(buf.is_active());
+        let drained = buf.deactivate_and_drain(&ts(0)).expect("no overflow");
+        assert!(drained.is_empty());
+        assert!(!buf.is_active());
+    }
+}

@@ -47,7 +47,10 @@ fn make_ts(seq: u32) -> Timestamp {
     }
 }
 
-fn make_op_ctx(conn_id: topgun_server::network::connection::ConnectionId, seq: u64) -> OperationContext {
+fn make_op_ctx(
+    conn_id: topgun_server::network::connection::ConnectionId,
+    seq: u64,
+) -> OperationContext {
     let fence = Timestamp {
         millis: BASE_MILLIS,
         counter: 0,
@@ -91,9 +94,7 @@ async fn run_scan(
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshot_reflects_durable_state_at_scan_time() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let data_store = Arc::new(
-        RedbDataStore::new(dir.path().join("ac3.redb")).expect("redb open"),
-    );
+    let data_store = Arc::new(RedbDataStore::new(dir.path().join("ac3.redb")).expect("redb open"));
     let factory = Arc::new(RecordStoreFactory::new(
         StorageConfig::default(),
         data_store.clone(),
@@ -160,12 +161,110 @@ async fn snapshot_reflects_durable_state_at_scan_time() {
 
     // Cross-check: scan 1's results are a proper subset of scan 2's results
     // (no record was removed, only added).
-    let keys1: std::collections::HashSet<String> =
-        results1.iter().map(|e| e.key.clone()).collect();
-    let keys2: std::collections::HashSet<String> =
-        results2.iter().map(|e| e.key.clone()).collect();
+    let keys1: std::collections::HashSet<String> = results1.iter().map(|e| e.key.clone()).collect();
+    let keys2: std::collections::HashSet<String> = results2.iter().map(|e| e.key.clone()).collect();
     assert!(
         keys1.is_subset(&keys2),
         "all keys from scan 1 must appear in scan 2 (no records disappeared)"
+    );
+}
+
+/// AC3 (merge direction): when a key lives in BOTH the in-memory engine (resident)
+/// and the durable datastore with conflicting HLC timestamps, the full-scan merge
+/// must apply HLC-LWW per key — independent of which tier holds the newer copy.
+///
+/// - resident-wins:  resident HLC  >  datastore HLC → resident value surfaces
+/// - datastore-wins: datastore HLC >  resident HLC  → datastore value surfaces
+/// - tie:            resident HLC  == datastore HLC → resident value wins (the
+///   resident copy is preferred unless the durable copy is *strictly* newer,
+///   matching the write-behind window where in-memory is the freshest replica)
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_merges_resident_over_datastore_by_hlc_direction() {
+    use topgun_server::storage::{CallerProvenance, ExpiryPolicy};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data_store =
+        Arc::new(RedbDataStore::new(dir.path().join("ac3-merge.redb")).expect("redb open"));
+    let factory = Arc::new(RecordStoreFactory::new(
+        StorageConfig::default(),
+        data_store.clone(),
+        Vec::new(),
+    ));
+    let map_name = "merge_map";
+
+    // Durable copies in the datastore.
+    let durable = [
+        ("resident-wins", "datastore-low", make_ts(1)), // older than resident
+        ("datastore-wins", "datastore-high", make_ts(9)), // newer than resident
+        ("tie", "datastore-tie", make_ts(5)),           // equal to resident
+    ];
+    for (key, val, ts) in durable {
+        let value = RecordValue::Lww {
+            value: Value::String(val.to_string()),
+            timestamp: ts,
+        };
+        data_store
+            .add(map_name, key, &value, 0, 1_704_067_200)
+            .await
+            .expect("durable write");
+    }
+
+    // Resident copies in the in-memory engine. `CallerProvenance::Load` writes to
+    // the engine WITHOUT writing back through to the datastore, so the two tiers
+    // genuinely diverge and the scan must merge them.
+    let store = factory.get_or_create(map_name, 0);
+    let resident = [
+        ("resident-wins", "resident-high", make_ts(9)), // newer → wins
+        ("datastore-wins", "resident-low", make_ts(1)), // older → loses
+        ("tie", "resident-tie", make_ts(5)),            // equal → wins
+    ];
+    for (key, val, ts) in resident {
+        let value = RecordValue::Lww {
+            value: Value::String(val.to_string()),
+            timestamp: ts,
+        };
+        store
+            .put(key, value, ExpiryPolicy::NONE, CallerProvenance::Load)
+            .await
+            .expect("resident write");
+    }
+
+    let conn_registry = Arc::new(ConnectionRegistry::new());
+    let config = ConnectionConfig::default();
+    let (handle, _rx) = conn_registry.register(ConnectionKind::Client, &config);
+    let conn_id = handle.id;
+
+    let svc = Arc::new(QueryService::new(
+        Arc::new(QueryRegistry::new()),
+        factory.clone(),
+        conn_registry,
+        None,
+        10_000,
+        None,
+        #[cfg(feature = "datafusion")]
+        None,
+    ));
+
+    let results = run_scan(Arc::clone(&svc), conn_id, "ac3-merge", map_name, 1).await;
+
+    let by_key: std::collections::HashMap<String, String> = results
+        .iter()
+        .filter_map(|e| e.value.as_str().map(|v| (e.key.clone(), v.to_string())))
+        .collect();
+
+    assert_eq!(
+        by_key.get("resident-wins").map(String::as_str),
+        Some("resident-high"),
+        "resident copy with strictly-higher HLC must win over the durable copy"
+    );
+    assert_eq!(
+        by_key.get("datastore-wins").map(String::as_str),
+        Some("datastore-high"),
+        "durable copy with strictly-higher HLC must win over the resident copy"
+    );
+    assert_eq!(
+        by_key.get("tie").map(String::as_str),
+        Some("resident-tie"),
+        "on equal HLC the resident copy wins (durable must be STRICTLY newer to override)"
     );
 }
