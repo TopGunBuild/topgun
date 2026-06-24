@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - fix(query): full-scan pager uses cap=limit+1 for correct pagination + mandatory _key tie-break on sort
+- **Behavior change (query result ordering):** sorted queries now break ties on the
+  record key (`_key` ascending). Rows that compare equal on the sort field may surface
+  in a different order than before, but the order is now deterministic across runs.
+- **Behavior change (query result ordering):** a query with `limit` but no sort now
+  returns rows in ascending key order. Previously the order was unspecified.
+- feat(query): full-scan reads stream durable (non-resident) records and merge them
+  HLC-LWW against the in-memory snapshot, so queries see records that were evicted from
+  or never loaded into memory — without ever materializing the whole map in RAM.
+- feat(query): new typed response codes `QUERY_UNBOUNDED_SORT` (a sort that cannot be
+  bounded without a `limit` is rejected) and `QUERY_SNAPSHOT_OVERFLOW` (too many
+  concurrent writes during a live snapshot; the client should resubscribe).
 
 ## [2.0.0] - 2026-05-23
 
