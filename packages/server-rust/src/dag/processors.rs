@@ -13,10 +13,11 @@
 //! Each processor has a corresponding supplier (`*ProcessorSupplier`) that
 //! implements `ProcessorSupplier` to create instances for the executor.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use anyhow::Result;
+use topgun_core::hlc::Timestamp;
 use topgun_core::messages::base::{AggFunc, Aggregation, PredicateNode, SortDirection};
 
 use crate::dag::types::{Inbox, Outbox, Processor, ProcessorContext, ProcessorSupplier};
@@ -211,6 +212,32 @@ fn group_key_string(item: &rmpv::Value, group_by: &[String]) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Key injection helper
+// ---------------------------------------------------------------------------
+
+/// Inject the record key as `_key` into an rmpv map value so downstream stages
+/// (CursorProcessor's last_key tie-break, SortProcessor field access) can reach
+/// it without a separate key channel.
+fn inject_key(key: &str, rmpv_val: rmpv::Value) -> rmpv::Value {
+    match rmpv_val {
+        rmpv::Value::Map(mut pairs) => {
+            pairs.push((
+                rmpv::Value::String("_key".into()),
+                rmpv::Value::String(key.into()),
+            ));
+            rmpv::Value::Map(pairs)
+        }
+        other => rmpv::Value::Map(vec![
+            (
+                rmpv::Value::String("_key".into()),
+                rmpv::Value::String(key.into()),
+            ),
+            (rmpv::Value::String("_value".into()), other),
+        ]),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ScanProcessor
 // ---------------------------------------------------------------------------
 
@@ -249,43 +276,94 @@ impl ScanProcessor {
 impl Processor for ScanProcessor {
     fn init(&mut self, context: &ProcessorContext) -> Result<()> {
         self.partition_ids.clone_from(&context.partition_ids);
-        // Pre-load all records from all assigned partitions into the buffer.
+
+        // Take an up-front key-sorted resident snapshot from all assigned partitions.
+        // The BTreeMap gives us key-sorted order and deduplication across partitions;
+        // the timestamp is retained so we can LWW-merge against the datastore copy.
+        let mut resident: BTreeMap<String, (rmpv::Value, Timestamp)> = BTreeMap::new();
         for &pid in &self.partition_ids {
             let store = self.factory.get_or_create(&self.map_name, pid);
             store.for_each_boxed(
                 &mut |key, record| {
-                    // Convert topgun_core::types::Value -> rmpv::Value using the
-                    // canonical untagged converter (the same representation used on
-                    // the wire and by the predicate engine). A serde round-trip would
-                    // produce an externally-tagged form (`Value::Int(30)` -> `{Int:30}`),
-                    // which breaks field access for Filter/Sort and the client result shape.
-                    if let RecordValue::Lww { value, .. } = &record.value {
-                        let rmpv_val = crate::service::domain::predicate::value_to_rmpv(value);
-                        // Inject the record key as `_key` so downstream stages
-                        // (e.g. CursorProcessor's last_key tie-break) can access
-                        // it without a separate key channel.
-                        let row = match rmpv_val {
-                            rmpv::Value::Map(mut pairs) => {
-                                pairs.push((
-                                    rmpv::Value::String("_key".into()),
-                                    rmpv::Value::String(key.into()),
-                                ));
-                                rmpv::Value::Map(pairs)
-                            }
-                            other => rmpv::Value::Map(vec![
-                                (
-                                    rmpv::Value::String("_key".into()),
-                                    rmpv::Value::String(key.into()),
-                                ),
-                                (rmpv::Value::String("_value".into()), other),
-                            ]),
-                        };
-                        self.buffer.push(row);
+                    if let RecordValue::Lww { value, timestamp } = &record.value {
+                        let rmpv_val =
+                            crate::service::domain::predicate::value_to_rmpv(value);
+                        let row = inject_key(key, rmpv_val);
+                        resident.insert(key.to_string(), (row, timestamp.clone()));
                     }
                 },
                 false,
             );
         }
+
+        // Stream the datastore for persisted-but-non-resident records and merge
+        // them HLC-LWW against the resident snapshot. This surfaces records that
+        // are durable on disk but were evicted from (or never loaded into) the
+        // in-memory engine — the gap that causes silent divergence post-restart
+        // or post-eviction.
+        //
+        // Merge rule: the resident copy wins when its timestamp is >= the durable
+        // copy (the dirty write-behind window means in-memory is often newer);
+        // the durable copy wins only when its timestamp is strictly higher than
+        // the resident — an unusual case where a peer write landed in the durable
+        // store before it propagated to the in-memory engine.
+        let data_store = self.factory.data_store();
+        if !data_store.is_null() {
+            let map_name = self.map_name.clone();
+
+            // Run the async datastore scan from within this synchronous init()
+            // call. The server runs on a multi-thread tokio runtime so
+            // block_in_place is safe and correct; it moves the blocking work to
+            // a dedicated thread to avoid starving the async executor.
+            let datastore_records: Vec<(String, RecordValue)> =
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        let mut all_records = Vec::new();
+                        let batch_cost: u64 = 0; // use backend default
+                        let mut batch = data_store
+                            .scan_values(&map_name, false, batch_cost)
+                            .await?;
+                        loop {
+                            all_records.extend(batch.records);
+                            let Some(cursor) = batch.next_cursor else {
+                                break;
+                            };
+                            batch = data_store
+                                .scan_values_batched(&map_name, false, cursor, batch_cost)
+                                .await?;
+                        }
+                        anyhow::Ok(all_records)
+                    })
+                })
+                .unwrap_or_default();
+
+            for (key, record_value) in datastore_records {
+                if let RecordValue::Lww { value, timestamp } = record_value {
+                    let rmpv_val = crate::service::domain::predicate::value_to_rmpv(&value);
+                    let row = inject_key(&key, rmpv_val);
+                    match resident.get(&key) {
+                        None => {
+                            // Key is non-resident: the durable record fills the gap.
+                            resident.insert(key, (row, timestamp));
+                        }
+                        Some((_, resident_ts)) => {
+                            // Key is resident: apply HLC-LWW — only replace if the
+                            // durable record is strictly newer (rare during normal
+                            // operation but possible if a write arrived directly from
+                            // a peer into storage before the in-memory engine saw it).
+                            if timestamp > *resident_ts {
+                                resident.insert(key, (row, timestamp));
+                            }
+                            // Otherwise the resident copy wins; no change needed.
+                        }
+                    }
+                }
+            }
+        }
+
+        // Flatten the merged BTreeMap (already key-sorted) into the output buffer.
+        // Discarding the timestamp here since downstream stages only need the value.
+        self.buffer = resident.into_values().map(|(row, _)| row).collect();
         self.initialized = true;
         Ok(())
     }

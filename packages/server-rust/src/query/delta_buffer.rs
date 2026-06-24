@@ -33,13 +33,15 @@ pub const QUERY_SNAPSHOT_OVERFLOW: &str = "QUERY_SNAPSHOT_OVERFLOW";
 // ---------------------------------------------------------------------------
 
 /// A single per-key entry captured by the buffer while the snapshot scan is in flight.
-struct DeltaEntry {
+// Fields are read by the live-query snapshot correction path wired in G3.
+#[allow(dead_code)]
+pub(crate) struct DeltaEntry {
     /// The record value at the time the mutation was routed.
-    value: rmpv::Value,
+    pub(crate) value: rmpv::Value,
     /// Timestamp of the mutation; used to fence against mutations that pre-date the scan.
-    timestamp: Timestamp,
+    pub(crate) timestamp: Timestamp,
     /// Whether the record matched the subscription predicate at the time of mutation.
-    matches: bool,
+    pub(crate) matches: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -63,6 +65,9 @@ struct Inner {
 /// 2. Concurrent mutations call `route()` for each affected key.
 /// 3. `deactivate_and_drain(fence)` — close the buffer, discard entries whose timestamp
 ///    is ≤ the fence (they were already captured in the scan), return the rest.
+// The full usage (activate + deactivate_and_drain) is wired in G3's live-query
+// subscription handler.
+#[allow(dead_code)]
 pub struct DeltaBuffer {
     inner: Mutex<Inner>,
     /// Maximum number of distinct keys the buffer will accept before overflowing.
@@ -72,14 +77,22 @@ pub struct DeltaBuffer {
 impl DeltaBuffer {
     /// Create a new, inactive buffer with the given key capacity.
     pub fn new(capacity: usize) -> Self {
-        todo!()
+        Self {
+            inner: Mutex::new(Inner {
+                active: false,
+                entries: HashMap::new(),
+                overflowed: false,
+            }),
+            capacity,
+        }
     }
 
     /// Open the buffer so that subsequent `route` calls are recorded.
     ///
     /// Calling `activate` on an already-active buffer is a no-op (idempotent).
     pub fn activate(&self) {
-        todo!()
+        let mut inner = self.inner.lock();
+        inner.active = true;
     }
 
     /// Record a mutation for `key`.
@@ -92,7 +105,35 @@ impl DeltaBuffer {
     /// overflowed; subsequent `route` calls are still no-ops (no additional state
     /// is modified once overflow is set).
     pub fn route(&self, key: &str, value: rmpv::Value, timestamp: Timestamp, matches: bool) {
-        todo!()
+        let mut inner = self.inner.lock();
+        if !inner.active {
+            return;
+        }
+        if inner.overflowed {
+            return;
+        }
+        // Check capacity before inserting a new key; existing keys update in-place.
+        if !inner.entries.contains_key(key) && inner.entries.len() >= self.capacity {
+            inner.overflowed = true;
+            return;
+        }
+        // Per-key LWW: only update if the incoming timestamp is strictly newer than
+        // what we already have. This ensures the snapshot correction uses the latest
+        // known value, not an accidentally replayed older write.
+        let should_insert = match inner.entries.get(key) {
+            None => true,
+            Some(existing) => timestamp > existing.timestamp,
+        };
+        if should_insert {
+            inner.entries.insert(
+                key.to_string(),
+                DeltaEntry {
+                    value,
+                    timestamp,
+                    matches,
+                },
+            );
+        }
     }
 
     /// Close the buffer and return all entries whose timestamp is strictly after `fence`.
@@ -103,7 +144,25 @@ impl DeltaBuffer {
     /// Returns:
     /// - `Ok(vec)` — list of `(key, DeltaEntry)` pairs to overlay on the snapshot.
     /// - `Err(())` — the buffer overflowed; caller must retry the snapshot.
-    pub fn deactivate_and_drain(&self, fence: Timestamp) -> Result<Vec<(String, DeltaEntry)>, ()> {
-        todo!()
+    ///
+    /// The deactivation and drain happen under a single lock acquisition so no mutation
+    /// can slip in between closing the window and reading the accumulated set.
+    // Called by the live-query snapshot correction path wired in G3.
+    #[allow(dead_code)]
+    pub(crate) fn deactivate_and_drain(
+        &self,
+        fence: Timestamp,
+    ) -> Result<Vec<(String, DeltaEntry)>, ()> {
+        let mut inner = self.inner.lock();
+        inner.active = false;
+        if inner.overflowed {
+            return Err(());
+        }
+        let drained: Vec<(String, DeltaEntry)> = inner
+            .entries
+            .drain()
+            .filter(|(_, entry)| entry.timestamp > fence)
+            .collect();
+        Ok(drained)
     }
 }

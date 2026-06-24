@@ -233,6 +233,16 @@ impl RecordStoreFactory {
         Ok(())
     }
 
+    /// Returns a reference to the shared persistence backend.
+    ///
+    /// Exposes the underlying [`MapDataStore`] so callers (e.g. the query scan
+    /// path) can drive datastore-backed streaming scans without going through the
+    /// per-partition hydration loop.
+    #[must_use]
+    pub fn data_store(&self) -> Arc<dyn MapDataStore> {
+        self.data_store.clone()
+    }
+
     /// Returns a snapshot of all live stores across all maps and partitions.
     ///
     /// Allocates a Vec + clones every Arc per call — O(N stores). Negligible at
