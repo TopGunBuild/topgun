@@ -797,10 +797,15 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     /// Proves cost-based eviction fires end-to-end: real `put()` → real cost →
-    /// real `tick()` → records evicted.
+    /// write-through marks record clean → real `tick()` → records evicted.
     ///
     /// Uses the real private `tick()` (accessible here because this test lives
     /// inside `eviction_orchestrator.rs`'s own `cfg(test)` mod).
+    ///
+    /// Eligibility comes from the REAL clean-marking path (R6): `put()` with
+    /// `CallerProvenance::Client` over a real redb datastore writes through AND
+    /// calls `metadata.on_store(now)` after the WAL append succeeds, so records
+    /// are genuinely non-dirty without any manual metadata manipulation.
     #[tokio::test]
     async fn ac1_eviction_fires_under_real_cost_pressure() {
         use tempfile::tempdir;
@@ -812,7 +817,7 @@ mod tests {
         use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
 
         // Build a factory over a real redb datastore so put() writes through
-        // (records become durable, making the setup realistic).
+        // (records become durable AND marked clean via R6).
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("ac1_eviction.redb");
         let data_store: Arc<dyn crate::storage::map_data_store::MapDataStore> =
@@ -832,6 +837,10 @@ mod tests {
         // a short string value serializes to ~30–60 bytes. Writing 50 records
         // with keys like "k000" (4 bytes each) yields ~2 000–3 000 bytes total,
         // well above the 500-byte ceiling chosen below.
+        //
+        // Critically: put() with CallerProvenance::Client over a real datastore
+        // triggers write-through which calls on_store(now) after add() succeeds,
+        // marking each record clean without any manual manipulation.
         let value_str = "hello-eviction-test-record-payload";
         for i in 0..50u32 {
             let key = format!("k{i:03}");
@@ -849,30 +858,21 @@ mod tests {
                 .expect("put must succeed");
         }
 
-        // Verify cost is non-zero after puts — this is the G2 correctness proof.
+        // Verify cost is non-zero after puts — proves G2 real cost measurement.
         let cost_before = store.owned_entry_cost();
         assert!(
             cost_before > 0,
             "owned_entry_cost must be > 0 after puts with real cost measurement; got {cost_before}"
         );
 
-        // Mark all records non-dirty so evict_lru can select them. Records written
-        // via put() are dirty (last_stored_time=0) because on_store() is not yet
-        // wired into the write-through path. Re-insert each record with
-        // last_stored_time = last_update_time to satisfy the never-evict-dirty
-        // invariant, simulating the state after a completed flush cycle.
-        let snapshot = store.storage().snapshot_iter();
-        for (key, mut record) in snapshot {
-            // Advance last_stored_time to match last_update_time → not dirty.
-            record.metadata.last_stored_time = record.metadata.last_update_time;
-            store.storage().put(&key, record);
-        }
-
-        // Confirm records are now eligible (dirty_count == 0).
+        // Verify records are clean after puts — proves R6 write-through marking.
+        // dirty_count == 0 means evict_lru candidates are genuinely eligible without
+        // any manual last_stored_time manipulation.
         assert_eq!(
             store.dirty_count(),
             0,
-            "all records must be non-dirty before eviction tick"
+            "all records must be non-dirty after put() with a real datastore (R6); \
+             dirty_count must be 0 without any manual metadata manipulation"
         );
 
         // Configure the orchestrator with a ceiling small enough that the 50
@@ -895,7 +895,8 @@ mod tests {
 
         let size_before = store.size();
 
-        // Call the real private tick() — this is the core of the behavioral proof.
+        // Call the real private tick() — this exercises the literal defect surface:
+        // current_ram < high_threshold branch with real cost values from real puts.
         orchestrator.tick();
 
         let size_after = store.size();

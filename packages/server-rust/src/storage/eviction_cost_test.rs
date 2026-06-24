@@ -4,6 +4,7 @@
 //! - AC2: queries remain correct with active eviction (322c streaming load-bearing)
 //! - AC3: restart correctness with active eviction (TODO-530 closure holds)
 //! - AC4: cost non-leakage (RecordMetadata.cost never reaches the wire or disk)
+//! - AC6: write-through marks records clean → genuinely evictable (R6 production path)
 //!
 //! AC1 (eviction fires under real cost pressure) lives in eviction_orchestrator.rs
 //! because it requires private `tick()` access.
@@ -55,14 +56,12 @@ mod eviction_cost_tests {
         )
     }
 
-    /// Write N records to the store, return them non-dirty by re-inserting with
-    /// `last_stored_time` matching `last_update_time` (simulating a completed flush
-    /// cycle so `evict_lru` can select the candidates — never-evict-dirty invariant).
-    async fn write_and_flush_records(
-        store: &DefaultRecordStore,
-        n: usize,
-        prefix: &str,
-    ) -> Vec<String> {
+    /// Write N records to the store via `put()` with `CallerProvenance::Client`.
+    ///
+    /// When the store is backed by a real datastore, R6 marks each record clean
+    /// automatically (write-through + `on_store(now)` after `add()` succeeds), so
+    /// `evict_lru` can select them immediately without any manual manipulation.
+    async fn write_records(store: &DefaultRecordStore, n: usize, prefix: &str) -> Vec<String> {
         let mut keys = Vec::with_capacity(n);
         for i in 0..n {
             let key = format!("{prefix}{i:03}");
@@ -77,17 +76,6 @@ mod eviction_cost_tests {
                 .expect("put must succeed");
             keys.push(key);
         }
-
-        // Re-insert each record with last_stored_time = last_update_time so
-        // is_dirty() returns false. Records written by put() start with
-        // last_stored_time=0 because on_store() is not called by the write-through
-        // path — this simulates the state after a completed persistence flush.
-        let snapshot = store.storage().snapshot_iter();
-        for (key, mut record) in snapshot {
-            record.metadata.last_stored_time = record.metadata.last_update_time;
-            store.storage().put(&key, record);
-        }
-
         keys
     }
 
@@ -109,8 +97,16 @@ mod eviction_cost_tests {
             data_store.clone() as Arc<dyn MapDataStore>,
         );
 
-        // Write 20 records — write-through persists each to redb.
-        let keys = write_and_flush_records(&store, 20, "q").await;
+        // Write 20 records — write-through persists each to redb and marks them
+        // clean (R6), so they are immediately evictable.
+        let keys = write_records(&store, 20, "q").await;
+
+        // Confirm all records are clean after puts (proving R6 is active).
+        assert_eq!(
+            store.dirty_count(),
+            0,
+            "all records must be non-dirty after put() over a real datastore"
+        );
 
         // Evict ALL records to make them non-resident.
         let evicted = store.evict_lru(u32::MAX, false);
@@ -175,7 +171,8 @@ mod eviction_cost_tests {
                 "restart_map",
                 data_store.clone() as Arc<dyn MapDataStore>,
             );
-            let keys = write_and_flush_records(&store, 15, "r").await;
+            // R6 marks records clean after write-through, so they are immediately evictable.
+            let keys = write_records(&store, 15, "r").await;
             // Evict all — proves records survive as durable-but-non-resident.
             let evicted = store.evict_lru(u32::MAX, false);
             assert!(evicted > 0, "pre-restart eviction must remove > 0 records");
@@ -301,5 +298,134 @@ mod eviction_cost_tests {
             "NullDataStore holds no durable records; cost must not appear \
              as a phantom value in the persistence layer"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC6: write-through marks records clean → genuinely evictable (R6 production
+    // path)
+    //
+    // Proves R6: put() with CallerProvenance::Client over a real datastore yields
+    // a record that is !is_dirty() without any manual metadata manipulation.
+    // Conversely, put() over NullDataStore (no real persistence) leaves the record
+    // dirty — clean-marking is gated on actual persistence, not unconditional.
+    // Records loaded via get() lazy-load from the datastore enter the engine clean.
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn ac6_write_through_marks_records_clean() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("ac6_clean.redb");
+
+        // --- Part 1: put() over a real datastore → record is clean (evictable) ---
+        {
+            let data_store = Arc::new(RedbDataStore::new(&path).expect("redb open"));
+            let store = make_store_with_datastore(
+                "ac6_map",
+                data_store.clone() as Arc<dyn MapDataStore>,
+            );
+
+            store
+                .put(
+                    "key-real",
+                    lww_value("value-real"),
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Client,
+                )
+                .await
+                .expect("put must succeed");
+
+            // R6: write-through succeeds → on_store(now) is called → !is_dirty()
+            assert_eq!(
+                store.dirty_count(),
+                0,
+                "put() with a real datastore must mark the record clean (dirty_count == 0) \
+                 without any manual metadata manipulation — R6 production path"
+            );
+
+            // Confirm the record is in memory (not evicted yet).
+            assert!(
+                store.exists_in_memory("key-real"),
+                "record must still be resident in memory after put"
+            );
+
+            // Confirm evict_lru can actually evict it (proves genuine eligibility).
+            let evicted = store.evict_lru(1, false);
+            assert_eq!(
+                evicted, 1,
+                "evict_lru must evict the clean record; got {evicted} — record must be genuinely \
+                 eligible, not blocked by dirty state"
+            );
+        }
+
+        // --- Part 2: put() over NullDataStore → record stays dirty ---
+        {
+            let null_store = Arc::new(NullDataStore);
+            let store =
+                make_store_with_datastore("ac6_null_map", null_store as Arc<dyn MapDataStore>);
+
+            store
+                .put(
+                    "key-null",
+                    lww_value("value-null"),
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Client,
+                )
+                .await
+                .expect("put must succeed");
+
+            // NullDataStore discards writes — nothing is actually persisted, so
+            // the record must remain dirty (not safe to evict without real backing).
+            assert!(
+                store.dirty_count() >= 1,
+                "put() over NullDataStore must leave the record dirty (dirty_count >= 1); \
+                 clean-marking is gated on real persistence, not the no-op null store. \
+                 got dirty_count = {}",
+                store.dirty_count()
+            );
+
+            // Confirm evict_lru skips it (dirty records are never evicted).
+            let evicted = store.evict_lru(1, false);
+            assert_eq!(
+                evicted, 0,
+                "dirty records must not be evicted by evict_lru; \
+                 NullDataStore-backed records are permanently ineligible"
+            );
+        }
+
+        // --- Part 3: get() lazy-load from datastore → record enters engine clean ---
+        {
+            // Reopen the redb file written in Part 1. The in-memory engine is empty.
+            let data_store = Arc::new(RedbDataStore::new(&path).expect("redb reopen"));
+            let store = make_store_with_datastore(
+                "ac6_map",
+                data_store.clone() as Arc<dyn MapDataStore>,
+            );
+
+            // Trigger a lazy-load: get() miss → load from datastore → insert into engine.
+            let loaded = store
+                .get("key-real", false)
+                .await
+                .expect("get must succeed");
+            assert!(
+                loaded.is_some(),
+                "key-real must be loadable from the datastore after restart"
+            );
+
+            // A record loaded from the datastore is already persisted → must enter
+            // the engine clean so it is immediately re-evictable.
+            assert_eq!(
+                store.dirty_count(),
+                0,
+                "a record loaded via get() lazy-load from the datastore must enter the engine \
+                 clean (dirty_count == 0) — required for the evict→reload steady state"
+            );
+
+            // Confirm evict_lru can evict the loaded record (proves re-evictability).
+            let evicted = store.evict_lru(1, false);
+            assert_eq!(
+                evicted, 1,
+                "a lazy-loaded record must be evictable immediately; got {evicted}"
+            );
+        }
     }
 }
