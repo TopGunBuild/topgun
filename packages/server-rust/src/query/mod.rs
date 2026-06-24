@@ -2,5 +2,7 @@
 
 pub mod cursor;
 pub mod delta_buffer;
+pub mod full_scan_pager;
 pub mod scan_planner;
+pub mod sort_key;
 pub mod window;
