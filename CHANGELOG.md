@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Versions below 0.12 are pre-release internal milestones — TopGun's public
 > history begins at v2.0.0.
 
+## [Unreleased]
+
+- fix(query): full-scan pager uses cap=limit+1 for correct pagination + mandatory _key tie-break on sort
+
 ## [2.0.0] - 2026-05-23
 
 > First general-availability release of TopGun v2. Complete rewrite from the v1
