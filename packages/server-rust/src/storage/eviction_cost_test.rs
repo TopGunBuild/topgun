@@ -22,8 +22,16 @@ mod eviction_cost_tests {
     use crate::storage::impls::{DefaultRecordStore, StorageConfig};
     use crate::storage::map_data_store::MapDataStore;
     use crate::storage::mutation_observer::CompositeMutationObserver;
-    use crate::storage::record::{estimated_cost, RecordValue};
+    use crate::storage::record::{estimated_cost, RecordMetadata, RecordValue};
     use crate::storage::record_store::{CallerProvenance, ExpiryPolicy, RecordStore};
+    use static_assertions::assert_not_impl_any;
+
+    // Compile-time proof of the non-leakage invariant (AC4): RecordMetadata —
+    // which carries the local `cost` field — must never gain a serde impl, or it
+    // could reach the wire / disk. If a `Serialize`/`Deserialize` derive is ever
+    // added, this fails to COMPILE (not just at runtime), turning the AC4
+    // structural guarantee from a comment into an enforced contract.
+    assert_not_impl_any!(RecordMetadata: serde::Serialize, serde::de::DeserializeOwned);
 
     // ---------------------------------------------------------------------------
     // Shared helpers
