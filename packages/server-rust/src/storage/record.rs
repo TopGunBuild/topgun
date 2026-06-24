@@ -100,6 +100,18 @@ impl RecordMetadata {
     }
 }
 
+/// Conservative fallback heap cost (bytes) used when a [`RecordValue`] cannot
+/// be serialized for sizing.
+///
+/// Deliberately moderate, not `u64::MAX`-large: a value that fails to encode
+/// here also cannot be persisted, so it stays dirty and un-evictable regardless.
+/// A huge sentinel would make the orchestrator thrash — evicting innocent
+/// records every tick trying to drop under a ceiling it can never reach, because
+/// the offending record is itself un-evictable. A moderate constant keeps the
+/// orchestrator roughly honest without that collateral damage; the real signal
+/// is the `tracing::warn!` emitted alongside it.
+pub const COST_ESTIMATE_FALLBACK: u64 = 4096;
+
 /// Returns the estimated heap cost of a [`RecordValue`] in bytes.
 ///
 /// Serializes the value via `rmp_serde::to_vec_named` (the same encoding used
@@ -107,19 +119,34 @@ impl RecordMetadata {
 /// The floor prevents empty/`Null` values from contributing zero cost, which
 /// would leave the eviction orchestrator blind to maps of empty values.
 ///
-/// On serialization error the fallback is `1`: a serialize failure here is
-/// benign (the persistence path would surface it separately), and panicking
-/// on the write path is never acceptable.
+/// This is a deliberate *second* serialization of the value — the persistence
+/// path (`MapDataStore::add`) encodes it again to write it. Reusing the
+/// persisted bytes would require threading the encoded length back out through
+/// the datastore trait (every backend impl), so the estimate stays
+/// self-contained here. The extra encode is bounded by the value size already
+/// paid for the durable write and runs only on the write path (not per eviction
+/// tick), so the cost is acceptable; folding the two encodes into one is a
+/// tracked follow-up optimization.
+///
+/// On serialization failure the fallback is [`COST_ESTIMATE_FALLBACK`] plus a
+/// `tracing::warn!` — never a silent `1`, which would blind the orchestrator to
+/// the record's true size. Panicking on the write path is never acceptable.
 ///
 /// **Call sites must add `key.len() as u64`** to capture the key string's heap
 /// contribution alongside the value bytes. The helper stays value-only so that
 /// callers retain the key in scope without the helper needing to take ownership.
 #[must_use]
 pub fn estimated_cost(value: &RecordValue) -> u64 {
-    rmp_serde::to_vec_named(value)
-        .map(|b| b.len() as u64)
-        .unwrap_or(1)
-        .max(1)
+    match rmp_serde::to_vec_named(value) {
+        Ok(bytes) => (bytes.len() as u64).max(1),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "estimated_cost: RecordValue failed to serialize; using fallback cost estimate"
+            );
+            COST_ESTIMATE_FALLBACK
+        }
+    }
 }
 
 /// The value portion of a record, representing the actual CRDT data.
