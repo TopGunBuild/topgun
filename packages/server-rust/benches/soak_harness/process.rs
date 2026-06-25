@@ -335,9 +335,16 @@ fn spawn_line_reader<R>(
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
+        let passthrough = std::env::var("SOAK_SERVER_LOG_PASSTHROUGH").is_ok();
         let mut lines = BufReader::new(reader).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             panic_watch.record_line(&line);
+            // Opt-in diagnostic: mirror server log lines to the harness's stderr so
+            // an operator can confirm server-side behavior (e.g. eviction firing)
+            // from the run output. Off by default — keeps CI / 72h runs quiet.
+            if passthrough {
+                eprintln!("[server] {line}");
+            }
             if let Some(tx) = &ready_tx {
                 if line.starts_with("PORT=") {
                     if let Some(sender) = tx.lock().take() {

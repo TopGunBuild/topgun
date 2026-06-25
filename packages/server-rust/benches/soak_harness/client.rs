@@ -322,6 +322,20 @@ async fn send_encoded(ws: &mut Ws, msg: &Message) -> Result<()> {
 /// server pushes (e.g. `QUERY_UPDATE`, `SERVER_EVENT`) until a frame decodes to
 /// a `Message`. `what` names the awaited message for error context. Bounded by
 /// `REQUEST_TIMEOUT` so a wedged server surfaces as an error, not a hang.
+/// True for server-initiated broadcast pushes that arrive asynchronously on a
+/// connection with a live subscription (a `QUERY_SUB` is one), independent of
+/// any request the harness issued. No request-response path here ever awaits
+/// these, so `recv_decoded` skips them while waiting for the actual reply.
+fn is_unsolicited_push(msg: &Message) -> bool {
+    matches!(
+        msg,
+        Message::ServerEvent { .. }
+            | Message::ServerBatchEvent { .. }
+            | Message::QueryUpdate { .. }
+            | Message::JournalEvent { .. }
+    )
+}
+
 async fn recv_decoded(ws: &mut Ws, what: &str) -> Result<Message> {
     let deadline = tokio::time::Instant::now() + REQUEST_TIMEOUT;
     loop {
@@ -338,12 +352,24 @@ async fn recv_decoded(ws: &mut Ws, what: &str) -> Result<Message> {
         match frame {
             WsMessage::Binary(data) => {
                 if let Ok(msg) = rmp_serde::from_slice::<Message>(&data) {
+                    if is_unsolicited_push(&msg) {
+                        // A `QUERY_SUB` registers a live subscription, so the server
+                        // can push live `ServerEvent` deltas on this connection that
+                        // interleave with — or arrive before — the request-response
+                        // reply we are waiting for (residual in-flight writes can
+                        // still land during a quiesce window under heavy churn).
+                        // These are never the awaited reply; skip and keep reading.
+                        continue;
+                    }
                     return Ok(msg);
                 }
                 // Undecodable frame — skip and keep waiting.
             }
             WsMessage::Text(text) => {
                 if let Ok(msg) = rmp_serde::from_slice::<Message>(text.as_bytes()) {
+                    if is_unsolicited_push(&msg) {
+                        continue;
+                    }
                     return Ok(msg);
                 }
             }
