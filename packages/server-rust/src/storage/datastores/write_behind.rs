@@ -522,6 +522,29 @@ impl WriteBehindDataStore {
             .is_some()
     }
 
+    /// Stage the latest buffered `value` for `(map, key)` under sequence `seq`,
+    /// keeping monotonicity: a write only replaces the slot if its `seq` is at
+    /// least the slot's current `seq`. `seq` is `next_sequence()`, strictly
+    /// increasing per call, so a higher `seq` is always the later write. Two
+    /// concurrent writers on the same key can otherwise interleave between
+    /// `next_sequence()` and this insert and let the older write clobber the
+    /// newer staged value (a plain `insert` is last-writer-wins by wall-clock,
+    /// not by `seq`). The monotonic guard makes the slot's `seq` truthful, which
+    /// is the identity [`clear_staging_if_current`] relies on.
+    fn stage(&self, map: &str, key: &str, seq: u64, value: Option<RecordValue>) {
+        use dashmap::mapref::entry::Entry;
+        match self.staging.entry((map.to_string(), key.to_string())) {
+            Entry::Occupied(mut e) => {
+                if seq >= e.get().seq {
+                    e.insert(StagingSlot { seq, value });
+                }
+            }
+            Entry::Vacant(e) => {
+                e.insert(StagingSlot { seq, value });
+            }
+        }
+    }
+
     /// Returns the next WAL sequence number for ordering.
     fn next_wal_sequence(&self) -> u64 {
         self.wal_sequence.fetch_add(1, Ordering::Relaxed)
@@ -795,13 +818,8 @@ impl MapDataStore for WriteBehindDataStore {
         }
 
         // Update staging area for read-your-writes
-        self.staging.insert(
-            staging_key,
-            StagingSlot {
-                seq: entry_seq,
-                value: Some(value.clone()),
-            },
-        );
+        let (smap, skey) = staging_key;
+        self.stage(&smap, &skey, entry_seq, Some(value.clone()));
 
         Ok(())
     }
@@ -879,13 +897,8 @@ impl MapDataStore for WriteBehindDataStore {
         }
 
         // Pending delete marker in staging
-        self.staging.insert(
-            staging_key,
-            StagingSlot {
-                seq: entry_seq,
-                value: None,
-            },
-        );
+        let (smap, skey) = staging_key;
+        self.stage(&smap, &skey, entry_seq, None);
 
         Ok(())
     }
@@ -998,13 +1011,8 @@ impl MapDataStore for WriteBehindDataStore {
                 self.pending_count.fetch_add(1, Ordering::Relaxed);
             }
 
-            self.staging.insert(
-                staging_key,
-                StagingSlot {
-                    seq: entry_seq,
-                    value: None,
-                },
-            );
+            let (smap, skey) = staging_key;
+            self.stage(&smap, &skey, entry_seq, None);
         }
 
         Ok(())
@@ -2782,6 +2790,29 @@ mod tests {
         assert!(
             store.staging.is_empty(),
             "no staging slot may leak after both writes flush"
+        );
+    }
+
+    // An out-of-order (lower-seq) stage must not clobber a newer staged value.
+    // Two concurrent same-key writers can interleave between `next_sequence()`
+    // and the staging insert; `stage` keeps the slot monotonic by `seq` so the
+    // later write's value is the one that survives.
+    #[tokio::test]
+    async fn stage_is_monotonic_by_seq() {
+        let (store, _dir) = redb_backed_store();
+
+        store.stage("m", "k", 10, Some(lww("v10", 10)));
+        // A higher seq replaces.
+        store.stage("m", "k", 11, Some(lww("v11", 11)));
+        assert_lww(&store.load("m", "k").await.unwrap().unwrap(), "v11", 11);
+        // A late, lower seq is rejected (does not clobber the newer value).
+        store.stage("m", "k", 10, Some(lww("v10", 10)));
+        assert_lww(&store.load("m", "k").await.unwrap().unwrap(), "v11", 11);
+        // Equal seq (same write, idempotent) is allowed.
+        store.stage("m", "k", 11, None);
+        assert!(
+            store.load("m", "k").await.unwrap().is_none(),
+            "equal-seq restage applies (idempotent same-write update)"
         );
     }
 }
