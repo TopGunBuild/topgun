@@ -1045,7 +1045,10 @@ impl MapDataStore for WriteBehindDataStore {
         }
 
         let pending = self.collect_staging_for_map(map);
-        let batch = self.inner.scan_values(map, is_backup, max_batch_cost).await?;
+        let batch = self
+            .inner
+            .scan_values(map, is_backup, max_batch_cost)
+            .await?;
         // The first batch is the only place staging-only keys are emitted, so
         // they are surfaced exactly once across the whole resumable scan.
         Ok(overlay_scan_batch(batch, &pending, true))
@@ -2363,5 +2366,308 @@ mod tests {
         let cfg = WriteBehindConfig::from_env();
         std::env::remove_var("TOPGUN_WAL_FSYNC_POLICY");
         assert_eq!(cfg.wal_fsync_policy, WalFsyncPolicy::PerOp);
+    }
+
+    // -----------------------------------------------------------------------
+    // Buffer-aware read surface (scan/enumerate/list_maps overlay staging)
+    // -----------------------------------------------------------------------
+
+    use crate::storage::map_data_store::{MerkleLeaf, MerkleLeafKind};
+    use crate::storage::record::OrMapEntry;
+    use crate::storage::RedbDataStore;
+
+    /// `WriteBehind` over a real redb inner with a flush delay long enough that
+    /// `add`/`remove` stay buffered for the duration of a test (no background
+    /// flush fires unless we force it via `flush_key`).
+    fn redb_backed_store() -> (Arc<WriteBehindDataStore>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("wb.redb");
+        let inner: Arc<dyn MapDataStore> = Arc::new(RedbDataStore::new(&path).expect("redb open"));
+        let config = WriteBehindConfig {
+            write_delay_ms: 600_000,
+            flush_interval_ms: 600_000,
+            capacity: 0,
+            ..WriteBehindConfig::default()
+        };
+        (WriteBehindDataStore::new(inner, config), dir)
+    }
+
+    fn lww(value: &str, millis: u64) -> RecordValue {
+        RecordValue::Lww {
+            value: Value::String(value.to_string()),
+            timestamp: Timestamp {
+                millis,
+                counter: 0,
+                node_id: "n".to_string(),
+            },
+        }
+    }
+
+    /// Assert an `Lww` record carries the expected string value and HLC millis.
+    /// `RecordValue` is intentionally not `PartialEq` (avoids a production derive
+    /// just for tests), so destructure instead.
+    fn assert_lww(record: &RecordValue, value: &str, millis: u64) {
+        match record {
+            RecordValue::Lww {
+                value: Value::String(v),
+                timestamp,
+            } => {
+                assert_eq!(v, value, "lww value mismatch");
+                assert_eq!(timestamp.millis, millis, "lww hlc millis mismatch");
+            }
+            other => panic!("expected Lww string record, got {other:?}"),
+        }
+    }
+
+    async fn drain_scan(
+        store: &Arc<WriteBehindDataStore>,
+        map: &str,
+    ) -> Vec<(String, RecordValue)> {
+        let mut out = Vec::new();
+        let mut batch = store.scan_values(map, false, 0).await.unwrap();
+        loop {
+            out.append(&mut batch.records);
+            match batch.next_cursor.take() {
+                Some(cursor) => {
+                    batch = store
+                        .scan_values_batched(map, false, cursor, 0)
+                        .await
+                        .unwrap();
+                }
+                None => break,
+            }
+        }
+        out
+    }
+
+    /// `LeafSink` that collects every emitted leaf for assertions.
+    struct CollectLeaves {
+        leaves: Vec<MerkleLeaf>,
+    }
+
+    #[async_trait]
+    impl LeafSink for CollectLeaves {
+        async fn consume(&mut self, batch: Vec<MerkleLeaf>) -> anyhow::Result<()> {
+            self.leaves.extend(batch);
+            Ok(())
+        }
+    }
+
+    async fn collect_leaves(store: &Arc<WriteBehindDataStore>, map: &str) -> Vec<MerkleLeaf> {
+        let mut sink = CollectLeaves { leaves: Vec::new() };
+        store.enumerate_leaves(map, false, &mut sink).await.unwrap();
+        sink.leaves
+    }
+
+    // AC2 — scan_values surfaces a buffered-only value; no double-count after
+    // flush; a buffered write overrides an older flushed redb value.
+    #[tokio::test]
+    async fn ac2_scan_values_buffer_aware() {
+        let (store, _dir) = redb_backed_store();
+
+        // Buffered-only key: only in staging, never flushed.
+        store.add("m", "k", &lww("v1", 1), 0, 1000).await.unwrap();
+        let rows = drain_scan(&store, "m").await;
+        assert_eq!(rows.len(), 1, "buffered-only key must be surfaced by scan");
+        assert_eq!(rows[0].0, "k");
+        assert_lww(&rows[0].1, "v1", 1);
+
+        // Flush to redb; scan must still return it exactly once (no double-count).
+        store
+            .flush_key("m", "k", &lww("v1", 1), false)
+            .await
+            .unwrap();
+        let rows = drain_scan(&store, "m").await;
+        assert_eq!(rows.len(), 1, "flushed key must appear exactly once");
+        assert_lww(&rows[0].1, "v1", 1);
+
+        // A newer buffered write over the flushed redb value wins, exactly once.
+        store.add("m", "k", &lww("v2", 5), 0, 2000).await.unwrap();
+        let rows = drain_scan(&store, "m").await;
+        assert_eq!(rows.len(), 1, "override must not double-count");
+        assert_lww(&rows[0].1, "v2", 5);
+    }
+
+    // AC3 — a pending delete buffered in staging hides the flushed redb value
+    // from both scan_values and enumerate_leaves (no resurrection).
+    #[tokio::test]
+    async fn ac3_pending_delete_suppression() {
+        let (store, _dir) = redb_backed_store();
+
+        store.add("m", "k", &lww("v1", 1), 0, 1000).await.unwrap();
+        store
+            .flush_key("m", "k", &lww("v1", 1), false)
+            .await
+            .unwrap();
+        // Now buffer a delete (staging None) over the flushed value.
+        store.remove("m", "k", 2000).await.unwrap();
+
+        let rows = drain_scan(&store, "m").await;
+        assert!(
+            rows.is_empty(),
+            "pending delete must hide the flushed value"
+        );
+
+        let leaves = collect_leaves(&store, "m").await;
+        assert!(
+            leaves.is_empty(),
+            "pending delete must suppress the durable leaf"
+        );
+    }
+
+    // AC4 — leaf-hash parity across flush + OrMap None-leaf propagation.
+    #[tokio::test]
+    async fn ac4_enumerate_leaves_hash_parity() {
+        let (store, _dir) = redb_backed_store();
+
+        // Buffered-only Lww leaf.
+        store.add("m", "k", &lww("v1", 7), 0, 1000).await.unwrap();
+        let buffered_leaves = collect_leaves(&store, "m").await;
+        assert_eq!(buffered_leaves.len(), 1, "buffered-only leaf must surface");
+
+        // Flush and re-enumerate: same leaf hash (Merkle root unchanged).
+        store
+            .flush_key("m", "k", &lww("v1", 7), false)
+            .await
+            .unwrap();
+        let flushed_leaves = collect_leaves(&store, "m").await;
+        assert_eq!(
+            buffered_leaves, flushed_leaves,
+            "leaf hash must be identical buffered vs flushed"
+        );
+        assert_eq!(buffered_leaves[0].kind, MerkleLeafKind::Lww);
+
+        // OrMap sub-assertion: an OrMap entry yields a leaf; an OrTombstones
+        // entry (merkle_leaf_hash == None) contributes NO leaf — no zero/
+        // placeholder leaf injected.
+        let or_value = RecordValue::OrMap {
+            records: vec![OrMapEntry {
+                value: Value::String("x".to_string()),
+                tag: "t1".to_string(),
+                timestamp: Timestamp {
+                    millis: 1,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
+            }],
+            tombstones: Vec::new(),
+        };
+        store.add("o", "ok", &or_value, 0, 1000).await.unwrap();
+        let none_value = RecordValue::OrTombstones {
+            tags: vec!["gone".to_string()],
+        };
+        store
+            .add("o", "tombstoned", &none_value, 0, 1000)
+            .await
+            .unwrap();
+
+        let or_leaves = collect_leaves(&store, "o").await;
+        assert_eq!(
+            or_leaves.len(),
+            1,
+            "OrMap entry yields a leaf; OrTombstones (None) contributes none"
+        );
+        assert_eq!(or_leaves[0].key, "ok");
+        assert_eq!(or_leaves[0].kind, MerkleLeafKind::OrMap);
+    }
+
+    // AC5 — a backup scan/enumerate is byte-for-byte the inner result: no
+    // overlay of non-backup staging writes.
+    #[tokio::test]
+    async fn ac5_is_backup_untouched() {
+        let (store, _dir) = redb_backed_store();
+
+        // Non-backup buffered write on map "m".
+        store
+            .add("m", "k", &lww("primary", 1), 0, 1000)
+            .await
+            .unwrap();
+
+        // Backup scan must not see the non-backup staging write.
+        let backup_batch = store.scan_values("m", true, 0).await.unwrap();
+        assert!(
+            backup_batch.records.is_empty(),
+            "backup scan must not overlay non-backup staging writes"
+        );
+
+        let mut sink = CollectLeaves { leaves: Vec::new() };
+        store.enumerate_leaves("m", true, &mut sink).await.unwrap();
+        assert!(
+            sink.leaves.is_empty(),
+            "backup enumerate must not overlay non-backup staging writes"
+        );
+    }
+
+    // AC6 — list_maps unions staging-only maps; pending-delete-only maps are
+    // excluded.
+    #[tokio::test]
+    async fn ac6_list_maps_union() {
+        let (store, _dir) = redb_backed_store();
+
+        // Map whose only write is buffered, never flushed.
+        store
+            .add("buffered_map", "k", &lww("v", 1), 0, 1000)
+            .await
+            .unwrap();
+        // Map present in staging only via a pending delete.
+        store.remove("delete_only_map", "k", 1000).await.unwrap();
+
+        let maps = store.list_maps().await.unwrap();
+        assert!(
+            maps.contains(&"buffered_map".to_string()),
+            "buffered-only map must appear in list_maps"
+        );
+        assert!(
+            !maps.contains(&"delete_only_map".to_string()),
+            "pending-delete-only map must not appear in list_maps"
+        );
+    }
+
+    // AC7 — multi-batch scan over flushed + staging-only keys returns the full
+    // logical key set exactly once, no boundary miss, no staging-only duplicate.
+    #[tokio::test]
+    async fn ac7_cursor_safe_merge() {
+        let (store, _dir) = redb_backed_store();
+
+        // Flush several keys to redb so the scan spans multiple small batches.
+        for i in 0..6u32 {
+            let k = format!("flushed_{i:02}");
+            let v = lww(&format!("v{i}"), 1);
+            store.add("m", &k, &v, 0, 1000).await.unwrap();
+            store.flush_key("m", &k, &v, false).await.unwrap();
+        }
+        // Add staging-only keys (buffered, never flushed) interleaved by name.
+        for i in 0..4u32 {
+            let k = format!("buffered_{i:02}");
+            store.add("m", &k, &lww("b", 2), 0, 2000).await.unwrap();
+        }
+
+        // Force a tiny batch budget so the redb scan pages across many batches.
+        let mut out: Vec<(String, RecordValue)> = Vec::new();
+        let mut batch = store.scan_values("m", false, 1).await.unwrap();
+        loop {
+            out.append(&mut batch.records);
+            match batch.next_cursor.take() {
+                Some(cursor) => {
+                    batch = store
+                        .scan_values_batched("m", false, cursor, 1)
+                        .await
+                        .unwrap();
+                }
+                None => break,
+            }
+        }
+
+        let mut keys: Vec<String> = out.iter().map(|(k, _)| k.clone()).collect();
+        keys.sort();
+        let mut expected: Vec<String> = (0..6)
+            .map(|i| format!("flushed_{i:02}"))
+            .chain((0..4).map(|i| format!("buffered_{i:02}")))
+            .collect();
+        expected.sort();
+        assert_eq!(
+            keys, expected,
+            "merged scan must yield every key exactly once across batches"
+        );
     }
 }
