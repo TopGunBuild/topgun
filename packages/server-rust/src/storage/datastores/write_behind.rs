@@ -352,6 +352,25 @@ fn partition_for(map: &str, key: &str) -> u32 {
 // WriteBehindDataStore
 // ---------------------------------------------------------------------------
 
+/// One entry in the staging overlay: the latest buffered value for a key plus
+/// the sequence of the write that produced it.
+///
+/// The `seq` is the identity check the background flush uses to remove a staging
+/// entry only when it still corresponds to the write it just persisted. Without
+/// it, a flush that drains an older value (`E1`) and then unconditionally clears
+/// the staging slot would wipe a NEWER value (`E2`) that coalesced in after the
+/// drain dequeued the batch — dropping read-your-writes back to the now-stale
+/// durable value until `E2` itself flushes. That window is what breaks
+/// read-your-writes under active eviction, where the resident copy is gone and
+/// the staging overlay is the only correct source.
+#[derive(Clone)]
+struct StagingSlot {
+    /// Sequence of the write that set this staged value (`DelayedEntry.sequence`).
+    seq: u64,
+    /// `Some(value)` = pending write, `None` = pending delete.
+    value: Option<RecordValue>,
+}
+
 /// Write-behind buffering layer that wraps any [`MapDataStore`].
 ///
 /// Buffers `add`/`remove` calls in per-partition coalesced queues and flushes
@@ -370,8 +389,8 @@ pub struct WriteBehindDataStore {
     /// Per-partition write queues, keyed by partition id.
     queues: DashMap<u32, PartitionQueue>,
     /// Staging area for read-your-writes consistency.
-    /// `Some(value)` = pending write, `None` = pending delete.
-    staging: DashMap<(String, String), Option<RecordValue>>,
+    /// `value`: `Some(value)` = pending write, `None` = pending delete.
+    staging: DashMap<(String, String), StagingSlot>,
     /// Monotonically increasing operation counter for ordering.
     sequence: AtomicU64,
     /// Node-wide count of pending entries across all partition queues.
@@ -478,10 +497,29 @@ impl WriteBehindDataStore {
         let mut pending = BTreeMap::new();
         for entry in &self.staging {
             if entry.key().0 == map {
-                pending.insert(entry.key().1.clone(), entry.value().clone());
+                pending.insert(entry.key().1.clone(), entry.value().value.clone());
             }
         }
         pending
+    }
+
+    /// Remove the staging slot for `(map, key)` ONLY if it still corresponds to
+    /// the write identified by `flushed_seq`. Returns `true` if it was removed.
+    ///
+    /// The background flush drains a batch and then persists each entry; the
+    /// queue lock is released during the persist, so a newer write can coalesce
+    /// into staging (with a higher `seq`) in between. Clearing the slot
+    /// unconditionally after a flush would then wipe that newer value, dropping
+    /// read-your-writes back to the now-stale durable copy — fatal under active
+    /// eviction, where the resident copy is gone and staging is the only correct
+    /// source. The `seq` guard removes the slot only when no newer write has
+    /// landed, leaving the newer value to be cleared by its own flush.
+    fn clear_staging_if_current(&self, map: &str, key: &str, flushed_seq: u64) -> bool {
+        self.staging
+            .remove_if(&(map.to_string(), key.to_string()), |_, slot| {
+                slot.seq == flushed_seq
+            })
+            .is_some()
     }
 
     /// Returns the next WAL sequence number for ordering.
@@ -585,10 +623,11 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                 let partition_id_for_wal = partition_for(&entry.map, &entry.key);
                 match result {
                     Ok(()) => {
-                        // Successfully flushed -- remove from staging and decrement count
-                        store
-                            .staging
-                            .remove(&(entry.map.clone(), entry.key.clone()));
+                        // Remove this write's staging slot ONLY if it is still the
+                        // one we flushed (a newer coalesced write must survive).
+                        // pending_count is decremented per terminal flush either
+                        // way -- it counts enqueues, one decrement per drained entry.
+                        store.clear_staging_if_current(&entry.map, &entry.key, entry.sequence);
                         store.pending_count.fetch_sub(1, Ordering::Relaxed);
                         // Mark the WAL entry applied so a clean restart does not
                         // re-replay writes that are already durable in the inner store.
@@ -633,9 +672,10 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                                 error = %err,
                                 "Write-behind entry discarded after max retries"
                             );
-                            store
-                                .staging
-                                .remove(&(entry.map.clone(), entry.key.clone()));
+                            // Same identity guard as the success path: a newer
+                            // coalesced write must not be cleared by an older
+                            // entry's terminal discard.
+                            store.clear_staging_if_current(&entry.map, &entry.key, entry.sequence);
                             store.pending_count.fetch_sub(1, Ordering::Relaxed);
                         }
                     }
@@ -724,6 +764,7 @@ impl MapDataStore for WriteBehindDataStore {
         };
         self.wal_append(partition_id, &wal_entry).await?;
 
+        let entry_seq = self.next_sequence();
         let entry = DelayedEntry {
             map: map.to_string(),
             key: key.to_string(),
@@ -732,7 +773,7 @@ impl MapDataStore for WriteBehindDataStore {
                 expiration_time,
             },
             store_time: now,
-            sequence: self.next_sequence(),
+            sequence: entry_seq,
             retry_count: 0,
             wal_sequence: wal_seq,
         };
@@ -754,7 +795,13 @@ impl MapDataStore for WriteBehindDataStore {
         }
 
         // Update staging area for read-your-writes
-        self.staging.insert(staging_key, Some(value.clone()));
+        self.staging.insert(
+            staging_key,
+            StagingSlot {
+                seq: entry_seq,
+                value: Some(value.clone()),
+            },
+        );
 
         Ok(())
     }
@@ -807,12 +854,13 @@ impl MapDataStore for WriteBehindDataStore {
         };
         self.wal_append(partition_id, &wal_entry).await?;
 
+        let entry_seq = self.next_sequence();
         let entry = DelayedEntry {
             map: map.to_string(),
             key: key.to_string(),
             operation: DelayedOp::Remove,
             store_time: now,
-            sequence: self.next_sequence(),
+            sequence: entry_seq,
             retry_count: 0,
             wal_sequence: wal_seq,
         };
@@ -831,7 +879,13 @@ impl MapDataStore for WriteBehindDataStore {
         }
 
         // Pending delete marker in staging
-        self.staging.insert(staging_key, None);
+        self.staging.insert(
+            staging_key,
+            StagingSlot {
+                seq: entry_seq,
+                value: None,
+            },
+        );
 
         Ok(())
     }
@@ -846,7 +900,7 @@ impl MapDataStore for WriteBehindDataStore {
 
         // Check staging first for read-your-writes consistency
         if let Some(entry) = self.staging.get(&staging_key) {
-            return match entry.value() {
+            return match &entry.value().value {
                 Some(value) => Ok(Some(value.clone())),
                 // Pending delete -- do not consult inner store
                 None => Ok(None),
@@ -868,7 +922,7 @@ impl MapDataStore for WriteBehindDataStore {
         for key in keys {
             let staging_key = (map.to_string(), key.clone());
             if let Some(entry) = self.staging.get(&staging_key) {
-                if let Some(value) = entry.value() {
+                if let Some(value) = &entry.value().value {
                     results.push((key.clone(), value.clone()));
                 }
                 // Pending delete (None) -- skip entirely, do not fetch from inner
@@ -921,12 +975,13 @@ impl MapDataStore for WriteBehindDataStore {
             };
             self.wal_append(partition_id, &wal_entry).await?;
 
+            let entry_seq = self.next_sequence();
             let entry = DelayedEntry {
                 map: map.to_string(),
                 key: key.clone(),
                 operation: DelayedOp::Remove,
                 store_time: now,
-                sequence: self.next_sequence(),
+                sequence: entry_seq,
                 retry_count: 0,
                 wal_sequence: wal_seq,
             };
@@ -943,7 +998,13 @@ impl MapDataStore for WriteBehindDataStore {
                 self.pending_count.fetch_add(1, Ordering::Relaxed);
             }
 
-            self.staging.insert(staging_key, None);
+            self.staging.insert(
+                staging_key,
+                StagingSlot {
+                    seq: entry_seq,
+                    value: None,
+                },
+            );
         }
 
         Ok(())
@@ -964,7 +1025,7 @@ impl MapDataStore for WriteBehindDataStore {
         let mut staging_only: Vec<String> = self
             .staging
             .iter()
-            .filter(|entry| entry.value().is_some())
+            .filter(|entry| entry.value().value.is_some())
             .map(|entry| entry.key().0.clone())
             .collect();
         staging_only.sort();
@@ -2668,6 +2729,59 @@ mod tests {
         assert_eq!(
             keys, expected,
             "merged scan must yield every key exactly once across batches"
+        );
+    }
+
+    // AC8 — the flush-vs-coalesce race must not drop read-your-writes. When a
+    // flush dequeues an older write (E1) and a newer write (E2) coalesces into
+    // staging before E1's terminal staging removal runs, that removal must NOT
+    // wipe E2's slot. White-box: drive the exact race window deterministically
+    // (the 600s flush interval keeps the background loop out of the way), then
+    // assert the read surface still serves the newer value. Reproduces the
+    // active-eviction soak residual (`expected=2 actual=1`) at unit scope.
+    #[tokio::test]
+    async fn ac8_flush_does_not_clear_newer_coalesced_staging() {
+        let (store, _dir) = redb_backed_store();
+
+        // E1: write v1. Staging now holds (seq1, v1); queue holds E1.
+        store.add("m", "k", &lww("v1", 1), 0, 1000).await.unwrap();
+        let pid = partition_for("m", "k");
+        // Drain E1 out of the queue (the flush loop's first step). The queue lock
+        // is now released, opening the race window.
+        let drained = store.queues.get_mut(&pid).unwrap().drain_ready(i64::MAX);
+        assert_eq!(drained.len(), 1, "E1 must be the only drained entry");
+        let e1_seq = drained[0].sequence;
+
+        // E2: a newer write coalesces in. Queue is empty (E1 already drained), so
+        // E2 enters as a new entry; staging is overwritten to (seq2, v2).
+        store.add("m", "k", &lww("v2", 5), 0, 2000).await.unwrap();
+
+        // E1's flush completes and tries to clear its staging slot. With the seq
+        // guard it must NOT remove the newer E2 slot.
+        let removed = store.clear_staging_if_current("m", "k", e1_seq);
+        assert!(
+            !removed,
+            "E1's terminal flush must not clear E2's newer staging slot"
+        );
+
+        // Read-your-writes holds: load and scan both surface v2, not the stale
+        // durable/None value that the old unconditional remove exposed.
+        assert_lww(&store.load("m", "k").await.unwrap().unwrap(), "v2", 5);
+        let rows = drain_scan(&store, "m").await;
+        assert_eq!(rows.len(), 1, "exactly one row for the key");
+        assert_lww(&rows[0].1, "v2", 5);
+
+        // When E2 itself flushes, its own seq clears the slot (no leak).
+        let e2 = store.queues.get_mut(&pid).unwrap().drain_ready(i64::MAX);
+        assert_eq!(e2.len(), 1, "E2 must be drained");
+        let e2_seq = e2[0].sequence;
+        assert!(
+            store.clear_staging_if_current("m", "k", e2_seq),
+            "E2's own flush clears its staging slot"
+        );
+        assert!(
+            store.staging.is_empty(),
+            "no staging slot may leak after both writes flush"
         );
     }
 }
