@@ -4,7 +4,7 @@
 //! in per-partition coalesced queues and flushing them on a configurable schedule.
 //! An optional WAL ensures every acked write is durable before the ack is returned.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -15,7 +15,9 @@ use tokio::sync::{watch, Notify};
 use topgun_core::{fnv1a_hash, PARTITION_COUNT};
 use tracing::warn;
 
-use crate::storage::map_data_store::{LeafSink, MapDataStore, ScanBatch, ScanCursor};
+use crate::storage::map_data_store::{
+    merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
+};
 use crate::storage::record::RecordValue;
 use crate::storage::wal::{Wal, WalEntry, WalFsyncPolicy, WalOp};
 
@@ -461,6 +463,25 @@ impl WriteBehindDataStore {
     /// Returns the next sequence number for ordering.
     fn next_sequence(&self) -> u64 {
         self.sequence.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Snapshot the pending staging entries for one map as a key-sorted map of
+    /// `key -> Option<RecordValue>` (`Some` = buffered write, `None` = pending
+    /// delete).
+    ///
+    /// The staging map is keyed globally by `(map, key)`, so this filters by map
+    /// name. The buffer is bounded by `TOPGUN_WRITEBEHIND_CAPACITY`, so the
+    /// snapshot is O(buffer), not O(map). Taking it upfront keeps the scan and
+    /// leaf overlays single-pass and free of the staging lock during the inner
+    /// enumeration.
+    fn collect_staging_for_map(&self, map: &str) -> BTreeMap<String, Option<RecordValue>> {
+        let mut pending = BTreeMap::new();
+        for entry in &self.staging {
+            if entry.key().0 == map {
+                pending.insert(entry.key().1.clone(), entry.value().clone());
+            }
+        }
+        pending
     }
 
     /// Returns the next WAL sequence number for ordering.
@@ -929,12 +950,33 @@ impl MapDataStore for WriteBehindDataStore {
     }
 
     async fn list_maps(&self) -> anyhow::Result<Vec<String>> {
-        // Delegate to the durable backend so the startup seed sees the same
-        // durable map catalog the rest of the server persists to. Maps that
-        // exist only as still-buffered staging writes are necessarily also
-        // resident in the in-memory engine, so the durable catalog is the
-        // correct source for the residency-independent seed.
-        self.inner.list_maps().await
+        // Start from the durable catalog so a map persisted before a restart is
+        // discovered even when not resident.
+        let mut names = self.inner.list_maps().await?;
+
+        // Union in maps whose only write is still buffered in staging. Before
+        // SPEC-323 clean-marking, a buffered record was necessarily also
+        // resident, so the durable catalog covered it. R6 makes a buffered
+        // record evictable, so a map whose sole write is buffered-and-evicted is
+        // now reachable only via staging — it must be surfaced here or the
+        // residency-independent seed would miss it. A map present in staging
+        // only via pending deletes (None) contributes nothing.
+        let mut staging_only: Vec<String> = self
+            .staging
+            .iter()
+            .filter(|entry| entry.value().is_some())
+            .map(|entry| entry.key().0.clone())
+            .collect();
+        staging_only.sort();
+        staging_only.dedup();
+        for name in staging_only {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        names.sort();
+        names.dedup();
+        Ok(names)
     }
 
     async fn enumerate_leaves(
@@ -943,11 +985,52 @@ impl MapDataStore for WriteBehindDataStore {
         is_backup: bool,
         sink: &mut dyn LeafSink,
     ) -> anyhow::Result<()> {
-        // Delegate to the durable backend. Records still buffered in staging are
-        // not yet durable; they remain resident in the in-memory engine and
-        // contribute their leaves there, so durable enumeration covers exactly
-        // the flushed set without double-counting.
-        self.inner.enumerate_leaves(map, is_backup, sink).await
+        // Backup scans carry no staging overlay: add_backup/remove_backup go
+        // straight to inner, so staging holds only non-backup writes. Overlaying
+        // would double-count or falsely surface a primary write onto a backup
+        // tree.
+        if is_backup {
+            return self.inner.enumerate_leaves(map, is_backup, sink).await;
+        }
+
+        // Collect the map's pending staging set upfront so the durable
+        // enumeration can be overlaid in a single pass. The buffer is bounded by
+        // TOPGUN_WRITEBEHIND_CAPACITY, so this stays O(buffer), not O(map).
+        let pending = self.collect_staging_for_map(map);
+
+        // Overlay the durable leaves with the buffered state: a buffered Some
+        // replaces the durable leaf hash (recomputed from the buffered value),
+        // and a buffered None (pending delete) suppresses the durable leaf so an
+        // evicted-but-deleted key cannot resurrect. The sink is invoked through
+        // an overlay adapter so peak memory stays bounded exactly as the durable
+        // path bounds it.
+        let mut overlay = StagingLeafSink::new(&pending, sink);
+        self.inner
+            .enumerate_leaves(map, is_backup, &mut overlay)
+            .await?;
+
+        // Emit staging-only leaves (buffered Some keys the durable store never
+        // had) after the durable enumeration completes. merkle_leaf_hash returns
+        // None for OrMap entries that must contribute no leaf; propagate that
+        // None so a rebuilt root stays byte-identical to the live root.
+        let mut extra: Vec<MerkleLeaf> = Vec::new();
+        for (key, value) in &pending {
+            if let Some(value) = value {
+                if !overlay.was_seen(key) {
+                    if let Some((kind, leaf_hash)) = merkle_leaf_hash(key, value) {
+                        extra.push(MerkleLeaf {
+                            key: key.clone(),
+                            kind,
+                            leaf_hash,
+                        });
+                    }
+                }
+            }
+        }
+        if !extra.is_empty() {
+            sink.consume(extra).await?;
+        }
+        Ok(())
     }
 
     async fn scan_values(
@@ -956,7 +1039,16 @@ impl MapDataStore for WriteBehindDataStore {
         is_backup: bool,
         max_batch_cost: u64,
     ) -> anyhow::Result<ScanBatch> {
-        self.inner.scan_values(map, is_backup, max_batch_cost).await
+        // Backup scans never carry staging overlay (see enumerate_leaves).
+        if is_backup {
+            return self.inner.scan_values(map, is_backup, max_batch_cost).await;
+        }
+
+        let pending = self.collect_staging_for_map(map);
+        let batch = self.inner.scan_values(map, is_backup, max_batch_cost).await?;
+        // The first batch is the only place staging-only keys are emitted, so
+        // they are surfaced exactly once across the whole resumable scan.
+        Ok(overlay_scan_batch(batch, &pending, true))
     }
 
     async fn scan_values_batched(
@@ -966,9 +1058,23 @@ impl MapDataStore for WriteBehindDataStore {
         cursor: ScanCursor,
         max_batch_cost: u64,
     ) -> anyhow::Result<ScanBatch> {
-        self.inner
+        // Backup scans never carry staging overlay (see enumerate_leaves).
+        if is_backup {
+            return self
+                .inner
+                .scan_values_batched(map, is_backup, cursor, max_batch_cost)
+                .await;
+        }
+
+        let pending = self.collect_staging_for_map(map);
+        let batch = self
+            .inner
             .scan_values_batched(map, is_backup, cursor, max_batch_cost)
-            .await
+            .await?;
+        // Resumed batches only overlay (replace/suppress) durable rows; the
+        // staging-only keys were already emitted by the first scan_values call,
+        // so emitting them again here would double-count.
+        Ok(overlay_scan_batch(batch, &pending, false))
     }
 
     fn is_loadable(&self, _key: &str) -> bool {
@@ -1158,6 +1264,132 @@ impl MapDataStore for WriteBehindDataStore {
 
     fn is_null(&self) -> bool {
         false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Staging overlay helpers for the buffer-aware read surface
+// ---------------------------------------------------------------------------
+
+/// Overlay a map's pending staging set onto one durable [`ScanBatch`].
+///
+/// For each durable row: a buffered `Some(v)` replaces the row with the newer
+/// buffered value; a buffered `None` (pending delete) suppresses the row so an
+/// evicted-but-deleted key cannot resurrect; an absent staging entry keeps the
+/// durable row unchanged. When `emit_staging_only` is true (the first batch of a
+/// resumable scan), staging-only `Some` keys the durable store never returned
+/// are appended once. Resumed batches pass `false` so those keys are never
+/// double-counted.
+fn overlay_scan_batch(
+    batch: ScanBatch,
+    pending: &BTreeMap<String, Option<RecordValue>>,
+    emit_staging_only: bool,
+) -> ScanBatch {
+    if pending.is_empty() {
+        return batch;
+    }
+
+    let ScanBatch {
+        records,
+        next_cursor,
+    } = batch;
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<(String, RecordValue)> = Vec::with_capacity(records.len());
+    for (key, value) in records {
+        match pending.get(&key) {
+            Some(Some(buffered)) => {
+                // Buffered write is newer than the durable row; emit it instead.
+                seen.insert(key.clone());
+                out.push((key, buffered.clone()));
+            }
+            Some(None) => {
+                // Pending delete hides the durable value.
+            }
+            None => {
+                out.push((key, value));
+            }
+        }
+    }
+
+    if emit_staging_only {
+        for (key, value) in pending {
+            if let Some(value) = value {
+                if !seen.contains(key) {
+                    out.push((key.clone(), value.clone()));
+                }
+            }
+        }
+    }
+
+    ScanBatch {
+        records: out,
+        next_cursor,
+    }
+}
+
+/// A [`LeafSink`] adapter that overlays a map's pending staging set onto the
+/// durable leaf stream before forwarding to the real sink.
+///
+/// A buffered `Some` recomputes the leaf hash from the buffered value (so a
+/// buffered-then-flushed record yields an identical leaf, leaving the Merkle
+/// root unchanged); a buffered `None` suppresses the durable leaf. Keys it has
+/// emitted are tracked so the outer enumeration can append the staging-only
+/// leaves exactly once.
+struct StagingLeafSink<'a> {
+    pending: &'a BTreeMap<String, Option<RecordValue>>,
+    inner: &'a mut dyn LeafSink,
+    seen: std::collections::HashSet<String>,
+}
+
+impl<'a> StagingLeafSink<'a> {
+    fn new(
+        pending: &'a BTreeMap<String, Option<RecordValue>>,
+        inner: &'a mut dyn LeafSink,
+    ) -> Self {
+        Self {
+            pending,
+            inner,
+            seen: std::collections::HashSet::new(),
+        }
+    }
+
+    fn was_seen(&self, key: &str) -> bool {
+        self.seen.contains(key)
+    }
+}
+
+#[async_trait]
+impl LeafSink for StagingLeafSink<'_> {
+    async fn consume(&mut self, batch: Vec<MerkleLeaf>) -> anyhow::Result<()> {
+        let mut out: Vec<MerkleLeaf> = Vec::with_capacity(batch.len());
+        for leaf in batch {
+            match self.pending.get(&leaf.key) {
+                Some(Some(buffered)) => {
+                    self.seen.insert(leaf.key.clone());
+                    // merkle_leaf_hash returns None for OrMap entries that must
+                    // contribute no leaf; propagate that None (emit nothing)
+                    // rather than injecting a zero/placeholder leaf.
+                    if let Some((kind, leaf_hash)) = merkle_leaf_hash(&leaf.key, buffered) {
+                        out.push(MerkleLeaf {
+                            key: leaf.key,
+                            kind,
+                            leaf_hash,
+                        });
+                    }
+                }
+                Some(None) => {
+                    // Pending delete suppresses the durable leaf.
+                }
+                None => {
+                    out.push(leaf);
+                }
+            }
+        }
+        if out.is_empty() {
+            return Ok(());
+        }
+        self.inner.consume(out).await
     }
 }
 
