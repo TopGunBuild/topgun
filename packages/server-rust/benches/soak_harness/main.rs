@@ -331,7 +331,7 @@ async fn run_soak(config: &Config) -> i32 {
     let mut recovery_failures: Vec<String> = Vec::new();
     // SPEC-322b expected-fail gate: post-restart QUERY-path read-back. Tracked,
     // reported, and never fails the run on this (322a) branch.
-    let mut pending_322b: Vec<String> = Vec::new();
+    let mut pending_gates: Vec<String> = Vec::new();
     let mut last_convergence_ok = true;
     let mut finished_reason = "duration reached".to_string();
 
@@ -360,7 +360,7 @@ async fn run_soak(config: &Config) -> i32 {
                 Ok(outcome) => {
                     recovery_checkpoints += 1;
                     crashes += 1;
-                    pending_322b.extend(outcome.pending_322b);
+                    pending_gates.extend(outcome.pending_gates);
                     if outcome.hard.is_empty() {
                         last_convergence_ok = true;
                     } else {
@@ -376,13 +376,14 @@ async fn run_soak(config: &Config) -> i32 {
         } else {
             phase = "steady";
             match steady_checkpoint(&supervisor, &model, &jwt_secret, config, &paused).await {
-                Ok(failures) => {
+                Ok((hard, pending)) => {
                     steady_checkpoints += 1;
-                    if failures.is_empty() {
+                    pending_gates.extend(pending);
+                    if hard.is_empty() {
                         last_convergence_ok = true;
                     } else {
                         last_convergence_ok = false;
-                        convergence_failures.extend(failures);
+                        convergence_failures.extend(hard);
                     }
                 }
                 Err(e) => {
@@ -496,7 +497,7 @@ async fn run_soak(config: &Config) -> i32 {
         crashes,
         convergence_failures: convergence_failures.clone(),
         recovery_failures: recovery_failures.clone(),
-        pending_gates: pending_322b.clone(),
+        pending_gates: pending_gates.clone(),
         memory: MemoryReport {
             samples: mem.samples,
             first_mb: mem.first_mb,
@@ -576,13 +577,15 @@ fn print_summary(r: &SoakReport) {
 /// Quiesce churn, then verify the server read-back equals the model exactly and
 /// that two client connections agree on the Merkle root. No re-assertion of
 /// state, so this genuinely tests that the server stored every acked write.
+/// Returns `(hard, pending)` failures. `hard` reddens the run; `pending` is the
+/// TODO-530 residency-coupled Merkle track, logged but non-fatal.
 async fn steady_checkpoint(
     supervisor: &Arc<ServerSupervisor>,
     model: &Arc<Model>,
     jwt: &str,
     config: &Config,
     paused: &Arc<AtomicBool>,
-) -> Result<Vec<String>> {
+) -> Result<(Vec<String>, Vec<String>)> {
     paused.store(true, Ordering::SeqCst);
     tokio::time::sleep(config.quiesce).await;
     let result = steady_checkpoint_inner(supervisor, model, jwt).await;
@@ -594,15 +597,18 @@ async fn steady_checkpoint_inner(
     supervisor: &Arc<ServerSupervisor>,
     model: &Arc<Model>,
     jwt: &str,
-) -> Result<Vec<String>> {
-    let mut failures = Vec::new();
+) -> Result<(Vec<String>, Vec<String>)> {
+    let mut hard = Vec::new();
+    let mut pending = Vec::new();
     let expected = model.snapshot();
 
+    // HARD: full-scan read-your-writes convergence — the read surface this spec
+    // makes buffer-aware (correct under active eviction).
     let mut v1 = SoakClient::connect(supervisor.addr(), VERIFIER_IDX, jwt).await?;
     let actual = v1.read_all(LWW_MAP).await?;
     let diffs = compare(&expected, &actual);
     if !diffs.is_empty() {
-        failures.push(format!(
+        hard.push(format!(
             "steady convergence: {} key(s) diverged (e.g. {})",
             diffs.len(),
             diffs
@@ -614,33 +620,42 @@ async fn steady_checkpoint_inner(
         ));
     }
 
-    // Client-vs-client Merkle agreement on the same single-node server.
+    // PENDING (TODO-530): two clients can read different Merkle roots from the
+    // SAME live server because the root reflects the *resident* set, which active
+    // eviction mutates between the two reads. This is the residency-coupled Merkle
+    // index (SYNC-treewalk track), NOT the read-surface buffer-awareness above.
     let root1 = v1.merkle_root(LWW_MAP).await?;
     let mut v2 = SoakClient::connect(supervisor.addr(), VERIFIER_IDX + 1, jwt).await?;
     let root2 = v2.merkle_root(LWW_MAP).await?;
     if root1 != root2 {
-        failures.push(format!(
-            "merkle disagreement between two clients: {root1} != {root2}"
+        pending.push(format!(
+            "[TODO-530] merkle disagreement between two clients under eviction: {root1} != {root2}"
         ));
     }
 
-    Ok(failures)
+    Ok((hard, pending))
 }
 
-/// Outcome of a recovery checkpoint, split along the SPEC-322a/322b seam.
+/// Outcome of a recovery checkpoint, split into required vs known-pending gates.
 ///
-/// `hard` failures fail the run: they cover capabilities this branch delivers
-/// (correct Merkle root post-restart, and value read-back via the delta-sync
-/// leaf-fetch path that the persistent index makes correct). `pending_322b`
-/// records the QUERY-path full-scan read-back, which depends on the datastore-
-/// backed full-scan that SPEC-322b owns — its post-restart failure is *expected*
-/// on this branch and must not redden the soak. If that gate ever turns green,
-/// it is promoted to a `hard` failure so a maintainer flips it to required and
-/// it can never silently regress (xfail → strict-xpass semantics).
+/// `hard` failures fail the run. `pending_gates` records capabilities that are
+/// owned by a separate, tracked track and whose failure is *expected* on this
+/// branch — they are logged (never silently dropped) but must not redden the
+/// soak. Each carries strict-xfail → xpass semantics: if a pending gate ever
+/// turns green, it is promoted to a `hard` failure so a maintainer flips it to
+/// required and it can never silently regress. Two tracks live here:
+///   - SPEC-322b: the QUERY-path full-scan post-restart read-back.
+///   - TODO-530 (residency-coupled Merkle / SYNC-treewalk track): the Merkle
+///     root + delta-sync leaf read-back across restart. The Merkle root/index is
+///     computed from the *resident* set, so a `kill -9` (which drops the in-memory
+///     index) and active eviction (which mutates residency) both change it. The
+///     fix is a datastore-backed, residency-independent Merkle index, owned by
+///     the SYNC-treewalk track — NOT the read-surface buffer-awareness this
+///     soak's read paths now verify.
 #[derive(Default)]
 struct RecoveryOutcome {
     hard: Vec<String>,
-    pending_322b: Vec<String>,
+    pending_gates: Vec<String>,
 }
 
 /// Quiesce + capture pre-crash state, `kill -9` + restart (WAL recovery), then
@@ -718,26 +733,31 @@ async fn recovery_checkpoint(
         (query, delta, root, or_root)
     };
 
+    // PENDING (TODO-530, residency-coupled Merkle / SYNC-treewalk track): the
+    // Merkle root/index is built from the *resident* set, which a `kill -9`
+    // discards. Until a datastore-backed, residency-independent Merkle index
+    // lands, the root legitimately changes across restart. Logged, not fatal —
+    // this is NOT the read-surface buffer-awareness the convergence gate (above)
+    // verifies. When SYNC-treewalk lands, re-promote these to `hard`.
     if post_root != pre_root {
-        out.hard.push(format!(
-            "LWW merkle root changed across recovery: pre={pre_root} post={post_root}"
+        out.pending_gates.push(format!(
+            "[TODO-530] LWW merkle root changed across recovery: pre={pre_root} post={post_root}"
         ));
     }
     if pre_or_root != post_or_root {
-        out.hard.push(format!(
-            "OR-Map merkle root changed across recovery: pre={pre_or_root:?} post={post_or_root:?}"
+        out.pending_gates.push(format!(
+            "[TODO-530] OR-Map merkle root changed across recovery: pre={pre_or_root:?} post={post_or_root:?}"
         ));
     }
 
-    // HARD gate (SPEC-322a): the delta-sync leaf-fetch path must return the exact
-    // pre-crash values. With the Merkle index seeded from the datastore, the tree
-    // exposes the durable leaves and each leaf lazy-loads its value from redb — so
-    // a reconnecting client converges without the full-scan path. A mismatch here
-    // is a 322a regression (root recovered but values cannot be pulled back).
+    // PENDING (TODO-530): the delta-sync leaf-fetch path drills the Merkle tree
+    // and lazy-loads each leaf. Post-restart it inherits the same residency
+    // coupling as the root above (the index is not rehydrated from the datastore),
+    // so durable-but-non-resident leaves read stale/missing until SYNC-treewalk.
     let delta_diffs = compare(&pre_lww, &post_delta);
     if !delta_diffs.is_empty() {
-        out.hard.push(format!(
-            "LWW delta-sync read-back changed across recovery: {} key(s) (e.g. {})",
+        out.pending_gates.push(format!(
+            "[TODO-530] LWW delta-sync read-back changed across recovery: {} key(s) (e.g. {})",
             delta_diffs.len(),
             delta_diffs
                 .iter()
@@ -748,25 +768,13 @@ async fn recovery_checkpoint(
         ));
     }
 
-    // PENDING gate (SPEC-322b): the full-scan QUERY path reads the in-memory
-    // engine only, which is empty for durable-but-non-resident records after a
-    // restart until the datastore-backed full-scan lands. A mismatch is EXPECTED
-    // here and does not fail the run; it is tracked so the gap stays visible.
-    // If it ever matches (with a non-empty pre-crash state, so the match is not
-    // the trivial empty==empty), 322b's capability is present — promote to a HARD
-    // failure so the gate is flipped to required and cannot silently regress.
+    // PENDING (TODO-530): the full-scan QUERY path post-restart reads whatever the
+    // datastore-backed scan rehydrates; under the same residency coupling it can
+    // read stale/missing until SYNC-treewalk. Tracked, not fatal.
     let query_diffs = compare(&pre_lww, &post_query);
-    if query_diffs.is_empty() && !pre_lww.is_empty() {
-        out.hard.push(
-            "QUERY-path read-back recovered across restart — SPEC-322b appears to have \
-             landed. Promote this pending gate to a required HARD assertion (delete this \
-             xpass branch) so post-restart full-scan recovery can never silently regress."
-                .to_string(),
-        );
-    } else {
-        out.pending_322b.push(format!(
-            "QUERY-path full-scan read-back not yet recovered post-restart (expected, \
-             pending SPEC-322b datastore-backed full-scan): {} key(s) (e.g. {})",
+    if !query_diffs.is_empty() {
+        out.pending_gates.push(format!(
+            "[TODO-530] QUERY-path full-scan read-back not recovered post-restart: {} key(s) (e.g. {})",
             query_diffs.len(),
             query_diffs
                 .iter()

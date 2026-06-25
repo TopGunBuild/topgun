@@ -4,7 +4,7 @@
 //! in per-partition coalesced queues and flushing them on a configurable schedule.
 //! An optional WAL ensures every acked write is durable before the ack is returned.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -15,7 +15,9 @@ use tokio::sync::{watch, Notify};
 use topgun_core::{fnv1a_hash, PARTITION_COUNT};
 use tracing::warn;
 
-use crate::storage::map_data_store::{LeafSink, MapDataStore, ScanBatch, ScanCursor};
+use crate::storage::map_data_store::{
+    merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
+};
 use crate::storage::record::RecordValue;
 use crate::storage::wal::{Wal, WalEntry, WalFsyncPolicy, WalOp};
 
@@ -350,6 +352,25 @@ fn partition_for(map: &str, key: &str) -> u32 {
 // WriteBehindDataStore
 // ---------------------------------------------------------------------------
 
+/// One entry in the staging overlay: the latest buffered value for a key plus
+/// the sequence of the write that produced it.
+///
+/// The `seq` is the identity check the background flush uses to remove a staging
+/// entry only when it still corresponds to the write it just persisted. Without
+/// it, a flush that drains an older value (`E1`) and then unconditionally clears
+/// the staging slot would wipe a NEWER value (`E2`) that coalesced in after the
+/// drain dequeued the batch — dropping read-your-writes back to the now-stale
+/// durable value until `E2` itself flushes. That window is what breaks
+/// read-your-writes under active eviction, where the resident copy is gone and
+/// the staging overlay is the only correct source.
+#[derive(Clone)]
+struct StagingSlot {
+    /// Sequence of the write that set this staged value (`DelayedEntry.sequence`).
+    seq: u64,
+    /// `Some(value)` = pending write, `None` = pending delete.
+    value: Option<RecordValue>,
+}
+
 /// Write-behind buffering layer that wraps any [`MapDataStore`].
 ///
 /// Buffers `add`/`remove` calls in per-partition coalesced queues and flushes
@@ -368,8 +389,8 @@ pub struct WriteBehindDataStore {
     /// Per-partition write queues, keyed by partition id.
     queues: DashMap<u32, PartitionQueue>,
     /// Staging area for read-your-writes consistency.
-    /// `Some(value)` = pending write, `None` = pending delete.
-    staging: DashMap<(String, String), Option<RecordValue>>,
+    /// `value`: `Some(value)` = pending write, `None` = pending delete.
+    staging: DashMap<(String, String), StagingSlot>,
     /// Monotonically increasing operation counter for ordering.
     sequence: AtomicU64,
     /// Node-wide count of pending entries across all partition queues.
@@ -461,6 +482,67 @@ impl WriteBehindDataStore {
     /// Returns the next sequence number for ordering.
     fn next_sequence(&self) -> u64 {
         self.sequence.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Snapshot the pending staging entries for one map as a key-sorted map of
+    /// `key -> Option<RecordValue>` (`Some` = buffered write, `None` = pending
+    /// delete).
+    ///
+    /// The staging map is keyed globally by `(map, key)`, so this filters by map
+    /// name. The buffer is bounded by `TOPGUN_WRITEBEHIND_CAPACITY`, so the
+    /// snapshot is O(buffer), not O(map). Taking it upfront keeps the scan and
+    /// leaf overlays single-pass and free of the staging lock during the inner
+    /// enumeration.
+    fn collect_staging_for_map(&self, map: &str) -> BTreeMap<String, Option<RecordValue>> {
+        let mut pending = BTreeMap::new();
+        for entry in &self.staging {
+            if entry.key().0 == map {
+                pending.insert(entry.key().1.clone(), entry.value().value.clone());
+            }
+        }
+        pending
+    }
+
+    /// Remove the staging slot for `(map, key)` ONLY if it still corresponds to
+    /// the write identified by `flushed_seq`. Returns `true` if it was removed.
+    ///
+    /// The background flush drains a batch and then persists each entry; the
+    /// queue lock is released during the persist, so a newer write can coalesce
+    /// into staging (with a higher `seq`) in between. Clearing the slot
+    /// unconditionally after a flush would then wipe that newer value, dropping
+    /// read-your-writes back to the now-stale durable copy — fatal under active
+    /// eviction, where the resident copy is gone and staging is the only correct
+    /// source. The `seq` guard removes the slot only when no newer write has
+    /// landed, leaving the newer value to be cleared by its own flush.
+    fn clear_staging_if_current(&self, map: &str, key: &str, flushed_seq: u64) -> bool {
+        self.staging
+            .remove_if(&(map.to_string(), key.to_string()), |_, slot| {
+                slot.seq == flushed_seq
+            })
+            .is_some()
+    }
+
+    /// Stage the latest buffered `value` for `(map, key)` under sequence `seq`,
+    /// keeping monotonicity: a write only replaces the slot if its `seq` is at
+    /// least the slot's current `seq`. `seq` is `next_sequence()`, strictly
+    /// increasing per call, so a higher `seq` is always the later write. Two
+    /// concurrent writers on the same key can otherwise interleave between
+    /// `next_sequence()` and this insert and let the older write clobber the
+    /// newer staged value (a plain `insert` is last-writer-wins by wall-clock,
+    /// not by `seq`). The monotonic guard makes the slot's `seq` truthful, which
+    /// is the identity [`clear_staging_if_current`] relies on.
+    fn stage(&self, map: &str, key: &str, seq: u64, value: Option<RecordValue>) {
+        use dashmap::mapref::entry::Entry;
+        match self.staging.entry((map.to_string(), key.to_string())) {
+            Entry::Occupied(mut e) => {
+                if seq >= e.get().seq {
+                    e.insert(StagingSlot { seq, value });
+                }
+            }
+            Entry::Vacant(e) => {
+                e.insert(StagingSlot { seq, value });
+            }
+        }
     }
 
     /// Returns the next WAL sequence number for ordering.
@@ -564,10 +646,11 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                 let partition_id_for_wal = partition_for(&entry.map, &entry.key);
                 match result {
                     Ok(()) => {
-                        // Successfully flushed -- remove from staging and decrement count
-                        store
-                            .staging
-                            .remove(&(entry.map.clone(), entry.key.clone()));
+                        // Remove this write's staging slot ONLY if it is still the
+                        // one we flushed (a newer coalesced write must survive).
+                        // pending_count is decremented per terminal flush either
+                        // way -- it counts enqueues, one decrement per drained entry.
+                        store.clear_staging_if_current(&entry.map, &entry.key, entry.sequence);
                         store.pending_count.fetch_sub(1, Ordering::Relaxed);
                         // Mark the WAL entry applied so a clean restart does not
                         // re-replay writes that are already durable in the inner store.
@@ -612,9 +695,10 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                                 error = %err,
                                 "Write-behind entry discarded after max retries"
                             );
-                            store
-                                .staging
-                                .remove(&(entry.map.clone(), entry.key.clone()));
+                            // Same identity guard as the success path: a newer
+                            // coalesced write must not be cleared by an older
+                            // entry's terminal discard.
+                            store.clear_staging_if_current(&entry.map, &entry.key, entry.sequence);
                             store.pending_count.fetch_sub(1, Ordering::Relaxed);
                         }
                     }
@@ -703,6 +787,7 @@ impl MapDataStore for WriteBehindDataStore {
         };
         self.wal_append(partition_id, &wal_entry).await?;
 
+        let entry_seq = self.next_sequence();
         let entry = DelayedEntry {
             map: map.to_string(),
             key: key.to_string(),
@@ -711,7 +796,7 @@ impl MapDataStore for WriteBehindDataStore {
                 expiration_time,
             },
             store_time: now,
-            sequence: self.next_sequence(),
+            sequence: entry_seq,
             retry_count: 0,
             wal_sequence: wal_seq,
         };
@@ -733,7 +818,8 @@ impl MapDataStore for WriteBehindDataStore {
         }
 
         // Update staging area for read-your-writes
-        self.staging.insert(staging_key, Some(value.clone()));
+        let (smap, skey) = staging_key;
+        self.stage(&smap, &skey, entry_seq, Some(value.clone()));
 
         Ok(())
     }
@@ -786,12 +872,13 @@ impl MapDataStore for WriteBehindDataStore {
         };
         self.wal_append(partition_id, &wal_entry).await?;
 
+        let entry_seq = self.next_sequence();
         let entry = DelayedEntry {
             map: map.to_string(),
             key: key.to_string(),
             operation: DelayedOp::Remove,
             store_time: now,
-            sequence: self.next_sequence(),
+            sequence: entry_seq,
             retry_count: 0,
             wal_sequence: wal_seq,
         };
@@ -810,7 +897,8 @@ impl MapDataStore for WriteBehindDataStore {
         }
 
         // Pending delete marker in staging
-        self.staging.insert(staging_key, None);
+        let (smap, skey) = staging_key;
+        self.stage(&smap, &skey, entry_seq, None);
 
         Ok(())
     }
@@ -825,7 +913,7 @@ impl MapDataStore for WriteBehindDataStore {
 
         // Check staging first for read-your-writes consistency
         if let Some(entry) = self.staging.get(&staging_key) {
-            return match entry.value() {
+            return match &entry.value().value {
                 Some(value) => Ok(Some(value.clone())),
                 // Pending delete -- do not consult inner store
                 None => Ok(None),
@@ -847,7 +935,7 @@ impl MapDataStore for WriteBehindDataStore {
         for key in keys {
             let staging_key = (map.to_string(), key.clone());
             if let Some(entry) = self.staging.get(&staging_key) {
-                if let Some(value) = entry.value() {
+                if let Some(value) = &entry.value().value {
                     results.push((key.clone(), value.clone()));
                 }
                 // Pending delete (None) -- skip entirely, do not fetch from inner
@@ -900,12 +988,13 @@ impl MapDataStore for WriteBehindDataStore {
             };
             self.wal_append(partition_id, &wal_entry).await?;
 
+            let entry_seq = self.next_sequence();
             let entry = DelayedEntry {
                 map: map.to_string(),
                 key: key.clone(),
                 operation: DelayedOp::Remove,
                 store_time: now,
-                sequence: self.next_sequence(),
+                sequence: entry_seq,
                 retry_count: 0,
                 wal_sequence: wal_seq,
             };
@@ -922,19 +1011,41 @@ impl MapDataStore for WriteBehindDataStore {
                 self.pending_count.fetch_add(1, Ordering::Relaxed);
             }
 
-            self.staging.insert(staging_key, None);
+            let (smap, skey) = staging_key;
+            self.stage(&smap, &skey, entry_seq, None);
         }
 
         Ok(())
     }
 
     async fn list_maps(&self) -> anyhow::Result<Vec<String>> {
-        // Delegate to the durable backend so the startup seed sees the same
-        // durable map catalog the rest of the server persists to. Maps that
-        // exist only as still-buffered staging writes are necessarily also
-        // resident in the in-memory engine, so the durable catalog is the
-        // correct source for the residency-independent seed.
-        self.inner.list_maps().await
+        // Start from the durable catalog so a map persisted before a restart is
+        // discovered even when not resident.
+        let mut names = self.inner.list_maps().await?;
+
+        // Union in maps whose only write is still buffered in staging. Before
+        // SPEC-323 clean-marking, a buffered record was necessarily also
+        // resident, so the durable catalog covered it. R6 makes a buffered
+        // record evictable, so a map whose sole write is buffered-and-evicted is
+        // now reachable only via staging — it must be surfaced here or the
+        // residency-independent seed would miss it. A map present in staging
+        // only via pending deletes (None) contributes nothing.
+        let mut staging_only: Vec<String> = self
+            .staging
+            .iter()
+            .filter(|entry| entry.value().value.is_some())
+            .map(|entry| entry.key().0.clone())
+            .collect();
+        staging_only.sort();
+        staging_only.dedup();
+        for name in staging_only {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        names.sort();
+        names.dedup();
+        Ok(names)
     }
 
     async fn enumerate_leaves(
@@ -943,11 +1054,52 @@ impl MapDataStore for WriteBehindDataStore {
         is_backup: bool,
         sink: &mut dyn LeafSink,
     ) -> anyhow::Result<()> {
-        // Delegate to the durable backend. Records still buffered in staging are
-        // not yet durable; they remain resident in the in-memory engine and
-        // contribute their leaves there, so durable enumeration covers exactly
-        // the flushed set without double-counting.
-        self.inner.enumerate_leaves(map, is_backup, sink).await
+        // Backup scans carry no staging overlay: add_backup/remove_backup go
+        // straight to inner, so staging holds only non-backup writes. Overlaying
+        // would double-count or falsely surface a primary write onto a backup
+        // tree.
+        if is_backup {
+            return self.inner.enumerate_leaves(map, is_backup, sink).await;
+        }
+
+        // Collect the map's pending staging set upfront so the durable
+        // enumeration can be overlaid in a single pass. The buffer is bounded by
+        // TOPGUN_WRITEBEHIND_CAPACITY, so this stays O(buffer), not O(map).
+        let pending = self.collect_staging_for_map(map);
+
+        // Overlay the durable leaves with the buffered state: a buffered Some
+        // replaces the durable leaf hash (recomputed from the buffered value),
+        // and a buffered None (pending delete) suppresses the durable leaf so an
+        // evicted-but-deleted key cannot resurrect. The sink is invoked through
+        // an overlay adapter so peak memory stays bounded exactly as the durable
+        // path bounds it.
+        let mut overlay = StagingLeafSink::new(&pending, sink);
+        self.inner
+            .enumerate_leaves(map, is_backup, &mut overlay)
+            .await?;
+
+        // Emit staging-only leaves (buffered Some keys the durable store never
+        // had) after the durable enumeration completes. merkle_leaf_hash returns
+        // None for OrMap entries that must contribute no leaf; propagate that
+        // None so a rebuilt root stays byte-identical to the live root.
+        let mut extra: Vec<MerkleLeaf> = Vec::new();
+        for (key, value) in &pending {
+            if let Some(value) = value {
+                if !overlay.was_seen(key) {
+                    if let Some((kind, leaf_hash)) = merkle_leaf_hash(key, value) {
+                        extra.push(MerkleLeaf {
+                            key: key.clone(),
+                            kind,
+                            leaf_hash,
+                        });
+                    }
+                }
+            }
+        }
+        if !extra.is_empty() {
+            sink.consume(extra).await?;
+        }
+        Ok(())
     }
 
     async fn scan_values(
@@ -956,7 +1108,19 @@ impl MapDataStore for WriteBehindDataStore {
         is_backup: bool,
         max_batch_cost: u64,
     ) -> anyhow::Result<ScanBatch> {
-        self.inner.scan_values(map, is_backup, max_batch_cost).await
+        // Backup scans never carry staging overlay (see enumerate_leaves).
+        if is_backup {
+            return self.inner.scan_values(map, is_backup, max_batch_cost).await;
+        }
+
+        let pending = self.collect_staging_for_map(map);
+        let batch = self
+            .inner
+            .scan_values(map, is_backup, max_batch_cost)
+            .await?;
+        // The first batch is the only place staging-only keys are emitted, so
+        // they are surfaced exactly once across the whole resumable scan.
+        Ok(overlay_scan_batch(batch, &pending, true))
     }
 
     async fn scan_values_batched(
@@ -966,9 +1130,23 @@ impl MapDataStore for WriteBehindDataStore {
         cursor: ScanCursor,
         max_batch_cost: u64,
     ) -> anyhow::Result<ScanBatch> {
-        self.inner
+        // Backup scans never carry staging overlay (see enumerate_leaves).
+        if is_backup {
+            return self
+                .inner
+                .scan_values_batched(map, is_backup, cursor, max_batch_cost)
+                .await;
+        }
+
+        let pending = self.collect_staging_for_map(map);
+        let batch = self
+            .inner
             .scan_values_batched(map, is_backup, cursor, max_batch_cost)
-            .await
+            .await?;
+        // Resumed batches only overlay (replace/suppress) durable rows; the
+        // staging-only keys were already emitted by the first scan_values call,
+        // so emitting them again here would double-count.
+        Ok(overlay_scan_batch(batch, &pending, false))
     }
 
     fn is_loadable(&self, _key: &str) -> bool {
@@ -1158,6 +1336,132 @@ impl MapDataStore for WriteBehindDataStore {
 
     fn is_null(&self) -> bool {
         false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Staging overlay helpers for the buffer-aware read surface
+// ---------------------------------------------------------------------------
+
+/// Overlay a map's pending staging set onto one durable [`ScanBatch`].
+///
+/// For each durable row: a buffered `Some(v)` replaces the row with the newer
+/// buffered value; a buffered `None` (pending delete) suppresses the row so an
+/// evicted-but-deleted key cannot resurrect; an absent staging entry keeps the
+/// durable row unchanged. When `emit_staging_only` is true (the first batch of a
+/// resumable scan), staging-only `Some` keys the durable store never returned
+/// are appended once. Resumed batches pass `false` so those keys are never
+/// double-counted.
+fn overlay_scan_batch(
+    batch: ScanBatch,
+    pending: &BTreeMap<String, Option<RecordValue>>,
+    emit_staging_only: bool,
+) -> ScanBatch {
+    if pending.is_empty() {
+        return batch;
+    }
+
+    let ScanBatch {
+        records,
+        next_cursor,
+    } = batch;
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<(String, RecordValue)> = Vec::with_capacity(records.len());
+    for (key, value) in records {
+        match pending.get(&key) {
+            Some(Some(buffered)) => {
+                // Buffered write is newer than the durable row; emit it instead.
+                seen.insert(key.clone());
+                out.push((key, buffered.clone()));
+            }
+            Some(None) => {
+                // Pending delete hides the durable value.
+            }
+            None => {
+                out.push((key, value));
+            }
+        }
+    }
+
+    if emit_staging_only {
+        for (key, value) in pending {
+            if let Some(value) = value {
+                if !seen.contains(key) {
+                    out.push((key.clone(), value.clone()));
+                }
+            }
+        }
+    }
+
+    ScanBatch {
+        records: out,
+        next_cursor,
+    }
+}
+
+/// A [`LeafSink`] adapter that overlays a map's pending staging set onto the
+/// durable leaf stream before forwarding to the real sink.
+///
+/// A buffered `Some` recomputes the leaf hash from the buffered value (so a
+/// buffered-then-flushed record yields an identical leaf, leaving the Merkle
+/// root unchanged); a buffered `None` suppresses the durable leaf. Keys it has
+/// emitted are tracked so the outer enumeration can append the staging-only
+/// leaves exactly once.
+struct StagingLeafSink<'a> {
+    pending: &'a BTreeMap<String, Option<RecordValue>>,
+    inner: &'a mut dyn LeafSink,
+    seen: std::collections::HashSet<String>,
+}
+
+impl<'a> StagingLeafSink<'a> {
+    fn new(
+        pending: &'a BTreeMap<String, Option<RecordValue>>,
+        inner: &'a mut dyn LeafSink,
+    ) -> Self {
+        Self {
+            pending,
+            inner,
+            seen: std::collections::HashSet::new(),
+        }
+    }
+
+    fn was_seen(&self, key: &str) -> bool {
+        self.seen.contains(key)
+    }
+}
+
+#[async_trait]
+impl LeafSink for StagingLeafSink<'_> {
+    async fn consume(&mut self, batch: Vec<MerkleLeaf>) -> anyhow::Result<()> {
+        let mut out: Vec<MerkleLeaf> = Vec::with_capacity(batch.len());
+        for leaf in batch {
+            match self.pending.get(&leaf.key) {
+                Some(Some(buffered)) => {
+                    self.seen.insert(leaf.key.clone());
+                    // merkle_leaf_hash returns None for OrMap entries that must
+                    // contribute no leaf; propagate that None (emit nothing)
+                    // rather than injecting a zero/placeholder leaf.
+                    if let Some((kind, leaf_hash)) = merkle_leaf_hash(&leaf.key, buffered) {
+                        out.push(MerkleLeaf {
+                            key: leaf.key,
+                            kind,
+                            leaf_hash,
+                        });
+                    }
+                }
+                Some(None) => {
+                    // Pending delete suppresses the durable leaf.
+                }
+                None => {
+                    out.push(leaf);
+                }
+            }
+        }
+        if out.is_empty() {
+            return Ok(());
+        }
+        self.inner.consume(out).await
     }
 }
 
@@ -2131,5 +2435,384 @@ mod tests {
         let cfg = WriteBehindConfig::from_env();
         std::env::remove_var("TOPGUN_WAL_FSYNC_POLICY");
         assert_eq!(cfg.wal_fsync_policy, WalFsyncPolicy::PerOp);
+    }
+
+    // -----------------------------------------------------------------------
+    // Buffer-aware read surface (scan/enumerate/list_maps overlay staging)
+    // -----------------------------------------------------------------------
+
+    use crate::storage::map_data_store::{MerkleLeaf, MerkleLeafKind};
+    use crate::storage::record::OrMapEntry;
+    use crate::storage::RedbDataStore;
+
+    /// `WriteBehind` over a real redb inner with a flush delay long enough that
+    /// `add`/`remove` stay buffered for the duration of a test (no background
+    /// flush fires unless we force it via `flush_key`).
+    fn redb_backed_store() -> (Arc<WriteBehindDataStore>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("wb.redb");
+        let inner: Arc<dyn MapDataStore> = Arc::new(RedbDataStore::new(&path).expect("redb open"));
+        let config = WriteBehindConfig {
+            write_delay_ms: 600_000,
+            flush_interval_ms: 600_000,
+            capacity: 0,
+            ..WriteBehindConfig::default()
+        };
+        (WriteBehindDataStore::new(inner, config), dir)
+    }
+
+    fn lww(value: &str, millis: u64) -> RecordValue {
+        RecordValue::Lww {
+            value: Value::String(value.to_string()),
+            timestamp: Timestamp {
+                millis,
+                counter: 0,
+                node_id: "n".to_string(),
+            },
+        }
+    }
+
+    /// Assert an `Lww` record carries the expected string value and HLC millis.
+    /// `RecordValue` is intentionally not `PartialEq` (avoids a production derive
+    /// just for tests), so destructure instead.
+    fn assert_lww(record: &RecordValue, value: &str, millis: u64) {
+        match record {
+            RecordValue::Lww {
+                value: Value::String(v),
+                timestamp,
+            } => {
+                assert_eq!(v, value, "lww value mismatch");
+                assert_eq!(timestamp.millis, millis, "lww hlc millis mismatch");
+            }
+            other => panic!("expected Lww string record, got {other:?}"),
+        }
+    }
+
+    async fn drain_scan(
+        store: &Arc<WriteBehindDataStore>,
+        map: &str,
+    ) -> Vec<(String, RecordValue)> {
+        let mut out = Vec::new();
+        let mut batch = store.scan_values(map, false, 0).await.unwrap();
+        loop {
+            out.append(&mut batch.records);
+            match batch.next_cursor.take() {
+                Some(cursor) => {
+                    batch = store
+                        .scan_values_batched(map, false, cursor, 0)
+                        .await
+                        .unwrap();
+                }
+                None => break,
+            }
+        }
+        out
+    }
+
+    /// `LeafSink` that collects every emitted leaf for assertions.
+    struct CollectLeaves {
+        leaves: Vec<MerkleLeaf>,
+    }
+
+    #[async_trait]
+    impl LeafSink for CollectLeaves {
+        async fn consume(&mut self, batch: Vec<MerkleLeaf>) -> anyhow::Result<()> {
+            self.leaves.extend(batch);
+            Ok(())
+        }
+    }
+
+    async fn collect_leaves(store: &Arc<WriteBehindDataStore>, map: &str) -> Vec<MerkleLeaf> {
+        let mut sink = CollectLeaves { leaves: Vec::new() };
+        store.enumerate_leaves(map, false, &mut sink).await.unwrap();
+        sink.leaves
+    }
+
+    // AC2 — scan_values surfaces a buffered-only value; no double-count after
+    // flush; a buffered write overrides an older flushed redb value.
+    #[tokio::test]
+    async fn ac2_scan_values_buffer_aware() {
+        let (store, _dir) = redb_backed_store();
+
+        // Buffered-only key: only in staging, never flushed.
+        store.add("m", "k", &lww("v1", 1), 0, 1000).await.unwrap();
+        let rows = drain_scan(&store, "m").await;
+        assert_eq!(rows.len(), 1, "buffered-only key must be surfaced by scan");
+        assert_eq!(rows[0].0, "k");
+        assert_lww(&rows[0].1, "v1", 1);
+
+        // Flush to redb; scan must still return it exactly once (no double-count).
+        store
+            .flush_key("m", "k", &lww("v1", 1), false)
+            .await
+            .unwrap();
+        let rows = drain_scan(&store, "m").await;
+        assert_eq!(rows.len(), 1, "flushed key must appear exactly once");
+        assert_lww(&rows[0].1, "v1", 1);
+
+        // A newer buffered write over the flushed redb value wins, exactly once.
+        store.add("m", "k", &lww("v2", 5), 0, 2000).await.unwrap();
+        let rows = drain_scan(&store, "m").await;
+        assert_eq!(rows.len(), 1, "override must not double-count");
+        assert_lww(&rows[0].1, "v2", 5);
+    }
+
+    // AC3 — a pending delete buffered in staging hides the flushed redb value
+    // from both scan_values and enumerate_leaves (no resurrection).
+    #[tokio::test]
+    async fn ac3_pending_delete_suppression() {
+        let (store, _dir) = redb_backed_store();
+
+        store.add("m", "k", &lww("v1", 1), 0, 1000).await.unwrap();
+        store
+            .flush_key("m", "k", &lww("v1", 1), false)
+            .await
+            .unwrap();
+        // Now buffer a delete (staging None) over the flushed value.
+        store.remove("m", "k", 2000).await.unwrap();
+
+        let rows = drain_scan(&store, "m").await;
+        assert!(
+            rows.is_empty(),
+            "pending delete must hide the flushed value"
+        );
+
+        let leaves = collect_leaves(&store, "m").await;
+        assert!(
+            leaves.is_empty(),
+            "pending delete must suppress the durable leaf"
+        );
+    }
+
+    // AC4 — leaf-hash parity across flush + OrMap None-leaf propagation.
+    #[tokio::test]
+    async fn ac4_enumerate_leaves_hash_parity() {
+        let (store, _dir) = redb_backed_store();
+
+        // Buffered-only Lww leaf.
+        store.add("m", "k", &lww("v1", 7), 0, 1000).await.unwrap();
+        let buffered_leaves = collect_leaves(&store, "m").await;
+        assert_eq!(buffered_leaves.len(), 1, "buffered-only leaf must surface");
+
+        // Flush and re-enumerate: same leaf hash (Merkle root unchanged).
+        store
+            .flush_key("m", "k", &lww("v1", 7), false)
+            .await
+            .unwrap();
+        let flushed_leaves = collect_leaves(&store, "m").await;
+        assert_eq!(
+            buffered_leaves, flushed_leaves,
+            "leaf hash must be identical buffered vs flushed"
+        );
+        assert_eq!(buffered_leaves[0].kind, MerkleLeafKind::Lww);
+
+        // OrMap sub-assertion: an OrMap entry yields a leaf; an OrTombstones
+        // entry (merkle_leaf_hash == None) contributes NO leaf — no zero/
+        // placeholder leaf injected.
+        let or_value = RecordValue::OrMap {
+            records: vec![OrMapEntry {
+                value: Value::String("x".to_string()),
+                tag: "t1".to_string(),
+                timestamp: Timestamp {
+                    millis: 1,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
+            }],
+            tombstones: Vec::new(),
+        };
+        store.add("o", "ok", &or_value, 0, 1000).await.unwrap();
+        let none_value = RecordValue::OrTombstones {
+            tags: vec!["gone".to_string()],
+        };
+        store
+            .add("o", "tombstoned", &none_value, 0, 1000)
+            .await
+            .unwrap();
+
+        let or_leaves = collect_leaves(&store, "o").await;
+        assert_eq!(
+            or_leaves.len(),
+            1,
+            "OrMap entry yields a leaf; OrTombstones (None) contributes none"
+        );
+        assert_eq!(or_leaves[0].key, "ok");
+        assert_eq!(or_leaves[0].kind, MerkleLeafKind::OrMap);
+    }
+
+    // AC5 — a backup scan/enumerate is byte-for-byte the inner result: no
+    // overlay of non-backup staging writes.
+    #[tokio::test]
+    async fn ac5_is_backup_untouched() {
+        let (store, _dir) = redb_backed_store();
+
+        // Non-backup buffered write on map "m".
+        store
+            .add("m", "k", &lww("primary", 1), 0, 1000)
+            .await
+            .unwrap();
+
+        // Backup scan must not see the non-backup staging write.
+        let backup_batch = store.scan_values("m", true, 0).await.unwrap();
+        assert!(
+            backup_batch.records.is_empty(),
+            "backup scan must not overlay non-backup staging writes"
+        );
+
+        let mut sink = CollectLeaves { leaves: Vec::new() };
+        store.enumerate_leaves("m", true, &mut sink).await.unwrap();
+        assert!(
+            sink.leaves.is_empty(),
+            "backup enumerate must not overlay non-backup staging writes"
+        );
+    }
+
+    // AC6 — list_maps unions staging-only maps; pending-delete-only maps are
+    // excluded.
+    #[tokio::test]
+    async fn ac6_list_maps_union() {
+        let (store, _dir) = redb_backed_store();
+
+        // Map whose only write is buffered, never flushed.
+        store
+            .add("buffered_map", "k", &lww("v", 1), 0, 1000)
+            .await
+            .unwrap();
+        // Map present in staging only via a pending delete.
+        store.remove("delete_only_map", "k", 1000).await.unwrap();
+
+        let maps = store.list_maps().await.unwrap();
+        assert!(
+            maps.contains(&"buffered_map".to_string()),
+            "buffered-only map must appear in list_maps"
+        );
+        assert!(
+            !maps.contains(&"delete_only_map".to_string()),
+            "pending-delete-only map must not appear in list_maps"
+        );
+    }
+
+    // AC7 — multi-batch scan over flushed + staging-only keys returns the full
+    // logical key set exactly once, no boundary miss, no staging-only duplicate.
+    #[tokio::test]
+    async fn ac7_cursor_safe_merge() {
+        let (store, _dir) = redb_backed_store();
+
+        // Flush several keys to redb so the scan spans multiple small batches.
+        for i in 0..6u32 {
+            let k = format!("flushed_{i:02}");
+            let v = lww(&format!("v{i}"), 1);
+            store.add("m", &k, &v, 0, 1000).await.unwrap();
+            store.flush_key("m", &k, &v, false).await.unwrap();
+        }
+        // Add staging-only keys (buffered, never flushed) interleaved by name.
+        for i in 0..4u32 {
+            let k = format!("buffered_{i:02}");
+            store.add("m", &k, &lww("b", 2), 0, 2000).await.unwrap();
+        }
+
+        // Force a tiny batch budget so the redb scan pages across many batches.
+        let mut out: Vec<(String, RecordValue)> = Vec::new();
+        let mut batch = store.scan_values("m", false, 1).await.unwrap();
+        loop {
+            out.append(&mut batch.records);
+            match batch.next_cursor.take() {
+                Some(cursor) => {
+                    batch = store
+                        .scan_values_batched("m", false, cursor, 1)
+                        .await
+                        .unwrap();
+                }
+                None => break,
+            }
+        }
+
+        let mut keys: Vec<String> = out.iter().map(|(k, _)| k.clone()).collect();
+        keys.sort();
+        let mut expected: Vec<String> = (0..6)
+            .map(|i| format!("flushed_{i:02}"))
+            .chain((0..4).map(|i| format!("buffered_{i:02}")))
+            .collect();
+        expected.sort();
+        assert_eq!(
+            keys, expected,
+            "merged scan must yield every key exactly once across batches"
+        );
+    }
+
+    // AC8 — the flush-vs-coalesce race must not drop read-your-writes. When a
+    // flush dequeues an older write (E1) and a newer write (E2) coalesces into
+    // staging before E1's terminal staging removal runs, that removal must NOT
+    // wipe E2's slot. White-box: drive the exact race window deterministically
+    // (the 600s flush interval keeps the background loop out of the way), then
+    // assert the read surface still serves the newer value. Reproduces the
+    // active-eviction soak residual (`expected=2 actual=1`) at unit scope.
+    #[tokio::test]
+    async fn ac8_flush_does_not_clear_newer_coalesced_staging() {
+        let (store, _dir) = redb_backed_store();
+
+        // E1: write v1. Staging now holds (seq1, v1); queue holds E1.
+        store.add("m", "k", &lww("v1", 1), 0, 1000).await.unwrap();
+        let pid = partition_for("m", "k");
+        // Drain E1 out of the queue (the flush loop's first step). The queue lock
+        // is now released, opening the race window.
+        let drained = store.queues.get_mut(&pid).unwrap().drain_ready(i64::MAX);
+        assert_eq!(drained.len(), 1, "E1 must be the only drained entry");
+        let e1_seq = drained[0].sequence;
+
+        // E2: a newer write coalesces in. Queue is empty (E1 already drained), so
+        // E2 enters as a new entry; staging is overwritten to (seq2, v2).
+        store.add("m", "k", &lww("v2", 5), 0, 2000).await.unwrap();
+
+        // E1's flush completes and tries to clear its staging slot. With the seq
+        // guard it must NOT remove the newer E2 slot.
+        let removed = store.clear_staging_if_current("m", "k", e1_seq);
+        assert!(
+            !removed,
+            "E1's terminal flush must not clear E2's newer staging slot"
+        );
+
+        // Read-your-writes holds: load and scan both surface v2, not the stale
+        // durable/None value that the old unconditional remove exposed.
+        assert_lww(&store.load("m", "k").await.unwrap().unwrap(), "v2", 5);
+        let rows = drain_scan(&store, "m").await;
+        assert_eq!(rows.len(), 1, "exactly one row for the key");
+        assert_lww(&rows[0].1, "v2", 5);
+
+        // When E2 itself flushes, its own seq clears the slot (no leak).
+        let e2 = store.queues.get_mut(&pid).unwrap().drain_ready(i64::MAX);
+        assert_eq!(e2.len(), 1, "E2 must be drained");
+        let e2_seq = e2[0].sequence;
+        assert!(
+            store.clear_staging_if_current("m", "k", e2_seq),
+            "E2's own flush clears its staging slot"
+        );
+        assert!(
+            store.staging.is_empty(),
+            "no staging slot may leak after both writes flush"
+        );
+    }
+
+    // An out-of-order (lower-seq) stage must not clobber a newer staged value.
+    // Two concurrent same-key writers can interleave between `next_sequence()`
+    // and the staging insert; `stage` keeps the slot monotonic by `seq` so the
+    // later write's value is the one that survives.
+    #[tokio::test]
+    async fn stage_is_monotonic_by_seq() {
+        let (store, _dir) = redb_backed_store();
+
+        store.stage("m", "k", 10, Some(lww("v10", 10)));
+        // A higher seq replaces.
+        store.stage("m", "k", 11, Some(lww("v11", 11)));
+        assert_lww(&store.load("m", "k").await.unwrap().unwrap(), "v11", 11);
+        // A late, lower seq is rejected (does not clobber the newer value).
+        store.stage("m", "k", 10, Some(lww("v10", 10)));
+        assert_lww(&store.load("m", "k").await.unwrap().unwrap(), "v11", 11);
+        // Equal seq (same write, idempotent) is allowed.
+        store.stage("m", "k", 11, None);
+        assert!(
+            store.load("m", "k").await.unwrap().is_none(),
+            "equal-seq restage applies (idempotent same-write update)"
+        );
     }
 }
