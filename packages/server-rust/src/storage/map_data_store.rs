@@ -310,29 +310,39 @@ pub trait MapDataStore: Send + Sync {
 /// trips are needed per call. This avoids re-enumeration when a sync peer
 /// drills down through multiple trie levels in one session.
 ///
+/// Holds two independent trie views (LWW and OR-Map) mirroring the dual-tree
+/// structure the write-path observer maintains in `MerkleSyncManager`. The
+/// `root()` method returns the cross-kind combined root so a single hash is
+/// sufficient for the `SYNC_INIT` comparison; `buckets()` and `leaf_keys()`
+/// merge both trees at the requested path.
+///
 /// Created by [`DurableMerkleIndex::build_session`]; the caller is responsible
 /// for deciding when to discard the snapshot (e.g. after the sync round-trip
 /// completes or a write invalidates the root).
 pub struct MerkleSession {
-    /// The materialised coordinate-trie as `path → aggregate_hash` entries.
-    /// An empty path key `""` holds the map root hash.
-    /// Internal-node paths hold the per-hex-bucket child hashes exactly as
-    /// `aggregate_lww_buckets` / `get_buckets` in `merkle_sync.rs` compute them.
-    // Fields are read by the G2 method bodies; suppress the stub-state lint.
-    #[allow(dead_code)]
-    nodes: HashMap<String, HashMap<char, u32>>,
-    /// Leaf membership per path: path → sorted record keys at that leaf level.
-    #[allow(dead_code)]
-    leaves: HashMap<String, Vec<String>>,
+    /// Pre-computed per-path aggregate bucket hashes for the LWW tree.
+    /// `""` maps to the root-level children; each child path maps to its own
+    /// children, following the same BFS expansion the write-path observer uses.
+    pub(crate) lww_nodes: HashMap<String, HashMap<char, u32>>,
+    /// Pre-computed per-path aggregate bucket hashes for the OR-Map tree.
+    pub(crate) ormap_nodes: HashMap<String, HashMap<char, u32>>,
+    /// Aggregate LWW root hash (mirrors `MerkleSyncManager::aggregate_lww_root_hash`).
+    pub(crate) lww_root: u32,
+    /// Aggregate OR-Map root hash (mirrors `MerkleSyncManager::aggregate_ormap_root_hash`).
+    pub(crate) ormap_root: u32,
+    /// Leaf key membership by hex-path prefix (depth-length) for `leaf_keys` queries.
+    /// Key: hex-path of length `tree_depth`; value: record keys hashing to that path.
+    pub(crate) leaf_keys_by_path: HashMap<String, Vec<String>>,
 }
 
 impl MerkleSession {
     /// Return the aggregate root hash for the map.
     ///
-    /// The root is the XOR-fold of all leaf hashes bucketed up through the
-    /// full hex-depth of the trie — byte-identical to the live in-memory root.
+    /// Combines the LWW and OR-Map aggregate roots with the same
+    /// `combine_hashes` function used across all partition aggregation sites,
+    /// producing a single hash byte-compatible with the live in-memory root.
     pub fn root(&self) -> u32 {
-        todo!("G2 will fill in the real root read from `self.nodes`")
+        topgun_core::hash::combine_hashes(&[self.lww_root, self.ormap_root])
     }
 
     /// Return the per-hex-bucket child hashes for the internal trie node at
@@ -342,10 +352,39 @@ impl MerkleSession {
     /// hex nibble characters, following the same convention as
     /// `aggregate_lww_buckets` / `get_buckets` in `merkle_sync.rs` (e.g.
     /// `""` = root level, `"a"` = bucket `'a'` under root, `"a3"` = sub-bucket
-    /// `'3'` under `'a'`). Returns an empty map if the path does not exist in
-    /// the snapshot.
-    pub fn buckets(&self, _path: &str) -> HashMap<char, u32> {
-        todo!("G2 will fill in the real bucket lookup from `self.nodes`")
+    /// `'3'` under `'a'`). Returns a merged view of LWW + OR-Map children.
+    /// Returns an empty map if the path does not exist in the snapshot.
+    pub fn buckets(&self, path: &str) -> HashMap<char, u32> {
+        let lww = self.lww_nodes.get(path).cloned().unwrap_or_default();
+        let ormap = self.ormap_nodes.get(path).cloned().unwrap_or_default();
+        // Merge: for chars that appear in both trees, combine their hashes.
+        let mut merged: HashMap<char, Vec<u32>> = HashMap::new();
+        for (c, h) in lww {
+            merged.entry(c).or_default().push(h);
+        }
+        for (c, h) in ormap {
+            merged.entry(c).or_default().push(h);
+        }
+        merged
+            .into_iter()
+            .map(|(c, hs)| (c, topgun_core::hash::combine_hashes(&hs)))
+            .collect()
+    }
+
+    /// Return the LWW aggregate root hash only.
+    ///
+    /// Useful for tests that need to compare against
+    /// `MerkleSyncManager::aggregate_lww_root_hash` independently.
+    pub fn lww_root(&self) -> u32 {
+        self.lww_root
+    }
+
+    /// Return the OR-Map aggregate root hash only.
+    ///
+    /// Useful for tests that need to compare against
+    /// `MerkleSyncManager::aggregate_ormap_root_hash` independently.
+    pub fn ormap_root(&self) -> u32 {
+        self.ormap_root
     }
 
     /// Return the record keys that are leaves under `path` in the trie.
@@ -353,8 +392,11 @@ impl MerkleSession {
     /// Used by the sync peer to confirm leaf-level membership without loading
     /// full record values. Returns an empty vec if the path has no leaves in
     /// the snapshot.
-    pub fn leaf_keys(&self, _path: &str) -> Vec<String> {
-        todo!("G2 will fill in the real leaf lookup from `self.leaves`")
+    pub fn leaf_keys(&self, path: &str) -> Vec<String> {
+        self.leaf_keys_by_path
+            .get(path)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 

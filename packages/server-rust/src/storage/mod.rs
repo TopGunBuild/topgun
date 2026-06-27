@@ -20,6 +20,7 @@ mod crash_safety_proptest;
 mod eviction_cost_test;
 
 pub mod datastores;
+pub mod durable_merkle;
 pub mod engine;
 pub mod engines;
 pub mod eviction_config;
@@ -35,6 +36,7 @@ pub mod record_store;
 pub mod wal;
 
 pub use datastores::*;
+pub use durable_merkle::*;
 pub use engine::*;
 pub use engines::*;
 pub use eviction_config::*;
