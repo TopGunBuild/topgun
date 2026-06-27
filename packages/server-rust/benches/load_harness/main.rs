@@ -669,6 +669,11 @@ fn build_services() -> (
         )
         .with_journal(Arc::clone(&journal_store)),
     );
+    // No durable index here on purpose: this harness runs on a NullDataStore,
+    // which persists nothing, so a durable session would always be empty. The
+    // in-memory MerkleSyncManager fallback is the only valid SYNC source for an
+    // in-process NullDataStore run. The production binary (which runs on redb /
+    // postgres) wires the durable index via `with_durable_index`.
     let sync_svc = Arc::new(SyncService::new(
         merkle_manager,
         Arc::clone(&record_store_factory),
