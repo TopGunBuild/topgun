@@ -4,6 +4,13 @@
 //! write-behind persistence strategies. The [`RecordStore`](super::RecordStore)
 //! calls `add()` / `remove()` on every mutation; the implementation decides
 //! when and how to actually persist the data.
+//!
+//! Also defines [`DurableMerkleIndex`] and [`MerkleSession`]: a residency-
+//! independent Merkle computation surface that materialises the full coordinate-
+//! trie once from durable storage and serves repeated drill-down calls from that
+//! snapshot, so no re-enumeration is needed per query.
+
+use std::collections::HashMap;
 
 use async_trait::async_trait;
 
@@ -293,4 +300,82 @@ pub trait MapDataStore: Send + Sync {
     fn is_null(&self) -> bool {
         false
     }
+}
+
+/// A point-in-time snapshot of a map's coordinate-trie, held entirely in
+/// memory after a single enumeration pass.
+///
+/// Methods on `MerkleSession` answer root, internal-node bucket, and leaf-key
+/// queries from the already-materialised trie — no additional storage round
+/// trips are needed per call. This avoids re-enumeration when a sync peer
+/// drills down through multiple trie levels in one session.
+///
+/// Created by [`DurableMerkleIndex::build_session`]; the caller is responsible
+/// for deciding when to discard the snapshot (e.g. after the sync round-trip
+/// completes or a write invalidates the root).
+pub struct MerkleSession {
+    /// The materialised coordinate-trie as `path → aggregate_hash` entries.
+    /// An empty path key `""` holds the map root hash.
+    /// Internal-node paths hold the per-hex-bucket child hashes exactly as
+    /// `aggregate_lww_buckets` / `get_buckets` in `merkle_sync.rs` compute them.
+    // Fields are read by the G2 method bodies; suppress the stub-state lint.
+    #[allow(dead_code)]
+    nodes: HashMap<String, HashMap<char, u32>>,
+    /// Leaf membership per path: path → sorted record keys at that leaf level.
+    #[allow(dead_code)]
+    leaves: HashMap<String, Vec<String>>,
+}
+
+impl MerkleSession {
+    /// Return the aggregate root hash for the map.
+    ///
+    /// The root is the XOR-fold of all leaf hashes bucketed up through the
+    /// full hex-depth of the trie — byte-identical to the live in-memory root.
+    pub fn root(&self) -> u32 {
+        todo!("G2 will fill in the real root read from `self.nodes`")
+    }
+
+    /// Return the per-hex-bucket child hashes for the internal trie node at
+    /// `path`.
+    ///
+    /// `path` encodes the route from the root to this node as a sequence of
+    /// hex nibble characters, following the same convention as
+    /// `aggregate_lww_buckets` / `get_buckets` in `merkle_sync.rs` (e.g.
+    /// `""` = root level, `"a"` = bucket `'a'` under root, `"a3"` = sub-bucket
+    /// `'3'` under `'a'`). Returns an empty map if the path does not exist in
+    /// the snapshot.
+    pub fn buckets(&self, _path: &str) -> HashMap<char, u32> {
+        todo!("G2 will fill in the real bucket lookup from `self.nodes`")
+    }
+
+    /// Return the record keys that are leaves under `path` in the trie.
+    ///
+    /// Used by the sync peer to confirm leaf-level membership without loading
+    /// full record values. Returns an empty vec if the path has no leaves in
+    /// the snapshot.
+    pub fn leaf_keys(&self, _path: &str) -> Vec<String> {
+        todo!("G2 will fill in the real leaf lookup from `self.leaves`")
+    }
+}
+
+/// Residency-independent Merkle index surface.
+///
+/// Implementations build a [`MerkleSession`] by enumerating durable leaves
+/// from `store` for the given `map` (via [`MapDataStore::enumerate_leaves`]),
+/// folding them into a coordinate-trie, and returning the opaque handle.
+/// The caller drives the drill-down through `MerkleSession` methods without
+/// touching storage again for that session.
+///
+/// Decoupling the snapshot build from the drill-down queries means the sync
+/// handler can serve multiple `SYNC_STEP` messages from one enumeration pass,
+/// and records that are persisted but not in-memory still contribute their
+/// leaf hashes to the root — fixing the residency-coupling defect (TODO-530).
+pub trait DurableMerkleIndex {
+    /// Enumerate all durable leaves for `map` from `store` and materialise a
+    /// point-in-time coordinate-trie snapshot as a [`MerkleSession`] handle.
+    ///
+    /// Callers should hold the returned session for the duration of one sync
+    /// round-trip, then drop it. A new session should be built after any write
+    /// to `map` to keep the snapshot consistent with the durable state.
+    fn build_session(&self, map: &str, store: &dyn MapDataStore) -> MerkleSession;
 }
