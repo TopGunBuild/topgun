@@ -463,16 +463,11 @@ impl MutationObserver for MerkleMutationObserver {
             .remove_ormap(&self.map_name, self.partition_id, key);
     }
 
-    fn on_evict(&self, key: &str, _record: &Record, is_backup: bool) {
-        // Backup keys were never added to the tree.
-        if is_backup {
-            return;
-        }
-        // Same double-remove approach as on_remove for consistency.
-        self.manager
-            .remove_lww(&self.map_name, self.partition_id, key);
-        self.manager
-            .remove_ormap(&self.map_name, self.partition_id, key);
+    fn on_evict(&self, _key: &str, _record: &Record, _is_backup: bool) {
+        // Eviction changes residency only, not durable truth. The durable Merkle
+        // index (DurableMerkleIndex) is the authoritative source for SYNC; the
+        // in-memory tree is a non-authoritative accelerator. Removing the leaf here
+        // would cause the in-memory root to diverge from the durable index.
     }
 
     fn on_load(&self, key: &str, record: &Record, is_backup: bool) {

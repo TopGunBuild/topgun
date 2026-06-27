@@ -1569,9 +1569,10 @@ fn build_services(
             .with_observer_factories(observer_factories),
     );
 
-    // Seed each durably-persisted map's Merkle trees from the backend BEFORE the
-    // server accepts connections, so the first post-restart SYNC_INIT answers
-    // with the correct (non-zero, pre-crash-equal) root instead of an empty one.
+    // Warm up the in-memory Merkle tree as a non-authoritative accelerator.
+    // The durable Merkle index (DurableMerkleIndex) is the authoritative source
+    // for SYNC reads and does not depend on this warm-up. This accelerator may be
+    // retired once the durable index is the sole read path.
     //
     // This is an index-only seed: `rebuild_from_datastore` reads keys + u32 leaf
     // hashes via `enumerate_leaves` and never loads record VALUES, so it is
@@ -1583,9 +1584,8 @@ fn build_services(
     // into it. Eager seeding also makes the root trivially ready inside any
     // checkpoint quiesce window, since it completes before set_ready().
     //
-    // CRITICAL: `merkle_manager` here is the exact Arc moved into SyncService
-    // below (line constructing SyncService::new), which is the instance the real
-    // binary's SYNC_INIT path aggregates its root from — not a test-only path.
+    // `merkle_manager` here is the exact Arc moved into SyncService below, which
+    // is the instance the real binary's SYNC_INIT path aggregates its root from.
     // `datastore_for_merkle_seed` is the same durable backend (write-behind-
     // wrapped redb/Postgres) every other write goes through. Only primary
     // partitions are seeded (rebuild_from_datastore uses is_backup=false), which
@@ -1707,13 +1707,11 @@ fn build_services(
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
     ));
-    let query_merkle_manager =
-        Arc::new(topgun_server::storage::query_merkle::QueryMerkleSyncManager::new());
     let query_svc_base = QueryService::new(
         Arc::clone(&query_registry),
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
-        Some(Arc::clone(&query_merkle_manager)),
+        None,
         config.max_query_records,
         None,
         #[cfg(feature = "datafusion")]

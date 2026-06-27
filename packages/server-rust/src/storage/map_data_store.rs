@@ -4,6 +4,13 @@
 //! write-behind persistence strategies. The [`RecordStore`](super::RecordStore)
 //! calls `add()` / `remove()` on every mutation; the implementation decides
 //! when and how to actually persist the data.
+//!
+//! Also defines [`DurableMerkleIndex`] and [`MerkleSession`]: a residency-
+//! independent Merkle computation surface that materialises the full coordinate-
+//! trie once from durable storage and serves repeated drill-down calls from that
+//! snapshot, so no re-enumeration is needed per query.
+
+use std::collections::HashMap;
 
 use async_trait::async_trait;
 
@@ -293,4 +300,139 @@ pub trait MapDataStore: Send + Sync {
     fn is_null(&self) -> bool {
         false
     }
+}
+
+/// A point-in-time snapshot of a map's coordinate-trie, held entirely in
+/// memory after a single enumeration pass.
+///
+/// Methods on `MerkleSession` answer root, internal-node bucket, and leaf-key
+/// queries from the already-materialised trie — no additional storage round
+/// trips are needed per call. This avoids re-enumeration when a sync peer
+/// drills down through multiple trie levels in one session.
+///
+/// Holds two independent trie views (LWW and OR-Map) mirroring the dual-tree
+/// structure the write-path observer maintains in `MerkleSyncManager`. The
+/// `root()` method returns the cross-kind combined root so a single hash is
+/// sufficient for the `SYNC_INIT` comparison; `buckets()` and `leaf_keys()`
+/// merge both trees at the requested path.
+///
+/// Created by [`DurableMerkleIndex::build_session`]; the caller is responsible
+/// for deciding when to discard the snapshot (e.g. after the sync round-trip
+/// completes or a write invalidates the root).
+pub struct MerkleSession {
+    /// Pre-computed per-path aggregate bucket hashes for the LWW tree.
+    /// `""` maps to the root-level children; each child path maps to its own
+    /// children, following the same BFS expansion the write-path observer uses.
+    pub(crate) lww_nodes: HashMap<String, HashMap<char, u32>>,
+    /// Pre-computed per-path aggregate bucket hashes for the OR-Map tree.
+    pub(crate) ormap_nodes: HashMap<String, HashMap<char, u32>>,
+    /// Aggregate LWW root hash (mirrors `MerkleSyncManager::aggregate_lww_root_hash`).
+    pub(crate) lww_root: u32,
+    /// Aggregate OR-Map root hash (mirrors `MerkleSyncManager::aggregate_ormap_root_hash`).
+    pub(crate) ormap_root: u32,
+    /// Leaf key membership by hex-path prefix (depth-length) for `leaf_keys` queries.
+    /// Key: hex-path of length `tree_depth`; value: record keys hashing to that path.
+    pub(crate) leaf_keys_by_path: HashMap<String, Vec<String>>,
+}
+
+impl MerkleSession {
+    /// Return the aggregate root hash for the map.
+    ///
+    /// Combines the LWW and OR-Map aggregate roots with the same
+    /// `combine_hashes` function used across all partition aggregation sites,
+    /// producing a single hash byte-compatible with the live in-memory root.
+    #[must_use]
+    pub fn root(&self) -> u32 {
+        topgun_core::hash::combine_hashes(&[self.lww_root, self.ormap_root])
+    }
+
+    /// Return the per-hex-bucket child hashes for the internal trie node at
+    /// `path`.
+    ///
+    /// `path` encodes the route from the root to this node as a sequence of
+    /// hex nibble characters, following the same convention as
+    /// `aggregate_lww_buckets` / `get_buckets` in `merkle_sync.rs` (e.g.
+    /// `""` = root level, `"a"` = bucket `'a'` under root, `"a3"` = sub-bucket
+    /// `'3'` under `'a'`). Returns a merged view of LWW + OR-Map children.
+    /// Returns an empty map if the path does not exist in the snapshot.
+    #[must_use]
+    pub fn buckets(&self, path: &str) -> HashMap<char, u32> {
+        let lww = self.lww_nodes.get(path).cloned().unwrap_or_default();
+        let ormap = self.ormap_nodes.get(path).cloned().unwrap_or_default();
+        // Merge: for chars that appear in both trees, combine their hashes.
+        let mut merged: HashMap<char, Vec<u32>> = HashMap::new();
+        for (c, h) in lww {
+            merged.entry(c).or_default().push(h);
+        }
+        for (c, h) in ormap {
+            merged.entry(c).or_default().push(h);
+        }
+        merged
+            .into_iter()
+            .map(|(c, hs)| (c, topgun_core::hash::combine_hashes(&hs)))
+            .collect()
+    }
+
+    /// Return the LWW aggregate root hash only.
+    ///
+    /// Useful for tests that need to compare against
+    /// `MerkleSyncManager::aggregate_lww_root_hash` independently.
+    #[must_use]
+    pub fn lww_root(&self) -> u32 {
+        self.lww_root
+    }
+
+    /// Return the OR-Map aggregate root hash only.
+    ///
+    /// Useful for tests that need to compare against
+    /// `MerkleSyncManager::aggregate_ormap_root_hash` independently.
+    #[must_use]
+    pub fn ormap_root(&self) -> u32 {
+        self.ormap_root
+    }
+
+    /// Return the record keys that are leaves under `path` in the trie.
+    ///
+    /// Used by the sync peer to confirm leaf-level membership without loading
+    /// full record values. Returns an empty vec if the path has no leaves in
+    /// the snapshot.
+    #[must_use]
+    pub fn leaf_keys(&self, path: &str) -> Vec<String> {
+        self.leaf_keys_by_path
+            .get(path)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+/// Residency-independent Merkle index surface.
+///
+/// Implementations build a [`MerkleSession`] by enumerating durable leaves
+/// from `store` for the given `map` (via [`MapDataStore::enumerate_leaves`]),
+/// folding them into a coordinate-trie, and returning the opaque handle.
+/// The caller drives the drill-down through `MerkleSession` methods without
+/// touching storage again for that session.
+///
+/// Decoupling the snapshot build from the drill-down queries means the sync
+/// handler can serve multiple `SYNC_STEP` messages from one enumeration pass,
+/// and records that are persisted but not in-memory still contribute their
+/// leaf hashes to the root — fixing the residency-coupling defect (TODO-530).
+pub trait DurableMerkleIndex {
+    /// Enumerate all durable leaves for `map` from `store` and materialise a
+    /// point-in-time coordinate-trie snapshot as a [`MerkleSession`] handle.
+    ///
+    /// Callers should hold the returned session for the duration of one sync
+    /// round-trip, then drop it. A new session should be built after any write
+    /// to `map` to keep the snapshot consistent with the durable state.
+    ///
+    /// # Errors
+    ///
+    /// Returns any error surfaced by [`MapDataStore::enumerate_leaves`]. A
+    /// failed or partial enumeration MUST NOT silently yield a session built
+    /// over an incomplete leaf set — that would produce a wrong (yet
+    /// plausible) root and let the sync handler answer with leaves that diverge
+    /// from durable truth. The contract mirrors
+    /// [`MerkleSyncManager::rebuild_from_datastore`](crate::storage::merkle_sync::MerkleSyncManager::rebuild_from_datastore):
+    /// propagate, never degrade to wrong leaves.
+    fn build_session(&self, map: &str, store: &dyn MapDataStore) -> anyhow::Result<MerkleSession>;
 }
