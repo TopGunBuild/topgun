@@ -577,8 +577,8 @@ fn print_summary(r: &SoakReport) {
 /// Quiesce churn, then verify the server read-back equals the model exactly and
 /// that two client connections agree on the Merkle root. No re-assertion of
 /// state, so this genuinely tests that the server stored every acked write.
-/// Returns `(hard, pending)` failures. `hard` reddens the run; `pending` is the
-/// TODO-530 residency-coupled Merkle track, logged but non-fatal.
+/// Returns `(hard, pending)` failures. `hard` reddens the run; `pending` is
+/// reserved for future expected-fail gates (currently empty).
 async fn steady_checkpoint(
     supervisor: &Arc<ServerSupervisor>,
     model: &Arc<Model>,
@@ -599,7 +599,7 @@ async fn steady_checkpoint_inner(
     jwt: &str,
 ) -> Result<(Vec<String>, Vec<String>)> {
     let mut hard = Vec::new();
-    let mut pending = Vec::new();
+    let pending = Vec::new();
     let expected = model.snapshot();
 
     // HARD: full-scan read-your-writes convergence — the read surface this spec
@@ -620,16 +620,15 @@ async fn steady_checkpoint_inner(
         ));
     }
 
-    // PENDING (TODO-530): two clients can read different Merkle roots from the
-    // SAME live server because the root reflects the *resident* set, which active
-    // eviction mutates between the two reads. This is the residency-coupled Merkle
-    // index (SYNC-treewalk track), NOT the read-surface buffer-awareness above.
+    // HARD: two clients must agree on the Merkle root. DurableMerkleIndex
+    // (SPEC-325b / SYNC-treewalk) now builds from the datastore rather than the
+    // resident set, so eviction no longer mutates the root between reads.
     let root1 = v1.merkle_root(LWW_MAP).await?;
     let mut v2 = SoakClient::connect(supervisor.addr(), VERIFIER_IDX + 1, jwt).await?;
     let root2 = v2.merkle_root(LWW_MAP).await?;
     if root1 != root2 {
-        pending.push(format!(
-            "[TODO-530] merkle disagreement between two clients under eviction: {root1} != {root2}"
+        hard.push(format!(
+            "merkle disagreement between two clients under eviction: {root1} != {root2}"
         ));
     }
 
@@ -639,19 +638,14 @@ async fn steady_checkpoint_inner(
 /// Outcome of a recovery checkpoint, split into required vs known-pending gates.
 ///
 /// `hard` failures fail the run. `pending_gates` records capabilities that are
-/// owned by a separate, tracked track and whose failure is *expected* on this
-/// branch — they are logged (never silently dropped) but must not redden the
-/// soak. Each carries strict-xfail → xpass semantics: if a pending gate ever
-/// turns green, it is promoted to a `hard` failure so a maintainer flips it to
-/// required and it can never silently regress. Two tracks live here:
-///   - SPEC-322b: the QUERY-path full-scan post-restart read-back.
-///   - TODO-530 (residency-coupled Merkle / SYNC-treewalk track): the Merkle
-///     root + delta-sync leaf read-back across restart. The Merkle root/index is
-///     computed from the *resident* set, so a `kill -9` (which drops the in-memory
-///     index) and active eviction (which mutates residency) both change it. The
-///     fix is a datastore-backed, residency-independent Merkle index, owned by
-///     the SYNC-treewalk track — NOT the read-surface buffer-awareness this
-///     soak's read paths now verify.
+/// owned by a separate, tracked track and whose failure is *expected* — they are
+/// logged (never silently dropped) but must not redden the soak. Each carries
+/// strict-xfail → xpass semantics: if a pending gate turns green it is promoted
+/// to a `hard` failure so a maintainer flips it to required and it can never
+/// silently regress. All prior TODO-530 gates (Merkle root + delta-sync +
+/// QUERY-path full-scan) have been promoted to `hard` by SPEC-325b; this struct
+/// is preserved so new expected-fail gates can be added without changing the
+/// checkpoint interface.
 #[derive(Default)]
 struct RecoveryOutcome {
     hard: Vec<String>,
@@ -733,31 +727,26 @@ async fn recovery_checkpoint(
         (query, delta, root, or_root)
     };
 
-    // PENDING (TODO-530, residency-coupled Merkle / SYNC-treewalk track): the
-    // Merkle root/index is built from the *resident* set, which a `kill -9`
-    // discards. Until a datastore-backed, residency-independent Merkle index
-    // lands, the root legitimately changes across restart. Logged, not fatal —
-    // this is NOT the read-surface buffer-awareness the convergence gate (above)
-    // verifies. When SYNC-treewalk lands, re-promote these to `hard`.
+    // HARD: DurableMerkleIndex (SPEC-325b) builds from the datastore, not the
+    // resident set, so the Merkle root must survive a kill -9 + restart unchanged.
     if post_root != pre_root {
-        out.pending_gates.push(format!(
-            "[TODO-530] LWW merkle root changed across recovery: pre={pre_root} post={post_root}"
+        out.hard.push(format!(
+            "LWW merkle root changed across recovery: pre={pre_root} post={post_root}"
         ));
     }
     if pre_or_root != post_or_root {
-        out.pending_gates.push(format!(
-            "[TODO-530] OR-Map merkle root changed across recovery: pre={pre_or_root:?} post={post_or_root:?}"
+        out.hard.push(format!(
+            "OR-Map merkle root changed across recovery: pre={pre_or_root:?} post={post_or_root:?}"
         ));
     }
 
-    // PENDING (TODO-530): the delta-sync leaf-fetch path drills the Merkle tree
-    // and lazy-loads each leaf. Post-restart it inherits the same residency
-    // coupling as the root above (the index is not rehydrated from the datastore),
-    // so durable-but-non-resident leaves read stale/missing until SYNC-treewalk.
+    // HARD: the delta-sync leaf-fetch path drills the DurableMerkleIndex, which
+    // now reads from the datastore. Post-restart the index is rebuilt from durable
+    // storage, so every leaf must be reachable regardless of residency.
     let delta_diffs = compare(&pre_lww, &post_delta);
     if !delta_diffs.is_empty() {
-        out.pending_gates.push(format!(
-            "[TODO-530] LWW delta-sync read-back changed across recovery: {} key(s) (e.g. {})",
+        out.hard.push(format!(
+            "LWW delta-sync read-back changed across recovery: {} key(s) (e.g. {})",
             delta_diffs.len(),
             delta_diffs
                 .iter()
@@ -768,13 +757,13 @@ async fn recovery_checkpoint(
         ));
     }
 
-    // PENDING (TODO-530): the full-scan QUERY path post-restart reads whatever the
-    // datastore-backed scan rehydrates; under the same residency coupling it can
-    // read stale/missing until SYNC-treewalk. Tracked, not fatal.
+    // HARD: SPEC-322c wired FullScanPager with a datastore-backed streaming scan,
+    // so the full-scan QUERY path must return the complete persisted dataset after
+    // restart with no residency dependency.
     let query_diffs = compare(&pre_lww, &post_query);
     if !query_diffs.is_empty() {
-        out.pending_gates.push(format!(
-            "[TODO-530] QUERY-path full-scan read-back not recovered post-restart: {} key(s) (e.g. {})",
+        out.hard.push(format!(
+            "QUERY-path full-scan read-back not recovered post-restart: {} key(s) (e.g. {})",
             query_diffs.len(),
             query_diffs
                 .iter()
