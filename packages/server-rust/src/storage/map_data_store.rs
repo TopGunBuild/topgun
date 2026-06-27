@@ -424,5 +424,15 @@ pub trait DurableMerkleIndex {
     /// Callers should hold the returned session for the duration of one sync
     /// round-trip, then drop it. A new session should be built after any write
     /// to `map` to keep the snapshot consistent with the durable state.
-    fn build_session(&self, map: &str, store: &dyn MapDataStore) -> MerkleSession;
+    ///
+    /// # Errors
+    ///
+    /// Returns any error surfaced by [`MapDataStore::enumerate_leaves`]. A
+    /// failed or partial enumeration MUST NOT silently yield a session built
+    /// over an incomplete leaf set — that would produce a wrong (yet
+    /// plausible) root and let the sync handler answer with leaves that diverge
+    /// from durable truth. The contract mirrors
+    /// [`MerkleSyncManager::rebuild_from_datastore`](crate::storage::merkle_sync::MerkleSyncManager::rebuild_from_datastore):
+    /// propagate, never degrade to wrong leaves.
+    fn build_session(&self, map: &str, store: &dyn MapDataStore) -> anyhow::Result<MerkleSession>;
 }

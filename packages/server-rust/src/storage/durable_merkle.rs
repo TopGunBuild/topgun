@@ -36,7 +36,7 @@ use super::map_data_store::{
 pub struct DurableMerkle;
 
 impl DurableMerkleIndex for DurableMerkle {
-    fn build_session(&self, map: &str, store: &dyn MapDataStore) -> MerkleSession {
+    fn build_session(&self, map: &str, store: &dyn MapDataStore) -> anyhow::Result<MerkleSession> {
         // Run the async enumeration from a synchronous context. When called
         // from within a Tokio multi-threaded runtime (the normal server path
         // and `#[tokio::test(flavor = "multi_thread")]` tests), block_in_place
@@ -50,7 +50,7 @@ impl DurableMerkleIndex for DurableMerkle {
 }
 
 /// Async inner: enumerate leaves and fold into per-partition trees.
-async fn build_session_async(map: &str, store: &dyn MapDataStore) -> MerkleSession {
+async fn build_session_async(map: &str, store: &dyn MapDataStore) -> anyhow::Result<MerkleSession> {
     let mut sink = SessionBuildSink {
         lww_trees: HashMap::new(),
         ormap_trees: HashMap::new(),
@@ -58,11 +58,15 @@ async fn build_session_async(map: &str, store: &dyn MapDataStore) -> MerkleSessi
         depth: 3,
     };
     // A single streaming pass — no values are loaded, only (key, kind, hash).
-    store
-        .enumerate_leaves(map, false, &mut sink)
-        .await
-        .unwrap_or_default();
-    sink.into_session()
+    //
+    // Propagate any enumeration failure rather than swallowing it: a partial
+    // scan would leave `sink` holding a subset of leaves, and `into_session`
+    // would then publish a non-empty but WRONG root. The sync read source must
+    // degrade to an error (so the handler can reject/retry), never to wrong
+    // leaves — the same contract `MerkleSyncManager::rebuild_from_datastore`
+    // upholds for the in-memory accelerator.
+    store.enumerate_leaves(map, false, &mut sink).await?;
+    Ok(sink.into_session())
 }
 
 // ---------------------------------------------------------------------------
@@ -122,8 +126,8 @@ impl SessionBuildSink {
     fn into_session(self) -> MerkleSession {
         // Materialise LWW aggregate buckets for every path that any partition
         // exposes. Paths are discovered by walking `get_buckets` at each depth
-        // level from root. We use a BFS over the hex trie to enumerate all
-        // internal nodes without revisiting them.
+        // level from root, descending the hex trie to enumerate every internal
+        // node exactly once.
 
         // ---- LWW bucket map ------------------------------------------------
         let mut lww_nodes: HashMap<String, HashMap<char, u32>> = HashMap::new();
@@ -195,30 +199,43 @@ impl SessionBuildSink {
     }
 }
 
-/// BFS-walk a set of per-partition trees and materialise the aggregate
+/// Walk a set of per-partition trees and materialise the aggregate
 /// per-hex-bucket hashes for every reachable internal node into `out_nodes`.
 ///
 /// `bucket_fn` computes the aggregate `HashMap<char, u32>` for a given path
-/// by combining per-partition buckets with `combine_hashes`. Stops at depth
-/// `max_depth` to avoid descending into leaf nodes.
+/// by combining per-partition buckets with `combine_hashes`. `max_depth` is a
+/// hard bound: internal nodes live at paths of length `0..max_depth`, so once a
+/// path reaches `max_depth` its children are leaf-level and must not be
+/// expanded. The trie self-terminates today (leaf nodes expose no children via
+/// `get_buckets`), but enforcing the bound keeps the snapshot correct even if
+/// `MerkleTree` leaf enumeration changes — never publish a node the live tree
+/// would not.
 fn materialise_aggregate_buckets<T>(
     trees: &HashMap<u32, Mutex<T>>,
     out_nodes: &mut HashMap<String, HashMap<char, u32>>,
     bucket_fn: impl Fn(&HashMap<u32, Mutex<T>>, &str) -> HashMap<char, u32>,
-    _max_depth: usize,
+    max_depth: usize,
 ) where
     T: Send,
 {
-    // BFS from root ("") down through all reachable children.
-    let mut queue: Vec<String> = vec![String::new()]; // start at root path ""
-    while let Some(path) = queue.pop() {
+    // Depth-first walk from root ("") down through all reachable children,
+    // visiting each internal node exactly once.
+    let mut stack: Vec<String> = vec![String::new()]; // start at root path ""
+    while let Some(path) = stack.pop() {
+        // Hard bound: paths of length `max_depth` address leaf nodes, which are
+        // served via `leaf_keys`, never `buckets`. Never call `get_buckets` on
+        // them or publish them — even if a future `MerkleTree` change made leaf
+        // nodes expose children, the snapshot must not gain a level the sync
+        // protocol does not walk.
+        if path.len() >= max_depth {
+            continue;
+        }
         let children = bucket_fn(trees, &path);
         if children.is_empty() {
             continue;
         }
         for c in children.keys() {
-            let child_path = format!("{path}{c}");
-            queue.push(child_path);
+            stack.push(format!("{path}{c}"));
         }
         out_nodes.insert(path, children);
     }
@@ -349,6 +366,9 @@ mod tests {
     struct SpyStore {
         inner: RedbDataStore,
         enumerate_calls: Arc<AtomicUsize>,
+        /// When true, `enumerate_leaves` returns an error AFTER pushing a
+        /// partial batch — models a mid-stream storage fault.
+        fail_enumerate: bool,
     }
 
     #[async_trait]
@@ -398,6 +418,18 @@ mod tests {
             sink: &mut dyn LeafSink,
         ) -> anyhow::Result<()> {
             self.enumerate_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_enumerate {
+                // Push a partial batch first so the sink holds a non-empty
+                // subset, then fail — proving build_session must not publish a
+                // session over that subset.
+                sink.consume(vec![MerkleLeaf {
+                    key: "partial".to_string(),
+                    kind: MerkleLeafKind::Lww,
+                    leaf_hash: 0xDEAD_BEEF,
+                }])
+                .await?;
+                anyhow::bail!("simulated mid-stream enumerate_leaves fault");
+            }
             self.inner.enumerate_leaves(map, is_backup, sink).await
         }
         async fn scan_values(
@@ -467,8 +499,12 @@ mod tests {
             .unwrap();
 
         let idx = DurableMerkle;
-        let session1 = idx.build_session("m", store.as_ref());
-        let session2 = idx.build_session("m", store.as_ref());
+        let session1 = idx
+            .build_session("m", store.as_ref())
+            .expect("build_session");
+        let session2 = idx
+            .build_session("m", store.as_ref())
+            .expect("build_session");
 
         assert_ne!(
             session1.root(),
@@ -499,7 +535,9 @@ mod tests {
         let write_path_root = resident.aggregate_lww_root_hash("m");
 
         let idx = DurableMerkle;
-        let session = idx.build_session("m", store.as_ref());
+        let session = idx
+            .build_session("m", store.as_ref())
+            .expect("build_session");
 
         assert_eq!(
             session.lww_root(),
@@ -534,7 +572,9 @@ mod tests {
         }
 
         let idx = DurableMerkle;
-        let session = idx.build_session("users", store.as_ref());
+        let session = idx
+            .build_session("users", store.as_ref())
+            .expect("build_session");
 
         let expected_lww = resident.aggregate_lww_root_hash("users");
         let expected_ormap = resident.aggregate_ormap_root_hash("users");
@@ -584,7 +624,9 @@ mod tests {
             .unwrap();
 
         let idx = DurableMerkle;
-        let session = idx.build_session("m", store.as_ref());
+        let session = idx
+            .build_session("m", store.as_ref())
+            .expect("build_session");
 
         // A pure-tombstone map should produce root 0 — no live leaves.
         assert_eq!(
@@ -620,7 +662,9 @@ mod tests {
         for (k, v) in &records {
             ctrl_store.add("big", k, v, 0, 1).await.unwrap();
         }
-        let ctrl_session = DurableMerkle.build_session("big", &ctrl_store as &dyn MapDataStore);
+        let ctrl_session = DurableMerkle
+            .build_session("big", &ctrl_store as &dyn MapDataStore)
+            .expect("build_session");
         let expected_root = ctrl_session.root();
         drop(ctrl_store); // close before second open attempt
 
@@ -634,9 +678,12 @@ mod tests {
         let spy: Arc<dyn MapDataStore> = Arc::new(SpyStore {
             inner: spy_inner,
             enumerate_calls: Arc::clone(&enumerate_calls),
+            fail_enumerate: false,
         });
         // Must not panic; if load/load_all are called the test panics.
-        let spy_session = DurableMerkle.build_session("big", spy.as_ref());
+        let spy_session = DurableMerkle
+            .build_session("big", spy.as_ref())
+            .expect("build_session");
 
         assert!(
             enumerate_calls.load(Ordering::SeqCst) >= 1,
@@ -673,7 +720,9 @@ mod tests {
 
         // Build session with NO MerkleSyncManager in scope.
         let idx = DurableMerkle;
-        let session = idx.build_session("m", store.as_ref());
+        let session = idx
+            .build_session("m", store.as_ref())
+            .expect("build_session");
 
         // Independently compute what the root should be via the same primitives.
         let leaf_hash = fnv1a_hash(&format!("{key}:{millis}:0:n1"));
@@ -709,7 +758,9 @@ mod tests {
             .unwrap();
 
         let idx = DurableMerkle;
-        let session = idx.build_session("m", store.as_ref());
+        let session = idx
+            .build_session("m", store.as_ref())
+            .expect("build_session");
 
         let root_before = session.root();
         let buckets_before = session.buckets("");
@@ -743,12 +794,53 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Error propagation — a mid-stream enumerate fault must surface, never
+    // produce a session over a partial (wrong) leaf set.
+    //
+    // The sync read source degrades to an error (so the handler can
+    // reject/retry), never to wrong leaves — the same contract
+    // MerkleSyncManager::rebuild_from_datastore upholds.
+    // -----------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_session_propagates_enumerate_error_no_partial_session() {
+        let spy_dir = tempfile::tempdir().expect("tempdir");
+        let spy_inner = RedbDataStore::new(spy_dir.path().join("fail.redb")).expect("redb open");
+        // Seed some real data so a swallowed error would yield a plausible,
+        // non-empty (but WRONG) root rather than an obviously-empty one.
+        for i in 0..10u32 {
+            spy_inner
+                .add(
+                    "m",
+                    &format!("k{i}"),
+                    &lww_value("v", u64::from(i), i, "n"),
+                    0,
+                    1,
+                )
+                .await
+                .unwrap();
+        }
+        let spy: Arc<dyn MapDataStore> = Arc::new(SpyStore {
+            inner: spy_inner,
+            enumerate_calls: Arc::new(AtomicUsize::new(0)),
+            fail_enumerate: true,
+        });
+
+        let result = DurableMerkle.build_session("m", spy.as_ref());
+        assert!(
+            result.is_err(),
+            "build_session must propagate the enumerate fault, not return a partial session"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Bonus: empty store produces root 0
     // -----------------------------------------------------------------------
     #[tokio::test(flavor = "multi_thread")]
     async fn empty_store_produces_root_zero() {
         let (store, _dir) = fresh_redb();
-        let session = DurableMerkle.build_session("nonexistent", store.as_ref());
+        let session = DurableMerkle
+            .build_session("nonexistent", store.as_ref())
+            .expect("build_session");
         assert_eq!(session.root(), 0, "empty map must produce root 0");
         assert!(session.buckets("").is_empty());
         assert!(session.leaf_keys("000").is_empty());
