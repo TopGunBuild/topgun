@@ -4,6 +4,7 @@ import {
   createLWWRecord,
   waitForSync,
   waitUntil,
+  completeMerkleSync,
   TestClient,
 } from './helpers';
 
@@ -1236,105 +1237,160 @@ describe('Integration: Queries (Rust Server)', () => {
   });
 
   // ========================================
-  // Merkle Delta Reconnect (SPEC-144)
+  // Merkle Delta Reconnect — map-level tree-walk SYNC path
   //
-  // SKIPPED: per-query Merkle is retired on the full-scan path (SPEC-322c SYNC/QUERY
-  // separation). Reconnect now falls back to a full snapshot (correct, less efficient)
-  // until the map-level Merkle tree-walk SYNC lands (SYNC-treewalk track). The client
-  // degrades gracefully: merkleRootHash undefined → defaults to 0 → full snapshot.
-  // Re-enable (rewritten against the tree-walk protocol) when SYNC-treewalk ships.
+  // Rewritten from per-query Merkle (retired in SYNC/QUERY separation) to the
+  // durable map-level tree-walk SYNC path (SYNC_INIT → SYNC_RESP_ROOT →
+  // MERKLE_REQ_BUCKET → SYNC_RESP_BUCKETS | SYNC_RESP_LEAF). The server SYNC
+  // path reads from the DurableMerkleIndex so results survive restart and are
+  // not coupled to in-memory residency.
   // ========================================
-  describe.skip('QUERY_SYNC_INIT Merkle delta reconnect', () => {
-    test('reconnect with stored Merkle hash sends QUERY_SYNC_INIT', async () => {
-      const mapName = `merkle-reconnect-${Date.now()}`;
+  describe('Merkle delta reconnect via tree-walk SYNC path', () => {
+    test('reconnecting client gets non-zero root hash and full records via SYNC_INIT', async () => {
+      const mapName = `merkle-treewalk-${Date.now()}`;
 
-      // First connection: establish query with fields, receive QUERY_RESP with merkleRootHash
+      // First connection: write two records and confirm the server persists them
       const client1 = await createRustTestClient(port, {
-        nodeId: 'merkle-rc-client-1',
-        userId: 'merkle-rc-user-1',
+        nodeId: 'merkle-tw-client-1',
+        userId: 'merkle-tw-user-1',
         roles: ['ADMIN'],
       });
       await client1.waitForMessage('AUTH_ACK');
 
-      // Write initial data
+      const writes = [
+        { id: 'mtw-put-1', key: 'mtw-item-1', value: { name: 'Alice', status: 'active' } },
+        { id: 'mtw-put-2', key: 'mtw-item-2', value: { name: 'Bob', status: 'inactive' } },
+      ];
+
+      for (const w of writes) {
+        client1.messages.length = 0;
+        client1.send({
+          type: 'CLIENT_OP',
+          payload: {
+            id: w.id,
+            mapName,
+            opType: 'PUT',
+            key: w.key,
+            record: createLWWRecord(w.value),
+          },
+        });
+        await client1.waitForMessage('OP_ACK');
+      }
+
+      await waitForSync(300);
+
+      // First SYNC_INIT: confirm server root hash is non-zero (tree is built)
       client1.messages.length = 0;
-      client1.send({
-        type: 'CLIENT_OP',
-        payload: {
-          id: 'mrc-put-1',
-          mapName,
-          opType: 'PUT',
-          key: 'mrc-item-1',
-          record: createLWWRecord({ name: 'Initial', status: 'active' }),
-        },
-      });
-      await client1.waitForMessage('OP_ACK');
-      await waitForSync(200);
-
-      // Subscribe with field projection
-      const queryId = 'mrc-q-1';
-      client1.messages.length = 0;
-      client1.send({
-        type: 'QUERY_SUB',
-        payload: {
-          queryId,
-          mapName,
-          query: {},
-          fields: ['name', 'status'],
-        },
-      });
-
-      const initialResp = await client1.waitForMessage('QUERY_RESP');
-      expect(initialResp.payload.queryId).toBe(queryId);
-      expect(initialResp.payload.results.length).toBe(1);
-
-      // Server should return a merkleRootHash for field-projected queries
-      const storedHash = initialResp.payload.merkleRootHash;
-      expect(storedHash).toBeDefined();
-      expect(typeof storedHash).toBe('number');
-      expect(storedHash).not.toBe(0);
+      client1.send({ type: 'SYNC_INIT', mapName });
+      const rootResp = await client1.waitForMessage('SYNC_RESP_ROOT', 8000);
+      expect(rootResp.payload.mapName).toBe(mapName);
+      const storedRootHash = rootResp.payload.rootHash;
+      expect(storedRootHash).not.toBe(0);
 
       client1.close();
       await waitForSync(200);
 
-      // Second connection: simulate reconnect by opening a new client
-      // and sending QUERY_SYNC_INIT with the stored hash
+      // Simulated reconnect: open a fresh client and run the full tree-walk SYNC.
+      // This mirrors what the SyncEngine does on reconnect — it sends SYNC_INIT
+      // and walks the Merkle tree to discover divergent buckets.
       const client2 = await createRustTestClient(port, {
-        nodeId: 'merkle-rc-client-2',
-        userId: 'merkle-rc-user-2',
+        nodeId: 'merkle-tw-client-2',
+        userId: 'merkle-tw-user-2',
         roles: ['ADMIN'],
       });
       await client2.waitForMessage('AUTH_ACK');
-
-      // Send QUERY_SUB first (as QueryManager.resubscribeAll does)
       client2.messages.length = 0;
-      client2.send({
-        type: 'QUERY_SUB',
-        payload: {
-          queryId: 'mrc-q-reconnect',
-          mapName,
-          query: {},
-          fields: ['name', 'status'],
-        },
-      });
 
-      // Then send QUERY_SYNC_INIT with the stored Merkle hash
-      client2.send({
-        type: 'QUERY_SYNC_INIT',
-        payload: {
-          queryId: 'mrc-q-reconnect',
-          rootHash: storedHash,
-        },
-      });
+      const syncedRecords = await completeMerkleSync(client2, mapName);
 
-      // Server should respond — either QUERY_RESP (full snapshot if hash mismatch)
-      // or no response if state is identical. In test, we expect at least QUERY_RESP
-      // from the initial QUERY_SUB to confirm the server accepted both messages.
-      const reconnectResp = await client2.waitForMessage('QUERY_RESP');
-      expect(reconnectResp).toBeDefined();
-      expect(reconnectResp.payload.queryId).toBe('mrc-q-reconnect');
+      // All written records must be delivered through the tree-walk path
+      expect(syncedRecords.size).toBe(2);
+      expect(syncedRecords.has('mtw-item-1')).toBe(true);
+      expect(syncedRecords.get('mtw-item-1')!.value).toEqual({ name: 'Alice', status: 'active' });
+      expect(syncedRecords.has('mtw-item-2')).toBe(true);
+      expect(syncedRecords.get('mtw-item-2')!.value).toEqual({ name: 'Bob', status: 'inactive' });
+
+      // The root hash returned on reconnect must match the hash seen before disconnect,
+      // proving the durable index is consistent across connections.
+      client2.messages.length = 0;
+      client2.send({ type: 'SYNC_INIT', mapName });
+      const reconnectRootResp = await client2.waitForMessage('SYNC_RESP_ROOT', 8000);
+      expect(reconnectRootResp.payload.rootHash).toBe(storedRootHash);
 
       client2.close();
+    });
+
+    test('root hash advances when new records are written between syncs', async () => {
+      const mapName = `merkle-tw-delta-${Date.now()}`;
+
+      const writer = await createRustTestClient(port, {
+        nodeId: 'merkle-tw-writer',
+        userId: 'merkle-tw-wuser',
+        roles: ['ADMIN'],
+      });
+      await writer.waitForMessage('AUTH_ACK');
+
+      // Write first record
+      writer.messages.length = 0;
+      writer.send({
+        type: 'CLIENT_OP',
+        payload: {
+          id: 'mtwd-put-1',
+          mapName,
+          opType: 'PUT',
+          key: 'item-1',
+          record: createLWWRecord({ v: 1 }),
+        },
+      });
+      await writer.waitForMessage('OP_ACK');
+      await waitForSync(300);
+
+      // Capture root hash after first write
+      writer.messages.length = 0;
+      writer.send({ type: 'SYNC_INIT', mapName });
+      const rootResp1 = await writer.waitForMessage('SYNC_RESP_ROOT', 8000);
+      const hash1 = rootResp1.payload.rootHash;
+      expect(hash1).not.toBe(0);
+
+      // Write a second record — the tree must change
+      writer.messages.length = 0;
+      writer.send({
+        type: 'CLIENT_OP',
+        payload: {
+          id: 'mtwd-put-2',
+          mapName,
+          opType: 'PUT',
+          key: 'item-2',
+          record: createLWWRecord({ v: 2 }),
+        },
+      });
+      await writer.waitForMessage('OP_ACK');
+      await waitForSync(300);
+
+      // Root hash must differ from the pre-write snapshot
+      writer.messages.length = 0;
+      writer.send({ type: 'SYNC_INIT', mapName });
+      const rootResp2 = await writer.waitForMessage('SYNC_RESP_ROOT', 8000);
+      const hash2 = rootResp2.payload.rootHash;
+      expect(hash2).not.toBe(0);
+      expect(hash2).not.toBe(hash1);
+
+      // A client that missed the second write can discover all records via tree-walk
+      const lateJoiner = await createRustTestClient(port, {
+        nodeId: 'merkle-tw-late',
+        userId: 'merkle-tw-luser',
+        roles: ['ADMIN'],
+      });
+      await lateJoiner.waitForMessage('AUTH_ACK');
+      lateJoiner.messages.length = 0;
+
+      const synced = await completeMerkleSync(lateJoiner, mapName);
+      expect(synced.size).toBe(2);
+      expect(synced.get('item-1')!.value).toEqual({ v: 1 });
+      expect(synced.get('item-2')!.value).toEqual({ v: 2 });
+
+      writer.close();
+      lateJoiner.close();
     });
   });
 
