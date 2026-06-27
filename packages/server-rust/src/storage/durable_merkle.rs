@@ -43,9 +43,8 @@ impl DurableMerkleIndex for DurableMerkle {
         // parks the current thread and hands the executor thread back to the
         // pool, avoiding a deadlock on the single-threaded runtime.
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                build_session_async(map, store).await
-            })
+            tokio::runtime::Handle::current()
+                .block_on(async { build_session_async(map, store).await })
         })
     }
 }
@@ -203,7 +202,7 @@ impl SessionBuildSink {
 /// by combining per-partition buckets with `combine_hashes`. Stops at depth
 /// `max_depth` to avoid descending into leaf nodes.
 fn materialise_aggregate_buckets<T>(
-    _trees: &HashMap<u32, Mutex<T>>,
+    trees: &HashMap<u32, Mutex<T>>,
     out_nodes: &mut HashMap<String, HashMap<char, u32>>,
     bucket_fn: impl Fn(&HashMap<u32, Mutex<T>>, &str) -> HashMap<char, u32>,
     _max_depth: usize,
@@ -213,11 +212,11 @@ fn materialise_aggregate_buckets<T>(
     // BFS from root ("") down through all reachable children.
     let mut queue: Vec<String> = vec![String::new()]; // start at root path ""
     while let Some(path) = queue.pop() {
-        let children = bucket_fn(_trees, &path);
+        let children = bucket_fn(trees, &path);
         if children.is_empty() {
             continue;
         }
-        for (c, _) in &children {
+        for c in children.keys() {
             let child_path = format!("{path}{c}");
             queue.push(child_path);
         }
@@ -471,7 +470,11 @@ mod tests {
         let session1 = idx.build_session("m", store.as_ref());
         let session2 = idx.build_session("m", store.as_ref());
 
-        assert_ne!(session1.root(), 0, "root must be non-zero for non-empty map");
+        assert_ne!(
+            session1.root(),
+            0,
+            "root must be non-zero for non-empty map"
+        );
         assert_eq!(
             session1.root(),
             session2.root(),
@@ -608,12 +611,7 @@ mod tests {
     async fn ac6_build_session_never_loads_values() {
         // Seed data: key-value pairs shared between the spy and control stores.
         let records: Vec<(String, RecordValue)> = (0..500u32)
-            .map(|i| {
-                (
-                    format!("k{i:04}"),
-                    lww_value("v", u64::from(i), i, "n"),
-                )
-            })
+            .map(|i| (format!("k{i:04}"), lww_value("v", u64::from(i), i, "n")))
             .collect();
 
         // Control store: independent redb file seeded with the same records.
@@ -622,15 +620,13 @@ mod tests {
         for (k, v) in &records {
             ctrl_store.add("big", k, v, 0, 1).await.unwrap();
         }
-        let ctrl_session =
-            DurableMerkle.build_session("big", &ctrl_store as &dyn MapDataStore);
+        let ctrl_session = DurableMerkle.build_session("big", &ctrl_store as &dyn MapDataStore);
         let expected_root = ctrl_session.root();
         drop(ctrl_store); // close before second open attempt
 
         // Spy store: separate redb file seeded with the same records.
         let spy_dir = tempfile::tempdir().expect("tempdir");
-        let spy_inner =
-            RedbDataStore::new(spy_dir.path().join("spy.redb")).expect("redb open");
+        let spy_inner = RedbDataStore::new(spy_dir.path().join("spy.redb")).expect("redb open");
         for (k, v) in &records {
             spy_inner.add("big", k, v, 0, 1).await.unwrap();
         }
@@ -646,7 +642,11 @@ mod tests {
             enumerate_calls.load(Ordering::SeqCst) >= 1,
             "build_session must drive enumerate_leaves (streaming)"
         );
-        assert_ne!(spy_session.root(), 0, "root must be non-zero over 500 records");
+        assert_ne!(
+            spy_session.root(),
+            0,
+            "root must be non-zero over 500 records"
+        );
         assert_eq!(
             spy_session.root(),
             expected_root,

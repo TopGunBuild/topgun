@@ -341,6 +341,7 @@ impl MerkleSession {
     /// Combines the LWW and OR-Map aggregate roots with the same
     /// `combine_hashes` function used across all partition aggregation sites,
     /// producing a single hash byte-compatible with the live in-memory root.
+    #[must_use]
     pub fn root(&self) -> u32 {
         topgun_core::hash::combine_hashes(&[self.lww_root, self.ormap_root])
     }
@@ -354,6 +355,7 @@ impl MerkleSession {
     /// `""` = root level, `"a"` = bucket `'a'` under root, `"a3"` = sub-bucket
     /// `'3'` under `'a'`). Returns a merged view of LWW + OR-Map children.
     /// Returns an empty map if the path does not exist in the snapshot.
+    #[must_use]
     pub fn buckets(&self, path: &str) -> HashMap<char, u32> {
         let lww = self.lww_nodes.get(path).cloned().unwrap_or_default();
         let ormap = self.ormap_nodes.get(path).cloned().unwrap_or_default();
@@ -375,6 +377,7 @@ impl MerkleSession {
     ///
     /// Useful for tests that need to compare against
     /// `MerkleSyncManager::aggregate_lww_root_hash` independently.
+    #[must_use]
     pub fn lww_root(&self) -> u32 {
         self.lww_root
     }
@@ -383,6 +386,7 @@ impl MerkleSession {
     ///
     /// Useful for tests that need to compare against
     /// `MerkleSyncManager::aggregate_ormap_root_hash` independently.
+    #[must_use]
     pub fn ormap_root(&self) -> u32 {
         self.ormap_root
     }
@@ -392,6 +396,7 @@ impl MerkleSession {
     /// Used by the sync peer to confirm leaf-level membership without loading
     /// full record values. Returns an empty vec if the path has no leaves in
     /// the snapshot.
+    #[must_use]
     pub fn leaf_keys(&self, path: &str) -> Vec<String> {
         self.leaf_keys_by_path
             .get(path)
