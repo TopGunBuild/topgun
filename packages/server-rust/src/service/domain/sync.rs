@@ -305,9 +305,13 @@ impl SyncService {
             // Check for internal node (has children in the LWW trie at this path).
             let lww_children = session.lww_nodes.get(&path).cloned().unwrap_or_default();
             if !lww_children.is_empty() {
+                // Aggregate mode: bucket keys are single hex chars. The client
+                // extends its current path by each char, so returning a full
+                // path here would double-prefix (e.g. at path "a" the child 'b'
+                // must be sent as "b", not "ab", or the client drills to "ab"+"b").
                 let buckets: HashMap<String, u32> = lww_children
                     .into_iter()
-                    .map(|(c, h)| (format!("{path}{c}"), h))
+                    .map(|(c, h)| (c.to_string(), h))
                     .collect();
                 return Ok(OperationResponse::Message(Box::new(
                     Message::SyncRespBuckets(SyncRespBucketsMessage {
@@ -600,9 +604,11 @@ impl SyncService {
             // Check for OR-Map internal node at this path.
             let ormap_children = session.ormap_nodes.get(&path).cloned().unwrap_or_default();
             if !ormap_children.is_empty() {
+                // Aggregate mode: single-char bucket keys (see the LWW handler) —
+                // the client appends each char to its current path itself.
                 let buckets: HashMap<String, u32> = ormap_children
                     .into_iter()
-                    .map(|(c, h)| (format!("{path}{c}"), h))
+                    .map(|(c, h)| (c.to_string(), h))
                     .collect();
                 return Ok(OperationResponse::Message(Box::new(
                     Message::ORMapSyncRespBuckets(ORMapSyncRespBuckets {
@@ -2324,6 +2330,139 @@ mod tests {
                 OperationResponse::Message(_) | OperationResponse::Empty
             ),
             "expected Message or Empty response after session-cached bucket request"
+        );
+    }
+
+    /// End-to-end durable tree-walk: drive the exact reconnecting-client protocol
+    /// (`SYNC_INIT` root → `MerkleReqBucket` DFS from `""` → `SYNC_RESP_LEAF`)
+    /// against a `SyncService` whose durable index AND record-store factory are
+    /// both backed by the SAME real redb store, and assert every seeded key is
+    /// recovered through the walk. This is the machine check the soak harness'
+    /// recovery checkpoint performs; the AC9 tests stop at "didn't panic / not
+    /// the in-memory path" and never assert leaf delivery.
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::too_many_lines)]
+    async fn durable_tree_walk_recovers_all_seeded_keys() {
+        use crate::storage::datastores::RedbDataStore;
+        use crate::storage::durable_merkle::DurableMerkle;
+        use std::collections::HashMap;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(RedbDataStore::new(dir.path().join("walk.redb")).expect("redb open"));
+
+        // Seed enough keys to force a multi-level trie (internal nodes + leaves).
+        let mut expected: HashMap<String, i64> = HashMap::new();
+        for i in 0..64u32 {
+            let key = format!("walk-key-{i:04}");
+            store
+                .add(
+                    "wmap",
+                    &key,
+                    &RecordValue::Lww {
+                        value: Value::Int(i64::from(i)),
+                        timestamp: Timestamp {
+                            millis: u64::from(i) + 1,
+                            counter: i,
+                            node_id: "n1".to_string(),
+                        },
+                    },
+                    0,
+                    1,
+                )
+                .await
+                .expect("seed");
+            expected.insert(key, i64::from(i));
+        }
+
+        // Record factory backed by the SAME store so leaf fetches lazy-load
+        // the durable values — exactly the production wiring.
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::clone(&store) as Arc<dyn crate::storage::map_data_store::MapDataStore>,
+            Vec::new(),
+        ));
+        let durable_index: Arc<
+            dyn crate::storage::map_data_store::DurableMerkleIndex + Send + Sync,
+        > = Arc::new(DurableMerkle);
+        let durable_store: Arc<dyn crate::storage::map_data_store::MapDataStore> =
+            Arc::clone(&store) as Arc<dyn crate::storage::map_data_store::MapDataStore>;
+        let svc = Arc::new(
+            SyncService::new(
+                Arc::new(MerkleSyncManager::default()),
+                factory,
+                Arc::new(ConnectionRegistry::new()),
+            )
+            .with_durable_index(durable_index, durable_store),
+        );
+
+        // SYNC_INIT — root must be non-zero (data present).
+        let init_resp = Arc::clone(&svc)
+            .oneshot(Operation::SyncInit {
+                ctx: make_ctx(service_names::SYNC),
+                payload: topgun_core::messages::SyncInitMessage {
+                    map_name: "wmap".to_string(),
+                    last_sync_timestamp: None,
+                },
+            })
+            .await
+            .expect("SyncInit");
+        let root = match init_resp {
+            OperationResponse::Message(msg) => match *msg {
+                topgun_core::messages::Message::SyncRespRoot(m) => m.payload.root_hash,
+                other => panic!("expected SyncRespRoot, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        };
+        assert_ne!(root, 0, "root must be non-zero over 64 seeded keys");
+
+        // DFS walk from "" exactly like SoakClient::delta_sync_all.
+        let mut found: HashMap<String, i64> = HashMap::new();
+        let mut stack = vec![String::new()];
+        let mut visited = 0usize;
+        while let Some(path) = stack.pop() {
+            visited += 1;
+            assert!(visited < 10_000, "walk did not terminate");
+            let resp = Arc::clone(&svc)
+                .oneshot(Operation::MerkleReqBucket {
+                    ctx: make_ctx(service_names::SYNC),
+                    payload: topgun_core::messages::MerkleReqBucketMessage {
+                        payload: topgun_core::messages::MerkleReqBucketPayload {
+                            map_name: "wmap".to_string(),
+                            path: path.clone(),
+                        },
+                    },
+                })
+                .await
+                .expect("MerkleReqBucket");
+            match resp {
+                OperationResponse::Message(msg) => match *msg {
+                    topgun_core::messages::Message::SyncRespBuckets(b) => {
+                        for child in b.payload.buckets.keys() {
+                            stack.push(format!("{path}{child}"));
+                        }
+                    }
+                    topgun_core::messages::Message::SyncRespLeaf(l) => {
+                        for rec in l.payload.records {
+                            if let Some(v) = rec.record.value.as_ref().and_then(rmpv::Value::as_i64)
+                            {
+                                found.insert(rec.key, v);
+                            }
+                        }
+                    }
+                    other => panic!("unexpected message in walk: {other:?}"),
+                },
+                OperationResponse::Empty => panic!(
+                    "durable walk returned Empty at path {path:?} — the reconnecting client \
+                     would hang waiting for SYNC_RESP_BUCKETS|SYNC_RESP_LEAF"
+                ),
+                other => panic!("unexpected response in walk: {other:?}"),
+            }
+        }
+
+        assert_eq!(
+            found, expected,
+            "durable tree-walk must recover every seeded key/value"
         );
     }
 }
