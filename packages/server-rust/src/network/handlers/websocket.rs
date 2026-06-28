@@ -155,10 +155,12 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             };
             match next {
                 Some(Ok(Message::Binary(data))) => {
-                    // Depth-checked decode BEFORE auth: a deeply-nested frame would
-                    // otherwise recurse `rmp_serde` to a stack-overflow abort,
-                    // killing every connection on the node from an unauthenticated
-                    // client. Over-deep/malformed frames are dropped, not fatal.
+                    // Depth-checked decode BEFORE auth: our version-independent
+                    // guard against an unbounded recursive decode (a deeply-nested
+                    // frame), which on a codec without an internal cap would
+                    // stack-overflow and abort the whole node from an
+                    // unauthenticated client. Over-deep/malformed frames are
+                    // dropped, not fatal.
                     let tg_msg = match decode::decode_depth_checked::<TopGunMessage>(&data) {
                         Ok(msg) => msg,
                         Err(e) => {
@@ -750,8 +752,14 @@ async fn unpack_and_dispatch_batch(
         let msg_bytes = &data[offset..offset + len];
         offset += len;
 
-        // Deserialize the inner message
-        let inner_msg = match rmp_serde::from_slice::<TopGunMessage>(msg_bytes) {
+        // Deserialize the inner message. Inner messages live inside the batch's
+        // opaque `bin` body, which the outer frame's depth pre-scan skips without
+        // descending — so each inner message gets its own depth-checked decode,
+        // consistent with the top-level Phase 1/2 sites. This is the
+        // version-independent guard against an unbounded recursive decode of a
+        // deeply-nested inner frame; the pinned rmp_serde also caps recursion at
+        // 1024, but that is an unstable codec internal we do not rely on.
+        let inner_msg = match decode::decode_depth_checked::<TopGunMessage>(msg_bytes) {
             Ok(msg) => msg,
             Err(e) => {
                 debug!(
