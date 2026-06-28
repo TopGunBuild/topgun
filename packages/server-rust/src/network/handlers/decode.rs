@@ -27,6 +27,16 @@
 //! input to well-formed, shallow frames. The pinning regression test
 //! `rmp_serde_own_depth_limit_is_present` fails loudly if a future bump removes the
 //! dependency's safety net, re-escalating the residual risk.
+//!
+//! Caveat on that safety net: `rmp_serde`'s 1024 cap only returns gracefully when
+//! the thread has enough stack left to actually descend ~1024 recursive frames and
+//! reach the guard. In unoptimized (debug) builds each frame is large enough that
+//! ~1024 of them can overflow a default ~2 MB thread stack *before* the guard
+//! fires; release builds shrink the frames enough to fit. This is one more reason
+//! the codec ceiling is only a backstop — the [`MAX_DECODE_DEPTH`] pre-scan, which
+//! never recurses, is the actual guarantee. (The pinning test runs its deliberately
+//! over-deep decode on a large stack so it observes the guard's return rather than
+//! the overflow.)
 
 use rmp::Marker;
 use serde::de::DeserializeOwned;
@@ -312,6 +322,26 @@ mod tests {
         buf
     }
 
+    /// Runs a deliberately deep raw `rmp_serde` decode on a thread with a
+    /// generous stack, so the recursion can descend far enough to hit the
+    /// codec's own 1024 depth guard and RETURN `DepthLimitExceeded` — rather
+    /// than overflowing the test thread's default ~2 MB stack first. In debug
+    /// builds the per-frame stack cost of ~1024 recursive `rmpv::Value` frames
+    /// exceeds 2 MB before the guard fires (release builds optimize the frames
+    /// small enough to fit); the big stack makes the assertion deterministic
+    /// across both profiles. Only the tests that feed an over-deep frame to RAW
+    /// `rmp_serde` (bypassing the pre-scan) need this — production never does.
+    fn decode_on_big_stack<T: serde::de::DeserializeOwned + Send + 'static>(
+        bytes: Vec<u8>,
+    ) -> Result<T, rmp_serde::decode::Error> {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || rmp_serde::from_slice::<T>(&bytes))
+            .expect("spawn big-stack decode thread")
+            .join()
+            .expect("big-stack decode thread panicked")
+    }
+
     #[test]
     fn shallow_nesting_passes_depth_check() {
         // Negative control: 64-deep is valid `MsgPack` and within the limit.
@@ -429,7 +459,10 @@ mod tests {
             ),
             "pre-scan must reject {depth}-deep (> MAX_DECODE_DEPTH={MAX_DECODE_DEPTH})"
         );
-        let raw: Result<rmpv::Value, _> = rmp_serde::from_slice(&bytes);
+        // Run on a big stack: 500 recursive frames can crowd a debug build's
+        // default ~2 MB test-thread stack, and we want to observe rmp_serde's
+        // ACCEPT, not an environment-dependent overflow.
+        let raw: Result<rmpv::Value, _> = decode_on_big_stack(bytes);
         assert!(
             raw.is_ok(),
             "rmp_serde itself ACCEPTS {depth}-deep (< its 1024 limit) — proving our \
@@ -445,9 +478,16 @@ mod tests {
         // guard — but any future code path that bypasses the pre-scan still leans on
         // this ceiling to avoid a stack-overflow abort. If a dependency bump removes
         // it, this fails loudly so the residual risk is caught and re-escalated.
-        let within: Result<rmpv::Value, _> = rmp_serde::from_slice(&nested_msgpack(1023));
+        //
+        // Both decodes run on a big stack: descending ~1024 recursive frames blows
+        // a debug build's default ~2 MB test-thread stack BEFORE the 1024 guard
+        // returns, so on the default stack this would SIGABRT instead of asserting.
+        // The big stack lets the guard's graceful Err be observed deterministically
+        // (and the need for it is itself why our pre-scan, not this cap, is the
+        // real guarantee — see the module docs).
+        let within: Result<rmpv::Value, _> = decode_on_big_stack(nested_msgpack(1023));
         assert!(within.is_ok(), "1023-deep is within rmp_serde's 1024 limit");
-        let over = rmp_serde::from_slice::<rmpv::Value>(&nested_msgpack(1025));
+        let over: Result<rmpv::Value, _> = decode_on_big_stack(nested_msgpack(1025));
         assert!(
             matches!(over, Err(rmp_serde::decode::Error::DepthLimitExceeded)),
             "rmp_serde must still reject >1024-deep with DepthLimitExceeded, got {over:?}"
