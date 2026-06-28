@@ -457,16 +457,63 @@ fn release_session_state(state: &AppState, conn_id: ConnectionId) {
 /// individually. Non-BATCH messages are classified, have `connection_id`
 /// and `principal` set, and are routed through the pipeline. Each
 /// `OperationResponse` variant is mapped to the appropriate outbound message(s).
+/// Hard upper bound on the number of inner items a single transport `Batch`
+/// frame may carry through `unpack_and_dispatch_batch`.
+///
+/// Bounds worst-case per-frame dispatch work: the 2 MB inbound frame cap lets a
+/// `Batch.data` blob pack roughly 524K minimal 4-byte length-prefixed entries,
+/// each of which would otherwise drive a decode + classify + dispatch. Capping
+/// at `8_192` keeps per-frame dispatch cost bounded while sitting far above any
+/// legitimate batch size (tens to low thousands), so honest clients never hit it.
+const MAX_BATCH_INNER_ITEMS: usize = 8_192;
+
+/// Counts the well-formed length-prefixed inner items packed into a transport
+/// `Batch.data` blob, without decoding any inner payload.
+///
+/// This is the single source of truth for BOTH the rate-limiter charge and the
+/// hard inner-item cap, so the charged count and the dispatched count agree by
+/// construction. It mirrors `unpack_and_dispatch_batch`'s framing walk exactly:
+/// read a 4-byte big-endian length prefix, skip that many bytes, repeat. A
+/// truncated trailing prefix or payload ends the walk (the unpacker `break`s on
+/// the same condition), so only complete framed items are counted — the charge
+/// is never larger than what the unpacker would actually dispatch.
+///
+/// Pure pointer arithmetic over the already-in-memory slice: no heap allocation,
+/// no inner decode.
+fn count_batch_items(data: &[u8]) -> usize {
+    let mut offset = 0;
+    let mut count = 0;
+    while offset + 4 <= data.len() {
+        let len = u32::from_be_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]) as usize;
+        offset += 4;
+        if offset + len > data.len() {
+            // Truncated payload: the unpacker stops here, so do we.
+            break;
+        }
+        offset += len;
+        count += 1;
+    }
+    count
+}
+
 /// Cost, in op-rate-limiter tokens, of an inbound frame.
 ///
 /// A frame's cost is the number of individual ops it carries so a single peer
 /// cannot evade the per-connection rate limit by packing many ops into one
-/// `OpBatch`/`Batch` frame. Non-batch messages cost one token. Always at least
-/// 1 so an empty batch still consumes a token (and cannot be used to spin).
+/// `OpBatch`/`Batch` frame. For a transport `Batch` the declared `count` field
+/// is attacker-controlled and is NOT trusted: the cost is the actual number of
+/// length-prefixed inner items the unpacker would dispatch. Non-batch messages
+/// cost one token. Always at least 1 so an empty batch still consumes a token
+/// (and cannot be used to spin).
 fn inbound_op_cost(msg: &TopGunMessage) -> u32 {
     let count = match msg {
         TopGunMessage::OpBatch(b) => b.payload.ops.len(),
-        TopGunMessage::Batch(b) => b.count as usize,
+        TopGunMessage::Batch(b) => count_batch_items(&b.data),
         _ => 1,
     };
     u32::try_from(count.max(1)).unwrap_or(u32::MAX)
@@ -723,6 +770,32 @@ async fn unpack_and_dispatch_batch(
     tx: &mpsc::Sender<OutboundMessage>,
 ) {
     let data = &batch_msg.data;
+
+    // Authoritative dispatch-side bound: drop the WHOLE frame if it packs more
+    // inner items than the cap. This holds even if the cost function is later
+    // changed or this path is reached another way, and matches the existing
+    // whole-frame token-exhaustion behavior — the batch path has no per-item ack,
+    // so partial dispatch would be silent unacked loss. The client is told via an
+    // explicit error rather than a silent drop.
+    let item_count = count_batch_items(data);
+    if item_count > MAX_BATCH_INNER_ITEMS {
+        debug!(
+            "batch from {:?} exceeds max inner items ({} > {}); dropping whole frame",
+            conn_id, item_count, MAX_BATCH_INNER_ITEMS
+        );
+        let err = TopGunMessage::Error {
+            payload: ErrorPayload {
+                code: 413,
+                message: "batch exceeds maximum inner item count".to_string(),
+                details: None,
+            },
+        };
+        if let Ok(bytes) = rmp_serde::to_vec_named(&err) {
+            let _ = tx.send(OutboundMessage::Binary(bytes)).await;
+        }
+        return;
+    }
+
     let mut offset = 0;
 
     while offset < data.len() {
@@ -945,8 +1018,28 @@ mod tests {
     use topgun_core::messages::search::SearchOptions;
     use topgun_core::messages::{BatchMessage, ClientOp, OpBatchMessage, OpBatchPayload};
 
+    /// Frames `body` as one length-prefixed batch inner item (4-byte big-endian
+    /// length header + body), matching the wire framing the unpacker expects.
+    fn frame_inner_item(body: &[u8]) -> Vec<u8> {
+        let len = u32::try_from(body.len()).expect("inner item fits in u32");
+        let mut out = len.to_be_bytes().to_vec();
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// Concatenates `n` minimal (empty-body) framed inner items.
+    fn pack_n_minimal_items(n: usize) -> Vec<u8> {
+        let mut data = Vec::new();
+        for _ in 0..n {
+            data.extend_from_slice(&frame_inner_item(&[]));
+        }
+        data
+    }
+
     /// The op-rate limiter charges a frame by the number of ops it carries, so a
     /// peer cannot evade the per-connection cap by packing ops into one batch.
+    /// For a transport `Batch` the declared `count` is attacker-controlled and
+    /// must NOT be the cost basis — the cost is the actual packed inner-item count.
     #[test]
     fn inbound_op_cost_counts_batch_ops() {
         // A non-batch message costs one token.
@@ -967,18 +1060,34 @@ mod tests {
         });
         assert_eq!(inbound_op_cost(&three_ops), 3);
 
-        // An empty batch still costs one token (cannot be used to spin for free).
+        // An empty OpBatch still costs one token (cannot be used to spin for free).
         let empty = TopGunMessage::OpBatch(OpBatchMessage {
             payload: OpBatchPayload::default(),
         });
         assert_eq!(inbound_op_cost(&empty), 1);
 
-        // A transport Batch costs its declared message count.
-        let batch = TopGunMessage::Batch(BatchMessage {
-            count: 5,
+        // A transport Batch declaring count=1 but packing 50 framed inner items
+        // is charged ~50, NOT 1 — the declared count is not trusted.
+        let amplified = TopGunMessage::Batch(BatchMessage {
+            count: 1,
+            data: pack_n_minimal_items(50),
+        });
+        assert_eq!(inbound_op_cost(&amplified), 50);
+
+        // An empty transport Batch (no framed items) still costs one token.
+        let empty_batch = TopGunMessage::Batch(BatchMessage {
+            count: 0,
             data: vec![],
         });
-        assert_eq!(inbound_op_cost(&batch), 5);
+        assert_eq!(inbound_op_cost(&empty_batch), 1);
+
+        // A transport Batch declaring count=99 but packing only 3 framed items
+        // is charged 3 — the cost follows the actual packed count, not the lie.
+        let over_declared = TopGunMessage::Batch(BatchMessage {
+            count: 99,
+            data: pack_n_minimal_items(3),
+        });
+        assert_eq!(inbound_op_cost(&over_declared), 3);
     }
 
     /// Disconnect cleanup must drain a connection's standing subscriptions from
