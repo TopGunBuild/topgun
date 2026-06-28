@@ -819,7 +819,7 @@ async fn max_observed_sequence_reads_watermark_of_compacted_empty_partition() {
 //
 // The other crash scenarios drive the write path single-threaded-sequentially:
 // every op is appended, then the store is dropped. That schedule can never see
-// the F1 compaction race (compact_log rewriting the active log while an append
+// the seal/rotate race (mark_applied sealing the active segment while an append
 // interleaves) — it slipped past the suite and `kill -9` cannot see it either
 // (the page cache survives a process kill, and steady-state entries usually also
 // reached the inner store before the kill).
@@ -828,18 +828,18 @@ async fn max_observed_sequence_reads_watermark_of_compacted_empty_partition() {
 // production WriteBehindDataStore write path, then models the crash (drop), and
 // asserts against a FRESH durable inner store recovered from the on-disk WAL —
 // NOT against the OS-cached WAL file. With never-flush config every acked write
-// lives only in the WAL until the crash, so a compaction that drops a
+// lives only in the WAL until the crash, so a seal/rotate that drops a
 // concurrently-appended frame is a lost acked write that recovery cannot find.
 //
 // `mark_applied(partition, 0)` is the fault injection: it retains every entry
-// (watermark 0) yet still performs compact_log's read->rewrite->rename on the
-// active file, exactly as the real flush loop's mark_applied does while clients
-// keep writing the same partition. Driving it directly (rather than via the
-// flush loop) is what makes the race deterministic instead of timing-dependent.
+// (watermark 0) yet still seals the active segment and rotates a fresh one in,
+// exactly as the real flush loop's mark_applied does while clients keep writing
+// the same partition. Driving it directly (rather than via the flush loop) is
+// what makes the race deterministic instead of timing-dependent.
 //
-// Negative control: reverting compact_log to acquire the files lock late (the
-// pre-PR#50 shape — read/rewrite/rename without the lock) makes this test drop a
-// large fraction of acked writes and fail.
+// Negative control: reverting mark_applied to the pre-PR#50 unlocked
+// read/rewrite/rename shape (or sealing without freezing the active frames first)
+// makes this test drop a large fraction of acked writes and fail.
 // ---------------------------------------------------------------------------
 
 /// Generates `count` distinct keys that all map to `partition` under
@@ -942,4 +942,204 @@ async fn concurrent_compaction_loses_no_acked_write_across_crash() {
         missing.len(),
         &missing[..missing.len().min(10)]
     );
+}
+
+// ---------------------------------------------------------------------------
+// Crash on a PARTIAL FINAL (active) segment under concurrent same-partition
+// load (G3 / AC6).
+//
+// A SIGKILL can land mid-append: the active segment ends with a half-written
+// frame whose bytes reached the page cache but whose final frame was never
+// completed. Under segment rotation this is the ONLY place a torn tail may
+// legitimately appear — sealed segments are fsynced whole before they join the
+// sealed set, so a torn tail on a non-last segment is fatal corruption.
+//
+// This test drives concurrent appends + seal/rotate on ONE partition (so the
+// partition ends with several sealed segments plus a populated active segment),
+// models the crash by dropping the store, then PHYSICALLY TRUNCATES the active
+// (highest-first_seq) segment's tail to model the half-written final frame.
+// Recovery into a FRESH durable inner store must:
+//   - succeed (the truncated tail on the active segment is tolerated, WARN + Ok);
+//   - replay every acked write whose frame is in the intact prefix (the sealed
+//     segments + the active segment up to the torn byte) — no acked op below the
+//     torn frame is lost.
+//
+// The oracle is conservative on the boundary: only the single key whose frame was
+// torn off may be absent. We assert the prefix is fully recovered by checking
+// that recovery is Ok and that the overwhelming majority (all but at most the
+// torn tail's key) survive — and crucially that a key written EARLY (deep in a
+// sealed segment) is always present.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)]
+async fn crash_on_partial_active_segment_recovers_intact_prefix() {
+    use crate::storage::wal::segment::parse_segment_filename;
+
+    let dir = tempfile::tempdir().unwrap();
+    let wal_dir = dir.path().to_path_buf();
+
+    let total = 1000usize;
+    let partition = partition_of(TEST_MAP, "anchor");
+    let keys = keys_for_partition(TEST_MAP, partition, total);
+
+    // Production write path; never-flush so acked writes live ONLY in the WAL
+    // until the crash. PerOp fsync so each frame is fully on disk at ack time —
+    // we then synthesize the torn FINAL frame by truncating, not by relying on a
+    // partial OS flush.
+    let pre_crash_inner: Arc<dyn MapDataStore> = Arc::new(RetainingStore::default());
+    let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).expect("WalWriter::new");
+    let store = WriteBehindDataStore::new_with_wal(
+        pre_crash_inner,
+        never_flush_config(),
+        Some(WalBootstrap {
+            wal: Arc::clone(&wal) as Arc<dyn Wal>,
+            sequence_start: 1,
+        }),
+    );
+
+    // Appender: each add returns Ok ⇒ its WAL frame is durable.
+    let appender = {
+        let store = Arc::clone(&store);
+        let keys = keys.clone();
+        tokio::spawn(async move {
+            for (i, key) in keys.iter().enumerate() {
+                let tag = u64::try_from(i).unwrap() + 1;
+                store
+                    .add(TEST_MAP, key, &lww_value(tag, tag), 0, 1000)
+                    .await
+                    .expect("add must ack");
+            }
+        })
+    };
+
+    // Compactor: seal/rotate the same partition repeatedly so the partition ends
+    // with several SEALED segments plus a populated ACTIVE segment — the layout
+    // where "torn final segment" is meaningfully distinct from "torn whole log".
+    let compactor = {
+        let wal = Arc::clone(&wal);
+        tokio::spawn(async move {
+            for _ in 0..total {
+                wal.mark_applied(partition, 0).await.expect("mark_applied");
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+
+    appender.await.unwrap();
+    // Stop the compactor BEFORE the final tail batch so no rotation can run
+    // between those appends and the truncation — the seal/rotate race already ran
+    // for the bulk of the load above; the tail batch deterministically populates
+    // the active segment so a torn final frame is guaranteed to exist there
+    // (a last-moment seal would otherwise leave the active segment empty, which is
+    // a legitimate state but not the "torn active segment" this test targets).
+    compactor.await.unwrap();
+
+    // Final deterministic tail batch through the real write path, landing in the
+    // current active segment with no concurrent rotation. The last of these is the
+    // frame the truncation tears off.
+    let tail_keys = keys_for_partition(TEST_MAP, partition, total + 8)
+        .split_off(total)
+        .into_iter()
+        .collect::<Vec<_>>();
+    for (i, key) in tail_keys.iter().enumerate() {
+        let tag = u64::try_from(total + i).unwrap() + 1;
+        store
+            .add(TEST_MAP, key, &lww_value(tag, tag), 0, 1000)
+            .await
+            .expect("tail add must ack");
+    }
+
+    // Crash: in-memory staging gone; on-disk segments survive.
+    drop(store);
+    // Drop the WAL handle so its open active-segment file descriptor is closed
+    // before we truncate on disk (avoids racing an in-flight fsync timer).
+    drop(wal);
+
+    // Identify the ACTIVE (highest-first_seq) segment of the partition and lop off
+    // its last few bytes to model a half-written final frame at SIGKILL time.
+    let mut segments: Vec<(u64, std::path::PathBuf)> = std::fs::read_dir(&wal_dir)
+        .unwrap()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            parse_segment_filename(&name)
+                .and_then(|(p, first_seq)| (p == partition).then(|| (first_seq, e.path())))
+        })
+        .collect();
+    segments.sort_by_key(|(first_seq, _)| *first_seq);
+    assert!(
+        segments.len() >= 2,
+        "test must produce a multi-segment partition (sealed + active); got {}",
+        segments.len()
+    );
+    let (_active_first_seq, active_path) = segments.last().cloned().unwrap();
+
+    let active_bytes = std::fs::read(&active_path).unwrap();
+    assert!(
+        active_bytes.len() > 4,
+        "active segment must hold the tail batch's frames to truncate a torn tail"
+    );
+    // Truncate the last 3 bytes so the active segment's final frame is incomplete
+    // on disk — the classic torn-tail SIGKILL signature.
+    std::fs::write(&active_path, &active_bytes[..active_bytes.len() - 3]).unwrap();
+
+    // Recover into a FRESH durable inner store via the real recovery path. A torn
+    // tail on the ACTIVE (last) segment must be tolerated (Ok), not fatal.
+    let recovered: Arc<RetainingStore> = Arc::new(RetainingStore::default());
+    let wal2 = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).unwrap();
+    let recovery = WalRecovery::new(Arc::clone(&wal2), Vec::new());
+    let result = recovery
+        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+        .await;
+    assert!(
+        result.is_ok(),
+        "a torn tail on the active segment must be tolerated, not fatal: {result:?}"
+    );
+
+    // Every bulk-phase acked write lives in a sealed segment or in the active
+    // segment's intact prefix below the torn frame — so ALL must survive. Only the
+    // single torn final frame (the last tail-batch key) may be absent.
+    let mut missing_bulk = Vec::new();
+    for key in &keys {
+        if !recovered.contains(TEST_MAP, key).await {
+            missing_bulk.push(key.clone());
+        }
+    }
+    assert!(
+        missing_bulk.is_empty(),
+        "torn active-segment tail lost {} bulk-phase acked writes that should be in \
+         sealed segments or the intact active prefix (first few: {:?})",
+        missing_bulk.len(),
+        &missing_bulk[..missing_bulk.len().min(10)]
+    );
+
+    // The tail batch landed in the active segment; only its torn final frame may
+    // be missing. Every tail key except the last must be recovered from the intact
+    // active prefix.
+    let mut missing_tail = Vec::new();
+    for key in &tail_keys {
+        if !recovered.contains(TEST_MAP, key).await {
+            missing_tail.push(key.clone());
+        }
+    }
+    assert!(
+        missing_tail.len() <= 1,
+        "torn active-segment tail lost {} acked writes beyond the single torn final \
+         frame (first few: {:?})",
+        missing_tail.len(),
+        &missing_tail[..missing_tail.len().min(10)]
+    );
+
+    // An EARLY key (frame deep in a sealed segment, far from the torn tail) must
+    // always survive — proves recovery replayed across all sealed segments, not
+    // just the active one.
+    assert!(
+        recovered.contains(TEST_MAP, &keys[0]).await,
+        "the earliest acked write (deep in a sealed segment) must survive a torn \
+         active-segment tail"
+    );
+
+    drop(dir);
 }
