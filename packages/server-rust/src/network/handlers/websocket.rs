@@ -475,15 +475,23 @@ const MAX_BATCH_INNER_ITEMS: usize = 8_192;
 /// construction. It mirrors `unpack_and_dispatch_batch`'s framing walk exactly:
 /// read a 4-byte big-endian length prefix, skip that many bytes, repeat. A
 /// truncated trailing prefix or payload ends the walk (the unpacker `break`s on
-/// the same condition), so only complete framed items are counted — the charge
-/// is never larger than what the unpacker would actually dispatch.
+/// the same condition), so the count is exactly the number of complete framed
+/// items the unpacker iterates over — i.e. the charge is never *smaller* than
+/// what the unpacker would actually attempt to decode and dispatch, which is the
+/// property the rate limiter relies on.
+///
+/// Comparisons are written against the remaining byte count (`data.len() -
+/// offset`) rather than `offset + len` so an adversarial length prefix near
+/// `u32::MAX` cannot overflow `usize` on a 32-bit target (where it would
+/// otherwise wrap the truncation guard and spin the walk). `offset <= data.len()`
+/// holds on every iteration, so the subtraction never underflows.
 ///
 /// Pure pointer arithmetic over the already-in-memory slice: no heap allocation,
 /// no inner decode.
 fn count_batch_items(data: &[u8]) -> usize {
     let mut offset = 0;
     let mut count = 0;
-    while offset + 4 <= data.len() {
+    while data.len() - offset >= 4 {
         let len = u32::from_be_bytes([
             data[offset],
             data[offset + 1],
@@ -491,7 +499,7 @@ fn count_batch_items(data: &[u8]) -> usize {
             data[offset + 3],
         ]) as usize;
         offset += 4;
-        if offset + len > data.len() {
+        if len > data.len() - offset {
             // Truncated payload: the unpacker stops here, so do we.
             break;
         }
@@ -799,8 +807,13 @@ async fn unpack_and_dispatch_batch(
     let mut offset = 0;
 
     while offset < data.len() {
-        // Read 4-byte big-endian length prefix
-        if offset + 4 > data.len() {
+        // Read 4-byte big-endian length prefix. Comparisons use the remaining
+        // byte count (`data.len() - offset`) rather than `offset + len` so an
+        // adversarial near-`u32::MAX` length cannot overflow `usize` on a 32-bit
+        // target; `offset < data.len()` here and `offset <= data.len()` after the
+        // prefix read keep the subtraction from underflowing. This mirrors
+        // `count_batch_items` exactly so the charged and dispatched counts agree.
+        if data.len() - offset < 4 {
             debug!("truncated batch length prefix from {:?}", conn_id);
             break;
         }
@@ -812,7 +825,7 @@ async fn unpack_and_dispatch_batch(
         ]) as usize;
         offset += 4;
 
-        if offset + len > data.len() {
+        if len > data.len() - offset {
             debug!(
                 "truncated batch message (need {} bytes, {} available) from {:?}",
                 len,
