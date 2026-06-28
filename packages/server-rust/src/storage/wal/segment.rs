@@ -68,9 +68,15 @@ pub fn format_segment_filename(partition: u32, first_seq: u64) -> String {
 
 /// Parses a segment filename back into its `(partition, first_seq)` components.
 ///
-/// Returns `None` for any name that is not a segment file (wrong prefix/suffix,
-/// missing separator, or non-numeric components) so callers can skip sidecar and
-/// unrelated files during directory discovery without erroring.
+/// Returns `None` for any name that is not a segment file (wrong prefix/suffix
+/// or non-numeric components) so callers can skip sidecar and unrelated files
+/// during directory discovery without erroring.
+///
+/// A legacy single-file WAL name (`partition-NNN.log`, with no `first_seq`
+/// component) is auto-migrated: it is treated as the partition's oldest segment
+/// (`first_seq = 0`). Without this, a pre-rotation WAL file would be silently
+/// skipped on upgrade and its un-applied frames lost. Discovery sorts by numeric
+/// `first_seq`, so a legacy file (`first_seq = 0`) orders first.
 #[must_use]
 pub fn parse_segment_filename(name: &str) -> Option<(u32, u64)> {
     let inner = name
@@ -78,10 +84,17 @@ pub fn parse_segment_filename(name: &str) -> Option<(u32, u64)> {
         .strip_suffix(SEGMENT_FILE_SUFFIX)?;
     // The first '-' separates the partition id from the first_seq. first_seq is
     // pure digits, so splitting on the first '-' is unambiguous.
-    let (partition_str, first_seq_str) = inner.split_once('-')?;
-    let partition = partition_str.parse::<u32>().ok()?;
-    let first_seq = first_seq_str.parse::<u64>().ok()?;
-    Some((partition, first_seq))
+    if let Some((partition_str, first_seq_str)) = inner.split_once('-') {
+        let partition = partition_str.parse::<u32>().ok()?;
+        let first_seq = first_seq_str.parse::<u64>().ok()?;
+        Some((partition, first_seq))
+    } else {
+        // No separator → legacy single-file layout (`partition-NNN.log`). Treat
+        // the whole inner string as the partition id at first_seq 0 so the file
+        // is discovered and replayed instead of silently skipped on upgrade.
+        let partition = inner.parse::<u32>().ok()?;
+        Some((partition, 0))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -483,5 +496,43 @@ impl SegmentSet {
         let mut out: Vec<&Segment> = self.sealed.iter().collect();
         out.push(&self.active);
         out
+    }
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_new_format_filename() {
+        // New rotation format: partition + first_seq components.
+        assert_eq!(
+            parse_segment_filename("partition-005-00000000000000000042.log"),
+            Some((5, 42))
+        );
+    }
+
+    #[test]
+    fn parse_legacy_single_file_filename() {
+        // Legacy pre-rotation single file (`partition-NNN.log`, no first_seq) is
+        // auto-migrated to first_seq 0 so its frames are recovered, not skipped.
+        assert_eq!(parse_segment_filename("partition-007.log"), Some((7, 0)));
+    }
+
+    #[test]
+    fn parse_rejects_non_segment_names() {
+        assert_eq!(parse_segment_filename("partition-007.applied"), None);
+        assert_eq!(parse_segment_filename("partition-abc.log"), None);
+        assert_eq!(parse_segment_filename("unrelated.log"), None);
+    }
+
+    #[test]
+    fn format_then_parse_round_trips() {
+        let name = format_segment_filename(5, 42);
+        assert_eq!(parse_segment_filename(&name), Some((5, 42)));
     }
 }
