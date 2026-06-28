@@ -149,11 +149,30 @@ function exitTracker(server: SpawnedServer): () => boolean {
   return () => exited || server.process.exitCode !== null || server.process.signalCode !== null;
 }
 
-type InboundMessage = { type: string; payload?: { lastId?: string } };
+type InboundMessage = { type: string; payload?: { lastId?: string; code?: number } };
 
 /** True if an OP_ACK referencing `lastId` has been received. */
 function sawOpAck(messages: InboundMessage[], lastId: string): boolean {
   return messages.some((m) => m.type === 'OP_ACK' && m.payload?.lastId === lastId);
+}
+
+/** True if an ERROR frame carrying `code` has been received. */
+function sawError(messages: InboundMessage[], code: number): boolean {
+  return messages.some((m) => m.type === 'ERROR' && m.payload?.code === code);
+}
+
+/** Polls until an ERROR frame with `code` arrives; returns whether it did. */
+async function waitForError(
+  messages: InboundMessage[],
+  code: number,
+  timeout = 5_000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (sawError(messages, code)) return true;
+    await waitForSync(50);
+  }
+  return sawError(messages, code);
 }
 
 /** Polls until an OP_ACK for `lastId` arrives, or throws on timeout. */
@@ -383,6 +402,69 @@ describe('Integration: MsgPack decode depth defense (Rust Server)', () => {
       // The shallow inner op is classified, dispatched, and acked — proving the
       // drops above are depth-driven, not a blanket batch drop.
       await waitForOpAck(client.messages, id);
+
+      client.close();
+    });
+  });
+
+  describe('transport Batch rate-limiter charge follows actual inner-item count', () => {
+    test('LOAD-BEARING: count=1 frames packing >40k framed items are charged their true count and trigger a 429', async () => {
+      // Each outer frame declares count=1 (encodeBatchFrame hardcodes it) but packs
+      // 40_001 well-formed zero-length framed inner items (each a 4-byte BE length of
+      // 0). The server's count_batch_items returns 40_001 per frame. The cost is
+      // clamped to the bucket capacity (40_000) at the charge site, so the FIRST such
+      // frame drains the full burst to ~0 (and succeeds); the SECOND frame, arriving a
+      // few ms later with only a sliver of refill available, cannot cover its clamped
+      // cost → try_consume fails → a 429 ERROR fires at the CHARGE SITE, before any
+      // inner item is decoded or dispatched (inner validity is irrelevant). ~160 KB
+      // per frame, well under the 2 MB inbound cap.
+      //
+      // WHY this discriminates the fix: under the pre-fix model each frame costs the
+      // declared count (1), so neither frame meaningfully drains the bucket and NO 429
+      // is produced. Revert inbound_op_cost's Batch arm to `b.count as usize` and this
+      // test goes red. (Burst is the hardcoded 40_000 in the spawned server — the
+      // over-burst approach is required; it is not env-tunable.)
+      const client = await createRustTestClient(port);
+      await client.waitForMessage('AUTH_ACK', 10_000);
+      client.messages.length = 0;
+
+      const ITEMS = 40_001;
+      // ITEMS framed len-0 entries = ITEMS * 4 zero bytes (each 4-byte BE length = 0).
+      const data = Buffer.alloc(ITEMS * 4, 0);
+      // First frame drains the burst; second finds the bucket empty → 429.
+      client.ws.send(encodeBatchFrame(data));
+      client.ws.send(encodeBatchFrame(data));
+
+      const got429 = await waitForError(client.messages, 429);
+      expect(got429).toBe(true);
+      expect(hasExited()).toBe(false);
+
+      client.close();
+    });
+
+    test('negative control: a count=1 frame packing a few valid ops is charged its true small count and processed (no 429)', async () => {
+      // A legitimate small batch: count=1 on the wire, ~5 valid shallow inner ops
+      // packed in data. Its true charge is ~5, far under the burst, so it is admitted
+      // and processed normally — no 429. Proves the >40k rejection above is the
+      // amplification guard, not a blanket batch penalty.
+      const client = await createRustTestClient(port);
+      await client.waitForMessage('AUTH_ACK', 10_000);
+      client.messages.length = 0;
+
+      const ids = Array.from({ length: 5 }, (_, i) => `batch-charge-neg-${i}-${Date.now()}`);
+      const data = Buffer.concat(
+        ids.flatMap((id) => {
+          const inner = validDeepClientOp(id, 1); // shallow, valid CLIENT_OP
+          return [lenPrefix(inner.length), Buffer.from(inner)];
+        }),
+      );
+      client.ws.send(encodeBatchFrame(data));
+
+      // Each valid inner op is dispatched and acked; the last ack confirms the whole
+      // frame was processed, and no 429 was raised for this legitimate batch.
+      await waitForOpAck(client.messages, ids[ids.length - 1]);
+      expect(sawError(client.messages, 429)).toBe(false);
+      expect(hasExited()).toBe(false);
 
       client.close();
     });
