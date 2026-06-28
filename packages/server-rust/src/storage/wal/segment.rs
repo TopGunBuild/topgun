@@ -20,6 +20,8 @@
 
 use std::path::{Path, PathBuf};
 
+use tokio::io::AsyncWriteExt;
+
 // ---------------------------------------------------------------------------
 // Filename convention
 // ---------------------------------------------------------------------------
@@ -127,10 +129,14 @@ pub struct Segment {
     /// in the filename so coverage is known without opening the file.
     first_seq: u64,
     /// Highest sequence number written to this segment so far. Advances on append
-    /// to the active segment; frozen at seal time. Equals `first_seq.wrapping_sub`
-    /// semantics are avoided — a freshly created empty segment reports its
-    /// `max_seq` as its `first_seq` floor (see `max_seq`).
+    /// to the active segment; frozen at seal time. A freshly created empty segment
+    /// seeds this to `first_seq` as a floor — `max_seq_explicit` distinguishes that
+    /// seed from a genuine single-frame segment whose only frame is `first_seq`.
     max_seq: u64,
+    /// Whether `max_seq` reflects a frame that was actually appended (or decoded),
+    /// rather than the `first_seq` floor seeded into an empty active segment. Guards
+    /// the empty-segment +1 overcount from leaking into watermark / GC decisions.
+    max_seq_explicit: bool,
 }
 
 impl Segment {
@@ -150,6 +156,7 @@ impl Segment {
             },
             first_seq,
             max_seq: first_seq,
+            max_seq_explicit: false,
         }
     }
 
@@ -167,6 +174,9 @@ impl Segment {
             state: SegmentState::Sealed,
             first_seq,
             max_seq,
+            // A sealed segment discovered on disk covers real decoded frames; its
+            // max_seq is authoritative even when it equals first_seq.
+            max_seq_explicit: true,
         }
     }
 
@@ -198,6 +208,133 @@ impl Segment {
     #[must_use]
     pub fn is_sealed(&self) -> bool {
         matches!(self.state, SegmentState::Sealed)
+    }
+
+    /// Whether this segment has actually had any frame appended to it.
+    ///
+    /// A freshly-created active segment seeds `max_seq = first_seq`, which would
+    /// otherwise overstate its coverage by one phantom sequence. Callers use this
+    /// to treat an empty segment as covering no frames (so its seeded `max_seq`
+    /// never leaks into a watermark / GC decision).
+    #[must_use]
+    pub fn has_frames(&self) -> bool {
+        self.max_seq > self.first_seq || self.max_seq_explicit
+    }
+
+    /// Appends an already-encoded frame to the active segment, advancing
+    /// `max_seq` to `sequence` and bumping the un-fsynced frame counter.
+    ///
+    /// Performs the OS-visibility flush (not an fsync) so a concurrent fresh
+    /// reader observes the bytes; durability is governed by the caller's fsync
+    /// policy. Returns the new un-fsynced count so the caller can apply its
+    /// batched-fsync threshold.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the segment is sealed (a programming bug) or if the
+    /// underlying write/flush fails.
+    pub async fn append_frame(&mut self, frame: &[u8], sequence: u64) -> anyhow::Result<u32> {
+        let path = self.path.clone();
+        let SegmentState::Active {
+            file,
+            unfsynced_count,
+        } = &mut self.state
+        else {
+            anyhow::bail!("append to sealed WAL segment {}", path.display());
+        };
+        file.write_all(frame)
+            .await
+            .map_err(|e| anyhow::anyhow!("WAL write failed for {}: {e}", path.display()))?;
+        // Push tokio's buffer to the OS so a concurrent fresh read of this
+        // segment observes the frame. This is visibility, not durability.
+        file.flush()
+            .await
+            .map_err(|e| anyhow::anyhow!("WAL flush failed for {}: {e}", path.display()))?;
+        *unfsynced_count = unfsynced_count.saturating_add(1);
+        let count = *unfsynced_count;
+        // A frame was written; coverage now genuinely reaches `sequence`.
+        self.max_seq = sequence;
+        self.max_seq_explicit = true;
+        Ok(count)
+    }
+
+    /// fsyncs the active segment's data and resets the un-fsynced counter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the segment is sealed or the fsync fails.
+    pub async fn sync_data(&mut self) -> anyhow::Result<()> {
+        let path = self.path.clone();
+        let SegmentState::Active {
+            file,
+            unfsynced_count,
+        } = &mut self.state
+        else {
+            anyhow::bail!("fsync of sealed WAL segment {}", path.display());
+        };
+        file.sync_data()
+            .await
+            .map_err(|e| anyhow::anyhow!("WAL fsync failed for {}: {e}", path.display()))?;
+        *unfsynced_count = 0;
+        Ok(())
+    }
+
+    /// fsyncs the active segment's data, then freezes it into a sealed segment.
+    ///
+    /// The data fsync happens **before** the segment is frozen because a sealed
+    /// segment is non-last in the live ordering, and a torn tail on a non-last
+    /// segment is fatal during recovery (truncated-tail tolerance is active-only).
+    /// Consumes the open file handle (dropping it closes the descriptor).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the segment is already sealed or the fsync fails.
+    pub async fn seal(self) -> anyhow::Result<Self> {
+        let Segment {
+            path,
+            state,
+            first_seq,
+            max_seq,
+            max_seq_explicit,
+        } = self;
+        let SegmentState::Active { file, .. } = state else {
+            anyhow::bail!("seal of already-sealed WAL segment {}", path.display());
+        };
+        file.sync_data()
+            .await
+            .map_err(|e| anyhow::anyhow!("WAL seal fsync failed for {}: {e}", path.display()))?;
+        drop(file);
+        Ok(Self {
+            path,
+            state: SegmentState::Sealed,
+            first_seq,
+            max_seq,
+            max_seq_explicit,
+        })
+    }
+
+    /// Seeds an active segment reopened during recovery with the `max_seq` decoded
+    /// from its existing frames, marking the coverage as explicit (real frames).
+    ///
+    /// `max_seq` is only raised, never lowered — a recovered file already holds
+    /// those frames, so its coverage cannot retreat. A value at or below
+    /// `first_seq` means the file held no frames, leaving the empty floor intact.
+    pub fn set_recovered_max_seq(&mut self, max_seq: u64) {
+        if max_seq > self.first_seq {
+            self.max_seq = max_seq;
+            self.max_seq_explicit = true;
+        }
+    }
+
+    /// Number of frames written since the last fsync (0 for a sealed segment).
+    #[must_use]
+    pub fn unfsynced_count(&self) -> u32 {
+        match &self.state {
+            SegmentState::Active {
+                unfsynced_count, ..
+            } => *unfsynced_count,
+            SegmentState::Sealed => 0,
+        }
     }
 }
 
