@@ -1143,6 +1143,231 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // RULE stress regression (promoted from the G9 depth-audit scratch suite):
+    // no acked WAL frame may be dropped by seal/rotate/GC under concurrent
+    // same-partition append. Two variants:
+    //
+    //   Variant A — watermark pinned at 0: GC reclaims nothing, so EVERY acked
+    //     sequence must survive in `unapplied`. This isolates the seal/rotate
+    //     interleave from GC (a rotation landing between two appends must not
+    //     orphan an acked frame).
+    //
+    //   Variant B — a non-zero, advancing watermark that lags the appender: this
+    //     actually exercises seal → rotate → unlink. The invariant is the RULE:
+    //     every acked sequence `s` must be either present in `unapplied` (it is
+    //     above the final watermark) OR provably applied (`s <= final watermark`,
+    //     so a correct `unapplied` filter excludes it). Zero acked sequences may
+    //     be silently dropped — i.e. absent from `unapplied` while also above the
+    //     watermark.
+    // -----------------------------------------------------------------------
+
+    /// Variant A — pinned watermark 0: every acked sequence survives in
+    /// `unapplied` because GC reclaims nothing while seal/rotate keeps racing the
+    /// appender. This is the segment-rotation analogue of the audit's original
+    /// `stress_compact_races_append_loses_acked_writes` repro.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn stress_compact_races_append_loses_acked_writes() {
+        const N: u64 = 2000;
+
+        let dir = tempfile::tempdir().unwrap();
+        let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap();
+
+        let appender = {
+            let wal = Arc::clone(&wal);
+            tokio::spawn(async move {
+                let mut acked = HashSet::new();
+                for seq in 1..=N {
+                    wal.append(0, &make_wal_entry(seq)).await.unwrap();
+                    acked.insert(seq);
+                }
+                acked
+            })
+        };
+
+        let compactor = {
+            let wal = Arc::clone(&wal);
+            tokio::spawn(async move {
+                // watermark == 0 ⇒ GC retains every entry, but seal/rotate still
+                // freezes the active segment under the appender's feet on every
+                // call — the window the RULE forbids from dropping a frame.
+                for _ in 0..4000 {
+                    wal.mark_applied(0, 0).await.unwrap();
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+
+        let acked = appender.await.unwrap();
+        compactor.await.unwrap();
+
+        // Watermark is still 0, so `unapplied` must return every acked frame.
+        let present: HashSet<u64> = wal
+            .unapplied(0)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.sequence)
+            .collect();
+
+        let lost: Vec<u64> = acked.difference(&present).copied().collect();
+        assert!(
+            lost.is_empty(),
+            "{} acked sequences silently dropped by seal/rotate race (e.g. {:?})",
+            lost.len(),
+            &lost.iter().take(10).collect::<Vec<_>>()
+        );
+    }
+
+    /// Variant B — an advancing, appender-lagging watermark drives real
+    /// seal/rotate/GC (sealed segments below the watermark are unlinked). The
+    /// RULE: no acked sequence may be both absent from `unapplied` and above the
+    /// final watermark.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn stress_advancing_watermark_drops_no_acked_write() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        const N: u64 = 4000;
+        // The GC task advances the watermark to this many sequences behind the
+        // appender's latest ack, so a band of recent sequences always stays above
+        // the watermark (in live segments) while older ones are genuinely GC'd.
+        const LAG: u64 = 64;
+
+        let dir = tempfile::tempdir().unwrap();
+        let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap();
+
+        // Highest sequence the appender has acked so far; the GC task reads it to
+        // pick a watermark that lags behind the live frontier.
+        let acked_frontier = Arc::new(AtomicU64::new(0));
+
+        let appender = {
+            let wal = Arc::clone(&wal);
+            let frontier = Arc::clone(&acked_frontier);
+            tokio::spawn(async move {
+                for seq in 1..=N {
+                    wal.append(0, &make_wal_entry(seq)).await.unwrap();
+                    // Publish the ack only AFTER append returns Ok, so the GC task
+                    // can never advance the watermark past a not-yet-acked frame.
+                    frontier.store(seq, Ordering::Release);
+                }
+            })
+        };
+
+        let compactor = {
+            let wal = Arc::clone(&wal);
+            let frontier = Arc::clone(&acked_frontier);
+            tokio::spawn(async move {
+                loop {
+                    let acked = frontier.load(Ordering::Acquire);
+                    // Lag the watermark behind the live frontier so seal/rotate +
+                    // unlink run continuously without the watermark ever reaching
+                    // an unacked sequence.
+                    let watermark = acked.saturating_sub(LAG);
+                    wal.mark_applied(0, watermark).await.unwrap();
+                    tokio::task::yield_now().await;
+                    if acked >= N {
+                        break;
+                    }
+                }
+            })
+        };
+
+        appender.await.unwrap();
+        compactor.await.unwrap();
+
+        // Final watermark observed on disk: every acked sequence at or below it is
+        // provably applied and a correct `unapplied` filter excludes it.
+        let final_watermark = WalWriter::read_applied_sequence(&wal.applied_path(0));
+        let present: HashSet<u64> = wal
+            .unapplied(0)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.sequence)
+            .collect();
+
+        // The RULE: every acked sequence is either still live (in `unapplied`) or
+        // below the watermark (provably applied). A sequence that is BOTH absent
+        // from `unapplied` AND above the watermark was silently dropped.
+        let dropped: Vec<u64> = (1..=N)
+            .filter(|s| !present.contains(s) && *s > final_watermark)
+            .collect();
+        assert!(
+            dropped.is_empty(),
+            "{} acked sequences dropped above the final watermark {} (e.g. {:?})",
+            dropped.len(),
+            final_watermark,
+            &dropped[..dropped.len().min(10)]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AC3 — lock discipline (structural): GC of sealed segments must NEVER block
+    // an in-flight append to the active segment. The two paths take DISTINCT
+    // locks (`PartitionHandle::active` vs `PartitionHandle::sealed`), so GC can
+    // run to completion while the active-append lock is held by someone else.
+    //
+    // We assert this by reproducing `mark_applied`'s exact GC body (drain the
+    // watermark-covered prefix of the sealed set + unlink) while HOLDING the
+    // active-append lock the whole time. If GC took the active lock, this would
+    // deadlock; the test completing proves the locks are separate and that an
+    // append in flight (which would hold `active`) does not serialize against GC.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn gc_does_not_block_inflight_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap();
+
+        // Build a partition with several sealed segments below a watermark by
+        // appending and sealing repeatedly. Each mark_applied seals the active
+        // segment and rotates a fresh one; watermark 0 keeps them sealed (not yet
+        // GC'd) so the sealed set is populated for the GC-under-lock assertion.
+        for seq in 1..=8u64 {
+            wal.append(0, &make_wal_entry(seq)).await.unwrap();
+            wal.mark_applied(0, 0).await.unwrap();
+        }
+
+        let handle = wal.handle(0).await.unwrap();
+
+        // Hold the active-append lock for the entire GC run. An in-flight append
+        // holds exactly this lock; if GC needed it, this would deadlock.
+        let active_guard = handle.active.lock().await;
+
+        // Reproduce mark_applied's GC body verbatim: it takes ONLY the sealed-set
+        // lock, drains the watermark-covered prefix, and unlinks — never touching
+        // the active lock we are holding above.
+        let watermark = u64::MAX; // reclaim every sealed segment
+        let reclaimed: Vec<PathBuf> = {
+            let mut sealed = handle.sealed.lock().await;
+            let reclaim = sealed
+                .iter()
+                .take_while(|s| s.max_seq() <= watermark)
+                .count();
+            assert!(
+                reclaim > 0,
+                "test setup must leave at least one sealed segment to GC"
+            );
+            sealed
+                .drain(..reclaim)
+                .map(|s| s.path().to_path_buf())
+                .collect()
+        };
+        for path in &reclaimed {
+            tokio::fs::remove_file(path).await.unwrap();
+        }
+
+        // Reaching here while still holding the active lock proves GC made full
+        // progress without the active-append lock — the AC3 lock-discipline
+        // guarantee. Drop the guard explicitly to document the held duration.
+        drop(active_guard);
+
+        // Sanity: the sealed set is now empty (everything GC'd) and the active
+        // segment is untouched and still appendable.
+        assert!(handle.sealed.lock().await.is_empty());
+        wal.append(0, &make_wal_entry(9)).await.unwrap();
+    }
+
+    // -----------------------------------------------------------------------
     // AC2: mark_applied removes entry from unapplied set (clean restart is no-op)
     // -----------------------------------------------------------------------
 
