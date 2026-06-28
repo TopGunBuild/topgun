@@ -232,15 +232,12 @@ mod integration_tests {
                 Arc::clone(&connection_registry),
             )),
         );
-        let query_merkle_manager =
-            Arc::new(crate::storage::query_merkle::QueryMerkleSyncManager::new());
         router.register(
             service_names::QUERY,
             Arc::new(QueryService::new(
                 Arc::clone(&query_registry),
                 Arc::clone(&record_store_factory),
                 Arc::clone(&connection_registry),
-                Some(query_merkle_manager),
                 config.max_query_records,
                 Some(Arc::clone(&index_observer_factory)),
                 #[cfg(feature = "datafusion")]
@@ -484,7 +481,6 @@ mod integration_tests {
             query_registry,
             Arc::clone(&record_store_factory),
             Arc::new(ConnectionRegistry::new()),
-            None,
             10_000,
             None,
             #[cfg(feature = "datafusion")]

@@ -679,13 +679,10 @@ fn build_services() -> (
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
     ));
-    let query_merkle_manager =
-        Arc::new(topgun_server::storage::query_merkle::QueryMerkleSyncManager::new());
     let query_svc = Arc::new(QueryService::new(
         Arc::clone(&query_registry),
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
-        Some(Arc::clone(&query_merkle_manager)),
         config.max_query_records,
         None,
         #[cfg(feature = "datafusion")]

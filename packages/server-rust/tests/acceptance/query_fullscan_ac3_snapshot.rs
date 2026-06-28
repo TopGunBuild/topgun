@@ -123,7 +123,6 @@ async fn snapshot_reflects_durable_state_at_scan_time() {
         Arc::new(QueryRegistry::new()),
         factory.clone(),
         conn_registry,
-        None,
         10_000,
         None,
         #[cfg(feature = "datafusion")]
@@ -238,7 +237,6 @@ async fn snapshot_merges_resident_over_datastore_by_hlc_direction() {
         Arc::new(QueryRegistry::new()),
         factory.clone(),
         conn_registry,
-        None,
         10_000,
         None,
         #[cfg(feature = "datafusion")]

@@ -239,7 +239,6 @@ impl SimNode {
                 query_registry,
                 Arc::clone(&record_store_factory),
                 Arc::clone(&connection_registry),
-                None,
                 10_000,
                 None,
                 #[cfg(feature = "datafusion")]

@@ -114,7 +114,6 @@ async fn full_scan_returns_all_records_regardless_of_hlc_skew() {
         Arc::new(QueryRegistry::new()),
         factory.clone(),
         conn_registry,
-        None,
         10_000,
         None,
         #[cfg(feature = "datafusion")]
