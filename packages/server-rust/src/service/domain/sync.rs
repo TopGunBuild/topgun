@@ -197,18 +197,29 @@ impl SyncService {
     /// always driven from a multi-threaded runtime (the server binary and every
     /// `#[tokio::test(flavor = "multi_thread")]` sim test), so `block_in_place`
     /// is safe here.
+    ///
+    /// Returns `Ok(None)` only when no durable index is configured — the caller
+    /// then serves the round from the in-memory accelerator (the pre-durable
+    /// behaviour, correct for tests and null-store deployments). When a durable
+    /// index IS configured but the snapshot build fails, returns `Err`: we must
+    /// NOT silently fall back to the in-memory tree, because that tree only sees
+    /// resident keys and would hand the reconnecting client a root that omits
+    /// persisted-but-evicted records — the exact residency coupling this path
+    /// exists to eliminate. Surfacing the error lets the client retry against
+    /// durable truth (mirrors `DurableMerkleIndex::build_session`'s
+    /// "propagate, never degrade to wrong leaves" contract).
     fn get_or_build_session(
         &self,
         map_name: &str,
         force_rebuild: bool,
-    ) -> Option<Arc<MerkleSession>> {
+    ) -> Result<Option<Arc<MerkleSession>>, OperationError> {
         let (Some(index), Some(store)) = (&self.durable_index, &self.durable_store) else {
-            return None;
+            return Ok(None);
         };
 
         if !force_rebuild {
             if let Some(cached) = self.session_cache.get(map_name) {
-                return Some(Arc::clone(cached.value()));
+                return Ok(Some(Arc::clone(cached.value())));
             }
         }
 
@@ -217,15 +228,17 @@ impl SyncService {
                 let arc = Arc::new(session);
                 self.session_cache
                     .insert(map_name.to_string(), Arc::clone(&arc));
-                Some(arc)
+                Ok(Some(arc))
             }
             Err(err) => {
                 tracing::error!(
                     map = %map_name,
                     error = %err,
-                    "DurableMerkleIndex::build_session failed; falling back to in-memory tree"
+                    "DurableMerkleIndex::build_session failed; rejecting sync round (no silent in-memory fallback)"
                 );
-                None
+                Err(OperationError::Internal(anyhow::anyhow!(
+                    "durable Merkle session build failed for map {map_name}: {err}"
+                )))
             }
         }
     }
@@ -255,7 +268,7 @@ impl SyncService {
         // Build a fresh session at the start of each sync round so the snapshot
         // reflects the current durable state. force_rebuild=true replaces any
         // cached session from a previous round for the same map.
-        let root_hash = if let Some(session) = self.get_or_build_session(&map_name, true) {
+        let root_hash = if let Some(session) = self.get_or_build_session(&map_name, true)? {
             // Return the LWW-only root so the client drives the LWW tree walk.
             // The combined root would mix LWW and OR-Map hashes, changing the
             // wire protocol that the existing client expects for SYNC_INIT.
@@ -301,7 +314,7 @@ impl SyncService {
         // Durable-index path: reuse the session built during SYNC_INIT
         // (force_rebuild=false) so no second enumerate_leaves pass is needed.
         // Paths in this branch are pure hex aggregate paths — no partition prefix.
-        if let Some(session) = self.get_or_build_session(&map_name, false) {
+        if let Some(session) = self.get_or_build_session(&map_name, false)? {
             // Check for internal node (has children in the LWW trie at this path).
             let lww_children = session.lww_nodes.get(&path).cloned().unwrap_or_default();
             if !lww_children.is_empty() {
@@ -563,7 +576,7 @@ impl SyncService {
         // Reuse any session already built by the LWW SYNC_INIT for this map; build
         // one now if not yet cached. force_rebuild=false so a concurrent or prior
         // LWW SYNC_INIT's session is shared rather than discarded.
-        let root_hash = if let Some(session) = self.get_or_build_session(&map_name, false) {
+        let root_hash = if let Some(session) = self.get_or_build_session(&map_name, false)? {
             session.ormap_root()
         } else {
             self.merkle_manager.aggregate_ormap_root_hash(&map_name)
@@ -600,7 +613,7 @@ impl SyncService {
 
         // Durable-index path: reuse the session built during ORMapSyncInit (or SYNC_INIT).
         // OR-Map tombstones yield no leaf in the session (parity with write path: SPEC-324 R4).
-        if let Some(session) = self.get_or_build_session(&map_name, false) {
+        if let Some(session) = self.get_or_build_session(&map_name, false)? {
             // Check for OR-Map internal node at this path.
             let ormap_children = session.ormap_nodes.get(&path).cloned().unwrap_or_default();
             if !ormap_children.is_empty() {
@@ -2463,6 +2476,82 @@ mod tests {
         assert_eq!(
             found, expected,
             "durable tree-walk must recover every seeded key/value"
+        );
+    }
+
+    // When a durable index IS wired but build_session fails (transient store /
+    // enumerate fault), the SYNC handlers must REJECT the round rather than
+    // silently serving the in-memory accelerator — that tree only sees resident
+    // keys, so a fallback would hand the reconnecting client a residency-coupled
+    // root that omits persisted-but-evicted records (the exact TODO-530 defect
+    // this path eliminates). Proves the fail-closed contract behaviorally.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn durable_session_build_error_rejects_round_no_inmem_fallback() {
+        use crate::storage::datastores::RedbDataStore;
+        use tower::ServiceExt;
+
+        struct FailingIndex;
+        impl crate::storage::map_data_store::DurableMerkleIndex for FailingIndex {
+            fn build_session(
+                &self,
+                _map: &str,
+                _store: &dyn crate::storage::map_data_store::MapDataStore,
+            ) -> anyhow::Result<MerkleSession> {
+                anyhow::bail!("simulated durable session build fault")
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(RedbDataStore::new(dir.path().join("fault.redb")).expect("redb open"));
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::clone(&store) as Arc<dyn crate::storage::map_data_store::MapDataStore>,
+            Vec::new(),
+        ));
+        let durable_index: Arc<
+            dyn crate::storage::map_data_store::DurableMerkleIndex + Send + Sync,
+        > = Arc::new(FailingIndex);
+        let durable_store: Arc<dyn crate::storage::map_data_store::MapDataStore> =
+            Arc::clone(&store) as Arc<dyn crate::storage::map_data_store::MapDataStore>;
+        let svc = Arc::new(
+            SyncService::new(
+                Arc::new(MerkleSyncManager::default()),
+                factory,
+                Arc::new(ConnectionRegistry::new()),
+            )
+            .with_durable_index(durable_index, durable_store),
+        );
+
+        // SYNC_INIT must error, not fall back to the in-memory aggregate root.
+        let init = Arc::clone(&svc)
+            .oneshot(Operation::SyncInit {
+                ctx: make_ctx(service_names::SYNC),
+                payload: topgun_core::messages::SyncInitMessage {
+                    map_name: "fault-map".to_string(),
+                    last_sync_timestamp: None,
+                },
+            })
+            .await;
+        assert!(
+            init.is_err(),
+            "durable build failure must reject SYNC_INIT, not silently serve the in-memory tree"
+        );
+
+        // MerkleReqBucket must reject too.
+        let bucket = Arc::clone(&svc)
+            .oneshot(Operation::MerkleReqBucket {
+                ctx: make_ctx(service_names::SYNC),
+                payload: topgun_core::messages::MerkleReqBucketMessage {
+                    payload: topgun_core::messages::MerkleReqBucketPayload {
+                        map_name: "fault-map".to_string(),
+                        path: String::new(),
+                    },
+                },
+            })
+            .await;
+        assert!(
+            bucket.is_err(),
+            "durable build failure must reject MerkleReqBucket, not silently serve the in-memory tree"
         );
     }
 }
