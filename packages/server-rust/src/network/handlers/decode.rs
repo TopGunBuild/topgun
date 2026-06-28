@@ -282,7 +282,12 @@ pub fn decode_depth_checked<T: DeserializeOwned>(data: &[u8]) -> Result<T, Decod
     let observed = check_msgpack_depth(data, MAX_DECODE_DEPTH)?;
     // Telemetry, not a guard: an accepted frame deeper than the old 128 bound is
     // unusual. Log it (without rejecting) so the real-world depth distribution is
-    // measured before MAX_DECODE_DEPTH is ever tightened on a guess.
+    // measured before MAX_DECODE_DEPTH is ever tightened on a guess. Deliberately
+    // `debug!`, not `info!`/`warn!`: this band is reachable by an UNauthenticated
+    // client (Phase 1), so a louder level would be a log-amplification vector — a
+    // flood of (128, 256]-deep frames could spam production logs. The production-
+    // grade form of this telemetry is a counter/histogram metric (follow-up), which
+    // is flood-safe; until then operators enable `debug` on this target to sample.
     if observed > WARN_DECODE_DEPTH {
         tracing::debug!(
             depth = observed,

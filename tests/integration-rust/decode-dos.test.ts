@@ -308,6 +308,42 @@ describe('Integration: MsgPack decode depth defense (Rust Server)', () => {
       client.close();
     });
 
+    test('batch loop continues past a dropped over-deep inner item (multi-item batch)', async () => {
+      // [over-deep inner (rejected), shallow valid inner] packed into ONE batch.
+      // The over-deep first item must be dropped with `continue` — NOT break/return
+      // — so the second item is still classified, dispatched, and acked. This fails
+      // if the inner-decode error arm ever tears down the batch loop (silent loss of
+      // every inner item after a hostile one).
+      const client = await createRustTestClient(port);
+      await client.waitForMessage('AUTH_ACK', 10_000);
+      client.messages.length = 0;
+
+      const id = `batch-multi-${Date.now()}`;
+      const deep = deepFrame(); // map-wrapped, rejected by the scanner
+      const shallow = serialize({
+        type: 'CLIENT_OP',
+        payload: {
+          id,
+          mapName: 'decode-dos-multi',
+          opType: 'PUT',
+          key: 'k',
+          record: createLWWRecord({ ok: true }),
+        },
+      });
+      const data = Buffer.concat([
+        lenPrefix(deep.length),
+        deep,
+        lenPrefix(shallow.length),
+        Buffer.from(shallow),
+      ]);
+      client.ws.send(encodeBatchFrame(data));
+
+      // The shallow second item is acked only if the loop continued past the drop.
+      await waitForOpAck(client.messages, id);
+
+      client.close();
+    });
+
     test('negative control: a shallow inner message inside an OpBatch is processed', async () => {
       const client = await createRustTestClient(port);
       await client.waitForMessage('AUTH_ACK', 10_000);
