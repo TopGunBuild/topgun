@@ -104,7 +104,6 @@ async fn full_scan_accepts_all_records_with_monotone_hlc() {
         Arc::new(QueryRegistry::new()),
         factory,
         conn_registry,
-        None,
         10_000,
         None,
         #[cfg(feature = "datafusion")]

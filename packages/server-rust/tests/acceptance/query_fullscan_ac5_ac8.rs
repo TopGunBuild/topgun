@@ -74,7 +74,6 @@ fn make_svc(
         Arc::new(QueryRegistry::new()),
         factory,
         conn_registry,
-        None,
         10_000,
         None,
         #[cfg(feature = "datafusion")]

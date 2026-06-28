@@ -1731,7 +1731,6 @@ fn build_services(
         Arc::clone(&query_registry),
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
-        None,
         config.max_query_records,
         None,
         #[cfg(feature = "datafusion")]

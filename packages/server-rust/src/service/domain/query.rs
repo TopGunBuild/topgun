@@ -23,7 +23,7 @@ use topgun_core::messages::query::{QueryRespMessage, QueryRespPayload, QueryResu
 use topgun_core::messages::vector::{
     VectorSearchPayload, VectorSearchRespPayload, VectorSearchResult,
 };
-use topgun_core::messages::{Message, SyncRespRootMessage, SyncRespRootPayload};
+use topgun_core::messages::Message;
 use topgun_core::vector::distance::DistanceMetric;
 
 use crate::dag::coordinator::{run_dag_local, ClusterQueryCoordinator};
@@ -470,9 +470,6 @@ pub struct QueryService {
     /// subscriptions when a client disconnects, and so the drain path can
     /// deliver overflow signals directly to the subscriber's connection.
     connection_registry: Arc<ConnectionRegistry>,
-    /// Per-query Merkle manager for delta sync init.
-    /// `None` when query Merkle sync is not wired (test ergonomics).
-    query_merkle_manager: Option<Arc<crate::storage::query_merkle::QueryMerkleSyncManager>>,
     /// Maximum records returned in a single `QUERY_RESP`. Queries matching more
     /// records are clamped to this limit with `has_more: true`.
     max_query_records: u32,
@@ -552,9 +549,6 @@ fn map_dag_rows_to_entries(raw: Vec<rmpv::Value>) -> Vec<QueryResultEntry> {
 impl QueryService {
     /// Creates a new `QueryService` with its required dependencies.
     ///
-    /// Pass `Some(query_merkle_manager)` to enable per-query Merkle sync init.
-    /// Pass `None` to keep existing call sites working unchanged.
-    ///
     /// Pass `Some(index_observer_factory)` to enable index-accelerated predicate
     /// evaluation. Pass `None` to fall back to full-scan (sim/test call sites).
     #[must_use]
@@ -562,7 +556,6 @@ impl QueryService {
         query_registry: Arc<QueryRegistry>,
         record_store_factory: Arc<RecordStoreFactory>,
         connection_registry: Arc<ConnectionRegistry>,
-        query_merkle_manager: Option<Arc<crate::storage::query_merkle::QueryMerkleSyncManager>>,
         max_query_records: u32,
         index_observer_factory: Option<Arc<IndexObserverFactory>>,
         #[cfg(feature = "datafusion")] sql_query_backend: Option<
@@ -573,7 +566,6 @@ impl QueryService {
             query_registry,
             record_store_factory,
             connection_registry,
-            query_merkle_manager,
             max_query_records,
             index_observer_factory,
             #[cfg(feature = "datafusion")]
@@ -1069,55 +1061,22 @@ impl QueryService {
         _ctx: &crate::service::operation::OperationContext,
         payload: &topgun_core::messages::query::QueryUnsubMessage,
     ) -> Result<OperationResponse, OperationError> {
-        // Clean up Merkle trees for this query
-        if let Some(ref merkle) = self.query_merkle_manager {
-            merkle.cleanup_query(&payload.payload.query_id);
-        }
         let _ = self.query_registry.unregister(&payload.payload.query_id);
         Ok(OperationResponse::Empty)
     }
 
     /// Handles a `QuerySyncInit` operation.
     ///
-    /// Client sends its stored query Merkle root hash. The server computes the aggregate
-    /// query root hash across all partitions and responds with `SyncRespRootMessage`.
-    ///
-    /// If the hashes differ, the client drives traversal via `MerkleReqBucket` messages
-    /// with query-prefixed paths (e.g. `"query:<query_id>/<partition_id>/<sub_path>"`).
-    /// Parsing of query-prefixed bucket paths in `SyncService` is deferred to a follow-up spec.
-    ///
-    /// Returns `OperationResponse::Empty` when query Merkle sync is not wired
-    /// (i.e. `query_merkle_manager` is `None`).
+    /// The per-query Merkle sync path was retired when QUERY switched to bounded
+    /// streaming full-scan (SYNC/QUERY separation). The wire operation is still
+    /// dispatched for protocol compatibility; the handler is a no-op stub.
     #[allow(clippy::unused_async)]
     async fn handle_query_sync_init(
         &self,
-        ctx: &crate::service::operation::OperationContext,
-        payload: topgun_core::messages::query::QuerySyncInitMessage,
+        _ctx: &crate::service::operation::OperationContext,
+        _payload: topgun_core::messages::query::QuerySyncInitMessage,
     ) -> Result<OperationResponse, OperationError> {
-        let Some(query_merkle) = self.query_merkle_manager.as_ref() else {
-            return Ok(OperationResponse::Empty);
-        };
-
-        let query_id = payload.payload.query_id;
-
-        // Look up map_name for this query from the registry.
-        let Some(sub) = self.query_registry.get_subscription(&query_id) else {
-            return Ok(OperationResponse::Empty);
-        };
-        let map_name = sub.map_name.clone();
-
-        // Compute the server's aggregate query root hash across all partitions.
-        let root_hash = query_merkle.aggregate_query_root_hash(&query_id, &map_name);
-
-        Ok(OperationResponse::Message(Box::new(Message::SyncRespRoot(
-            SyncRespRootMessage {
-                payload: SyncRespRootPayload {
-                    map_name,
-                    root_hash,
-                    timestamp: ctx.timestamp.clone(),
-                },
-            },
-        ))))
+        Ok(OperationResponse::Empty)
     }
 
     /// Handles a `SqlQuery` operation.
@@ -2162,7 +2121,6 @@ mod tests {
             registry,
             factory,
             conn_registry,
-            None,
             10_000,
             None,
             #[cfg(feature = "datafusion")]
@@ -2185,7 +2143,6 @@ mod tests {
             registry,
             factory,
             conn_registry,
-            None,
             10_000,
             None,
             #[cfg(feature = "datafusion")]
@@ -2227,7 +2184,6 @@ mod tests {
             registry,
             factory,
             conn_registry,
-            None,
             10_000,
             None,
             #[cfg(feature = "datafusion")]
@@ -2249,7 +2205,6 @@ mod tests {
             registry,
             factory,
             conn_registry,
-            None,
             10_000,
             None,
             #[cfg(feature = "datafusion")]
@@ -2283,7 +2238,6 @@ mod tests {
             registry.clone(),
             factory,
             conn_registry,
-            None,
             10_000,
             None,
             #[cfg(feature = "datafusion")]
@@ -2375,7 +2329,6 @@ mod tests {
             registry,
             factory,
             conn_registry,
-            None,
             10_000,
             None,
             #[cfg(feature = "datafusion")]
@@ -2488,7 +2441,6 @@ mod tests {
             Arc::new(QueryRegistry::new()),
             factory.clone(),
             conn_registry,
-            None,
             10_000,
             None,
             #[cfg(feature = "datafusion")]
@@ -2581,7 +2533,6 @@ mod tests {
             Arc::new(QueryRegistry::new()),
             factory.clone(),
             conn_registry,
-            None,
             10_000,
             None,
             #[cfg(feature = "datafusion")]
@@ -2674,7 +2625,6 @@ mod tests {
                 registry,
                 factory,
                 conn_registry,
-                None,
                 10_000,
                 None,
                 #[cfg(feature = "datafusion")]
@@ -2786,7 +2736,6 @@ mod tests {
             registry.clone(),
             factory,
             conn_registry,
-            None,
             10_000,
             None,
             #[cfg(feature = "datafusion")]
@@ -3035,141 +2984,6 @@ mod tests {
         assert_eq!(config.max_query_records, 10_000);
     }
 
-    /// AC4: QUERY_RESP includes `merkle_root_hash` computed from per-query Merkle trees.
-    /// AC5: QUERY_SYNC_INIT with matching root_hash returns SyncRespRoot with same hash.
-    #[tokio::test]
-    async fn query_sync_init_matching_hash_returns_same_hash() {
-        use crate::storage::query_merkle::QueryMerkleSyncManager;
-        use topgun_core::messages::query::{QuerySyncInitMessage, QuerySyncInitPayload};
-
-        let registry = Arc::new(QueryRegistry::new());
-        let factory = make_factory();
-        let conn_registry = Arc::new(ConnectionRegistry::new());
-        let config = test_config();
-        let (_handle, _rx) = conn_registry.register(ConnectionKind::Client, &config);
-
-        let merkle_mgr = Arc::new(QueryMerkleSyncManager::new());
-
-        let svc = Arc::new(QueryService::new(
-            registry.clone(),
-            factory,
-            conn_registry,
-            Some(Arc::clone(&merkle_mgr)),
-            10_000,
-            None,
-            #[cfg(feature = "datafusion")]
-            None,
-        ));
-
-        // Register a subscription manually so QUERY_SYNC_INIT can find it.
-        registry.register(QuerySubscription {
-            query_id: "q-sync-1".to_string(),
-            connection_id: ConnectionId(1),
-            map_name: "users".to_string(),
-            live_window: seeded_window(&Query::default(), &[]),
-            query: Query::default(),
-            previous_result_keys: DashSet::new(),
-            fields: None,
-            delta_buffer: inactive_buffer(),
-        });
-
-        // Init a Merkle tree for this query
-        merkle_mgr.init_tree("q-sync-1", "users", 0, &[("k1".to_string(), 42)]);
-        let server_hash = merkle_mgr.aggregate_query_root_hash("q-sync-1", "users");
-        assert_ne!(server_hash, 0);
-
-        // Send QUERY_SYNC_INIT with the server's hash (matching).
-        let ctx = make_ctx(Some(ConnectionId(1)));
-        let payload = QuerySyncInitMessage {
-            payload: QuerySyncInitPayload {
-                query_id: "q-sync-1".to_string(),
-                root_hash: server_hash,
-            },
-        };
-        let op = Operation::QuerySyncInit { ctx, payload };
-        let result = svc.oneshot(op).await.unwrap();
-
-        // Should get SyncRespRoot with the same hash.
-        match result {
-            OperationResponse::Message(msg) => {
-                if let Message::SyncRespRoot(resp) = *msg {
-                    assert_eq!(resp.payload.root_hash, server_hash);
-                    assert_eq!(resp.payload.map_name, "users");
-                } else {
-                    panic!("Expected SyncRespRoot, got {:?}", msg);
-                }
-            }
-            other => panic!("Expected Message response, got {:?}", other),
-        }
-    }
-
-    /// AC6: QUERY_SYNC_INIT with stale root_hash returns SyncRespRoot with server's current hash.
-    #[tokio::test]
-    async fn query_sync_init_different_hash_returns_server_hash() {
-        use crate::storage::query_merkle::QueryMerkleSyncManager;
-        use topgun_core::messages::query::{QuerySyncInitMessage, QuerySyncInitPayload};
-
-        let registry = Arc::new(QueryRegistry::new());
-        let factory = make_factory();
-        let conn_registry = Arc::new(ConnectionRegistry::new());
-        let config = test_config();
-        let (_handle, _rx) = conn_registry.register(ConnectionKind::Client, &config);
-
-        let merkle_mgr = Arc::new(QueryMerkleSyncManager::new());
-
-        let svc = Arc::new(QueryService::new(
-            registry.clone(),
-            factory,
-            conn_registry,
-            Some(Arc::clone(&merkle_mgr)),
-            10_000,
-            None,
-            #[cfg(feature = "datafusion")]
-            None,
-        ));
-
-        // Register a subscription
-        registry.register(QuerySubscription {
-            query_id: "q-sync-2".to_string(),
-            connection_id: ConnectionId(1),
-            map_name: "users".to_string(),
-            live_window: seeded_window(&Query::default(), &[]),
-            query: Query::default(),
-            previous_result_keys: DashSet::new(),
-            fields: None,
-            delta_buffer: inactive_buffer(),
-        });
-
-        // Init a Merkle tree
-        merkle_mgr.init_tree("q-sync-2", "users", 0, &[("k1".to_string(), 42)]);
-        let server_hash = merkle_mgr.aggregate_query_root_hash("q-sync-2", "users");
-
-        // Send QUERY_SYNC_INIT with a different (stale) hash.
-        let stale_hash = server_hash.wrapping_add(1);
-        let ctx = make_ctx(Some(ConnectionId(1)));
-        let payload = QuerySyncInitMessage {
-            payload: QuerySyncInitPayload {
-                query_id: "q-sync-2".to_string(),
-                root_hash: stale_hash,
-            },
-        };
-        let op = Operation::QuerySyncInit { ctx, payload };
-        let result = svc.oneshot(op).await.unwrap();
-
-        // Should get SyncRespRoot with the server's actual hash (different from client's).
-        match result {
-            OperationResponse::Message(msg) => {
-                if let Message::SyncRespRoot(resp) = *msg {
-                    assert_eq!(resp.payload.root_hash, server_hash);
-                    assert_ne!(resp.payload.root_hash, stale_hash);
-                } else {
-                    panic!("Expected SyncRespRoot, got {:?}", msg);
-                }
-            }
-            other => panic!("Expected Message response, got {:?}", other),
-        }
-    }
-
     /// Verify `QueryRegistry::get_subscription` lookup by query_id.
     #[test]
     fn registry_get_subscription_by_query_id() {
@@ -3329,7 +3143,6 @@ mod tests {
             registry,
             factory,
             conn_registry,
-            None,
             10_000,
             Some(observer_factory),
             #[cfg(feature = "datafusion")]
