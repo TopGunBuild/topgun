@@ -8,6 +8,7 @@
 //! replays un-applied entries through the inner store on startup.
 
 pub mod format;
+pub mod segment;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
