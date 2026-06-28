@@ -31,12 +31,7 @@
 
 import WebSocket from 'ws';
 import { serialize } from '@topgunbuild/core';
-import {
-  spawnRustServer,
-  createRustTestClient,
-  createLWWRecord,
-  waitForSync,
-} from './helpers';
+import { spawnRustServer, createRustTestClient, createLWWRecord, waitForSync } from './helpers';
 import type { SpawnedServer } from './helpers';
 
 // Deep enough that BOTH our 256 scanner bound AND rmp_serde's own 1024 ceiling
@@ -113,11 +108,29 @@ function packBatchData(inner: Uint8Array): Buffer {
 function encodeBatchFrame(data: Uint8Array): Uint8Array {
   const head = Buffer.from([
     0x83, // fixmap, 3 entries
-    0xa4, 0x74, 0x79, 0x70, 0x65, // "type"
-    0xa5, 0x42, 0x41, 0x54, 0x43, 0x48, // "BATCH"
-    0xa5, 0x63, 0x6f, 0x75, 0x6e, 0x74, // "count"
+    0xa4,
+    0x74,
+    0x79,
+    0x70,
+    0x65, // "type"
+    0xa5,
+    0x42,
+    0x41,
+    0x54,
+    0x43,
+    0x48, // "BATCH"
+    0xa5,
+    0x63,
+    0x6f,
+    0x75,
+    0x6e,
+    0x74, // "count"
     0x01, // 1
-    0xa4, 0x64, 0x61, 0x74, 0x61, // "data"
+    0xa4,
+    0x64,
+    0x61,
+    0x74,
+    0x61, // "data"
     0xc6, // bin32 marker; 4-byte big-endian length follows
   ]);
   return new Uint8Array(Buffer.concat([head, lenPrefix(data.length), Buffer.from(data)]));
@@ -133,17 +146,22 @@ function exitTracker(server: SpawnedServer): () => boolean {
   server.process.once('exit', () => {
     exited = true;
   });
-  return () =>
-    exited || server.process.exitCode !== null || server.process.signalCode !== null;
+  return () => exited || server.process.exitCode !== null || server.process.signalCode !== null;
 }
 
+type InboundMessage = { type: string; payload?: { lastId?: string } };
+
 /** True if an OP_ACK referencing `lastId` has been received. */
-function sawOpAck(messages: any[], lastId: string): boolean {
+function sawOpAck(messages: InboundMessage[], lastId: string): boolean {
   return messages.some((m) => m.type === 'OP_ACK' && m.payload?.lastId === lastId);
 }
 
 /** Polls until an OP_ACK for `lastId` arrives, or throws on timeout. */
-async function waitForOpAck(messages: any[], lastId: string, timeout = 10_000): Promise<void> {
+async function waitForOpAck(
+  messages: InboundMessage[],
+  lastId: string,
+  timeout = 10_000,
+): Promise<void> {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     if (sawOpAck(messages, lastId)) return;
