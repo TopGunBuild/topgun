@@ -87,6 +87,7 @@ use topgun_server::storage::datastores::RedbDataStore;
 use topgun_server::storage::datastores::{
     NullDataStore, WalBootstrap, WriteBehindConfig, WriteBehindDataStore,
 };
+use topgun_server::storage::durable_merkle::DurableMerkle;
 use topgun_server::storage::eviction_config::EvictionConfig;
 use topgun_server::storage::eviction_orchestrator::EvictionOrchestrator;
 use topgun_server::storage::factory::{ObserverFactory, RecordStoreFactory};
@@ -1702,11 +1703,30 @@ fn build_services(
         )
         .with_journal(Arc::clone(&journal_store)),
     );
-    let sync_svc = Arc::new(SyncService::new(
+    // Wire the durable Merkle index so SYNC tree-walk reads resolve from the
+    // persisted backend, not the eviction-coupled in-memory tree.
+    // `datastore_for_merkle_seed` is the same write-behind-wrapped durable
+    // backend the write path persists to, so the enumerated leaf set is
+    // authoritative over records that are durable but not resident.
+    // `build_services` always runs on the multi-threaded runtime, so
+    // `build_session`'s internal `block_in_place` is safe.
+    //
+    // Only wire it for durable backends: the Null backend persists nothing, so a
+    // durable session would always be empty — the in-memory MerkleSyncManager is
+    // the only valid SYNC source there. This mirrors the merkle-seed guard below.
+    let sync_base = SyncService::new(
         merkle_manager,
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
-    ));
+    );
+    let sync_svc = Arc::new(if datastore_for_merkle_seed.is_null() {
+        sync_base
+    } else {
+        sync_base.with_durable_index(
+            Arc::new(DurableMerkle),
+            Arc::clone(&datastore_for_merkle_seed),
+        )
+    });
     let query_svc_base = QueryService::new(
         Arc::clone(&query_registry),
         Arc::clone(&record_store_factory),

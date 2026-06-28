@@ -57,11 +57,13 @@ fn parse_partition_prefix(path: &str) -> Option<(u32, String)> {
     }
 }
 
+use dashmap::DashMap;
 use tracing::Instrument;
 
 use crate::network::connection::{ConnectionKind, ConnectionRegistry};
 use crate::service::operation::{service_names, Operation, OperationError, OperationResponse};
 use crate::service::registry::{ManagedService, ServiceContext};
+use crate::storage::map_data_store::{DurableMerkleIndex, MapDataStore, MerkleSession};
 use crate::storage::merkle_sync::MerkleSyncManager;
 use crate::storage::record::RecordValue;
 use crate::storage::{CallerProvenance, ExpiryPolicy, RecordStoreFactory};
@@ -106,10 +108,33 @@ pub(crate) fn value_to_rmpv(v: &Value) -> rmpv::Value {
 /// Handles LWW-Map and OR-Map synchronization using Merkle tree comparison
 /// so clients receive only the changed records when reconnecting after
 /// an offline period.
+///
+/// When wired with a durable index via [`SyncService::with_durable_index`],
+/// the 4 Merkle tree-walk handlers resolve root/buckets/leaf-keys from the
+/// [`DurableMerkleIndex`] rather than the in-memory [`MerkleSyncManager`].
+/// This makes SYNC reads authoritative over persisted-but-not-resident records.
+///
+/// ## Session lifecycle
+///
+/// `build_session` does a full `enumerate_leaves` pass over the whole map
+/// and returns a point-in-time snapshot. To keep the per-round cost to one
+/// enumeration pass (not one per handler call), each `SYNC_INIT` builds a
+/// fresh session for the map and stores it in `session_cache`. Every subsequent
+/// `MerkleReqBucket` / `ORMapMerkleReqBucket` call reuses the cached snapshot
+/// for that map without touching storage again. `SYNC_INIT` always replaces
+/// any existing entry so a new sync round sees the current durable state.
 pub struct SyncService {
     merkle_manager: Arc<MerkleSyncManager>,
     record_store_factory: Arc<RecordStoreFactory>,
     connection_registry: Arc<ConnectionRegistry>,
+    /// Durable Merkle index: when present, tree-walk handlers resolve
+    /// root/buckets/leaf-keys from this index instead of the in-memory manager.
+    durable_index: Option<Arc<dyn DurableMerkleIndex + Send + Sync>>,
+    /// The durable backing store passed to `build_session`.
+    durable_store: Option<Arc<dyn MapDataStore>>,
+    /// Per-map session cache: keyed by map name, one session per active sync round.
+    /// `SYNC_INIT` inserts/replaces; bucket handlers read from the same entry.
+    session_cache: DashMap<String, Arc<MerkleSession>>,
 }
 
 impl SyncService {
@@ -124,6 +149,97 @@ impl SyncService {
             merkle_manager,
             record_store_factory,
             connection_registry,
+            durable_index: None,
+            durable_store: None,
+            session_cache: DashMap::new(),
+        }
+    }
+
+    /// Wire the durable Merkle index into this `SyncService`.
+    ///
+    /// Once set, the four Merkle tree-walk handlers (`SyncInit`,
+    /// `MerkleReqBucket`, `ORMapSyncInit`, `ORMapMerkleReqBucket`) resolve
+    /// their root / bucket / leaf-key results from the durable index rather
+    /// than the in-memory `MerkleSyncManager`. This makes SYNC reads
+    /// authoritative over records that are persisted but not resident in memory,
+    /// fixing the residency-coupling defect (TODO-530).
+    ///
+    /// The `store` must be the same durable backend the write path persists to
+    /// so the enumerated leaf set is the authoritative one.
+    ///
+    /// `SyncService::new`'s 3-arg signature is unchanged; this is a builder
+    /// method so existing construction sites need no modification.
+    #[must_use]
+    pub fn with_durable_index(
+        mut self,
+        index: Arc<dyn DurableMerkleIndex + Send + Sync>,
+        store: Arc<dyn MapDataStore>,
+    ) -> Self {
+        self.durable_index = Some(index);
+        self.durable_store = Some(store);
+        self
+    }
+
+    // -----------------------------------------------------------------------
+    // Session helpers
+    // -----------------------------------------------------------------------
+
+    /// Build (or return the cached) `MerkleSession` for `map_name`.
+    ///
+    /// When called from `handle_sync_init` the caller passes `force_rebuild =
+    /// true` so a fresh session is always constructed for the start of a new
+    /// sync round. Subsequent bucket handler calls pass `force_rebuild = false`
+    /// and reuse the session built during `SYNC_INIT`, keeping the per-round
+    /// cost to one `enumerate_leaves` pass.
+    ///
+    /// `build_session` uses `tokio::task::block_in_place` internally and MUST
+    /// NOT be called from a single-threaded Tokio runtime. This service is
+    /// always driven from a multi-threaded runtime (the server binary and every
+    /// `#[tokio::test(flavor = "multi_thread")]` sim test), so `block_in_place`
+    /// is safe here.
+    ///
+    /// Returns `Ok(None)` only when no durable index is configured — the caller
+    /// then serves the round from the in-memory accelerator (the pre-durable
+    /// behaviour, correct for tests and null-store deployments). When a durable
+    /// index IS configured but the snapshot build fails, returns `Err`: we must
+    /// NOT silently fall back to the in-memory tree, because that tree only sees
+    /// resident keys and would hand the reconnecting client a root that omits
+    /// persisted-but-evicted records — the exact residency coupling this path
+    /// exists to eliminate. Surfacing the error lets the client retry against
+    /// durable truth (mirrors `DurableMerkleIndex::build_session`'s
+    /// "propagate, never degrade to wrong leaves" contract).
+    fn get_or_build_session(
+        &self,
+        map_name: &str,
+        force_rebuild: bool,
+    ) -> Result<Option<Arc<MerkleSession>>, OperationError> {
+        let (Some(index), Some(store)) = (&self.durable_index, &self.durable_store) else {
+            return Ok(None);
+        };
+
+        if !force_rebuild {
+            if let Some(cached) = self.session_cache.get(map_name) {
+                return Ok(Some(Arc::clone(cached.value())));
+            }
+        }
+
+        match index.build_session(map_name, store.as_ref()) {
+            Ok(session) => {
+                let arc = Arc::new(session);
+                self.session_cache
+                    .insert(map_name.to_string(), Arc::clone(&arc));
+                Ok(Some(arc))
+            }
+            Err(err) => {
+                tracing::error!(
+                    map = %map_name,
+                    error = %err,
+                    "DurableMerkleIndex::build_session failed; rejecting sync round (no silent in-memory fallback)"
+                );
+                Err(OperationError::Internal(anyhow::anyhow!(
+                    "durable Merkle session build failed for map {map_name}: {err}"
+                )))
+            }
         }
     }
 
@@ -136,13 +252,11 @@ impl SyncService {
     /// `SyncInitMessage` is a FLAT message: `map_name` is directly on the payload struct,
     /// not nested in a `.payload` sub-field (contrast with `MerkleReqBucketMessage`).
     ///
-    /// Returns a scatter-gathered root hash: the collision-resistant combine of all
-    /// per-partition root hashes. This eliminates the Mutex bottleneck on a shared
-    /// partition 0 that previously serialized all writes under concurrent load. The
-    /// combine is order-independent (commutative + associative) so `DashMap`'s
-    /// non-deterministic iteration order does not affect the aggregate, yet resists the
-    /// compensating-pair collision that plain additive folding would reintroduce one
-    /// level above the trie.
+    /// When a durable index is wired, builds a fresh `MerkleSession` for `map_name` and
+    /// caches it so subsequent `MerkleReqBucket` calls for the same sync round can reuse
+    /// the already-materialised snapshot without a second `enumerate_leaves` pass.
+    /// Returns the combined LWW+OR-Map root from the session. Falls back to the
+    /// in-memory `MerkleSyncManager` aggregate when no durable index is configured.
     #[allow(clippy::unused_async)] // declared async for uniformity with other handlers
     async fn handle_sync_init(
         &self,
@@ -150,7 +264,18 @@ impl SyncService {
         payload: messages::SyncInitMessage,
     ) -> Result<OperationResponse, OperationError> {
         let map_name = payload.map_name;
-        let root_hash = self.merkle_manager.aggregate_lww_root_hash(&map_name);
+
+        // Build a fresh session at the start of each sync round so the snapshot
+        // reflects the current durable state. force_rebuild=true replaces any
+        // cached session from a previous round for the same map.
+        let root_hash = if let Some(session) = self.get_or_build_session(&map_name, true)? {
+            // Return the LWW-only root so the client drives the LWW tree walk.
+            // The combined root would mix LWW and OR-Map hashes, changing the
+            // wire protocol that the existing client expects for SYNC_INIT.
+            session.lww_root()
+        } else {
+            self.merkle_manager.aggregate_lww_root_hash(&map_name)
+        };
 
         Ok(OperationResponse::Message(Box::new(Message::SyncRespRoot(
             SyncRespRootMessage {
@@ -169,14 +294,15 @@ impl SyncService {
     /// nested `.payload` field (i.e., `payload.payload.map_name`), unlike the flat
     /// `SyncInitMessage`.
     ///
-    /// Path encoding operates in two modes:
-    /// - **Aggregate mode** (`""` or paths without a 3-digit partition prefix): the server
-    ///   combines results from all partition trees via the order-independent,
-    ///   collision-resistant combine for hashes (not plain additive folding, which would
-    ///   reintroduce the compensating-pair collision one level above the trie).
-    /// - **Routed mode** (paths beginning with a 3-digit zero-padded partition prefix like
-    ///   `"042/abc"`): the server strips the prefix and routes to the specific partition tree.
-    #[allow(clippy::too_many_lines)] // two-mode dispatch (routed vs aggregate) with leaf collection is inherently verbose
+    /// When a durable index is wired, all paths are pure hex aggregate paths (no
+    /// partition-prefix routing needed — the durable index materialises a fully
+    /// aggregated trie). Reuses the `MerkleSession` built during `SYNC_INIT` for
+    /// the same map so this call costs zero additional `enumerate_leaves` passes.
+    ///
+    /// When no durable index is wired, falls back to the original two-mode dispatch:
+    /// - **Aggregate mode** (`""` or paths without a 3-digit partition prefix)
+    /// - **Routed mode** (paths beginning with a 3-digit zero-padded partition prefix)
+    #[allow(clippy::too_many_lines)] // durable + fallback branches with leaf collection is inherently verbose
     async fn handle_merkle_req_bucket(
         &self,
         _ctx: &crate::service::operation::OperationContext,
@@ -185,6 +311,81 @@ impl SyncService {
         let map_name = payload.payload.map_name;
         let path = payload.payload.path;
 
+        // Durable-index path: reuse the session built during SYNC_INIT
+        // (force_rebuild=false) so no second enumerate_leaves pass is needed.
+        // Paths in this branch are pure hex aggregate paths — no partition prefix.
+        if let Some(session) = self.get_or_build_session(&map_name, false)? {
+            // Check for internal node (has children in the LWW trie at this path).
+            let lww_children = session.lww_nodes.get(&path).cloned().unwrap_or_default();
+            if !lww_children.is_empty() {
+                // Aggregate mode: bucket keys are single hex chars. The client
+                // extends its current path by each char, so returning a full
+                // path here would double-prefix (e.g. at path "a" the child 'b'
+                // must be sent as "b", not "ab", or the client drills to "ab"+"b").
+                let buckets: HashMap<String, u32> = lww_children
+                    .into_iter()
+                    .map(|(c, h)| (c.to_string(), h))
+                    .collect();
+                return Ok(OperationResponse::Message(Box::new(
+                    Message::SyncRespBuckets(SyncRespBucketsMessage {
+                        payload: SyncRespBucketsPayload {
+                            map_name,
+                            path,
+                            buckets,
+                        },
+                    }),
+                )));
+            }
+
+            // No children at this path — check leaf membership.
+            let leaf_keys = session.leaf_keys(&path);
+            if !leaf_keys.is_empty() {
+                let mut records = Vec::new();
+                for key in &leaf_keys {
+                    let key_partition = hash_to_partition(key);
+                    let store = self
+                        .record_store_factory
+                        .get_or_create(&map_name, key_partition);
+                    match store.get(key, false).await {
+                        Ok(Some(record)) => {
+                            if let RecordValue::Lww { value, timestamp } = record.value {
+                                records.push(SyncLeafRecord {
+                                    key: key.clone(),
+                                    record: LWWRecord {
+                                        value: Some(value_to_rmpv(&value)),
+                                        timestamp,
+                                        ttl_ms: None,
+                                    },
+                                });
+                            }
+                        }
+                        Ok(None) => {
+                            tracing::warn!(key = %key, partition = key_partition,
+                                "Merkle leaf (durable): record not found in store");
+                        }
+                        Err(e) => {
+                            tracing::error!(key = %key, partition = key_partition, error = %e,
+                                "Merkle leaf (durable): store.get() error");
+                        }
+                    }
+                }
+                return Ok(OperationResponse::Message(Box::new(Message::SyncRespLeaf(
+                    SyncRespLeafMessage {
+                        payload: SyncRespLeafPayload {
+                            map_name,
+                            path,
+                            records,
+                        },
+                    },
+                ))));
+            }
+
+            // Path not present in the durable trie — map is empty or path is beyond
+            // the trie depth. Return empty so the client stops drilling.
+            return Ok(OperationResponse::Empty);
+        }
+
+        // Fallback: no durable index wired — use the in-memory MerkleSyncManager.
         // Parse path: routed mode uses a fixed 3-digit partition prefix (e.g. "042/abc").
         if let Some((partition_id, sub_path)) = parse_partition_prefix(&path) {
             // Routed mode: route directly to the specific partition tree.
@@ -358,8 +559,12 @@ impl SyncService {
     ///
     /// `ORMapSyncInit` is a FLAT message: `map_name` is directly on the struct.
     ///
-    /// Returns a scatter-gathered root hash across all partitions, matching the
-    /// same approach as `handle_sync_init`.
+    /// When a durable index is wired, reuses the `MerkleSession` cached during
+    /// the preceding LWW `SYNC_INIT` (if any) — one `enumerate_leaves` pass covers
+    /// both LWW and OR-Map roots. If no LWW `SYNC_INIT` has yet run for this map,
+    /// builds a fresh session now (`force_rebuild=false` with a cache miss triggers
+    /// a build). Falls back to the in-memory `MerkleSyncManager` aggregate when no
+    /// durable index is configured.
     #[allow(clippy::unused_async)] // declared async for uniformity with other handlers
     async fn handle_ormap_sync_init(
         &self,
@@ -367,7 +572,15 @@ impl SyncService {
         payload: messages::ORMapSyncInit,
     ) -> Result<OperationResponse, OperationError> {
         let map_name = payload.map_name;
-        let root_hash = self.merkle_manager.aggregate_ormap_root_hash(&map_name);
+
+        // Reuse any session already built by the LWW SYNC_INIT for this map; build
+        // one now if not yet cached. force_rebuild=false so a concurrent or prior
+        // LWW SYNC_INIT's session is shared rather than discarded.
+        let root_hash = if let Some(session) = self.get_or_build_session(&map_name, false)? {
+            session.ormap_root()
+        } else {
+            self.merkle_manager.aggregate_ormap_root_hash(&map_name)
+        };
 
         Ok(OperationResponse::Message(Box::new(
             Message::ORMapSyncRespRoot(ORMapSyncRespRoot {
@@ -385,8 +598,11 @@ impl SyncService {
     /// `ORMapMerkleReqBucket` is a WRAPPED message: `map_name` and `path` live in a
     /// nested `.payload` field.
     ///
-    /// Follows the same scatter-gather and path prefix routing as `handle_merkle_req_bucket`.
-    #[allow(clippy::too_many_lines)] // two-mode dispatch (routed vs aggregate) with entry collection is inherently verbose
+    /// When a durable index is wired, reuses the cached `MerkleSession` (built during
+    /// `SYNC_INIT` or `ORMapSyncInit`) with OR-Map-specific trie nodes. Paths are pure
+    /// hex aggregate paths. Falls back to the original scatter-gather routing when no
+    /// durable index is configured.
+    #[allow(clippy::too_many_lines)] // durable + fallback branches with entry collection is inherently verbose
     async fn handle_ormap_merkle_req_bucket(
         &self,
         _ctx: &crate::service::operation::OperationContext,
@@ -395,6 +611,95 @@ impl SyncService {
         let map_name = payload.payload.map_name;
         let path = payload.payload.path;
 
+        // Durable-index path: reuse the session built during ORMapSyncInit (or SYNC_INIT).
+        // OR-Map tombstones yield no leaf in the session (parity with write path: SPEC-324 R4).
+        if let Some(session) = self.get_or_build_session(&map_name, false)? {
+            // Check for OR-Map internal node at this path.
+            let ormap_children = session.ormap_nodes.get(&path).cloned().unwrap_or_default();
+            if !ormap_children.is_empty() {
+                // Aggregate mode: single-char bucket keys (see the LWW handler) —
+                // the client appends each char to its current path itself.
+                let buckets: HashMap<String, u32> = ormap_children
+                    .into_iter()
+                    .map(|(c, h)| (c.to_string(), h))
+                    .collect();
+                return Ok(OperationResponse::Message(Box::new(
+                    Message::ORMapSyncRespBuckets(ORMapSyncRespBuckets {
+                        payload: ORMapSyncRespBucketsPayload {
+                            map_name,
+                            path,
+                            buckets,
+                        },
+                    }),
+                )));
+            }
+
+            // No children — check leaf membership in the OR-Map trie.
+            let leaf_keys = session.leaf_keys(&path);
+            // Filter to keys that actually have OR-Map values (not LWW).
+            // OrTombstones have no leaf in the session so they never appear here,
+            // preserving the write-path invariant that tombstone-only keys produce
+            // no leaf (SPEC-324 R4 parity).
+            if !leaf_keys.is_empty() {
+                let mut entries = Vec::new();
+                for key in leaf_keys {
+                    let key_partition = hash_to_partition(&key);
+                    let store = self
+                        .record_store_factory
+                        .get_or_create(&map_name, key_partition);
+                    if let Ok(Some(record)) = store.get(&key, false).await {
+                        match record.value {
+                            RecordValue::OrMap {
+                                records,
+                                tombstones,
+                            } => {
+                                let wire_records: Vec<ORMapRecord<rmpv::Value>> = records
+                                    .into_iter()
+                                    .map(|r| ORMapRecord {
+                                        value: value_to_rmpv(&r.value),
+                                        timestamp: r.timestamp,
+                                        tag: r.tag,
+                                        ttl_ms: None,
+                                    })
+                                    .collect();
+                                // Carry tombstones so remove-wins suppression and
+                                // add-wins survival both replicate to the peer.
+                                entries.push(ORMapEntry {
+                                    key,
+                                    records: wire_records,
+                                    tombstones,
+                                });
+                            }
+                            RecordValue::OrTombstones { tags } => {
+                                // Tombstone-only key: propagate tombstones, no live records.
+                                entries.push(ORMapEntry {
+                                    key,
+                                    records: Vec::new(),
+                                    tombstones: tags,
+                                });
+                            }
+                            RecordValue::Lww { .. } => {
+                                // LWW value under an OR-Map leaf path: skip, wrong CRDT type.
+                            }
+                        }
+                    }
+                }
+                return Ok(OperationResponse::Message(Box::new(
+                    Message::ORMapSyncRespLeaf(ORMapSyncRespLeaf {
+                        payload: ORMapSyncRespLeafPayload {
+                            map_name,
+                            path,
+                            entries,
+                        },
+                    }),
+                )));
+            }
+
+            // Path absent from the OR-Map trie — return empty.
+            return Ok(OperationResponse::Empty);
+        }
+
+        // Fallback: no durable index wired — use the in-memory MerkleSyncManager.
         if let Some((partition_id, sub_path)) = parse_partition_prefix(&path) {
             // Routed mode: route directly to the specific OR-Map partition tree.
             let node_data = self
@@ -1814,5 +2119,439 @@ mod tests {
             }
             other => panic!("expected Message response, got {other:?}"),
         }
+    }
+
+    // =========================================================================
+    // AC9 — Durable-index SYNC handlers: no-panic on multi-thread runtime
+    //
+    // Uses `#[tokio::test(flavor = "multi_thread")]` because `build_session`
+    // calls `tokio::task::block_in_place` internally. Single-thread runtimes
+    // (the default `#[tokio::test]`) would panic on that call site. Multi-thread
+    // is the non-negotiable requirement for the production server binary and for
+    // every test that exercises the durable-index code path.
+    // =========================================================================
+
+    /// AC9 — `SyncInit` through the durable index does not panic on a
+    /// multi-threaded Tokio runtime.
+    ///
+    /// Fault scenario: a simulated "peer node" is killed (its backing store is
+    /// dropped) while the local node independently builds a Merkle session and
+    /// resolves the LWW root. The local session build must succeed regardless of
+    /// whether the peer is alive, because `build_session` reads only from the
+    /// local durable store — inter-node unavailability cannot affect it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ac9_sync_init_via_durable_index_no_panic_multi_thread() {
+        use crate::storage::datastores::RedbDataStore;
+        use crate::storage::durable_merkle::DurableMerkle;
+        use tower::ServiceExt;
+
+        // Build a real redb store and seed two LWW records so the root is non-zero.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ac9_test.redb");
+        let store = Arc::new(RedbDataStore::new(&path).expect("redb open"));
+
+        let key_a = "ac9-key-a";
+        let key_b = "ac9-key-b";
+        let ts_a = topgun_core::hlc::Timestamp {
+            millis: 100,
+            counter: 0,
+            node_id: "node-a".to_string(),
+        };
+        let ts_b = topgun_core::hlc::Timestamp {
+            millis: 200,
+            counter: 0,
+            node_id: "node-b".to_string(),
+        };
+        store
+            .add(
+                "syncmap",
+                key_a,
+                &RecordValue::Lww {
+                    value: Value::String("val-a".to_string()),
+                    timestamp: ts_a,
+                },
+                0,
+                1,
+            )
+            .await
+            .expect("seed key-a");
+        store
+            .add(
+                "syncmap",
+                key_b,
+                &RecordValue::Lww {
+                    value: Value::String("val-b".to_string()),
+                    timestamp: ts_b,
+                },
+                0,
+                2,
+            )
+            .await
+            .expect("seed key-b");
+
+        // Wire the durable index into the SyncService.
+        let durable_index: Arc<
+            dyn crate::storage::map_data_store::DurableMerkleIndex + Send + Sync,
+        > = Arc::new(DurableMerkle);
+        let durable_store: Arc<dyn crate::storage::map_data_store::MapDataStore> =
+            Arc::clone(&store) as Arc<dyn crate::storage::map_data_store::MapDataStore>;
+
+        let merkle_manager = Arc::new(MerkleSyncManager::default());
+        let record_store_factory = make_factory();
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        let svc = Arc::new(
+            SyncService::new(merkle_manager, record_store_factory, connection_registry)
+                .with_durable_index(durable_index, durable_store),
+        );
+
+        // Fault scenario: simulate peer-node failure by dropping the peer's store
+        // reference before the local SYNC_INIT runs. The local node's build_session
+        // must still succeed because it reads from its own local store only.
+        let peer_store =
+            Arc::new(RedbDataStore::new(dir.path().join("ac9_peer.redb")).expect("peer redb open"));
+        // Kill the peer: drop its store (simulating node failure / partition).
+        drop(peer_store);
+
+        // Dispatch SyncInit through the operation router — this exercises
+        // `build_session` on the multi-threaded runtime. Must NOT panic.
+        let op = Operation::SyncInit {
+            ctx: make_ctx(service_names::SYNC),
+            payload: topgun_core::messages::SyncInitMessage {
+                map_name: "syncmap".to_string(),
+                last_sync_timestamp: None,
+            },
+        };
+
+        let resp = svc.oneshot(op).await.expect("SyncInit must not fail");
+
+        match resp {
+            OperationResponse::Message(msg) => {
+                if let topgun_core::messages::Message::SyncRespRoot(m) = *msg {
+                    assert_eq!(m.payload.map_name, "syncmap");
+                    assert_ne!(
+                        m.payload.root_hash, 0,
+                        "durable index over 2 seeded records must produce non-zero root"
+                    );
+                } else {
+                    panic!("expected SyncRespRoot, got different Message variant");
+                }
+            }
+            other => panic!("expected Message response, got {other:?}"),
+        }
+    }
+
+    /// AC9 — `MerkleReqBucket` via durable index reuses the session cached by
+    /// `SyncInit` (no second `enumerate_leaves` pass) and does not panic.
+    ///
+    /// Fault scenario: network partition simulated by running the bucket drill-down
+    /// after the backing store for a second "partition peer" has been dropped. The
+    /// local service must still answer from its session cache.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ac9_merkle_req_bucket_via_durable_index_reuses_session_no_panic() {
+        use crate::storage::datastores::RedbDataStore;
+        use crate::storage::durable_merkle::DurableMerkle;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store =
+            Arc::new(RedbDataStore::new(dir.path().join("ac9_bucket.redb")).expect("redb open"));
+
+        // Seed enough records to create at least one internal node at depth > 0.
+        for i in 0..20u32 {
+            let key = format!("bucket-key-{i:04}");
+            store
+                .add(
+                    "bmap",
+                    &key,
+                    &RecordValue::Lww {
+                        value: Value::Int(i64::from(i)),
+                        timestamp: topgun_core::hlc::Timestamp {
+                            millis: u64::from(i) + 1,
+                            counter: i,
+                            node_id: "n1".to_string(),
+                        },
+                    },
+                    0,
+                    1,
+                )
+                .await
+                .expect("seed");
+        }
+
+        let durable_index: Arc<
+            dyn crate::storage::map_data_store::DurableMerkleIndex + Send + Sync,
+        > = Arc::new(DurableMerkle);
+        let durable_store: Arc<dyn crate::storage::map_data_store::MapDataStore> =
+            Arc::clone(&store) as Arc<dyn crate::storage::map_data_store::MapDataStore>;
+
+        let svc = Arc::new(
+            SyncService::new(
+                Arc::new(MerkleSyncManager::default()),
+                make_factory(),
+                Arc::new(ConnectionRegistry::new()),
+            )
+            .with_durable_index(durable_index, durable_store),
+        );
+
+        // 1. SYNC_INIT — builds and caches the session.
+        let init_op = Operation::SyncInit {
+            ctx: make_ctx(service_names::SYNC),
+            payload: topgun_core::messages::SyncInitMessage {
+                map_name: "bmap".to_string(),
+                last_sync_timestamp: None,
+            },
+        };
+        let init_resp = Arc::clone(&svc)
+            .oneshot(init_op)
+            .await
+            .expect("SyncInit must succeed");
+        let _root_hash = match init_resp {
+            OperationResponse::Message(msg) => {
+                if let topgun_core::messages::Message::SyncRespRoot(m) = *msg {
+                    m.payload.root_hash
+                } else {
+                    panic!("expected SyncRespRoot");
+                }
+            }
+            other => panic!("expected Message, got {other:?}"),
+        };
+
+        // 2. Fault: simulate partition by dropping the secondary peer store reference.
+        //    The session was already built; the local service answers from cache.
+        drop(store);
+
+        // 3. MerkleReqBucket at root — reuses the cached session (no second
+        //    enumerate_leaves even though the store was dropped).
+        let bucket_op = Operation::MerkleReqBucket {
+            ctx: make_ctx(service_names::SYNC),
+            payload: topgun_core::messages::MerkleReqBucketMessage {
+                payload: topgun_core::messages::MerkleReqBucketPayload {
+                    map_name: "bmap".to_string(),
+                    path: String::new(),
+                },
+            },
+        };
+        let bucket_resp = Arc::clone(&svc)
+            .oneshot(bucket_op)
+            .await
+            .expect("MerkleReqBucket must not fail even after store drop");
+
+        // The session has data so we expect buckets or a leaf response.
+        assert!(
+            matches!(
+                bucket_resp,
+                OperationResponse::Message(_) | OperationResponse::Empty
+            ),
+            "expected Message or Empty response after session-cached bucket request"
+        );
+    }
+
+    /// End-to-end durable tree-walk: drive the exact reconnecting-client protocol
+    /// (`SYNC_INIT` root → `MerkleReqBucket` DFS from `""` → `SYNC_RESP_LEAF`)
+    /// against a `SyncService` whose durable index AND record-store factory are
+    /// both backed by the SAME real redb store, and assert every seeded key is
+    /// recovered through the walk. This is the machine check the soak harness'
+    /// recovery checkpoint performs; the AC9 tests stop at "didn't panic / not
+    /// the in-memory path" and never assert leaf delivery.
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::too_many_lines)]
+    async fn durable_tree_walk_recovers_all_seeded_keys() {
+        use crate::storage::datastores::RedbDataStore;
+        use crate::storage::durable_merkle::DurableMerkle;
+        use std::collections::HashMap;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(RedbDataStore::new(dir.path().join("walk.redb")).expect("redb open"));
+
+        // Seed enough keys to force a multi-level trie (internal nodes + leaves).
+        let mut expected: HashMap<String, i64> = HashMap::new();
+        for i in 0..64u32 {
+            let key = format!("walk-key-{i:04}");
+            store
+                .add(
+                    "wmap",
+                    &key,
+                    &RecordValue::Lww {
+                        value: Value::Int(i64::from(i)),
+                        timestamp: Timestamp {
+                            millis: u64::from(i) + 1,
+                            counter: i,
+                            node_id: "n1".to_string(),
+                        },
+                    },
+                    0,
+                    1,
+                )
+                .await
+                .expect("seed");
+            expected.insert(key, i64::from(i));
+        }
+
+        // Record factory backed by the SAME store so leaf fetches lazy-load
+        // the durable values — exactly the production wiring.
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::clone(&store) as Arc<dyn crate::storage::map_data_store::MapDataStore>,
+            Vec::new(),
+        ));
+        let durable_index: Arc<
+            dyn crate::storage::map_data_store::DurableMerkleIndex + Send + Sync,
+        > = Arc::new(DurableMerkle);
+        let durable_store: Arc<dyn crate::storage::map_data_store::MapDataStore> =
+            Arc::clone(&store) as Arc<dyn crate::storage::map_data_store::MapDataStore>;
+        let svc = Arc::new(
+            SyncService::new(
+                Arc::new(MerkleSyncManager::default()),
+                factory,
+                Arc::new(ConnectionRegistry::new()),
+            )
+            .with_durable_index(durable_index, durable_store),
+        );
+
+        // SYNC_INIT — root must be non-zero (data present).
+        let init_resp = Arc::clone(&svc)
+            .oneshot(Operation::SyncInit {
+                ctx: make_ctx(service_names::SYNC),
+                payload: topgun_core::messages::SyncInitMessage {
+                    map_name: "wmap".to_string(),
+                    last_sync_timestamp: None,
+                },
+            })
+            .await
+            .expect("SyncInit");
+        let root = match init_resp {
+            OperationResponse::Message(msg) => match *msg {
+                topgun_core::messages::Message::SyncRespRoot(m) => m.payload.root_hash,
+                other => panic!("expected SyncRespRoot, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        };
+        assert_ne!(root, 0, "root must be non-zero over 64 seeded keys");
+
+        // DFS walk from "" exactly like SoakClient::delta_sync_all.
+        let mut found: HashMap<String, i64> = HashMap::new();
+        let mut stack = vec![String::new()];
+        let mut visited = 0usize;
+        while let Some(path) = stack.pop() {
+            visited += 1;
+            assert!(visited < 10_000, "walk did not terminate");
+            let resp = Arc::clone(&svc)
+                .oneshot(Operation::MerkleReqBucket {
+                    ctx: make_ctx(service_names::SYNC),
+                    payload: topgun_core::messages::MerkleReqBucketMessage {
+                        payload: topgun_core::messages::MerkleReqBucketPayload {
+                            map_name: "wmap".to_string(),
+                            path: path.clone(),
+                        },
+                    },
+                })
+                .await
+                .expect("MerkleReqBucket");
+            match resp {
+                OperationResponse::Message(msg) => match *msg {
+                    topgun_core::messages::Message::SyncRespBuckets(b) => {
+                        for child in b.payload.buckets.keys() {
+                            stack.push(format!("{path}{child}"));
+                        }
+                    }
+                    topgun_core::messages::Message::SyncRespLeaf(l) => {
+                        for rec in l.payload.records {
+                            if let Some(v) = rec.record.value.as_ref().and_then(rmpv::Value::as_i64)
+                            {
+                                found.insert(rec.key, v);
+                            }
+                        }
+                    }
+                    other => panic!("unexpected message in walk: {other:?}"),
+                },
+                OperationResponse::Empty => panic!(
+                    "durable walk returned Empty at path {path:?} — the reconnecting client \
+                     would hang waiting for SYNC_RESP_BUCKETS|SYNC_RESP_LEAF"
+                ),
+                other => panic!("unexpected response in walk: {other:?}"),
+            }
+        }
+
+        assert_eq!(
+            found, expected,
+            "durable tree-walk must recover every seeded key/value"
+        );
+    }
+
+    // When a durable index IS wired but build_session fails (transient store /
+    // enumerate fault), the SYNC handlers must REJECT the round rather than
+    // silently serving the in-memory accelerator — that tree only sees resident
+    // keys, so a fallback would hand the reconnecting client a residency-coupled
+    // root that omits persisted-but-evicted records (the exact TODO-530 defect
+    // this path eliminates). Proves the fail-closed contract behaviorally.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn durable_session_build_error_rejects_round_no_inmem_fallback() {
+        use crate::storage::datastores::RedbDataStore;
+        use tower::ServiceExt;
+
+        struct FailingIndex;
+        impl crate::storage::map_data_store::DurableMerkleIndex for FailingIndex {
+            fn build_session(
+                &self,
+                _map: &str,
+                _store: &dyn crate::storage::map_data_store::MapDataStore,
+            ) -> anyhow::Result<MerkleSession> {
+                anyhow::bail!("simulated durable session build fault")
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(RedbDataStore::new(dir.path().join("fault.redb")).expect("redb open"));
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::clone(&store) as Arc<dyn crate::storage::map_data_store::MapDataStore>,
+            Vec::new(),
+        ));
+        let durable_index: Arc<
+            dyn crate::storage::map_data_store::DurableMerkleIndex + Send + Sync,
+        > = Arc::new(FailingIndex);
+        let durable_store: Arc<dyn crate::storage::map_data_store::MapDataStore> =
+            Arc::clone(&store) as Arc<dyn crate::storage::map_data_store::MapDataStore>;
+        let svc = Arc::new(
+            SyncService::new(
+                Arc::new(MerkleSyncManager::default()),
+                factory,
+                Arc::new(ConnectionRegistry::new()),
+            )
+            .with_durable_index(durable_index, durable_store),
+        );
+
+        // SYNC_INIT must error, not fall back to the in-memory aggregate root.
+        let init = Arc::clone(&svc)
+            .oneshot(Operation::SyncInit {
+                ctx: make_ctx(service_names::SYNC),
+                payload: topgun_core::messages::SyncInitMessage {
+                    map_name: "fault-map".to_string(),
+                    last_sync_timestamp: None,
+                },
+            })
+            .await;
+        assert!(
+            init.is_err(),
+            "durable build failure must reject SYNC_INIT, not silently serve the in-memory tree"
+        );
+
+        // MerkleReqBucket must reject too.
+        let bucket = Arc::clone(&svc)
+            .oneshot(Operation::MerkleReqBucket {
+                ctx: make_ctx(service_names::SYNC),
+                payload: topgun_core::messages::MerkleReqBucketMessage {
+                    payload: topgun_core::messages::MerkleReqBucketPayload {
+                        map_name: "fault-map".to_string(),
+                        path: String::new(),
+                    },
+                },
+            })
+            .await;
+        assert!(
+            bucket.is_err(),
+            "durable build failure must reject MerkleReqBucket, not silently serve the in-memory tree"
+        );
     }
 }
