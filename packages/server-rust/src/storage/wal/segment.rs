@@ -292,38 +292,36 @@ impl Segment {
         Ok(())
     }
 
-    /// fsyncs the active segment's data, then freezes it into a sealed segment.
+    /// Freezes an active segment into a sealed one **without** fsyncing, dropping
+    /// the open file handle.
     ///
-    /// The data fsync happens **before** the segment is frozen because a sealed
-    /// segment is non-last in the live ordering, and a torn tail on a non-last
-    /// segment is fatal during recovery (truncated-tail tolerance is active-only).
-    /// Consumes the open file handle (dropping it closes the descriptor).
+    /// Unlike [`seal`](Self::seal), this is infallible: it performs no I/O. The
+    /// caller MUST have already durably synced the segment's data (e.g. via
+    /// [`sync_data`](Self::sync_data)) before calling this, because a sealed
+    /// segment becomes non-last in the live ordering and a torn tail on a non-last
+    /// segment is fatal during recovery. Doing the (fallible) fsync first and the
+    /// (infallible) state transition second guarantees no fsync can fail *after*
+    /// the segment has been swapped out — which would otherwise orphan a non-last
+    /// segment that was dropped without being unlinked.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the segment is already sealed or the fsync fails.
-    pub async fn seal(self) -> anyhow::Result<Self> {
+    /// `first_seq` / `max_seq` / `max_seq_explicit` are preserved unchanged.
+    #[must_use]
+    pub fn into_sealed(self) -> Self {
         let Segment {
             path,
-            state,
+            state: _,
             first_seq,
             max_seq,
             max_seq_explicit,
         } = self;
-        let SegmentState::Active { file, .. } = state else {
-            anyhow::bail!("seal of already-sealed WAL segment {}", path.display());
-        };
-        file.sync_data()
-            .await
-            .map_err(|e| anyhow::anyhow!("WAL seal fsync failed for {}: {e}", path.display()))?;
-        drop(file);
-        Ok(Self {
+        // Dropping `state` (the Active file handle, if any) closes the descriptor.
+        Self {
             path,
             state: SegmentState::Sealed,
             first_seq,
             max_seq,
             max_seq_explicit,
-        })
+        }
     }
 
     /// Seeds an active segment reopened during recovery with the `max_seq` decoded

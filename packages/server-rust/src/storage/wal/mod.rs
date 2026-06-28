@@ -296,7 +296,17 @@ impl WalWriter {
                     for handle in handles {
                         let mut active = handle.active.lock().await;
                         if active.unfsynced_count() > 0 {
-                            let _ = active.sync_data().await;
+                            // Surface batch-fsync failures: swallowing the error
+                            // would leave acked frames non-durable under Batched
+                            // with no operator signal that durability is
+                            // compromised.
+                            if let Err(e) = active.sync_data().await {
+                                tracing::error!(
+                                    segment = ?active.path(),
+                                    error = %e,
+                                    "WAL batch fsync failed; acked frames may not be durable"
+                                );
+                            }
                         }
                     }
                 }
@@ -405,7 +415,55 @@ impl WalWriter {
                 let max_seq = Self::decode_segment_max_seq(&path).await?;
                 sealed.push(Segment::sealed_existing(path, first_seq, max_seq));
             }
-            let max_seq = Self::decode_segment_max_seq(&active_path).await?;
+            // Decode the active segment's intact prefix (tolerating a torn tail
+            // from a crash mid-append; mid-file corruption stays fatal). If the
+            // intact prefix is shorter than the file on disk, the tail was torn:
+            // truncate it durably BEFORE opening the append handle. Left in place,
+            // the torn bytes would sit between the intact prefix and the new
+            // appends; once this segment is later sealed (becomes non-last), the
+            // torn region becomes fatal mid-file corruption that refuses recovery.
+            let data = tokio::fs::read(&active_path).await.map_err(|e| {
+                anyhow::anyhow!("Cannot read WAL segment {}: {e}", active_path.display())
+            })?;
+            let entries = Self::decode_segment_or_refuse(&active_path, &data, true)?;
+            // Exact byte length of the intact prefix: re-encode each intact entry
+            // (the codec is deterministic) and sum the frame lengths.
+            let mut intact_len: u64 = 0;
+            for e in &entries {
+                intact_len = intact_len.saturating_add(format::encode(e)?.len() as u64);
+            }
+            if intact_len < data.len() as u64 {
+                tracing::warn!(
+                    path = ?active_path,
+                    file_len = data.len(),
+                    intact_len,
+                    "WAL active segment has a torn tail; truncating to intact prefix \
+                     before reopening for append"
+                );
+                let truncate_file = tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&active_path)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Cannot open WAL segment {} for truncation: {e}",
+                            active_path.display()
+                        )
+                    })?;
+                truncate_file.set_len(intact_len).await.map_err(|e| {
+                    anyhow::anyhow!(
+                        "Cannot truncate torn WAL segment {}: {e}",
+                        active_path.display()
+                    )
+                })?;
+                truncate_file.sync_all().await.map_err(|e| {
+                    anyhow::anyhow!(
+                        "Cannot fsync truncated WAL segment {}: {e}",
+                        active_path.display()
+                    )
+                })?;
+            }
+            let max_seq = entries.iter().map(|e| e.sequence).max().unwrap_or(0);
             let file = tokio::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -580,6 +638,16 @@ impl Wal for WalWriter {
         {
             let mut active = handle.active.lock().await;
             if active.has_frames() {
+                // Durably fsync the current active's data FIRST, before any swap or
+                // new-file creation. A sealed segment is non-last in the live
+                // ordering, and a torn tail on a non-last segment is fatal during
+                // recovery — so its data must be synced before it is frozen. Doing
+                // the only fallible fsync here (while the old active is still
+                // installed and no new file exists yet) means a failure leaves no
+                // orphan: returning early keeps the old active in place with no
+                // dangling new segment.
+                active.sync_data().await?;
+
                 let next_first_seq = active.max_seq().saturating_add(1);
                 let new_path = self
                     .wal_dir
@@ -597,12 +665,14 @@ impl Wal for WalWriter {
                 // released).
                 fsync_dir(&self.wal_dir)?;
 
-                // Swap in the fresh active, take the old one out to seal it. The
-                // old segment's data is fsynced inside `seal()` BEFORE it joins the
-                // sealed set, because a torn tail on a non-last segment is fatal.
+                // Swap in the fresh active, take the old one out to freeze it. The
+                // old segment's data was already fsynced above, so the freeze is
+                // the infallible `into_sealed` — no fallible fsync runs AFTER the
+                // swap, which guarantees the old active can never be dropped
+                // (orphaned) by a failing fsync after it has been replaced.
                 let new_active = Segment::new_active(new_path, next_first_seq, new_file);
                 let old_active = std::mem::replace(&mut *active, new_active);
-                let frozen = old_active.seal().await?;
+                let frozen = old_active.into_sealed();
                 // The sealed-set lock is taken only for the push, never held across
                 // the append-lock release, so appenders are not serialized by GC.
                 handle.sealed.lock().await.push(frozen);
@@ -653,9 +723,21 @@ impl Wal for WalWriter {
         let last_idx = segments.len() - 1;
         let mut all: Vec<WalEntry> = Vec::new();
         for (idx, (_first_seq, path)) in segments.into_iter().enumerate() {
-            let data = tokio::fs::read(&path)
-                .await
-                .map_err(|e| anyhow::anyhow!("Cannot read WAL segment {}: {e}", path.display()))?;
+            let data = match tokio::fs::read(&path).await {
+                Ok(data) => data,
+                // A concurrent GC can unlink a sealed segment between the directory
+                // scan above and this read. A GC'd segment is `<= watermark` by
+                // construction, so its frames are already applied and the later
+                // `retain(|e| e.sequence > applied_seq)` would drop them anyway —
+                // skipping the vanished file is correct, not a lost frame.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Cannot read WAL segment {}: {e}",
+                        path.display()
+                    ));
+                }
+            };
             // A truncated tail is tolerated ONLY on the active (last) segment; a
             // torn tail on a sealed, non-last segment is corruption.
             let tolerate_tail = idx == last_idx;
@@ -1365,6 +1447,87 @@ mod tests {
         // segment is untouched and still appendable.
         assert!(handle.sealed.lock().await.is_empty());
         wal.append(0, &make_wal_entry(9)).await.unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // HIGH-1 regression: a crash-torn tail on the ACTIVE segment must be
+    // truncated on reopen, BEFORE further appends and BEFORE the segment is later
+    // sealed. Without truncation the torn bytes stay between the pre-crash prefix
+    // and the post-reopen appends; once the segment seals (becomes non-last) the
+    // torn region is fatal mid-file corruption and recovery refuses to start,
+    // losing every frame written after the tear.
+    //
+    // Repro: append frames to the active segment, simulate a torn tail by
+    // appending garbage bytes to the segment file on disk, reopen the writer,
+    // append MORE frames, then mark_applied(0) to seal+rotate the (truncated-then-
+    // extended) segment. Reopen once more and assert recovery is Ok and every
+    // acked frame before AND after the tear is recovered (the torn partial frame
+    // may be absent). Fails without Fix 1 (seal hits mid-file corruption → Err);
+    // passes with it.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn torn_active_tail_truncated_on_reopen_survives_seal() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_path_buf();
+
+        // Phase 1: write frames 1..=3 to the active segment, then drop the writer.
+        {
+            let wal = WalWriter::new(dir_path.clone(), WalFsyncPolicy::None).unwrap();
+            for seq in 1..=3u64 {
+                wal.append(0, &make_wal_entry(seq)).await.unwrap();
+            }
+        }
+
+        // Simulate a crash mid-append: append a few garbage / partial bytes to the
+        // active segment file so its tail is torn (not a clean frame boundary).
+        let active_path = dir_path.join(segment::format_segment_filename(0, 0));
+        {
+            use tokio::io::AsyncWriteExt as _;
+            let mut f = tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(&active_path)
+                .await
+                .unwrap();
+            // Start a frame (valid magic+version) but truncate it — a classic torn
+            // mid-append tail.
+            f.write_all(&format::FRAME_MAGIC.to_be_bytes())
+                .await
+                .unwrap();
+            f.write_all(&[format::FRAME_VERSION, 0xAB, 0xCD])
+                .await
+                .unwrap();
+            f.flush().await.unwrap();
+        }
+
+        // Phase 2: reopen the writer (Fix 1 truncates the torn tail on handle open),
+        // append frames 4..=6, then seal+rotate via mark_applied. Watermark 0 keeps
+        // nothing GC'd so every frame must remain recoverable.
+        {
+            let wal = WalWriter::new(dir_path.clone(), WalFsyncPolicy::None).unwrap();
+            for seq in 4..=6u64 {
+                wal.append(0, &make_wal_entry(seq)).await.unwrap();
+            }
+            // Seals the (now-truncated-then-extended) segment and rotates a fresh
+            // one. Without Fix 1 the sealed segment carries the torn region as a
+            // mid-file gap.
+            wal.mark_applied(0, 0).await.unwrap();
+        }
+
+        // Phase 3: fresh writer over the same dir — recovery must succeed and
+        // return every acked frame (1..=6). Without Fix 1, the sealed segment's
+        // torn region is fatal mid-file corruption → Err here.
+        let wal = WalWriter::new(dir_path.clone(), WalFsyncPolicy::None).unwrap();
+        let unapplied = wal
+            .unapplied(0)
+            .await
+            .expect("recovery must succeed: a sealed segment must not carry a torn tail");
+        let seen: HashSet<u64> = unapplied.iter().map(|e| e.sequence).collect();
+        let missing: Vec<u64> = (1..=6u64).filter(|s| !seen.contains(s)).collect();
+        assert!(
+            missing.is_empty(),
+            "acked frames lost across the torn-tail truncate+seal: {missing:?} (seen: {seen:?})"
+        );
     }
 
     // -----------------------------------------------------------------------
