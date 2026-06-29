@@ -93,21 +93,33 @@ Two CI jobs run this harness (`.github/workflows/rust.yml`):
 - **`soak-smoke` (blocking).** The two negative controls (must go RED) + a tiny
   no-crash soak (`--duration 25 --churn-clients 6 --keyspace 48 --crash-interval 0`).
   It guards that the harness compiles and its fault detection still works, on every PR.
-- **`soak-loaded` (non-blocking, advisory).** A **loaded** no-crash convergence soak
-  (`--duration 150 --churn-clients 16 --keyspace 200`, `--crash-interval 0`) that builds
-  a real write-behind backlog. The smoke gate is too small to accumulate a backlog, so a
-  backlog-dependent durability/convergence regression cannot surface there — exactly the
-  gap that masked **SPEC-325b AC1**, which only failed at keyspace ~200 / churn ~16. This
-  job shifts that coverage left to PR/CI time. It is `continue-on-error: true` for now
-  because the GREEN result is established on local debug/macOS and not yet validated on
+- **`soak-loaded` (non-blocking, advisory).** A **loaded** no-crash convergence soak. The
+  full invocation is:
+
+  ```bash
+  soak_harness --duration 150 --crash-interval 0 --steady-interval 15 \
+    --churn-clients 16 --keyspace 200 --quiesce 3 \
+    --mem-min-growth-mb 300 --mem-ceiling-mb 900 --json-output soak-loaded.json
+  # gate: jq -e '.passed == true and .totalWrites > 20000'
+  ```
+
+  It builds a real write-behind backlog. The smoke gate is too small to accumulate a
+  backlog, so a backlog-dependent durability/convergence regression cannot surface there —
+  exactly the gap that masked **SPEC-325b AC1**, which only failed at keyspace ~200 / churn
+  ~16. This job shifts that coverage left to PR/CI time. The `.totalWrites > 20000` floor
+  asserts the load actually ran (the tiny smoke cannot reach it), guarding against a silent
+  mis-edit that shrinks the params back to smoke scale. It is `continue-on-error: true` for
+  now because the GREEN result is established on local debug/macOS and not yet validated on
   ubuntu CI; **promote it to blocking after ≥10 consecutive green runs on `main`** (owner:
   the stabilization-program G4b gate).
 
   Memory on the loaded job: the slope threshold stays at the honest default (50 MB/h) but
-  `--mem-min-growth-mb 500` makes the slope arm fire only as a **gross-leak tripwire** — a
+  `--mem-min-growth-mb 300` makes the slope arm fire only as a **gross-leak tripwire** — a
   150s OR-churn burst's slope extrapolated to MB/hour is not a valid slow-leak signal (that
-  is the 72h run's job); the `--mem-ceiling-mb 1200` ceiling is the real OOM guard. The job
-  gates on **convergence-under-backlog**, not on the memory slope.
+  is the 72h run's job); observed legitimate peak growth at this load is ~190 MB, so the
+  300 MB min-growth clears it with margin while still tripping on a runaway leak, and the
+  `--mem-ceiling-mb 900` ceiling is the real OOM guard that catches a runaway sooner. The
+  job gates on **convergence-under-backlog**, not on the memory slope.
 
 ## Known finding surfaced by this harness
 
