@@ -126,8 +126,9 @@ pub(crate) fn value_to_rmpv(v: &Value) -> rmpv::Value {
 /// `SYNC_INIT` can only replace its OWN entry — it can never swap a slow
 /// client's in-progress walk snapshot out from under it. Entries are released
 /// when the connection disconnects (wired through
-/// [`ConnectionRegistry::on_disconnect`]), bounding the cache by live-connection
-/// count without a TTL/LRU that could evict an in-progress session.
+/// [`ConnectionRegistry::on_disconnect`]), so the cache is bounded by
+/// (live connections × maps synced per connection) and fully drains as
+/// connections close — no TTL/LRU that could evict an in-progress session.
 pub struct SyncService {
     merkle_manager: Arc<MerkleSyncManager>,
     record_store_factory: Arc<RecordStoreFactory>,
@@ -152,9 +153,13 @@ pub struct SyncService {
 ///
 /// Keying by `(map_name, ConnectionId)` isolates each connection's round (a peer
 /// can only replace its OWN entry), and [`Self::release_on_disconnect`] drops a
-/// connection's sessions when it disconnects, bounding the cache by
-/// live-connection count. No TTL/LRU: an eviction-based bound could drop an
-/// in-progress session under load and re-open a narrowed TODO-544.
+/// connection's sessions when it disconnects. The cache is therefore bounded by
+/// (live connections × maps synced per connection) and drains fully as
+/// connections close — not by live-connection count alone. No TTL/LRU: an
+/// eviction-based bound could drop an in-progress session under load and re-open
+/// a narrowed TODO-544. `release_on_disconnect` is O(total sessions) (a full
+/// `retain` scan); cheap at demo-tier connection counts — a per-connection
+/// reverse index is tracked as a scale follow-up (see `/sf:todo`).
 #[derive(Default)]
 struct SyncSessionRegistry {
     sessions: DashMap<(String, ConnectionId), Arc<MerkleSession>>,
@@ -197,9 +202,10 @@ impl SyncService {
     ) -> Self {
         let session_registry = Arc::new(SyncSessionRegistry::default());
         // Release a connection's sessions when it disconnects: the registry's
-        // `remove()` is the single disconnect chokepoint every WebSocket exit
-        // path (and the reaper) funnels through, so this bounds the session
-        // cache by live-connection count without a TTL/LRU sweep.
+        // `remove()` is the single disconnect chokepoint the WebSocket handler
+        // funnels through at end-of-life (after draining all in-flight dispatch
+        // tasks), so a connection's sessions are always released and the cache is
+        // bounded by (live connections × maps-per-connection) without a TTL/LRU.
         {
             let registry = Arc::clone(&session_registry);
             connection_registry
@@ -321,6 +327,15 @@ impl SyncService {
             // key would re-open TODO-544 on that path (one None caller's rebuild
             // would stomp another's in-progress walk). The build/Err contract is
             // unchanged — only the insert is skipped.
+            //
+            // This path is for single-shot internal/forwarded ops: every real
+            // client SYNC round carries a connection_id set by the WebSocket
+            // dispatch, so it takes the cached `Some` path above. A None caller
+            // that ran a MULTI-call bucket walk would rebuild from current durable
+            // state each call and so would NOT get a stable point-in-time snapshot
+            // across the walk — giving it one would require a server-minted round
+            // id echoed by the client, i.e. a WIRE CHANGE, which is out of scope
+            // here (R6/C3). No such multi-call None-path walk exists today.
             None => Ok(Some(build()?)),
         }
     }
