@@ -61,8 +61,12 @@ impl OrLedger {
             .insert(tag.to_string());
     }
 
-    /// Point-in-time snapshot of the acked-add set per key. Taken while churn is
-    /// quiesced at a checkpoint, so it is a consistent view.
+    /// Snapshot of the acked-add set per key. `DashMap::iter` locks shards one at
+    /// a time rather than globally, so this is not a single atomic instant; that
+    /// is fine because the caller snapshots while churn is paused AND before the
+    /// post-recovery read, so any concurrent `record_add` is either already
+    /// applied on the server before that read or simply absent from the snapshot —
+    /// never a tag that is in `acked` but legitimately not yet on the server.
     pub fn snapshot(&self) -> HashMap<String, HashSet<String>> {
         self.adds
             .iter()

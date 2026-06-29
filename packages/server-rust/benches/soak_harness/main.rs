@@ -825,23 +825,37 @@ async fn recovery_checkpoint(
     // last and on its own connection: it is a different map from the LWW reads, so
     // it cannot warm the LWW store the cold full-scan query above depends on.
     if config.or_churn && !or_ledger.is_empty() {
-        let post_observed = {
-            let mut v = SoakClient::connect(supervisor.addr(), VERIFIER_IDX, jwt).await?;
-            v.ormap_read_all(OR_MAP).await?
-        };
+        // Snapshot the ledger BEFORE reading the server. Any acked add recorded
+        // after this point (e.g. a late-delivered ack on a fresh post-restart
+        // reconnect, or a kernel-buffered pre-kill ack processed late) is simply
+        // absent from `acked` and never checked, so it cannot manufacture a false
+        // loss. Every tag in `acked` was recorded on an ack that returned before
+        // the read below, so the server had applied it before the read — keeping
+        // this a true directional superset check, never a read/snapshot race.
         let acked = or_ledger.snapshot();
-        let missing = missing_acked_adds(&acked, &post_observed);
-        if !missing.is_empty() {
-            out.hard.push(format!(
-                "OR-Map acked add(s) LOST across recovery: {} (key,tag) pair(s) (e.g. {})",
-                missing.len(),
-                missing
-                    .iter()
-                    .take(5)
-                    .map(|(k, t)| format!("{k}/{t}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
+        let mut v = SoakClient::connect(supervisor.addr(), VERIFIER_IDX, jwt).await?;
+        match v.ormap_read_all(OR_MAP).await {
+            Ok(post_observed) => {
+                let missing = missing_acked_adds(&acked, &post_observed);
+                if !missing.is_empty() {
+                    out.hard.push(format!(
+                        "OR-Map acked add(s) LOST across recovery: {} (key,tag) pair(s) (e.g. {})",
+                        missing.len(),
+                        missing
+                            .iter()
+                            .take(5)
+                            .map(|(k, t)| format!("{k}/{t}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+            }
+            // A read failure must NOT silently skip the no-loss check — that would
+            // let a real loss hide behind a generic harness error (a loss could
+            // even be the cause of the read failure). Surface it as a HARD failure.
+            Err(e) => out.hard.push(format!(
+                "OR-Map no-loss check could not complete (post-recovery read failed): {e}"
+            )),
         }
     }
 
@@ -962,6 +976,12 @@ async fn run_churn_client(idx: usize, ctx: ChurnCtx) {
                     break;
                 }
 
+                // `slot` cycles over this client's FIXED owned-slot set
+                // (`owned[rr % owned.len()]`), so `pt-{idx}-{slot}` ranges over a
+                // bounded set of distinct tags — one stable tag per owned slot.
+                // Re-visiting a slot re-adds the same tag (idempotent), so neither
+                // the ledger nor the server's persistent OR keyspace grows without
+                // bound over a long soak.
                 let persist_key = format!("ork-persist-{}", slot % ctx.or_keyspace.max(1));
                 let persist_tag = format!("pt-{idx}-{slot}");
                 let (pms, pctr) = next_stamp();
