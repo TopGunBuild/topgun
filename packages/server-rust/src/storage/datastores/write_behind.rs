@@ -200,21 +200,23 @@ impl WriteBehindConfig {
         }
 
         // Parse TOPGUN_WAL_FSYNC_POLICY → wal_fsync_policy (WalFsyncPolicy)
+        //
+        // An unknown value is FATAL: silently falling back to the Batched default
+        // here is exactly what masked a durability regression through a full RED
+        // soak (a misspelled durable policy quietly ran with the weaker default).
+        // Refusing to start forces the misconfiguration to surface at boot rather
+        // than as silent data loss on the next unclean shutdown.
         if let Some(raw) = get("TOPGUN_WAL_FSYNC_POLICY") {
             match raw.trim().parse::<WalFsyncPolicy>() {
                 Ok(policy) => {
                     cfg.wal_fsync_policy = policy;
                 }
                 Err(err) => {
-                    tracing::warn!(
-                        target: "topgun_server::storage::write_behind",
-                        var = "TOPGUN_WAL_FSYNC_POLICY",
-                        value = %raw,
-                        error = %err,
-                        default = ?defaults.wal_fsync_policy,
-                        "Failed to parse env var; using default"
+                    panic!(
+                        "TOPGUN_WAL_FSYNC_POLICY={raw:?} is not a valid WAL fsync policy: {err}. \
+                         Refusing to start: an unknown durability policy must not be silently \
+                         downgraded to a weaker default. Set a valid value or unset the variable."
                     );
-                    cfg.wal_fsync_policy = defaults.wal_fsync_policy;
                 }
             }
         }
@@ -2408,20 +2410,27 @@ mod tests {
             WriteBehindConfig::from_source(config_source(&[("TOPGUN_WAL_FSYNC_POLICY", "per_op")]));
         assert_eq!(cfg.wal_fsync_policy, WalFsyncPolicy::PerOp);
 
-        // TOPGUN_WAL_FSYNC_POLICY with an invalid value falls back to Batched
-        let cfg = WriteBehindConfig::from_source(config_source(&[(
-            "TOPGUN_WAL_FSYNC_POLICY",
-            "invalid_policy",
-        )]));
-        assert_eq!(
-            cfg.wal_fsync_policy,
-            WalFsyncPolicy::Batched,
-            "Invalid policy must fall back to Batched default"
-        );
+        // The harness/doc `perop` spelling must resolve to PerOp (no silent
+        // downgrade) now that the parser normalizes the separator/case.
+        let cfg =
+            WriteBehindConfig::from_source(config_source(&[("TOPGUN_WAL_FSYNC_POLICY", "perop")]));
+        assert_eq!(cfg.wal_fsync_policy, WalFsyncPolicy::PerOp);
 
         // No override → Batched default
         let cfg = WriteBehindConfig::from_source(config_source(&[]));
         assert_eq!(cfg.wal_fsync_policy, WalFsyncPolicy::Batched);
+    }
+
+    #[test]
+    #[should_panic(expected = "is not a valid WAL fsync policy")]
+    fn from_source_unknown_fsync_policy_is_fatal() {
+        // An unknown durability policy must refuse to start rather than silently
+        // degrade to the weaker default — the silent-downgrade path is what hid a
+        // durability regression through a full RED soak.
+        let _ = WriteBehindConfig::from_source(config_source(&[(
+            "TOPGUN_WAL_FSYNC_POLICY",
+            "invalid_policy",
+        )]));
     }
 
     /// Wiring-only smoke test for the real `from_env` → `std::env` seam. The sole
