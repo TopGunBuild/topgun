@@ -429,6 +429,85 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
+// AC1 (RED) + AC3: acked == durable when the policy is derived FROM THE ENV
+// STRING the harness actually passes (`"perop"`), not the `WalFsyncPolicy::PerOp`
+// literal. This closes the green-bypasses-env gap: the proptest above passes the
+// enum directly, so it stays green even if `from_str` is broken. This test goes
+// RED on revert of the `from_str` normalization — a reverted parser makes
+// `"perop"` either fail to parse (panic at `.expect`) or, if a fallback is
+// reintroduced, downgrade to Batched, whose ~10ms fsync window drops the
+// last-appended-but-not-fsynced frame as a one-behind loss after the crash.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn acked_equals_durable_from_env_string_perop() {
+    // Derive the policy the way the soak harness does: from the env *string*, so
+    // the test exercises the parser, not a hand-picked enum variant. A reverted
+    // `from_str` cannot satisfy this expect for the `perop` spelling.
+    let policy: WalFsyncPolicy = "perop"
+        .parse()
+        .expect("the env-string spelling used by the soak harness must parse to a durable policy");
+    assert_eq!(
+        policy,
+        WalFsyncPolicy::PerOp,
+        "the harness env string must resolve to the durable PerOp policy, \
+         not a downgraded default"
+    );
+
+    // A load-shaped sequence: many overlapping keys each incremented several
+    // times, so a one-behind loss (actual = expected - 1) would surface as the
+    // last store of a key going missing after the crash — exactly the soak's
+    // observed signature.
+    let mut ops = Vec::new();
+    for round in 0..8u64 {
+        for k in 0..32u8 {
+            ops.push(Op::Store {
+                key: format!("k{k}"),
+                value_tag: round * 100 + u64::from(k),
+            });
+        }
+    }
+    let crash_after = ops.len();
+
+    // Crash after EVERY op is acked, with NO pre-flush drain: the scenario drops
+    // the store immediately after the last ack, so every acked write must survive
+    // on the WAL alone (never_flush_config keeps the background flush from leaking
+    // writes to the inner store before the crash).
+    let (recovered, acked) = run_crash_scenario(&ops, crash_after, policy).await;
+
+    // Zero one-behind: every acked store must be present after recovery, with its
+    // final value_tag intact.
+    let expected = expected_final_state(&ops);
+    let mut missing = Vec::new();
+    for (key, state) in &expected {
+        match state {
+            Some(_) => {
+                if !recovered.contains(TEST_MAP, key).await {
+                    missing.push(key.clone());
+                }
+            }
+            None => {
+                if recovered.contains(TEST_MAP, key).await {
+                    missing.push(format!("{key} (should be tombstoned)"));
+                }
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "acked == durable violated under env-string PerOp: {} acked writes lost \
+         after crash recovery (one-behind regression): {:?}",
+        missing.len(),
+        &missing[..missing.len().min(10)]
+    );
+    assert_eq!(
+        acked.len(),
+        expected.len(),
+        "every distinct key must have been acked before the crash"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // AC2(a): clean/strict recovery replays all acked ops (full sequence acked).
 // ---------------------------------------------------------------------------
 
