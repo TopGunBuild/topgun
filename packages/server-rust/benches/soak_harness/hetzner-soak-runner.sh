@@ -25,7 +25,13 @@ STEADY_INTERVAL="${STEADY_INTERVAL:-120}" # steady convergence check every 2 min
 CHURN_CLIENTS="${CHURN_CLIENTS:-32}"
 KEYSPACE="${KEYSPACE:-500}"
 QUIESCE="${QUIESCE:-4}"
-WAL_FSYNC="${WAL_FSYNC:-perop}"
+# per_op fdatasyncs each WAL frame before the ingress write acks, so acked == durable
+# on an unclean kill (perop/per-op are accepted aliases; per_op is canonical).
+WAL_FSYNC="${WAL_FSYNC:-per_op}"
+# Set NO_PRE_KILL_DRAIN=1 to kill -9 WITHOUT first flushing the write-behind buffer,
+# so recovery must rebuild every acked write from the WAL alone — the honest
+# acked == durable assertion (does not depend on a pre-kill drain).
+NO_PRE_KILL_DRAIN="${NO_PRE_KILL_DRAIN:-0}"
 MEM_THRESHOLD="${MEM_THRESHOLD:-25}"      # MB/hour slope ceiling over a 72h run
 MEM_CEILING="${MEM_CEILING:-2048}"
 OUT_ROOT="${OUT_ROOT:-/var/soak}"
@@ -86,6 +92,11 @@ echo "  log:      ${LOG}"
 echo "  progress: ${PROGRESS}"
 echo "  report:   ${REPORT}"
 
+DRAIN_FLAG=()
+if [ "${NO_PRE_KILL_DRAIN}" = "1" ]; then
+  DRAIN_FLAG=(--no-pre-kill-drain)
+fi
+
 nohup "${SOAK_BIN}" \
   --duration "${DURATION}" \
   --crash-interval "${CRASH_INTERVAL}" \
@@ -94,6 +105,7 @@ nohup "${SOAK_BIN}" \
   --keyspace "${KEYSPACE}" \
   --quiesce "${QUIESCE}" \
   --wal-fsync "${WAL_FSYNC}" \
+  "${DRAIN_FLAG[@]}" \
   --mem-threshold-mb-per-hour "${MEM_THRESHOLD}" \
   --mem-ceiling-mb "${MEM_CEILING}" \
   --data-dir "${DATA_DIR}" \
