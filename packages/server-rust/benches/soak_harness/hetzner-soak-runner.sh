@@ -113,7 +113,7 @@ nohup "${SOAK_BIN}" \
   --keyspace "${KEYSPACE}" \
   --quiesce "${QUIESCE}" \
   --wal-fsync "${WAL_FSYNC}" \
-  "${DRAIN_FLAG[@]:-}" \
+  "${DRAIN_FLAG[@]+"${DRAIN_FLAG[@]}"}" \
   --mem-threshold-mb-per-hour "${MEM_THRESHOLD}" \
   --mem-ceiling-mb "${MEM_CEILING}" \
   --data-dir "${DATA_DIR}" \
