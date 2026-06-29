@@ -100,6 +100,12 @@ struct Config {
     progress_output: Option<PathBuf>,
     inject_divergence: bool,
     inject_panic: bool,
+    /// Skip the pre-`kill -9` quiesce drain in the recovery checkpoint. When set,
+    /// the checkpoint kills the server WITHOUT first letting the write-behind
+    /// buffer flush to redb, so post-restart recovery must rely on the WAL alone.
+    /// This is the assertion mode that proves acked == durable on `kill -9` under
+    /// load: it does NOT depend on a pre-kill flush masking a durability gap.
+    no_pre_kill_drain: bool,
     /// True once any soak-controlling flag is parsed. A bare invocation (or one
     /// carrying only foreign libtest args, as `cargo test --all-targets` passes)
     /// leaves this false so the harness prints usage and exits 0 instead of
@@ -126,7 +132,11 @@ impl Default for Config {
             mem_ceiling_mb: 1800.0,
             server_port: 0,
             data_dir: None,
-            wal_fsync: "perop".to_string(),
+            // Durability under the soak comes from PerOp: every WAL frame is
+            // fdatasync'd before the ingress write acks, so acked == durable on a
+            // `kill -9`. The parser normalizes case/separator, so per_op/perop are
+            // equivalent; this canonical spelling matches the production default.
+            wal_fsync: "per_op".to_string(),
             or_churn: true,
             or_keyspace: 32,
             or_every: 5,
@@ -134,6 +144,7 @@ impl Default for Config {
             progress_output: None,
             inject_divergence: false,
             inject_panic: false,
+            no_pre_kill_drain: false,
             mode_requested: false,
         }
     }
@@ -664,8 +675,23 @@ async fn recovery_checkpoint(
     paused: &Arc<AtomicBool>,
 ) -> Result<RecoveryOutcome> {
     paused.store(true, Ordering::SeqCst);
-    // Let in-flight acks settle and the write-behind buffer flush to redb+WAL.
-    tokio::time::sleep(config.quiesce).await;
+    // Pause new client writes, then choose the pre-kill behavior:
+    //
+    // - default (drain): sleep `quiesce` so in-flight acks settle and the
+    //   write-behind buffer flushes to redb+WAL before the kill. This scopes the
+    //   assertion to durable-state recovery (the Merkle/SYNC read path).
+    // - `--no-pre-kill-drain`: skip the flush entirely and kill immediately, so
+    //   the only thing standing between an acked write and a `kill -9` is the WAL.
+    //   This is the acked == durable assertion: it must NOT depend on a pre-kill
+    //   flush. Under correctly-applied PerOp the WAL frame is fsynced before the
+    //   ack returns, so recovery replays every acked write with zero one-behind
+    //   loss even though the buffer never drained.
+    if config.no_pre_kill_drain {
+        // No sleep: leave acked-but-unflushed writes in the buffer so recovery is
+        // forced to rebuild them from the WAL alone.
+    } else {
+        tokio::time::sleep(config.quiesce).await;
+    }
 
     let mut out = RecoveryOutcome::default();
 
@@ -1112,6 +1138,7 @@ const KNOWN_FLAGS: &[&str] = &[
     "--progress-output",
     "--inject-divergence",
     "--inject-panic",
+    "--no-pre-kill-drain",
     "--smoke",
 ];
 
@@ -1256,6 +1283,10 @@ fn parse_args() -> Config {
             }
             "--inject-panic" => {
                 c.inject_panic = true;
+                i += 1;
+            }
+            "--no-pre-kill-drain" => {
+                c.no_pre_kill_drain = true;
                 i += 1;
             }
             "--smoke" => {
