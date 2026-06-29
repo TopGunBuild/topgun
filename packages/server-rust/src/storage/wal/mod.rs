@@ -64,7 +64,8 @@ impl std::fmt::Display for ParseWalFsyncPolicyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "unknown WAL fsync policy {:?}; valid values are per_op, batched, none",
+            "unknown WAL fsync policy {:?}; valid values are per_op (also perop, per-op), \
+             batched, none (case-insensitive)",
             self.0
         )
     }
@@ -76,11 +77,18 @@ impl FromStr for WalFsyncPolicy {
     type Err = ParseWalFsyncPolicyError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim() {
-            "per_op" => Ok(Self::PerOp),
+        // Normalize so operator/harness/doc spellings all resolve: case-insensitive
+        // and tolerant of the separator (`per_op`, `perop`, `per-op` are the same
+        // intent). The soak harness and docs historically used the unseparated
+        // `perop` spelling; rejecting it silently downgraded durability to the
+        // Batched default, which is precisely the failure mode this normalization
+        // prevents.
+        let normalized = s.trim().to_ascii_lowercase().replace(['_', '-'], "");
+        match normalized.as_str() {
+            "perop" => Ok(Self::PerOp),
             "batched" => Ok(Self::Batched),
             "none" => Ok(Self::None),
-            other => Err(ParseWalFsyncPolicyError(other.to_string())),
+            _ => Err(ParseWalFsyncPolicyError(s.trim().to_string())),
         }
     }
 }
@@ -1667,6 +1675,35 @@ mod tests {
         assert_eq!(
             "per_op".parse::<WalFsyncPolicy>().unwrap(),
             WalFsyncPolicy::PerOp
+        );
+    }
+
+    #[test]
+    fn fsync_policy_parse_perop_aliases() {
+        // The harness and docs use the unseparated `perop` spelling; it must
+        // resolve to PerOp so the durable mode is actually applied rather than
+        // silently downgraded to Batched.
+        for spelling in ["perop", "PerOp", "PER_OP", "per-op", "  perop  ", "PEROP"] {
+            assert_eq!(
+                spelling.parse::<WalFsyncPolicy>().unwrap(),
+                WalFsyncPolicy::PerOp,
+                "spelling {spelling:?} must resolve to PerOp"
+            );
+        }
+    }
+
+    #[test]
+    fn fsync_policy_parse_garbage_still_rejected() {
+        // Normalization must not turn genuinely-unknown values into a silent
+        // default — they must still surface as an error at startup.
+        let result = "garbage".parse::<WalFsyncPolicy>();
+        assert!(
+            result.is_err(),
+            "unknown policy 'garbage' must return Err, not a default"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("garbage"),
+            "error must name the bad value"
         );
     }
 
