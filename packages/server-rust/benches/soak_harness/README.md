@@ -75,7 +75,8 @@ a multi-hour default soak.
 | `--churn-clients <n>` | 16 | Concurrent churn clients (each owns a disjoint key slice) |
 | `--keyspace <n>` | 200 | Distinct keys (bounded → legitimate memory is bounded) |
 | `--quiesce <secs>` | 3 | Pause+settle before a checkpoint reads or kills (≥ write-behind flush window) |
-| `--wal-fsync <policy>` | perop | `perop` \| `batched` \| `none`; `perop` makes recovery assertions crisp |
+| `--wal-fsync <policy>` | per_op | `per_op` (also `perop`/`per-op`, case-insensitive) \| `batched` \| `none`; `per_op` fdatasyncs each WAL frame before the ingress write acks, so acked == durable on `kill -9` |
+| `--no-pre-kill-drain` | off | Skip the pre-`kill -9` quiesce flush in the recovery checkpoint so post-restart recovery relies on the WAL alone; the acked == durable assertion that must NOT depend on a pre-kill drain |
 | `--or-churn <bool>` | true | Drive OR-Map add/remove to grow tombstones (memory watch) |
 | `--mem-threshold-mb-per-hour <f>` | 50 | Fail if RSS slope exceeds this (with `--mem-min-growth-mb` guard, default 150) |
 | `--mem-ceiling-mb <f>` | 1800 | Fail if peak RSS exceeds this |
@@ -121,31 +122,53 @@ Two CI jobs run this harness (`.github/workflows/rust.yml`):
   `--mem-ceiling-mb 900` ceiling is the real OOM guard that catches a runaway sooner. The
   job gates on **convergence-under-backlog**, not on the memory slope.
 
-## Known finding surfaced by this harness
+## Findings surfaced by this harness
 
-### Crash-recovery at load is RED — now due to TODO-546, not TODO-530
+### TODO-530 — empty-map after restart (CLOSED)
 
 The first version of this harness found **TODO-530** (HIGH): after `kill -9` + restart the
 redb-backed server served an **empty** map (Merkle root `0`) although the data was durably
 on disk — the query full-scan and Merkle-sync paths read only the in-memory `StorageEngine`
 and persisted records were not rehydrated on restart. **TODO-530 is now CLOSED** (SPEC-325a/b):
-the `DurableMerkleIndex` and `FullScanPager` read from the datastore, the recovery checkpoint
+the `DurableMerkleIndex` and `FullScanPager` read from the datastore, and the recovery checkpoint
 gates were promoted to **HARD** (`main.rs` `recovery_checkpoint`, "must survive a kill -9 +
-restart unchanged"), and the checkpoint quiesce (`main.rs`, `paused` + `sleep(quiesce)`) drains
-the write-behind buffer before the kill. The empty-map failure no longer reproduces.
+restart unchanged"). The empty-map failure no longer reproduces.
 
-A **loaded with-crash** soak is, however, **still RED** — but for a different reason. At
-churn 16 / keyspace 200, a `kill -9` recovery checkpoint shows keys a few increments **behind**
-post-restart with a **non-zero** Merkle root (i.e. partial, not empty). That is **TODO-546**
-(ack-before-durable): the write-behind buffer acks writes ~1s before they are persisted, and at
-load the 3s quiesce does not fully drain the backlog, so acked-but-unflushed writes are lost on
-the unclean kill. This is a **known-open critical** (MUST-FIX before public launch), not a fresh
-regression. CI therefore runs the loaded variant **no-crash** (above); the **with-crash** loaded
-run stays local and on the Hetzner 72h runner as the **TODO-546 reproducer/validator** (TODO-546
-`depends_on` this loaded soak). Once TODO-546 is fixed, promote a with-crash loaded variant into
-CI as a blocking crash-recovery-at-load gate — otherwise crash recovery at load is never
-CI-gated, the same gap class as SPEC-325b. (Issue states drift: re-check the live TODO-530/546
-status before trusting this note.)
+### TODO-546 — acked != durable one-behind loss at load (CLOSED)
+
+A **loaded with-crash** soak then showed a different failure: at churn 16 / keyspace 200, a
+`kill -9` recovery checkpoint showed keys exactly one increment **behind** post-restart with a
+**non-zero** Merkle root (partial, not empty). Root cause: the harness passed
+`TOPGUN_WAL_FSYNC_POLICY=perop`, which the parser rejected (it only accepted `per_op`) and
+**silently downgraded to `Batched`**, whose ~10ms fsync window let a `kill -9` drop the last
+appended-but-not-fsynced acked frame.
+
+The parser now normalizes case + separator so `perop`/`per_op`/`per-op` all resolve to `PerOp`,
+and an *unknown* policy value is now **fatal at startup** (the server refuses to start rather than
+silently degrade durability). Under correctly-applied `PerOp` every WAL frame is fdatasync'd
+**before** the ingress write acks, so acked == durable.
+
+The acked == durable assertion does **NOT** depend on the pre-kill quiesce drain. By default the
+recovery checkpoint sleeps `quiesce` to let the write-behind buffer flush before the kill (which
+scopes the assertion to durable-state recovery). With `--no-pre-kill-drain` the checkpoint settles
+only the in-flight ACK pipeline (~250ms, far under the flush interval) and kills the server
+**without** flushing the buffer, so recovery must rebuild every acked write from the WAL alone —
+the honest acked == durable test (LWW convergence + delta-sync + full-scan read-backs stay HARD;
+the OR-Map strict pre==post root equality is relaxed under no-drain because add/remove churn leaves
+acked-but-unsettled tags that recovery legitimately surfaces post-restart — recovered-more, not
+loss).
+
+The no-drain validator must run the **production** write-behind flush cadence
+(`TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS=1000`); the harness default fast flush (100ms) would drain
+the buffer inside the ack-settle and mask the WAL path. The Hetzner runner pins this automatically
+when `NO_PRE_KILL_DRAIN=1`. The storage-layer behavioral proof is independent of the soak and lives
+in `crash_safety_proptest.rs` (`acked_equals_durable_from_env_string_perop`, which derives the
+policy from the `perop` env string with a never-flush config and is red-on-revert of the parser
+fix).
+
+Production context: `per_op` maximizes durability at a per-write fsync cost. The server default is
+`Batched` (CLAUDE.md production-defaults), a throughput/durability balance; the soak deliberately
+selects `per_op` because its assertion is acked == durable on an unclean kill.
 
 ### Crash-window `write_errors` are transient connection drops, not a write-path defect
 

@@ -51,7 +51,9 @@ pub struct ServerConfig {
     pub port: u16,
     /// JWT signing secret shared with `SoakClient`.
     pub jwt_secret: String,
-    /// WAL fsync policy (`perop` | `batched` | `none`).
+    /// WAL fsync policy forwarded to `TOPGUN_WAL_FSYNC_POLICY`. Accepted spellings:
+    /// `per_op` (also `perop`, `per-op`, case-insensitive) | `batched` | `none`.
+    /// The soak relies on `per_op` for acked == durable on `kill -9`.
     pub wal_fsync_policy: String,
 }
 

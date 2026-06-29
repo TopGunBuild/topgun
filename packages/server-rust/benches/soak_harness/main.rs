@@ -100,6 +100,12 @@ struct Config {
     progress_output: Option<PathBuf>,
     inject_divergence: bool,
     inject_panic: bool,
+    /// Skip the pre-`kill -9` quiesce drain in the recovery checkpoint. When set,
+    /// the checkpoint kills the server WITHOUT first letting the write-behind
+    /// buffer flush to redb, so post-restart recovery must rely on the WAL alone.
+    /// This is the assertion mode that proves acked == durable on `kill -9` under
+    /// load: it does NOT depend on a pre-kill flush masking a durability gap.
+    no_pre_kill_drain: bool,
     /// True once any soak-controlling flag is parsed. A bare invocation (or one
     /// carrying only foreign libtest args, as `cargo test --all-targets` passes)
     /// leaves this false so the harness prints usage and exits 0 instead of
@@ -126,7 +132,11 @@ impl Default for Config {
             mem_ceiling_mb: 1800.0,
             server_port: 0,
             data_dir: None,
-            wal_fsync: "perop".to_string(),
+            // Durability under the soak comes from PerOp: every WAL frame is
+            // fdatasync'd before the ingress write acks, so acked == durable on a
+            // `kill -9`. The parser normalizes case/separator, so per_op/perop are
+            // equivalent; this canonical spelling matches the production default.
+            wal_fsync: "per_op".to_string(),
             or_churn: true,
             or_keyspace: 32,
             or_every: 5,
@@ -134,6 +144,7 @@ impl Default for Config {
             progress_output: None,
             inject_divergence: false,
             inject_panic: false,
+            no_pre_kill_drain: false,
             mode_requested: false,
         }
     }
@@ -664,8 +675,35 @@ async fn recovery_checkpoint(
     paused: &Arc<AtomicBool>,
 ) -> Result<RecoveryOutcome> {
     paused.store(true, Ordering::SeqCst);
-    // Let in-flight acks settle and the write-behind buffer flush to redb+WAL.
-    tokio::time::sleep(config.quiesce).await;
+    // Pause new client writes, then choose the pre-kill behavior:
+    //
+    // - default (drain): sleep `quiesce` so in-flight acks settle and the
+    //   write-behind buffer flushes to redb+WAL before the kill. This scopes the
+    //   assertion to durable-state recovery (the Merkle/SYNC read path).
+    // - `--no-pre-kill-drain`: skip the flush entirely and kill immediately, so
+    //   the only thing standing between an acked write and a `kill -9` is the WAL.
+    //   This is the acked == durable assertion: it must NOT depend on a pre-kill
+    //   flush. Under correctly-applied PerOp the WAL frame is fsynced before the
+    //   ack returns, so recovery replays every acked write with zero one-behind
+    //   loss even though the buffer never drained.
+    if config.no_pre_kill_drain {
+        // Settle only the in-flight ACK pipeline (a few network RTTs), NOT the
+        // write-behind buffer. This stops new acks so the pre-crash snapshot is
+        // a stable acked set, while staying well under the production write-behind
+        // flush interval (1000ms) so acked writes remain unflushed in the buffer —
+        // recovery is then forced to rebuild them from the WAL alone. This is what
+        // makes the acked == durable assertion NOT depend on a pre-kill flush.
+        //
+        // NOTE: this assertion is only honest when the server runs the production
+        // flush cadence (TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS=1000); the harness's
+        // default fast flush would drain the buffer inside this settle and mask the
+        // WAL durability path. The runner sets the production cadence for the
+        // no-drain validator.
+        const ACK_SETTLE: Duration = Duration::from_millis(250);
+        tokio::time::sleep(ACK_SETTLE).await;
+    } else {
+        tokio::time::sleep(config.quiesce).await;
+    }
 
     let mut out = RecoveryOutcome::default();
 
@@ -734,6 +772,12 @@ async fn recovery_checkpoint(
             "LWW merkle root changed across recovery: pre={pre_root} post={post_root}"
         ));
     }
+    // HARD (unconditional): the OR-Map merkle root must survive recovery unchanged.
+    // This is the OR-Map's only durability assertion, so it must never be skipped —
+    // a blanket skip would let an acked OR-Map write lost on kill -9 pass silently.
+    // Under --no-pre-kill-drain OR churn is disabled (see parse_args), so both roots
+    // are absent and this holds honestly; OR-Map crash-recovery under load is still
+    // covered by the drained mode (its WAL-only behavior is a tracked follow-up).
     if pre_or_root != post_or_root {
         out.hard.push(format!(
             "OR-Map merkle root changed across recovery: pre={pre_or_root:?} post={post_or_root:?}"
@@ -1112,6 +1156,7 @@ const KNOWN_FLAGS: &[&str] = &[
     "--progress-output",
     "--inject-divergence",
     "--inject-panic",
+    "--no-pre-kill-drain",
     "--smoke",
 ];
 
@@ -1258,6 +1303,10 @@ fn parse_args() -> Config {
                 c.inject_panic = true;
                 i += 1;
             }
+            "--no-pre-kill-drain" => {
+                c.no_pre_kill_drain = true;
+                i += 1;
+            }
             "--smoke" => {
                 // Convenience preset: short but full-feature (used by CI + local).
                 c.duration = Duration::from_secs(25);
@@ -1274,6 +1323,16 @@ fn parse_args() -> Config {
                 i += 1;
             }
         }
+    }
+    // The no-drain validator scopes strictly to the LWW acked==durable
+    // target. OR-Map WAL-only crash-recovery semantics — the live net-compacted
+    // observed set vs the WAL-replayed intermediate tags — is a distinct question
+    // that needs its own audit. Rather than run OR churn and relax its assertion
+    // (which would let a genuine OR-Map acked-write loss pass silently), we simply
+    // do not generate OR writes in this mode, so the OR-root equality check stays
+    // unconditionally HARD and holds honestly (both roots absent).
+    if c.no_pre_kill_drain {
+        c.or_churn = false;
     }
     c
 }
