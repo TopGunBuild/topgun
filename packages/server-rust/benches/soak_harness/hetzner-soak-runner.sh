@@ -32,6 +32,14 @@ WAL_FSYNC="${WAL_FSYNC:-per_op}"
 # so recovery must rebuild every acked write from the WAL alone — the honest
 # acked == durable assertion (does not depend on a pre-kill drain).
 NO_PRE_KILL_DRAIN="${NO_PRE_KILL_DRAIN:-0}"
+# The no-drain validator must run the PRODUCTION write-behind flush cadence
+# (1000ms): the harness's default fast flush (100ms) would drain the buffer to
+# redb inside the brief pre-snapshot ack-settle and mask the WAL durability path,
+# making acked == durable trivially true for the wrong reason. Pin production
+# cadence here so the WAL is genuinely on the critical recovery path.
+if [ "${NO_PRE_KILL_DRAIN}" = "1" ]; then
+  export TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS="${TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS:-1000}"
+fi
 MEM_THRESHOLD="${MEM_THRESHOLD:-25}"      # MB/hour slope ceiling over a 72h run
 MEM_CEILING="${MEM_CEILING:-2048}"
 OUT_ROOT="${OUT_ROOT:-/var/soak}"
