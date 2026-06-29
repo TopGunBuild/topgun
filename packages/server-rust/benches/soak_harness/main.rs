@@ -772,16 +772,13 @@ async fn recovery_checkpoint(
             "LWW merkle root changed across recovery: pre={pre_root} post={post_root}"
         ));
     }
-    // The OR-Map strict pre==post root check assumes a quiesced pre-crash state.
-    // Under --no-pre-kill-drain the OR churn's add-then-remove pairs can leave
-    // acked-but-unsettled tag state at kill time: the verifier's pre-crash root
-    // reads the net-empty observed set (root 0), while WAL recovery faithfully
-    // replays the durable intermediate tags and surfaces a non-zero root post-
-    // restart. That is recovered-MORE (durability working), not loss — the
-    // acked == durable invariant this mode validates is carried by the LWW checks
-    // above/below (the SPEC-330 one-behind target). So the strict OR-root equality
-    // is only enforced in the drained mode where the pre-crash state is quiesced.
-    if !config.no_pre_kill_drain && pre_or_root != post_or_root {
+    // HARD (unconditional): the OR-Map merkle root must survive recovery unchanged.
+    // This is the OR-Map's only durability assertion, so it must never be skipped —
+    // a blanket skip would let an acked OR-Map write lost on kill -9 pass silently.
+    // Under --no-pre-kill-drain OR churn is disabled (see parse_args), so both roots
+    // are absent and this holds honestly; OR-Map crash-recovery under load is still
+    // covered by the drained mode (its WAL-only behavior is a tracked follow-up).
+    if pre_or_root != post_or_root {
         out.hard.push(format!(
             "OR-Map merkle root changed across recovery: pre={pre_or_root:?} post={post_or_root:?}"
         ));
@@ -1326,6 +1323,16 @@ fn parse_args() -> Config {
                 i += 1;
             }
         }
+    }
+    // The no-drain validator scopes strictly to the SPEC-330 LWW acked==durable
+    // target. OR-Map WAL-only crash-recovery semantics — the live net-compacted
+    // observed set vs the WAL-replayed intermediate tags — is a distinct question
+    // that needs its own audit. Rather than run OR churn and relax its assertion
+    // (which would let a genuine OR-Map acked-write loss pass silently), we simply
+    // do not generate OR writes in this mode, so the OR-root equality check stays
+    // unconditionally HARD and holds honestly (both roots absent).
+    if c.no_pre_kill_drain {
+        c.or_churn = false;
     }
     c
 }
