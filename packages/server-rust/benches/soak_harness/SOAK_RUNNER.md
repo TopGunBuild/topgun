@@ -118,11 +118,16 @@ Interpretation:
   capture the `run-dir` (it holds the log, progress stream, and the on-disk
   redb + WAL for forensics) and file it.
 
-## 6. Known caveat for the current build (TODO-530)
+## 6. Known caveat for the current build (TODO-546)
 
-On the current build the crash-loop path is **RED by design** because of
-TODO-530 (after `kill -9` + restart the server serves an empty map although the
-data is durably on disk — query/Merkle read only the in-memory layer, which is
-not rehydrated on restart). Run the full crash-loop 72h soak only **after**
-TODO-530 lands. To exercise everything *except* recovery in the meantime, set
-`CRASH_INTERVAL=0` (churn + steady convergence + memory + panic watch).
+**TODO-530 is now CLOSED** (SPEC-325a/b): the empty-map-on-restart failure no longer
+reproduces — query/Merkle now read from the datastore and the recovery gates are HARD.
+But the crash-loop path is **still RED at load**, now because of **TODO-546**
+(ack-before-durable): the write-behind buffer acks writes ~1s before they are persisted,
+so at a real backlog a `kill -9` loses acked-but-unflushed writes and post-restart keys
+are a few increments **behind** (partial, non-zero Merkle root — not empty). Run the full
+crash-loop 72h soak as the TODO-546 reproducer/validator. To exercise everything *except*
+recovery in the meantime, set `CRASH_INTERVAL=0` (churn + steady convergence + memory +
+panic watch) — this is also what the non-blocking `soak-loaded` CI job runs at scale.
+(See the "Known finding" section in [`README.md`](./README.md); re-check live TODO-546
+status, issue states drift.)

@@ -401,9 +401,10 @@ jobs:
     # detection must keep working. We run the two negative controls (which MUST
     # go RED) plus a short no-crash convergence/churn/memory soak (which MUST be
     # green). The full 72h crash-loop soak runs on a Hetzner scratch box, not in
-    # CI. The crash-loop path is also currently RED by design against TODO-530
-    # (post-restart rehydration gap), so CI deliberately exercises the no-crash
-    # mode here — see packages/server-rust/benches/soak_harness/README.md.
+    # CI. The crash-loop path is still RED at load — now due to TODO-546
+    # (ack-before-durable), not the closed TODO-530 — so CI exercises the no-crash
+    # mode here; the loaded no-crash variant is the separate non-blocking
+    # soak-loaded job below. See packages/server-rust/benches/soak_harness/README.md.
     steps:
       - uses: actions/checkout@v4
 
@@ -466,6 +467,84 @@ jobs:
         with:
           name: soak-smoke-${{ github.run_id }}
           path: soak-smoke.json
+          retention-days: 30
+
+  soak-loaded:
+    name: Soak Harness Loaded (G4b, non-blocking)
+    needs: [check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # NON-BLOCKING (continue-on-error) loaded convergence soak. The fast soak-smoke
+    # gate above runs a tiny no-crash soak (churn 6 / keyspace 48 / 25s) that is too
+    # small to build a write-behind backlog, so backlog-dependent durability/
+    # convergence regressions cannot surface there — exactly the gap that masked
+    # SPEC-325b AC1 (which only failed at keyspace ~200 / churn ~16). This job drives
+    # a real backlog (churn 16 / keyspace 200 / 150s, no-crash) so those regressions
+    # fail at PR/CI time instead of only at the 72h Hetzner run or in production.
+    #
+    # Why NO-CRASH at load: a loaded WITH-crash soak is currently RED purely due to
+    # the open ack-before-durable gap (TODO-546) — acked-but-unflushed writes are lost
+    # on kill -9 at load. That is a known-open critical, not a fresh regression, so a
+    # with-crash gate here would just re-report TODO-546. The with-crash loaded
+    # reproducer stays local/Hetzner as the TODO-546 validator; once TODO-546 is fixed
+    # it should be promoted into CI as a blocking crash-recovery-at-load gate.
+    #
+    # Why non-blocking for now: this GREEN result is established on local debug/macOS;
+    # it is not yet validated on ubuntu CI. Promote to BLOCKING after >=10 consecutive
+    # green runs on main (owner: stabilization-program G4b gate). Until then it is
+    # advisory so a CI-platform flake never blocks merges.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-soak-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-soak-
+            ${{ runner.os }}-cargo-
+
+      - name: Build server binary + soak bench
+        run: cargo build --bin topgun-server --bench soak_harness
+
+      - name: Locate soak bench binary
+        id: soak
+        run: |
+          BIN=$(ls -t target/debug/deps/soak_harness-* | grep -vE '\.(d|o|rcgu)' | head -1)
+          test -x "$BIN" || { echo "soak bench binary not found"; exit 1; }
+          echo "bin=$BIN" >> "$GITHUB_OUTPUT"
+
+      - name: Loaded no-crash convergence soak must be GREEN
+        run: |
+          # Loaded params build a real write-behind backlog (vs the tiny smoke).
+          # Memory: the slope threshold stays at the honest default (50 MB/h) but the
+          # min-growth guard is raised to 500MB so the slope arm acts only as a
+          # GROSS-leak tripwire — a 150s OR-churn burst's slope extrapolation is not a
+          # valid slow-leak signal (that is the 72h run's job); the 1200MB ceiling is
+          # the real OOM guard. This job gates on CONVERGENCE-under-backlog.
+          ${{ steps.soak.outputs.bin }} \
+            --duration 150 --crash-interval 0 --steady-interval 15 \
+            --churn-clients 16 --keyspace 200 --quiesce 3 \
+            --mem-min-growth-mb 500 --mem-ceiling-mb 1200 \
+            --json-output soak-loaded.json
+          jq -e '.passed == true' soak-loaded.json >/dev/null \
+            || { echo "FAIL: loaded no-crash soak did not pass"; cat soak-loaded.json; exit 1; }
+          echo "OK: loaded no-crash convergence soak passed"
+
+      - name: Upload loaded soak report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-loaded-${{ github.run_id }}
+          path: soak-loaded.json
           retention-days: 30
 
   audit:

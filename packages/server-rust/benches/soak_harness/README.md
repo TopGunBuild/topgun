@@ -86,16 +86,81 @@ a multi-hour default soak.
 Exit code: `0` pass, `1` an assertion failed (convergence/recovery/memory/panic),
 `2` setup error, `3` a negative control failed to detect its injected fault.
 
+## CI coverage: a fast smoke gate + a loaded convergence gate
+
+Two CI jobs run this harness (`.github/workflows/rust.yml`):
+
+- **`soak-smoke` (blocking).** The two negative controls (must go RED) + a tiny
+  no-crash soak (`--duration 25 --churn-clients 6 --keyspace 48 --crash-interval 0`).
+  It guards that the harness compiles and its fault detection still works, on every PR.
+- **`soak-loaded` (non-blocking, advisory).** A **loaded** no-crash convergence soak
+  (`--duration 150 --churn-clients 16 --keyspace 200`, `--crash-interval 0`) that builds
+  a real write-behind backlog. The smoke gate is too small to accumulate a backlog, so a
+  backlog-dependent durability/convergence regression cannot surface there — exactly the
+  gap that masked **SPEC-325b AC1**, which only failed at keyspace ~200 / churn ~16. This
+  job shifts that coverage left to PR/CI time. It is `continue-on-error: true` for now
+  because the GREEN result is established on local debug/macOS and not yet validated on
+  ubuntu CI; **promote it to blocking after ≥10 consecutive green runs on `main`** (owner:
+  the stabilization-program G4b gate).
+
+  Memory on the loaded job: the slope threshold stays at the honest default (50 MB/h) but
+  `--mem-min-growth-mb 500` makes the slope arm fire only as a **gross-leak tripwire** — a
+  150s OR-churn burst's slope extrapolated to MB/hour is not a valid slow-leak signal (that
+  is the 72h run's job); the `--mem-ceiling-mb 1200` ceiling is the real OOM guard. The job
+  gates on **convergence-under-backlog**, not on the memory slope.
+
 ## Known finding surfaced by this harness
 
-On its first crash-recovery checkpoint, the soak found **TODO-530** (HIGH):
-after `kill -9` + restart the redb-backed server serves an **empty** map
-(Merkle root `0`) although the data is durably on disk — the query full-scan and
-Merkle-sync paths read only the in-memory `StorageEngine` and persisted records
-are not rehydrated on restart (also latent under eviction). Until TODO-530 is
-fixed the **crash-loop path is RED by design**. CI therefore runs the no-crash
-convergence/churn/memory mode + both negative controls (all green); the crash
-loop is run locally and on the Hetzner 72h runner as the TODO-530 reproducer.
+### Crash-recovery at load is RED — now due to TODO-546, not TODO-530
+
+The first version of this harness found **TODO-530** (HIGH): after `kill -9` + restart the
+redb-backed server served an **empty** map (Merkle root `0`) although the data was durably
+on disk — the query full-scan and Merkle-sync paths read only the in-memory `StorageEngine`
+and persisted records were not rehydrated on restart. **TODO-530 is now CLOSED** (SPEC-325a/b):
+the `DurableMerkleIndex` and `FullScanPager` read from the datastore, the recovery checkpoint
+gates were promoted to **HARD** (`main.rs` `recovery_checkpoint`, "must survive a kill -9 +
+restart unchanged"), and the checkpoint quiesce (`main.rs`, `paused` + `sleep(quiesce)`) drains
+the write-behind buffer before the kill. The empty-map failure no longer reproduces.
+
+A **loaded with-crash** soak is, however, **still RED** — but for a different reason. At
+churn 16 / keyspace 200, a `kill -9` recovery checkpoint shows keys a few increments **behind**
+post-restart with a **non-zero** Merkle root (i.e. partial, not empty). That is **TODO-546**
+(ack-before-durable): the write-behind buffer acks writes ~1s before they are persisted, and at
+load the 3s quiesce does not fully drain the backlog, so acked-but-unflushed writes are lost on
+the unclean kill. This is a **known-open critical** (MUST-FIX before public launch), not a fresh
+regression. CI therefore runs the loaded variant **no-crash** (above); the **with-crash** loaded
+run stays local and on the Hetzner 72h runner as the **TODO-546 reproducer/validator** (TODO-546
+`depends_on` this loaded soak). Once TODO-546 is fixed, promote a with-crash loaded variant into
+CI as a blocking crash-recovery-at-load gate — otherwise crash recovery at load is never
+CI-gated, the same gap class as SPEC-325b. (Issue states drift: re-check the live TODO-530/546
+status before trusting this note.)
+
+### Crash-window `write_errors` are transient connection drops, not a write-path defect
+
+The `write_errors` counter increments **only** when an active-burst `write_lww` fails at the
+socket (`run_churn_client`: on `write_lww(...).is_err()` it bumps `write_errors`, sets
+`session_alive = false`, breaks, and the outer loop reconnects via `connect_with_retry`, bumping
+`reconnects`; the next session's replay phase resends every owned key under LWW, bumping
+`resends`). A failed write therefore means *the connection died mid-write* — which during a
+`kill -9` window is expected — and is immediately self-healing: reconnect + idempotent
+higher-HLC resend restores any value lost to the kill window.
+
+Evidence this is transient, not a flush/write-path defect:
+
+- **No-crash runs are clean.** Every no-crash soak (smoke and loaded, 60k+ writes) reports
+  `write_errors = 0` — the steady-state write path produces no errors.
+- **In this harness the counter is 0 even with crashes**, because `kill -9` happens during the
+  recovery-checkpoint quiesce while churn is **paused** (clients hold, no in-flight burst write),
+  so no write straddles the kill window.
+- The historically observed **~13 / 20k** crash-window `write_errors` (≈0.065%) came from a
+  config where crashes overlapped **active** churn: those ~13 are exactly the in-flight burst
+  writes whose socket died during the kill, each followed by a `reconnects` increment and a
+  `resends` replay. They track reconnects 1:1 and leave no missing data once the client replays.
+
+**Conclusion:** the crash-window `write_errors` are expected transient kill-window connection
+drops, self-healed by reconnect + LWW resend — **not** a flush-induced write-path defect. (Data
+loss at the crash boundary at load is a *separate* property, owned by the crash-recovery
+assertion above = TODO-546, and is not measured by `write_errors`.) No follow-up TODO is filed.
 
 ## 72h run on Hetzner
 
