@@ -60,7 +60,7 @@ fn parse_partition_prefix(path: &str) -> Option<(u32, String)> {
 use dashmap::DashMap;
 use tracing::Instrument;
 
-use crate::network::connection::{ConnectionKind, ConnectionRegistry};
+use crate::network::connection::{ConnectionId, ConnectionKind, ConnectionRegistry};
 use crate::service::operation::{service_names, Operation, OperationError, OperationResponse};
 use crate::service::registry::{ManagedService, ServiceContext};
 use crate::storage::map_data_store::{DurableMerkleIndex, MapDataStore, MerkleSession};
@@ -119,10 +119,16 @@ pub(crate) fn value_to_rmpv(v: &Value) -> rmpv::Value {
 /// `build_session` does a full `enumerate_leaves` pass over the whole map
 /// and returns a point-in-time snapshot. To keep the per-round cost to one
 /// enumeration pass (not one per handler call), each `SYNC_INIT` builds a
-/// fresh session for the map and stores it in `session_cache`. Every subsequent
-/// `MerkleReqBucket` / `ORMapMerkleReqBucket` call reuses the cached snapshot
-/// for that map without touching storage again. `SYNC_INIT` always replaces
-/// any existing entry so a new sync round sees the current durable state.
+/// fresh session and stores it in [`SyncSessionRegistry`], keyed by
+/// `(map_name, connection_id)`. Every subsequent `MerkleReqBucket` /
+/// `ORMapMerkleReqBucket` call from the SAME connection reuses that snapshot
+/// without touching storage again. Keying per connection means a peer's
+/// `SYNC_INIT` can only replace its OWN entry — it can never swap a slow
+/// client's in-progress walk snapshot out from under it. Entries are released
+/// when the connection disconnects (wired through
+/// [`ConnectionRegistry::on_disconnect`]), so the cache is bounded by
+/// (live connections × maps synced per connection) and fully drains as
+/// connections close — no TTL/LRU that could evict an in-progress session.
 pub struct SyncService {
     merkle_manager: Arc<MerkleSyncManager>,
     record_store_factory: Arc<RecordStoreFactory>,
@@ -132,9 +138,58 @@ pub struct SyncService {
     durable_index: Option<Arc<dyn DurableMerkleIndex + Send + Sync>>,
     /// The durable backing store passed to `build_session`.
     durable_store: Option<Arc<dyn MapDataStore>>,
-    /// Per-map session cache: keyed by map name, one session per active sync round.
-    /// `SYNC_INIT` inserts/replaces; bucket handlers read from the same entry.
-    session_cache: DashMap<String, Arc<MerkleSession>>,
+    /// Per-`(map, connection)` session cache; entries released on disconnect.
+    session_registry: Arc<SyncSessionRegistry>,
+}
+
+/// Per-`(map_name, connection_id)` cache of materialised Merkle sync sessions.
+///
+/// SPEC-325b cached one `MerkleSession` per map so a sync round materialises the
+/// durable trie once. Keying by map name ALONE had two coupled defects: a second
+/// client's `SYNC_INIT` (force-rebuild) could swap a slow client's in-progress
+/// snapshot out from under its bucket DFS (TODO-544), and nothing ever released
+/// entries, so each synced map's full key set stayed resident forever, outside
+/// the eviction-cost accounting (TODO-545).
+///
+/// Keying by `(map_name, ConnectionId)` isolates each connection's round (a peer
+/// can only replace its OWN entry), and [`Self::release_on_disconnect`] drops a
+/// connection's sessions when it disconnects. The cache is therefore bounded by
+/// (live connections × maps synced per connection) and drains fully as
+/// connections close — not by live-connection count alone. No TTL/LRU: an
+/// eviction-based bound could drop an in-progress session under load and re-open
+/// a narrowed TODO-544. `release_on_disconnect` is O(total sessions) (a full
+/// `retain` scan); cheap at demo-tier connection counts — a per-connection
+/// reverse index is tracked as a scale follow-up (see `/sf:todo`).
+#[derive(Default)]
+struct SyncSessionRegistry {
+    sessions: DashMap<(String, ConnectionId), Arc<MerkleSession>>,
+}
+
+impl SyncSessionRegistry {
+    /// Returns the cached session for `(map_name, conn_id)`, if any.
+    fn get(&self, map_name: &str, conn_id: ConnectionId) -> Option<Arc<MerkleSession>> {
+        self.sessions
+            .get(&(map_name.to_string(), conn_id))
+            .map(|entry| Arc::clone(entry.value()))
+    }
+
+    /// Inserts (replacing any prior entry) the session for `(map_name, conn_id)`.
+    fn insert(&self, map_name: &str, conn_id: ConnectionId, session: Arc<MerkleSession>) {
+        self.sessions
+            .insert((map_name.to_string(), conn_id), session);
+    }
+
+    /// Drops every session belonging to `conn_id`. Invoked on disconnect via the
+    /// `ConnectionRegistry` observer so a connection's sessions do not outlive it.
+    fn release_on_disconnect(&self, conn_id: ConnectionId) {
+        self.sessions.retain(|(_, c), _| *c != conn_id);
+    }
+
+    /// Number of cached sessions across all connections (test-only bound check).
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.sessions.len()
+    }
 }
 
 impl SyncService {
@@ -145,13 +200,24 @@ impl SyncService {
         record_store_factory: Arc<RecordStoreFactory>,
         connection_registry: Arc<ConnectionRegistry>,
     ) -> Self {
+        let session_registry = Arc::new(SyncSessionRegistry::default());
+        // Release a connection's sessions when it disconnects: the registry's
+        // `remove()` is the single disconnect chokepoint the WebSocket handler
+        // funnels through at end-of-life (after draining all in-flight dispatch
+        // tasks), so a connection's sessions are always released and the cache is
+        // bounded by (live connections × maps-per-connection) without a TTL/LRU.
+        {
+            let registry = Arc::clone(&session_registry);
+            connection_registry
+                .on_disconnect(Arc::new(move |id| registry.release_on_disconnect(id)));
+        }
         Self {
             merkle_manager,
             record_store_factory,
             connection_registry,
             durable_index: None,
             durable_store: None,
-            session_cache: DashMap::new(),
+            session_registry,
         }
     }
 
@@ -211,35 +277,66 @@ impl SyncService {
     fn get_or_build_session(
         &self,
         map_name: &str,
+        conn_id: Option<ConnectionId>,
         force_rebuild: bool,
     ) -> Result<Option<Arc<MerkleSession>>, OperationError> {
         let (Some(index), Some(store)) = (&self.durable_index, &self.durable_store) else {
             return Ok(None);
         };
 
-        if !force_rebuild {
-            if let Some(cached) = self.session_cache.get(map_name) {
-                return Ok(Some(Arc::clone(cached.value())));
+        // Build a fresh durable snapshot, propagating any build error. We must
+        // NOT silently fall back to the in-memory tree on failure (it only sees
+        // resident keys and would hand the client a root omitting evicted-but-
+        // persisted records); surfacing the Err lets the client retry against
+        // durable truth — the "propagate, never degrade to wrong leaves" contract.
+        let build = || -> Result<Arc<MerkleSession>, OperationError> {
+            match index.build_session(map_name, store.as_ref()) {
+                Ok(session) => Ok(Arc::new(session)),
+                Err(err) => {
+                    tracing::error!(
+                        map = %map_name,
+                        error = %err,
+                        "DurableMerkleIndex::build_session failed; rejecting sync round (no silent in-memory fallback)"
+                    );
+                    Err(OperationError::Internal(anyhow::anyhow!(
+                        "durable Merkle session build failed for map {map_name}: {err}"
+                    )))
+                }
             }
-        }
+        };
 
-        match index.build_session(map_name, store.as_ref()) {
-            Ok(session) => {
-                let arc = Arc::new(session);
-                self.session_cache
-                    .insert(map_name.to_string(), Arc::clone(&arc));
+        match conn_id {
+            // Cache keyed per connection so a peer's SYNC_INIT cannot swap this
+            // client's in-progress walk snapshot out from under it. `connection_id`
+            // is the per-connection id the WebSocket dispatch sets on every client
+            // SYNC op — used here for SESSION ISOLATION, distinct from the
+            // security/authorization identity the field's doc-comment refers to.
+            Some(cid) => {
+                if !force_rebuild {
+                    if let Some(cached) = self.session_registry.get(map_name, cid) {
+                        return Ok(Some(cached));
+                    }
+                }
+                let arc = build()?;
+                self.session_registry
+                    .insert(map_name, cid, Arc::clone(&arc));
                 Ok(Some(arc))
             }
-            Err(err) => {
-                tracing::error!(
-                    map = %map_name,
-                    error = %err,
-                    "DurableMerkleIndex::build_session failed; rejecting sync round (no silent in-memory fallback)"
-                );
-                Err(OperationError::Internal(anyhow::anyhow!(
-                    "durable Merkle session build failed for map {map_name}: {err}"
-                )))
-            }
+            // Internal/forwarded ops carry no connection identity. Build fresh and
+            // return WITHOUT caching: collapsing all None callers onto one shared
+            // key would re-open TODO-544 on that path (one None caller's rebuild
+            // would stomp another's in-progress walk). The build/Err contract is
+            // unchanged — only the insert is skipped.
+            //
+            // This path is for single-shot internal/forwarded ops: every real
+            // client SYNC round carries a connection_id set by the WebSocket
+            // dispatch, so it takes the cached `Some` path above. A None caller
+            // that ran a MULTI-call bucket walk would rebuild from current durable
+            // state each call and so would NOT get a stable point-in-time snapshot
+            // across the walk — giving it one would require a server-minted round
+            // id echoed by the client, i.e. a WIRE CHANGE, which is out of scope
+            // here (R6/C3). No such multi-call None-path walk exists today.
+            None => Ok(Some(build()?)),
         }
     }
 
@@ -268,14 +365,15 @@ impl SyncService {
         // Build a fresh session at the start of each sync round so the snapshot
         // reflects the current durable state. force_rebuild=true replaces any
         // cached session from a previous round for the same map.
-        let root_hash = if let Some(session) = self.get_or_build_session(&map_name, true)? {
-            // Return the LWW-only root so the client drives the LWW tree walk.
-            // The combined root would mix LWW and OR-Map hashes, changing the
-            // wire protocol that the existing client expects for SYNC_INIT.
-            session.lww_root()
-        } else {
-            self.merkle_manager.aggregate_lww_root_hash(&map_name)
-        };
+        let root_hash =
+            if let Some(session) = self.get_or_build_session(&map_name, ctx.connection_id, true)? {
+                // Return the LWW-only root so the client drives the LWW tree walk.
+                // The combined root would mix LWW and OR-Map hashes, changing the
+                // wire protocol that the existing client expects for SYNC_INIT.
+                session.lww_root()
+            } else {
+                self.merkle_manager.aggregate_lww_root_hash(&map_name)
+            };
 
         Ok(OperationResponse::Message(Box::new(Message::SyncRespRoot(
             SyncRespRootMessage {
@@ -305,16 +403,16 @@ impl SyncService {
     #[allow(clippy::too_many_lines)] // durable + fallback branches with leaf collection is inherently verbose
     async fn handle_merkle_req_bucket(
         &self,
-        _ctx: &crate::service::operation::OperationContext,
+        ctx: &crate::service::operation::OperationContext,
         payload: messages::MerkleReqBucketMessage,
     ) -> Result<OperationResponse, OperationError> {
         let map_name = payload.payload.map_name;
         let path = payload.payload.path;
 
-        // Durable-index path: reuse the session built during SYNC_INIT
-        // (force_rebuild=false) so no second enumerate_leaves pass is needed.
-        // Paths in this branch are pure hex aggregate paths — no partition prefix.
-        if let Some(session) = self.get_or_build_session(&map_name, false)? {
+        // Durable-index path: reuse the session built during SYNC_INIT for THIS
+        // connection (force_rebuild=false) so no second enumerate_leaves pass is
+        // needed. Paths in this branch are pure hex aggregate paths — no prefix.
+        if let Some(session) = self.get_or_build_session(&map_name, ctx.connection_id, false)? {
             // Check for internal node (has children in the LWW trie at this path).
             let lww_children = session.lww_nodes.get(&path).cloned().unwrap_or_default();
             if !lww_children.is_empty() {
@@ -576,7 +674,9 @@ impl SyncService {
         // Reuse any session already built by the LWW SYNC_INIT for this map; build
         // one now if not yet cached. force_rebuild=false so a concurrent or prior
         // LWW SYNC_INIT's session is shared rather than discarded.
-        let root_hash = if let Some(session) = self.get_or_build_session(&map_name, false)? {
+        let root_hash = if let Some(session) =
+            self.get_or_build_session(&map_name, ctx.connection_id, false)?
+        {
             session.ormap_root()
         } else {
             self.merkle_manager.aggregate_ormap_root_hash(&map_name)
@@ -605,15 +705,16 @@ impl SyncService {
     #[allow(clippy::too_many_lines)] // durable + fallback branches with entry collection is inherently verbose
     async fn handle_ormap_merkle_req_bucket(
         &self,
-        _ctx: &crate::service::operation::OperationContext,
+        ctx: &crate::service::operation::OperationContext,
         payload: messages::ORMapMerkleReqBucket,
     ) -> Result<OperationResponse, OperationError> {
         let map_name = payload.payload.map_name;
         let path = payload.payload.path;
 
-        // Durable-index path: reuse the session built during ORMapSyncInit (or SYNC_INIT).
-        // OR-Map tombstones yield no leaf in the session (parity with write path: SPEC-324 R4).
-        if let Some(session) = self.get_or_build_session(&map_name, false)? {
+        // Durable-index path: reuse the session built during ORMapSyncInit (or
+        // SYNC_INIT) for THIS connection. OR-Map tombstones yield no leaf in the
+        // session (parity with write path: SPEC-324 R4).
+        if let Some(session) = self.get_or_build_session(&map_name, ctx.connection_id, false)? {
             // Check for OR-Map internal node at this path.
             let ormap_children = session.ormap_nodes.get(&path).cloned().unwrap_or_default();
             if !ormap_children.is_empty() {
@@ -2552,6 +2653,293 @@ mod tests {
         assert!(
             bucket.is_err(),
             "durable build failure must reject MerkleReqBucket, not silently serve the in-memory tree"
+        );
+    }
+
+    /// AC3 (TODO-544, red-on-revert): two clients on the SAME map. A write lands
+    /// between client A's `SYNC_INIT` and its bucket walk, while client B issues a
+    /// concurrent `SYNC_INIT`. Client A's DFS must recover the snapshot A anchored
+    /// at its OWN `SYNC_INIT` — it must NOT observe B's newer snapshot (which
+    /// includes the post-anchor write). On the pre-fix map-name-only keying, B's
+    /// `SYNC_INIT` (`force_rebuild`) replaced the single shared entry, so A's
+    /// `force_rebuild=false` bucket calls read B's session and surface the new key
+    /// → this test FAILS when the keying change is reverted (non-vacuous).
+    ///
+    /// Multi-thread runtime required: `build_session` uses `block_in_place`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::too_many_lines)]
+    async fn ac3_concurrent_sync_init_does_not_swap_peer_snapshot() {
+        use crate::storage::datastores::RedbDataStore;
+        use crate::storage::durable_merkle::DurableMerkle;
+        use std::collections::HashSet;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(RedbDataStore::new(dir.path().join("ac3.redb")).expect("redb open"));
+
+        // Seed enough keys to force a multi-level trie (internal nodes + leaves).
+        let mut seeded: HashSet<String> = HashSet::new();
+        for i in 0..32u32 {
+            let key = format!("ac3-key-{i:04}");
+            store
+                .add(
+                    "amap",
+                    &key,
+                    &RecordValue::Lww {
+                        value: Value::Int(i64::from(i)),
+                        timestamp: Timestamp {
+                            millis: u64::from(i) + 1,
+                            counter: i,
+                            node_id: "n1".to_string(),
+                        },
+                    },
+                    0,
+                    1,
+                )
+                .await
+                .expect("seed");
+            seeded.insert(key);
+        }
+
+        // Record factory backed by the SAME store so leaf fetches lazy-load the
+        // durable values — exactly the production wiring.
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::clone(&store) as Arc<dyn crate::storage::map_data_store::MapDataStore>,
+            Vec::new(),
+        ));
+        let durable_index: Arc<
+            dyn crate::storage::map_data_store::DurableMerkleIndex + Send + Sync,
+        > = Arc::new(DurableMerkle);
+        let durable_store: Arc<dyn crate::storage::map_data_store::MapDataStore> =
+            Arc::clone(&store) as Arc<dyn crate::storage::map_data_store::MapDataStore>;
+        let svc = Arc::new(
+            SyncService::new(
+                Arc::new(MerkleSyncManager::default()),
+                factory,
+                Arc::new(ConnectionRegistry::new()),
+            )
+            .with_durable_index(durable_index, durable_store),
+        );
+
+        let conn_a = Some(ConnectionId(1));
+        let conn_b = Some(ConnectionId(2));
+
+        // 1. Client A SYNC_INIT — anchors A's snapshot over the 32 seeded keys.
+        let mut ctx_a = make_ctx(service_names::SYNC);
+        ctx_a.connection_id = conn_a;
+        let root_a = match Arc::clone(&svc)
+            .oneshot(Operation::SyncInit {
+                ctx: ctx_a,
+                payload: topgun_core::messages::SyncInitMessage {
+                    map_name: "amap".to_string(),
+                    last_sync_timestamp: None,
+                },
+            })
+            .await
+            .expect("A SyncInit")
+        {
+            OperationResponse::Message(m) => match *m {
+                topgun_core::messages::Message::SyncRespRoot(r) => r.payload.root_hash,
+                o => panic!("expected SyncRespRoot, got {o:?}"),
+            },
+            o => panic!("expected Message, got {o:?}"),
+        };
+
+        // 2. A write lands AFTER A anchored its snapshot.
+        let new_key = "ac3-key-9999";
+        store
+            .add(
+                "amap",
+                new_key,
+                &RecordValue::Lww {
+                    value: Value::Int(9999),
+                    timestamp: Timestamp {
+                        millis: 100_000,
+                        counter: 0,
+                        node_id: "n1".to_string(),
+                    },
+                },
+                0,
+                1,
+            )
+            .await
+            .expect("post-anchor write");
+
+        // 3. Client B SYNC_INIT (concurrent) — builds a NEWER snapshot incl new_key.
+        let mut ctx_b = make_ctx(service_names::SYNC);
+        ctx_b.connection_id = conn_b;
+        let root_b = match Arc::clone(&svc)
+            .oneshot(Operation::SyncInit {
+                ctx: ctx_b,
+                payload: topgun_core::messages::SyncInitMessage {
+                    map_name: "amap".to_string(),
+                    last_sync_timestamp: None,
+                },
+            })
+            .await
+            .expect("B SyncInit")
+        {
+            OperationResponse::Message(m) => match *m {
+                topgun_core::messages::Message::SyncRespRoot(r) => r.payload.root_hash,
+                o => panic!("expected SyncRespRoot, got {o:?}"),
+            },
+            o => panic!("expected Message, got {o:?}"),
+        };
+        assert_ne!(
+            root_a, root_b,
+            "sanity: the post-anchor write must change the durable root B observes"
+        );
+
+        // 4. Client A's bucket DFS (force_rebuild=false) — must reflect A's own
+        //    anchored snapshot: recover exactly the 32 seeded keys, NOT new_key.
+        //    On map-name-only keying A would read B's swapped-in session.
+        let mut found: HashSet<String> = HashSet::new();
+        let mut stack = vec![String::new()];
+        let mut visited = 0usize;
+        while let Some(path) = stack.pop() {
+            visited += 1;
+            assert!(visited < 10_000, "walk did not terminate");
+            let mut ctx = make_ctx(service_names::SYNC);
+            ctx.connection_id = conn_a;
+            let resp = Arc::clone(&svc)
+                .oneshot(Operation::MerkleReqBucket {
+                    ctx,
+                    payload: topgun_core::messages::MerkleReqBucketMessage {
+                        payload: topgun_core::messages::MerkleReqBucketPayload {
+                            map_name: "amap".to_string(),
+                            path: path.clone(),
+                        },
+                    },
+                })
+                .await
+                .expect("A MerkleReqBucket");
+            match resp {
+                OperationResponse::Message(msg) => match *msg {
+                    topgun_core::messages::Message::SyncRespBuckets(b) => {
+                        for child in b.payload.buckets.keys() {
+                            stack.push(format!("{path}{child}"));
+                        }
+                    }
+                    topgun_core::messages::Message::SyncRespLeaf(l) => {
+                        for rec in l.payload.records {
+                            found.insert(rec.key);
+                        }
+                    }
+                    other => panic!("unexpected message in A's walk: {other:?}"),
+                },
+                OperationResponse::Empty => {}
+                other => panic!("unexpected response in A's walk: {other:?}"),
+            }
+        }
+
+        assert!(
+            !found.contains(new_key),
+            "client A walked B's swapped-in snapshot: it surfaced the post-anchor write \
+             {new_key} (the TODO-544 map-name-only keying regression)"
+        );
+        assert_eq!(
+            found, seeded,
+            "client A's walk must recover exactly its own anchored snapshot (32 seeded keys)"
+        );
+    }
+
+    /// AC4 (TODO-545, red-on-revert): after a connection disconnects, its session
+    /// entries are released so the cache cannot retain the full leaf-key set
+    /// indefinitely. Two connections each run `SYNC_INIT` (two cached sessions);
+    /// removing one connection from the `ConnectionRegistry` (the single
+    /// disconnect chokepoint) must drop ONLY that connection's session. On the
+    /// pre-fix never-cleared cache there is no release path, so the cache stays at
+    /// 2 → this test FAILS when the lifecycle change is reverted (non-vacuous).
+    ///
+    /// Multi-thread runtime required: `build_session` uses `block_in_place`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ac4_sessions_released_on_disconnect_bounds_cache() {
+        use crate::storage::datastores::RedbDataStore;
+        use crate::storage::durable_merkle::DurableMerkle;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(RedbDataStore::new(dir.path().join("ac4.redb")).expect("redb open"));
+        for i in 0..8u32 {
+            let key = format!("ac4-key-{i:04}");
+            store
+                .add(
+                    "lmap",
+                    &key,
+                    &RecordValue::Lww {
+                        value: Value::Int(i64::from(i)),
+                        timestamp: Timestamp {
+                            millis: u64::from(i) + 1,
+                            counter: i,
+                            node_id: "n1".to_string(),
+                        },
+                    },
+                    0,
+                    1,
+                )
+                .await
+                .expect("seed");
+        }
+
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::clone(&store) as Arc<dyn crate::storage::map_data_store::MapDataStore>,
+            Vec::new(),
+        ));
+        let durable_index: Arc<
+            dyn crate::storage::map_data_store::DurableMerkleIndex + Send + Sync,
+        > = Arc::new(DurableMerkle);
+        let durable_store: Arc<dyn crate::storage::map_data_store::MapDataStore> =
+            Arc::clone(&store) as Arc<dyn crate::storage::map_data_store::MapDataStore>;
+        // The SAME ConnectionRegistry the service registers its disconnect
+        // observer on — so remove() here fires that observer.
+        let registry = Arc::new(ConnectionRegistry::new());
+        let svc = Arc::new(
+            SyncService::new(
+                Arc::new(MerkleSyncManager::default()),
+                factory,
+                Arc::clone(&registry),
+            )
+            .with_durable_index(durable_index, durable_store),
+        );
+
+        // Two connections each run SYNC_INIT → two cached sessions.
+        for cid in [1u64, 2u64] {
+            let mut ctx = make_ctx(service_names::SYNC);
+            ctx.connection_id = Some(ConnectionId(cid));
+            Arc::clone(&svc)
+                .oneshot(Operation::SyncInit {
+                    ctx,
+                    payload: topgun_core::messages::SyncInitMessage {
+                        map_name: "lmap".to_string(),
+                        last_sync_timestamp: None,
+                    },
+                })
+                .await
+                .expect("SyncInit");
+        }
+        assert_eq!(
+            svc.session_registry.len(),
+            2,
+            "both connections' sessions must be cached after SYNC_INIT"
+        );
+
+        // Connection 1 disconnects → ConnectionRegistry::remove fires the
+        // disconnect observer, releasing connection 1's sessions ONLY.
+        registry.remove(ConnectionId(1));
+        assert_eq!(
+            svc.session_registry.len(),
+            1,
+            "disconnect must release the disconnected connection's session (cache stays bounded)"
+        );
+
+        // Connection 2 disconnects → cache fully drained.
+        registry.remove(ConnectionId(2));
+        assert_eq!(
+            svc.session_registry.len(),
+            0,
+            "after all connections disconnect the session cache is empty (the TODO-545 bound)"
         );
     }
 }
