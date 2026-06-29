@@ -106,6 +106,14 @@ impl WriteBehindConfig {
     /// over `std::env::var`. Tests pass a map-backed closure so they exercise the
     /// full parse logic without mutating process-global environment state —
     /// eliminating the cross-test env race that made parallel runs flaky.
+    ///
+    /// # Panics
+    ///
+    /// Panics (refuses to start) if `TOPGUN_WAL_FSYNC_POLICY` is set to a value
+    /// that does not parse to a known [`WalFsyncPolicy`]. Silently downgrading an
+    /// unknown durability policy to the weaker default is what masked a durability
+    /// regression through a full RED soak, so the misconfiguration is made fatal at
+    /// startup rather than surfacing as data loss on the next unclean shutdown.
     #[must_use]
     pub fn from_source<F: Fn(&str) -> Option<String>>(get: F) -> Self {
         let defaults = Self::default();
