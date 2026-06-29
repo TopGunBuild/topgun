@@ -1324,7 +1324,7 @@ fn parse_args() -> Config {
             }
         }
     }
-    // The no-drain validator scopes strictly to the SPEC-330 LWW acked==durable
+    // The no-drain validator scopes strictly to the LWW acked==durable
     // target. OR-Map WAL-only crash-recovery semantics — the live net-compacted
     // observed set vs the WAL-replayed intermediate tags — is a distinct question
     // that needs its own audit. Rather than run OR churn and relax its assertion
