@@ -1926,17 +1926,39 @@ const unsubscribe = handle.subscribe((results) => setResults(results));
 handle.dispose();
 ```
 
-### `sql(query)` — opt-in, server-feature-gated
+### `sql(query)` — not yet available (preview API)
 
 ```typescript
 public async sql(query: string): Promise<SqlQueryResult>
 ```
 
-Execute a one-shot SQL query server-side via the DataFusion engine. Map names are used as table names; the server must have schemas registered for them.
+:::caution[Not functional yet]
+SQL is **not wired into the server today** — calling `client.sql()` against any current build (including one compiled with `--features datafusion`) rejects with a `SqlError` whose `code` is `'FEATURE_DISABLED'`. The method and its types ship so the surface is stable for early adopters, but the server-side query engine is not yet connected. Enablement (plus per-table authorization for SQL) is tracked in the roadmap; until then, use the structured query API.
+:::
 
-**Off by default.** The server's DataFusion feature is a compile-time opt-in (`--features datafusion`). The default server build (`default = ["redb"]`) does NOT include DataFusion. If you send a SQL query to a server built without this feature, the server returns an error.
+When it lands, `client.sql()` will execute a one-shot SQL query server-side via the DataFusion engine — an **opt-in, compile-time-gated** feature (`--features datafusion`; the default build is `default = ["redb"]` and does not include it). Map names are used as table names.
 
-**Niche — use only for what the structured query API cannot express.** `client.sql()` exists for queries that genuinely require SQL: multi-map **joins**, **window functions**, **HAVING** clauses, and **DISTINCT** aggregation. For everything else — filtering, sorting, full-text search, group-by, aggregate functions — use the structured query API (`client.query()`, `client.queryOnce()`, `client.queryOncePaged()`) backed by the canonical DAG engine. Reaching for SQL when the structured API suffices adds a server-side dependency and bypasses the local-first offline path.
+**Niche — only for what the structured query API cannot express.** SQL is intended for queries that genuinely require it: multi-map **joins**, **window functions**, **HAVING** clauses, and **DISTINCT** aggregation. For everything else — filtering, sorting, full-text search, group-by, aggregate functions — use the structured query API (`client.query()`, `client.queryOnce()`, `client.queryOncePaged()`) backed by the canonical DAG engine, which keeps the local-first offline path.
+
+Detect a server without SQL enabled by checking the error `code`:
+
+```typescript
+
+try {
+  const result = await client.sql('SELECT 1');
+  console.log(result.columns, result.rows);
+} catch (err) {
+  if (err instanceof SqlError && err.code === 'FEATURE_DISABLED') {
+    // This server build has no SQL engine — fall back to client.query().
+  } else {
+    throw err;
+  }
+}
+```
+
+The intended shape once enabled (cross-map join, illustrative):
+
+{/* doctest skip reason="SQL is not yet wired into the server (returns FEATURE_DISABLED); shown as the planned API surface" */}
 
 ```typescript
 // Only appropriate for cross-map joins or window/HAVING/DISTINCT queries
@@ -2133,20 +2155,21 @@ True when the writer is currently paused under the pause strategy.
 ### `onBackpressure(event, listener)`
 
 ```typescript
-public onBackpressure(
-  event: 'backpressure:high' | 'backpressure:low' | 'backpressure:paused' | 'backpressure:resumed' | 'operation:dropped',
-  listener: (data?: BackpressureThresholdEvent | OperationDroppedEvent) => void
-): () => void
+public onBackpressure(event: 'backpressure:high' | 'backpressure:low', listener: (event: BackpressureThresholdEvent) => void): () => void
+public onBackpressure(event: 'operation:dropped', listener: (event: OperationDroppedEvent) => void): () => void
+public onBackpressure(event: 'backpressure:paused' | 'backpressure:resumed', listener: () => void): () => void
 ```
 
 Subscribe to backpressure transitions.
 
+The listener type narrows by event name — threshold events carry `{ pending, max }`, `'operation:dropped'` carries the dropped-op descriptor, and the paused/resumed transitions carry no payload:
+
 ```typescript
-client.onBackpressure('backpressure:high', (e) => {
-  // Threshold events carry `pending` / `max` counts.
-  if (e && 'pending' in e) {
-    console.warn(`Warning: ${e.pending}/${e.max} pending ops`);
-  }
+client.onBackpressure('backpressure:high', ({ pending, max }) => {
+  console.warn(`Warning: ${pending}/${max} pending ops`);
+});
+client.onBackpressure('operation:dropped', ({ mapName, key }) => {
+  console.warn(`Dropped ${mapName}:${key} under backpressure`);
 });
 client.onBackpressure('backpressure:paused', () => showLoadingSpinner());
 client.onBackpressure('backpressure:resumed', () => hideLoadingSpinner());
@@ -2180,6 +2203,13 @@ const events = await journal.readFrom(0n, 100);
 ```
 
 `EventJournalReader` methods: `readFrom(sequence, limit)`, `readMapEvents(...)`, `getLatestSequence()`, `subscribe(listener, options?)`.
+
+The server records every applied mutation (`PUT`/`OR_ADD` → `PUT`, `REMOVE`/`OR_REMOVE` → `DELETE`) into an in-memory ring buffer and pushes it to active subscribers. Notes on current behavior:
+
+- **In-memory, capped.** The buffer holds the most recent `TOPGUN_JOURNAL_CAPACITY` events (default 10,000); older events are evicted and the journal is not durable across a server restart.
+- **`previousValue` is not yet populated.** Events carry the new `value`; capturing the prior value on the hot path is a planned follow-up.
+- **Live push is best-effort (at-most-once).** A subscriber that is briefly disconnected or backpressured may miss a live event; use `readFrom`/`getLatestSequence` to backfill gaps from the buffer.
+- **Opt-out.** Set `TOPGUN_JOURNAL_ENABLED=false` on the server to disable capture; reads then return no events.
 
 ## Conflict Resolvers
 
