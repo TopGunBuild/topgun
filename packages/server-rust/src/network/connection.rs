@@ -245,14 +245,40 @@ impl Default for ConnectionMetadata {
     }
 }
 
+/// Callback invoked with a `ConnectionId` when that connection is removed from
+/// the registry (disconnect). Registered via [`ConnectionRegistry::on_disconnect`]
+/// so owners of per-connection session state (e.g. the SYNC Merkle session cache)
+/// can release a connection's resources at the single `remove()` chokepoint.
+/// The callback takes only a `ConnectionId`, so the network layer notifies
+/// observers without importing any domain type — no layering inversion.
+pub type DisconnectObserver = Arc<dyn Fn(ConnectionId) + Send + Sync>;
+
 /// Thread-safe registry of all active connections.
 ///
 /// Uses `DashMap` for lock-free concurrent access, supporting 10K+
 /// simultaneous connections without contention.
-#[derive(Debug)]
 pub struct ConnectionRegistry {
     connections: DashMap<ConnectionId, Arc<ConnectionHandle>>,
     next_id: AtomicU64,
+    /// Observers notified (with the removed `ConnectionId`) on every `remove()`.
+    /// Registered once at construction wiring time; the disconnect path is
+    /// per-connection (not per-message), so a plain `std::sync::Mutex` is cheap.
+    disconnect_observers: std::sync::Mutex<Vec<DisconnectObserver>>,
+}
+
+impl std::fmt::Debug for ConnectionRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let observer_count = self
+            .disconnect_observers
+            .lock()
+            .map(|o| o.len())
+            .unwrap_or(0);
+        f.debug_struct("ConnectionRegistry")
+            .field("connections", &self.connections)
+            .field("next_id", &self.next_id)
+            .field("disconnect_observers", &observer_count)
+            .finish()
+    }
 }
 
 impl ConnectionRegistry {
@@ -264,6 +290,7 @@ impl ConnectionRegistry {
         Self {
             connections: DashMap::new(),
             next_id: AtomicU64::new(1),
+            disconnect_observers: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -295,9 +322,35 @@ impl ConnectionRegistry {
         (handle, rx)
     }
 
+    /// Registers an observer invoked with the `ConnectionId` whenever a
+    /// connection is removed (disconnect). Used by owners of per-connection
+    /// session state (e.g. the SYNC Merkle session cache) to release that
+    /// connection's resources at the single `remove()` chokepoint. Observers are
+    /// retained for the registry's lifetime and registered at construction time.
+    pub fn on_disconnect(&self, observer: DisconnectObserver) {
+        if let Ok(mut observers) = self.disconnect_observers.lock() {
+            observers.push(observer);
+        }
+    }
+
     /// Removes a connection from the registry, returning its handle if found.
+    ///
+    /// Fires every registered disconnect observer with `id` so owners of
+    /// per-connection session state can release that connection's resources.
+    /// Observer Arcs are cloned out before invocation so the observer lock is
+    /// never held across a callback. Idempotent: repeat calls for the same `id`
+    /// simply re-run the (no-op) observers.
     pub fn remove(&self, id: ConnectionId) -> Option<Arc<ConnectionHandle>> {
-        self.connections.remove(&id).map(|(_, handle)| handle)
+        let removed = self.connections.remove(&id).map(|(_, handle)| handle);
+        let observers: Vec<DisconnectObserver> = self
+            .disconnect_observers
+            .lock()
+            .map(|o| o.clone())
+            .unwrap_or_default();
+        for observer in observers {
+            observer(id);
+        }
+        removed
     }
 
     /// Looks up a connection by ID.
