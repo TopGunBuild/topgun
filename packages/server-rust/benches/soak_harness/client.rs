@@ -32,7 +32,7 @@ use topgun_core::messages::{
     SyncInitMessage, WriteConcern,
 };
 
-use crate::or_noloss::observed_tags;
+use crate::or_noloss::observed_values;
 
 type Ws = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -130,11 +130,12 @@ impl SoakClient {
         map: &str,
         key: &str,
         tag: &str,
+        value: i64,
         millis: u64,
         counter: u32,
     ) -> Result<()> {
         let or_record = ORMapRecord {
-            value: rmpv::Value::from(counter),
+            value: rmpv::Value::from(value),
             timestamp: Timestamp {
                 millis,
                 counter,
@@ -287,16 +288,22 @@ impl SoakClient {
         Ok(out)
     }
 
-    /// Reconstruct every OR-Map key's **observed tag set** (active record tags
-    /// minus tombstone tags) for `map` by walking the server's OR-Map Merkle tree
-    /// the way a reconnecting OR-Map sync client does: `ORMAP_SYNC_INIT` root →
-    /// `ORMAP_MERKLE_REQ_BUCKET` aggregate-mode drill-down → `ORMAP_SYNC_RESP_LEAF`.
-    /// This is the OR-Map analogue of `delta_sync_all`: it proves the durable
-    /// OR-Map content can be pulled back after a crash, not merely that a root
-    /// hash matched. Reuses the existing OR-Map sync protocol — no new wire type.
+    /// Reconstruct every OR-Map key's **observed value set** (the rendered value
+    /// of each active, non-tombstoned record) for `map` by walking the server's
+    /// OR-Map Merkle tree the way a reconnecting OR-Map sync client does:
+    /// `ORMAP_SYNC_INIT` root → `ORMAP_MERKLE_REQ_BUCKET` aggregate-mode drill-down
+    /// → `ORMAP_SYNC_RESP_LEAF`. This is the OR-Map analogue of `delta_sync_all`:
+    /// it proves the durable OR-Map content can be pulled back after a crash, not
+    /// merely that a root hash matched. Reuses the existing OR-Map sync protocol —
+    /// no new wire type.
+    ///
+    /// The set is keyed on record VALUE rather than tag because the server
+    /// re-stamps every OR add's HLC and regenerates the tag from it, so the client
+    /// tag is never the persisted identity; the value is stored verbatim and is the
+    /// identity that survives sanitization and crash recovery (see `observed_values`).
     ///
     /// Keys whose observed set is empty (e.g. a fully-tombstoned churn key) are
-    /// omitted; only keys with at least one observed tag appear in the result.
+    /// omitted; only keys with at least one observed value appear in the result.
     pub async fn ormap_read_all(&mut self, map: &str) -> Result<HashMap<String, HashSet<String>>> {
         let mut out: HashMap<String, HashSet<String>> = HashMap::new();
 
@@ -347,7 +354,11 @@ impl SoakClient {
                 }
                 Message::ORMapSyncRespLeaf(l) => {
                     for entry in l.payload.entries {
-                        let observed = observed_tags(&entry);
+                        // Key the recovered set on record VALUE, not tag: the server
+                        // re-stamps each OR add's HLC and regenerates the tag from it,
+                        // so the client tag is never the persisted identity. The value
+                        // is stored verbatim and is what the no-loss ledger reconciles.
+                        let observed = observed_values(&entry);
                         if !observed.is_empty() {
                             out.entry(entry.key).or_default().extend(observed);
                         }

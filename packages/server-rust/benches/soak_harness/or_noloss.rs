@@ -80,18 +80,42 @@ impl OrLedger {
     }
 }
 
-/// The observed tag set for one OR-Map sync leaf entry: active record tags MINUS
-/// tombstone tags. This is the user-visible OR-Map content for the key — a tag
-/// that has been tombstoned is no longer observed.
-pub fn observed_tags(entry: &ORMapEntry) -> HashSet<String> {
+/// The observed **value** set for one OR-Map sync leaf entry: the rendered
+/// `value` of every non-tombstoned active record.
+///
+/// ## Why the no-loss ledger must key on value, not tag
+///
+/// The server re-stamps every OR add's HLC (security: a forged client HLC must
+/// not win a future conflict) and, because the OR tag is derived from that HLC
+/// (`{millis}:{counter}:{node_id}`), it regenerates the tag as well. So the tag
+/// the *client* chose for an add is never the tag the server persists — keying a
+/// directional no-loss check on the client tag makes it vacuously red (the
+/// client tag is structurally absent from every recovered record). The record
+/// `value`, by contrast, is client-supplied and the server stores it verbatim,
+/// so it is the identity that actually survives sanitization and crash recovery.
+/// The persistent keyspace therefore writes a stable unique value per owned slot
+/// and the ledger reconciles on that value.
+///
+/// A tombstoned tag's value is excluded — a removed record is no longer observed,
+/// mirroring [`observed_tags`].
+pub fn observed_values(entry: &ORMapEntry) -> HashSet<String> {
     let tombstones: HashSet<&str> = entry.tombstones.iter().map(String::as_str).collect();
     entry
         .records
         .iter()
-        .map(|r| r.tag.as_str())
-        .filter(|tag| !tombstones.contains(tag))
-        .map(ToString::to_string)
+        .filter(|r| !tombstones.contains(r.tag.as_str()))
+        .map(|r| render_value(&r.value))
         .collect()
+}
+
+/// Render an OR record `value` to the stable string identity the ledger keys on.
+/// Integer values (the soak's persistent-keyspace shape) render to their decimal
+/// form; any other shape falls back to its debug rendering so the check still has
+/// a deterministic, comparable identity.
+pub fn render_value(value: &rmpv::Value) -> String {
+    value
+        .as_i64()
+        .map_or_else(|| format!("{value:?}"), |n| n.to_string())
 }
 
 /// Directional OR-Map no-loss diff: every acked (net-present) OR add tag must

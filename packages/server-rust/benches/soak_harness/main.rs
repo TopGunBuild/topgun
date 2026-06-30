@@ -223,6 +223,25 @@ async fn run_soak(config: &Config) -> i32 {
         config.or_churn,
     );
 
+    // Single-writer-per-persist-key invariant. The persistent OR keyspace maps
+    // slot `i` to `ork-persist-{i % or_keyspace}` and slot `i` is owned solely by
+    // churn client `i % churn_clients`. Two distinct clients share a persist
+    // bucket only if some owned slots collide under `% or_keyspace` without
+    // colliding under `% churn_clients` — impossible exactly when
+    // `churn_clients | or_keyspace`. A config that breaks this (e.g.
+    // `--churn-clients 16 --or-keyspace 24`) would make the persist keyspace
+    // multi-writer and invalidate the no-loss check's single-writer premise, so
+    // fail loudly rather than silently degrade the gate.
+    if config.or_churn {
+        assert!(
+            config.or_keyspace.is_multiple_of(config.churn_clients),
+            "or_keyspace ({}) must be a multiple of churn_clients ({}) to keep the \
+             persistent OR keyspace single-writer-per-key",
+            config.or_keyspace,
+            config.churn_clients,
+        );
+    }
+
     let binary = resolve_server_binary();
 
     // Persistent on-disk data dir. A caller-supplied dir survives the run for
@@ -966,7 +985,14 @@ async fn run_churn_client(idx: usize, ctx: ChurnCtx) {
             if ctx.or_churn && write_count.is_multiple_of(ctx.or_every) {
                 let or_key = format!("ork-{}", slot % ctx.or_keyspace.max(1));
                 let tag = format!("{ms}:{ctr}:{idx}");
-                if client.or_add(OR_MAP, &or_key, &tag, ms, ctr).await.is_ok() {
+                // Churn value is irrelevant — this stream is add-then-remove and is
+                // excluded from the no-loss ledger; only its tombstone growth matters.
+                let churn_value = i64::from(ctr);
+                if client
+                    .or_add(OR_MAP, &or_key, &tag, churn_value, ms, ctr)
+                    .await
+                    .is_ok()
+                {
                     if client.or_remove(OR_MAP, &or_key, &tag).await.is_err() {
                         session_alive = false;
                         break;
@@ -984,16 +1010,25 @@ async fn run_churn_client(idx: usize, ctx: ChurnCtx) {
                 // bound over a long soak.
                 let persist_key = format!("ork-persist-{}", slot % ctx.or_keyspace.max(1));
                 let persist_tag = format!("pt-{idx}-{slot}");
+                // The no-loss ledger keys on the record VALUE, not the tag: the
+                // server re-stamps every OR add's HLC and regenerates the tag from
+                // it, so the client tag is never the persisted identity. The value
+                // is stored verbatim, so a stable unique value per (idx, slot)
+                // gives an identity that survives sanitization and crash recovery.
+                // `idx`<churn_clients and `slot`<keyspace, so this is collision-free
+                // across clients and slots and stable across re-adds of the slot.
+                let persist_value = (idx as i64) * 1_000_000 + slot as i64;
                 let (pms, pctr) = next_stamp();
                 if client
-                    .or_add(OR_MAP, &persist_key, &persist_tag, pms, pctr)
+                    .or_add(OR_MAP, &persist_key, &persist_tag, persist_value, pms, pctr)
                     .await
                     .is_ok()
                 {
                     // Ledger updated ONLY on ack: an add whose ack never returned
                     // is never recorded, so a kill-window drop of an unacked add is
                     // not miscounted as loss.
-                    ctx.or_ledger.record_add(&persist_key, &persist_tag);
+                    ctx.or_ledger
+                        .record_add(&persist_key, &persist_value.to_string());
                 } else {
                     session_alive = false;
                     break;
