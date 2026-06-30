@@ -461,6 +461,25 @@ jobs:
             || { echo "FAIL: no-crash soak did not pass"; cat soak-smoke.json; exit 1; }
           echo "OK: no-crash soak passed"
 
+      - name: OR-churn crash soak — acked OR adds must NOT be lost across recovery
+        run: |
+          # Gate the OR-Map directional no-loss invariant under kill -9 + OR churn.
+          # We assert ONLY the absence of the OR loss signature, not the full
+          # `passed == true`: a loaded with-crash soak can still RED on the open LWW
+          # ack-before-durable window (TODO-546), which is a separate known-open
+          # critical, not an OR regression. Coupling this step to `passed == true`
+          # would just re-report TODO-546 and flap. The OR no-loss line is the
+          # regression signal owned here.
+          set +e
+          OUT=$(${{ steps.soak.outputs.bin }} \
+            --duration 30 --crash-interval 9 --or-churn true --or-every 3)
+          echo "$OUT"
+          if echo "$OUT" | grep -q "OR-Map acked add(s) LOST across recovery"; then
+            echo "FAIL: acked OR-Map add(s) lost across crash recovery"
+            exit 1
+          fi
+          echo "OK: no OR-Map acked-add loss across recovery"
+
       - name: Upload soak smoke report
         if: always()
         uses: actions/upload-artifact@v4
