@@ -1430,7 +1430,7 @@ async fn ac4_legacy_null_value_wal_frame_replays_as_zero_epoch_lww() {
     drop(dir);
 }
 
-/// The cardinal rule names OrMap **and** OrTombstones. New code never emits
+/// The cardinal rule names `OrMap` **and** `OrTombstones`. New code never emits
 /// `OrTombstones` through the write path, but the WAL format must still carry it
 /// losslessly so any in-flight or legacy `Record(OrTombstones)` frame survives a
 /// crash. Appends the frame through the real WAL and asserts the exact variant
