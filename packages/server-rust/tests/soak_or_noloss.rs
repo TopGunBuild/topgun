@@ -99,10 +99,13 @@ async fn observed_values_is_active_minus_tombstones() {
 // soak's 136-pair "loss"). Keying on the record VALUE, which the server stores
 // verbatim, makes the check honest: the acked value is present, so ZERO loss.
 //
-// RED-ON-REVERT: reverting `ormap_read_all` to key the observed set on tag (the
-// pre-fix behaviour) makes `observed` carry server-stamped tag strings that share
-// no element with the value-keyed ledger, so this assertion fails (reports the
-// acked values as missing).
+// RED-ON-REVERT: this test drives `observed_values` directly (not `ormap_read_all`),
+// so it guards the comparator's value-keying semantics independent of the call site.
+// Reverting `observed_values` to return record tags makes `observed` carry
+// server-stamped tag strings that share no element with the value-keyed ledger, so
+// the first assertion below fails. The explicit `observed_by_tag` comparison at the
+// end separately encodes the 100% false-loss the pre-fix tag-keyed call site produced
+// (`false_loss.len() == 3`), pinning the defect regardless of which surface reverts.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]

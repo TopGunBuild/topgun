@@ -96,8 +96,19 @@ impl OrLedger {
 /// The persistent keyspace therefore writes a stable unique value per owned slot
 /// and the ledger reconciles on that value.
 ///
-/// A tombstoned tag's value is excluded — a removed record is no longer observed,
-/// mirroring [`observed_tags`].
+/// A tombstoned tag's value is excluded — a removed record is no longer observed.
+///
+/// ## Coverage limit: per-value, not per-add
+///
+/// The server dedups OR records by tag and stamps a fresh tag on every add, so N
+/// re-adds of the same `(key, value)` are stored as N distinct records. This set
+/// collapses them to one element, and the ledger likewise records the value once.
+/// The check therefore verifies that each acked VALUE survives recovery, not that
+/// each individual acked ADD does: losing M of N re-adds of the same value while
+/// at least one survives is not detected. The persistent keyspace writes one stable
+/// unique value per owned slot, so per-slot durability IS covered; closing the
+/// per-add gap needs the server-regenerated tag surfaced to the client (tracked in
+/// TODO-558), which is out of scope here.
 pub fn observed_values(entry: &ORMapEntry) -> HashSet<String> {
     let tombstones: HashSet<&str> = entry.tombstones.iter().map(String::as_str).collect();
     entry
@@ -112,10 +123,19 @@ pub fn observed_values(entry: &ORMapEntry) -> HashSet<String> {
 /// Integer values (the soak's persistent-keyspace shape) render to their decimal
 /// form; any other shape falls back to its debug rendering so the check still has
 /// a deterministic, comparable identity.
+///
+/// Both `as_i64` and `as_u64` are tried so a positive integer that msgpack
+/// round-trips as an unsigned variant still renders to the same decimal string the
+/// ledger recorded — otherwise the debug fallback (`UInt(42)` vs `42`) would make
+/// the check falsely RED (fail-closed, but flaky).
 pub fn render_value(value: &rmpv::Value) -> String {
-    value
-        .as_i64()
-        .map_or_else(|| format!("{value:?}"), |n| n.to_string())
+    if let Some(n) = value.as_i64() {
+        return n.to_string();
+    }
+    if let Some(n) = value.as_u64() {
+        return n.to_string();
+    }
+    format!("{value:?}")
 }
 
 /// Directional OR-Map no-loss diff: every acked (net-present) OR add tag must
