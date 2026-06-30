@@ -153,7 +153,7 @@ pub fn estimated_cost(value: &RecordValue) -> u64 {
 ///
 /// Each variant corresponds to a different CRDT strategy. Serialized to
 /// `MsgPack` for persistence in the `MapDataStore` layer.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RecordValue {
     /// Last-Write-Wins value with HLC timestamp.
@@ -190,7 +190,7 @@ pub enum RecordValue {
 /// A single entry in an OR-Map record.
 ///
 /// Each entry carries a unique tag for observed-remove semantics.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrMapEntry {
     /// The actual data value.

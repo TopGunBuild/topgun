@@ -19,7 +19,7 @@ use crate::storage::map_data_store::{
     merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
 };
 use crate::storage::record::RecordValue;
-use crate::storage::wal::{Wal, WalEntry, WalFsyncPolicy, WalOp};
+use crate::storage::wal::{Wal, WalEntry, WalFsyncPolicy, WalOp, WalStorePayload};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -762,37 +762,28 @@ impl MapDataStore for WriteBehindDataStore {
         // Append to WAL and satisfy the fsync policy before touching in-memory
         // state. This must happen before returning Ok(()) so a crash after ack
         // still has the write in the WAL for recovery to replay.
-        let wal_value_for_entry = if let RecordValue::Lww {
-            value: v,
-            timestamp,
-        } = value
-        {
-            let wal_op = WalOp::Store {
-                value: v.clone(),
-                expiration_time: if expiration_time == 0 {
-                    None
-                } else {
-                    Some(expiration_time)
-                },
-            };
-            (wal_op, Some(timestamp.clone()))
+        // Persist the full RecordValue so OR-Map adds and tombstones survive a
+        // kill -9 in the write-behind window — not just LWW scalars. The WAL
+        // entry timestamp is the LWW idempotency-dedup key; OR values carry their
+        // own per-entry timestamps inside the record, so it stays None for them.
+        let wal_timestamp = if let RecordValue::Lww { timestamp, .. } = value {
+            Some(timestamp.clone())
         } else {
-            // Non-LWW values (OrMap, OrTombstones) use a Store op with no timestamp.
-            let wal_op = WalOp::Store {
-                value: topgun_core::types::Value::Null,
-                expiration_time: if expiration_time == 0 {
-                    None
-                } else {
-                    Some(expiration_time)
-                },
-            };
-            (wal_op, None)
+            None
+        };
+        let wal_op = WalOp::Store {
+            value: WalStorePayload::Record(value.clone()),
+            expiration_time: if expiration_time == 0 {
+                None
+            } else {
+                Some(expiration_time)
+            },
         };
         let wal_entry = WalEntry {
             map: map.to_string(),
             key: key.to_string(),
-            op: wal_value_for_entry.0,
-            timestamp: wal_value_for_entry.1,
+            op: wal_op,
+            timestamp: wal_timestamp,
             sequence: wal_seq,
         };
         self.wal_append(partition_id, &wal_entry).await?;

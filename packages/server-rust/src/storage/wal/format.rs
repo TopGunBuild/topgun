@@ -314,23 +314,28 @@ pub fn decode_all(data: &[u8]) -> FrameDecodeResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::wal::{WalEntry, WalOp};
+    use crate::storage::record::RecordValue;
+    use crate::storage::wal::{WalEntry, WalOp, WalStorePayload};
     use topgun_core::hlc::Timestamp;
     use topgun_core::types::Value;
 
     fn make_store_entry(seq: u64) -> WalEntry {
+        let timestamp = Timestamp {
+            millis: 1_700_000_000_000,
+            counter: 0,
+            node_id: "node1".to_string(),
+        };
         WalEntry {
             map: "test_map".to_string(),
             key: format!("key_{seq}"),
             op: WalOp::Store {
-                value: Value::String("hello".to_string()),
+                value: WalStorePayload::Record(RecordValue::Lww {
+                    value: Value::String("hello".to_string()),
+                    timestamp: timestamp.clone(),
+                }),
                 expiration_time: Some(1_700_000_000_000),
             },
-            timestamp: Some(Timestamp {
-                millis: 1_700_000_000_000,
-                counter: 0,
-                node_id: "node1".to_string(),
-            }),
+            timestamp: Some(timestamp),
             sequence: seq,
         }
     }

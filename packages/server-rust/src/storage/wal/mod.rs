@@ -105,10 +105,13 @@ impl FromStr for WalFsyncPolicy {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WalOp {
-    /// Upsert: the record value and its TTL expiration timestamp in milliseconds.
+    /// Upsert: the full CRDT record value and its TTL expiration timestamp in
+    /// milliseconds.
     Store {
-        /// The full CRDT value to persist.
-        value: Value,
+        /// The CRDT value to persist. Carries the full [`RecordValue`] so OR-Map
+        /// adds and tombstones survive `kill -9` recovery losslessly, while still
+        /// decoding the bare-`Value` shape written by older servers.
+        value: WalStorePayload,
         /// Wall-clock expiration time in milliseconds since epoch.
         /// Negative or zero means no expiration.
         #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -116,6 +119,28 @@ pub enum WalOp {
     },
     /// Tombstone: remove the record from the store.
     Remove,
+}
+
+/// Payload of a [`WalOp::Store`] frame.
+///
+/// Current servers write `Record(RecordValue)`, preserving the exact CRDT shape
+/// (LWW, OR-Map, or legacy OR tombstones). Older servers wrote a bare
+/// [`Value`] (and destroyed OR payloads as `Value::Null`); those frames still
+/// decode through the `Legacy` arm and replay as LWW.
+///
+/// The enum is `untagged` so the same `value` field decodes both shapes. A
+/// legacy frame's `value` holds an externally-tagged `Value` (e.g. `{"Int": …}`,
+/// or the bare string `"Null"`), whose tags are disjoint from the
+/// externally-tagged `RecordValue` tags (`lww`/`orMap`/`orTombstones`). The
+/// `Record` arm therefore rejects legacy frames and the `Legacy` arm accepts
+/// them, so the server never refuses to start on a pre-existing WAL.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WalStorePayload {
+    /// Full CRDT record value written by current servers.
+    Record(RecordValue),
+    /// Bare value written by older servers; replayed as an LWW record.
+    Legacy(Value),
 }
 
 // ---------------------------------------------------------------------------
@@ -936,18 +961,26 @@ impl WalRecovery {
                         value,
                         expiration_time,
                     } => {
-                        // Build a RecordValue from the WAL entry.  The timestamp
-                        // in the WAL entry is used when present; absent timestamps
-                        // (malformed/legacy frames) are treated as always-replay
-                        // by using a zero-epoch timestamp.
-                        let ts = entry.timestamp.clone().unwrap_or_else(|| Timestamp {
-                            millis: 0,
-                            counter: 0,
-                            node_id: String::new(),
-                        });
-                        let record_value = RecordValue::Lww {
-                            value: value.clone(),
-                            timestamp: ts,
+                        // Reconstruct the exact RecordValue. Current frames carry
+                        // the full value (LWW or OR), so OR-Map adds/tombstones
+                        // replay losslessly. Legacy frames carried a bare Value and
+                        // are replayed as LWW; an absent WAL timestamp (legacy/
+                        // malformed) becomes a zero-epoch timestamp so the inner
+                        // store treats the replay as always-merge.
+                        let record_value = match value {
+                            WalStorePayload::Record(rv) => rv.clone(),
+                            WalStorePayload::Legacy(v) => {
+                                let ts =
+                                    entry.timestamp.clone().unwrap_or_else(|| Timestamp {
+                                        millis: 0,
+                                        counter: 0,
+                                        node_id: String::new(),
+                                    });
+                                RecordValue::Lww {
+                                    value: v.clone(),
+                                    timestamp: ts,
+                                }
+                            }
                         };
                         inner_store
                             .add(
@@ -1149,18 +1182,22 @@ mod tests {
     }
 
     fn make_wal_entry(seq: u64) -> WalEntry {
+        let timestamp = Timestamp {
+            millis: seq,
+            counter: 0,
+            node_id: "n1".to_string(),
+        };
         WalEntry {
             map: "m".to_string(),
             key: format!("k{seq}"),
             op: WalOp::Store {
-                value: TgValue::String("v".to_string()),
+                value: WalStorePayload::Record(RecordValue::Lww {
+                    value: TgValue::String("v".to_string()),
+                    timestamp: timestamp.clone(),
+                }),
                 expiration_time: None,
             },
-            timestamp: Some(Timestamp {
-                millis: seq,
-                counter: 0,
-                node_id: "n1".to_string(),
-            }),
+            timestamp: Some(timestamp),
             sequence: seq,
         }
     }

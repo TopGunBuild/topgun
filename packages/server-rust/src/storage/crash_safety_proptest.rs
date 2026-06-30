@@ -849,7 +849,7 @@ async fn ac4_acked_writes_survive_multiple_restart_cycles() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn max_observed_sequence_reads_watermark_of_compacted_empty_partition() {
-    use crate::storage::wal::{WalEntry, WalOp};
+    use crate::storage::wal::{WalEntry, WalOp, WalStorePayload};
 
     let dir = tempfile::tempdir().unwrap();
     let wal_dir = dir.path().to_path_buf();
@@ -863,7 +863,14 @@ async fn max_observed_sequence_reads_watermark_of_compacted_empty_partition() {
         map: "m".to_string(),
         key: "k".to_string(),
         op: WalOp::Store {
-            value: Value::Int(1),
+            value: WalStorePayload::Record(RecordValue::Lww {
+                value: Value::Int(1),
+                timestamp: Timestamp {
+                    millis: 1,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
+            }),
             expiration_time: None,
         },
         timestamp: Some(Timestamp {
