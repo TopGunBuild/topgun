@@ -1385,8 +1385,7 @@ async fn ac3_drained_redb_path_preserves_ormap_adds() {
     let or_value = or_record();
 
     {
-        let redb: Arc<dyn MapDataStore> =
-            Arc::new(RedbDataStore::new(&db_path).expect("redb new"));
+        let redb: Arc<dyn MapDataStore> = Arc::new(RedbDataStore::new(&db_path).expect("redb new"));
         let store = WriteBehindDataStore::new(redb, never_flush_config());
         store
             .add(TEST_MAP, "ork-persist-1", &or_value, 0, 1000)

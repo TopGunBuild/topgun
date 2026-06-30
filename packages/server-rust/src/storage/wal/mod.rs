@@ -970,12 +970,11 @@ impl WalRecovery {
                         let record_value = match value {
                             WalStorePayload::Record(rv) => rv.clone(),
                             WalStorePayload::Legacy(v) => {
-                                let ts =
-                                    entry.timestamp.clone().unwrap_or_else(|| Timestamp {
-                                        millis: 0,
-                                        counter: 0,
-                                        node_id: String::new(),
-                                    });
+                                let ts = entry.timestamp.clone().unwrap_or_else(|| Timestamp {
+                                    millis: 0,
+                                    counter: 0,
+                                    node_id: String::new(),
+                                });
                                 RecordValue::Lww {
                                     value: v.clone(),
                                     timestamp: ts,
