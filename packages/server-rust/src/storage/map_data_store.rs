@@ -319,6 +319,33 @@ pub trait MapDataStore: Send + Sync {
 /// Created by [`DurableMerkleIndex::build_session`]; the caller is responsible
 /// for deciding when to discard the snapshot (e.g. after the sync round-trip
 /// completes or a write invalidates the root).
+///
+/// # Consistency contract: pins structure, not values
+///
+/// A session pins ONLY the trie STRUCTURE captured at build time:
+/// - the per-path aggregate bucket hashes (`lww_nodes` / `ormap_nodes`),
+/// - the leaf-KEY membership (`leaf_keys_by_path`), and
+/// - the aggregate roots (`lww_root` / `ormap_root`).
+///
+/// It deliberately does NOT pin per-leaf record VALUES. During a sync drill-down
+/// the leaf-serving handlers fetch each record's bytes LIVE from the store
+/// (a lazy `store.get` keyed by the pinned leaf key), so the value a peer
+/// receives is always the newest durable value, not the one that contributed to
+/// the pinned bucket hash. Holding only key membership keeps the snapshot's
+/// memory cost proportional to the key set rather than the full value set.
+///
+/// This means a write landing BETWEEN the session build and a leaf fetch yields
+/// a wire-level torn read: the bucket hash the peer verifies was folded from the
+/// OLD leaf, while the served leaf carries the NEWER live value. That torn read
+/// is self-healing and never breaks convergence, because the peer treats the
+/// bucket hash only as a drill-down TRIGGER — it descends into the subtree on a
+/// hash mismatch but never commits the hash as authoritative state. The bytes it
+/// actually commits are the served leaf, which it folds in monotonically (LWW by
+/// timestamp; OR-Map by tag/tombstone CRDT merge). Since the served leaf is the
+/// live store value, the peer can only ever converge toward durable truth, never
+/// toward a value the store does not hold; any residual root divergence is
+/// resolved on the next root compare. Pinning per-leaf values here would buy
+/// nothing for correctness while inflating the snapshot to the full value set.
 pub struct MerkleSession {
     /// Pre-computed per-path aggregate bucket hashes for the LWW tree.
     /// `""` maps to the root-level children; each child path maps to its own
