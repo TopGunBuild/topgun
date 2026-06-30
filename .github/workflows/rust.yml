@@ -455,7 +455,7 @@ jobs:
         run: |
           ${{ steps.soak.outputs.bin }} \
             --duration 25 --crash-interval 0 --steady-interval 6 \
-            --churn-clients 6 --keyspace 48 --quiesce 3 \
+            --churn-clients 6 --keyspace 48 --or-keyspace 48 --quiesce 3 \
             --json-output soak-smoke.json
           jq -e '.passed == true' soak-smoke.json >/dev/null \
             || { echo "FAIL: no-crash soak did not pass"; cat soak-smoke.json; exit 1; }
