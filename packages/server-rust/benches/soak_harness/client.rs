@@ -13,7 +13,7 @@
 //! connection that is opened and dropped repeatedly by the churn driver, so the
 //! type is deliberately small and cheap to construct.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -26,10 +26,13 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use topgun_core::hlc::{LWWRecord, ORMapRecord, Timestamp};
 use topgun_core::messages::{
-    AuthMessage, ClientOp, MerkleReqBucketMessage, MerkleReqBucketPayload, Message, OpBatchMessage,
+    AuthMessage, ClientOp, MerkleReqBucketMessage, MerkleReqBucketPayload, Message,
+    ORMapMerkleReqBucket, ORMapMerkleReqBucketPayload, ORMapSyncInit, OpBatchMessage,
     OpBatchPayload, Query, QuerySubMessage, QuerySubPayload, QueryUnsubMessage, QueryUnsubPayload,
     SyncInitMessage, WriteConcern,
 };
+
+use crate::or_noloss::observed_tags;
 
 type Ws = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -279,6 +282,81 @@ impl SoakClient {
                 other => {
                     bail!("delta-sync: expected SYNC_RESP_BUCKETS or SYNC_RESP_LEAF, got {other:?}")
                 }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Reconstruct every OR-Map key's **observed tag set** (active record tags
+    /// minus tombstone tags) for `map` by walking the server's OR-Map Merkle tree
+    /// the way a reconnecting OR-Map sync client does: `ORMAP_SYNC_INIT` root →
+    /// `ORMAP_MERKLE_REQ_BUCKET` aggregate-mode drill-down → `ORMAP_SYNC_RESP_LEAF`.
+    /// This is the OR-Map analogue of `delta_sync_all`: it proves the durable
+    /// OR-Map content can be pulled back after a crash, not merely that a root
+    /// hash matched. Reuses the existing OR-Map sync protocol — no new wire type.
+    ///
+    /// Keys whose observed set is empty (e.g. a fully-tombstoned churn key) are
+    /// omitted; only keys with at least one observed tag appear in the result.
+    pub async fn ormap_read_all(&mut self, map: &str) -> Result<HashMap<String, HashSet<String>>> {
+        let mut out: HashMap<String, HashSet<String>> = HashMap::new();
+
+        // `ORMAP_SYNC_INIT` builds (or reuses) this connection's Merkle session
+        // and returns the OR-Map root. Root 0 ⇒ empty OR-Map: the bucket walk
+        // would wedge on the empty-path response, so return early (parity with
+        // `delta_sync_all`'s root==0 guard). The client root/bucket fields are
+        // ignored by the server, which answers from its own state.
+        let init = Message::ORMapSyncInit(ORMapSyncInit {
+            map_name: map.to_string(),
+            root_hash: 0,
+            bucket_hashes: HashMap::new(),
+            last_sync_timestamp: None,
+        });
+        send_encoded(&mut self.ws, &init).await?;
+        let root = match recv_decoded(&mut self.ws, "ORMAP_SYNC_RESP_ROOT").await? {
+            Message::ORMapSyncRespRoot(r) => r.payload.root_hash,
+            other => bail!("expected ORMAP_SYNC_RESP_ROOT, got {other:?}"),
+        };
+        if root == 0 {
+            return Ok(out);
+        }
+
+        // Aggregate-mode DFS over single-char trie children, identical in shape
+        // to `delta_sync_all`: we only descend into children the server reported,
+        // so a pushed path always answers with buckets or a leaf, never the
+        // hang-inducing empty response.
+        let mut stack = vec![String::new()];
+        let mut visited = 0usize;
+        while let Some(path) = stack.pop() {
+            visited += 1;
+            if visited > 100_000 {
+                bail!("ormap-read walk for '{map}' exceeded 100k nodes — aborting");
+            }
+            let req = Message::ORMapMerkleReqBucket(ORMapMerkleReqBucket {
+                payload: ORMapMerkleReqBucketPayload {
+                    map_name: map.to_string(),
+                    path: path.clone(),
+                },
+            });
+            send_encoded(&mut self.ws, &req).await?;
+            match recv_decoded(&mut self.ws, "ORMAP_SYNC_RESP_BUCKETS|ORMAP_SYNC_RESP_LEAF").await?
+            {
+                Message::ORMapSyncRespBuckets(b) => {
+                    for child in b.payload.buckets.keys() {
+                        stack.push(format!("{path}{child}"));
+                    }
+                }
+                Message::ORMapSyncRespLeaf(l) => {
+                    for entry in l.payload.entries {
+                        let observed = observed_tags(&entry);
+                        if !observed.is_empty() {
+                            out.entry(entry.key).or_default().extend(observed);
+                        }
+                    }
+                }
+                other => bail!(
+                    "ormap-read: expected ORMAP_SYNC_RESP_BUCKETS or ORMAP_SYNC_RESP_LEAF, got \
+                     {other:?}"
+                ),
             }
         }
         Ok(out)

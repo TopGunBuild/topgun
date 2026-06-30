@@ -46,6 +46,7 @@
 mod client;
 mod model;
 mod monitor;
+mod or_noloss;
 mod process;
 mod report;
 
@@ -62,6 +63,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use client::SoakClient;
 use model::{compare, next_stamp, Model};
 use monitor::{assess, sample_rss_mb, MemSample};
+use or_noloss::{missing_acked_adds, OrLedger};
 use process::{resolve_server_binary, ServerConfig, ServerSupervisor};
 use report::{
     append_progress, utc_timestamp_now, write_report, MemoryReport, ProgressSnapshot, SoakReport,
@@ -163,6 +165,10 @@ struct SoakMetrics {
 struct ChurnCtx {
     supervisor: Arc<ServerSupervisor>,
     model: Arc<Model>,
+    /// Acked persistent-OR-add ledger: the set of adds that must survive a
+    /// `kill -9`. Updated only on an `or_add` ACK for the add-only persistent
+    /// keyspace; read by `recovery_checkpoint` for the directional no-loss check.
+    or_ledger: Arc<OrLedger>,
     metrics: Arc<SoakMetrics>,
     paused: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
@@ -270,6 +276,7 @@ async fn run_soak(config: &Config) -> i32 {
     let panic_watch = supervisor.panic_watch();
 
     let model = Arc::new(Model::new(config.keyspace, config.churn_clients));
+    let or_ledger = Arc::new(OrLedger::new());
     let metrics = Arc::new(SoakMetrics::default());
     let paused = Arc::new(AtomicBool::new(false));
     let stop = Arc::new(AtomicBool::new(false));
@@ -280,6 +287,7 @@ async fn run_soak(config: &Config) -> i32 {
         let ctx = ChurnCtx {
             supervisor: Arc::clone(&supervisor),
             model: Arc::clone(&model),
+            or_ledger: Arc::clone(&or_ledger),
             metrics: Arc::clone(&metrics),
             paused: Arc::clone(&paused),
             stop: Arc::clone(&stop),
@@ -367,7 +375,16 @@ async fn run_soak(config: &Config) -> i32 {
         let phase;
         if now >= next_crash {
             phase = "recovery";
-            match recovery_checkpoint(&supervisor, &model, &jwt_secret, config, &paused).await {
+            match recovery_checkpoint(
+                &supervisor,
+                &model,
+                &or_ledger,
+                &jwt_secret,
+                config,
+                &paused,
+            )
+            .await
+            {
                 Ok(outcome) => {
                     recovery_checkpoints += 1;
                     crashes += 1;
@@ -670,6 +687,7 @@ struct RecoveryOutcome {
 async fn recovery_checkpoint(
     supervisor: &Arc<ServerSupervisor>,
     model: &Arc<Model>,
+    or_ledger: &Arc<OrLedger>,
     jwt: &str,
     config: &Config,
     paused: &Arc<AtomicBool>,
@@ -707,17 +725,14 @@ async fn recovery_checkpoint(
 
     let mut out = RecoveryOutcome::default();
 
-    // Pre-crash snapshot (also a steady convergence check).
-    let (pre_lww, pre_root, pre_or_root) = {
+    // Pre-crash snapshot (also a steady convergence check). The OR-Map no-loss
+    // check is directional against the acked-add ledger, not a pre/post root
+    // comparison, so no pre-crash OR root is captured here.
+    let (pre_lww, pre_root) = {
         let mut v = SoakClient::connect(supervisor.addr(), VERIFIER_IDX, jwt).await?;
         let lww = v.read_all(LWW_MAP).await?;
         let root = v.merkle_root(LWW_MAP).await?;
-        let or_root = if config.or_churn {
-            Some(v.merkle_root(OR_MAP).await?)
-        } else {
-            None
-        };
-        (lww, root, or_root)
+        (lww, root)
     };
     let expected = model.snapshot();
     let pre_diffs = compare(&expected, &pre_lww);
@@ -752,17 +767,12 @@ async fn recovery_checkpoint(
     // first it would warm the store and the subsequent full-scan query would
     // observe the now-resident records — a false "322b recovered" signal. Reading
     // the query path before anything touches the store measures the genuine gap.
-    let (post_query, post_delta, post_root, post_or_root) = {
+    let (post_query, post_delta, post_root) = {
         let mut v = SoakClient::connect(supervisor.addr(), VERIFIER_IDX, jwt).await?;
         let query = v.read_all(LWW_MAP).await?;
         let delta = v.delta_sync_all(LWW_MAP).await?;
         let root = v.merkle_root(LWW_MAP).await?;
-        let or_root = if config.or_churn {
-            Some(v.merkle_root(OR_MAP).await?)
-        } else {
-            None
-        };
-        (query, delta, root, or_root)
+        (query, delta, root)
     };
 
     // HARD: DurableMerkleIndex (SPEC-325b) builds from the datastore, not the
@@ -772,18 +782,6 @@ async fn recovery_checkpoint(
             "LWW merkle root changed across recovery: pre={pre_root} post={post_root}"
         ));
     }
-    // HARD (unconditional): the OR-Map merkle root must survive recovery unchanged.
-    // This is the OR-Map's only durability assertion, so it must never be skipped —
-    // a blanket skip would let an acked OR-Map write lost on kill -9 pass silently.
-    // Under --no-pre-kill-drain OR churn is disabled (see parse_args), so both roots
-    // are absent and this holds honestly; OR-Map crash-recovery under load is still
-    // covered by the drained mode (its WAL-only behavior is a tracked follow-up).
-    if pre_or_root != post_or_root {
-        out.hard.push(format!(
-            "OR-Map merkle root changed across recovery: pre={pre_or_root:?} post={post_or_root:?}"
-        ));
-    }
-
     // HARD: the delta-sync leaf-fetch path drills the DurableMerkleIndex, which
     // now reads from the datastore. Post-restart the index is rebuilt from durable
     // storage, so every leaf must be reachable regardless of residency.
@@ -816,6 +814,49 @@ async fn recovery_checkpoint(
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
+    }
+
+    // HARD: OR-Map directional no-loss. Every acked add in the add-only persistent
+    // keyspace MUST still be observed after recovery; a missing one is a lost acked
+    // write. This replaces the old OR-root equality, which false-redded on the
+    // benign "recovered-more" asymmetry (WAL replay reconstructs intermediate churn
+    // add/remove tags the live tree had compacted). Recovered-more is a SUPERSET of
+    // the ledger, so it never reddens here — only a true loss does. The OR read runs
+    // last and on its own connection: it is a different map from the LWW reads, so
+    // it cannot warm the LWW store the cold full-scan query above depends on.
+    if config.or_churn && !or_ledger.is_empty() {
+        // Snapshot the ledger BEFORE reading the server. Any acked add recorded
+        // after this point (e.g. a late-delivered ack on a fresh post-restart
+        // reconnect, or a kernel-buffered pre-kill ack processed late) is simply
+        // absent from `acked` and never checked, so it cannot manufacture a false
+        // loss. Every tag in `acked` was recorded on an ack that returned before
+        // the read below, so the server had applied it before the read — keeping
+        // this a true directional superset check, never a read/snapshot race.
+        let acked = or_ledger.snapshot();
+        let mut v = SoakClient::connect(supervisor.addr(), VERIFIER_IDX, jwt).await?;
+        match v.ormap_read_all(OR_MAP).await {
+            Ok(post_observed) => {
+                let missing = missing_acked_adds(&acked, &post_observed);
+                if !missing.is_empty() {
+                    out.hard.push(format!(
+                        "OR-Map acked add(s) LOST across recovery: {} (key,tag) pair(s) (e.g. {})",
+                        missing.len(),
+                        missing
+                            .iter()
+                            .take(5)
+                            .map(|(k, t)| format!("{k}/{t}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+            }
+            // A read failure must NOT silently skip the no-loss check — that would
+            // let a real loss hide behind a generic harness error (a loss could
+            // even be the cause of the read failure). Surface it as a HARD failure.
+            Err(e) => out.hard.push(format!(
+                "OR-Map no-loss check could not complete (post-recovery read failed): {e}"
+            )),
+        }
     }
 
     paused.store(false, Ordering::SeqCst);
@@ -908,7 +949,19 @@ async fn run_churn_client(idx: usize, ctx: ChurnCtx) {
                 break;
             }
 
-            // OR-Map add/remove to drive tombstone growth (memory watch).
+            // OR-Map churn. Two independent streams on the same map:
+            //
+            //  - `ork-*` add-then-immediately-remove: drives tombstone growth, the
+            //    unbounded-memory candidate the soak watches (TODO-479/480). This
+            //    keyspace is EXCLUDED from the no-loss check (its net observed set
+            //    is empty by construction; under the WAL-only window its replayed
+            //    intermediate tags are the benign "recovered-more").
+            //  - `ork-persist-*` add-only: a stable `(key, tag)` per owned slot,
+            //    never removed, recorded into the acked-add ledger ON ACK. Because
+            //    it is never tombstoned, the post-recovery observed set must always
+            //    contain it — that is the directional no-loss invariant. Re-adding
+            //    the same tag is idempotent and keeps the persistent keyspace
+            //    bounded, so it does not itself look like a memory leak.
             write_count += 1;
             if ctx.or_churn && write_count.is_multiple_of(ctx.or_every) {
                 let or_key = format!("ork-{}", slot % ctx.or_keyspace.max(1));
@@ -918,6 +971,29 @@ async fn run_churn_client(idx: usize, ctx: ChurnCtx) {
                         session_alive = false;
                         break;
                     }
+                } else {
+                    session_alive = false;
+                    break;
+                }
+
+                // `slot` cycles over this client's FIXED owned-slot set
+                // (`owned[rr % owned.len()]`), so `pt-{idx}-{slot}` ranges over a
+                // bounded set of distinct tags — one stable tag per owned slot.
+                // Re-visiting a slot re-adds the same tag (idempotent), so neither
+                // the ledger nor the server's persistent OR keyspace grows without
+                // bound over a long soak.
+                let persist_key = format!("ork-persist-{}", slot % ctx.or_keyspace.max(1));
+                let persist_tag = format!("pt-{idx}-{slot}");
+                let (pms, pctr) = next_stamp();
+                if client
+                    .or_add(OR_MAP, &persist_key, &persist_tag, pms, pctr)
+                    .await
+                    .is_ok()
+                {
+                    // Ledger updated ONLY on ack: an add whose ack never returned
+                    // is never recorded, so a kill-window drop of an unacked add is
+                    // not miscounted as loss.
+                    ctx.or_ledger.record_add(&persist_key, &persist_tag);
                 } else {
                     session_alive = false;
                     break;
@@ -1324,16 +1400,16 @@ fn parse_args() -> Config {
             }
         }
     }
-    // The no-drain validator scopes strictly to the LWW acked==durable
-    // target. OR-Map WAL-only crash-recovery semantics — the live net-compacted
-    // observed set vs the WAL-replayed intermediate tags — is a distinct question
-    // that needs its own audit. Rather than run OR churn and relax its assertion
-    // (which would let a genuine OR-Map acked-write loss pass silently), we simply
-    // do not generate OR writes in this mode, so the OR-root equality check stays
-    // unconditionally HARD and holds honestly (both roots absent).
-    if c.no_pre_kill_drain {
-        c.or_churn = false;
-    }
+    // OR-Map churn now runs under --no-pre-kill-drain too. The old root-equality
+    // check false-redded here on the benign "recovered-more" asymmetry (the live
+    // tree compacts an add+remove pair while WAL replay reconstructs both tags),
+    // so OR churn used to be suppressed in this mode. The check is now a
+    // DIRECTIONAL no-loss assertion instead: a separate add-only persistent OR
+    // keyspace (`ork-persist-*`) seeds an acked-add ledger, and recovery asserts
+    // the post-restart observed set is a SUPERSET of those acked adds. Recovered-
+    // more is a superset and never reddens; only a missing acked add fails. There
+    // is therefore no longer any reason to shed OR writes in no-drain mode — doing
+    // so is exactly what this spec re-enables to make WAL-only OR recovery honest.
     c
 }
 
