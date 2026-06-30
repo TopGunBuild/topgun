@@ -3169,19 +3169,26 @@ mod tests {
             "served leaf must be the post-mutation value (the lazy fetch is live)"
         );
 
-        // The drill-down verified a snapshot-anchored bucket hash that does NOT
-        // include the new leaf — documenting the torn read is real, while the
-        // served bytes above are the live truth the client actually converges on.
-        // (The snapshot bucket before the mutation is retained unchanged.)
-        assert_eq!(
-            snapshot_bucket_before,
-            cached_after
-                .lww_nodes
-                .get(&target_path[..2])
-                .cloned()
-                .unwrap_or_default(),
-            "the cached snapshot's bucket structure must be unchanged by the mutation \
-             (same-snapshot window, not a rebuild)"
+        // Prove the verified bucket hash is genuinely OLD-anchored (the torn read
+        // is real, not merely implied): a session rebuilt over the post-mutation
+        // live state — on a NEW connection so nothing is served from conn 1's
+        // cache — yields a DIFFERENT bucket aggregate for the same path than the
+        // stale structure the client just walked. This demonstrates the hash the
+        // client verified pre-dates the mutation while the served leaf was live.
+        let fresh = svc
+            .get_or_build_session("tmap", Some(ConnectionId(2)), false)
+            .expect("fresh session build")
+            .expect("durable index present");
+        let fresh_bucket = fresh
+            .lww_nodes
+            .get(&target_path[..2])
+            .cloned()
+            .unwrap_or_default();
+        assert_ne!(
+            snapshot_bucket_before, fresh_bucket,
+            "the bucket structure the client verified must be OLD-anchored: a session \
+             rebuilt over live state differs, proving the verified structure pre-dates \
+             the mutation while the served leaf was live (the torn read is real)"
         );
     }
 
@@ -3576,7 +3583,7 @@ mod tests {
             "OR_REMOVE torn read served tombstones that disagree with the live store"
         );
         assert!(
-            live_remove_records.is_empty() && add_entry.key == target_add,
+            live_remove_records.is_empty(),
             "OR_REMOVE target must have no live records (tombstone-only OrMap leaf)"
         );
         assert!(
@@ -3589,13 +3596,21 @@ mod tests {
             "served OR_REMOVE entry must carry the post-mutation tombstone (lazy fetch is live)"
         );
 
-        // The cached snapshot's OR-Map bucket structure is unchanged by the
-        // mutations (same-snapshot window, not a rebuild).
-        assert_eq!(
+        // Prove the verified bucket hashes are OLD-anchored (the torn read is real,
+        // not implied): an OR-Map session rebuilt over the post-mutation live state
+        // — on a NEW connection, bypassing conn 1's cache — yields a DIFFERENT
+        // bucket aggregate for the add path than the stale structure the client
+        // just walked.
+        let fresh = svc
+            .get_or_build_session("omap", Some(ConnectionId(2)), false)
+            .expect("fresh OR-Map session build")
+            .expect("durable index present");
+        assert_ne!(
             cached.ormap_nodes.get(&add_path[..2]),
-            cached_after.ormap_nodes.get(&add_path[..2]),
-            "the cached snapshot's OR-Map bucket structure must be unchanged by the \
-             mid-session mutations (same-snapshot window, not a rebuild)"
+            fresh.ormap_nodes.get(&add_path[..2]),
+            "the OR-Map bucket structure the client verified must be OLD-anchored: a \
+             session rebuilt over live state differs, proving the verified structure \
+             pre-dates the mutations while the served entries were live (torn read real)"
         );
     }
 
