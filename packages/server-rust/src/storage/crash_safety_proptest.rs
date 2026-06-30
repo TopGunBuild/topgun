@@ -1374,6 +1374,179 @@ async fn ac4_legacy_bare_value_wal_frame_replays_as_lww() {
     drop(dir);
 }
 
+/// The realistic legacy OR-Map WAL frame: pre-fix servers hard-coded
+/// `WalOp::Store { value: Value::Null }` for every non-LWW record and wrote no
+/// HLC timestamp. `Value::Null` is a serde *unit* variant — it round-trips
+/// through a different `untagged` content path than a newtype variant like
+/// `Value::String`, so it needs explicit coverage. Recovery must decode it via
+/// the `Legacy` arm (never refusing to start) and replay it as a zero-epoch LWW
+/// value so the inner store's merge always accepts it.
+#[tokio::test]
+async fn ac4_legacy_null_value_wal_frame_replays_as_zero_epoch_lww() {
+    use crate::storage::wal::{WalEntry, WalOp, WalStorePayload};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wal_dir = dir.path().to_path_buf();
+    let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).expect("WalWriter::new");
+
+    // The exact shape an older server wrote for OR-Map data: bare Value::Null, no ts.
+    let legacy_entry = WalEntry {
+        map: TEST_MAP.to_string(),
+        key: "legacy-null-k".to_string(),
+        op: WalOp::Store {
+            value: WalStorePayload::Legacy(Value::Null),
+            expiration_time: None,
+        },
+        timestamp: None,
+        sequence: 1,
+    };
+    wal.append(0, &legacy_entry)
+        .await
+        .expect("append legacy Value::Null frame");
+
+    let recovered = Arc::new(RetainingStore::default());
+    let recovery = WalRecovery::new(Arc::clone(&wal), Vec::new());
+    recovery
+        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+        .await
+        .expect("server must not refuse to start on a legacy Value::Null WAL");
+
+    let got = recovered
+        .load(TEST_MAP, "legacy-null-k")
+        .await
+        .unwrap()
+        .expect("legacy Value::Null frame must replay");
+    match got {
+        RecordValue::Lww { value, timestamp } => {
+            assert_eq!(value, Value::Null, "legacy Null must replay as LWW Null");
+            assert_eq!(
+                timestamp.millis, 0,
+                "absent WAL timestamp must replay as a zero-epoch LWW timestamp"
+            );
+        }
+        other => panic!("legacy Value::Null frame must replay as LWW, got {other:?}"),
+    }
+
+    drop(dir);
+}
+
+/// The cardinal rule names OrMap **and** OrTombstones. New code never emits
+/// `OrTombstones` through the write path, but the WAL format must still carry it
+/// losslessly so any in-flight or legacy `Record(OrTombstones)` frame survives a
+/// crash. Appends the frame through the real WAL and asserts the exact variant
+/// recovers — the `Record` arm must not collapse it to LWW.
+#[tokio::test]
+async fn ac2_wal_only_recovery_preserves_ortombstones() {
+    use crate::storage::wal::{WalEntry, WalOp, WalStorePayload};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wal_dir = dir.path().to_path_buf();
+    let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).expect("WalWriter::new");
+
+    let tomb = RecordValue::OrTombstones {
+        tags: vec!["t-1".to_string(), "t-2".to_string()],
+    };
+    let entry = WalEntry {
+        map: TEST_MAP.to_string(),
+        key: "ortomb-1".to_string(),
+        op: WalOp::Store {
+            value: WalStorePayload::Record(tomb.clone()),
+            expiration_time: None,
+        },
+        timestamp: None,
+        sequence: 1,
+    };
+    wal.append(0, &entry)
+        .await
+        .expect("append OrTombstones frame");
+
+    let recovered = Arc::new(RetainingStore::default());
+    let recovery = WalRecovery::new(Arc::clone(&wal), Vec::new());
+    recovery
+        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+        .await
+        .expect("recovery must succeed on an OrTombstones WAL frame");
+
+    let got = recovered
+        .load(TEST_MAP, "ortomb-1")
+        .await
+        .unwrap()
+        .expect("OrTombstones frame must replay");
+    assert_eq!(
+        got, tomb,
+        "recovered OrTombstones must equal the acked record exactly (no LWW collapse)"
+    );
+
+    drop(dir);
+}
+
+/// A WAL segment written across an upgrade carries both legacy bare-`Value`
+/// frames and new `Record(RecordValue)` frames. `untagged` decoding is
+/// per-frame, so both must replay correctly from a single segment — this guards
+/// against any cross-frame decode desync between the two payload shapes.
+#[tokio::test]
+async fn ac4_mixed_legacy_and_record_frames_both_replay() {
+    use crate::storage::wal::{WalEntry, WalOp, WalStorePayload};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wal_dir = dir.path().to_path_buf();
+    let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).expect("WalWriter::new");
+
+    let or_value = or_record();
+    let legacy = WalEntry {
+        map: TEST_MAP.to_string(),
+        key: "mixed-legacy".to_string(),
+        op: WalOp::Store {
+            value: WalStorePayload::Legacy(Value::Null),
+            expiration_time: None,
+        },
+        timestamp: None,
+        sequence: 1,
+    };
+    let modern = WalEntry {
+        map: TEST_MAP.to_string(),
+        key: "mixed-modern".to_string(),
+        op: WalOp::Store {
+            value: WalStorePayload::Record(or_value.clone()),
+            expiration_time: None,
+        },
+        timestamp: None,
+        sequence: 2,
+    };
+    wal.append(0, &legacy).await.expect("append legacy frame");
+    wal.append(0, &modern)
+        .await
+        .expect("append modern OR frame");
+
+    let recovered = Arc::new(RetainingStore::default());
+    let recovery = WalRecovery::new(Arc::clone(&wal), Vec::new());
+    recovery
+        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+        .await
+        .expect("recovery must succeed on a mixed-format WAL");
+
+    match recovered
+        .load(TEST_MAP, "mixed-legacy")
+        .await
+        .unwrap()
+        .expect("legacy frame must replay")
+    {
+        RecordValue::Lww { value, .. } => assert_eq!(value, Value::Null),
+        other => panic!("legacy frame must replay as LWW, got {other:?}"),
+    }
+    let got_modern = recovered
+        .load(TEST_MAP, "mixed-modern")
+        .await
+        .unwrap()
+        .expect("modern OR frame must replay");
+    assert_eq!(
+        got_modern, or_value,
+        "modern OR frame must replay losslessly alongside a legacy frame"
+    );
+
+    drop(dir);
+}
+
 /// AC3 — acked OR adds flushed through the real write-behind→redb drain survive a
 /// process restart: re-opening redb with no in-memory residency still yields the
 /// full OR content. Confirms the durable OR path (Cause-2 collapse guard) and
