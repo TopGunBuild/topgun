@@ -3190,6 +3190,32 @@ mod tests {
              rebuilt over live state differs, proving the verified structure pre-dates \
              the mutation while the served leaf was live (the torn read is real)"
         );
+
+        // Tie the bucket hash actually served ON THE WIRE (not just the in-memory
+        // cached structure) to the stale snapshot: it equals the OLD cached child
+        // hash and differs from the fresh/live one. The structure assertion above
+        // reads both sides from in-memory sessions; without this a handler that
+        // recomputed bucket hashes from live state per request would close the torn
+        // read at the wire yet leave that assertion green. This makes "the torn read
+        // is observable at the wire" a falsifiable claim against the served bytes.
+        let target_child = target_path
+            .chars()
+            .nth(2)
+            .expect("target path has a depth-3 child char");
+        let stale_child_hash = *snapshot_bucket_before
+            .get(&target_child)
+            .expect("stale snapshot bucket must hold the target child");
+        assert_eq!(
+            verified_bucket_hash, stale_child_hash,
+            "the bucket hash served on the wire must be the stale cached value — the \
+             torn read is observable at the wire, not merely in the in-memory snapshot"
+        );
+        assert_ne!(
+            Some(verified_bucket_hash),
+            fresh_bucket.get(&target_child).copied(),
+            "the wire-served bucket hash must differ from the fresh/live one (the \
+             verified structure is OLD-anchored while the served leaf was live)"
+        );
     }
 
     /// OR-Map counterpart of the torn-read diagnostic above. The OR-Map leaf serve
@@ -3445,8 +3471,9 @@ mod tests {
         let remove_entry = served
             .get(target_remove)
             .expect("OR_REMOVE target must be served as a leaf entry");
-        let _ = verified_add_hash.expect("walk must verify a snapshot bucket hash en route to add");
-        let _ = verified_remove_hash
+        let verified_add_hash =
+            verified_add_hash.expect("walk must verify a snapshot bucket hash en route to add");
+        let verified_remove_hash = verified_remove_hash
             .expect("walk must verify a snapshot bucket hash en route to remove");
 
         // Sanity: the mid-session mutations changed each target's leaf hash, so the
@@ -3611,6 +3638,55 @@ mod tests {
             "the OR-Map bucket structure the client verified must be OLD-anchored: a \
              session rebuilt over live state differs, proving the verified structure \
              pre-dates the mutations while the served entries were live (torn read real)"
+        );
+
+        // Tie each OR-Map bucket hash actually served ON THE WIRE to the stale
+        // snapshot: it equals the OLD cached child hash and differs from the
+        // fresh/live one. As in the LWW case, the structure assertion above reads
+        // both sides from in-memory sessions; pinning the served wire value makes
+        // "the torn read is observable at the wire" falsifiable for both directions.
+        let add_child = add_path
+            .chars()
+            .nth(2)
+            .expect("add path has a depth-3 child char");
+        let remove_child = remove_path
+            .chars()
+            .nth(2)
+            .expect("remove path has a depth-3 child char");
+        let stale_add = cached
+            .ormap_nodes
+            .get(&add_path[..2])
+            .and_then(|m| m.get(&add_child).copied())
+            .expect("stale OR-Map snapshot must hold the add child");
+        let stale_remove = cached
+            .ormap_nodes
+            .get(&remove_path[..2])
+            .and_then(|m| m.get(&remove_child).copied())
+            .expect("stale OR-Map snapshot must hold the remove child");
+        assert_eq!(
+            verified_add_hash, stale_add,
+            "the OR_ADD bucket hash served on the wire must be the stale cached value \
+             (the torn read is observable at the wire, not merely in the snapshot)"
+        );
+        assert_eq!(
+            verified_remove_hash, stale_remove,
+            "the OR_REMOVE bucket hash served on the wire must be the stale cached value"
+        );
+        assert_ne!(
+            Some(verified_add_hash),
+            fresh
+                .ormap_nodes
+                .get(&add_path[..2])
+                .and_then(|m| m.get(&add_child).copied()),
+            "the wire-served OR_ADD bucket hash must differ from the fresh/live one"
+        );
+        assert_ne!(
+            Some(verified_remove_hash),
+            fresh
+                .ormap_nodes
+                .get(&remove_path[..2])
+                .and_then(|m| m.get(&remove_child).copied()),
+            "the wire-served OR_REMOVE bucket hash must differ from the fresh/live one"
         );
     }
 
