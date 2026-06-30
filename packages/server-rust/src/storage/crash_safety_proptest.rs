@@ -34,9 +34,11 @@ use tokio::task::block_in_place;
 use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
 
-use crate::storage::datastores::{WalBootstrap, WriteBehindConfig, WriteBehindDataStore};
+use crate::storage::datastores::{
+    RedbDataStore, WalBootstrap, WriteBehindConfig, WriteBehindDataStore,
+};
 use crate::storage::map_data_store::{LeafSink, MapDataStore, ScanBatch, ScanCursor};
-use crate::storage::record::RecordValue;
+use crate::storage::record::{OrMapEntry, RecordValue};
 use crate::storage::wal::{Wal, WalFsyncPolicy, WalRecovery, WalWriter};
 
 // ---------------------------------------------------------------------------
@@ -1225,6 +1227,186 @@ async fn crash_on_partial_active_segment_recovers_intact_prefix() {
         recovered.contains(TEST_MAP, &keys[0]).await,
         "the earliest acked write (deep in a sealed segment) must survive a torn \
          active-segment tail"
+    );
+
+    drop(dir);
+}
+
+// ---------------------------------------------------------------------------
+// OR-Map durability across recovery (SPEC-333)
+// ---------------------------------------------------------------------------
+
+/// Build an HLC timestamp for the OR-Map durability tests.
+fn or_ts(millis: u64) -> Timestamp {
+    Timestamp {
+        millis,
+        counter: 0,
+        node_id: "sf333".to_string(),
+    }
+}
+
+/// A populated OR-Map record with two live adds and a tombstone, exercising the
+/// `records` + `tombstones` shape the WAL must carry losslessly.
+fn or_record() -> RecordValue {
+    RecordValue::OrMap {
+        records: vec![
+            OrMapEntry {
+                value: Value::String("alpha".to_string()),
+                tag: "tag-a".to_string(),
+                timestamp: or_ts(1),
+            },
+            OrMapEntry {
+                value: Value::Int(42),
+                tag: "tag-b".to_string(),
+                timestamp: or_ts(2),
+            },
+        ],
+        tombstones: vec!["gone-tag".to_string()],
+    }
+}
+
+/// AC2 — an acked OR-Map add that survives only on the WAL (never flushed to the
+/// inner store before the crash) must replay as its exact OR content, not as a
+/// `Value::Null`/LWW placeholder.
+///
+/// Red on revert of the full-`RecordValue` WAL encode/replay: the pre-fix code
+/// encoded every non-LWW value as `Value::Null` and replayed every `Store` as
+/// `RecordValue::Lww`, so the recovered value would be `Lww(Null)`, not the OR
+/// record — this assertion would fail.
+#[tokio::test]
+async fn ac2_wal_only_recovery_preserves_ormap_adds() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wal_dir = dir.path().to_path_buf();
+
+    // never_flush_config ⇒ the OR add never reaches the inner store before the
+    // crash; its only durable record is the WAL frame.
+    let pre_crash_inner: Arc<dyn MapDataStore> = Arc::new(RetainingStore::default());
+    let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).expect("WalWriter::new");
+    let wal_dyn: Arc<dyn Wal> = Arc::clone(&wal) as Arc<dyn Wal>;
+    let store = WriteBehindDataStore::new_with_wal(
+        pre_crash_inner,
+        never_flush_config(),
+        Some(WalBootstrap {
+            wal: wal_dyn,
+            sequence_start: 1,
+        }),
+    );
+
+    let or_value = or_record();
+    store
+        .add(TEST_MAP, "ork-1", &or_value, 0, 1000)
+        .await
+        .expect("OR add must ack");
+
+    // Crash: drop the write-behind store; only the on-disk WAL survives.
+    drop(store);
+
+    let recovered = Arc::new(RetainingStore::default());
+    let recovery = WalRecovery::new(Arc::clone(&wal), Vec::new());
+    recovery
+        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+        .await
+        .expect("recovery must succeed on an intact WAL");
+
+    let got = recovered
+        .load(TEST_MAP, "ork-1")
+        .await
+        .unwrap()
+        .expect("acked OR add must survive WAL recovery (lost as Value::Null pre-fix)");
+    assert_eq!(
+        got, or_value,
+        "recovered OR content must equal the acked OR record exactly"
+    );
+
+    drop(dir);
+}
+
+/// AC4 — a legacy bare-`Value` WAL frame (the shape older servers wrote) must
+/// still decode and replay as LWW; the server must never refuse to start on an
+/// old WAL.
+///
+/// `WalStorePayload::Legacy(v)` serializes (untagged) to the exact bare-`Value`
+/// wire shape an older server emitted for `WalOp::Store { value: Value }`, so
+/// appending it reproduces a pre-existing on-disk frame. Red on revert of the
+/// untagged backward-compat decode: a tag-renamed variant would fail to decode
+/// the `"store"`-tagged legacy frame and recovery would treat it as corruption.
+#[tokio::test]
+async fn ac4_legacy_bare_value_wal_frame_replays_as_lww() {
+    use crate::storage::wal::{WalEntry, WalOp, WalStorePayload};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wal_dir = dir.path().to_path_buf();
+    let wal = WalWriter::new(wal_dir.clone(), WalFsyncPolicy::PerOp).expect("WalWriter::new");
+
+    let legacy_entry = WalEntry {
+        map: TEST_MAP.to_string(),
+        key: "legacy-k".to_string(),
+        op: WalOp::Store {
+            value: WalStorePayload::Legacy(Value::String("legacy-val".to_string())),
+            expiration_time: None,
+        },
+        timestamp: Some(or_ts(5)),
+        sequence: 1,
+    };
+    wal.append(0, &legacy_entry)
+        .await
+        .expect("append legacy frame");
+
+    let recovered = Arc::new(RetainingStore::default());
+    let recovery = WalRecovery::new(Arc::clone(&wal), Vec::new());
+    recovery
+        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+        .await
+        .expect("server must not refuse to start on a legacy WAL");
+
+    let got = recovered
+        .load(TEST_MAP, "legacy-k")
+        .await
+        .unwrap()
+        .expect("legacy frame must replay");
+    match got {
+        RecordValue::Lww { value, .. } => {
+            assert_eq!(value, Value::String("legacy-val".to_string()));
+        }
+        other => panic!("legacy frame must replay as LWW, got {other:?}"),
+    }
+
+    drop(dir);
+}
+
+/// AC3 — acked OR adds flushed through the real write-behind→redb drain survive a
+/// process restart: re-opening redb with no in-memory residency still yields the
+/// full OR content. Confirms the durable OR path (Cause-2 collapse guard) and
+/// catches any regression that drops OR structure on the redb persist/reload path.
+#[tokio::test(flavor = "multi_thread")]
+async fn ac3_drained_redb_path_preserves_ormap_adds() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("redb_or.db");
+    let or_value = or_record();
+
+    {
+        let redb: Arc<dyn MapDataStore> =
+            Arc::new(RedbDataStore::new(&db_path).expect("redb new"));
+        let store = WriteBehindDataStore::new(redb, never_flush_config());
+        store
+            .add(TEST_MAP, "ork-persist-1", &or_value, 0, 1000)
+            .await
+            .expect("OR add must ack");
+        // Drain the buffer into redb, then drop all in-memory write-behind state.
+        store.hard_flush().await.expect("hard_flush drains to redb");
+        drop(store);
+    }
+
+    // Fresh redb open — no write-behind overlay, no in-memory residency.
+    let reopened = RedbDataStore::new(&db_path).expect("redb reopen");
+    let got = reopened
+        .load(TEST_MAP, "ork-persist-1")
+        .await
+        .unwrap()
+        .expect("drained OR add must persist durably in redb");
+    assert_eq!(
+        got, or_value,
+        "redb-reloaded OR content must equal the acked OR record exactly"
     );
 
     drop(dir);
