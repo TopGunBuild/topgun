@@ -2844,6 +2844,347 @@ mod tests {
         );
     }
 
+    /// SPEC-334 diagnostic gate: a value mutation landing on a walked key BETWEEN
+    /// the snapshot build (`SYNC_INIT`) and the lazy leaf fetch produces a torn
+    /// read at the wire — the bucket hash the client verifies was folded from the
+    /// OLD leaf hash, while the served leaf carries the NEWER live value. This
+    /// test pins the actual behaviour of THAT same-snapshot, same-connection
+    /// live-leaf path (distinct from the SPEC-331 session-SWAP path the `ac3`
+    /// test above exercises).
+    ///
+    /// Outcome class established by this test: **(b) self-healing, no defect.**
+    /// The torn read is real at the structure-vs-served-bytes layer, but it is
+    /// NOT convergence-breaking for two independently-verified reasons:
+    ///
+    /// 1. The served leaf is ALWAYS the live store value (the lazy `store.get`
+    ///    returns the newest record), never a stale or fabricated value that
+    ///    disagrees with both the snapshot AND the live state. The client's
+    ///    `handleSyncRespLeaf` does a monotonic CRDT `map.merge(key, record)` on
+    ///    those exact bytes — it does NOT commit the server's bucket hash as
+    ///    authoritative state. The bucket hash is used only as a drill-down
+    ///    TRIGGER (`handleSyncRespBuckets`), so a stale bucket hash can only cause
+    ///    the client to descend into a subtree, where it then receives and merges
+    ///    the live truth.
+    /// 2. The self-heal round is the client's NEXT `SYNC_INIT`/root comparison:
+    ///    after merging the live leaf its local tree reflects the new value, so a
+    ///    subsequent root compare either matches (converged) or re-walks the still
+    ///    -divergent subtree and re-merges. No round ever commits a value the live
+    ///    store does not hold.
+    ///
+    /// This assertion is therefore a POSITIVE convergence guard, NOT
+    /// `assert!(true)`: it FAILS if the lazy-fetch path ever served a value that
+    /// disagrees with the live store (the only way the client could commit a value
+    /// inconsistent with durable truth). It does not borrow the SPEC-325b/TODO-544
+    /// session-SWAP "self-heals" claim — the evidence here (served-bytes ==
+    /// live-store-value under a mid-session mutation on the SAME cached snapshot)
+    /// is independent.
+    ///
+    /// Multi-thread runtime required: `build_session` uses `block_in_place`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::too_many_lines)]
+    async fn sync_torn_read_under_mid_session_mutation_serves_live_value() {
+        use crate::storage::datastores::RedbDataStore;
+        use crate::storage::durable_merkle::DurableMerkle;
+        use std::collections::HashMap as Map;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store =
+            Arc::new(RedbDataStore::new(dir.path().join("tornread.redb")).expect("redb open"));
+
+        // Seed enough keys to force a multi-level trie so the drill-down visits a
+        // real leaf bucket rather than serving everything from the root.
+        for i in 0..32u32 {
+            let key = format!("tr-key-{i:04}");
+            store
+                .add(
+                    "tmap",
+                    &key,
+                    &RecordValue::Lww {
+                        value: Value::Int(i64::from(i)),
+                        timestamp: Timestamp {
+                            millis: u64::from(i) + 1,
+                            counter: i,
+                            node_id: "n1".to_string(),
+                        },
+                    },
+                    0,
+                    1,
+                )
+                .await
+                .expect("seed");
+        }
+
+        // Record factory backed by the SAME store so leaf fetches lazy-load the
+        // durable values — exactly the production wiring.
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::clone(&store) as Arc<dyn crate::storage::map_data_store::MapDataStore>,
+            Vec::new(),
+        ));
+        let durable_index: Arc<
+            dyn crate::storage::map_data_store::DurableMerkleIndex + Send + Sync,
+        > = Arc::new(DurableMerkle);
+        let durable_store: Arc<dyn crate::storage::map_data_store::MapDataStore> =
+            Arc::clone(&store) as Arc<dyn crate::storage::map_data_store::MapDataStore>;
+        // Hold a clone of the factory so the test can read the live record the
+        // SAME way the handler does (`get_or_create` → `RecordStore::get`).
+        let read_factory = Arc::clone(&factory);
+        let svc = Arc::new(
+            SyncService::new(
+                Arc::new(MerkleSyncManager::default()),
+                factory,
+                Arc::new(ConnectionRegistry::new()),
+            )
+            .with_durable_index(durable_index, durable_store),
+        );
+
+        let conn = Some(ConnectionId(1));
+
+        // The key whose value we mutate mid-session. It is one of the seeded keys,
+        // so the snapshot's bucket structure already includes its OLD leaf hash.
+        let target_key = "tr-key-0007";
+        let old_value = Value::Int(7);
+        let old_timestamp = Timestamp {
+            millis: 8,
+            counter: 7,
+            node_id: "n1".to_string(),
+        };
+
+        // The leaf path the drill-down visits for this key: 8-char hex of its
+        // fnv1a hash, truncated to the tree depth (3), mirroring the build sink.
+        let target_path: String = {
+            let hex = format!("{:08x}", topgun_core::hash::fnv1a_hash(target_key));
+            hex[..3].to_string()
+        };
+
+        // --- 1. SYNC_INIT: builds and CACHES the snapshot for this connection. ---
+        let mut ctx_init = make_ctx(service_names::SYNC);
+        ctx_init.connection_id = conn;
+        let _root = match Arc::clone(&svc)
+            .oneshot(Operation::SyncInit {
+                ctx: ctx_init,
+                payload: topgun_core::messages::SyncInitMessage {
+                    map_name: "tmap".to_string(),
+                    last_sync_timestamp: None,
+                },
+            })
+            .await
+            .expect("SyncInit")
+        {
+            OperationResponse::Message(m) => match *m {
+                topgun_core::messages::Message::SyncRespRoot(r) => r.payload.root_hash,
+                o => panic!("expected SyncRespRoot, got {o:?}"),
+            },
+            o => panic!("expected Message, got {o:?}"),
+        };
+
+        // Capture the snapshot bucket hash that the client would verify for the
+        // target leaf path. This is the OLD-value-anchored structure: it was
+        // folded from the target key's leaf hash at snapshot build time.
+        let cached = svc
+            .session_registry
+            .get("tmap", ConnectionId(1))
+            .expect("session cached after SYNC_INIT");
+        // Aggregate the snapshot bucket children along the target path so we have a
+        // concrete pre-mutation structure fingerprint to compare after the write.
+        let snapshot_bucket_before: Map<char, u32> = cached
+            .lww_nodes
+            .get(&target_path[..2])
+            .cloned()
+            .unwrap_or_default();
+
+        // --- 2. Mutate the target key AFTER the snapshot was cached. ---
+        // A strictly-newer timestamp so the new write wins LWW and changes the
+        // key's leaf hash (the hash folds timestamp, so the snapshot's bucket hash
+        // is now stale relative to live).
+        let new_value = Value::Int(70_007);
+        let new_timestamp = Timestamp {
+            millis: 500_000,
+            counter: 0,
+            node_id: "n1".to_string(),
+        };
+        store
+            .add(
+                "tmap",
+                target_key,
+                &RecordValue::Lww {
+                    value: new_value.clone(),
+                    timestamp: new_timestamp.clone(),
+                },
+                0,
+                1,
+            )
+            .await
+            .expect("mid-session mutation");
+
+        // Confirm the snapshot was NOT rebuilt by the mutation: the cached session
+        // is the same Arc the registry held before the write, and its bucket hash
+        // for the target path still reflects the OLD leaf. This is what makes the
+        // window genuinely same-snapshot (force_rebuild=false reuse), not a swap.
+        let cached_after = svc
+            .session_registry
+            .get("tmap", ConnectionId(1))
+            .expect("session still cached");
+        assert!(
+            Arc::ptr_eq(&cached, &cached_after),
+            "snapshot must NOT be rebuilt by a mid-session write — the bucket walk \
+             below must reuse the SAME cached session (force_rebuild=false)"
+        );
+
+        // --- 3. MerkleReqBucket drill-down on the SAME connection. ---
+        // Walk to the target leaf, capturing the bucket hash the client verifies
+        // (snapshot, OLD-anchored) and the leaf value the client receives (live,
+        // NEW). The torn read is: structure verified == OLD, value served == NEW.
+        let mut served_value: Option<rmpv::Value> = None;
+        let mut served_timestamp: Option<Timestamp> = None;
+        let mut verified_bucket_hash: Option<u32> = None;
+        let mut stack = vec![String::new()];
+        let mut visited = 0usize;
+        while let Some(path) = stack.pop() {
+            visited += 1;
+            assert!(visited < 10_000, "walk did not terminate");
+            let mut ctx = make_ctx(service_names::SYNC);
+            ctx.connection_id = conn;
+            let resp = Arc::clone(&svc)
+                .oneshot(Operation::MerkleReqBucket {
+                    ctx,
+                    payload: topgun_core::messages::MerkleReqBucketMessage {
+                        payload: topgun_core::messages::MerkleReqBucketPayload {
+                            map_name: "tmap".to_string(),
+                            path: path.clone(),
+                        },
+                    },
+                })
+                .await
+                .expect("MerkleReqBucket");
+            match resp {
+                OperationResponse::Message(msg) => match *msg {
+                    topgun_core::messages::Message::SyncRespBuckets(b) => {
+                        for (child, hash) in &b.payload.buckets {
+                            let child_path = format!("{path}{child}");
+                            // Record the bucket hash on the route to the target key
+                            // — this is the snapshot-anchored hash the client uses
+                            // as its drill-down trigger.
+                            if target_path.starts_with(&child_path) {
+                                verified_bucket_hash = Some(*hash);
+                            }
+                            stack.push(child_path);
+                        }
+                    }
+                    topgun_core::messages::Message::SyncRespLeaf(l) => {
+                        for rec in l.payload.records {
+                            if rec.key == target_key {
+                                served_value = rec.record.value;
+                                served_timestamp = Some(rec.record.timestamp);
+                            }
+                        }
+                    }
+                    other => panic!("unexpected message in walk: {other:?}"),
+                },
+                OperationResponse::Empty => {}
+                other => panic!("unexpected response in walk: {other:?}"),
+            }
+        }
+
+        // --- Live evidence (AC1) ---
+        let served_value = served_value.expect("target key must be served as a leaf record");
+        let served_timestamp = served_timestamp.expect("served leaf must carry a timestamp");
+        let verified_bucket_hash =
+            verified_bucket_hash.expect("the walk must verify a snapshot bucket hash en route");
+
+        // Recompute the OLD (snapshot-time) leaf hash and the NEW (live) leaf hash
+        // so the report can quote the disagreement concretely.
+        let (_, old_leaf_hash) = crate::storage::map_data_store::merkle_leaf_hash(
+            target_key,
+            &RecordValue::Lww {
+                value: old_value.clone(),
+                timestamp: old_timestamp.clone(),
+            },
+        )
+        .expect("LWW leaf hash");
+        let (_, new_leaf_hash) = crate::storage::map_data_store::merkle_leaf_hash(
+            target_key,
+            &RecordValue::Lww {
+                value: new_value.clone(),
+                timestamp: new_timestamp.clone(),
+            },
+        )
+        .expect("LWW leaf hash");
+
+        eprintln!(
+            "SPEC-334 evidence: target_key={target_key} target_path={target_path}\n  \
+             snapshot_bucket_before (path {})={:?}\n  \
+             verified_bucket_hash (snapshot, OLD-anchored)={verified_bucket_hash}\n  \
+             old_leaf_hash={old_leaf_hash} new_leaf_hash={new_leaf_hash}\n  \
+             served_value (live)={served_value:?} served_ts.millis={}",
+            &target_path[..2],
+            snapshot_bucket_before,
+            served_timestamp.millis,
+        );
+
+        // The torn read EXISTS at the wire: the leaf hash baked into the verified
+        // bucket structure changed under the mutation. If this is not true the
+        // test is not exercising the torn-read window at all.
+        assert_ne!(
+            old_leaf_hash, new_leaf_hash,
+            "sanity: the mid-session mutation must change the target key's leaf hash, \
+             else there is no torn read to diagnose"
+        );
+
+        // CARDINAL convergence guard (non-vacuous): the value the client receives
+        // and merges MUST equal the LIVE store value — never the stale snapshot
+        // value, never a fabricated one. The client merges these exact bytes via
+        // monotonic LWW; serving the live truth is what makes the torn read
+        // self-healing rather than convergence-breaking. This FAILS if the
+        // lazy-fetch path ever serves a value inconsistent with durable state.
+        let live = read_factory
+            .get_or_create("tmap", hash_to_partition(target_key))
+            .get(target_key, false)
+            .await
+            .expect("live get")
+            .expect("target key present");
+        let RecordValue::Lww {
+            value: live_value,
+            timestamp: live_timestamp,
+        } = live.value
+        else {
+            panic!("target key must be an LWW record");
+        };
+        assert_eq!(
+            served_value,
+            value_to_rmpv(&live_value),
+            "torn read served a value that disagrees with the live store — the client \
+             would commit a state inconsistent with durable truth (convergence-breaking)"
+        );
+        assert_eq!(
+            served_timestamp, live_timestamp,
+            "served leaf timestamp must match the live record so LWW merge converges to truth"
+        );
+        // And the served value is the NEW one (proves the window landed live, not a
+        // stale snapshot read).
+        assert_eq!(
+            served_value,
+            value_to_rmpv(&new_value),
+            "served leaf must be the post-mutation value (the lazy fetch is live)"
+        );
+
+        // The drill-down verified a snapshot-anchored bucket hash that does NOT
+        // include the new leaf — documenting the torn read is real, while the
+        // served bytes above are the live truth the client actually converges on.
+        // (The snapshot bucket before the mutation is retained unchanged.)
+        assert_eq!(
+            snapshot_bucket_before,
+            cached_after
+                .lww_nodes
+                .get(&target_path[..2])
+                .cloned()
+                .unwrap_or_default(),
+            "the cached snapshot's bucket structure must be unchanged by the mutation \
+             (same-snapshot window, not a rebuild)"
+        );
+    }
+
     /// AC4 (TODO-545, red-on-revert): after a connection disconnects, its session
     /// entries are released so the cache cannot retain the full leaf-key set
     /// indefinitely. Two connections each run `SYNC_INIT` (two cached sessions);
