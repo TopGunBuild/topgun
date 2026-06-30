@@ -80,18 +80,62 @@ impl OrLedger {
     }
 }
 
-/// The observed tag set for one OR-Map sync leaf entry: active record tags MINUS
-/// tombstone tags. This is the user-visible OR-Map content for the key — a tag
-/// that has been tombstoned is no longer observed.
-pub fn observed_tags(entry: &ORMapEntry) -> HashSet<String> {
+/// The observed **value** set for one OR-Map sync leaf entry: the rendered
+/// `value` of every non-tombstoned active record.
+///
+/// ## Why the no-loss ledger must key on value, not tag
+///
+/// The server re-stamps every OR add's HLC (security: a forged client HLC must
+/// not win a future conflict) and, because the OR tag is derived from that HLC
+/// (`{millis}:{counter}:{node_id}`), it regenerates the tag as well. So the tag
+/// the *client* chose for an add is never the tag the server persists — keying a
+/// directional no-loss check on the client tag makes it vacuously red (the
+/// client tag is structurally absent from every recovered record). The record
+/// `value`, by contrast, is client-supplied and the server stores it verbatim,
+/// so it is the identity that actually survives sanitization and crash recovery.
+/// The persistent keyspace therefore writes a stable unique value per owned slot
+/// and the ledger reconciles on that value.
+///
+/// A tombstoned tag's value is excluded — a removed record is no longer observed.
+///
+/// ## Coverage limit: per-value, not per-add
+///
+/// The server dedups OR records by tag and stamps a fresh tag on every add, so N
+/// re-adds of the same `(key, value)` are stored as N distinct records. This set
+/// collapses them to one element, and the ledger likewise records the value once.
+/// The check therefore verifies that each acked VALUE survives recovery, not that
+/// each individual acked ADD does: losing M of N re-adds of the same value while
+/// at least one survives is not detected. The persistent keyspace writes one stable
+/// unique value per owned slot, so per-slot durability IS covered; closing the
+/// per-add gap needs the server-regenerated tag surfaced to the client (tracked in
+/// TODO-558), which is out of scope here.
+pub fn observed_values(entry: &ORMapEntry) -> HashSet<String> {
     let tombstones: HashSet<&str> = entry.tombstones.iter().map(String::as_str).collect();
     entry
         .records
         .iter()
-        .map(|r| r.tag.as_str())
-        .filter(|tag| !tombstones.contains(tag))
-        .map(ToString::to_string)
+        .filter(|r| !tombstones.contains(r.tag.as_str()))
+        .map(|r| render_value(&r.value))
         .collect()
+}
+
+/// Render an OR record `value` to the stable string identity the ledger keys on.
+/// Integer values (the soak's persistent-keyspace shape) render to their decimal
+/// form; any other shape falls back to its debug rendering so the check still has
+/// a deterministic, comparable identity.
+///
+/// Both `as_i64` and `as_u64` are tried so a positive integer that msgpack
+/// round-trips as an unsigned variant still renders to the same decimal string the
+/// ledger recorded — otherwise the debug fallback (`UInt(42)` vs `42`) would make
+/// the check falsely RED (fail-closed, but flaky).
+pub fn render_value(value: &rmpv::Value) -> String {
+    if let Some(n) = value.as_i64() {
+        return n.to_string();
+    }
+    if let Some(n) = value.as_u64() {
+        return n.to_string();
+    }
+    format!("{value:?}")
 }
 
 /// Directional OR-Map no-loss diff: every acked (net-present) OR add tag must
