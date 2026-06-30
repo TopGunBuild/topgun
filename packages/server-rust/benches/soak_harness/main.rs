@@ -233,6 +233,14 @@ async fn run_soak(config: &Config) -> i32 {
     // multi-writer and invalidate the no-loss check's single-writer premise, so
     // fail loudly rather than silently degrade the gate.
     if config.or_churn {
+        // `or_keyspace == 0` would make `is_multiple_of` vacuously true while every
+        // `slot % or_keyspace.max(1)` collapses to a single multi-writer persist key,
+        // defeating the single-writer premise the assert exists to protect. Require a
+        // positive keyspace explicitly.
+        assert!(
+            config.or_keyspace > 0,
+            "or_keyspace must be > 0 when or_churn is enabled"
+        );
         assert!(
             config.or_keyspace.is_multiple_of(config.churn_clients),
             "or_keyspace ({}) must be a multiple of churn_clients ({}) to keep the \
@@ -856,7 +864,18 @@ async fn recovery_checkpoint(
         match v.ormap_read_all(OR_MAP).await {
             Ok(post_observed) => {
                 let missing = missing_acked_adds(&acked, &post_observed);
-                if !missing.is_empty() {
+                if missing.is_empty() {
+                    // Positive completion marker. A CI gate that only greps for the
+                    // LOST signature is false-green if the check never reaches this
+                    // point (crash, early exit, or the read-failed HARD below): the
+                    // absence of a failure string is indistinguishable from "did not
+                    // run". Emit a PASS line the gate can positively assert ran.
+                    let acked_count: usize =
+                        acked.values().map(std::collections::HashSet::len).sum();
+                    println!(
+                        "OR-Map no-loss check: PASS — {acked_count} acked add(s) verified across recovery"
+                    );
+                } else {
                     out.hard.push(format!(
                         "OR-Map acked add(s) LOST across recovery: {} (key,tag) pair(s) (e.g. {})",
                         missing.len(),

@@ -474,8 +474,22 @@ jobs:
           OUT=$(${{ steps.soak.outputs.bin }} \
             --duration 30 --crash-interval 9 --or-churn true --or-every 3)
           echo "$OUT"
+          # Real OR durability loss.
           if echo "$OUT" | grep -q "OR-Map acked add(s) LOST across recovery"; then
             echo "FAIL: acked OR-Map add(s) lost across crash recovery"
+            exit 1
+          fi
+          # The OR check errored (post-recovery read failed) — a real loss could
+          # hide behind it (it could even be the cause), so do not treat as green.
+          if echo "$OUT" | grep -q "OR-Map no-loss check could not complete"; then
+            echo "FAIL: OR-Map no-loss check could not complete"
+            exit 1
+          fi
+          # Positive assertion that the OR check actually RAN. Without it, a crash or
+          # early exit before the recovery check prints neither failure string, and
+          # grepping for absence-of-loss alone would be vacuously green.
+          if ! echo "$OUT" | grep -q "OR-Map no-loss check: PASS"; then
+            echo "FAIL: OR-Map no-loss check did not run (no PASS marker — crash/early-exit?)"
             exit 1
           fi
           echo "OK: no OR-Map acked-add loss across recovery"
