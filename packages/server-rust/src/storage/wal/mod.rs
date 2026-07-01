@@ -1283,7 +1283,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // AC1: append-before-ack — entry durable before append returns
+    // AC1: append-before-ack — entry persisted (readable) before append returns;
+    // fsync-durability under kill -9 depends on the policy (see WalFsyncPolicy)
     // -----------------------------------------------------------------------
 
     #[tokio::test]
