@@ -62,27 +62,23 @@ pub trait StorageEngine: Send + Sync + 'static {
     /// `put()`, and the value is never re-put, so a concurrent same-key write
     /// can be neither clobbered nor lost.
     ///
-    /// The mark is applied only when `last_update_time <= now`. This is a
-    /// best-effort, timestamp-based guard — NOT a per-write identity check. It
-    /// reliably leaves a *strictly newer* write (`last_update_time > now`)
-    /// dirty, but it does not distinguish the caller's own write from a
-    /// concurrent same-key write carrying an equal-millisecond timestamp. Under
-    /// two concurrent puts to the same key in the same millisecond, this can
-    /// transiently mark the *other* writer's not-yet-durable record clean (hence
-    /// evictable) before that writer's own persist completes.
+    /// The mark is applied only when the resident record's `write_token` equals
+    /// the caller's `token` — a per-write identity check. This guarantees the
+    /// mark applies only when the resident record is the exact write the caller
+    /// just persisted. A concurrent same-key write (any timestamp, equal or
+    /// newer) carries a different token and is left dirty until its own persist
+    /// completes. Two concurrent puts to the same key in the same millisecond
+    /// therefore never prematurely mark each other clean.
     ///
-    /// That window is bounded and self-healing: the other writer's persist runs
-    /// to completion independently of any eviction (eviction only drops the
-    /// in-memory copy, it does not cancel an in-flight write), and
-    /// `RecordStore::put` acks only after its own persist returns — so no
-    /// acked-durable write is ever lost. It is the same class as the engine's
-    /// existing last-writer-wins blind clobber on concurrent same-key writes.
-    /// True per-write identity marking (`mark_stored(key, now, token)`) is left
-    /// to a tracked follow-up.
+    /// `now` is retained: on a successful match, `on_store(now)` stamps
+    /// `last_stored_time = now` for `is_dirty()` bookkeeping. The token
+    /// identifies the write just persisted, whether a direct `put()` or a
+    /// deferred flush of the current resident.
     ///
     /// Returns `true` if a record was found and the mark applied; `false` if
-    /// the key is absent or a strictly-newer write superseded it.
-    fn mark_stored(&self, key: &str, now: i64) -> bool;
+    /// the key is absent or the resident record is a different write (token
+    /// mismatch — a newer write owns the slot).
+    fn mark_stored(&self, key: &str, now: i64, token: u64) -> bool;
 
     /// Remove a record by key, returning the removed record.
     fn remove(&self, key: &str) -> Option<Record>;

@@ -3,9 +3,21 @@
 //! Defines the core data structures stored in [`StorageEngine`](super::StorageEngine):
 //! [`Record`], [`RecordMetadata`], [`RecordValue`], and [`OrMapEntry`].
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use serde::{Deserialize, Serialize};
 use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
+
+/// Process-monotonic counter for minting per-write identity tokens.
+///
+/// Initialized at 1 so the first `fetch_add(1)` returns 1. Token `0` is
+/// reserved exclusively for `Default`-constructed `RecordMetadata`, which must
+/// never enter the engine in a dirty state. Every live write constructs its
+/// metadata via `RecordMetadata::new()`, which mints a token ≥ 1.
+/// `Relaxed` ordering is sufficient because token publication is already
+/// synchronized by the `DashMap` shard lock at `get_mut`/put.
+static WRITE_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 /// Minimum elapsed milliseconds before a read access updates `last_access_time`.
 ///
@@ -21,9 +33,16 @@ pub const RECENCY_COALESCE_MS: i64 = 100;
 ///
 /// **Non-leakage invariant:** This struct intentionally has NO `Serialize` or
 /// `Deserialize` derive. Only `RecordValue` crosses the wire or reaches the
-/// persistence layer. The `cost` field in particular is a local, never-wire,
-/// never-disk heap-accounting value derived at write time and re-derived on
-/// every load — it must never be serialized.
+/// persistence layer. The `cost` and `write_token` fields in particular are
+/// local, never-wire, never-disk values — they must never be serialized.
+///
+/// **Write-token invariant:** `write_token == 0` means the record was
+/// `Default`-constructed and must never enter the engine dirty. Every live or
+/// hydrated write constructs metadata via `new()`, which mints a token ≥ 1.
+/// `mark_stored` uses the token as an exact per-write identity check: it marks a
+/// record clean only when the resident record's token matches the one the caller
+/// just persisted, so a concurrent same-key write (any timestamp, equal or newer)
+/// carrying a different token is never prematurely marked clean.
 #[derive(Debug, Clone, Default)]
 pub struct RecordMetadata {
     /// Record version, incremented on every update.
@@ -46,13 +65,35 @@ pub struct RecordMetadata {
     /// Re-derived on every load/hydrate so records entering via any path carry
     /// a real cost (eviction → reload steady state).
     pub cost: u64,
+    /// Process-monotonic per-write identity token.
+    ///
+    /// Minted once per logical write via `WRITE_TOKEN.fetch_add(1, Relaxed)`
+    /// inside `new()`. Token `0` is reserved for `Default`-constructed metadata
+    /// (which must never enter the engine dirty); every live write mints a
+    /// token ≥ 1. `mark_stored` uses this token as an exact identity check —
+    /// only the record whose token matches the one the caller persisted is
+    /// marked clean.
+    ///
+    /// LOCAL ONLY — never serialized to the wire or persisted to the datastore.
+    pub write_token: u64,
 }
 
 impl RecordMetadata {
+    /// Mints a fresh per-write identity token from the process-monotonic counter.
+    ///
+    /// Returns a value ≥ 1. Token `0` is reserved for `Default`-constructed
+    /// metadata. All minting goes through this single helper — never
+    /// `load`+`store`, which would break uniqueness under concurrent writers.
+    fn mint_token() -> u64 {
+        WRITE_TOKEN.fetch_add(1, Ordering::Relaxed)
+    }
+
     /// Creates new metadata with the given wall-clock time and estimated cost.
     ///
     /// Sets `creation_time`, `last_access_time`, and `last_update_time` to `now`.
     /// Version starts at 1, hits at 0, and `last_stored_time` at 0 (never stored).
+    /// Mints a fresh per-write identity token (≥ 1) for use as the exact-identity
+    /// key in `mark_stored`.
     #[must_use]
     pub fn new(now: i64, cost: u64) -> Self {
         Self {
@@ -63,6 +104,7 @@ impl RecordMetadata {
             last_stored_time: 0,
             hits: 0,
             cost,
+            write_token: Self::mint_token(),
         }
     }
 
@@ -79,10 +121,17 @@ impl RecordMetadata {
         }
     }
 
-    /// Records a write: increments `version` and updates `last_update_time`.
+    /// Records a write: increments `version`, updates `last_update_time`, and
+    /// mints a fresh per-write identity token.
+    ///
+    /// A fresh token is minted so that every logical write boundary has a unique
+    /// identity. Without this, an in-place update followed by `mark_stored` could
+    /// match a stale token from the original `new()` call and mark the record clean
+    /// before the updated value is persisted.
     pub fn on_update(&mut self, now: i64) {
         self.version = self.version.saturating_add(1);
         self.last_update_time = now;
+        self.write_token = Self::mint_token();
     }
 
     /// Records a persistence event: updates `last_stored_time`.
