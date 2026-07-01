@@ -319,6 +319,43 @@ pub trait MapDataStore: Send + Sync {
 /// Created by [`DurableMerkleIndex::build_session`]; the caller is responsible
 /// for deciding when to discard the snapshot (e.g. after the sync round-trip
 /// completes or a write invalidates the root).
+///
+/// # Consistency contract: pins structure, not values
+///
+/// A session pins ONLY the trie STRUCTURE captured at build time:
+/// - the per-path aggregate bucket hashes (`lww_nodes` / `ormap_nodes`),
+/// - the leaf-KEY membership (`leaf_keys_by_path`), and
+/// - the aggregate roots (`lww_root` / `ormap_root`).
+///
+/// It deliberately does NOT pin per-leaf record VALUES. During a sync drill-down
+/// the leaf-serving handlers fetch each record's bytes LIVE from the store
+/// (a lazy `store.get` keyed by the pinned leaf key), so the value a peer
+/// receives is always the newest durable value, not the one that contributed to
+/// the pinned bucket hash. Holding only key membership keeps the snapshot's
+/// memory cost proportional to the key set rather than the full value set.
+///
+/// This means a write landing BETWEEN the session build and a leaf fetch yields
+/// a wire-level torn read: the bucket hash the peer verifies was folded from the
+/// OLD leaf, while the served leaf carries the NEWER live value. The guarantee
+/// THIS side provides is narrow and local: the leaf-serving handlers always hand
+/// back the live durable value for a pinned key, never the stale value that fed
+/// the pinned bucket hash.
+///
+/// That torn read is self-healing under the reconnect protocol the peer runs: a
+/// peer uses the bucket hash only as a drill-down TRIGGER — it descends into the
+/// subtree on a hash mismatch but never commits the hash as authoritative state —
+/// and folds the served leaf in monotonically (LWW by timestamp; OR-Map by
+/// tag/tombstone CRDT merge). Because the served bytes are the live store value,
+/// the peer never commits a value the store does not hold, and any residual root
+/// divergence is resolved on the next root compare. This convergence is a
+/// property of that protocol, NOT an invariant enforced by this struct — a peer
+/// that treated the bucket hash as authoritative state would not get it.
+///
+/// One bounded-staleness corollary: a key created AFTER the build is absent from
+/// the pinned `leaf_keys_by_path` and is not served this round; the peer learns
+/// it on the next `SYNC_INIT`, whose fresh snapshot includes it. That is delayed
+/// visibility, not divergence. Pinning per-leaf values here would buy nothing for
+/// correctness while inflating the snapshot to the full value set.
 pub struct MerkleSession {
     /// Pre-computed per-path aggregate bucket hashes for the LWW tree.
     /// `""` maps to the root-level children; each child path maps to its own
