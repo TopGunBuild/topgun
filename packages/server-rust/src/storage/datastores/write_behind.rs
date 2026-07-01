@@ -54,8 +54,15 @@ pub struct WriteBehindConfig {
     /// to avoid split-brain on partial-disk failure.
     pub wal_dir: PathBuf,
     /// Controls how aggressively the WAL writer calls fsync after writing frames.
-    /// `Batched` (the default) amortises fsync cost with group commit (~10ms/~100 ops).
-    /// Do NOT change to `PerOp` in production without evaluating write latency impact.
+    ///
+    /// The default is `Batched`: a write is acked after its frame is appended, but
+    /// the fsync is deferred to a ~10ms group-commit timer (or a 100-frame flush).
+    /// This is the throughput-favouring default — it does NOT make an acked write
+    /// durable under an unclean `kill -9`: writes inside the group-commit window are
+    /// lost. That is an accepted tradeoff for the single-node demo tier, where the
+    /// originating client still holds the write locally and re-converges on the next
+    /// delta-sync. Set `TOPGUN_WAL_FSYNC_POLICY=per_op` to make every acked write
+    /// fsynced-before-ack (acked == durable) at a large per-write latency cost.
     pub wal_fsync_policy: WalFsyncPolicy,
 }
 

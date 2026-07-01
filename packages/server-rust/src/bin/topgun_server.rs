@@ -95,7 +95,7 @@ use topgun_server::storage::impls::StorageConfig;
 use topgun_server::storage::map_data_store::MapDataStore;
 use topgun_server::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
 use topgun_server::storage::mutation_observer::MutationObserver;
-use topgun_server::storage::wal::{Wal, WalRecovery, WalWriter};
+use topgun_server::storage::wal::{Wal, WalFsyncPolicy, WalRecovery, WalWriter};
 
 // ---------------------------------------------------------------------------
 // Storage backend selection
@@ -846,6 +846,21 @@ async fn main() -> anyhow::Result<()> {
         rbac_configured,
         "eviction + write-behind + WAL initialized"
     );
+
+    // Make the default's crash-durability caveat impossible to miss at boot: under
+    // Batched a kill -9 inside the group-commit window drops acked-but-unfsynced
+    // writes. Operators who need acked-implies-durable must opt into PerOp.
+    if matches!(
+        write_behind_config.wal_fsync_policy,
+        WalFsyncPolicy::Batched
+    ) && !matches!(backend, StorageBackend::Null)
+    {
+        tracing::warn!(
+            "WAL fsync policy is Batched (default): acked writes inside the ~10ms \
+             group-commit window are NOT durable under an unclean shutdown. Set \
+             TOPGUN_WAL_FSYNC_POLICY=per_op for acked-implies-durable."
+        );
+    }
 
     // Allow integration test environments to opt in to detailed auth errors.
     let insecure_forward_auth_errors = std::env::var("INSECURE_FORWARD_AUTH_ERRORS")
