@@ -173,19 +173,20 @@ impl RecordStore for DefaultRecordStore {
         let write_token = metadata.write_token;
         let record = Record { value, metadata };
 
+        // Sanity check: a live write must carry a minted token (>= 1). Token 0 is
+        // reserved for Default-constructed/hydrated metadata, which must never
+        // enter the engine dirty on this path. We assert our OWN captured token,
+        // not the resident's: a concurrent same-key write can replace the slot
+        // between our put() and any read, and tokens are minted at new() time
+        // rather than put() time, so the resident's token has no ordering
+        // relationship to ours — comparing against it would panic spuriously.
+        debug_assert_ne!(
+            write_token, 0,
+            "live write must carry a minted token (>= 1)"
+        );
+
         // Step 4: Put into engine
         self.engine.put(key, record.clone());
-
-        // Sanity check: in debug builds, verify the resident's token matches the
-        // one we just minted. A mismatch here means a concurrent same-key write
-        // landed between our put() and this check — normal under contention, but
-        // the token we captured above is still the right one to pass to mark_stored.
-        debug_assert!(
-            self.engine
-                .get(key)
-                .map_or(true, |r| r.metadata.write_token >= write_token),
-            "resident token must be >= our token (a newer write may have landed)"
-        );
 
         // Step 5: Fire observer notifications
         if let Some(ref old) = old_record {
