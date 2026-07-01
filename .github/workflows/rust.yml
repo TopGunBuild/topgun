@@ -401,10 +401,11 @@ jobs:
     # detection must keep working. We run the two negative controls (which MUST
     # go RED) plus a short no-crash convergence/churn/memory soak (which MUST be
     # green). The full 72h crash-loop soak runs on a Hetzner scratch box, not in
-    # CI. The crash-loop path is still RED at load — now due to TODO-546
-    # (ack-before-durable), not the closed TODO-530 — so CI exercises the no-crash
-    # mode here; the loaded no-crash variant is the separate non-blocking
-    # soak-loaded job below. See packages/server-rust/benches/soak_harness/README.md.
+    # CI. TODO-546 (ack-before-durable) is closed by SPEC-330 (parse-normalize +
+    # fatal-on-unknown; acked == durable under correctly-applied PerOp). The
+    # loaded no-crash variant is the separate non-blocking soak-loaded job below;
+    # a loaded WITH-crash acked==durable gate runs there too (non-blocking, advisory).
+    # See packages/server-rust/benches/soak_harness/README.md.
     steps:
       - uses: actions/checkout@v4
 
@@ -465,11 +466,11 @@ jobs:
         run: |
           # Gate the OR-Map directional no-loss invariant under kill -9 + OR churn.
           # We assert ONLY the absence of the OR loss signature, not the full
-          # `passed == true`: a loaded with-crash soak can still RED on the open LWW
-          # ack-before-durable window (TODO-546), which is a separate known-open
-          # critical, not an OR regression. Coupling this step to `passed == true`
-          # would just re-report TODO-546 and flap. The OR no-loss line is the
-          # regression signal owned here.
+          # `passed == true`: a short crash soak at this scale (churn 6 / keyspace
+          # limited) may trip on unrelated convergence-under-backlog conditions that
+          # are not OR regressions. The OR no-loss line is the regression signal owned
+          # here; LWW acked==durable at load is validated in the soak-loaded job's
+          # --no-pre-kill-drain gate (TODO-546 was closed by SPEC-330).
           set +e
           OUT=$(${{ steps.soak.outputs.bin }} \
             --duration 30 --crash-interval 9 --or-churn true --or-every 3)
@@ -515,16 +516,19 @@ jobs:
     # a real backlog (churn 16 / keyspace 200 / 150s, no-crash) so those regressions
     # fail at PR/CI time instead of only at the 72h Hetzner run or in production.
     #
-    # Why NO-CRASH at load: a loaded WITH-crash soak is currently RED purely due to
-    # the open ack-before-durable gap (TODO-546) — acked-but-unflushed writes are lost
-    # on kill -9 at load. That is a known-open critical, not a fresh regression, so a
-    # with-crash gate here would just re-report TODO-546. The with-crash loaded
-    # reproducer stays local/Hetzner as the TODO-546 validator; once TODO-546 is fixed
-    # it should be promoted into CI as a blocking crash-recovery-at-load gate.
+    # Two gates run sequentially in this job:
+    # 1. No-crash loaded convergence soak (--crash-interval 0, 150s) — asserts
+    #    convergence under real write-behind backlog pressure (closed SPEC-325b AC1).
+    # 2. WITH-crash --no-pre-kill-drain acked==durable soak (--wal-fsync per_op,
+    #    ~75s) — asserts WAL durability without a pre-kill buffer drain. TODO-546
+    #    (ack-before-durable) was closed by SPEC-330 (parse-normalize + fatal-on-
+    #    unknown; acked == durable under correctly-applied PerOp). This gate
+    #    confirms that on the ubuntu CI runner — mirroring the hetzner-soak-runner.sh
+    #    NO_PRE_KILL_DRAIN=1 contract. Both gates remain NON-BLOCKING.
     #
-    # Why non-blocking for now: this GREEN result is established on local debug/macOS;
-    # it is not yet validated on ubuntu CI. Promote to BLOCKING after >=10 consecutive
-    # green runs on main (owner: stabilization-program G4b gate). Until then it is
+    # Why non-blocking for now: GREEN results established on local debug/macOS;
+    # not yet validated on ubuntu CI. Promote BOTH to BLOCKING after >=10 consecutive
+    # green runs on main (owner: stabilization-program G4b gate). Until then they are
     # advisory so a CI-platform flake never blocks merges.
     continue-on-error: true
     steps:
@@ -558,9 +562,10 @@ jobs:
       - name: Loaded no-crash convergence soak must be GREEN
         run: |
           # Loaded params build a real write-behind backlog (vs the tiny smoke) — the
-          # with-crash variant at these exact params loses acked-but-unflushed writes
-          # on kill -9 (TODO-546), direct proof the backlog is real and non-trivial;
-          # this no-crash run exercises convergence under that same write pressure.
+          # companion with-crash --no-pre-kill-drain gate below validates WAL
+          # durability at these same params (SPEC-330 closed TODO-546: acked == durable
+          # under correctly-applied PerOp); this no-crash run exercises convergence
+          # under the same write pressure.
           # Memory: the slope threshold stays at the honest default (50 MB/h) but the
           # min-growth guard makes the slope arm fire only as a GROSS-leak tripwire — a
           # 150s OR-churn burst's slope extrapolation is not a valid slow-leak signal
@@ -586,6 +591,53 @@ jobs:
         with:
           name: soak-loaded-${{ github.run_id }}
           path: soak-loaded.json
+          retention-days: 30
+
+      - name: Loaded WITH-crash --no-pre-kill-drain acked==durable soak (advisory)
+        # NON-BLOCKING: this step relies on the job-level continue-on-error: true.
+        # A RED result here does NOT fail the workflow or block merges.
+        #
+        # Why this gate: SPEC-330 (TODO-546) closed the ack-before-durable gap by
+        # diagnosing a `perop` → silent-`Batched` parse downgrade and fixing it with
+        # parse-normalize + fatal-on-unknown. Under correctly-applied PerOp every WAL
+        # frame is fdatasync'd BEFORE the ingress write acks, so acked == durable on
+        # an unclean kill -9 — even without a pre-kill buffer drain. This step
+        # confirms that invariant on the ubuntu CI runner using the same contract as
+        # hetzner-soak-runner.sh (NO_PRE_KILL_DRAIN=1 + WAL_FSYNC=per_op + FLUSH=1000):
+        #   - --wal-fsync per_op: every WAL frame fsynced before ack (WAL on critical path)
+        #   - TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS=1000: production flush cadence so the
+        #     write-behind buffer is genuinely on the recovery critical path (fast flush
+        #     would drain the buffer before kill -9, making acked==durable trivially true
+        #     for the wrong reason)
+        #   - --no-pre-kill-drain: no pre-kill buffer flush, WAL is the ONLY safety net
+        #
+        # Reuses the already-built binary (steps.soak.outputs.bin) — no rebuild needed.
+        # Duration 75s (materially shorter than the no-crash step's 150s) with a concrete
+        # --crash-interval=15s so multiple kill -9 cycles fire within the run. Wall-clock
+        # budget: cargo build (~5-6m) + no-crash (150s) + this step (75s) + overhead ~1m
+        # = ~12m total, comfortably under timeout-minutes: 25.
+        #
+        # Promote to BLOCKING after >=10 consecutive green runs on main
+        # (owner: stabilization-program G4b gate). Mirrors the SPEC-329 non-blocking
+        # soak-loaded promotion pattern (see "Why non-blocking for now" above).
+        run: |
+          export TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS=1000
+          ${{ steps.soak.outputs.bin }} \
+            --duration 75 --crash-interval 15 --steady-interval 10 \
+            --churn-clients 16 --keyspace 200 --quiesce 5 \
+            --no-pre-kill-drain \
+            --wal-fsync per_op \
+            --json-output soak-loaded-crash.json
+          jq -e '.passed == true' soak-loaded-crash.json >/dev/null \
+            || { echo "FAIL: loaded with-crash acked==durable soak did not pass"; cat soak-loaded-crash.json; exit 1; }
+          echo "OK: loaded with-crash acked==durable soak passed"
+
+      - name: Upload loaded with-crash soak report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-loaded-crash-${{ github.run_id }}
+          path: soak-loaded-crash.json
           retention-days: 30
 
   audit:
