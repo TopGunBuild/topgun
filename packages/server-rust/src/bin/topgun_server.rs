@@ -847,19 +847,24 @@ async fn main() -> anyhow::Result<()> {
         "eviction + write-behind + WAL initialized"
     );
 
-    // Make the default's crash-durability caveat impossible to miss at boot: under
-    // Batched a kill -9 inside the group-commit window drops acked-but-unfsynced
-    // writes. Operators who need acked-implies-durable must opt into PerOp.
-    if matches!(
-        write_behind_config.wal_fsync_policy,
-        WalFsyncPolicy::Batched
-    ) && !matches!(backend, StorageBackend::Null)
-    {
-        tracing::warn!(
-            "WAL fsync policy is Batched (default): acked writes inside the ~10ms \
-             group-commit window are NOT durable under an unclean shutdown. Set \
-             TOPGUN_WAL_FSYNC_POLICY=per_op for acked-implies-durable."
-        );
+    // Make each policy's crash-durability caveat impossible to miss at boot on a
+    // durable backend: Batched drops acked writes inside the group-commit window
+    // under kill -9, and None never fsyncs at all. PerOp (acked == durable) is
+    // silent. Null is not a durable backend, so no WAL caveat applies.
+    if !matches!(backend, StorageBackend::Null) {
+        match write_behind_config.wal_fsync_policy {
+            WalFsyncPolicy::Batched => tracing::warn!(
+                "WAL fsync policy is Batched (default): acked writes inside the ~10ms \
+                 group-commit window are NOT durable under an unclean shutdown. Set \
+                 TOPGUN_WAL_FSYNC_POLICY=per_op for acked-implies-durable."
+            ),
+            WalFsyncPolicy::None => tracing::warn!(
+                "WAL fsync policy is None: the WAL is never fsynced, so acked writes are \
+                 NOT crash-safe at all. This is intended for tests/benchmarks only — set \
+                 TOPGUN_WAL_FSYNC_POLICY=per_op (durable) or batched (default) for production."
+            ),
+            WalFsyncPolicy::PerOp => {}
+        }
     }
 
     // Allow integration test environments to opt in to detailed auth errors.

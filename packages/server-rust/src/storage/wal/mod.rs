@@ -1264,15 +1264,21 @@ mod tests {
         println!("PerOp     {perop_ops:>10.0}   {perop_p50:>7}   {perop_p99:>7}");
         println!("Batched   {batched_ops:>10.0}   {batched_p50:>7}   {batched_p99:>7}");
         println!("None      {none_ops:>10.0}   {none_p50:>7}   {none_p99:>7}");
+        assert!(
+            perop_ops > 0.0 && batched_ops > 0.0 && none_ops > 0.0,
+            "degenerate run: a policy measured 0 ops/sec"
+        );
         let slowdown = batched_ops / perop_ops;
         println!("Batched/PerOp throughput ratio: {slowdown:.1}x");
 
-        // Sanity floor (not a tight perf gate — kept loose so the ignored bench
-        // never fails on a fast NVMe where OS buffering blurs the policies):
-        // fsync-every-append cannot out-throughput the no-fsync path.
+        // Sanity floor: fsync-every-append does strictly more work than the
+        // no-fsync path on the same medium, so PerOp must not out-throughput None.
+        // A PerOp faster-or-equal to None would mean fsync was silently skipped.
+        // (Ignored manual bench; on a pure RAM-disk where fsync is a near-no-op
+        // the two can converge — re-check this margin if running there.)
         assert!(
-            perop_ops <= none_ops * 1.5,
-            "PerOp ({perop_ops:.0}) unexpectedly faster than None ({none_ops:.0}) — fsync accounting suspect"
+            perop_ops <= none_ops,
+            "PerOp ({perop_ops:.0}) not slower than None ({none_ops:.0}) — fsync may be silently skipped"
         );
     }
 
