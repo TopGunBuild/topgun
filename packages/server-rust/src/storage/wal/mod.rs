@@ -32,20 +32,28 @@ use crate::storage::record::RecordValue;
 /// Controls how aggressively the WAL writer calls `fsync` after writing frames.
 ///
 /// Choosing the right policy is a crash-safety vs. throughput tradeoff:
-/// - `PerOp` maximises durability at the cost of per-write syscall overhead.
-/// - `Batched` amortises fsync cost across a group of writes (the default).
+/// - `PerOp` fsyncs every frame *before* the write acks, so an acked write is
+///   durable across an unclean `kill -9` (acked == durable). Highest per-write
+///   latency: on macOS `sync_data` is a full `F_FULLFSYNC` device barrier.
+/// - `Batched` (the default) acks after the frame is appended but fsyncs only on
+///   a ~10ms group-commit timer or a 100-frame flush. Acked writes inside that
+///   window are NOT durable under an unclean `kill -9`. This is the
+///   throughput-favouring default for the single-node demo tier; set `PerOp`
+///   when acked-implies-durable is required.
 /// - `None` skips fsync entirely — useful for tests and throughput benchmarks
 ///   where crash-safety is not required.
 ///
 /// The *behaviour* of the policy (actually calling fsync) is implemented in the
-/// `WalWriter` (307c). This enum is the configuration carrier only.
+/// `WalWriter`. This enum is the configuration carrier only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WalFsyncPolicy {
-    /// Call `fsync` after every appended frame. Safest; highest latency.
+    /// Call `fsync` after every appended frame, before the write acks. Acked ==
+    /// durable under `kill -9`. Highest latency.
     PerOp,
-    /// Call `fsync` after each flush batch. Default — good balance of safety
-    /// and throughput.
+    /// Default. Ack after append; fsync on a ~10ms group-commit timer / 100-frame
+    /// flush. Highest throughput, but acked writes in the group-commit window are
+    /// NOT durable under an unclean shutdown.
     #[default]
     Batched,
     /// Never call `fsync`. OS-buffered writes only. Not crash-safe.
@@ -1201,8 +1209,82 @@ mod tests {
         }
     }
 
+    /// Manual measurement of the per-append fsync tax of each `WalFsyncPolicy`.
+    ///
+    /// `#[ignore]` so it never runs in CI (it is a benchmark, not a correctness
+    /// assertion) — invoke it deliberately to reproduce the durability-vs-throughput
+    /// numbers behind the production-default fsync choice:
+    ///
+    /// ```text
+    /// cargo test --release -p topgun-server --lib \
+    ///   wal::tests::measure_fsync_policy_append_cost -- --ignored --nocapture
+    /// ```
+    ///
+    /// It appends a fixed number of frames to a single partition sequentially
+    /// (the worst case for `PerOp`, where every append fsyncs before returning)
+    /// and reports total throughput plus p50/p99 append latency for `PerOp`,
+    /// `Batched`, and `None`. Single-partition sequential isolates the raw
+    /// per-fsync cost; production spreads writes across 271 partitions, so the
+    /// aggregate `PerOp` penalty is amortised by cross-partition fsync parallelism.
+    #[tokio::test]
+    #[ignore = "benchmark; run manually with --ignored --nocapture"]
+    async fn measure_fsync_policy_append_cost() {
+        const N: u64 = 5000;
+        const WARMUP: u64 = 200;
+
+        async fn run(policy: WalFsyncPolicy) -> (f64, u64, u64) {
+            let dir = tempfile::tempdir().unwrap();
+            let wal = WalWriter::new(dir.path().to_path_buf(), policy).unwrap();
+            // Warm up so file creation / first-write cost is excluded.
+            for seq in 1..=WARMUP {
+                wal.append(0, &make_wal_entry(seq)).await.unwrap();
+            }
+            let mut samples: Vec<u128> = Vec::with_capacity(usize::try_from(N).unwrap_or(0));
+            let start = std::time::Instant::now();
+            for seq in (WARMUP + 1)..=(WARMUP + N) {
+                let t = std::time::Instant::now();
+                wal.append(0, &make_wal_entry(seq)).await.unwrap();
+                samples.push(t.elapsed().as_nanos());
+            }
+            let elapsed = start.elapsed();
+            samples.sort_unstable();
+            let p50_us = u64::try_from(samples[samples.len() / 2] / 1000).unwrap_or(u64::MAX);
+            let p99_us =
+                u64::try_from(samples[samples.len() * 99 / 100] / 1000).unwrap_or(u64::MAX);
+            let ops_per_sec = f64::from(u32::try_from(N).unwrap()) / elapsed.as_secs_f64();
+            (ops_per_sec, p50_us, p99_us)
+        }
+
+        let (perop_ops, perop_p50, perop_p99) = run(WalFsyncPolicy::PerOp).await;
+        let (batched_ops, batched_p50, batched_p99) = run(WalFsyncPolicy::Batched).await;
+        let (none_ops, none_p50, none_p99) = run(WalFsyncPolicy::None).await;
+
+        println!("\n=== WAL append fsync-policy cost (single partition, {N} appends) ===");
+        println!("policy    ops/sec        p50(us)   p99(us)");
+        println!("PerOp     {perop_ops:>10.0}   {perop_p50:>7}   {perop_p99:>7}");
+        println!("Batched   {batched_ops:>10.0}   {batched_p50:>7}   {batched_p99:>7}");
+        println!("None      {none_ops:>10.0}   {none_p50:>7}   {none_p99:>7}");
+        assert!(
+            perop_ops > 0.0 && batched_ops > 0.0 && none_ops > 0.0,
+            "degenerate run: a policy measured 0 ops/sec"
+        );
+        let slowdown = batched_ops / perop_ops;
+        println!("Batched/PerOp throughput ratio: {slowdown:.1}x");
+
+        // Sanity floor: fsync-every-append does strictly more work than the
+        // no-fsync path on the same medium, so PerOp must not out-throughput None.
+        // A PerOp faster-or-equal to None would mean fsync was silently skipped.
+        // (Ignored manual bench; on a pure RAM-disk where fsync is a near-no-op
+        // the two can converge — re-check this margin if running there.)
+        assert!(
+            perop_ops <= none_ops,
+            "PerOp ({perop_ops:.0}) not slower than None ({none_ops:.0}) — fsync may be silently skipped"
+        );
+    }
+
     // -----------------------------------------------------------------------
-    // AC1: append-before-ack — entry durable before append returns
+    // AC1: append-before-ack — entry persisted (readable) before append returns;
+    // fsync-durability under kill -9 depends on the policy (see WalFsyncPolicy)
     // -----------------------------------------------------------------------
 
     #[tokio::test]

@@ -154,8 +154,9 @@ All three env vars below are real — sourced from `packages/server-rust/src/sto
 | `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` | `1000` | `write_behind.rs:79` | How often the background flush task runs |
 | `TOPGUN_WRITEBEHIND_BATCH_SIZE` | `100` | `write_behind.rs:99` | Max records flushed per tick |
 | `TOPGUN_WRITEBEHIND_CAPACITY` | `10000` | `write_behind.rs:119` | Bounded buffer size; once full, writes apply back-pressure |
+| `TOPGUN_WAL_FSYNC_POLICY` | `batched` | `write_behind.rs` | WAL fsync aggressiveness: `batched` (default, throughput) \| `per_op` (acked == durable under `kill -9`) \| `none` (tests only) |
 
-**Durability note:** Write-behind buffers acked writes for ~1s before persisting to disk. Acceptable for demo-tier. Crash-safe shutdown drain + WAL recovery are tracked separately (out of scope for this release). Until that lands, an unclean shutdown can lose buffered writes not yet flushed.
+**Durability note:** The default `TOPGUN_WAL_FSYNC_POLICY=batched` acks a write once its WAL frame is appended, then fsyncs on a ~10 ms group-commit timer — so an unclean `kill -9` can drop the last few milliseconds of acked writes. This is a deliberate throughput default for demo-tier single-node deployments; the originating client keeps the write in local storage and re-converges on reconnect. **If you need acked-implies-durable, set `TOPGUN_WAL_FSYNC_POLICY=per_op`** (every WAL frame is fsynced before the write acks) — expect materially lower write throughput in exchange. Separately, the write-behind buffer holds acked writes for ~1s before persisting to the durable backend; crash-safe shutdown drain + WAL recovery are tracked separately (out of scope for this release).
 
 ## Programmatic tuning
 

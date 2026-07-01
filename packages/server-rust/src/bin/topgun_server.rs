@@ -95,7 +95,7 @@ use topgun_server::storage::impls::StorageConfig;
 use topgun_server::storage::map_data_store::MapDataStore;
 use topgun_server::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
 use topgun_server::storage::mutation_observer::MutationObserver;
-use topgun_server::storage::wal::{Wal, WalRecovery, WalWriter};
+use topgun_server::storage::wal::{Wal, WalFsyncPolicy, WalRecovery, WalWriter};
 
 // ---------------------------------------------------------------------------
 // Storage backend selection
@@ -846,6 +846,26 @@ async fn main() -> anyhow::Result<()> {
         rbac_configured,
         "eviction + write-behind + WAL initialized"
     );
+
+    // Make each policy's crash-durability caveat impossible to miss at boot on a
+    // durable backend: Batched drops acked writes inside the group-commit window
+    // under kill -9, and None never fsyncs at all. PerOp (acked == durable) is
+    // silent. Null is not a durable backend, so no WAL caveat applies.
+    if !matches!(backend, StorageBackend::Null) {
+        match write_behind_config.wal_fsync_policy {
+            WalFsyncPolicy::Batched => tracing::warn!(
+                "WAL fsync policy is Batched (default): acked writes inside the ~10ms \
+                 group-commit window are NOT durable under an unclean shutdown. Set \
+                 TOPGUN_WAL_FSYNC_POLICY=per_op for acked-implies-durable."
+            ),
+            WalFsyncPolicy::None => tracing::warn!(
+                "WAL fsync policy is None: the WAL is never fsynced, so acked writes are \
+                 NOT crash-safe at all. This is intended for tests/benchmarks only — set \
+                 TOPGUN_WAL_FSYNC_POLICY=per_op (durable) or batched (default) for production."
+            ),
+            WalFsyncPolicy::PerOp => {}
+        }
+    }
 
     // Allow integration test environments to opt in to detailed auth errors.
     let insecure_forward_auth_errors = std::env::var("INSECURE_FORWARD_AUTH_ERRORS")
