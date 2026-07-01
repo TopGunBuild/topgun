@@ -16,7 +16,7 @@ use topgun_core::types::Value;
 /// never enter the engine in a dirty state. Every live write constructs its
 /// metadata via `RecordMetadata::new()`, which mints a token ≥ 1.
 /// `Relaxed` ordering is sufficient because token publication is already
-/// synchronized by the DashMap shard lock at `get_mut`/put.
+/// synchronized by the `DashMap` shard lock at `get_mut`/put.
 static WRITE_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 /// Minimum elapsed milliseconds before a read access updates `last_access_time`.

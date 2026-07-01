@@ -449,7 +449,7 @@ mod tests {
     /// AC1 behavioral test: same-millisecond two-concurrent-same-key writes.
     ///
     /// Two writes to the same key share an identical timestamp (same-ms tie).
-    /// Under the old timestamp guard (<= now), write A's mark_stored call would
+    /// Under the old timestamp guard (<= now), write A's `mark_stored` call would
     /// pass for write B's resident record, prematurely marking B clean before B
     /// persists. Under the token guard (== token), the tokens differ and the
     /// loser stays dirty until its own persist.
