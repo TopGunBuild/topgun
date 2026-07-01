@@ -166,11 +166,26 @@ impl RecordStore for DefaultRecordStore {
         let cost = crate::storage::record::estimated_cost(&value) + key.len() as u64;
         let metadata = RecordMetadata::new(now, cost);
 
-        // Step 3: Create record
+        // Step 3: Create record. Capture the token from this record's metadata
+        // before it is moved — this is the exact token that identifies this write.
+        // Never re-allocate or re-read the token off the resident after put(),
+        // since a concurrent writer may have already replaced the slot.
+        let write_token = metadata.write_token;
         let record = Record { value, metadata };
 
         // Step 4: Put into engine
         self.engine.put(key, record.clone());
+
+        // Sanity check: in debug builds, verify the resident's token matches the
+        // one we just minted. A mismatch here means a concurrent same-key write
+        // landed between our put() and this check — normal under contention, but
+        // the token we captured above is still the right one to pass to mark_stored.
+        debug_assert!(
+            self.engine
+                .get(key)
+                .map_or(true, |r| r.metadata.write_token >= write_token),
+            "resident token must be >= our token (a newer write may have landed)"
+        );
 
         // Step 5: Fire observer notifications
         if let Some(ref old) = old_record {
@@ -190,25 +205,22 @@ impl RecordStore for DefaultRecordStore {
                 .add(&self.name, key, &record.value, expiration_time, now)
                 .await?;
 
-            // Mark the record clean only when the value was written to a real
-            // persistent store (not a no-op null store). The WAL append + fsync
-            // inside add() completes before returning Ok on real backends, so the
-            // value is durable and the record is safely evictable. Mark in place
-            // under the engine's per-key lock (mark_stored) rather than a
-            // get()+put(): the in-place mark never re-puts the value, so a
-            // concurrent same-key write can be neither clobbered nor lost. The
-            // timestamp guard leaves a strictly-newer write dirty, but it is
-            // best-effort, not a per-write identity check — a concurrent same-key
-            // write in the same millisecond may be transiently marked clean
-            // before its own persist completes. That window is bounded and
-            // self-healing (the concurrent persist completes independently of
-            // eviction, and put() acks only after its own persist), so no
-            // acked-durable write is lost.
-            if !self.data_store.is_null() && !self.engine.mark_stored(key, now) {
+            // Mark the record clean only if the value was written to a real
+            // persistent store (not a no-op null store) AND the token of the
+            // resident record still matches the one we persisted. The WAL append
+            // + fsync inside add() completes before returning Ok on real backends,
+            // so the value is durable when we reach here. The per-write token
+            // ensures that only the exact write just persisted is marked clean:
+            // a concurrent same-key write in the same millisecond carries a
+            // different token and stays dirty until its own persist completes.
+            // Mark in place under the engine's per-key lock (mark_stored) — the
+            // in-place mark never re-puts the value, so concurrent writes are
+            // never clobbered or lost.
+            if !self.data_store.is_null() && !self.engine.mark_stored(key, now, write_token) {
                 // Record was evicted between the engine put and this mark, or a
-                // strictly-newer write superseded it. Harmless (the value is
-                // durable via add(), or the newer write owns the slot), but worth
-                // a trace to surface write-then-immediately-evict churn.
+                // concurrent write landed and owns the slot. Harmless: the value
+                // is durable via add(), and the newer write will mark itself clean
+                // when its own persist completes.
                 tracing::trace!(
                     key,
                     "mark_stored found no eligible record after persist (evicted or superseded)"
@@ -1201,6 +1213,7 @@ mod tests {
             last_stored_time: 1, // equal to last_update_time => not dirty
             hits: 0,
             cost: 0,
+            write_token: 0, // test helper only — not used on the mark_stored path
         };
         Record {
             value: make_value("clean"),
@@ -1222,6 +1235,7 @@ mod tests {
             last_stored_time: 0, // never stored => dirty
             hits: 0,
             cost: 0,
+            write_token: 0, // test helper only — not used on the mark_stored path
         };
         Record {
             value: make_value("dirty"),

@@ -63,12 +63,15 @@ impl StorageEngine for HashMapStorage {
         self.entries.get(key).map(|r| r.clone())
     }
 
-    fn mark_stored(&self, key: &str, now: i64) -> bool {
+    fn mark_stored(&self, key: &str, now: i64, token: u64) -> bool {
         // `get_mut` holds the shard's write lock for the lifetime of the guard,
-        // so the version-by-timestamp check and the mutation are atomic with
-        // respect to any other engine operation on this key.
+        // so the token check and the mutation are atomic with respect to any
+        // other engine operation on this key — no separate get()+put() window.
+        // The token uniquely identifies the exact write the caller persisted:
+        // a concurrent same-key write (any timestamp, equal or newer) carries a
+        // different token and is left dirty until its own persist completes.
         if let Some(mut entry) = self.entries.get_mut(key) {
-            if entry.metadata.last_update_time <= now {
+            if entry.metadata.write_token == token {
                 entry.metadata.on_store(now);
                 return true;
             }
@@ -395,13 +398,15 @@ mod tests {
         let storage = HashMapStorage::new();
         // make_record stamps last_update_time = 0 (RecordMetadata::new), so it
         // starts dirty (last_update 0 > last_stored 0 is false → actually clean
-        // at 0/0; bump update to force dirty).
+        // at 0/0; bump update to force dirty, which also mints a fresh token).
         let mut record = make_record(10);
         record.metadata.on_update(5);
+        let token = record.metadata.write_token;
         storage.put("a", record);
         assert!(storage.get("a").unwrap().metadata.is_dirty());
 
-        assert!(storage.mark_stored("a", 5));
+        // Matching token → mark applies.
+        assert!(storage.mark_stored("a", 5, token));
         assert!(!storage.get("a").unwrap().metadata.is_dirty());
         assert_eq!(storage.get("a").unwrap().metadata.last_stored_time, 5);
     }
@@ -409,21 +414,123 @@ mod tests {
     #[test]
     fn mark_stored_skips_newer_write() {
         let storage = HashMapStorage::new();
-        let mut record = make_record(10);
-        record.metadata.on_update(10); // resident write is newer than `now`
-        storage.put("a", record);
+        // Two records for the same key: first write (A) is placed, then a newer
+        // write (B) replaces it. Passing A's token must not mark B clean —
+        // a different token means a different logical write owns the slot.
+        let record_a = make_record(10);
+        let token_a = record_a.metadata.write_token;
+        storage.put("a", record_a);
 
-        // A stale persistence completion (now = 5) must NOT mark the newer
-        // (still-dirty) resident write clean.
-        assert!(!storage.mark_stored("a", 5));
+        // Second write — on_update mints a new token, making B's token != A's.
+        let mut record_b = make_record(10);
+        record_b.metadata.on_update(10);
+        let token_b = record_b.metadata.write_token;
+        storage.put("a", record_b);
+
+        // Tokens must differ: each logical write boundary gets a unique token.
+        assert_ne!(token_a, token_b, "each write must carry a unique token");
+
+        // A stale persist (using A's token) must NOT mark B's slot clean.
+        assert!(!storage.mark_stored("a", 5, token_a));
         assert!(storage.get("a").unwrap().metadata.is_dirty());
         assert_eq!(storage.get("a").unwrap().metadata.last_stored_time, 0);
+
+        // Matching token (B's) → mark applies.
+        assert!(storage.mark_stored("a", 10, token_b));
+        assert!(!storage.get("a").unwrap().metadata.is_dirty());
     }
 
     #[test]
     fn mark_stored_absent_key_returns_false() {
         let storage = HashMapStorage::new();
-        assert!(!storage.mark_stored("missing", 100));
+        assert!(!storage.mark_stored("missing", 100, 42));
+    }
+
+    /// AC1 behavioral test: same-millisecond two-concurrent-same-key writes.
+    ///
+    /// Two writes to the same key share an identical timestamp (same-ms tie).
+    /// Under the old timestamp guard (<= now), write A's mark_stored call would
+    /// pass for write B's resident record, prematurely marking B clean before B
+    /// persists. Under the token guard (== token), the tokens differ and the
+    /// loser stays dirty until its own persist.
+    ///
+    /// This test is RED if the token guard is reverted to the timestamp-only
+    /// `<= now` guard — the dirty-state assertion would pass for the loser
+    /// under the old guard, so the test would fail on the assert that the
+    /// loser remains dirty.
+    #[test]
+    fn ac1_same_millisecond_write_stays_dirty_until_own_persist() {
+        let storage = HashMapStorage::new();
+
+        // Both writes share the same "now" — simulating a same-millisecond tie
+        // without relying on wall-clock timing.
+        let same_now: i64 = 1_000_000;
+
+        // Write A: first to arrive, gets pushed out by Write B.
+        let record_a = Record {
+            value: RecordValue::Lww {
+                value: topgun_core::types::Value::String("value-a".to_string()),
+                timestamp: Timestamp {
+                    millis: same_now as u64,
+                    counter: 0,
+                    node_id: "node-a".to_string(),
+                },
+            },
+            metadata: RecordMetadata::new(same_now, 64),
+        };
+        let token_a = record_a.metadata.write_token;
+        storage.put("key", record_a);
+
+        // Write B: arrives after A, replaces the slot. Same timestamp as A.
+        let record_b = Record {
+            value: RecordValue::Lww {
+                value: topgun_core::types::Value::String("value-b".to_string()),
+                timestamp: Timestamp {
+                    millis: same_now as u64,
+                    counter: 0,
+                    node_id: "node-b".to_string(),
+                },
+            },
+            metadata: RecordMetadata::new(same_now, 64),
+        };
+        let token_b = record_b.metadata.write_token;
+        storage.put("key", record_b);
+
+        // AC1 KL2 proof: tokens must differ even for same-ms writes.
+        assert_ne!(
+            token_a, token_b,
+            "same-millisecond writes must carry distinct tokens (KL2)"
+        );
+
+        // Resident is now Write B. Write A's persist completes and calls
+        // mark_stored with A's token — must NOT mark B clean.
+        let marked = storage.mark_stored("key", same_now, token_a);
+        assert!(
+            !marked,
+            "mark_stored with A's token must not match B's resident slot"
+        );
+
+        // B is still dirty — its own persist has not completed.
+        let resident = storage.get("key").unwrap();
+        assert!(
+            resident.metadata.is_dirty(),
+            "loser write B must remain dirty until its own persist completes; \
+             this assertion is RED under the old timestamp-only guard"
+        );
+
+        // Token inequality is the concrete proof that KL2 holds.
+        assert_ne!(
+            token_a, resident.metadata.write_token,
+            "loser token must differ from resident token (KL2 token-inequality proof)"
+        );
+
+        // AC2: B's own persist then completes with the matching token → B is marked clean.
+        let marked_b = storage.mark_stored("key", same_now, token_b);
+        assert!(marked_b, "B's own persist must mark it clean");
+        assert!(
+            !storage.get("key").unwrap().metadata.is_dirty(),
+            "B must be clean after its own persist"
+        );
     }
 
     #[test]
