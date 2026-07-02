@@ -129,8 +129,12 @@ impl Default for Config {
             quiesce: Duration::from_secs(3),
             ready_timeout: Duration::from_secs(40),
             mem_sample_interval: Duration::from_secs(5),
-            mem_threshold_mb_per_hour: 50.0,
-            mem_min_growth_mb: 150.0,
+            // Calibrated to catch the OR-Map tombstone leak (~3-5 MB/h) rather
+            // than mask it: the old 50 MB/h slope sat far above the leak rate and
+            // false-GREENed it. See monitor.rs for the calibration rationale and
+            // the executable proof (tests::calibration_*).
+            mem_threshold_mb_per_hour: monitor::DEFAULT_MEM_THRESHOLD_MB_PER_HOUR,
+            mem_min_growth_mb: monitor::DEFAULT_MEM_MIN_GROWTH_MB,
             mem_ceiling_mb: 1800.0,
             server_port: 0,
             data_dir: None,

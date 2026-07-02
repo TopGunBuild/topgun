@@ -538,6 +538,19 @@ impl CrdtService {
                 let (mut records, mut tombstones) = read_or_map_state(existing.map(|r| r.value));
 
                 records.retain(|e| e.tag != *tag);
+                // The tombstone set grows unbounded by design: it is NOT pruned
+                // here. Pruning a tag is only safe once every replica that could
+                // still hold the matching add has observed this remove, and a
+                // single node with transient reconnecting clients has no
+                // causal-stability / delivery-ack tracking to know that. A
+                // time-threshold prune is unsafe for any horizon — a client
+                // offline longer than the horizon reconnects, delta-syncs without
+                // the dropped tombstone, and resurrects the removed value. A loud,
+                // bounded-memory OOM is preferable to silent CRDT corruption, so
+                // for the single-node demo tier we accept linear tombstone growth.
+                // Revisit when a causal-stability low-water-mark lands or the tier
+                // moves beyond single-node demo (see the soak memory monitor,
+                // which is calibrated to flag this growth rather than mask it).
                 // Dedup: a re-issued remove must not duplicate the tombstone.
                 if !tombstones.contains(tag) {
                     tombstones.push(tag.clone());

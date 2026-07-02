@@ -40,7 +40,12 @@ NO_PRE_KILL_DRAIN="${NO_PRE_KILL_DRAIN:-0}"
 if [ "${NO_PRE_KILL_DRAIN}" = "1" ]; then
   export TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS="${TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS:-1000}"
 fi
-MEM_THRESHOLD="${MEM_THRESHOLD:-25}"      # MB/hour slope ceiling over a 72h run
+# Calibrated slope ceiling for the 72h run. The OR tombstone leak the soak drives
+# is ~3-5 MB/h; the former 25 MB/h sat above it and false-GREENed a real leak.
+# 2 MB/h sits below the leak band and above a genuine in-place plateau (~0 MB/h);
+# the harness min-growth guard (80 MB, in-code default) keeps short runs green.
+# Mirrors monitor::DEFAULT_MEM_THRESHOLD_MB_PER_HOUR.
+MEM_THRESHOLD="${MEM_THRESHOLD:-2}"       # MB/hour slope ceiling over a 72h run
 MEM_CEILING="${MEM_CEILING:-2048}"
 OUT_ROOT="${OUT_ROOT:-/var/soak}"
 
