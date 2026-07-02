@@ -32,6 +32,20 @@
 //! only a run that grows past [`DEFAULT_MEM_MIN_GROWTH_MB`] at more than
 //! [`DEFAULT_MEM_THRESHOLD_MB_PER_HOUR`] — i.e. the 72h tombstone leak — fails.
 //! See `tests::calibration_*` for the executable proof of both directions.
+//!
+//! ## Detection floor — a short green soak is not a bounded-memory guarantee
+//!
+//! This is a *sustained-leak* detector, not an instantaneous one. Because the
+//! min-growth guard suppresses the slope clause until total growth clears
+//! [`DEFAULT_MEM_MIN_GROWTH_MB`], a leak is only caught once the run is long
+//! enough to accumulate that much: ~16h at 5 MB/h, ~27h at 3 MB/h. That is
+//! deliberate, not a gap — over a few hours a 3-5 MB/h leak's absolute growth is
+//! within RSS noise (allocator retention, cache warmup, GC), so failing on slope
+//! alone would false-FAIL healthy short soaks. The 72h run is therefore the gate
+//! that actually asserts bounded tombstone memory; the minutes-scale smoke and
+//! bounded soaks exercise crash/convergence, and their green memory verdict means
+//! "no leak large enough to clear the noise floor in this window", NOT "bounded
+//! memory proven". Do not read a short green soak as the latter.
 
 use std::process::Command;
 
@@ -235,6 +249,23 @@ mod tests {
             2048.0,
         );
         assert!(!a.passed, "3 MB/h leak must fail; reason={:?}", a.reason);
+    }
+
+    /// Pin the lower edge of the leak band: a 2.5 MB/h series (180 MB over 72h)
+    /// must FAIL at the 2.0 MB/h threshold. Without this, a future loosening of
+    /// the threshold toward the estimated leak band (e.g. to 2.5) would still
+    /// pass the 3.0/4.0 tests yet silently false-GREEN a 2.3 MB/h leak — this
+    /// test fails the moment the threshold creeps up to meet the band.
+    #[test]
+    fn calibration_pins_low_band_edge() {
+        let samples = linear_72h(220.0, 2.5);
+        let a = assess(
+            &samples,
+            DEFAULT_MEM_THRESHOLD_MB_PER_HOUR,
+            DEFAULT_MEM_MIN_GROWTH_MB,
+            2048.0,
+        );
+        assert!(!a.passed, "2.5 MB/h leak must fail; reason={:?}", a.reason);
     }
 
     /// A genuine in-place-overwrite plateau (slope ~0, tiny bounded jitter) MUST
