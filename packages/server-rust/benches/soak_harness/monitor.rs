@@ -324,4 +324,53 @@ mod tests {
             a.reason
         );
     }
+
+    /// A *noisy* linear leak — a 3.5 MB/h trend with a large ±40 MB sawtooth on
+    /// top of it (allocator GC / cache warmup jitter) — must still FAIL. This
+    /// pins the robustness of the growth clause: because `assess` computes total
+    /// growth as `peak_mb - first_mb` (fold-max, not `last - first`), a low final
+    /// sample cannot drag computed growth below the min-growth guard, so endpoint
+    /// noise cannot suppress the slope clause on a real trend.
+    #[test]
+    fn calibration_fails_noisy_linear_leak() {
+        // 3.5 MB/h trend + deterministic ±40 MB oscillation, hourly over 72h.
+        let samples: Vec<MemSample> = (0..=72)
+            .map(|h| MemSample {
+                elapsed_secs: f64::from(h) * 3600.0,
+                rss_mb: 220.0 + 3.5 * f64::from(h) + 40.0 * (f64::from(h % 3) - 1.0),
+            })
+            .collect();
+        let a = assess(
+            &samples,
+            DEFAULT_MEM_THRESHOLD_MB_PER_HOUR,
+            DEFAULT_MEM_MIN_GROWTH_MB,
+            2048.0,
+        );
+        assert!(
+            !a.passed,
+            "noisy 3.5 MB/h leak must fail; slope={:.2} peak={:.1} reason={:?}",
+            a.slope_mb_per_hour, a.peak_mb, a.reason
+        );
+        assert!(a.slope_mb_per_hour > DEFAULT_MEM_THRESHOLD_MB_PER_HOUR);
+    }
+
+    /// The Hetzner 72h runner and this module are two independent sources of
+    /// truth for the same slope threshold. The runner default MUST track
+    /// [`DEFAULT_MEM_THRESHOLD_MB_PER_HOUR`] so the 72h gate cannot be silently
+    /// loosened by editing only one of them (e.g. bumping the shell default back
+    /// to 25 without failing any test — the exact false-GREEN this spec closes).
+    /// `include_str!` is resolved relative to this file, i.e. the `soak_harness` dir.
+    #[test]
+    fn hetzner_runner_default_matches_calibrated_constant() {
+        let script = include_str!("hetzner-soak-runner.sh");
+        // `{}` on an integral f64 prints without a trailing `.0` (2.0 -> "2"),
+        // matching the integer MB/h the shell default carries.
+        let expected =
+            format!("MEM_THRESHOLD=\"${{MEM_THRESHOLD:-{DEFAULT_MEM_THRESHOLD_MB_PER_HOUR}}}\"");
+        assert!(
+            script.contains(&expected),
+            "hetzner-soak-runner.sh MEM_THRESHOLD default must match \
+             monitor::DEFAULT_MEM_THRESHOLD_MB_PER_HOUR (expected {expected:?})"
+        );
+    }
 }
