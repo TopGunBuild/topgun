@@ -2,16 +2,53 @@
 //!
 //! The soak runs a fixed keyspace overwritten in place, so the server's
 //! resident set should plateau. A sustained upward trend implicates a leak —
-//! most plausibly unbounded OR-Map tombstone accumulation (TODO-479/480), which
-//! the soak deliberately drives via add/remove churn on an OR-Map.
+//! most plausibly unbounded OR-Map tombstone accumulation, which the soak
+//! deliberately drives via add/remove churn on an OR-Map with a distinct tag
+//! per iteration.
 //!
 //! RSS is sampled by shelling out to `ps -o rss= -p <pid>` (KiB on both macOS
 //! and Linux), avoiding a platform-specific dependency. The assessment fits a
 //! least-squares line to `(elapsed_hours, rss_mb)` and fails if either the
 //! slope exceeds a per-hour threshold (with a minimum absolute growth guard to
 //! ignore short-run noise) or the peak exceeds a hard ceiling.
+//!
+//! ## Slope threshold is calibrated to catch the tombstone leak, not mask it
+//!
+//! The OR-Map tombstone set on the server write path is intentionally unbounded
+//! (there is no causal-stability tracking that would let the server prune a
+//! tombstone without risking resurrection on a lagging client — pruning is a
+//! correctness hazard, not a memory optimization). The soak's OR churn stream
+//! therefore grows tombstones linearly, estimated at ~3-5 MB/h RSS over a 72h
+//! run. The earlier default slope threshold (50 MB/h in-process, 25 MB/h on the
+//! Hetzner 72h runner) sat 5-10x ABOVE that rate, so a real linear leak fitted a
+//! ~3-5 MB/h line that passed both clauses — a false GREEN masking an eventual
+//! out-of-memory.
+//!
+//! [`DEFAULT_MEM_THRESHOLD_MB_PER_HOUR`] and [`DEFAULT_MEM_MIN_GROWTH_MB`] are
+//! set so a sustained ~3-5 MB/h linear series FAILS while a genuine in-place
+//! plateau (slope near zero, total growth below the min-growth guard) PASSES.
+//! The min-growth guard is what keeps short bounded soaks (10-60 min) green: a
+//! plateau never accumulates enough absolute growth to trip the slope clause, so
+//! only a run that grows past [`DEFAULT_MEM_MIN_GROWTH_MB`] at more than
+//! [`DEFAULT_MEM_THRESHOLD_MB_PER_HOUR`] — i.e. the 72h tombstone leak — fails.
+//! See `tests::calibration_*` for the executable proof of both directions.
 
 use std::process::Command;
+
+/// Calibrated slope ceiling (MB/hour) for the 72h soak's memory assertion.
+///
+/// Below the ~3-5 MB/h the OR tombstone leak produces, above the ~0 MB/h a real
+/// in-place-overwrite plateau produces — so it distinguishes leak from plateau
+/// at the rate the soak actually drives. Callers (soak `main.rs` defaults, the
+/// Hetzner runner env default) should feed this value so the 72h run cannot
+/// false-GREEN the accepted-but-real tombstone growth.
+pub const DEFAULT_MEM_THRESHOLD_MB_PER_HOUR: f64 = 2.0;
+
+/// Calibrated absolute-growth guard (MB): below this total growth the slope
+/// clause is ignored as short-run noise. Sized so a genuine plateau (and any
+/// bounded short soak) stays green, while the 72h tombstone leak — which
+/// accumulates hundreds of MB — clears the guard and is judged on slope.
+pub const DEFAULT_MEM_MIN_GROWTH_MB: f64 = 80.0;
 
 /// One resident-set sample.
 #[derive(Debug, Clone, Copy)]
@@ -140,5 +177,120 @@ fn least_squares_slope_per_hour(samples: &[MemSample]) -> f64 {
         0.0
     } else {
         num / den
+    }
+}
+
+// This bench target is `harness = false` (it owns `main`), so these `#[test]`
+// functions do NOT run under `cargo test --bench soak_harness` — libtest never
+// drives them. They are executed as a real CI gate by the integration target
+// `tests/soak_monitor_calibration.rs`, which re-includes this module under the
+// standard harness. `allow(dead_code)` keeps the bench's own test-mode compile
+// warning-free (the helper is unreferenced there because libtest is absent).
+#[cfg(test)]
+#[allow(dead_code)]
+mod tests {
+    use super::*;
+
+    /// Build a 72h series sampled hourly with a constant per-hour slope,
+    /// starting at `first_mb`.
+    fn linear_72h(first_mb: f64, slope_mb_per_hour: f64) -> Vec<MemSample> {
+        (0..=72)
+            .map(|h| MemSample {
+                elapsed_secs: f64::from(h) * 3600.0,
+                rss_mb: first_mb + slope_mb_per_hour * f64::from(h),
+            })
+            .collect()
+    }
+
+    /// A ~4 MB/h linear tombstone leak over 72h (≈288 MB total growth) MUST FAIL
+    /// under the calibrated defaults — this is the exact shape the soak's OR
+    /// churn drives, and the whole point of the calibration is that it can no
+    /// longer false-GREEN.
+    #[test]
+    fn calibration_fails_linear_tombstone_leak() {
+        let samples = linear_72h(220.0, 4.0);
+        let a = assess(
+            &samples,
+            DEFAULT_MEM_THRESHOLD_MB_PER_HOUR,
+            DEFAULT_MEM_MIN_GROWTH_MB,
+            2048.0,
+        );
+        assert!(
+            !a.passed,
+            "4 MB/h linear leak must fail the calibrated gate; slope={:.2} reason={:?}",
+            a.slope_mb_per_hour, a.reason
+        );
+        assert!(a.slope_mb_per_hour > DEFAULT_MEM_THRESHOLD_MB_PER_HOUR);
+    }
+
+    /// The lower edge of the estimated leak band (~3 MB/h) must also FAIL — the
+    /// gate must not have a blind spot just above plateau.
+    #[test]
+    fn calibration_fails_low_end_leak() {
+        let samples = linear_72h(220.0, 3.0);
+        let a = assess(
+            &samples,
+            DEFAULT_MEM_THRESHOLD_MB_PER_HOUR,
+            DEFAULT_MEM_MIN_GROWTH_MB,
+            2048.0,
+        );
+        assert!(!a.passed, "3 MB/h leak must fail; reason={:?}", a.reason);
+    }
+
+    /// A genuine in-place-overwrite plateau (slope ~0, tiny bounded jitter) MUST
+    /// PASS — otherwise the gate false-FAILs every healthy long run.
+    #[test]
+    fn calibration_passes_plateau() {
+        // Flat at 300 MB with ±1 MB sawtooth jitter, hourly over 72h.
+        let samples: Vec<MemSample> = (0..=72)
+            .map(|h| MemSample {
+                elapsed_secs: f64::from(h) * 3600.0,
+                rss_mb: 300.0 + if h % 2 == 0 { 1.0 } else { -1.0 },
+            })
+            .collect();
+        let a = assess(
+            &samples,
+            DEFAULT_MEM_THRESHOLD_MB_PER_HOUR,
+            DEFAULT_MEM_MIN_GROWTH_MB,
+            2048.0,
+        );
+        assert!(
+            a.passed,
+            "plateau must pass; slope={:.3} peak={:.1} reason={:?}",
+            a.slope_mb_per_hour, a.peak_mb, a.reason
+        );
+    }
+
+    /// Proof the tightening is what makes it a gate: the SAME 4 MB/h leak that
+    /// the calibrated defaults reject would have PASSED under the old loose
+    /// thresholds (25 MB/h slope, 150 MB min-growth). Guards against a future
+    /// loosening silently restoring the false-GREEN.
+    #[test]
+    fn old_loose_thresholds_would_false_green_the_leak() {
+        let samples = linear_72h(220.0, 4.0);
+        let old = assess(&samples, 25.0, 150.0, 2048.0);
+        assert!(
+            old.passed,
+            "the old 25 MB/h threshold is exactly the false-GREEN this spec closes"
+        );
+    }
+
+    /// A plateau that parks at a high-but-flat RSS (allocator retention) must
+    /// still PASS on slope — retention is not growth. Only the hard ceiling may
+    /// fail it, which it does not here.
+    #[test]
+    fn calibration_passes_high_flat_retention() {
+        let samples = linear_72h(900.0, 0.0);
+        let a = assess(
+            &samples,
+            DEFAULT_MEM_THRESHOLD_MB_PER_HOUR,
+            DEFAULT_MEM_MIN_GROWTH_MB,
+            2048.0,
+        );
+        assert!(
+            a.passed,
+            "flat-but-high retention must pass; reason={:?}",
+            a.reason
+        );
     }
 }
