@@ -16,9 +16,14 @@
 //!    is a HARD gate; the **full-scan QUERY** read-back is a tracked
 //!    *expected-fail* gate pending the datastore-backed full-scan, so the two
 //!    halves are scoped to the capability each actually delivers.
-//! 3. **Bounded memory:** with a fixed keyspace overwritten in place, the
-//!    server RSS must plateau; a sustained upward slope flags a leak (e.g.
-//!    unbounded OR-Map tombstone growth, TODO-479/480).
+//! 3. **Bounded memory:** the OR-Map tombstone-bytes gauge
+//!    (`topgun_ormap_tombstone_bytes_total`, scraped from the server's own
+//!    `GET /metrics`) is sampled every interval and its slope is asserted
+//!    against a tight per-hour threshold — a direct, residency-independent
+//!    leak signal with no allocator/cache noise floor. Server RSS is sampled
+//!    in parallel and asserted against a looser slope as a secondary/backstop
+//!    gate; neither replaces the other (e.g. unbounded OR-Map tombstone
+//!    growth, TODO-479/480).
 //! 4. **Zero panics:** any panic marker in server output, or any un-requested
 //!    exit, fails the run with the captured context.
 //!
@@ -62,7 +67,10 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 use client::SoakClient;
 use model::{compare, next_stamp, Model};
-use monitor::{assess, sample_rss_mb, MemSample};
+use monitor::{
+    assess, assess_tombstone_bytes, sample_rss_mb, MemSample, TombstoneAssessment, TombstoneSample,
+    DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH, DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+};
 use or_noloss::{missing_acked_adds, OrLedger};
 use process::{resolve_server_binary, ServerConfig, ServerSupervisor};
 use report::{
@@ -333,7 +341,10 @@ async fn run_soak(config: &Config) -> i32 {
         churn_handles.push(tokio::spawn(run_churn_client(idx, ctx)));
     }
 
-    // --- Spawn memory sampler ---
+    // --- Spawn memory + tombstone-bytes samplers ---
+    // Both samplers share one clock so their `elapsed_secs` axes line up exactly
+    // (required for a fair side-by-side slope comparison in the summary/report).
+    let sampler_start = Instant::now();
     let samples: Arc<Mutex<Vec<MemSample>>> = Arc::new(Mutex::new(Vec::new()));
     let peak_rss = Arc::new(Mutex::new(0.0_f64));
     {
@@ -342,7 +353,7 @@ async fn run_soak(config: &Config) -> i32 {
         let peak_rss = Arc::clone(&peak_rss);
         let stop = Arc::clone(&stop);
         let interval = config.mem_sample_interval;
-        let start = Instant::now();
+        let start = sampler_start;
         tokio::spawn(async move {
             loop {
                 if stop.load(Ordering::SeqCst) {
@@ -360,6 +371,36 @@ async fn run_soak(config: &Config) -> i32 {
                             *p = mb;
                         }
                     }
+                }
+                tokio::time::sleep(interval).await;
+            }
+        });
+    }
+
+    // Direct, residency-independent tombstone-byte gauge sampler: scrapes the
+    // real `topgun_ormap_tombstone_bytes_total` Prometheus counter off the same
+    // running server over HTTP, the production surface (KL2) rather than a
+    // test-only hook. A transient scrape failure (connection refused mid-restart,
+    // non-200, or the metric line absent) is skipped rather than recorded as a
+    // bogus point, mirroring `sample_rss_mb`'s `None`-on-gone-process contract.
+    let tombstone_samples: Arc<Mutex<Vec<TombstoneSample>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let samples = Arc::clone(&tombstone_samples);
+        let stop = Arc::clone(&stop);
+        let interval = config.mem_sample_interval;
+        let start = sampler_start;
+        let http = reqwest::Client::new();
+        tokio::spawn(async move {
+            loop {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                if let Some(bytes) = scrape_tombstone_bytes(&http, port).await {
+                    let elapsed = start.elapsed().as_secs_f64();
+                    samples.lock().push(TombstoneSample {
+                        elapsed_secs: elapsed,
+                        bytes,
+                    });
                 }
                 tokio::time::sleep(interval).await;
             }
@@ -513,7 +554,7 @@ async fn run_soak(config: &Config) -> i32 {
     }
     supervisor.shutdown().await;
 
-    // --- Assess memory ---
+    // --- Assess memory (secondary/backstop gate) ---
     let mem_samples = samples.lock().clone();
     let mem = assess(
         &mem_samples,
@@ -522,16 +563,34 @@ async fn run_soak(config: &Config) -> i32 {
         config.mem_ceiling_mb,
     );
 
+    // --- Assess tombstone-byte growth (primary, tight-threshold leak signal).
+    // Coexists with the RSS gate above — neither replaces the other (AC6). A
+    // run that collected zero gauge samples fails as a blind monitor, same as
+    // the RSS empty-samples branch.
+    let tombstone_samples_snapshot = tombstone_samples.lock().clone();
+    let tombstones = assess_tombstone_bytes(
+        &tombstone_samples_snapshot,
+        DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+        DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+    );
+
     let panic_report = panic_watch.report();
     let passed = convergence_failures.is_empty()
         && recovery_failures.is_empty()
         && mem.passed
+        && tombstones.passed
         && panic_report.is_none();
 
     if !mem.passed {
         finished_reason = format!(
             "memory growth assertion failed: {}",
             mem.reason.clone().unwrap_or_default()
+        );
+    }
+    if !tombstones.passed {
+        finished_reason = format!(
+            "tombstone-byte growth assertion failed: {}",
+            tombstones.reason.clone().unwrap_or_default()
         );
     }
     if let Some(pr) = &panic_report {
@@ -572,16 +631,21 @@ async fn run_soak(config: &Config) -> i32 {
         timestamp: utc_timestamp_now(),
     };
 
-    print_summary(&report);
+    print_summary(&report, &tombstones);
     if let Some(path) = &config.json_output {
         write_report(path, &report);
         println!("wrote JSON report to {}", path.display());
     }
+    // NOTE: the tombstone-byte verdict is asserted into `passed`/`finished_reason`
+    // above and printed in the console summary below, but is not yet a field on
+    // `SoakReport` (report.rs) — adding it there would be a 6th touched file
+    // against this spec's 5-file cap. Tracked as a follow-up so JSON consumers
+    // (CI dashboards) gain the same visibility the console already has.
 
     i32::from(!passed)
 }
 
-fn print_summary(r: &SoakReport) {
+fn print_summary(r: &SoakReport, tombstones: &TombstoneAssessment) {
     println!("\n=== SOAK SUMMARY ===");
     println!(
         "result:            {}",
@@ -599,12 +663,25 @@ fn print_summary(r: &SoakReport) {
         r.recovery_checkpoints, r.crashes
     );
     println!(
-        "memory:            first={:.0}MB peak={:.0}MB last={:.0}MB slope={:.1}MB/h -> {}",
+        "memory:            first={:.0}MB peak={:.0}MB last={:.0}MB slope={:.1}MB/h -> {} (backstop)",
         r.memory.first_mb,
         r.memory.peak_mb,
         r.memory.last_mb,
         r.memory.slope_mb_per_hour,
         if r.memory.passed { "ok" } else { "FAIL" }
+    );
+    println!(
+        "tombstone_bytes:   first={} peak={} last={} slope={:.1}B/h samples={} -> {} (primary){}",
+        tombstones.first_bytes,
+        tombstones.peak_bytes,
+        tombstones.last_bytes,
+        tombstones.slope_bytes_per_hour,
+        tombstones.samples,
+        if tombstones.passed { "ok" } else { "FAIL" },
+        tombstones
+            .reason
+            .as_ref()
+            .map_or_else(String::new, |r| format!(" reason={r}")),
     );
     if !r.convergence_failures.is_empty() {
         println!("convergence_failures:");
@@ -627,6 +704,51 @@ fn print_summary(r: &SoakReport) {
     if let Some(pr) = &r.panic_report {
         println!("panic_report:      {pr}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tombstone-bytes gauge sampling
+// ---------------------------------------------------------------------------
+
+/// Scrape `topgun_ormap_tombstone_bytes_total` from the real running server's
+/// `GET /metrics` (Prometheus text exposition format). Returns `None` on any
+/// transient failure — connection refused (server mid-restart), non-2xx
+/// status, an unreadable body, or the metric line simply not being present —
+/// so the caller skips the sample instead of recording a bogus point. This
+/// mirrors `sample_rss_mb`'s `None`-on-gone-process contract in `monitor.rs`.
+async fn scrape_tombstone_bytes(http: &reqwest::Client, port: u16) -> Option<u64> {
+    let url = format!("http://127.0.0.1:{port}/metrics");
+    let resp = http.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body = resp.text().await.ok()?;
+    parse_tombstone_bytes_total(&body)
+}
+
+/// Parse the `topgun_ormap_tombstone_bytes_total` sample value out of a
+/// Prometheus text exposition body, skipping `# HELP`/`# TYPE` comment lines
+/// and any blank lines. A metric line is `name value` or `name{labels} value`
+/// (space-separated); this counter carries no labels today, but the label-form
+/// prefix match keeps the parser correct if one is ever added.
+fn parse_tombstone_bytes_total(body: &str) -> Option<u64> {
+    const METRIC: &str = "topgun_ormap_tombstone_bytes_total";
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let name = parts.next()?;
+        if name == METRIC || name.starts_with(&format!("{METRIC}{{")) {
+            let value = parts.next()?;
+            // Prometheus renders counter values as text floats (e.g. "1234" or
+            // "1234.0"); the gauge is logically u64 bytes, so parse as f64 and
+            // truncate rather than fail on the trailing ".0" rendering.
+            return value.parse::<f64>().ok().map(|f| f as u64);
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
