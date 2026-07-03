@@ -559,6 +559,10 @@ impl CrdtService {
                 // Dedup: a re-issued remove must not duplicate the tombstone.
                 if !tombstones.contains(tag) {
                     tombstones.push(tag.clone());
+                    // Feeds the residency-independent soak leak gauge: counted here
+                    // on the write path (once per genuinely-new tag) so eviction and
+                    // rehydration of the record never move this number.
+                    crate::storage::record::add_tombstone_bytes(tag.len() as u64);
                 }
                 RecordValue::OrMap {
                     records,
@@ -2706,6 +2710,96 @@ mod tests {
                 .collect(),
             _ => Vec::new(),
         }
+    }
+
+    // -- Tombstone-bytes gauge is residency-independent --
+    //
+    // Drives the REAL evict -> rehydrate path via `RecordStore::evict_lru` (the
+    // same primitive `EvictionOrchestrator` calls in production) rather than the
+    // documented read-path surrogate, since the existing store/factory test
+    // infrastructure (a real `RedbDataStore` + `evict_lru`/`get`) makes it
+    // practical here — this exercises the actual eviction blind-spot the gauge
+    // exists to defend against, not a stand-in for it.
+    #[tokio::test]
+    async fn or_remove_tombstone_gauge_survives_real_eviction_and_rehydration() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let redb_path = dir.path().join("gauge_residency.redb");
+        let data_store: Arc<dyn crate::storage::MapDataStore> = Arc::new(
+            crate::storage::datastores::RedbDataStore::new(&redb_path).expect("redb open"),
+        );
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            data_store,
+            Vec::new(),
+        ));
+        let registry = Arc::new(ConnectionRegistry::new());
+        let query_registry = Arc::new(QueryRegistry::new());
+        let svc = Arc::new(CrdtService::new(
+            Arc::clone(&factory),
+            registry,
+            make_validator(),
+            query_registry,
+            Arc::new(SchemaService::new()),
+        ));
+
+        let map_name = "gauge_residency_map";
+        let key = "item-1";
+        let tag = "tag-gauge-residency";
+
+        // The gauge is a process-global static shared across parallel test
+        // threads, so assert on the DELTA this test produces, never an absolute
+        // value.
+        let before_write = crate::storage::record::tombstone_bytes();
+
+        svc.clone()
+            .oneshot(or_add_op(map_name, key, "payload", tag))
+            .await
+            .expect("or_add must succeed");
+        svc.clone()
+            .oneshot(or_remove_op(map_name, key, tag))
+            .await
+            .expect("or_remove must succeed");
+
+        let after_write = crate::storage::record::tombstone_bytes();
+        assert_eq!(
+            after_write - before_write,
+            tag.len() as u64,
+            "gauge must increase by exactly the new tombstone tag's byte length"
+        );
+
+        // Force the record non-resident via the real eviction primitive. The
+        // OR_REMOVE above wrote through with `CallerProvenance::CrdtMerge` over a
+        // real (non-null) data store, which marks the record clean and therefore
+        // evictable.
+        let store = factory.get_or_create(map_name, hash_to_partition(key));
+        let evicted = store.evict_lru(u32::MAX, false);
+        assert!(evicted > 0, "the clean record must be evicted");
+        assert!(
+            !store.exists_in_memory(key),
+            "record must be non-resident after eviction"
+        );
+
+        let after_eviction = crate::storage::record::tombstone_bytes();
+        assert_eq!(
+            after_eviction, after_write,
+            "evicting a tombstone-bearing record must not drop the gauge"
+        );
+
+        // Rehydrate: `get()` transparently reloads the non-resident record from
+        // the datastore. Confirm the tombstone survived the round trip and the
+        // gauge did not move.
+        let (_, tombstones) = read_or_map(&factory, map_name, key).await;
+        assert_eq!(
+            tombstones,
+            vec![tag.to_string()],
+            "tombstone must still be present after rehydration"
+        );
+
+        let after_rehydration = crate::storage::record::tombstone_bytes();
+        assert_eq!(
+            after_rehydration, after_write,
+            "rehydrating a tombstone-bearing record must not double-count the gauge"
+        );
     }
 
     // AC1: add-wins — OR_REMOVE of one tag preserves concurrent survivors.
