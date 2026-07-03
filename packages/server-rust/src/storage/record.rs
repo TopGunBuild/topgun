@@ -395,7 +395,7 @@ mod tombstone_bytes_gauge_tests {
 
     /// Serializing/deserializing an `OrMap` `RecordValue` must not touch the
     /// gauge — the gauge is updated only by explicit call sites at the
-    /// OR_REMOVE tombstone-push / inbound-sync-union points (later task
+    /// `OR_REMOVE` tombstone-push / inbound-sync-union points (later task
     /// groups), never as a side effect of encoding.
     #[test]
     fn ormap_serde_round_trip_does_not_touch_gauge() {
