@@ -19,6 +19,74 @@ use topgun_core::types::Value;
 /// synchronized by the `DashMap` shard lock at `get_mut`/put.
 static WRITE_TOKEN: AtomicU64 = AtomicU64::new(1);
 
+/// Process-global running total of OR-Map tombstone bytes (sum of removed
+/// tags' UTF-8 byte lengths currently tracked across all `OrMap.tombstones`
+/// sets).
+///
+/// This is the in-process source of truth behind [`add_tombstone_bytes`],
+/// [`sub_tombstone_bytes`], and [`tombstone_bytes`]. It exists to give the
+/// unbounded-tombstone-growth soak monitor (and the `/metrics` Prometheus
+/// surface) a cheap, lock-free signal of how much tombstone data has
+/// accumulated, without walking every resident `OrMap` record on each check.
+/// `Relaxed` ordering is sufficient: this is a monitoring counter, not a
+/// correctness-critical value guarding any invariant, so no other memory
+/// operation needs to be ordered against it.
+static OR_TOMBSTONE_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Adds `n` bytes to the process-global OR-Map tombstone-bytes gauge and
+/// emits the same delta to the `topgun_ormap_tombstone_bytes_total`
+/// Prometheus counter (mirrors the `topgun_operations_total` emit pattern in
+/// `service/middleware/metrics.rs`).
+///
+/// Call sites pass `tag.len() as u64` — the tombstone's contribution is its
+/// removed tag's UTF-8 byte length, which is the direct measure of what grows
+/// in `OrMap.tombstones: Vec<String>`. Fixed per-entry allocator overhead is
+/// intentionally excluded: the slope, not the absolute total, is the signal
+/// this gauge exists to expose, and a constant per-entry factor only scales
+/// it without changing what it reveals.
+pub fn add_tombstone_bytes(n: u64) {
+    OR_TOMBSTONE_BYTES.fetch_add(n, Ordering::Relaxed);
+    metrics::counter!("topgun_ormap_tombstone_bytes_total").increment(n);
+}
+
+/// Subtracts `n` bytes from the process-global OR-Map tombstone-bytes gauge.
+///
+/// This is the decrement path for the future OR-Map epoch-GC prune
+/// (TODO-566): once that prune wires in, it will call this function as it
+/// drops fully-superseded tombstone epochs. It is intentionally unused on
+/// today's additive-only write path (nothing yet prunes tombstones), so it is
+/// exercised solely by a unit test to keep it out of `-D warnings` dead-code
+/// territory until the prune lands.
+///
+/// **Prometheus divergence (forward-looking):** unlike [`add_tombstone_bytes`],
+/// this function does NOT emit to `topgun_ormap_tombstone_bytes_total` — that
+/// metric follows the `_total` *monotonic*-counter convention, so it cannot
+/// legally decrease. That is harmless today because usage is purely additive,
+/// but once TODO-566's prune starts calling this decrement path, the exported
+/// Prometheus series will diverge from (stay flat relative to) the
+/// authoritative in-process [`tombstone_bytes`] value. TODO-566 must reconcile
+/// the external surface at that point — e.g. switch the exported metric to a
+/// gauge, or have consumers (soak harness, dashboards) read the in-process
+/// accessor instead of scraping the counter.
+///
+/// Saturating-safe by construction: the future prune is only ever expected to
+/// subtract bytes it previously observed being added, so it should never
+/// underflow in practice, but `fetch_sub` wraps on underflow rather than
+/// panicking — acceptable for a monitoring counter.
+pub fn sub_tombstone_bytes(n: u64) {
+    OR_TOMBSTONE_BYTES.fetch_sub(n, Ordering::Relaxed);
+}
+
+/// Reads the current value of the process-global OR-Map tombstone-bytes gauge.
+///
+/// This is the authoritative in-process accessor referenced by the
+/// [`sub_tombstone_bytes`] Prometheus-divergence note above, and by the
+/// soak-test monitor that watches for unbounded tombstone growth.
+#[must_use]
+pub fn tombstone_bytes() -> u64 {
+    OR_TOMBSTONE_BYTES.load(Ordering::Relaxed)
+}
+
 /// Minimum elapsed milliseconds before a read access updates `last_access_time`.
 ///
 /// Coalesces recency updates to bound write amplification under read-heavy load
@@ -230,7 +298,7 @@ pub enum RecordValue {
         /// across ALL tracked clients has passed it. Migrating existing blobs to the
         /// epoch-indexed form (assigning the legacy corpus to one conservative
         /// pre-migration generation) is the downstream implementation's obligation
-        /// (TODO-566; contract in core-rust tombstone_frontier.rs).
+        /// (TODO-566; contract in core-rust `tombstone_frontier.rs`).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tombstones: Vec<String>,
     },
@@ -270,6 +338,92 @@ pub struct Record {
     pub value: RecordValue,
     /// Server-internal metadata (NOT sent over the wire).
     pub metadata: RecordMetadata,
+}
+
+#[cfg(test)]
+mod tombstone_bytes_gauge_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // `OR_TOMBSTONE_BYTES` is a single process-global static. No production
+    // call site exists yet (added by later task groups), so the only writers
+    // today are these three tests themselves — but the Rust test harness runs
+    // them concurrently on separate threads, and a delta-based assertion in
+    // one test can still observe an in-flight mutation from another. A
+    // test-local mutex serializes just this module's tests against each
+    // other, which is sufficient today; asserting deltas (rather than
+    // absolute values) additionally keeps these tests robust once real call
+    // sites (G2/G3) start mutating the gauge from other test modules too.
+    static TEST_SERIALIZE: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn add_tombstone_bytes_is_monotonic_and_visible_via_accessor() {
+        let _guard = TEST_SERIALIZE.lock().unwrap();
+        let baseline = tombstone_bytes();
+
+        add_tombstone_bytes(5);
+        assert_eq!(
+            tombstone_bytes(),
+            baseline + 5,
+            "add_tombstone_bytes must increase the gauge by exactly n"
+        );
+
+        add_tombstone_bytes(3);
+        assert_eq!(
+            tombstone_bytes(),
+            baseline + 8,
+            "successive adds must accumulate monotonically"
+        );
+    }
+
+    #[test]
+    fn sub_tombstone_bytes_decrements_the_gauge() {
+        let _guard = TEST_SERIALIZE.lock().unwrap();
+        // Add first so the subtraction has headroom and cannot underflow
+        // relative to this test's own contribution, independent of whatever
+        // baseline other parallel tests have left in the global counter.
+        add_tombstone_bytes(10);
+        let after_add = tombstone_bytes();
+
+        sub_tombstone_bytes(4);
+        assert_eq!(
+            tombstone_bytes(),
+            after_add - 4,
+            "sub_tombstone_bytes must decrease the gauge by exactly n"
+        );
+    }
+
+    /// Serializing/deserializing an `OrMap` `RecordValue` must not touch the
+    /// gauge — the gauge is updated only by explicit call sites at the
+    /// OR_REMOVE tombstone-push / inbound-sync-union points (later task
+    /// groups), never as a side effect of encoding.
+    #[test]
+    fn ormap_serde_round_trip_does_not_touch_gauge() {
+        let _guard = TEST_SERIALIZE.lock().unwrap();
+        let baseline = tombstone_bytes();
+
+        let value = RecordValue::OrMap {
+            records: vec![OrMapEntry {
+                value: Value::String("hello".to_string()),
+                tag: "tag-1".to_string(),
+                timestamp: Timestamp {
+                    millis: 100,
+                    counter: 0,
+                    node_id: "node-a".to_string(),
+                },
+            }],
+            tombstones: vec!["tag-removed".to_string()],
+        };
+
+        let bytes = rmp_serde::to_vec_named(&value).expect("serialize OrMap");
+        let _decoded: RecordValue = rmp_serde::from_slice(&bytes).expect("deserialize OrMap");
+
+        assert_eq!(
+            tombstone_bytes(),
+            baseline,
+            "serde round-trip must not mutate the tombstone-bytes gauge"
+        );
+    }
 }
 
 #[cfg(test)]
