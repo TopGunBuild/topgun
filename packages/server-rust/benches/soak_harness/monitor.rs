@@ -46,6 +46,21 @@
 //! bounded soaks exercise crash/convergence, and their green memory verdict means
 //! "no leak large enough to clear the noise floor in this window", NOT "bounded
 //! memory proven". Do not read a short green soak as the latter.
+//!
+//! ## Tombstone-byte gate: same slope idea, no detection floor
+//!
+//! `topgun_ormap_tombstone_bytes_total` (sampled over HTTP from `GET /metrics`)
+//! is a direct, residency-independent count of tombstone bytes on the write
+//! path — unlike RSS it carries no allocator retention, no read/GC jitter, and
+//! no cache-warmup wobble. Every unit of observed growth is either a newly
+//! inserted tombstone or nothing; there is no noise floor to wait out. That is
+//! why [`assess_tombstone_bytes`] uses a much tighter per-hour threshold than
+//! the RSS gate AND does not replicate RSS's large min-growth guard (see
+//! "Detection floor" above) — the RSS guard exists solely to suppress noise
+//! until a leak's absolute growth clears it, and this gauge has no analogous
+//! noise to suppress. That is precisely what lets *short* soak runs gain real
+//! leak signal from the byte gate long before the RSS gate's multi-hour
+//! detection floor would let it see anything.
 
 use std::process::Command;
 
@@ -179,6 +194,150 @@ fn least_squares_slope_per_hour(samples: &[MemSample]) -> f64 {
     // x in hours so the slope is directly MB/hour.
     let xs: Vec<f64> = samples.iter().map(|s| s.elapsed_secs / 3600.0).collect();
     let ys: Vec<f64> = samples.iter().map(|s| s.rss_mb).collect();
+    let mean_x = xs.iter().sum::<f64>() / n;
+    let mean_y = ys.iter().sum::<f64>() / n;
+    let mut num = 0.0;
+    let mut den = 0.0;
+    for (x, y) in xs.iter().zip(ys.iter()) {
+        num += (x - mean_x) * (y - mean_y);
+        den += (x - mean_x) * (x - mean_x);
+    }
+    if den.abs() < f64::EPSILON {
+        0.0
+    } else {
+        num / den
+    }
+}
+
+/// Calibrated slope ceiling (bytes/hour) for the tombstone-byte gate.
+///
+/// ~0.5 KB/h. Tight by design — see the module-level "no detection floor" doc:
+/// with no RSS-style noise to absorb, any sustained per-hour growth this small
+/// is already real signal, not measurement wobble.
+///
+/// `allow(dead_code)`: this bench target (`harness = false`) is a binary, so
+/// unused-in-`main.rs` pub items are flagged dead by design until the harness
+/// wiring lands (samples `GET /metrics` and calls [`assess_tombstone_bytes`]
+/// alongside the existing RSS `assess` call) — the calibration tests below
+/// exercise this code today via the `soak_monitor_calibration` integration
+/// target, which re-includes this module under the standard libtest harness.
+#[allow(dead_code)]
+pub const DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR: f64 = 512.0;
+
+/// Absolute-growth guard (bytes) for the tombstone-byte slope clause.
+///
+/// Deliberately minimal — NOT the RSS gate's large [`DEFAULT_MEM_MIN_GROWTH_MB`]
+/// analogue. The RSS guard exists to suppress a real leak's *slope* signal
+/// until enough hours have passed for its absolute growth to clear RSS noise;
+/// this gauge has no such noise, so a large guard would only reintroduce the
+/// RSS gate's multi-hour detection floor for no benefit. Kept just above zero
+/// so a one/two-sample run (degenerate least-squares fit) cannot trip the
+/// clause on rounding.
+#[allow(dead_code)]
+pub const DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH: f64 = 1.0;
+
+/// One tombstone-byte-gauge sample (`topgun_ormap_tombstone_bytes_total`,
+/// scraped over HTTP). `bytes` is `u64` — a counted byte total is a
+/// non-negative integer, never a float.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub struct TombstoneSample {
+    pub elapsed_secs: f64,
+    pub bytes: u64,
+}
+
+/// Verdict of a tombstone-byte-growth assessment. Mirrors [`MemoryAssessment`]'s
+/// shape so callers (soak `main.rs`) can report both gates uniformly.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct TombstoneAssessment {
+    pub samples: usize,
+    pub first_bytes: u64,
+    pub peak_bytes: u64,
+    pub last_bytes: u64,
+    pub slope_bytes_per_hour: f64,
+    pub passed: bool,
+    pub reason: Option<String>,
+}
+
+/// Assess a series of tombstone-byte samples for bounded growth.
+///
+/// * `threshold_bytes_per_hour` — maximum tolerated growth slope.
+/// * `min_growth_bytes` — absolute growth (peak − first) below which slope is
+///   treated as noise. Kept minimal (see [`DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH`]
+///   doc) rather than mirroring the RSS gate's large guard.
+#[allow(clippy::cast_precision_loss, dead_code)]
+pub fn assess_tombstone_bytes(
+    samples: &[TombstoneSample],
+    threshold_bytes_per_hour: f64,
+    min_growth_bytes: f64,
+) -> TombstoneAssessment {
+    if samples.is_empty() {
+        // Same rationale as the RSS gate's empty-samples branch: zero samples
+        // means the monitor was BLIND (metrics scrape failed or the server was
+        // never reachable) — a leak would be invisible. Fail rather than
+        // silently pass.
+        return TombstoneAssessment {
+            samples: 0,
+            first_bytes: 0,
+            peak_bytes: 0,
+            last_bytes: 0,
+            slope_bytes_per_hour: 0.0,
+            passed: false,
+            reason: Some(
+                "no tombstone-byte samples collected — monitoring was blind (metrics scrape \
+                 failed or server never reachable); cannot assert bounded tombstone growth"
+                    .to_string(),
+            ),
+        };
+    }
+
+    let first_bytes = samples[0].bytes;
+    let last_bytes = samples[samples.len() - 1].bytes;
+    let peak_bytes = samples.iter().map(|s| s.bytes).max().unwrap_or(first_bytes);
+
+    let slope_bytes_per_hour = least_squares_slope_per_hour_bytes(samples);
+
+    #[allow(clippy::cast_precision_loss)]
+    let growth = peak_bytes.saturating_sub(first_bytes) as f64;
+    let mut reasons = Vec::new();
+
+    if growth >= min_growth_bytes && slope_bytes_per_hour > threshold_bytes_per_hour {
+        reasons.push(format!(
+            "tombstone-byte growth slope {slope_bytes_per_hour:.1} bytes/h exceeds \
+             {threshold_bytes_per_hour:.1} bytes/h (total growth {growth:.0} bytes over {} \
+             samples)",
+            samples.len()
+        ));
+    }
+
+    let passed = reasons.is_empty();
+    TombstoneAssessment {
+        samples: samples.len(),
+        first_bytes,
+        peak_bytes,
+        last_bytes,
+        slope_bytes_per_hour,
+        passed,
+        reason: if passed {
+            None
+        } else {
+            Some(reasons.join("; "))
+        },
+    }
+}
+
+/// Least-squares slope of `bytes` vs. time, expressed in bytes per hour.
+/// Same fit as [`least_squares_slope_per_hour`]; kept as a separate function
+/// because the sample type differs (`u64` bytes vs. `f64` MB).
+#[allow(clippy::cast_precision_loss, dead_code)]
+fn least_squares_slope_per_hour_bytes(samples: &[TombstoneSample]) -> f64 {
+    let n = samples.len() as f64;
+    if n < 2.0 {
+        return 0.0;
+    }
+    let xs: Vec<f64> = samples.iter().map(|s| s.elapsed_secs / 3600.0).collect();
+    let ys: Vec<f64> = samples.iter().map(|s| s.bytes as f64).collect();
     let mean_x = xs.iter().sum::<f64>() / n;
     let mean_y = ys.iter().sum::<f64>() / n;
     let mut num = 0.0;
@@ -372,5 +531,72 @@ mod tests {
             "hetzner-soak-runner.sh MEM_THRESHOLD default must match \
              monitor::DEFAULT_MEM_THRESHOLD_MB_PER_HOUR (expected {expected:?})"
         );
+    }
+
+    /// Build an hourly-sampled tombstone-byte series with a constant per-hour
+    /// growth rate, starting at `first_bytes`.
+    fn linear_bytes_series(
+        first_bytes: u64,
+        hours: u32,
+        bytes_per_hour: u64,
+    ) -> Vec<TombstoneSample> {
+        (0..=hours)
+            .map(|h| TombstoneSample {
+                elapsed_secs: f64::from(h) * 3600.0,
+                bytes: first_bytes + u64::from(h) * bytes_per_hour,
+            })
+            .collect()
+    }
+
+    /// A clearly-linear tombstone-byte-growth series — well above the tight
+    /// per-hour threshold — MUST FAIL. Mirrors the RSS gate's
+    /// `calibration_fails_linear_tombstone_leak`, but at the byte gauge's much
+    /// tighter scale: with no RSS noise floor, a sustained per-hour growth this
+    /// small is already real signal (see module docs).
+    #[test]
+    fn calibration_fails_linear_tombstone_bytes() {
+        let samples = linear_bytes_series(1_000, 24, 5_000);
+        let a = assess_tombstone_bytes(
+            &samples,
+            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+        );
+        assert!(
+            !a.passed,
+            "5000 bytes/h linear tombstone-byte growth must fail the tight gate; \
+             slope={:.1} reason={:?}",
+            a.slope_bytes_per_hour, a.reason
+        );
+        assert!(a.slope_bytes_per_hour > DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR);
+    }
+
+    /// A flat tombstone-byte series (churn stopped, or a future prune landed)
+    /// MUST PASS — otherwise the gate false-FAILs every healthy run.
+    #[test]
+    fn calibration_passes_flat_tombstone_bytes() {
+        let samples = linear_bytes_series(50_000, 24, 0);
+        let a = assess_tombstone_bytes(
+            &samples,
+            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+        );
+        assert!(
+            a.passed,
+            "flat tombstone-byte series must pass; slope={:.3} reason={:?}",
+            a.slope_bytes_per_hour, a.reason
+        );
+    }
+
+    /// Zero samples means the metrics scrape was blind — must FAIL, same
+    /// rationale as the RSS gate's empty-samples branch (AC6: a zero-sample
+    /// run must not silently report bounded growth).
+    #[test]
+    fn calibration_fails_zero_tombstone_samples() {
+        let a = assess_tombstone_bytes(
+            &[],
+            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+        );
+        assert!(!a.passed, "zero samples must fail as a blind monitor");
     }
 }
