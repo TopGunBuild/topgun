@@ -219,8 +219,18 @@ pub enum RecordValue {
         /// Tags of entries that have been removed but not yet garbage-collected.
         ///
         /// Coexists with `records` so both live additions and observed-remove
-        /// tombstones are carried in the same storage slot. Empty on all paths
-        /// today; the read-modify-write `OR_REMOVE` fix populates this field.
+        /// tombstones are carried in the same storage slot. `OR_REMOVE` populates
+        /// this field (see the CRDT service write path), so it is NOT empty once
+        /// any removal has occurred for the key.
+        ///
+        /// Grows unbounded today. The designed bound is epoch/generation GC (M4):
+        /// the server associates each tombstone with a server-authoritative epoch
+        /// at remove-apply time (server-side metadata — this WIRE shape stays
+        /// `Vec<String>`) and drops an epoch's set wholesale once the low-water-mark
+        /// across ALL tracked clients has passed it. Migrating existing blobs to the
+        /// epoch-indexed form (assigning the legacy corpus to one conservative
+        /// pre-migration generation) is the downstream implementation's obligation
+        /// (TODO-566; contract in core-rust tombstone_frontier.rs).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tombstones: Vec<String>,
     },

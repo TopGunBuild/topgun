@@ -538,8 +538,8 @@ impl CrdtService {
                 let (mut records, mut tombstones) = read_or_map_state(existing.map(|r| r.value));
 
                 records.retain(|e| e.tag != *tag);
-                // The tombstone set grows unbounded by design: it is NOT pruned
-                // here. Pruning a tag is only safe once every replica that could
+                // The tombstone set grows unbounded here today: it is NOT pruned on
+                // this path. Pruning a tag is only safe once every replica that could
                 // still hold the matching add has observed this remove, and a
                 // single node with transient reconnecting clients has no
                 // causal-stability / delivery-ack tracking to know that. A
@@ -548,9 +548,14 @@ impl CrdtService {
                 // the dropped tombstone, and resurrects the removed value. A loud,
                 // bounded-memory OOM is preferable to silent CRDT corruption, so
                 // for the single-node demo tier we accept linear tombstone growth.
-                // Revisit when a causal-stability low-water-mark lands or the tier
-                // moves beyond single-node demo (see the soak memory monitor,
-                // which is calibrated to flag this growth rather than mask it).
+                // The real bound is designed: epoch/generation GC (M4) prunes an
+                // entire epoch's tombstone set wholesale once the low-water-mark
+                // across ALL tracked clients has passed it. The prune wiring, the
+                // forgotten-client pre-apply gate, and the confirmed-apply ACK
+                // protocol it depends on are the downstream implementation
+                // (TODO-566; contract in core-rust tombstone_frontier.rs). Until
+                // that lands, the soak memory monitor is calibrated to flag this
+                // growth rather than mask it.
                 // Dedup: a re-issued remove must not duplicate the tombstone.
                 if !tombstones.contains(tag) {
                     tombstones.push(tag.clone());
