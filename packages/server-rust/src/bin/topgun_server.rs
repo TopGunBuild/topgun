@@ -332,13 +332,12 @@ impl ClusterService for ClusterStateAdapter {
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
-    // Initialize tracing for debug output
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // Initialize tracing AND install the global Prometheus recorder in one call.
+    // Without this the `/metrics` endpoint renders an empty body (no recorder is
+    // installed), so counters like `topgun_ormap_tombstone_bytes_total` are
+    // invisible to out-of-process scrapers such as the soak harness. The handle
+    // is threaded into AppState so the `/metrics` handler can render it.
+    let observability = Arc::new(topgun_server::service::middleware::init_observability());
 
     let args = Args::parse();
     let node_id = args.node_id.clone();
@@ -937,7 +936,7 @@ async fn main() -> anyhow::Result<()> {
             ..NetworkConfig::default()
         }),
         start_time: Instant::now(),
-        observability: None,
+        observability: Some(observability),
         operation_service: Some(classify_svc),
         dispatcher: Some(Arc::new(dispatcher)),
         jwt_secret,
