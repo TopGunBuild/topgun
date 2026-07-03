@@ -1110,7 +1110,14 @@ impl SyncService {
 
             // Union inbound tombstones (remove-wins) before applying records, so a
             // tag tombstoned anywhere suppresses its record everywhere.
-            tombstones.extend(entry.tombstones.iter().cloned());
+            // `insert` returns true only for tags not already in the local set, so
+            // the tombstone-bytes gauge counts genuinely-new inbound tombstones —
+            // idempotent re-pushes and intra-batch duplicates don't inflate it.
+            for tag in &entry.tombstones {
+                if tombstones.insert(tag.clone()) {
+                    crate::storage::record::add_tombstone_bytes(tag.len() as u64);
+                }
+            }
 
             // Drop any locally-stored record whose tag is now tombstoned.
             merged_records.retain(|r| !tombstones.contains(&r.tag));
