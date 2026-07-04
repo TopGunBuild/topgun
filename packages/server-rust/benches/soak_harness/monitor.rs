@@ -61,6 +61,18 @@
 //! noise to suppress. That is precisely what lets *short* soak runs gain real
 //! leak signal from the byte gate long before the RSS gate's multi-hour
 //! detection floor would let it see anything.
+//!
+//! Note on gating responsibility: [`assess_tombstone_bytes`] *computes* the byte
+//! verdict (including its `passed` flag), but whether that verdict gates the run
+//! is decided in `main.rs`, not here. Today the byte **slope** is report-only —
+//! the process-local counter resets to 0 on every `kill -9`, so across a
+//! crash-enabled run its series is a per-life sawtooth whose OLS slope is
+//! untrustworthy, and the OR-Map tombstone leak it measures is deliberately
+//! unbounded until TODO-566. `main.rs` therefore routes a slope breach to its
+//! `pending_gates` channel (surfaced, does NOT fail the run) and hard-gates only
+//! on the blind-monitor (zero-sample) case. So do not read this module's
+//! `passed: bool` as load-bearing everywhere — see `main.rs`'s run-end
+//! verdict-assembly for the authoritative gating decision.
 
 use std::process::Command;
 
