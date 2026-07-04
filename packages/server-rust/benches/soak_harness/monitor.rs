@@ -215,13 +215,10 @@ fn least_squares_slope_per_hour(samples: &[MemSample]) -> f64 {
 /// with no RSS-style noise to absorb, any sustained per-hour growth this small
 /// is already real signal, not measurement wobble.
 ///
-/// `allow(dead_code)`: this bench target (`harness = false`) is a binary, so
-/// unused-in-`main.rs` pub items are flagged dead by design until the harness
-/// wiring lands (samples `GET /metrics` and calls [`assess_tombstone_bytes`]
-/// alongside the existing RSS `assess` call) — the calibration tests below
-/// exercise this code today via the `soak_monitor_calibration` integration
-/// target, which re-includes this module under the standard libtest harness.
-#[allow(dead_code)]
+/// Consumed by `main.rs` (the soak loop scrapes `GET /metrics` and calls
+/// [`assess_tombstone_bytes`] with this threshold alongside the RSS `assess`) and
+/// by the `soak_monitor_calibration` integration target's tests — the harness
+/// wiring has landed, so no `allow(dead_code)` is needed here.
 pub const DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR: f64 = 512.0;
 
 /// Absolute-growth guard (bytes) for the tombstone-byte slope clause.
@@ -233,14 +230,12 @@ pub const DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR: f64 = 512.0;
 /// RSS gate's multi-hour detection floor for no benefit. Kept just above zero
 /// so a one/two-sample run (degenerate least-squares fit) cannot trip the
 /// clause on rounding.
-#[allow(dead_code)]
 pub const DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH: f64 = 1.0;
 
 /// One tombstone-byte-gauge sample (`topgun_ormap_tombstone_bytes_total`,
 /// scraped over HTTP). `bytes` is `u64` — a counted byte total is a
 /// non-negative integer, never a float.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub struct TombstoneSample {
     pub elapsed_secs: f64,
     pub bytes: u64,
@@ -249,7 +244,6 @@ pub struct TombstoneSample {
 /// Verdict of a tombstone-byte-growth assessment. Mirrors [`MemoryAssessment`]'s
 /// shape so callers (soak `main.rs`) can report both gates uniformly.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct TombstoneAssessment {
     pub samples: usize,
     pub first_bytes: u64,
@@ -266,7 +260,7 @@ pub struct TombstoneAssessment {
 /// * `min_growth_bytes` — absolute growth (peak − first) below which slope is
 ///   treated as noise. Kept minimal (see [`DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH`]
 ///   doc) rather than mirroring the RSS gate's large guard.
-#[allow(clippy::cast_precision_loss, dead_code)]
+#[allow(clippy::cast_precision_loss)]
 pub fn assess_tombstone_bytes(
     samples: &[TombstoneSample],
     threshold_bytes_per_hour: f64,
@@ -330,7 +324,7 @@ pub fn assess_tombstone_bytes(
 /// Least-squares slope of `bytes` vs. time, expressed in bytes per hour.
 /// Same fit as [`least_squares_slope_per_hour`]; kept as a separate function
 /// because the sample type differs (`u64` bytes vs. `f64` MB).
-#[allow(clippy::cast_precision_loss, dead_code)]
+#[allow(clippy::cast_precision_loss)]
 fn least_squares_slope_per_hour_bytes(samples: &[TombstoneSample]) -> f64 {
     let n = samples.len() as f64;
     if n < 2.0 {
