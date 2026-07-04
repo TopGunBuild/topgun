@@ -93,6 +93,7 @@ use topgun_server::storage::eviction_orchestrator::EvictionOrchestrator;
 use topgun_server::storage::factory::{ObserverFactory, RecordStoreFactory};
 use topgun_server::storage::impls::StorageConfig;
 use topgun_server::storage::map_data_store::MapDataStore;
+use topgun_server::storage::record::{set_tombstone_bytes, RecordValue};
 use topgun_server::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
 use topgun_server::storage::mutation_observer::MutationObserver;
 use topgun_server::storage::wal::{Wal, WalFsyncPolicy, WalRecovery, WalWriter};
@@ -162,6 +163,107 @@ async fn select_datastore() -> anyhow::Result<(Arc<dyn MapDataStore>, StorageBac
             "Unknown STORAGE_BACKEND='{other}' (expected: redb, postgres, null)"
         ),
     }
+}
+
+/// One-time startup reconciliation of the OR-Map tombstone-bytes gauge.
+///
+/// Runs exactly once, after WAL recovery completes and strictly before the
+/// listener accepts connections, for durable backends only. Walks the full
+/// persisted primary keyspace via the cursor-batched scan surface, sums
+/// `tag.len()` over every tombstone string in every persisted `OrMap` record,
+/// and re-baselines the gauge to that absolute total via [`set_tombstone_bytes`].
+/// This makes the scraped `topgun_ormap_tombstone_bytes_total` series survive a
+/// `kill -9` restart — the gauge otherwise resets to 0 on every process start
+/// and never re-counts rehydrated (redb-persisted) tombstones.
+///
+/// Never runs on any read/write/rehydration path — boot-only, exactly-once. On
+/// scan failure it logs a WARN and leaves the process-local gauge at its default
+/// (0): reconciliation is a monitoring-accuracy improvement, not a durability
+/// invariant, so a failed reconcile degrades to today's process-local behavior
+/// rather than aborting startup.
+///
+/// Legacy `RecordValue::OrTombstones { tags }` blobs are deliberately excluded
+/// from the sum. The live `add_tombstone_bytes` gauge never counts them either:
+/// the read path folds their tags into the unified `OrMap.tombstones` view
+/// WITHOUT emitting to the gauge, so summing them here would over-count relative
+/// to the live gauge this seed re-baselines.
+///
+/// `list_maps` on the redb backend enumerates primary partitions only, so backup
+/// tombstones are excluded — correct for the single-node soak/demo tier this
+/// targets; a future cluster/backup-accounting revisit is out of scope here.
+async fn reconcile_tombstone_bytes(store: Arc<dyn MapDataStore>) {
+    let maps = match store.list_maps().await {
+        Ok(maps) => maps,
+        Err(err) => {
+            tracing::warn!(
+                target: "topgun_server::bootstrap",
+                error = %err,
+                "tombstone-bytes reconciliation skipped: list_maps failed; gauge stays process-local"
+            );
+            return;
+        }
+    };
+
+    let mut total: u64 = 0;
+    let mut records_scanned: u64 = 0;
+
+    for map in &maps {
+        // Walk the whole map: first batch, then follow the cursor until exhausted
+        // so every record is visited regardless of map size. Each batch is itself
+        // cost-bounded, keeping resident cost under the TOPGUN_MAX_RAM_MB ceiling —
+        // a memory-safety property, not just a startup-latency one.
+        let mut batch = match store.scan_values(map, false, 0).await {
+            Ok(batch) => batch,
+            Err(err) => {
+                tracing::warn!(
+                    target: "topgun_server::bootstrap",
+                    map = %map,
+                    error = %err,
+                    "tombstone-bytes reconciliation skipped: scan_values failed; gauge stays process-local"
+                );
+                return;
+            }
+        };
+
+        loop {
+            for (_key, value) in &batch.records {
+                records_scanned += 1;
+                if let RecordValue::OrMap { tombstones, .. } = value {
+                    for tag in tombstones {
+                        total += tag.len() as u64;
+                    }
+                }
+            }
+
+            match batch.next_cursor.take() {
+                None => break,
+                Some(cursor) => {
+                    batch = match store.scan_values_batched(map, false, cursor, 0).await {
+                        Ok(next) => next,
+                        Err(err) => {
+                            tracing::warn!(
+                                target: "topgun_server::bootstrap",
+                                map = %map,
+                                error = %err,
+                                "tombstone-bytes reconciliation skipped: scan_values_batched failed; gauge stays process-local"
+                            );
+                            return;
+                        }
+                    };
+                }
+            }
+        }
+    }
+
+    set_tombstone_bytes(total);
+
+    tracing::info!(
+        target: "topgun_server::bootstrap",
+        tombstone_bytes = total,
+        records_scanned = records_scanned,
+        maps = maps.len(),
+        "OR-Map tombstone-bytes gauge reconciled from persisted keyspace"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -522,6 +624,14 @@ async fn main() -> anyhow::Result<()> {
                         eprintln!("FATAL: WAL recovery failed: {err}");
                         std::process::exit(1);
                     }
+
+                    // Re-baseline the OR-Map tombstone-bytes gauge from the now-
+                    // recovered durable keyspace, before the listener accepts any
+                    // connections, so the scraped metric survives kill -9 restarts
+                    // instead of sawtoothing back to 0 on every process start.
+                    // Clone the Arc here because `inner_data_store` is moved into
+                    // the write-behind wrap below — the walk reads through the clone.
+                    reconcile_tombstone_bytes(Arc::clone(&inner_data_store)).await;
 
                     // Seed the live sequence counter to one past the highest
                     // sequence ever durably observed. Computed AFTER recovery so
