@@ -120,7 +120,11 @@ async fn tombstone_bytes_gauge_survives_kill9() {
         .expect("client connect");
     for i in 0..N_TOMBS {
         let tag = format!("tomb-{i:06}");
-        assert_eq!(tag.len(), 11, "tag width must stay fixed for exact accounting");
+        assert_eq!(
+            tag.len(),
+            11,
+            "tag width must stay fixed for exact accounting"
+        );
         c.or_add(OR_MAP, OR_KEY, &tag, i as i64, 1, i as u32)
             .await
             .expect("or_add");
@@ -134,11 +138,17 @@ async fn tombstone_bytes_gauge_survives_kill9() {
     let pre = scrape_tombstone_bytes(port)
         .await
         .expect("pre-kill /metrics must expose the gauge");
-    assert!(pre > 0, "pre-kill gauge must be non-zero after seeding removes");
+    assert!(
+        pre > 0,
+        "pre-kill gauge must be non-zero after seeding removes"
+    );
     assert_eq!(pre, expected, "pre-kill gauge should equal N * tag_len");
 
     // kill -9 + relaunch against the same data dir (real WAL recovery).
-    supervisor.restart(READY_TIMEOUT).await.expect("server restart");
+    supervisor
+        .restart(READY_TIMEOUT)
+        .await
+        .expect("server restart");
 
     // FIRST post-restart scrape, with NO intervening OR mutation. The value must
     // come from boot reconciliation alone. On a fresh process without the seed

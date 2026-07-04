@@ -93,9 +93,9 @@ use topgun_server::storage::eviction_orchestrator::EvictionOrchestrator;
 use topgun_server::storage::factory::{ObserverFactory, RecordStoreFactory};
 use topgun_server::storage::impls::StorageConfig;
 use topgun_server::storage::map_data_store::MapDataStore;
-use topgun_server::storage::record::{set_tombstone_bytes, RecordValue};
 use topgun_server::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
 use topgun_server::storage::mutation_observer::MutationObserver;
+use topgun_server::storage::record::{set_tombstone_bytes, RecordValue};
 use topgun_server::storage::wal::{Wal, WalFsyncPolicy, WalRecovery, WalWriter};
 
 // ---------------------------------------------------------------------------
