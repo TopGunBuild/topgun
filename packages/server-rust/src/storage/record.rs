@@ -3,7 +3,7 @@
 //! Defines the core data structures stored in [`StorageEngine`](super::StorageEngine):
 //! [`Record`], [`RecordMetadata`], [`RecordValue`], and [`OrMapEntry`].
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use topgun_core::hlc::Timestamp;
@@ -33,6 +33,21 @@ static WRITE_TOKEN: AtomicU64 = AtomicU64::new(1);
 /// operation needs to be ordered against it.
 static OR_TOMBSTONE_BYTES: AtomicU64 = AtomicU64::new(0);
 
+/// Fail-loud tripwire recording whether [`add_tombstone_bytes`] has fired in
+/// this process.
+///
+/// [`set_tombstone_bytes`] pairs an **absolute** `AtomicU64` store with an
+/// **additive** Prometheus `increment`. The one-time boot seed is only correct
+/// on a fresh recorder: if any `add_tombstone_bytes` landed between recorder
+/// install and the boot seed, the `AtomicU64` would still self-correct (it is a
+/// store), but the Prometheus counter — the sink the soak harness scrapes —
+/// would silently double-count (it is additive). No `add_tombstone_bytes` call
+/// site is reachable before `set_ready()` today, so the boot seed is the sole
+/// gauge mutator in the recovery→ready window; this flag turns a future refactor
+/// that violates that ordering into a loud `debug_assert` failure rather than a
+/// silent double-count.
+static TOMBSTONE_ADD_FIRED: AtomicBool = AtomicBool::new(false);
+
 /// Adds `n` bytes to the process-global OR-Map tombstone-bytes gauge and
 /// emits the same delta to the `topgun_ormap_tombstone_bytes_total`
 /// Prometheus counter (mirrors the `topgun_operations_total` emit pattern in
@@ -45,6 +60,10 @@ static OR_TOMBSTONE_BYTES: AtomicU64 = AtomicU64::new(0);
 /// this gauge exists to expose, and a constant per-entry factor only scales
 /// it without changing what it reveals.
 pub fn add_tombstone_bytes(n: u64) {
+    // Arm the tripwire that makes the boot-seed dual-write asymmetry fail loud
+    // (see TOMBSTONE_ADD_FIRED). A single relaxed store on the write path is
+    // negligible next to the map mutation that precedes it.
+    TOMBSTONE_ADD_FIRED.store(true, Ordering::Relaxed);
     OR_TOMBSTONE_BYTES.fetch_add(n, Ordering::Relaxed);
     metrics::counter!("topgun_ormap_tombstone_bytes_total").increment(n);
 }
@@ -85,6 +104,45 @@ pub fn sub_tombstone_bytes(n: u64) {
 #[must_use]
 pub fn tombstone_bytes() -> u64 {
     OR_TOMBSTONE_BYTES.load(Ordering::Relaxed)
+}
+
+/// Re-baselines the OR-Map tombstone-bytes gauge to an absolute `total`.
+///
+/// This is the **only** absolute-set path for the gauge. It exists exclusively
+/// for the one-time startup reconciliation that runs after WAL recovery
+/// completes (see `bin/topgun_server.rs`): both the process-local
+/// [`OR_TOMBSTONE_BYTES`] atomic and the exported Prometheus
+/// `topgun_ormap_tombstone_bytes_total` counter reset to zero on every process
+/// start and never re-count rehydrated (redb-persisted) tombstones, so without
+/// this boot seed the scraped series sawtooths back to 0 on every `kill -9`
+/// restart and the cross-restart leak becomes invisible. It MUST NEVER be called
+/// on the hot read/write path — only once, at boot, before the listener accepts
+/// connections.
+///
+/// It performs BOTH writes, in order, because the two are **separate sinks**:
+///  1. `OR_TOMBSTONE_BYTES.store(total)` re-baselines the in-process `AtomicU64`
+///     — an absolute store, never `fetch_add`: a per-rehydration increment would
+///     reintroduce the eviction double-count the gauge's cardinal rule forbids.
+///  2. `metrics::counter!(...).increment(total)` seeds the Prometheus counter,
+///     which is a *different* sink living in the process `PrometheusHandle`
+///     recorder. The soak harness scrapes THIS counter via `GET /metrics`, not
+///     the `AtomicU64`; on a fresh process the recorder's counter starts at
+///     0/absent, so a single `increment(total)` from zero lands the exported
+///     series at `total` while staying a legal monotonic-from-zero `_total`
+///     counter (a Prometheus counter has no `.set`/`.store`). A `.store()`-only
+///     path would never reach the sink the harness actually reads.
+pub fn set_tombstone_bytes(total: u64) {
+    OR_TOMBSTONE_BYTES.store(total, Ordering::Relaxed);
+    // The Prometheus increment below is additive; correct only on a fresh-zero
+    // recorder. No add_tombstone_bytes site is reachable before this boot seed,
+    // so the tripwire must still be un-armed here — otherwise the counter the
+    // harness scrapes would silently double-count.
+    debug_assert!(
+        !TOMBSTONE_ADD_FIRED.load(Ordering::Relaxed),
+        "set_tombstone_bytes boot seed ran after add_tombstone_bytes — the additive \
+         Prometheus counter would double-count"
+    );
+    metrics::counter!("topgun_ormap_tombstone_bytes_total").increment(total);
 }
 
 /// Minimum elapsed milliseconds before a read access updates `last_access_time`.
