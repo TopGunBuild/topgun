@@ -74,6 +74,7 @@
 //! `passed: bool` as load-bearing everywhere — see `main.rs`'s run-end
 //! verdict-assembly for the authoritative gating decision.
 
+use std::path::Path;
 use std::process::Command;
 
 /// Calibrated slope ceiling (MB/hour) for the 72h soak's memory assertion.
@@ -357,6 +358,74 @@ fn least_squares_slope_per_hour_bytes(samples: &[TombstoneSample]) -> f64 {
     } else {
         num / den
     }
+}
+
+/// Calibrated slope ceiling (MB/hour) for the soak's on-disk data-dir growth
+/// assertion.
+///
+/// PRE-566 PLACEHOLDER: loosely calibrated so the deliberately-unbounded
+/// pre-TODO-566 OR-Map tombstone growth (which grows the durable dir linearly
+/// by design, see the module-level "Critical fence" rationale in the parent
+/// spec) does not spuriously trip this clause during a bounded/short soak.
+/// This is NOT the tight bounded-expectation value TODO-566/Gap 2 will
+/// calibrate once the leak is bounded — do not read this as a proven bound.
+pub const DEFAULT_DISK_THRESHOLD_MB_PER_HOUR: f64 = 50.0;
+
+/// Absolute-growth guard (MB) for the disk slope clause.
+///
+/// PRE-566 PLACEHOLDER (see [`DEFAULT_DISK_THRESHOLD_MB_PER_HOUR`] doc) — not
+/// the tight bounded-expectation guard TODO-566/Gap 2 will calibrate.
+pub const DEFAULT_DISK_MIN_GROWTH_MB: f64 = 100.0;
+
+/// Hard ceiling (MB) on peak on-disk data-dir size.
+///
+/// PRE-566 PLACEHOLDER (see [`DEFAULT_DISK_THRESHOLD_MB_PER_HOUR`] doc) — not
+/// the tight bounded-expectation ceiling TODO-566/Gap 2 will calibrate.
+pub const DEFAULT_DISK_CEILING_MB: f64 = 4096.0;
+
+/// One on-disk data-dir size sample (`du -sk <dir>`, KiB -> MB).
+#[derive(Debug, Clone, Copy)]
+pub struct DiskSample {
+    pub elapsed_secs: f64,
+    pub disk_mb: f64,
+}
+
+/// Verdict of a disk-growth assessment. Mirrors [`MemoryAssessment`]'s shape so
+/// callers (soak `main.rs`) can report RSS, tombstone bytes, and disk uniformly.
+#[derive(Debug, Clone)]
+pub struct DiskAssessment {
+    pub samples: usize,
+    pub first_mb: f64,
+    pub peak_mb: f64,
+    pub last_mb: f64,
+    pub slope_mb_per_hour: f64,
+    pub passed: bool,
+    pub reason: Option<String>,
+}
+
+/// Sample the on-disk size of `dir` in megabytes via `du -sk` (KiB on both
+/// macOS and Linux with `-k`). Returns `None` if `du` fails or its output
+/// cannot be parsed (mirrors `sample_rss_mb`'s `None`-on-failure contract).
+pub fn sample_disk_mb(dir: &Path) -> Option<f64> {
+    todo!("G2 fills in the du -sk shell-out body")
+}
+
+/// Assess a series of on-disk data-dir samples for bounded growth. Mirrors
+/// [`assess`]'s shape and clauses verbatim (empty-samples blind-monitor
+/// branch, least-squares slope via the shared OLS helper, growth/threshold and
+/// ceiling clauses) so RSS, tombstone-byte, and disk gates report uniformly.
+///
+/// * `threshold_mb_per_hour` — maximum tolerated growth slope.
+/// * `min_growth_mb` — absolute growth (peak − first) below which slope is
+///   treated as noise (guards tiny/short runs).
+/// * `ceiling_mb` — hard cap on peak on-disk size.
+pub fn assess_disk(
+    samples: &[DiskSample],
+    threshold_mb_per_hour: f64,
+    min_growth_mb: f64,
+    ceiling_mb: f64,
+) -> DiskAssessment {
+    todo!("G2 fills in the assess_disk body")
 }
 
 // This bench target is `harness = false` (it owns `main`), so these `#[test]`
