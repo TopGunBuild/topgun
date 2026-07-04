@@ -44,8 +44,12 @@ static OR_TOMBSTONE_BYTES: AtomicU64 = AtomicU64::new(0);
 /// would silently double-count (it is additive). No `add_tombstone_bytes` call
 /// site is reachable before `set_ready()` today, so the boot seed is the sole
 /// gauge mutator in the recovery→ready window; this flag turns a future refactor
-/// that violates that ordering into a loud `debug_assert` failure rather than a
-/// silent double-count.
+/// that violates that ordering into a loud failure — a `tracing::error!` in every
+/// build (the soak harness and production run release, where `debug_assert!` is a
+/// no-op) plus a hard `debug_assert!` in debug/test — rather than a silent
+/// double-count of the Prometheus counter the harness scrapes. Written with
+/// `Release` / read with `Acquire` so the boot seed reliably observes a prior arm
+/// even if the two ever run on different threads.
 static TOMBSTONE_ADD_FIRED: AtomicBool = AtomicBool::new(false);
 
 /// Adds `n` bytes to the process-global OR-Map tombstone-bytes gauge and
@@ -61,9 +65,10 @@ static TOMBSTONE_ADD_FIRED: AtomicBool = AtomicBool::new(false);
 /// it without changing what it reveals.
 pub fn add_tombstone_bytes(n: u64) {
     // Arm the tripwire that makes the boot-seed dual-write asymmetry fail loud
-    // (see TOMBSTONE_ADD_FIRED). A single relaxed store on the write path is
-    // negligible next to the map mutation that precedes it.
-    TOMBSTONE_ADD_FIRED.store(true, Ordering::Relaxed);
+    // (see TOMBSTONE_ADD_FIRED). A single store on the write path is negligible
+    // next to the map mutation that precedes it; `Release` pairs with the boot
+    // seed's `Acquire` load so the seed reliably observes this arm cross-thread.
+    TOMBSTONE_ADD_FIRED.store(true, Ordering::Release);
     OR_TOMBSTONE_BYTES.fetch_add(n, Ordering::Relaxed);
     metrics::counter!("topgun_ormap_tombstone_bytes_total").increment(n);
 }
@@ -136,9 +141,21 @@ pub fn set_tombstone_bytes(total: u64) {
     // The Prometheus increment below is additive; correct only on a fresh-zero
     // recorder. No add_tombstone_bytes site is reachable before this boot seed,
     // so the tripwire must still be un-armed here — otherwise the counter the
-    // harness scrapes would silently double-count.
+    // harness scrapes would silently double-count. Fail loud in EVERY build: the
+    // soak harness and production run release, where `debug_assert!` alone is a
+    // no-op, so an error log carries the signal there while the debug_assert hard
+    // -fails tests.
+    let armed = TOMBSTONE_ADD_FIRED.load(Ordering::Acquire);
+    if armed {
+        tracing::error!(
+            target: "topgun_server::bootstrap",
+            "set_tombstone_bytes boot seed ran after add_tombstone_bytes — the additive \
+             Prometheus counter will double-count; the recovery→ready gauge-window invariant \
+             was violated by a reachable pre-set_ready write path"
+        );
+    }
     debug_assert!(
-        !TOMBSTONE_ADD_FIRED.load(Ordering::Relaxed),
+        !armed,
         "set_tombstone_bytes boot seed ran after add_tombstone_bytes — the additive \
          Prometheus counter would double-count"
     );

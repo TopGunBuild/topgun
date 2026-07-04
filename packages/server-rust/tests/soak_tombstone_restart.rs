@@ -174,7 +174,9 @@ async fn tombstone_bytes_gauge_survives_kill9() {
         .expect("post-restart /metrics must expose the reconciled gauge");
     assert_eq!(
         post, pre,
-        "first post-restart scrape must reflect the reconciled total ({pre}), not 0"
+        "first post-restart scrape must reflect the reconciled total: post={post} pre={pre} — \
+         post==0 means boot reconciliation didn't run; post≈2×pre means WAL replay armed \
+         add_tombstone_bytes before the boot seed, double-counting the additive Prometheus counter"
     );
 
     supervisor.shutdown().await;
