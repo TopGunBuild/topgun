@@ -21,6 +21,7 @@ pub mod messages;
 pub mod or_map;
 pub mod partition;
 pub mod schema;
+pub mod tombstone_frontier;
 pub mod traits;
 pub mod types;
 pub mod vector;
