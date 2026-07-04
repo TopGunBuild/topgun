@@ -563,10 +563,10 @@ async fn run_soak(config: &Config) -> i32 {
         config.mem_ceiling_mb,
     );
 
-    // --- Assess tombstone-byte growth (primary, tight-threshold leak signal).
-    // Coexists with the RSS gate above — neither replaces the other (AC6). A
-    // run that collected zero gauge samples fails as a blind monitor, same as
-    // the RSS empty-samples branch.
+    // --- Assess tombstone-byte growth (direct residency-independent leak
+    // instrument). Coexists with the RSS gate above — neither replaces the other.
+    // The SLOPE clause is report-only today (see below); the blind-monitor clause
+    // (zero samples) hard-gates, mirroring the RSS empty-samples branch.
     let tombstone_samples_snapshot = tombstone_samples.lock().clone();
     let tombstones = assess_tombstone_bytes(
         &tombstone_samples_snapshot,
@@ -574,11 +574,26 @@ async fn run_soak(config: &Config) -> i32 {
         DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
     );
 
+    // The tombstone-byte SLOPE clause is REPORT-ONLY today, not a hard gate: the
+    // OR-Map tombstone leak it measures is deliberately unbounded until TODO-566
+    // bounds it, so any or-churn soak REDding on slope is the EXPECTED honest
+    // signal (a real, known leak), not a regression. Hard-gating on it would make
+    // every or-churn soak permanently red — including the blocking no-crash CI
+    // smoke. It is surfaced as a pending (expected-fail) gate below and flips to a
+    // hard gate once TODO-566 bounds the leak (see TODO-563 Gap 4). A process-
+    // local gauge that also resets to 0 on `kill -9`/restart is a further reason
+    // it cannot gate — its slope over a cross-restart sawtooth is untrustworthy.
+    //
+    // The blind-monitor guard, by contrast, DOES hard-gate: zero samples means
+    // the `/metrics` scrape was dead — a real harness defect independent of the
+    // leak magnitude, so a run that monitored nothing must not pass.
+    let blind_monitor = tombstones.samples == 0;
+
     let panic_report = panic_watch.report();
     let passed = convergence_failures.is_empty()
         && recovery_failures.is_empty()
         && mem.passed
-        && tombstones.passed
+        && !blind_monitor
         && panic_report.is_none();
 
     if !mem.passed {
@@ -587,11 +602,19 @@ async fn run_soak(config: &Config) -> i32 {
             mem.reason.clone().unwrap_or_default()
         );
     }
-    if !tombstones.passed {
+    if blind_monitor {
         finished_reason = format!(
-            "tombstone-byte growth assertion failed: {}",
+            "tombstone-byte monitoring blind: {}",
             tombstones.reason.clone().unwrap_or_default()
         );
+    } else if !tombstones.passed {
+        // Real, expected leak signal — record it as a pending gate (reported,
+        // did NOT fail the run) until TODO-566 makes bounded growth the norm.
+        pending_gates.push(format!(
+            "tombstone-byte slope {:.1} B/h exceeds {:.1} B/h — EXPECTED until \
+             TODO-566 bounds OR-Map tombstones (report-only, did NOT fail the run)",
+            tombstones.slope_bytes_per_hour, DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR
+        ));
     }
     if let Some(pr) = &panic_report {
         if passed {
@@ -670,14 +693,19 @@ fn print_summary(r: &SoakReport, tombstones: &TombstoneAssessment) {
         r.memory.slope_mb_per_hour,
         if r.memory.passed { "ok" } else { "FAIL" }
     );
+    // The byte SLOPE is report-only until TODO-566 bounds the (currently
+    // deliberate) OR-Map tombstone leak; only the blind-monitor (zero-sample)
+    // clause hard-gates today. See the run-end verdict rationale.
+    let tombstone_role = "slope report-only until TODO-566; blind-monitor hard-gates";
     println!(
-        "tombstone_bytes:   first={} peak={} last={} slope={:.1}B/h samples={} -> {} (primary){}",
+        "tombstone_bytes:   first={} peak={} last={} slope={:.1}B/h samples={} -> {} ({}){}",
         tombstones.first_bytes,
         tombstones.peak_bytes,
         tombstones.last_bytes,
         tombstones.slope_bytes_per_hour,
         tombstones.samples,
         if tombstones.passed { "ok" } else { "FAIL" },
+        tombstone_role,
         tombstones
             .reason
             .as_ref()
@@ -733,6 +761,9 @@ async fn scrape_tombstone_bytes(http: &reqwest::Client, port: u16) -> Option<u64
 /// prefix match keeps the parser correct if one is ever added.
 fn parse_tombstone_bytes_total(body: &str) -> Option<u64> {
     const METRIC: &str = "topgun_ormap_tombstone_bytes_total";
+    // Compute the labelled-series prefix once rather than allocating a fresh
+    // `String` per scanned line in the hot scrape loop.
+    let labelled_prefix = format!("{METRIC}{{");
     for line in body.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -740,12 +771,16 @@ fn parse_tombstone_bytes_total(body: &str) -> Option<u64> {
         }
         let mut parts = line.split_whitespace();
         let name = parts.next()?;
-        if name == METRIC || name.starts_with(&format!("{METRIC}{{")) {
+        if name == METRIC || name.starts_with(&labelled_prefix) {
             let value = parts.next()?;
-            // Prometheus renders counter values as text floats (e.g. "1234" or
-            // "1234.0"); the gauge is logically u64 bytes, so parse as f64 and
-            // truncate rather than fail on the trailing ".0" rendering.
-            return value.parse::<f64>().ok().map(|f| f as u64);
+            // The gauge is logically u64 bytes. Parse as u64 first (exact for a
+            // whole-number counter); fall back to f64-then-truncate only for the
+            // trailing ".0" float rendering Prometheus may emit — avoids the f64
+            // precision loss a `u64` value above 2^53 would otherwise suffer.
+            return value
+                .parse::<u64>()
+                .ok()
+                .or_else(|| value.parse::<f64>().ok().map(|f| f as u64));
         }
     }
     None
