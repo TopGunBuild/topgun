@@ -26,6 +26,22 @@
 //! re-including the modules here puts this proof under the standard libtest
 //! harness. `allow(dead_code)` covers bench items this test does not reference.
 
+// Mirror the soak harness's crate-level pedantic allow list: this test pulls in
+// the bench `client`/`process`/`or_noloss` modules by `#[path]`, so it must
+// carry the same allows they were written against (e.g. `doc_markdown` for
+// prose like "MsgPack", the intentional lossy `.0`-float→byte-count cast in the
+// Prometheus parser). Kept in sync with `benches/soak_harness/main.rs`.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::similar_names,
+    clippy::doc_markdown,
+    clippy::too_many_lines,
+    clippy::struct_excessive_bools
+)]
+
 #[path = "../benches/soak_harness/or_noloss.rs"]
 #[allow(dead_code)]
 mod or_noloss;
@@ -49,7 +65,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const OR_MAP: &str = "ork_map";
 const OR_KEY: &str = "ork";
 /// Number of unique-tag OR removes to seed.
-const N_TOMBS: usize = 50;
+const N_TOMBS: u32 = 50;
 
 /// Scrape `topgun_ormap_tombstone_bytes_total` from the running server's
 /// `GET /metrics`. Returns `None` on any transient failure (connection refused
@@ -125,14 +141,14 @@ async fn tombstone_bytes_gauge_survives_kill9() {
             11,
             "tag width must stay fixed for exact accounting"
         );
-        c.or_add(OR_MAP, OR_KEY, &tag, i as i64, 1, i as u32)
+        c.or_add(OR_MAP, OR_KEY, &tag, i64::from(i), 1, i)
             .await
             .expect("or_add");
         c.or_remove(OR_MAP, OR_KEY, &tag).await.expect("or_remove");
     }
     drop(c);
 
-    let expected: u64 = N_TOMBS as u64 * 11;
+    let expected: u64 = u64::from(N_TOMBS) * 11;
 
     // Pre-kill: the live gauge reflects the accumulated tombstone bytes.
     let pre = scrape_tombstone_bytes(port)
