@@ -162,7 +162,8 @@ pub fn assess(
     let last_mb = samples[samples.len() - 1].rss_mb;
     let peak_mb = samples.iter().fold(0.0_f64, |m, s| m.max(s.rss_mb));
 
-    let slope_mb_per_hour = least_squares_slope_per_hour(samples);
+    let points: Vec<(f64, f64)> = samples.iter().map(|s| (s.elapsed_secs, s.rss_mb)).collect();
+    let slope_mb_per_hour = least_squares_slope_per_hour(&points);
 
     let growth = peak_mb - first_mb;
     let mut reasons = Vec::new();
@@ -196,17 +197,22 @@ pub fn assess(
     }
 }
 
-/// Least-squares slope of `rss_mb` vs. time, expressed in MB per hour. Returns
-/// 0 when there is insufficient variance in the time axis (e.g. one sample).
+/// Least-squares slope of `value` vs. `elapsed_secs`, expressed as a per-hour
+/// rate. Returns 0 when there is insufficient variance in the time axis (e.g.
+/// one sample).
+///
+/// Shared by all three samplers (RSS MB, tombstone-bytes, disk MB) — the fit
+/// math is identical regardless of which quantity is being tracked, so it
+/// exists exactly once here rather than as a per-sampler-type copy.
 #[allow(clippy::cast_precision_loss)]
-fn least_squares_slope_per_hour(samples: &[MemSample]) -> f64 {
-    let n = samples.len() as f64;
+fn least_squares_slope_per_hour(points: &[(f64, f64)]) -> f64 {
+    let n = points.len() as f64;
     if n < 2.0 {
         return 0.0;
     }
-    // x in hours so the slope is directly MB/hour.
-    let xs: Vec<f64> = samples.iter().map(|s| s.elapsed_secs / 3600.0).collect();
-    let ys: Vec<f64> = samples.iter().map(|s| s.rss_mb).collect();
+    // x in hours so the slope is directly <unit>/hour.
+    let xs: Vec<f64> = points.iter().map(|(secs, _)| secs / 3600.0).collect();
+    let ys: Vec<f64> = points.iter().map(|(_, value)| *value).collect();
     let mean_x = xs.iter().sum::<f64>() / n;
     let mean_y = ys.iter().sum::<f64>() / n;
     let mut num = 0.0;
@@ -303,7 +309,12 @@ pub fn assess_tombstone_bytes(
     let last_bytes = samples[samples.len() - 1].bytes;
     let peak_bytes = samples.iter().map(|s| s.bytes).max().unwrap_or(first_bytes);
 
-    let slope_bytes_per_hour = least_squares_slope_per_hour_bytes(samples);
+    #[allow(clippy::cast_precision_loss)]
+    let points: Vec<(f64, f64)> = samples
+        .iter()
+        .map(|s| (s.elapsed_secs, s.bytes as f64))
+        .collect();
+    let slope_bytes_per_hour = least_squares_slope_per_hour(&points);
 
     #[allow(clippy::cast_precision_loss)]
     let growth = peak_bytes.saturating_sub(first_bytes) as f64;
@@ -331,32 +342,6 @@ pub fn assess_tombstone_bytes(
         } else {
             Some(reasons.join("; "))
         },
-    }
-}
-
-/// Least-squares slope of `bytes` vs. time, expressed in bytes per hour.
-/// Same fit as [`least_squares_slope_per_hour`]; kept as a separate function
-/// because the sample type differs (`u64` bytes vs. `f64` MB).
-#[allow(clippy::cast_precision_loss)]
-fn least_squares_slope_per_hour_bytes(samples: &[TombstoneSample]) -> f64 {
-    let n = samples.len() as f64;
-    if n < 2.0 {
-        return 0.0;
-    }
-    let xs: Vec<f64> = samples.iter().map(|s| s.elapsed_secs / 3600.0).collect();
-    let ys: Vec<f64> = samples.iter().map(|s| s.bytes as f64).collect();
-    let mean_x = xs.iter().sum::<f64>() / n;
-    let mean_y = ys.iter().sum::<f64>() / n;
-    let mut num = 0.0;
-    let mut den = 0.0;
-    for (x, y) in xs.iter().zip(ys.iter()) {
-        num += (x - mean_x) * (y - mean_y);
-        den += (x - mean_x) * (x - mean_x);
-    }
-    if den.abs() < f64::EPSILON {
-        0.0
-    } else {
-        num / den
     }
 }
 
@@ -407,7 +392,18 @@ pub struct DiskAssessment {
 /// macOS and Linux with `-k`). Returns `None` if `du` fails or its output
 /// cannot be parsed (mirrors `sample_rss_mb`'s `None`-on-failure contract).
 pub fn sample_disk_mb(dir: &Path) -> Option<f64> {
-    todo!("G2 fills in the du -sk shell-out body")
+    let out = Command::new("du")
+        .args(["-sk", dir.to_str()?])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    // `du -sk` prints "<KiB>\t<path>"; the KiB total is the first
+    // whitespace-separated field.
+    let kib: f64 = text.split_whitespace().next()?.parse().ok()?;
+    Some(kib / 1024.0)
 }
 
 /// Assess a series of on-disk data-dir samples for bounded growth. Mirrors
@@ -419,13 +415,73 @@ pub fn sample_disk_mb(dir: &Path) -> Option<f64> {
 /// * `min_growth_mb` — absolute growth (peak − first) below which slope is
 ///   treated as noise (guards tiny/short runs).
 /// * `ceiling_mb` — hard cap on peak on-disk size.
+#[allow(clippy::cast_precision_loss)]
 pub fn assess_disk(
     samples: &[DiskSample],
     threshold_mb_per_hour: f64,
     min_growth_mb: f64,
     ceiling_mb: f64,
 ) -> DiskAssessment {
-    todo!("G2 fills in the assess_disk body")
+    if samples.is_empty() {
+        // Zero samples over a real run means the monitor was BLIND (`du` failing
+        // or the data dir never resolving) — a leak would be invisible on disk
+        // exactly as an unreachable `ps`/`/metrics` would be for RSS/tombstone
+        // bytes. Fail rather than silently pass.
+        return DiskAssessment {
+            samples: 0,
+            first_mb: 0.0,
+            peak_mb: 0.0,
+            last_mb: 0.0,
+            slope_mb_per_hour: 0.0,
+            passed: false,
+            reason: Some(
+                "no disk-usage samples collected — disk monitoring was blind (du failed or \
+                 the data dir never resolved); cannot assert bounded disk growth"
+                    .to_string(),
+            ),
+        };
+    }
+
+    let first_mb = samples[0].disk_mb;
+    let last_mb = samples[samples.len() - 1].disk_mb;
+    let peak_mb = samples.iter().fold(0.0_f64, |m, s| m.max(s.disk_mb));
+
+    let points: Vec<(f64, f64)> = samples
+        .iter()
+        .map(|s| (s.elapsed_secs, s.disk_mb))
+        .collect();
+    let slope_mb_per_hour = least_squares_slope_per_hour(&points);
+
+    let growth = peak_mb - first_mb;
+    let mut reasons = Vec::new();
+
+    if peak_mb > ceiling_mb {
+        reasons.push(format!(
+            "peak disk usage {peak_mb:.1}MB exceeds ceiling {ceiling_mb:.1}MB"
+        ));
+    }
+    if growth >= min_growth_mb && slope_mb_per_hour > threshold_mb_per_hour {
+        reasons.push(format!(
+            "disk growth slope {slope_mb_per_hour:.1}MB/h exceeds {threshold_mb_per_hour:.1}MB/h \
+             (total growth {growth:.1}MB over {} samples)",
+            samples.len()
+        ));
+    }
+
+    let passed = reasons.is_empty();
+    DiskAssessment {
+        samples: samples.len(),
+        first_mb,
+        peak_mb,
+        last_mb,
+        slope_mb_per_hour,
+        passed,
+        reason: if passed {
+            None
+        } else {
+            Some(reasons.join("; "))
+        },
+    }
 }
 
 // This bench target is `harness = false` (it owns `main`), so these `#[test]`
@@ -673,5 +729,71 @@ mod tests {
             DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
         );
         assert!(!a.passed, "zero samples must fail as a blind monitor");
+    }
+
+    /// Build an hourly-sampled disk-usage series with a constant per-hour
+    /// growth rate, starting at `first_mb`.
+    fn linear_disk_series(first_mb: f64, hours: u32, mb_per_hour: f64) -> Vec<DiskSample> {
+        (0..=hours)
+            .map(|h| DiskSample {
+                elapsed_secs: f64::from(h) * 3600.0,
+                disk_mb: first_mb + mb_per_hour * f64::from(h),
+            })
+            .collect()
+    }
+
+    /// Zero disk samples means `du` never succeeded / the data dir never
+    /// resolved — the monitor was BLIND. AC2: must FAIL, same rationale as the
+    /// RSS/tombstone-byte empty-samples branches, since this is the ONE clause
+    /// that hard-gates `passed` in `main.rs`.
+    #[test]
+    fn calibration_fails_zero_disk_samples() {
+        let a = assess_disk(
+            &[],
+            DEFAULT_DISK_THRESHOLD_MB_PER_HOUR,
+            DEFAULT_DISK_MIN_GROWTH_MB,
+            DEFAULT_DISK_CEILING_MB,
+        );
+        assert!(!a.passed, "zero disk samples must fail as a blind monitor");
+    }
+
+    /// A flat disk-usage series (durable dir stopped growing) MUST PASS —
+    /// otherwise the gate false-FAILs every healthy in-place-overwrite run.
+    #[test]
+    fn calibration_passes_flat_disk_series() {
+        let samples = linear_disk_series(500.0, 72, 0.0);
+        let a = assess_disk(
+            &samples,
+            DEFAULT_DISK_THRESHOLD_MB_PER_HOUR,
+            DEFAULT_DISK_MIN_GROWTH_MB,
+            DEFAULT_DISK_CEILING_MB,
+        );
+        assert!(
+            a.passed,
+            "flat disk series must pass; slope={:.3} reason={:?}",
+            a.slope_mb_per_hour, a.reason
+        );
+    }
+
+    /// A steep, clearly-linear disk-growth series (well above the loosely
+    /// calibrated pre-566 threshold) MUST be flagged by `assess_disk`'s
+    /// `passed` field — this only proves the assessment's own slope clause is
+    /// correctly wired, NOT that it gates the run (it is report-only in
+    /// `main.rs`; see AC3/AC2).
+    #[test]
+    fn calibration_flags_steep_linear_disk_growth() {
+        let samples = linear_disk_series(200.0, 24, 200.0);
+        let a = assess_disk(
+            &samples,
+            DEFAULT_DISK_THRESHOLD_MB_PER_HOUR,
+            DEFAULT_DISK_MIN_GROWTH_MB,
+            DEFAULT_DISK_CEILING_MB,
+        );
+        assert!(
+            !a.passed,
+            "steep 200 MB/h disk growth must be flagged; slope={:.1} reason={:?}",
+            a.slope_mb_per_hour, a.reason
+        );
+        assert!(a.slope_mb_per_hour > DEFAULT_DISK_THRESHOLD_MB_PER_HOUR);
     }
 }

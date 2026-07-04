@@ -68,7 +68,9 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use client::SoakClient;
 use model::{compare, next_stamp, Model};
 use monitor::{
-    assess, assess_tombstone_bytes, sample_rss_mb, MemSample, TombstoneAssessment, TombstoneSample,
+    assess, assess_disk, assess_tombstone_bytes, sample_disk_mb, sample_rss_mb, DiskAssessment,
+    DiskSample, MemSample, TombstoneAssessment, TombstoneSample, DEFAULT_DISK_CEILING_MB,
+    DEFAULT_DISK_MIN_GROWTH_MB, DEFAULT_DISK_THRESHOLD_MB_PER_HOUR,
     DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH, DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
 };
 use or_noloss::{missing_acked_adds, OrLedger};
@@ -341,9 +343,10 @@ async fn run_soak(config: &Config) -> i32 {
         churn_handles.push(tokio::spawn(run_churn_client(idx, ctx)));
     }
 
-    // --- Spawn memory + tombstone-bytes samplers ---
-    // Both samplers share one clock so their `elapsed_secs` axes line up exactly
-    // (required for a fair side-by-side slope comparison in the summary/report).
+    // --- Spawn memory + tombstone-bytes + disk samplers ---
+    // All three samplers share one clock so their `elapsed_secs` axes line up
+    // exactly (required for a fair side-by-side slope comparison in the
+    // summary/report).
     let sampler_start = Instant::now();
     let samples: Arc<Mutex<Vec<MemSample>>> = Arc::new(Mutex::new(Vec::new()));
     let peak_rss = Arc::new(Mutex::new(0.0_f64));
@@ -400,6 +403,37 @@ async fn run_soak(config: &Config) -> i32 {
                     samples.lock().push(TombstoneSample {
                         elapsed_secs: elapsed,
                         bytes,
+                    });
+                }
+                tokio::time::sleep(interval).await;
+            }
+        });
+    }
+
+    // Disk-usage sampler: shells `du -sk` over the resolved local `data_dir`
+    // binding above (the same value handed to `ServerConfig.data_dir`) — NOT
+    // the raw `config.data_dir` `Option`, which is `None` on the default/CI
+    // path (the blocking Soak Smoke G4b invocation passes no `--data-dir`) and
+    // would yield zero samples, spuriously tripping the disk blind-monitor
+    // clause below. Runs on the same `sampler_start` clock as RSS/tombstone
+    // bytes so all three `elapsed_secs` axes line up for comparison.
+    let disk_samples: Arc<Mutex<Vec<DiskSample>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let samples = Arc::clone(&disk_samples);
+        let stop = Arc::clone(&stop);
+        let interval = config.mem_sample_interval;
+        let start = sampler_start;
+        let dir = data_dir.clone();
+        tokio::spawn(async move {
+            loop {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                if let Some(mb) = sample_disk_mb(&dir) {
+                    let elapsed = start.elapsed().as_secs_f64();
+                    samples.lock().push(DiskSample {
+                        elapsed_secs: elapsed,
+                        disk_mb: mb,
                     });
                 }
                 tokio::time::sleep(interval).await;
@@ -589,11 +623,28 @@ async fn run_soak(config: &Config) -> i32 {
     // leak magnitude, so a run that monitored nothing must not pass.
     let blind_monitor = tombstones.samples == 0;
 
+    // --- Assess disk growth (durable-dir footprint; catches leaks RSS cannot
+    // see, e.g. lazy-loaded records that never touch the in-memory cache).
+    // Mirrors the tombstone-byte gate exactly: the SLOPE is report-only (the
+    // pre-TODO-566 OR-churn leak grows the durable dir linearly by design, so
+    // hard-gating the slope would RED the blocking no-crash Soak Smoke G4b
+    // run — the same regression class SPEC-340 hit); only the blind-monitor
+    // (zero-sample) clause hard-gates.
+    let disk_samples_snapshot = disk_samples.lock().clone();
+    let disk = assess_disk(
+        &disk_samples_snapshot,
+        DEFAULT_DISK_THRESHOLD_MB_PER_HOUR,
+        DEFAULT_DISK_MIN_GROWTH_MB,
+        DEFAULT_DISK_CEILING_MB,
+    );
+    let disk_blind_monitor = disk.samples == 0;
+
     let panic_report = panic_watch.report();
     let passed = convergence_failures.is_empty()
         && recovery_failures.is_empty()
         && mem.passed
         && !blind_monitor
+        && !disk_blind_monitor
         && panic_report.is_none();
 
     if !mem.passed {
@@ -614,6 +665,22 @@ async fn run_soak(config: &Config) -> i32 {
             "tombstone-byte slope {:.1} B/h exceeds {:.1} B/h — EXPECTED until \
              TODO-566 bounds OR-Map tombstones (report-only, did NOT fail the run)",
             tombstones.slope_bytes_per_hour, DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR
+        ));
+    }
+    if disk_blind_monitor {
+        finished_reason = format!(
+            "disk monitoring blind: {}",
+            disk.reason.clone().unwrap_or_default()
+        );
+    } else if !disk.passed {
+        // Report-only, same rationale as the tombstone-byte slope above: the
+        // pre-566 OR churn grows the durable dir linearly by design, so this is
+        // the EXPECTED honest signal, not a regression. Do NOT AND this into
+        // `passed`.
+        pending_gates.push(format!(
+            "disk growth slope {:.1} MB/h exceeds {:.1} MB/h — EXPECTED until \
+             TODO-566 bounds OR-Map tombstones (report-only, did NOT fail the run)",
+            disk.slope_mb_per_hour, DEFAULT_DISK_THRESHOLD_MB_PER_HOUR
         ));
     }
     if let Some(pr) = &panic_report {
@@ -654,21 +721,22 @@ async fn run_soak(config: &Config) -> i32 {
         timestamp: utc_timestamp_now(),
     };
 
-    print_summary(&report, &tombstones);
+    print_summary(&report, &tombstones, &disk);
     if let Some(path) = &config.json_output {
         write_report(path, &report);
         println!("wrote JSON report to {}", path.display());
     }
-    // NOTE: the tombstone-byte verdict is asserted into `passed`/`finished_reason`
-    // above and printed in the console summary below, but is not yet a field on
-    // `SoakReport` (report.rs) — adding it there would be a 6th touched file
-    // against this spec's 5-file cap. Tracked as a follow-up so JSON consumers
-    // (CI dashboards) gain the same visibility the console already has.
+    // NOTE: neither the tombstone-byte nor the disk verdict is a field on
+    // `SoakReport` (report.rs) — both are asserted into `passed`/`finished_reason`
+    // above and printed in the console summary below, but adding structured
+    // fields there would be a 6th touched file against this spec's 5-file cap.
+    // Tracked as a follow-up so JSON consumers (CI dashboards) gain the same
+    // visibility the console already has.
 
     i32::from(!passed)
 }
 
-fn print_summary(r: &SoakReport, tombstones: &TombstoneAssessment) {
+fn print_summary(r: &SoakReport, tombstones: &TombstoneAssessment, disk: &DiskAssessment) {
     println!("\n=== SOAK SUMMARY ===");
     println!(
         "result:            {}",
@@ -708,6 +776,23 @@ fn print_summary(r: &SoakReport, tombstones: &TombstoneAssessment) {
         tombstone_role,
         tombstones
             .reason
+            .as_ref()
+            .map_or_else(String::new, |r| format!(" reason={r}")),
+    );
+    // Same report-only stance as tombstone bytes: the disk slope is EXPECTED to
+    // breach pre-TODO-566 under default OR-churn (linear durable-dir growth by
+    // design); only the blind-monitor (zero-sample) clause hard-gates.
+    let disk_role = "slope report-only until TODO-566; blind-monitor hard-gates";
+    println!(
+        "disk_mb:           first={:.1} peak={:.1} last={:.1} slope={:.1}MB/h samples={} -> {} ({}){}",
+        disk.first_mb,
+        disk.peak_mb,
+        disk.last_mb,
+        disk.slope_mb_per_hour,
+        disk.samples,
+        if disk.passed { "ok" } else { "FAIL" },
+        disk_role,
+        disk.reason
             .as_ref()
             .map_or_else(String::new, |r| format!(" reason={r}")),
     );
