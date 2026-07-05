@@ -12,6 +12,7 @@ pub mod network;
 pub mod query;
 pub mod service;
 pub mod storage;
+pub mod tombstone_frontier;
 pub mod traits;
 
 #[cfg(feature = "simulation")]
