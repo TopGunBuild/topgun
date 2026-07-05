@@ -79,8 +79,8 @@ pub struct CrdtService {
     /// unit tests that do not exercise the journal — `record_journal` is then a
     /// no-op, so the journal never perturbs CRDT-only test behaviour.
     journal: Option<Arc<JournalStore>>,
-    /// Per-KEY single-writer registry. Serializes the OR_ADD apply RMW
-    /// (`store.get` -> merge -> `store.put`) so concurrent OR_ADDs on the
+    /// Per-KEY single-writer registry. Serializes the `OR_ADD` apply RMW
+    /// (`store.get` -> merge -> `store.put`) so concurrent `OR_ADD`s on the
     /// SAME key cannot both read the pre-mutation state and race to `put`,
     /// which would silently drop one add (SPEC-333b lost-update race).
     /// Internal-only: not exposed via `new()` so existing call sites are

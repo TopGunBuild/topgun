@@ -39,7 +39,7 @@
 //!   single `put` call against a stale writer overwriting a newer one — a
 //!   point check on ONE write. It does not serialize the compound,
 //!   `.await`-spanning `get -> modify -> put` sequence: two concurrent
-//!   OR_ADDs can each pass their own `mark_stored` check on their own `put`
+//!   `OR_ADD`s can each pass their own `mark_stored` check on their own `put`
 //!   while both having read the same pre-mutation state, producing the
 //!   exact lost update this primitive exists to close.
 //!
@@ -109,7 +109,7 @@ impl KeyWriterRegistry {
     /// owned RAII guard that can be held across `.await` points — including
     /// across a longer async scope than the acquisition call itself (per
     /// the module's `tokio::sync::Mutex` rationale). Callers span this
-    /// guard over their entire critical region — for the OR_ADD joint-fix,
+    /// guard over their entire critical region — for the `OR_ADD` joint-fix,
     /// from `store.get` through the single `store.put` merge-commit.
     pub async fn acquire(&self, map_name: &str, key: &str) -> KeyWriterGuard {
         let lock = self.entry_lock(map_name, key);
@@ -157,7 +157,7 @@ mod tests {
     //    acquisitions on the same key, closing a classic read-then-write
     //    lost-update race. --
 
-    /// Simulates the exact RMW shape `crdt.rs`'s OR_ADD apply uses
+    /// Simulates the exact RMW shape `crdt.rs`'s `OR_ADD` apply uses
     /// (read state -> yield across an await -> write state) on shared
     /// state that is UNPROTECTED except by the registry's per-key guard.
     /// Without correct mutual exclusion, concurrent read-then-write races
