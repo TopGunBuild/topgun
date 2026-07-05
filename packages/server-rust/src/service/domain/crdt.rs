@@ -85,6 +85,15 @@ pub struct CrdtService {
     /// which would silently drop one add (SPEC-333b lost-update race).
     /// Internal-only: not exposed via `new()` so existing call sites are
     /// unaffected.
+    ///
+    /// Correctness precondition: this registry is owned per `CrdtService`, and a
+    /// `CrdtService` is 1:1 with its backing store (`record_store_factory`) — one
+    /// service is constructed over each store and registered as the router's sole
+    /// CRDT handle. Serialization therefore covers every `OR_ADD` that can reach
+    /// that store. If a future deployment ever constructs a SECOND `CrdtService`
+    /// over the SAME store (e.g. in-process sharding), it MUST share this same
+    /// registry — two registries over one store would mint distinct mutexes per
+    /// key and reopen the lost-update race.
     key_writer: Arc<KeyWriterRegistry>,
 }
 
