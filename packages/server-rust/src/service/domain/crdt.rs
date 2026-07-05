@@ -482,7 +482,7 @@ impl CrdtService {
             // clobbering the first's merge and losing an update (SPEC-333b). Held
             // across `store.get` through the single `store.put` merge-commit only —
             // does NOT cover the OR_REMOVE RMW below (342b's responsibility).
-            let _key_guard = self.key_writer.acquire(&op.map_name, &op.key).await;
+            let key_guard = self.key_writer.acquire(&op.map_name, &op.key).await;
 
             // Read existing OR-Map state so the new entry is merged in rather than replacing.
             // OR-Map add-wins semantics require all concurrent additions to be preserved,
@@ -525,6 +525,13 @@ impl CrdtService {
                 )
                 .await
                 .map_err(OperationError::Internal)?;
+
+            // Release the per-key writer lock the instant the merge-commit `put`
+            // returns: the critical region is exactly `store.get` -> `store.put`.
+            // The payload construction below only clones already-owned locals and
+            // touches no shared store state, so holding the lock across it would
+            // needlessly serialize unrelated writers to this key.
+            drop(key_guard);
 
             Ok(ServerEventPayload {
                 map_name: op.map_name.clone(),
