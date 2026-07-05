@@ -23,6 +23,7 @@ use tracing::Instrument;
 
 use crate::network::connection::{ConnectionId, ConnectionMetadata, ConnectionRegistry};
 use crate::service::domain::journal::JournalStore;
+use crate::service::domain::key_writer::KeyWriterRegistry;
 use crate::service::domain::predicate::{
     evaluate_predicate, evaluate_where, value_to_rmpv, EvalContext,
 };
@@ -78,6 +79,13 @@ pub struct CrdtService {
     /// unit tests that do not exercise the journal — `record_journal` is then a
     /// no-op, so the journal never perturbs CRDT-only test behaviour.
     journal: Option<Arc<JournalStore>>,
+    /// Per-KEY single-writer registry. Serializes the OR_ADD apply RMW
+    /// (`store.get` -> merge -> `store.put`) so concurrent OR_ADDs on the
+    /// SAME key cannot both read the pre-mutation state and race to `put`,
+    /// which would silently drop one add (SPEC-333b lost-update race).
+    /// Internal-only: not exposed via `new()` so existing call sites are
+    /// unaffected.
+    key_writer: Arc<KeyWriterRegistry>,
 }
 
 impl CrdtService {
@@ -97,6 +105,7 @@ impl CrdtService {
             query_registry,
             schema_provider,
             journal: None,
+            key_writer: Arc::new(KeyWriterRegistry::new()),
         }
     }
 
@@ -466,6 +475,14 @@ impl CrdtService {
                 };
                 (entry, or_rec.clone())
             };
+
+            // Serialize the compound read-modify-write per key: without this, two
+            // concurrent OR_ADDs on the SAME key could each read the pre-mutation
+            // state below and race to `store.put`, with the second `put` silently
+            // clobbering the first's merge and losing an update (SPEC-333b). Held
+            // across `store.get` through the single `store.put` merge-commit only —
+            // does NOT cover the OR_REMOVE RMW below (342b's responsibility).
+            let _key_guard = self.key_writer.acquire(&op.map_name, &op.key).await;
 
             // Read existing OR-Map state so the new entry is merged in rather than replacing.
             // OR-Map add-wins semantics require all concurrent additions to be preserved,
@@ -2872,6 +2889,49 @@ mod tests {
             vec!["tag-x"],
             "tag-x must remain tombstoned; tombstones={tombstones:?}"
         );
+    }
+
+    // AC6 (SPEC-342d / SPEC-333b): N concurrent OR_ADDs on the SAME key must
+    // all survive — the per-key writer lock now serializes the
+    // `store.get` -> merge -> `store.put` RMW inside `apply_single_op`'s
+    // OR_ADD branch, so no concurrent add can read stale pre-mutation state
+    // and clobber another add's merge on `put`. This proves OR_ADD-vs-OR_ADD
+    // ONLY — it does NOT prove OR_ADD-vs-OR_REMOVE interleaving is race-free
+    // (that remains 342b's responsibility, see module Context).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_or_adds_on_same_key_lose_no_update() {
+        for _ in 0..10 {
+            let (svc, factory) = make_service_with_factory();
+            let key = "concurrent-or-add-key";
+            let n = 20usize;
+
+            let mut handles = Vec::new();
+            for i in 0..n {
+                let svc = Arc::clone(&svc);
+                let tag = format!("t{i}");
+                let value = format!("v{i}");
+                handles.push(tokio::spawn(async move {
+                    svc.oneshot(or_add_op("tags", key, &value, &tag))
+                        .await
+                        .unwrap();
+                }));
+            }
+
+            futures_util::future::join_all(handles)
+                .await
+                .into_iter()
+                .for_each(|r| r.expect("task panicked"));
+
+            let (tags, tombstones) = read_or_map(&factory, "tags", key).await;
+            assert_eq!(
+                tags.len(),
+                n,
+                "all {n} concurrent OR_ADDs on the same key must survive with no lost update, \
+                 got {} survivors: {tags:?}",
+                tags.len()
+            );
+            assert!(tombstones.is_empty(), "no removes issued; tombstones must stay empty");
+        }
     }
 
     // AC3 (i): apply_single_op convergence — same op set delivered in DIFFERENT
