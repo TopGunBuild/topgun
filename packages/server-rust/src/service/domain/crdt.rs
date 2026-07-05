@@ -2930,7 +2930,10 @@ mod tests {
                  got {} survivors: {tags:?}",
                 tags.len()
             );
-            assert!(tombstones.is_empty(), "no removes issued; tombstones must stay empty");
+            assert!(
+                tombstones.is_empty(),
+                "no removes issued; tombstones must stay empty"
+            );
         }
     }
 
