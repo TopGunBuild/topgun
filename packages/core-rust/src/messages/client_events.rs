@@ -135,6 +135,26 @@ pub struct AuthAckData {
     pub device_token: Option<String>,
 }
 
+/// Flat fields for `DEVICE_ACK` message (minus the `type` discriminant).
+///
+/// The server's reply to `DEVICE_HELLO`: carries the bound `deviceId` and, when a
+/// credential was freshly minted/rotated, the new opaque `deviceToken`. Orthogonal to
+/// `AUTH_ACK` — a NO_AUTH connection stays `principal = None` while still receiving a
+/// server-issued device identity here.
+///
+/// Maps to `DeviceAckMessageSchema` in `client-message-schemas.ts`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceAckData {
+    /// Server-issued device identity bound to this connection.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub device_id: Option<String>,
+    /// Freshly minted/rotated device credential — present ONLY when a new credential
+    /// was issued; absent on a plain re-bind of an already-valid presented token.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub device_token: Option<String>,
+}
+
 /// Flat fields for `AUTH_FAIL` message (minus the `type` discriminant).
 ///
 /// Maps to `AuthFailMessageSchema` in `client-message-schemas.ts`.

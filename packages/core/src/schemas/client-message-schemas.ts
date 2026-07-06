@@ -84,6 +84,19 @@ export const AuthAckMessageSchema = z.object({
 });
 export type AuthAckMessage = z.infer<typeof AuthAckMessageSchema>;
 
+// DEVICE_ACK: server's reply to DEVICE_HELLO. Carries the bound deviceId and, when a
+// credential was freshly minted/rotated, the new opaque deviceToken. Orthogonal to
+// AUTH_ACK — a NO_AUTH connection receives a device identity here while staying
+// unauthenticated (no principal).
+export const DeviceAckMessageSchema = z.object({
+  type: z.literal('DEVICE_ACK'),
+  // Server-issued device identity bound to this connection.
+  deviceId: z.string().optional(),
+  // Freshly minted/rotated credential — present ONLY on mint/rotate, absent on plain re-bind.
+  deviceToken: z.string().optional(),
+});
+export type DeviceAckMessage = z.infer<typeof DeviceAckMessageSchema>;
+
 export const AuthFailMessageSchema = z.object({
   type: z.literal('AUTH_FAIL'),
   error: z.string().optional(),

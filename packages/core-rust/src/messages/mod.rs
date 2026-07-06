@@ -22,7 +22,7 @@ pub mod messaging;
 
 pub use base::{
     AggFunc, Aggregation, AuthMessage, AuthRequiredMessage, ChangeEventType, ClientOp,
-    PredicateNode, PredicateOp, Query, SortDirection, WriteConcern,
+    DeviceHelloMessage, PredicateNode, PredicateOp, Query, SortDirection, WriteConcern,
 };
 
 pub use cluster::{
@@ -67,7 +67,7 @@ pub use sync::{
 };
 
 pub use client_events::{
-    AuthAckData, AuthFailData, ErrorPayload, GcPrunePayload, LockGrantedPayload,
+    AuthAckData, AuthFailData, DeviceAckData, ErrorPayload, GcPrunePayload, LockGrantedPayload,
     LockReleasedPayload, QueryUpdatePayload, ServerBatchEventPayload, ServerEventPayload,
     ServerEventType, SyncResetRequiredPayload,
 };
@@ -119,6 +119,11 @@ pub enum Message {
     /// Server requests authentication from client.
     #[serde(rename = "AUTH_REQUIRED")]
     AuthRequired(AuthRequiredMessage),
+
+    /// Client presents a device credential for present-or-mint, orthogonally to
+    /// JWT `AUTH` (the JWT Phase-1 loop silently drops this non-`AUTH` frame).
+    #[serde(rename = "DEVICE_HELLO")]
+    DeviceHello(DeviceHelloMessage),
 
     // --- sync domain (20 variants) ---
     /// Single client operation.
@@ -456,6 +461,11 @@ pub enum Message {
     /// Server acknowledges authentication.
     #[serde(rename = "AUTH_ACK")]
     AuthAck(AuthAckData),
+
+    /// Server's reply to `DEVICE_HELLO`: the bound device identity (and a freshly
+    /// minted credential, when one was issued).
+    #[serde(rename = "DEVICE_ACK")]
+    DeviceAck(DeviceAckData),
 
     /// Server rejects authentication.
     #[serde(rename = "AUTH_FAIL")]
