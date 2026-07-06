@@ -430,15 +430,20 @@ impl ConnectionRegistry {
     /// Reconciles device-ownership after a claim discovers THIS connection is already
     /// gone (a concurrent `remove()` for it can interleave with either index insert).
     ///
-    /// The forward-ownership update goes through `Entry` so it is atomic against a
-    /// concurrent `remove()` that may already have DELETED the entry: the `Vacant` arm
-    /// re-inserts the displaced live owner rather than leaving the identity orphaned. A
+    /// Only restores a displaced prior owner `prev` if it is STILL LIVE. If `prev` has
+    /// since disconnected, its own `remove()` has already run and will never run again
+    /// (it could not clean this entry earlier because this now-dead claimant transiently
+    /// held ownership), so installing it would pin a dead owner that `is_current_owner`
+    /// would affirm forever with nothing left to clear it — worse than orphaning. In that
+    /// case the identity is left ownerless for the next legitimate connection to reclaim.
+    ///
+    /// When `prev` is live, the forward-ownership update goes through `Entry` so it is
+    /// atomic against a concurrent `remove()` that may already have DELETED the entry: the
+    /// `Vacant` arm re-inserts the live owner rather than leaving the identity orphaned (a
     /// plain `get_mut`-based swap silently no-ops on a deleted entry and loses the live
-    /// owner (the fencing bug this closes — a live owner orphaned by a dead claimant's
-    /// interleaved teardown would then fail `is_current_owner` forever). A newer valid
-    /// takeover that raced in (entry owned by someone else) is left untouched. Always
-    /// returns `None`: a dead connection never legitimately displaces a live owner, so
-    /// the caller must not tear one down.
+    /// owner — the fencing bug this closes). A newer valid takeover that raced in (entry
+    /// owned by someone else) is left untouched. Always returns `None`: a dead connection
+    /// never legitimately displaces a live owner, so the caller must not tear one down.
     fn reconcile_dead_claim(
         &self,
         key: &str,
@@ -446,7 +451,10 @@ impl ConnectionRegistry {
         displaced: Option<ConnectionId>,
     ) -> Option<ConnectionId> {
         use dashmap::mapref::entry::Entry;
-        match displaced {
+        // Restore only a prior owner that is still connected; a `prev` whose own teardown
+        // already ran must not be re-installed as a permanently-stuck dead owner.
+        let restore = displaced.filter(|prev| self.connections.get(prev).is_some());
+        match restore {
             Some(prev) => match self.device_ownership.entry(key.to_string()) {
                 Entry::Occupied(mut entry) => {
                     if *entry.get() == connection_id {
@@ -457,6 +465,8 @@ impl ConnectionRegistry {
                     entry.insert(prev);
                 }
             },
+            // No live prior owner to restore (never displaced one, or it has since died):
+            // drop our own dead claim if it still stands, leaving the identity ownerless.
             None => {
                 self.device_ownership
                     .remove_if(key, |_, owner| *owner == connection_id);
@@ -1172,13 +1182,16 @@ mod tests {
         // silently orphaned the live owner (fencing bug). Exercised deterministically by
         // driving the reconciliation directly against a post-delete (Vacant) state, since
         // the interleave is not reachable single-threaded through the public claim path.
+        let config = test_config();
         let registry = ConnectionRegistry::new();
-        let live_owner = ConnectionId(1);
-        let dead_claimer = ConnectionId(2);
-        let key = "identity-V";
+        // The prior owner must be a LIVE (registered) connection to be restored.
+        let (live, _rx) = registry.register(ConnectionKind::Client, &config);
+        let live_owner = live.id;
+        let dead_claimer = ConnectionId(9999); // never registered — dead
 
         // Post-delete state: entry Vacant (a concurrent remove() nuked it), but the claim
         // had captured `displaced = Some(live_owner)`.
+        let key = "identity-V";
         assert!(registry.device_ownership.get(key).is_none());
         let displaced = registry.reconcile_dead_claim(key, dead_claimer, Some(live_owner));
 
@@ -1193,13 +1206,44 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_dead_claim_does_not_restore_a_dead_prior_owner() {
+        // Regression: `prev` (the displaced prior owner) can itself have disconnected
+        // between the claim and this reconciliation — its own `remove()` already ran and
+        // will never run again. Restoring it would pin a permanently-stuck dead owner that
+        // `is_current_owner` affirms forever. The prev-liveness check must leave the
+        // identity ownerless instead (the over-correction the Vacant-restore fix could hit).
+        let registry = ConnectionRegistry::new();
+        let dead_prev = ConnectionId(1); // never registered — its teardown already ran
+        let dead_claimer = ConnectionId(9999);
+        let key = "identity-DP";
+
+        // Post-delete Vacant state, with the claim having captured a now-dead prior owner.
+        assert!(registry.device_ownership.get(key).is_none());
+        let displaced = registry.reconcile_dead_claim(key, dead_claimer, Some(dead_prev));
+
+        assert_eq!(displaced, None);
+        assert!(
+            !registry.is_current_owner(key, dead_prev),
+            "a dead prior owner must NOT be re-installed as a stuck dead owner"
+        );
+        assert!(
+            registry.device_ownership.get(key).is_none(),
+            "the identity must be left ownerless when no live prior owner exists"
+        );
+    }
+
+    #[test]
     fn reconcile_dead_claim_does_not_clobber_a_newer_takeover() {
         // If a newer valid takeover raced in and owns the entry, a dead claimant's
-        // reconciliation must leave it untouched (Occupied-by-other arm).
+        // reconciliation must leave it untouched (Occupied-by-other arm). Exercised with a
+        // LIVE prior owner so the restore path is actually entered (and still no-ops).
+        let config = test_config();
         let registry = ConnectionRegistry::new();
-        let old_owner = ConnectionId(1);
-        let dead_claimer = ConnectionId(2);
-        let newer_owner = ConnectionId(3);
+        let (old, _rxo) = registry.register(ConnectionKind::Client, &config);
+        let (newer, _rxn) = registry.register(ConnectionKind::Client, &config);
+        let old_owner = old.id;
+        let newer_owner = newer.id;
+        let dead_claimer = ConnectionId(9999);
         let key = "identity-N";
 
         registry
