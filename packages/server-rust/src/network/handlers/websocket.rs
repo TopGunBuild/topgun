@@ -422,8 +422,14 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 // dispatch task. The read loop is sequential, so cursor monotonicity is
                 // naturally preserved across a connection's ACK stream.
                 if let TopGunMessage::ClientApplyAck(ref ack) = tg_msg {
-                    handle_client_apply_ack(&state, &handle, conn_id, principal.as_ref(), ack.cursor)
-                        .await;
+                    handle_client_apply_ack(
+                        &state,
+                        &handle,
+                        conn_id,
+                        principal.as_ref(),
+                        ack.cursor,
+                    )
+                    .await;
                     continue;
                 }
 
@@ -579,7 +585,10 @@ async fn handle_client_apply_ack(
     };
     let device_id = { handle.metadata.read().await.device_id.clone() };
     let Some(device_id) = device_id else {
-        debug!("dropping confirmed-apply ACK from identity-less {:?}", conn_id);
+        debug!(
+            "dropping confirmed-apply ACK from identity-less {:?}",
+            conn_id
+        );
         return;
     };
     let client = frontier_client_id(principal.map(|p| p.id.as_str()), &device_id);

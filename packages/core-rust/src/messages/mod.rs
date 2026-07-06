@@ -56,15 +56,14 @@ pub use search::{
 
 pub use sync::{
     BatchMessage, ClientApplyAckMessage, ClientOpMessage, MerkleReqBucketMessage,
-    MerkleReqBucketPayload,
-    ORMapDiffRequest, ORMapDiffRequestPayload, ORMapDiffResponse, ORMapDiffResponsePayload,
-    ORMapEntry, ORMapMerkleReqBucket, ORMapMerkleReqBucketPayload, ORMapPushDiff,
-    ORMapPushDiffPayload, ORMapSyncInit, ORMapSyncRespBuckets, ORMapSyncRespBucketsPayload,
-    ORMapSyncRespLeaf, ORMapSyncRespLeafPayload, ORMapSyncRespRoot, ORMapSyncRespRootPayload,
-    OpAckMessage, OpAckPayload, OpBatchMessage, OpBatchPayload, OpRejectedMessage,
-    OpRejectedPayload, OpResult, SyncInitMessage, SyncLeafRecord, SyncRespBucketsMessage,
-    SyncRespBucketsPayload, SyncRespLeafMessage, SyncRespLeafPayload, SyncRespRootMessage,
-    SyncRespRootPayload,
+    MerkleReqBucketPayload, ORMapDiffRequest, ORMapDiffRequestPayload, ORMapDiffResponse,
+    ORMapDiffResponsePayload, ORMapEntry, ORMapMerkleReqBucket, ORMapMerkleReqBucketPayload,
+    ORMapPushDiff, ORMapPushDiffPayload, ORMapSyncInit, ORMapSyncRespBuckets,
+    ORMapSyncRespBucketsPayload, ORMapSyncRespLeaf, ORMapSyncRespLeafPayload, ORMapSyncRespRoot,
+    ORMapSyncRespRootPayload, OpAckMessage, OpAckPayload, OpBatchMessage, OpBatchPayload,
+    OpRejectedMessage, OpRejectedPayload, OpResult, SyncInitMessage, SyncLeafRecord,
+    SyncRespBucketsMessage, SyncRespBucketsPayload, SyncRespLeafMessage, SyncRespLeafPayload,
+    SyncRespRootMessage, SyncRespRootPayload,
 };
 
 pub use client_events::{

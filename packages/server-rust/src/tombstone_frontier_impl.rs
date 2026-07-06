@@ -115,7 +115,12 @@ impl FrontierState {
     /// ACK). A delivered-nothing connection (`delivered_conn == 0`) can never
     /// establish or advance a cursor: the bound is 0, so a fresh device stays
     /// untracked.
-    fn advance_on_ack(&mut self, client: &ClientId, claimed: Epoch, conn: ConnectionId) -> Option<Epoch> {
+    fn advance_on_ack(
+        &mut self,
+        client: &ClientId,
+        claimed: Epoch,
+        conn: ConnectionId,
+    ) -> Option<Epoch> {
         let delivered = self.delivered.get(&conn).copied().unwrap_or(0);
         let bound = claimed.min(delivered).min(self.current_max_epoch);
         let stored = self.cursors.get(client).copied();
@@ -144,7 +149,9 @@ impl FrontierState {
     /// the caller and its ACKs stay no-ops (delivered clamp) until a genuine resync
     /// sets `delivered_conn`.
     fn is_regressed(&self, client: &ClientId, claim: Epoch) -> bool {
-        self.cursors.get(client).is_some_and(|&stored| claim < stored)
+        self.cursors
+            .get(client)
+            .is_some_and(|&stored| claim < stored)
     }
 
     /// Rehydrate a persisted cursor for a KNOWN identity into the in-memory frontier
@@ -228,7 +235,9 @@ impl TombstoneFrontier {
         // A poisoned frontier mutex means a prior panic while holding it; recover the
         // guard rather than propagate the panic — the frontier is best-effort and a
         // stale-but-consistent snapshot is safe (cursor-loss degrades to resync).
-        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Inject the server's current max stamped epoch (the global bound). Settable so
@@ -431,13 +440,22 @@ mod tests {
         let f = frontier();
         let c: ClientId = "a5:alice|dev-1".into();
         f.set_delivered(CONN_A, 100);
-        assert!(f.confirm_apply_ack(&c, 10, CONN_A).await, "first advance to 10");
+        assert!(
+            f.confirm_apply_ack(&c, 10, CONN_A).await,
+            "first advance to 10"
+        );
         assert_eq!(f.cursor(&c), Some(10));
         // Replay a lower cursor: no-op.
-        assert!(!f.confirm_apply_ack(&c, 5, CONN_A).await, "replay < current");
+        assert!(
+            !f.confirm_apply_ack(&c, 5, CONN_A).await,
+            "replay < current"
+        );
         assert_eq!(f.cursor(&c), Some(10));
         // Re-send the same cursor: no-op.
-        assert!(!f.confirm_apply_ack(&c, 10, CONN_A).await, "replay == current");
+        assert!(
+            !f.confirm_apply_ack(&c, 10, CONN_A).await,
+            "replay == current"
+        );
         assert_eq!(f.cursor(&c), Some(10));
     }
 
@@ -470,7 +488,11 @@ mod tests {
             "delivered-nothing ACK cannot advance"
         );
         assert!(!f.is_tracked(&c), "fresh device stays untracked");
-        assert_eq!(f.low_water_mark(), Epoch::MAX, "untracked pins nothing (vacuous LWM)");
+        assert_eq!(
+            f.low_water_mark(),
+            Epoch::MAX,
+            "untracked pins nothing (vacuous LWM)"
+        );
     }
 
     /// A connection can advance ONLY the cursor of the identity it names; identity is
@@ -544,7 +566,11 @@ mod tests {
             !f.confirm_apply_ack(&c, 100, CONN_B).await,
             "cannot re-track at the stale-high cursor without resyncing (delivered==0)"
         );
-        assert_eq!(f.cursor(&c), Some(100), "still pinned at 100, not re-advanced");
+        assert_eq!(
+            f.cursor(&c),
+            Some(100),
+            "still pinned at 100, not re-advanced"
+        );
 
         // A genuine resync sets delivered_conn on the new connection; ACK now applies.
         f.set_delivered(CONN_B, 120);
@@ -562,7 +588,11 @@ mod tests {
         assert!(f.confirm_apply_ack(&c, 30, CONN_A).await);
         assert!(!f.is_regressed(&c, 30), "claim == stored is not regressed");
         assert!(!f.is_regressed(&c, 50), "claim > stored is not regressed");
-        assert_eq!(f.cursor(&c), Some(30), "sync-init claim did not advance the cursor");
+        assert_eq!(
+            f.cursor(&c),
+            Some(30),
+            "sync-init claim did not advance the cursor"
+        );
     }
 
     /// An unknown client (never confirmed) is untracked and pins nothing.
@@ -622,7 +652,11 @@ mod persistence_tests {
         let f = TombstoneFrontier::new(Some(store));
         assert!(!f.is_tracked(&c), "unknown before rehydrate");
         f.rehydrate(&c).await;
-        assert_eq!(f.cursor(&c), Some(77), "cursor restored from redb after restart");
+        assert_eq!(
+            f.cursor(&c),
+            Some(77),
+            "cursor restored from redb after restart"
+        );
     }
 
     /// On reconnect, a KNOWN identity is rehydrated into the frontier BEFORE any ACK,
@@ -653,7 +687,10 @@ mod persistence_tests {
             5,
             "reconnect-before-ACK rehydration pins the LWM at the lagging cursor"
         );
-        assert!(f.is_tracked(&lagging), "the reconnecting known device is tracked");
+        assert!(
+            f.is_tracked(&lagging),
+            "the reconnecting known device is tracked"
+        );
     }
 
     /// A freshly-minted identity has no persisted cursor: rehydrate is a no-op and it

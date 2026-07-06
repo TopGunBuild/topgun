@@ -571,7 +571,11 @@ mod tests {
             matches!(cursor_val, rmpv::Value::Integer(_)),
             "cursor must be MsgPack Integer, got {cursor_val:?}"
         );
-        assert_eq!(roundtrip_named(&msg), msg, "value survives round-trip exactly");
+        assert_eq!(
+            roundtrip_named(&msg),
+            msg,
+            "value survives round-trip exactly"
+        );
     }
 
     #[test]
