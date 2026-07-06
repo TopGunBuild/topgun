@@ -30,7 +30,8 @@ use tracing::{debug, warn};
 use super::auth::AuthHandler;
 use super::decode;
 use super::AppState;
-use crate::network::connection::ConnectionId;
+use crate::network::connection::{ConnectionHandle, ConnectionId};
+use crate::network::device_identity::{frontier_client_id, DeviceIdentityStore, NO_AUTH_SENTINEL};
 use crate::network::{ConnectionKind, OutboundMessage};
 use crate::service::classify::OperationService;
 use crate::service::dispatch::PartitionDispatcher;
@@ -197,9 +198,24 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                     }
                                     authenticated.store(true, Ordering::Release);
 
-                                    // Send AUTH_ACK with userId via the outbound channel
+                                    // Device identity present-or-mint (fail-open — never blocks
+                                    // auth). One-shot here is structural: this arm runs once then
+                                    // `break 'auth`s, so there is no second JWT-mode bind site.
+                                    let (device_id, device_token) = bind_device_identity(
+                                        &state,
+                                        &handle,
+                                        conn_id,
+                                        Some(&principal.id),
+                                        auth_msg.device_token.as_deref(),
+                                    )
+                                    .await;
+
+                                    // Send AUTH_ACK with userId + any device identity via the
+                                    // outbound channel.
                                     let ack_msg = TopGunMessage::AuthAck(AuthAckData {
                                         user_id: Some(principal.id.clone()),
+                                        device_id,
+                                        device_token,
                                         ..Default::default()
                                     });
                                     if let Ok(bytes) = rmp_serde::to_vec_named(&ack_msg) {
@@ -321,6 +337,46 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     }
                 };
 
+                // Opportunistic device-identity AUTH, handled at the websocket layer.
+                // In NO_AUTH mode a new client sends AUTH{token:"", deviceToken?} as its
+                // first frame; run present-or-mint under the sentinel namespace and reply
+                // AUTH_ACK. The Auth message NEVER enters data-plane dispatch. In JWT mode
+                // Phase-2 re-auth is unsupported, so a stray Auth is simply dropped here.
+                if let TopGunMessage::Auth(ref auth_msg) = tg_msg {
+                    if state.jwt_secret.is_none() {
+                        // One-shot binding (explicit Phase-2 guard): once an identity is
+                        // bound, drop any further AUTH so in-flight identity-scoped state
+                        // is never silently re-attributed. The read loop is sequential, so
+                        // the first AUTH binds and all later ones see device_id = Some.
+                        let already_bound = handle.metadata.read().await.device_id.is_some();
+                        if already_bound {
+                            debug!("dropping repeat AUTH on bound connection {:?}", conn_id);
+                            continue;
+                        }
+                        let (device_id, device_token) = bind_device_identity(
+                            &state,
+                            &handle,
+                            conn_id,
+                            None,
+                            auth_msg.device_token.as_deref(),
+                        )
+                        .await;
+                        // Reply AUTH_ACK only when an identity was actually bound (a store
+                        // must be wired); network-only test servers stay identity-less.
+                        if device_id.is_some() {
+                            let ack = TopGunMessage::AuthAck(AuthAckData {
+                                device_id,
+                                device_token,
+                                ..Default::default()
+                            });
+                            if let Ok(bytes) = rmp_serde::to_vec_named(&ack) {
+                                let _ = handle.tx.send(OutboundMessage::Binary(bytes)).await;
+                            }
+                        }
+                    }
+                    continue;
+                }
+
                 // Per-connection inbound op-rate limit. Cost = number of ops the
                 // frame carries (a batch counts as its op count) so one peer's
                 // flood is throttled fairly. On exceed we send a 429 back-off and
@@ -409,6 +465,64 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     release_session_state(&state, conn_id);
     state.registry.remove(conn_id);
     debug!("WebSocket disconnected: {:?}", conn_id);
+}
+
+/// Runs device-credential present-or-mint and binds the resulting identity to the
+/// connection (one-shot `device_id`) plus connection ownership (TAKEOVER).
+///
+/// Returns `(device_id, minted_token)` for the `AUTH_ACK`. **Fail-open:** a missing
+/// store or any storage error leaves the connection identity-less (`device_id` stays
+/// `None`) and NEVER blocks authentication — an attacker can always claim "no token"
+/// anyway, so failing an honest user out buys no security.
+///
+/// `principal_id` is `Some` in JWT mode and `None` in NO_AUTH mode (keyed under the
+/// frontier sentinel namespace). The caller guarantees the one-shot precondition
+/// (JWT: structural single Phase-1 bind; NO_AUTH: explicit pre-call guard), so this
+/// only sets `device_id` when it is still `None`.
+async fn bind_device_identity(
+    state: &AppState,
+    handle: &Arc<ConnectionHandle>,
+    conn_id: ConnectionId,
+    principal_id: Option<&str>,
+    presented: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let Some(factory) = state.store_factory.as_ref() else {
+        return (None, None);
+    };
+    let dev_store = DeviceIdentityStore::new(factory.data_store());
+    // The credential keyspace uses the fixed sentinel namespace for NO_AUTH.
+    let principal_key = principal_id.unwrap_or(NO_AUTH_SENTINEL);
+    match dev_store.present_or_mint(principal_key, presented).await {
+        Ok(binding) => {
+            {
+                let mut meta = handle.metadata.write().await;
+                if meta.device_id.is_none() {
+                    meta.device_id = Some(binding.device_id.clone());
+                }
+            }
+            // TAKEOVER: a valid credential for an already-owned identity displaces the
+            // prior connection, which is closed so its in-flight identity-scoped
+            // actions can be fenced out by `is_current_owner`.
+            let identity_key = frontier_client_id(principal_id, &binding.device_id);
+            if let Some(displaced) = state.registry.claim_device_ownership(identity_key, conn_id) {
+                if let Some(old) = state.registry.get(displaced) {
+                    old.cancel();
+                }
+                warn!(
+                    "device-identity takeover on {:?}: displaced {:?}",
+                    conn_id, displaced
+                );
+            }
+            (Some(binding.device_id), binding.minted_token)
+        }
+        Err(e) => {
+            debug!(
+                "device present-or-mint failed for {:?}: {} (fail-open, identity-less)",
+                conn_id, e
+            );
+            (None, None)
+        }
+    }
 }
 
 /// Releases all session-scoped registry state for a disconnecting connection.
