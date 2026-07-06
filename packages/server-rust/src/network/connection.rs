@@ -407,10 +407,23 @@ impl ConnectionRegistry {
         self.conn_identity
             .insert(connection_id, identity_key.clone());
         // Atomic swap: `insert` returns the prior owner under the shard lock.
-        match self.device_ownership.insert(identity_key, connection_id) {
+        let displaced = match self.device_ownership.insert(identity_key.clone(), connection_id) {
             Some(prev) if prev != connection_id => Some(prev),
             _ => None,
+        };
+        // Liveness re-check: the two inserts above are separate shard-locked ops, so a
+        // `remove(connection_id)` can interleave between them and run its release BEFORE
+        // ownership was set to us — leaving `device_ownership[key] = <this now-removed
+        // conn>` (a dead owner that `is_current_owner` would still affirm). If this
+        // connection is already gone, undo our own claim. Both interleavings are now
+        // covered: either `remove` clears ownership (owner == us), or this re-check does.
+        if self.connections.get(&connection_id).is_none() {
+            self.device_ownership
+                .remove_if(&identity_key, |_, owner| *owner == connection_id);
+            self.conn_identity
+                .remove_if(&connection_id, |_, k| *k == identity_key);
         }
+        displaced
     }
 
     /// The fencing primitive: is `connection_id` the current owner of `identity_key`?
@@ -1047,5 +1060,29 @@ mod tests {
             .claim_device_ownership(key.clone(), h1.id)
             .is_none());
         assert!(registry.is_current_owner(&key, h1.id));
+    }
+
+    #[test]
+    fn claim_for_disconnected_connection_does_not_orphan_ownership() {
+        // M6: a connection removed before/while it claims must not leave ownership
+        // pinned to a dead id (which `is_current_owner` would still affirm forever).
+        // The liveness re-check in `claim_device_ownership` undoes such a claim.
+        let config = test_config();
+        let registry = ConnectionRegistry::new();
+        let (h1, _rx1) = registry.register(ConnectionKind::Client, &config);
+        let dead_id = h1.id;
+        // The connection goes away (its socket closed) before it claims ownership.
+        registry.remove(dead_id);
+        let key = "identity-D".to_string();
+        assert!(registry.claim_device_ownership(key.clone(), dead_id).is_none());
+        assert!(
+            !registry.is_current_owner(&key, dead_id),
+            "ownership must not be pinned to a disconnected connection"
+        );
+        // And the reverse index must not retain the dead id either.
+        assert!(
+            registry.conn_identity.get(&dead_id).is_none(),
+            "reverse index must not retain a disconnected connection's key"
+        );
     }
 }

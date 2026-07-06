@@ -537,6 +537,16 @@ impl OperationService {
             Message::AuthRequired(_) => Err(ClassifyError::AuthMessage {
                 variant: "AuthRequired",
             }),
+            // Device-identity handshake frames are handled at the websocket layer and
+            // never reach the data plane; classify them as non-dispatchable so a stray
+            // one is rejected rather than routed. DEVICE_HELLO is client→server (like
+            // Auth); DEVICE_ACK is server→client (like AuthAck).
+            Message::DeviceHello(_) => Err(ClassifyError::AuthMessage {
+                variant: "DeviceHello",
+            }),
+            Message::DeviceAck(_) => Err(ClassifyError::ServerToClient {
+                variant: "DeviceAck",
+            }),
         }
     }
 }

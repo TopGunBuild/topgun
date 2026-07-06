@@ -33,7 +33,7 @@ use topgun_core::types::Value;
 pub const CREDENTIAL_MAP: &str = "_topgun_device_credentials";
 
 /// Result of a present-or-mint exchange.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DeviceBinding {
     /// The bound device identity (stable across credential rotation).
     pub device_id: String,
@@ -41,6 +41,18 @@ pub struct DeviceBinding {
     /// credential was issued (returned to the client in `AUTH_ACK`); `None` on a
     /// plain re-bind of an already-valid presented token.
     pub minted_token: Option<String>,
+}
+
+// `Debug` is hand-written (NOT derived) so `minted_token` — which embeds the raw
+// 256-bit device secret — can never leak into logs via a stray `{:?}`. Only the
+// presence of a credential is shown, never its bytes.
+impl std::fmt::Debug for DeviceBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceBinding")
+            .field("device_id", &self.device_id)
+            .field("minted_token", &self.minted_token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 /// Credential store over the shared [`MapDataStore`].
@@ -355,6 +367,80 @@ mod tests {
             no_auth,
             DeviceIdentityStore::identity_key(None, "dev-1"),
             "frontier and credential keys must be the same encoding"
+        );
+    }
+
+    #[test]
+    fn debug_redacts_minted_secret() {
+        // A `{:?}` of the binding must NEVER expose the raw token/secret.
+        let b = DeviceBinding {
+            device_id: "dev-1".to_string(),
+            minted_token: Some("dev-1.deadbeefcafe".to_string()),
+        };
+        let dbg = format!("{b:?}");
+        assert!(!dbg.contains("deadbeefcafe"), "secret leaked via Debug: {dbg}");
+        assert!(dbg.contains("<redacted>"), "Debug must mark the token redacted");
+    }
+
+    #[tokio::test]
+    async fn secret_and_token_never_logged_on_mint_or_verify() {
+        use std::sync::Mutex as StdMutex;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        // Capture EVERY field of EVERY event (all levels) emitted while running the
+        // mint + verify paths, then assert neither the raw secret hex nor the opaque
+        // token ever appears — AC3's "secret/token never appears in logs".
+        struct AllFieldsVisitor(String);
+        impl tracing::field::Visit for AllFieldsVisitor {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.0.push_str(field.name());
+                self.0.push('=');
+                self.0.push_str(value);
+                self.0.push(' ');
+            }
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.push_str(field.name());
+                self.0.push('=');
+                self.0.push_str(&format!("{value:?}"));
+                self.0.push(' ');
+            }
+        }
+        #[derive(Clone)]
+        struct Capture(Arc<StdMutex<String>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let mut v = AllFieldsVisitor(String::new());
+                event.record(&mut v);
+                self.0.lock().unwrap().push_str(&v.0);
+            }
+        }
+
+        let sink: Arc<StdMutex<String>> = Arc::new(StdMutex::new(String::new()));
+        let subscriber = tracing_subscriber::registry().with(Capture(Arc::clone(&sink)));
+        let guard = tracing::subscriber::set_default(subscriber);
+
+        let store = mem_store().await;
+        let s = DeviceIdentityStore::new(store);
+        // Mint path.
+        let minted = s.present_or_mint(Some("alice"), None).await.unwrap();
+        let token = minted.minted_token.clone().expect("mint returns a token");
+        let (_dev, secret_hex) = token.split_once('.').unwrap();
+        // Verify/re-bind path.
+        let _ = s.present_or_mint(Some("alice"), Some(&token)).await.unwrap();
+
+        drop(guard);
+        let logged = sink.lock().unwrap().clone();
+        assert!(
+            !logged.contains(secret_hex),
+            "raw secret hex leaked into logs: {logged}"
+        );
+        assert!(
+            !logged.contains(&token),
+            "opaque token leaked into logs: {logged}"
         );
     }
 }

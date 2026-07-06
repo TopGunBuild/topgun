@@ -23,7 +23,8 @@ use futures_util::stream::{SplitSink, StreamExt};
 use tokio::sync::mpsc;
 use topgun_core::hash_to_partition;
 use topgun_core::messages::{
-    AuthAckData, ErrorPayload, Message as TopGunMessage, OpAckMessage, OpAckPayload, WriteConcern,
+    AuthAckData, DeviceAckData, ErrorPayload, Message as TopGunMessage, OpAckMessage, OpAckPayload,
+    WriteConcern,
 };
 use tracing::{debug, warn};
 
@@ -337,41 +338,48 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     }
                 };
 
-                // Opportunistic device-identity AUTH, handled at the websocket layer.
-                // In NO_AUTH mode a new client sends AUTH{token:"", deviceToken?} as its
-                // first frame; run present-or-mint under the sentinel namespace and reply
-                // AUTH_ACK. The Auth message NEVER enters data-plane dispatch. In JWT mode
-                // Phase-2 re-auth is unsupported, so a stray Auth is simply dropped here.
-                if let TopGunMessage::Auth(ref auth_msg) = tg_msg {
-                    if state.jwt_secret.is_none() {
-                        // One-shot binding (explicit Phase-2 guard): once an identity is
-                        // bound, drop any further AUTH so in-flight identity-scoped state
-                        // is never silently re-attributed. The read loop is sequential, so
-                        // the first AUTH binds and all later ones see device_id = Some.
-                        let already_bound = handle.metadata.read().await.device_id.is_some();
-                        if already_bound {
-                            debug!("dropping repeat AUTH on bound connection {:?}", conn_id);
-                            continue;
-                        }
-                        let (device_id, device_token) = bind_device_identity(
-                            &state,
-                            &handle,
-                            conn_id,
-                            None,
-                            auth_msg.device_token.as_deref(),
-                        )
-                        .await;
-                        // Reply AUTH_ACK only when an identity was actually bound (a store
-                        // must be wired); network-only test servers stay identity-less.
-                        if device_id.is_some() {
-                            let ack = TopGunMessage::AuthAck(AuthAckData {
-                                device_id,
-                                device_token,
-                                ..Default::default()
-                            });
-                            if let Ok(bytes) = rmp_serde::to_vec_named(&ack) {
-                                let _ = handle.tx.send(OutboundMessage::Binary(bytes)).await;
-                            }
+                // Device-credential presentation, handled at the websocket layer (both
+                // modes). A token-less client (NO_AUTH, or a JWT client before it has a
+                // token) sends DEVICE_HELLO as its first frame instead of an empty-token
+                // AUTH — the latter collides with JWT validation and a JWT server would
+                // AUTH_FAIL + tear the connection down. DEVICE_HELLO is a distinct,
+                // non-AUTH frame: a JWT server drops it in Phase 1 (never reaching here),
+                // and here we run present-or-mint and reply DEVICE_ACK. It NEVER enters
+                // data-plane dispatch. The identity namespace follows the connection's
+                // authenticated principal (Some in the unlikely JWT-in-Phase-2 case, None
+                // → sentinel in NO_AUTH).
+                if let TopGunMessage::DeviceHello(ref hello) = tg_msg {
+                    // One-shot binding (explicit Phase-2 guard): once an identity is bound,
+                    // drop any further DEVICE_HELLO so in-flight identity-scoped state is
+                    // never silently re-attributed. This also makes the handler a safe
+                    // no-op for an already-authenticated JWT connection (bound in Phase 1).
+                    // The read loop is sequential, so the first bind wins and later frames
+                    // observe device_id = Some.
+                    let already_bound = handle.metadata.read().await.device_id.is_some();
+                    if already_bound {
+                        debug!(
+                            "dropping repeat DEVICE_HELLO on bound connection {:?}",
+                            conn_id
+                        );
+                        continue;
+                    }
+                    let (device_id, device_token) = bind_device_identity(
+                        &state,
+                        &handle,
+                        conn_id,
+                        principal.as_ref().map(|p| p.id.as_str()),
+                        hello.device_token.as_deref(),
+                    )
+                    .await;
+                    // Reply DEVICE_ACK only when an identity was actually bound (a store
+                    // must be wired); network-only test servers stay identity-less.
+                    if device_id.is_some() {
+                        let ack = TopGunMessage::DeviceAck(DeviceAckData {
+                            device_id,
+                            device_token,
+                        });
+                        if let Ok(bytes) = rmp_serde::to_vec_named(&ack) {
+                            let _ = handle.tx.send(OutboundMessage::Binary(bytes)).await;
                         }
                     }
                     continue;
