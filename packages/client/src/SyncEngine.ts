@@ -875,6 +875,11 @@ export class SyncEngine {
   public setAuthToken(token: string): void {
     this.authToken = token;
     this.tokenProvider = null;
+    // A new token may name a different principal, whose server-side per-device cursor
+    // is independent. Reset the local confirmed-apply high-water-mark so ACKs for the
+    // new identity are not suppressed by the prior identity's epoch (server-side
+    // monotone-max makes a redundant re-ACK under the same principal a harmless no-op).
+    this.lastAckedEpoch = 0;
 
     const state = this.stateMachine.getState();
     if (state === SyncState.AUTHENTICATING) {
@@ -1349,8 +1354,14 @@ export class SyncEngine {
    */
   private emitConfirmedApply(appliedEpoch: number): void {
     if (appliedEpoch <= this.lastAckedEpoch) return;
-    this.lastAckedEpoch = appliedEpoch;
-    this.sendMessage({ type: 'CLIENT_APPLY_ACK', cursor: appliedEpoch });
+    // Advance the local high-water-mark ONLY if the ACK actually went out. sendMessage
+    // returns false when the socket cannot take it (disconnected / buffer full); if we
+    // advanced regardless, that epoch's ACK would be dropped and never re-sent (the
+    // cursor is cumulative-monotonic — a lower epoch is never re-emitted), leaving the
+    // server's cursor stuck. A later applied epoch will re-attempt the ACK.
+    if (this.sendMessage({ type: 'CLIENT_APPLY_ACK', cursor: appliedEpoch })) {
+      this.lastAckedEpoch = appliedEpoch;
+    }
   }
 
   private async handleGcPrune(message: GcPruneMessage): Promise<void> {

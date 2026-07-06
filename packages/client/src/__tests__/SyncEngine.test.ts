@@ -1419,5 +1419,45 @@ describe('SyncEngine', () => {
       });
       expect(ws.sentMessages.find((m) => m.type === 'CLIENT_APPLY_ACK')).toBeUndefined();
     });
+
+    test('a failed ACK send does not advance the cursor; a later apply retries it', async () => {
+      await startEngineWithMap();
+      const sendSpy = jest.spyOn(syncEngine as any, 'sendMessage');
+
+      // The socket cannot take the ACK (disconnected / buffer full): sendMessage
+      // returns false for the ACK frame. The cursor must NOT advance — else the ACK
+      // for this epoch is dropped forever (monotone: a lower epoch is never re-sent).
+      sendSpy.mockImplementation((m: any) => m?.type !== 'CLIENT_APPLY_ACK');
+      await (syncEngine as any).handleServerBatchEvent({
+        payload: { events: [batchEvent('a', 5)] },
+      });
+      expect((syncEngine as any).lastAckedEpoch).toBe(0);
+
+      // Socket recovers; the next apply of the same epoch re-attempts the ACK.
+      const acks: number[] = [];
+      sendSpy.mockImplementation((m: any) => {
+        if (m?.type === 'CLIENT_APPLY_ACK') acks.push(m.cursor);
+        return true;
+      });
+      await (syncEngine as any).handleServerBatchEvent({
+        payload: { events: [batchEvent('a', 5)] },
+      });
+      expect(acks).toEqual([5]);
+      expect((syncEngine as any).lastAckedEpoch).toBe(5);
+    });
+
+    test('setAuthToken resets the confirmed-apply cursor (new principal → independent cursor)', async () => {
+      await startEngineWithMap();
+      await (syncEngine as any).handleServerBatchEvent({
+        payload: { events: [batchEvent('a', 5)] },
+      });
+      expect((syncEngine as any).lastAckedEpoch).toBe(5);
+
+      // A new token may name a different principal, whose server-side cursor is
+      // independent — the local high-water-mark must reset so its ACKs are not
+      // suppressed by the prior identity's epoch.
+      (syncEngine as any).setAuthToken('new-token-for-a-different-principal');
+      expect((syncEngine as any).lastAckedEpoch).toBe(0);
+    });
   });
 });
