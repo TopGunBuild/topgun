@@ -55,7 +55,8 @@ pub use search::{
 };
 
 pub use sync::{
-    BatchMessage, ClientOpMessage, MerkleReqBucketMessage, MerkleReqBucketPayload,
+    BatchMessage, ClientApplyAckMessage, ClientOpMessage, MerkleReqBucketMessage,
+    MerkleReqBucketPayload,
     ORMapDiffRequest, ORMapDiffRequestPayload, ORMapDiffResponse, ORMapDiffResponsePayload,
     ORMapEntry, ORMapMerkleReqBucket, ORMapMerkleReqBucketPayload, ORMapPushDiff,
     ORMapPushDiffPayload, ORMapSyncInit, ORMapSyncRespBuckets, ORMapSyncRespBucketsPayload,
@@ -137,6 +138,13 @@ pub enum Message {
     /// Client initiates LWW sync with merkle tree root.
     #[serde(rename = "SYNC_INIT")]
     SyncInit(SyncInitMessage),
+
+    /// Client confirms it has received AND durably applied all server epochs up to
+    /// and including `cursor`. Feeds the per-device causal frontier that licenses
+    /// tombstone pruning; carries no identity field (server-derived from the
+    /// authenticated connection).
+    #[serde(rename = "CLIENT_APPLY_ACK")]
+    ClientApplyAck(ClientApplyAckMessage),
 
     /// Server responds with merkle root comparison.
     #[serde(rename = "SYNC_RESP_ROOT")]

@@ -81,6 +81,32 @@ pub struct SyncInitMessage {
     pub last_sync_timestamp: Option<u64>,
 }
 
+/// Client → server confirmed-apply ACK.
+///
+/// A cumulative-monotonic cursor: `cursor` is the highest server epoch the client
+/// has confirmed it has **received AND durably applied** (inclusive — "applied ≤
+/// cursor"). It feeds the server's per-device causal frontier, whose fleet-wide
+/// minimum licenses tombstone pruning.
+///
+/// The message carries **NO identity field** by design: the server derives the
+/// authenticated `(principal, deviceId)` replica identity from the connection
+/// state, never from the wire, so a client cannot advance another client's cursor
+/// (nor even name which cursor its ACK advances). This is the load-bearing
+/// spoofing-CLEAN property — there is simply no identity on the wire to forge.
+///
+/// FLAT message — `cursor` is directly on the message, no payload wrapper. Maps to
+/// `ClientApplyAckMessageSchema` in `sync-schemas.ts`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientApplyAckMessage {
+    /// Highest server epoch the client has confirmed received-and-durably-applied
+    /// (inclusive). An unsigned integer decoded via the `serde_number` integer
+    /// helper so a TS `msgpackr` whole-number decodes directly as a `u64` (never
+    /// coerced through `f64`).
+    #[serde(deserialize_with = "serde_number::deserialize_u64")]
+    pub cursor: u64,
+}
+
 /// Payload for sync root hash response.
 ///
 /// Maps to the `payload` of `SyncRespRootMessageSchema` in `sync-schemas.ts`.
@@ -520,6 +546,52 @@ mod tests {
     }
 
     // ---- Client operation messages ----
+
+    #[test]
+    fn client_apply_ack_message_roundtrip() {
+        let msg = ClientApplyAckMessage { cursor: 42 };
+        assert_eq!(roundtrip_named(&msg), msg);
+    }
+
+    #[test]
+    fn client_apply_ack_cursor_is_msgpack_integer_not_float() {
+        // The cursor MUST decode as a MsgPack integer (u64), never coerced through
+        // f64 — a large value that loses precision in f64 proves the integer path.
+        let msg = ClientApplyAckMessage {
+            cursor: 9_007_199_254_740_993, // 2^53 + 1: not representable in f64
+        };
+        let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
+        let raw: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode");
+        let map = raw.as_map().expect("map");
+        let (_, cursor_val) = map
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("cursor"))
+            .expect("cursor key present");
+        assert!(
+            matches!(cursor_val, rmpv::Value::Integer(_)),
+            "cursor must be MsgPack Integer, got {cursor_val:?}"
+        );
+        assert_eq!(roundtrip_named(&msg), msg, "value survives round-trip exactly");
+    }
+
+    #[test]
+    fn client_apply_ack_as_message_has_single_type_discriminant() {
+        // The enum owns the `type` tag; the inner struct must NOT carry its own,
+        // and the discriminant must be CLIENT_APPLY_ACK.
+        let msg = crate::messages::Message::ClientApplyAck(ClientApplyAckMessage { cursor: 7 });
+        let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
+        let raw: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode");
+        let map = raw.as_map().expect("map");
+        let type_keys: Vec<_> = map
+            .iter()
+            .filter(|(k, _)| k.as_str() == Some("type"))
+            .collect();
+        assert_eq!(type_keys.len(), 1, "exactly one `type` key");
+        assert_eq!(type_keys[0].1.as_str(), Some("CLIENT_APPLY_ACK"));
+        let decoded: crate::messages::Message =
+            rmp_serde::from_slice(&bytes).expect("dispatch by type");
+        assert_eq!(decoded, msg);
+    }
 
     #[test]
     fn client_op_message_roundtrip() {

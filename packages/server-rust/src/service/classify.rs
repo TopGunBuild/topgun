@@ -547,6 +547,13 @@ impl OperationService {
             Message::DeviceAck(_) => Err(ClassifyError::ServerToClient {
                 variant: "DeviceAck",
             }),
+            // Confirmed-apply ACK is an identity-scoped control frame handled at the
+            // websocket layer (advances the per-device causal frontier under ownership
+            // fencing); it never reaches the data plane. Classify as non-dispatchable so
+            // a stray one is rejected rather than routed. Client→server, like Auth.
+            Message::ClientApplyAck(_) => Err(ClassifyError::AuthMessage {
+                variant: "ClientApplyAck",
+            }),
         }
     }
 }
