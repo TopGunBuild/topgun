@@ -126,6 +126,13 @@ pub struct AuthAckData {
     /// Authenticated user identifier from JWT claims.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub user_id: Option<String>,
+    /// Server-issued device identity bound to this connection.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub device_id: Option<String>,
+    /// Freshly minted/rotated device credential — present ONLY when a new credential
+    /// was issued; absent on a plain re-bind of an already-valid presented token.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub device_token: Option<String>,
 }
 
 /// Flat fields for `AUTH_FAIL` message (minus the `type` discriminant).

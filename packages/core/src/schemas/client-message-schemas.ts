@@ -77,6 +77,10 @@ export const AuthAckMessageSchema = z.object({
   type: z.literal('AUTH_ACK'),
   protocolVersion: z.number().optional(),
   userId: z.string().optional(),
+  // Server-issued device identity bound to this connection.
+  deviceId: z.string().optional(),
+  // Freshly minted/rotated credential — present ONLY on mint/rotate, absent on plain re-bind.
+  deviceToken: z.string().optional(),
 });
 export type AuthAckMessage = z.infer<typeof AuthAckMessageSchema>;
 

@@ -259,6 +259,10 @@ pub struct AuthMessage {
     pub token: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub protocol_version: Option<u32>,
+    // Opaque server-issued device credential presented for present-or-mint device binding.
+    // Additive/optional so old clients that never send it still authenticate.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub device_token: Option<String>,
 }
 
 /// Authentication required message sent by server to client.

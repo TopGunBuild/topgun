@@ -128,6 +128,8 @@ export const AuthMessageSchema = z.object({
   type: z.literal('AUTH'),
   token: z.string(),
   protocolVersion: z.number().optional(),
+  // Opaque server-issued device credential presented for present-or-mint binding.
+  deviceToken: z.string().optional(),
 });
 export type AuthMessage = z.infer<typeof AuthMessageSchema>;
 
