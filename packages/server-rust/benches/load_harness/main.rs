@@ -233,6 +233,7 @@ async fn main() {
                 jwt_secret: Some("test-e2e-secret".to_string()),
                 cluster_state: None,
                 store_factory: None,
+                frontier: None,
                 server_config: None,
                 policy_store: None,
                 admin_subjects: Arc::new(std::collections::HashSet::new()),

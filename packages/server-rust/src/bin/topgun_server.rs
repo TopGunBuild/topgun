@@ -1052,6 +1052,12 @@ async fn main() -> anyhow::Result<()> {
         jwt_secret,
         cluster_state: cluster_state_for_app,
         store_factory: Some(Arc::clone(&record_store_factory)),
+        // Durable per-device confirmed-apply frontier over the shared data store.
+        frontier: Some(Arc::new(
+            topgun_server::tombstone_frontier_impl::TombstoneFrontier::new(Some(
+                record_store_factory.data_store(),
+            )),
+        )),
         server_config: Some(Arc::new(ArcSwap::from_pointee(ServerConfig {
             node_id: node_id.clone(),
             ..ServerConfig::default()

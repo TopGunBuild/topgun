@@ -928,6 +928,14 @@ fn build_app(
         })
         .collect();
 
+    // Durable per-device confirmed-apply frontier over the shared data store (the
+    // same redb/Postgres backend as the record store). None when no store is wired.
+    let frontier = store_factory.as_ref().map(|f| {
+        Arc::new(crate::tombstone_frontier_impl::TombstoneFrontier::new(Some(
+            f.data_store(),
+        )))
+    });
+
     let state = AppState {
         registry,
         shutdown,
@@ -939,6 +947,7 @@ fn build_app(
         jwt_secret,
         cluster_state,
         store_factory,
+        frontier,
         server_config,
         policy_store,
         admin_subjects,

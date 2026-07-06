@@ -415,6 +415,18 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     continue;
                 }
 
+                // Confirmed-apply ACK: advance the per-device causal frontier inline.
+                // Identity-scoped and connection-ownership-fenced, so it is handled here
+                // (it needs the connection's device identity + the ownership registry,
+                // both in `state`/`handle`) rather than in the spawned data-plane
+                // dispatch task. The read loop is sequential, so cursor monotonicity is
+                // naturally preserved across a connection's ACK stream.
+                if let TopGunMessage::ClientApplyAck(ref ack) = tg_msg {
+                    handle_client_apply_ack(&state, &handle, conn_id, principal.as_ref(), ack.cursor)
+                        .await;
+                    continue;
+                }
+
                 // Acquire a permit before spawning; if the semaphore is closed
                 // (shutdown signal), exit the reader loop.
                 let Ok(permit) = semaphore.clone().acquire_owned().await else {
@@ -512,7 +524,10 @@ async fn bind_device_identity(
             // prior connection, which is closed so its in-flight identity-scoped
             // actions can be fenced out by `is_current_owner`.
             let identity_key = frontier_client_id(principal_id, &binding.device_id);
-            if let Some(displaced) = state.registry.claim_device_ownership(identity_key, conn_id) {
+            if let Some(displaced) = state
+                .registry
+                .claim_device_ownership(identity_key.clone(), conn_id)
+            {
                 if let Some(old) = state.registry.get(displaced) {
                     old.cancel();
                 }
@@ -520,6 +535,15 @@ async fn bind_device_identity(
                     "device-identity takeover on {:?}: displaced {:?}",
                     conn_id, displaced
                 );
+            }
+            // Rehydrate any persisted confirmed-apply cursor for this KNOWN identity
+            // into the in-memory frontier BEFORE any ACK, so a reconnecting device pins
+            // the prune low-water-mark at its true cursor instead of falling through the
+            // "unknown == forgotten" path (which pins nothing and would let the LWM jump
+            // forward). A freshly-minted identity has no persisted cursor and correctly
+            // stays untracked (unknown → gated). Best-effort: no store → no-op.
+            if let Some(frontier) = state.frontier.as_ref() {
+                frontier.rehydrate(&identity_key).await;
             }
             (Some(binding.device_id), binding.minted_token)
         }
@@ -530,6 +554,44 @@ async fn bind_device_identity(
             );
             (None, None)
         }
+    }
+}
+
+/// Handles a client→server confirmed-apply ACK: advances the per-device causal
+/// frontier under the bounded, monotone, connection-ownership-fenced rule.
+///
+/// The replica identity is derived ENTIRELY from server-authenticated connection
+/// state — the authenticated `principal` plus the server-issued `device_id` — never
+/// from the wire (the ACK carries only `cursor`). The ACK is accepted ONLY from the
+/// connection that currently OWNS the identity (342i `is_current_owner` fencing), so
+/// a displaced (taken-over) connection's in-flight stale ACK cannot advance the
+/// shared cursor past the current owner's durable state. Identity-less connections
+/// and rejected stale ACKs are dropped at `debug` (not errors) — they pin nothing.
+async fn handle_client_apply_ack(
+    state: &AppState,
+    handle: &Arc<ConnectionHandle>,
+    conn_id: ConnectionId,
+    principal: Option<&Principal>,
+    claimed: u64,
+) {
+    let Some(frontier) = state.frontier.as_ref() else {
+        return; // frontier not wired (network-only tests) — ACK is a no-op
+    };
+    let device_id = { handle.metadata.read().await.device_id.clone() };
+    let Some(device_id) = device_id else {
+        debug!("dropping confirmed-apply ACK from identity-less {:?}", conn_id);
+        return;
+    };
+    let client = frontier_client_id(principal.map(|p| p.id.as_str()), &device_id);
+    if !state.registry.is_current_owner(&client, conn_id) {
+        debug!(
+            "rejecting stale confirmed-apply ACK from non-owner {:?}",
+            conn_id
+        );
+        return;
+    }
+    if frontier.confirm_apply_ack(&client, claimed, conn_id).await {
+        debug!(conn = ?conn_id, cursor = claimed, "confirmed-apply cursor advanced");
     }
 }
 
@@ -566,6 +628,11 @@ fn release_session_state(state: &AppState, conn_id: ConnectionId) {
     }
     if let Some(ref reg) = state.hybrid_search_registry {
         let _ = reg.unregister_by_connection(conn_id);
+    }
+    // Drop this connection's per-connection `delivered` clamp state; the per-identity
+    // cursors are untouched (they survive reconnect via rehydration).
+    if let Some(ref frontier) = state.frontier {
+        frontier.remove_connection(conn_id);
     }
 }
 
