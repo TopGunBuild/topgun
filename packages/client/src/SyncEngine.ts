@@ -958,12 +958,21 @@ export class SyncEngine {
    */
   private handleDeviceAck(message: DeviceAckMessage): void {
     logger.info('Device identity acknowledged');
+    // Always persist the server-issued identity — it is ours to keep even if this
+    // DEVICE_ACK arrives late (after the grace timer already completed the connection).
+    this.persistDeviceCredential(message);
+    // If the opportunistic device-ack wait has already ended (grace timer fired,
+    // AUTH_REQUIRED arrived, or a real AUTH_ACK landed), the connection is past
+    // AUTHENTICATING — a late DEVICE_ACK must not re-drive the auth state machine
+    // (which would spuriously bounce CONNECTED → SYNCING and re-run post-auth wiring).
+    if (!this.deviceAckPending) {
+      return;
+    }
     this.deviceAckPending = false;
     if (this.authRequiredGraceTimer) {
       clearTimeout(this.authRequiredGraceTimer);
       this.authRequiredGraceTimer = null;
     }
-    this.persistDeviceCredential(message);
     // DEVICE_ACK does not authenticate a principal; reuse the SYNCING → CONNECTED wiring.
     this.handleAuthAck();
   }
