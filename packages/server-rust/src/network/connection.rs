@@ -301,6 +301,8 @@ impl std::fmt::Debug for ConnectionRegistry {
             .field("connections", &self.connections)
             .field("next_id", &self.next_id)
             .field("disconnect_observers", &observer_count)
+            .field("device_ownership", &self.device_ownership.len())
+            .field("conn_identity", &self.conn_identity.len())
             .finish()
     }
 }
@@ -991,12 +993,18 @@ mod tests {
         let key = "identity-A".to_string();
 
         // First claimant becomes owner, displacing nobody.
-        assert!(registry.claim_device_ownership(key.clone(), h1.id).is_none());
+        assert!(registry
+            .claim_device_ownership(key.clone(), h1.id)
+            .is_none());
         assert!(registry.is_current_owner(&key, h1.id));
 
         // Second claimant TAKES OVER: reports h1 as displaced and becomes owner.
         let displaced = registry.claim_device_ownership(key.clone(), h2.id);
-        assert_eq!(displaced, Some(h1.id), "takeover reports the displaced connection");
+        assert_eq!(
+            displaced,
+            Some(h1.id),
+            "takeover reports the displaced connection"
+        );
         assert!(registry.is_current_owner(&key, h2.id));
         // Fencing: the displaced connection is no longer the owner.
         assert!(!registry.is_current_owner(&key, h1.id));
@@ -1015,7 +1023,10 @@ mod tests {
 
         // The displaced h1 disconnecting must NOT clear h2's ownership.
         registry.remove(h1.id);
-        assert!(registry.is_current_owner(&key, h2.id), "displaced disconnect must not clobber the new owner");
+        assert!(
+            registry.is_current_owner(&key, h2.id),
+            "displaced disconnect must not clobber the new owner"
+        );
 
         // The current owner disconnecting releases the identity.
         registry.remove(h2.id);
@@ -1028,9 +1039,13 @@ mod tests {
         let registry = ConnectionRegistry::new();
         let (h1, _rx1) = registry.register(ConnectionKind::Client, &config);
         let key = "identity-C".to_string();
-        assert!(registry.claim_device_ownership(key.clone(), h1.id).is_none());
+        assert!(registry
+            .claim_device_ownership(key.clone(), h1.id)
+            .is_none());
         // Re-claiming an already-owned identity displaces nobody.
-        assert!(registry.claim_device_ownership(key.clone(), h1.id).is_none());
+        assert!(registry
+            .claim_device_ownership(key.clone(), h1.id)
+            .is_none());
         assert!(registry.is_current_owner(&key, h1.id));
     }
 }

@@ -32,9 +32,9 @@ use topgun_core::types::Value;
 /// injective `(principal, deviceId)` key below defends intra-namespace collisions.
 pub const CREDENTIAL_MAP: &str = "_topgun_device_credentials";
 
-/// Frontier/credential namespace for NO_AUTH connections.
+/// Frontier/credential namespace for `NO_AUTH` connections.
 ///
-/// In NO_AUTH mode `ConnectionMetadata.principal` stays `None` (the
+/// In `NO_AUTH` mode `ConnectionMetadata.principal` stays `None` (the
 /// `authenticated=false ⇒ principal=None` invariant is preserved); this sentinel
 /// exists ONLY inside the credential/frontier keyspace. The leading NUL makes it
 /// impossible for a real JWT-issued principal id (a printable `sub`) to collide
@@ -91,6 +91,10 @@ impl DeviceIdentityStore {
     /// hashes to the stored hash for `(principal, deviceId)` re-binds that identity
     /// with no new credential. Every other case (missing / unparseable / unknown /
     /// revoked / cross-principal / hash-mismatch) mints a fresh identity.
+    ///
+    /// # Errors
+    /// Returns an error only if the underlying store read/write fails; a failed
+    /// credential *match* is not an error (it mints fresh — fail-open).
     pub async fn present_or_mint(
         &self,
         principal: &str,
@@ -147,7 +151,13 @@ impl DeviceIdentityStore {
             },
         };
         self.store
-            .add(CREDENTIAL_MAP, &key, &record, 0, issued_at_ms as i64)
+            .add(
+                CREDENTIAL_MAP,
+                &key,
+                &record,
+                0,
+                i64::try_from(issued_at_ms).unwrap_or(i64::MAX),
+            )
             .await?;
 
         // Opaque to the client: deviceId + hex secret. The secret never touches the
@@ -161,6 +171,9 @@ impl DeviceIdentityStore {
 
     /// Revoke a credential (row delete). The device re-mints on its next connect;
     /// the orphaned `(principal, deviceId)` cursor is reclaimed downstream.
+    ///
+    /// # Errors
+    /// Returns an error if the underlying store delete fails.
     pub async fn revoke(&self, principal: &str, device_id: &str) -> anyhow::Result<()> {
         let key = Self::credential_key(principal, device_id);
         self.store.remove(CREDENTIAL_MAP, &key, 0).await
@@ -185,7 +198,8 @@ fn now_millis() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
         .unwrap_or(0)
 }
 
@@ -212,13 +226,22 @@ mod tests {
 
         // Fresh: mints a token + deviceId.
         let first = s.present_or_mint("alice", None).await.unwrap();
-        let token = first.minted_token.clone().expect("fresh mint returns a token");
+        let token = first
+            .minted_token
+            .clone()
+            .expect("fresh mint returns a token");
         assert!(!first.device_id.is_empty());
 
         // Re-present the exact token: same deviceId, NO new credential.
         let second = s.present_or_mint("alice", Some(&token)).await.unwrap();
-        assert_eq!(second.device_id, first.device_id, "valid re-present binds same deviceId");
-        assert!(second.minted_token.is_none(), "re-bind issues no new credential");
+        assert_eq!(
+            second.device_id, first.device_id,
+            "valid re-present binds same deviceId"
+        );
+        assert!(
+            second.minted_token.is_none(),
+            "re-bind issues no new credential"
+        );
     }
 
     #[tokio::test]
@@ -227,7 +250,10 @@ mod tests {
         let s = DeviceIdentityStore::new(store);
 
         // Garbage token → fresh mint (auth still succeeds).
-        let garbage = s.present_or_mint("alice", Some("not-a-token")).await.unwrap();
+        let garbage = s
+            .present_or_mint("alice", Some("not-a-token"))
+            .await
+            .unwrap();
         assert!(garbage.minted_token.is_some());
 
         // Establish a valid credential for alice.
@@ -237,17 +263,29 @@ mod tests {
         // Same token presented under a DIFFERENT principal → mints fresh (foreign row
         // untouched), never binds cross-account.
         let bob = s.present_or_mint("bob", Some(&alice_token)).await.unwrap();
-        assert!(bob.minted_token.is_some(), "cross-principal present mints fresh");
+        assert!(
+            bob.minted_token.is_some(),
+            "cross-principal present mints fresh"
+        );
         assert_ne!(bob.device_id, alice.device_id);
         // alice's own row still re-binds (was not overwritten by bob's mint).
-        let alice_again = s.present_or_mint("alice", Some(&alice_token)).await.unwrap();
+        let alice_again = s
+            .present_or_mint("alice", Some(&alice_token))
+            .await
+            .unwrap();
         assert_eq!(alice_again.device_id, alice.device_id);
         assert!(alice_again.minted_token.is_none());
 
         // Revoked token → mints fresh.
         s.revoke("alice", &alice.device_id).await.unwrap();
-        let after_revoke = s.present_or_mint("alice", Some(&alice_token)).await.unwrap();
-        assert!(after_revoke.minted_token.is_some(), "revoked present mints fresh");
+        let after_revoke = s
+            .present_or_mint("alice", Some(&alice_token))
+            .await
+            .unwrap();
+        assert!(
+            after_revoke.minted_token.is_some(),
+            "revoked present mints fresh"
+        );
         assert_ne!(after_revoke.device_id, alice.device_id);
     }
 
@@ -261,13 +299,25 @@ mod tests {
 
         // Read the raw stored row: it must be the SHA-256 hash, NOT the secret.
         let key = DeviceIdentityStore::credential_key("alice", device_id);
-        let row = store.load(CREDENTIAL_MAP, &key).await.unwrap().expect("row exists");
-        let RecordValue::Lww { value: Value::Bytes(stored), .. } = row else {
+        let row = store
+            .load(CREDENTIAL_MAP, &key)
+            .await
+            .unwrap()
+            .expect("row exists");
+        let RecordValue::Lww {
+            value: Value::Bytes(stored),
+            ..
+        } = row
+        else {
             panic!("expected Lww/Bytes credential row");
         };
         let secret = hex::decode(secret_hex).unwrap();
         assert_ne!(stored, secret, "raw secret must never be stored");
-        assert_eq!(stored, Sha256::digest(&secret).to_vec(), "stored value is SHA-256(secret)");
+        assert_eq!(
+            stored,
+            Sha256::digest(&secret).to_vec(),
+            "stored value is SHA-256(secret)"
+        );
         assert_eq!(stored.len(), 32);
     }
 

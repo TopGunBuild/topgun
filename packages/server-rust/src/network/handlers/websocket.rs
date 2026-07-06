@@ -475,9 +475,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 /// `None`) and NEVER blocks authentication — an attacker can always claim "no token"
 /// anyway, so failing an honest user out buys no security.
 ///
-/// `principal_id` is `Some` in JWT mode and `None` in NO_AUTH mode (keyed under the
+/// `principal_id` is `Some` in JWT mode and `None` in `NO_AUTH` mode (keyed under the
 /// frontier sentinel namespace). The caller guarantees the one-shot precondition
-/// (JWT: structural single Phase-1 bind; NO_AUTH: explicit pre-call guard), so this
+/// (JWT: structural single Phase-1 bind; `NO_AUTH`: explicit pre-call guard), so this
 /// only sets `device_id` when it is still `None`.
 async fn bind_device_identity(
     state: &AppState,
