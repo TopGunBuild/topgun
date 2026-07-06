@@ -145,6 +145,19 @@ export interface SyncEngineConfig {
 // connection provider in TopGunClient. This avoids the "two sources of truth, one
 // dead" trap where editing the wrong half changed nothing.
 
+/**
+ * Extracts the server epoch a pushed event confirms, for the confirmed-apply cursor.
+ *
+ * Forward-compatible with the prune-wiring epoch stamping: the server does not yet
+ * stamp an `epoch` on delta events, so this returns 0 today (no cursor to confirm).
+ * When epoch stamping lands, the client reads it here and confirms it after durable
+ * commit — no further client change needed.
+ */
+function epochOfServerEvent(payload: unknown): number {
+  const epoch = (payload as { epoch?: unknown } | null)?.epoch;
+  return typeof epoch === 'number' && Number.isFinite(epoch) && epoch > 0 ? epoch : 0;
+}
+
 export class SyncEngine {
   private readonly nodeId: string;
   private readonly storageAdapter: IStorageAdapter;
@@ -198,6 +211,11 @@ export class SyncEngine {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- maps registry holds heterogeneous LWWMap and ORMap instances; value types differ per map name
   private maps: Map<string, LWWMap<any, any> | ORMap<any, any>> = new Map();
   private lastSyncTimestamp: number = 0;
+  // Highest server epoch this client has confirmed to the server via CLIENT_APPLY_ACK.
+  // The confirmed-apply cursor is cumulative-monotonic: a non-advancing epoch is never
+  // re-sent. Distinct from lastSyncTimestamp (a delta-sync optimization hint) — this is
+  // the apply-not-receive confirmation the server's per-device causal frontier reads.
+  private lastAckedEpoch: number = 0;
   private authToken: string | null = null;
   private tokenProvider: (() => Promise<string | null>) | null = null;
   private onAuthRequired: ((error: AuthRequiredError) => void) | null = null;
@@ -1293,12 +1311,16 @@ export class SyncEngine {
     // Modified to support ORMap
     const { mapName, eventType, key, record, orRecord, orTag } = message.payload;
     await this.applyServerEvent(mapName, eventType, key, record, orRecord, orTag);
+    // Apply-not-receive: the ACK is emitted ONLY after applyServerEvent's durable
+    // IndexedDB commit above has resolved — never on receive.
+    this.emitConfirmedApply(epochOfServerEvent(message.payload));
   }
 
   private async handleServerBatchEvent(message: ServerBatchEventMessage): Promise<void> {
     // === OPTIMIZATION: Batch event processing ===
     // Server sends multiple events in a single message for efficiency
     const { events } = message.payload;
+    let highestEpoch = 0;
     for (const event of events) {
       await this.applyServerEvent(
         event.mapName,
@@ -1308,7 +1330,27 @@ export class SyncEngine {
         event.orRecord,
         event.orTag,
       );
+      highestEpoch = Math.max(highestEpoch, epochOfServerEvent(event));
     }
+    // Apply-not-receive: confirm the whole batch ONLY after every event above has been
+    // durably committed to IndexedDB (all the awaits have resolved).
+    this.emitConfirmedApply(highestEpoch);
+  }
+
+  /**
+   * Emit a confirmed-apply ACK for the highest server epoch this client has durably
+   * applied. Per the apply-not-receive contract, callers MUST invoke this ONLY after
+   * the covered server batch has been durably committed to IndexedDB.
+   *
+   * The cursor is cumulative-monotonic: a non-advancing (or zero) epoch is never sent.
+   * Server epoch stamping on the delta wire lands with the prune wiring; until then
+   * server events carry no epoch, so `appliedEpoch` is 0 and no ACK is emitted (the
+   * plumbing is inert, not incorrect).
+   */
+  private emitConfirmedApply(appliedEpoch: number): void {
+    if (appliedEpoch <= this.lastAckedEpoch) return;
+    this.lastAckedEpoch = appliedEpoch;
+    this.sendMessage({ type: 'CLIENT_APPLY_ACK', cursor: appliedEpoch });
   }
 
   private async handleGcPrune(message: GcPruneMessage): Promise<void> {

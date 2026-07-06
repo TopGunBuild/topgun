@@ -1343,4 +1343,81 @@ describe('SyncEngine', () => {
       expect(sentTimestamp.millis).toBeGreaterThan(0);
     });
   });
+
+  describe('Confirmed-apply ACK (apply-not-receive)', () => {
+    async function startEngineWithMap() {
+      syncEngine = new SyncEngine(config);
+      const hlc = syncEngine.getHLC();
+      const lwwMap = new LWWMap<string, any>(hlc);
+      syncEngine.registerMap('users', lwwMap);
+      await jest.runAllTimersAsync();
+      const ws = MockWebSocket.getLastInstance()!;
+      ws.sentMessages = []; // clear the auth/hello handshake frames
+      return ws;
+    }
+
+    function batchEvent(key: string, epoch?: number) {
+      return {
+        mapName: 'users',
+        eventType: 'PUT' as const,
+        key,
+        record: { value: { k: key }, timestamp: { millis: Date.now(), counter: 1, nodeId: 'remote' } },
+        ...(epoch !== undefined ? { epoch } : {}),
+      };
+    }
+
+    test('emits CLIENT_APPLY_ACK with the highest epoch ONLY after durable commit', async () => {
+      const ws = await startEngineWithMap();
+
+      // Gate the durable put so we can observe ordering: the ACK must NOT be sent
+      // until the IndexedDB commit resolves (apply-not-receive).
+      let resolvePut!: () => void;
+      mockStorage.put.mockImplementationOnce(
+        () => new Promise<void>((r) => (resolvePut = () => r())),
+      );
+
+      const applied = (syncEngine as any).handleServerBatchEvent({
+        payload: { events: [batchEvent('a', 5), batchEvent('b', 3)] },
+      }) as Promise<void>;
+
+      // Before the durable commit resolves, no ACK has been sent (not on receive).
+      expect(ws.sentMessages.find((m) => m.type === 'CLIENT_APPLY_ACK')).toBeUndefined();
+
+      resolvePut();
+      await applied;
+
+      const ack = ws.sentMessages.find((m) => m.type === 'CLIENT_APPLY_ACK');
+      expect(ack).toBeDefined();
+      expect(ack.cursor).toBe(5); // the highest epoch in the batch, inclusive
+    });
+
+    test('cursor is cumulative-monotonic: a non-advancing epoch is not re-sent', async () => {
+      const ws = await startEngineWithMap();
+
+      await (syncEngine as any).handleServerBatchEvent({
+        payload: { events: [batchEvent('a', 5)] },
+      });
+      // A lower/equal epoch later must NOT send another ACK.
+      await (syncEngine as any).handleServerBatchEvent({
+        payload: { events: [batchEvent('b', 4)] },
+      });
+      let acks = ws.sentMessages.filter((m) => m.type === 'CLIENT_APPLY_ACK');
+      expect(acks.map((m) => m.cursor)).toEqual([5]);
+
+      // A higher epoch advances the cursor and sends a fresh ACK.
+      await (syncEngine as any).handleServerBatchEvent({
+        payload: { events: [batchEvent('c', 7)] },
+      });
+      acks = ws.sentMessages.filter((m) => m.type === 'CLIENT_APPLY_ACK');
+      expect(acks.map((m) => m.cursor)).toEqual([5, 7]);
+    });
+
+    test('epoch-less events (current server wire) emit no ACK (inert, not incorrect)', async () => {
+      const ws = await startEngineWithMap();
+      await (syncEngine as any).handleServerBatchEvent({
+        payload: { events: [batchEvent('a'), batchEvent('b')] },
+      });
+      expect(ws.sentMessages.find((m) => m.type === 'CLIENT_APPLY_ACK')).toBeUndefined();
+    });
+  });
 });

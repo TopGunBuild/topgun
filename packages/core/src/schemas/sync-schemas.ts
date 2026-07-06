@@ -33,6 +33,18 @@ export const SyncInitMessageSchema = z.object({
 });
 export type SyncInitMessage = z.infer<typeof SyncInitMessageSchema>;
 
+// Client -> server confirmed-apply ACK. A cumulative-monotonic cursor: `cursor`
+// is the highest server epoch the client has confirmed it received AND durably
+// applied (inclusive — "applied <= cursor"). It feeds the server's per-device
+// causal frontier that licenses tombstone pruning. Carries NO identity field by
+// design — the server derives the authenticated (principal, deviceId) replica
+// identity from the connection, never from the wire.
+export const ClientApplyAckMessageSchema = z.object({
+  type: z.literal('CLIENT_APPLY_ACK'),
+  cursor: z.number(),
+});
+export type ClientApplyAckMessage = z.infer<typeof ClientApplyAckMessageSchema>;
+
 export const SyncRespRootMessageSchema = z.object({
   type: z.literal('SYNC_RESP_ROOT'),
   payload: z.object({
