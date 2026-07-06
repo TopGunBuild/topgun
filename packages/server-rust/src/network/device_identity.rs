@@ -32,15 +32,6 @@ use topgun_core::types::Value;
 /// injective `(principal, deviceId)` key below defends intra-namespace collisions.
 pub const CREDENTIAL_MAP: &str = "_topgun_device_credentials";
 
-/// Frontier/credential namespace for `NO_AUTH` connections.
-///
-/// In `NO_AUTH` mode `ConnectionMetadata.principal` stays `None` (the
-/// `authenticated=false ⇒ principal=None` invariant is preserved); this sentinel
-/// exists ONLY inside the credential/frontier keyspace. The leading NUL makes it
-/// impossible for a real JWT-issued principal id (a printable `sub`) to collide
-/// with the sentinel namespace.
-pub const NO_AUTH_SENTINEL: &str = "\u{0}noauth";
-
 /// Result of a present-or-mint exchange.
 #[derive(Debug, Clone)]
 pub struct DeviceBinding {
@@ -66,15 +57,25 @@ impl DeviceIdentityStore {
         Self { store }
     }
 
-    /// Injective encoding of `(principal, deviceId)`.
+    /// Injective, mode-tagged encoding of `(authMode, principal, deviceId)`.
     ///
-    /// A bare `"principal|deviceId"` is NOT injective if a principal may contain
-    /// the delimiter (IdP-issued `sub`s can contain `|`, `:`, etc.). Length-prefixing
-    /// the principal removes the ambiguity: the leading `<len>:` fixes exactly how
-    /// many following bytes belong to the principal, so no two distinct pairs share
-    /// a key regardless of their contents.
-    fn credential_key(principal: &str, device_id: &str) -> String {
-        format!("{}:{}|{}", principal.len(), principal, device_id)
+    /// This is the identity key for BOTH the credential store and (via
+    /// [`frontier_client_id`]) the connection-ownership map, so the two agree.
+    ///
+    /// Two ambiguities must be closed:
+    /// 1. A bare `"principal|deviceId"` is NOT injective if a principal may contain
+    ///    the delimiter (IdP-issued `sub`s can contain `|`, `:`, etc.). Length-prefixing
+    ///    the principal fixes exactly how many following bytes belong to it.
+    /// 2. A content-based `NO_AUTH` sentinel is spoofable — a JWT `sub` is an arbitrary
+    ///    string and could equal the sentinel text, colliding the two namespaces. So
+    ///    the mode is a STRUCTURAL leading tag (`a` = authenticated principal, `n` =
+    ///    no-auth) that principal content can never reproduce: a JWT principal always
+    ///    encodes through the `a` branch, so no `sub` value can forge an `n` key.
+    fn identity_key(principal_id: Option<&str>, device_id: &str) -> String {
+        match principal_id {
+            Some(p) => format!("a{}:{}|{}", p.len(), p, device_id),
+            None => format!("n:{device_id}"),
+        }
     }
 
     /// Split an opaque client token into `(deviceId, secretHex)`.
@@ -97,7 +98,7 @@ impl DeviceIdentityStore {
     /// credential *match* is not an error (it mints fresh — fail-open).
     pub async fn present_or_mint(
         &self,
-        principal: &str,
+        principal_id: Option<&str>,
         presented: Option<&str>,
     ) -> anyhow::Result<DeviceBinding> {
         if let Some(token) = presented {
@@ -106,7 +107,7 @@ impl DeviceIdentityStore {
                 // in a fixed charset and rejects malformed presentations early.
                 if Uuid::parse_str(device_id).is_ok() {
                     if let Ok(secret) = hex::decode(secret_hex) {
-                        let key = Self::credential_key(principal, device_id);
+                        let key = Self::identity_key(principal_id, device_id);
                         if let Some(RecordValue::Lww {
                             value: Value::Bytes(stored_hash),
                             ..
@@ -126,19 +127,19 @@ impl DeviceIdentityStore {
                 }
             }
         }
-        self.mint(principal).await
+        self.mint(principal_id).await
     }
 
     /// Mint a fresh `(deviceId, secret)`, persist only `SHA-256(secret)`, and return
     /// the opaque token to hand back to the client exactly once.
-    async fn mint(&self, principal: &str) -> anyhow::Result<DeviceBinding> {
+    async fn mint(&self, principal_id: Option<&str>) -> anyhow::Result<DeviceBinding> {
         let device_id = Uuid::new_v4().to_string();
         let mut secret = [0u8; 32];
         rand::rng().fill_bytes(&mut secret);
         let hash = Sha256::digest(secret);
 
         let issued_at_ms = now_millis();
-        let key = Self::credential_key(principal, &device_id);
+        let key = Self::identity_key(principal_id, &device_id);
         // Store the hash as an LWW record; the LWW timestamp millis doubles as the
         // issued-at marker (a credential row is a single-writer server artifact, not
         // a merged CRDT value).
@@ -174,23 +175,22 @@ impl DeviceIdentityStore {
     ///
     /// # Errors
     /// Returns an error if the underlying store delete fails.
-    pub async fn revoke(&self, principal: &str, device_id: &str) -> anyhow::Result<()> {
-        let key = Self::credential_key(principal, device_id);
+    pub async fn revoke(&self, principal_id: Option<&str>, device_id: &str) -> anyhow::Result<()> {
+        let key = Self::identity_key(principal_id, device_id);
         self.store.remove(CREDENTIAL_MAP, &key, 0).await
     }
 }
 
 /// Build the server-authenticated frontier identity for a connection.
 ///
-/// `injective(principal_id OR NO_AUTH_SENTINEL, device_id)` — the sentinel namespace
-/// exists only here and in the credential keyspace, never on `ConnectionMetadata`.
-/// This is the key the connection-ownership map and (downstream) the tombstone-GC
-/// cursor are keyed by.
+/// Delegates to the same mode-tagged [`DeviceIdentityStore::identity_key`] encoding as
+/// the credential store, so the ownership map, the credential keyspace, and (downstream)
+/// the tombstone-GC cursor all agree on one key per `(authMode, principal, deviceId)`.
+/// The no-auth namespace is a STRUCTURAL tag (`n`), never a content sentinel on
+/// `ConnectionMetadata` — `principal` stays `None` there.
 #[must_use]
 pub fn frontier_client_id(principal_id: Option<&str>, device_id: &str) -> String {
-    let namespace = principal_id.unwrap_or(NO_AUTH_SENTINEL);
-    // Same length-prefixed injective encoding as the credential key.
-    format!("{}:{}|{}", namespace.len(), namespace, device_id)
+    DeviceIdentityStore::identity_key(principal_id, device_id)
 }
 
 /// Wall-clock milliseconds since the Unix epoch.
@@ -225,7 +225,7 @@ mod tests {
         let s = DeviceIdentityStore::new(store);
 
         // Fresh: mints a token + deviceId.
-        let first = s.present_or_mint("alice", None).await.unwrap();
+        let first = s.present_or_mint(Some("alice"), None).await.unwrap();
         let token = first
             .minted_token
             .clone()
@@ -233,7 +233,10 @@ mod tests {
         assert!(!first.device_id.is_empty());
 
         // Re-present the exact token: same deviceId, NO new credential.
-        let second = s.present_or_mint("alice", Some(&token)).await.unwrap();
+        let second = s
+            .present_or_mint(Some("alice"), Some(&token))
+            .await
+            .unwrap();
         assert_eq!(
             second.device_id, first.device_id,
             "valid re-present binds same deviceId"
@@ -251,18 +254,21 @@ mod tests {
 
         // Garbage token → fresh mint (auth still succeeds).
         let garbage = s
-            .present_or_mint("alice", Some("not-a-token"))
+            .present_or_mint(Some("alice"), Some("not-a-token"))
             .await
             .unwrap();
         assert!(garbage.minted_token.is_some());
 
         // Establish a valid credential for alice.
-        let alice = s.present_or_mint("alice", None).await.unwrap();
+        let alice = s.present_or_mint(Some("alice"), None).await.unwrap();
         let alice_token = alice.minted_token.unwrap();
 
         // Same token presented under a DIFFERENT principal → mints fresh (foreign row
         // untouched), never binds cross-account.
-        let bob = s.present_or_mint("bob", Some(&alice_token)).await.unwrap();
+        let bob = s
+            .present_or_mint(Some("bob"), Some(&alice_token))
+            .await
+            .unwrap();
         assert!(
             bob.minted_token.is_some(),
             "cross-principal present mints fresh"
@@ -270,16 +276,16 @@ mod tests {
         assert_ne!(bob.device_id, alice.device_id);
         // alice's own row still re-binds (was not overwritten by bob's mint).
         let alice_again = s
-            .present_or_mint("alice", Some(&alice_token))
+            .present_or_mint(Some("alice"), Some(&alice_token))
             .await
             .unwrap();
         assert_eq!(alice_again.device_id, alice.device_id);
         assert!(alice_again.minted_token.is_none());
 
         // Revoked token → mints fresh.
-        s.revoke("alice", &alice.device_id).await.unwrap();
+        s.revoke(Some("alice"), &alice.device_id).await.unwrap();
         let after_revoke = s
-            .present_or_mint("alice", Some(&alice_token))
+            .present_or_mint(Some("alice"), Some(&alice_token))
             .await
             .unwrap();
         assert!(
@@ -293,12 +299,12 @@ mod tests {
     async fn hash_at_rest_not_secret() {
         let store = mem_store().await;
         let s = DeviceIdentityStore::new(store.clone());
-        let b = s.present_or_mint("alice", None).await.unwrap();
+        let b = s.present_or_mint(Some("alice"), None).await.unwrap();
         let token = b.minted_token.unwrap();
         let (device_id, secret_hex) = token.split_once('.').unwrap();
 
         // Read the raw stored row: it must be the SHA-256 hash, NOT the secret.
-        let key = DeviceIdentityStore::credential_key("alice", device_id);
+        let key = DeviceIdentityStore::identity_key(Some("alice"), device_id);
         let row = store
             .load(CREDENTIAL_MAP, &key)
             .await
@@ -322,21 +328,33 @@ mod tests {
     }
 
     #[test]
-    fn credential_key_is_injective_across_delimiter_containing_principals() {
+    fn identity_key_is_injective_across_delimiter_containing_principals() {
         // ("a|b", "c") vs ("a", "b|c"): a naive "p|d" key collides; the length prefix
         // keeps them distinct.
-        let k1 = DeviceIdentityStore::credential_key("a|b", "c");
-        let k2 = DeviceIdentityStore::credential_key("a", "b|c");
+        let k1 = DeviceIdentityStore::identity_key(Some("a|b"), "c");
+        let k2 = DeviceIdentityStore::identity_key(Some("a"), "b|c");
         assert_ne!(k1, k2);
     }
 
     #[test]
-    fn frontier_client_id_namespaces_noauth_distinctly() {
-        // A real principal whose literal id equals the sentinel text still cannot
-        // collide with the NO_AUTH namespace, because the length prefix differs.
-        let with_principal = frontier_client_id(Some("user-1"), "dev-1");
+    fn noauth_namespace_cannot_be_forged_by_any_principal_content() {
+        // The no-auth namespace is a STRUCTURAL tag (`n`), not a content sentinel: NO
+        // principal string — not even one crafted to look like a sentinel — can produce
+        // the same key as a genuine no-auth connection, because authenticated principals
+        // always encode through the `a` branch.
         let no_auth = frontier_client_id(None, "dev-1");
-        assert_ne!(with_principal, no_auth);
-        assert!(no_auth.contains(NO_AUTH_SENTINEL));
+        for adversarial in ["", "n", "n:dev-1", "\u{0}noauth", "1:x|dev-1"] {
+            let with_principal = frontier_client_id(Some(adversarial), "dev-1");
+            assert_ne!(
+                with_principal, no_auth,
+                "principal {adversarial:?} must not collide with the no-auth namespace"
+            );
+        }
+        // Credential-store keying agrees with the frontier/ownership keying.
+        assert_eq!(
+            no_auth,
+            DeviceIdentityStore::identity_key(None, "dev-1"),
+            "frontier and credential keys must be the same encoding"
+        );
     }
 }

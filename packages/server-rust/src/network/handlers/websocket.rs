@@ -31,7 +31,7 @@ use super::auth::AuthHandler;
 use super::decode;
 use super::AppState;
 use crate::network::connection::{ConnectionHandle, ConnectionId};
-use crate::network::device_identity::{frontier_client_id, DeviceIdentityStore, NO_AUTH_SENTINEL};
+use crate::network::device_identity::{frontier_client_id, DeviceIdentityStore};
 use crate::network::{ConnectionKind, OutboundMessage};
 use crate::service::classify::OperationService;
 use crate::service::dispatch::PartitionDispatcher;
@@ -490,9 +490,9 @@ async fn bind_device_identity(
         return (None, None);
     };
     let dev_store = DeviceIdentityStore::new(factory.data_store());
-    // The credential keyspace uses the fixed sentinel namespace for NO_AUTH.
-    let principal_key = principal_id.unwrap_or(NO_AUTH_SENTINEL);
-    match dev_store.present_or_mint(principal_key, presented).await {
+    // present_or_mint tags the no-auth namespace structurally from the `None` principal;
+    // no content sentinel is substituted here (a JWT `sub` can never forge the tag).
+    match dev_store.present_or_mint(principal_id, presented).await {
         Ok(binding) => {
             {
                 let mut meta = handle.metadata.write().await;
