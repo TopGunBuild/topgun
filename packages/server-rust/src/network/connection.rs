@@ -418,13 +418,34 @@ impl ConnectionRegistry {
         // `remove(connection_id)` can interleave between them and run its release BEFORE
         // ownership was set to us — leaving `device_ownership[key] = <this now-removed
         // conn>` (a dead owner that `is_current_owner` would still affirm). If this
-        // connection is already gone, undo our own claim. Both interleavings are now
-        // covered: either `remove` clears ownership (owner == us), or this re-check does.
+        // connection is already gone, UNDO our claim. Crucially, if we displaced a live
+        // prior owner, RESTORE it (a dead connection must not steal — nor orphan — an
+        // identity a live owner still holds), and report NO displacement, so the caller
+        // does not tear down a prior owner for a takeover that never really happened.
         if self.connections.get(&connection_id).is_none() {
-            self.device_ownership
-                .remove_if(&key_recheck, |_, owner| *owner == connection_id);
+            match displaced {
+                // We displaced a prior owner `prev`; restore it — but atomically, and only
+                // if WE are still the recorded owner, so a newer valid takeover that raced
+                // in after us is never clobbered. `get_mut` holds the shard write-lock
+                // across the check-and-swap.
+                Some(prev) => {
+                    if let Some(mut owner) = self.device_ownership.get_mut(&key_recheck) {
+                        if *owner == connection_id {
+                            *owner = prev;
+                        }
+                    }
+                }
+                // No prior owner: just drop our own (dead) claim if it still stands.
+                None => {
+                    self.device_ownership
+                        .remove_if(&key_recheck, |_, owner| *owner == connection_id);
+                }
+            }
             self.conn_identity
                 .remove_if(&connection_id, |_, k| *k == key_recheck);
+            // The claim was undone (or the prior owner restored) — there is no live
+            // displacement to report, so the caller must not tear down `prev`.
+            return None;
         }
         displaced
     }
@@ -1089,5 +1110,39 @@ mod tests {
             registry.conn_identity.get(&dead_id).is_none(),
             "reverse index must not retain a disconnected connection's key"
         );
+    }
+
+    #[test]
+    fn claim_by_disconnected_connection_restores_displaced_live_owner() {
+        // M6 (fencing): a DEAD connection's claim that displaces a LIVE owner must restore
+        // the live owner and report NO displacement — it must neither orphan the identity
+        // nor cause the caller to tear down the live owner for a takeover that never
+        // actually happened.
+        let config = test_config();
+        let registry = ConnectionRegistry::new();
+        let (a, _rxa) = registry.register(ConnectionKind::Client, &config);
+        let (b, _rxb) = registry.register(ConnectionKind::Client, &config);
+        let key = "identity-E".to_string();
+
+        // A legitimately owns K.
+        assert!(registry.claim_device_ownership(key.clone(), a.id).is_none());
+        assert!(registry.is_current_owner(&key, a.id));
+
+        // B disconnects, THEN (its in-flight) claim for K runs.
+        let dead_b = b.id;
+        registry.remove(dead_b);
+        let displaced = registry.claim_device_ownership(key.clone(), dead_b);
+
+        // No displacement is reported (A must not be kicked)...
+        assert_eq!(
+            displaced, None,
+            "a dead connection's claim must not report displacing the live owner"
+        );
+        // ...A remains the owner (identity not orphaned to nobody or to the dead B)...
+        assert!(
+            registry.is_current_owner(&key, a.id),
+            "the live owner must be restored, not orphaned"
+        );
+        assert!(!registry.is_current_owner(&key, dead_b));
     }
 }
