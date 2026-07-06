@@ -180,13 +180,15 @@ impl CausalFrontier for FrontierState {
 
     fn low_water_mark(&self) -> Epoch {
         // MIN across ALL tracked clients — a single lagging device pins the whole
-        // fleet. Vacuous case (no tracked clients): the current max epoch, so an
-        // empty frontier does not gratuitously hold pruning below what was stamped.
-        self.cursors
-            .values()
-            .copied()
-            .min()
-            .unwrap_or(self.current_max_epoch)
+        // fleet. Vacuous case (no tracked clients): 0, i.e. prune NOTHING. This is the
+        // loss-conservative direction the whole protocol rests on. Rehydration is lazy
+        // — a KNOWN client is only re-tracked when it reconnects — so an empty in-memory
+        // frontier does NOT mean "no client needs protection": post-restart it means
+        // "no client has reconnected yet." Returning the current max epoch here would
+        // license the prune (342b) to drop tombstones a not-yet-reconnected laggard has
+        // not applied → resurrection on that honest device. Only a genuinely tracked
+        // client's cursor may ever raise the LWM above 0.
+        self.cursors.values().copied().min().unwrap_or(0)
     }
 
     fn is_tracked(&self, client: &ClientId) -> bool {
@@ -316,7 +318,9 @@ impl TombstoneFrontier {
     }
 
     /// The prune low-water-mark: MIN cursor across all tracked clients (vacuous case
-    /// = the current max epoch). Consumed by 342b's prune gate.
+    /// = 0, i.e. prune nothing — the conservative direction, since rehydration is lazy
+    /// and an empty frontier post-restart does not mean "no client to protect").
+    /// Consumed by 342b's prune gate.
     #[must_use]
     pub fn low_water_mark(&self) -> Epoch {
         self.lock().low_water_mark()
@@ -335,8 +339,25 @@ impl TombstoneFrontier {
     }
 
     /// Forget a client (RAM-pressure / max-retention sacrifice). Consumed by 342c.
-    pub fn forget_client(&self, client: &ClientId) {
+    ///
+    /// Removes the client from the in-memory frontier AND deletes its durable cursor,
+    /// so a forget is DURABLE. The whole cursor-loss-is-safe model requires a forgotten
+    /// client to read as unknown → forgotten → full resync on its next connection: if
+    /// the durable row outlived the forget, `rehydrate` on reconnect would silently
+    /// re-track the client at its stale cursor and drop the low-water-mark below an
+    /// already-pruned watermark → resurrection on that device. The delete is
+    /// best-effort and safe in the OTHER direction — a failed delete only lets the row
+    /// linger, re-tracking the client at a real cursor it genuinely reached (no
+    /// premature prune), and 342f's orphan TTL is the backstop for a genuinely
+    /// abandoned row.
+    pub async fn forget_client(&self, client: &ClientId) {
         self.lock().forget_client(client);
+        if let Some(store) = self.store.as_ref() {
+            let now = i64::try_from(now_millis()).unwrap_or(i64::MAX);
+            if let Err(e) = store.remove(CURSOR_MAP, client, now).await {
+                debug!(client = %client, "cursor forget delete failed: {e}");
+            }
+        }
     }
 
     /// Release a connection's per-connection `delivered` state on disconnect so the
@@ -490,8 +511,30 @@ mod tests {
         assert!(!f.is_tracked(&c), "fresh device stays untracked");
         assert_eq!(
             f.low_water_mark(),
-            Epoch::MAX,
-            "untracked pins nothing (vacuous LWM)"
+            0,
+            "no tracked client → LWM 0 → prune nothing (conservative vacuous case)"
+        );
+    }
+
+    /// The vacuous low-water-mark is 0 (prune NOTHING), NOT the current max epoch.
+    /// Rehydration is lazy, so an empty in-memory frontier post-restart means "no
+    /// client has reconnected yet", not "no client to protect" — returning the max
+    /// epoch would license 342b to prune tombstones a not-yet-reconnected laggard
+    /// still needs. Even with a high injected global bound, empty → 0.
+    #[tokio::test]
+    async fn empty_frontier_lwm_is_zero_prunes_nothing() {
+        let f = frontier();
+        assert_eq!(
+            f.low_water_mark(),
+            0,
+            "empty frontier prunes nothing (default)"
+        );
+        // A set global bound must NOT leak into the vacuous LWM.
+        f.set_current_max_epoch(1_000_000);
+        assert_eq!(
+            f.low_water_mark(),
+            0,
+            "empty frontier still prunes nothing even with a high global bound"
         );
     }
 
@@ -691,6 +734,37 @@ mod persistence_tests {
             f.is_tracked(&lagging),
             "the reconnecting known device is tracked"
         );
+    }
+
+    /// A forget is DURABLE: `forget_client` deletes the persisted cursor, so a later
+    /// `rehydrate` finds nothing and the client stays untracked (unknown → forgotten →
+    /// full resync). If the durable row survived a forget, rehydrate would silently
+    /// re-track the client at its stale cursor and drop the LWM below an already-pruned
+    /// watermark → resurrection — this test guards that vector.
+    #[tokio::test]
+    async fn forget_client_deletes_durable_cursor_so_rehydrate_is_noop() {
+        let (path, _dir) = temp_store();
+        let c: ClientId = "a5:alice|dev-1".into();
+
+        let store = Arc::new(RedbDataStore::new(&path).expect("open"));
+        let f = TombstoneFrontier::new(Some(store));
+        f.set_delivered(CONN_A, 100);
+        assert!(f.confirm_apply_ack(&c, 50, CONN_A).await);
+        assert_eq!(f.cursor(&c), Some(50), "cursor established + persisted");
+
+        // Forget the client (342c RAM-pressure sacrifice). Must clear BOTH in-memory
+        // and durable state.
+        f.forget_client(&c).await;
+        assert!(!f.is_tracked(&c), "forgotten client untracked in memory");
+
+        // Rehydrate must be a no-op — the durable row is gone, so the client does NOT
+        // resurrect at its stale cursor.
+        f.rehydrate(&c).await;
+        assert!(
+            !f.is_tracked(&c),
+            "durable cursor deleted on forget → rehydrate cannot re-track the stale cursor"
+        );
+        assert_eq!(f.cursor(&c), None, "no stale cursor resurrected");
     }
 
     /// A freshly-minted identity has no persisted cursor: rehydrate is a no-op and it
