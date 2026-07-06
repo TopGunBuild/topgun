@@ -206,6 +206,7 @@ async fn connect_and_auth(addr: SocketAddr, idx: usize, jwt_secret: &str) -> Res
     let auth_msg = Message::Auth(AuthMessage {
         token,
         protocol_version: None,
+        device_token: None,
     });
     let auth_bytes = rmp_serde::to_vec_named(&auth_msg)
         .map_err(|e| anyhow!("connection {idx}: failed to encode AUTH: {e}"))?;

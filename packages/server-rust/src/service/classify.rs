@@ -689,6 +689,7 @@ mod tests {
         let msg = Message::Auth(topgun_core::messages::AuthMessage {
             token: "test-token".to_string(),
             protocol_version: None,
+            device_token: None,
         });
         let err = svc.classify(msg, None, CallerOrigin::Client).unwrap_err();
         assert!(matches!(

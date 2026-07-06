@@ -71,6 +71,7 @@ impl SoakClient {
         let auth = Message::Auth(AuthMessage {
             token,
             protocol_version: None,
+            device_token: None,
         });
         send_encoded(&mut ws, &auth).await?;
 
