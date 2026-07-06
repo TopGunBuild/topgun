@@ -5,6 +5,8 @@ import type {
   AuthFailMessage,
   AuthMessage,
   AuthAckMessage,
+  DeviceHelloMessage,
+  DeviceAckMessage,
   OpAckMessage,
   OpRejectedMessage,
   ErrorMessage,
@@ -211,9 +213,9 @@ export class SyncEngine {
   // (loadOpLog) and the auth path share a single read and the credential is
   // guaranteed available before the first AUTH is presented.
   private deviceCredentialLoadPromise: Promise<void> | null = null;
-  // True while an opportunistic NO_AUTH AUTH{token:''} awaits its AUTH_ACK. Used
-  // to infer a legacy (pre-device-identity) server: any non-AUTH_ACK message (or
-  // the grace timeout) while this is set means proceed auth-optional without a deviceId.
+  // True while a token-less DEVICE_HELLO awaits its DEVICE_ACK. Used to infer a legacy
+  // (pre-device-identity) server: any non-DEVICE_ACK message (or the grace timeout)
+  // while this is set means proceed auth-optional without a deviceId.
   private deviceAckPending = false;
 
   // Grace timer: gives the server a bounded window to send AUTH_REQUIRED after WS open.
@@ -417,6 +419,7 @@ export class SyncEngine {
         sendAuth: () => this.sendAuth(),
         handleAuthRequired: () => this.handleAuthRequired(),
         handleAuthAck: (msg) => this.handleAuthAck(msg),
+        handleDeviceAck: (msg) => this.handleDeviceAck(msg),
         handleAuthFail: (msg) => this.handleAuthFail(msg),
         handleOpAck: (msg) => this.handleOpAck(msg),
         handleQueryResp: (msg) => this.handleQueryResp(msg),
@@ -471,19 +474,21 @@ export class SyncEngine {
       return;
     }
 
-    // NO_AUTH mode (no token, no provider). Send an opportunistic
-    // AUTH{token:'', deviceToken} so a device-identity-aware server can
-    // present-or-mint a device identity and return it on AUTH_ACK. A legacy
-    // server predating device identity ignores this frame, so also arm the grace
-    // timer: if no AUTH_ACK (nor AUTH_REQUIRED) arrives we proceed auth-optional
-    // (degraded-to-legacy) and never hang.
+    // Token-less connect (no token, no provider). Present the device credential on a
+    // dedicated DEVICE_HELLO frame — NOT an empty-token AUTH, which a real JWT server
+    // treats as a JWT attempt, fails, and tears the connection down. DEVICE_HELLO is a
+    // distinct non-AUTH frame: a device-aware NO_AUTH server present-or-mints and replies
+    // DEVICE_ACK; a JWT server silently drops it and (separately) sends AUTH_REQUIRED, so
+    // the connection survives and Case 3 (supply a token later) still works; a legacy
+    // server ignores it. Arm the grace timer so a legacy/no-reply server still proceeds
+    // auth-optional instead of hanging.
     logger.info(
       { graceMs: this.AUTH_REQUIRED_GRACE_MS },
-      'Connection established (NO_AUTH). Presenting device credential; waiting briefly for AUTH_ACK...',
+      'Connection established (token-less). Presenting device credential; waiting briefly for DEVICE_ACK...',
     );
     this.stateMachine.transition(SyncState.AUTHENTICATING);
     this.deviceAckPending = true;
-    this.sendAuth();
+    this.sendDeviceHello();
     this.authRequiredGraceTimer = setTimeout(() => {
       this.authRequiredGraceTimer = null;
       this.deviceAckPending = false;
@@ -525,7 +530,7 @@ export class SyncEngine {
       return;
     }
 
-    logger.info('No AUTH_ACK received within grace window — assuming auth-optional legacy server.');
+    logger.info('No DEVICE_ACK received within grace window — assuming auth-optional legacy server.');
     this.deviceAckPending = false;
     // Traverse the canonical pre-auth → ready path (no new state transitions added).
     this.stateMachine.transition(SyncState.AUTHENTICATING);
@@ -684,11 +689,12 @@ export class SyncEngine {
   }
 
   /**
-   * Persist a device credential carried on AUTH_ACK. `deviceToken` is present only
-   * when the server minted or rotated the credential; when absent (a plain re-bind
-   * of an already-valid token) the existing token is kept, never cleared.
+   * Persist a device credential carried on AUTH_ACK (credentialed path) or DEVICE_ACK
+   * (token-less path). `deviceToken` is present only when the server minted or rotated
+   * the credential; when absent (a plain re-bind of an already-valid token) the existing
+   * token is kept, never cleared.
    */
-  private persistDeviceCredential(message: AuthAckMessage): void {
+  private persistDeviceCredential(message: AuthAckMessage | DeviceAckMessage): void {
     // The credential is now authoritative in memory; mark the boot-time load
     // satisfied so it cannot later overwrite these values.
     if (!this.deviceCredentialLoadPromise) {
@@ -914,20 +920,52 @@ export class SyncEngine {
 
     const token = this.authToken;
 
-    // JWT mode: a token provider is configured but yielded no token — park in
-    // AUTHENTICATING rather than sending anonymous auth (preserves the contract
-    // that resolved the earlier no-token deadlock). The onAuthRequired warn path
-    // surfaces the missing credential.
-    if (!token && this.tokenProvider) return;
+    // No token to present. Two cases, both "do not send an AUTH frame":
+    //   - JWT-with-provider that yielded nothing → park in AUTHENTICATING (preserves the
+    //     contract that resolved the earlier no-token deadlock; onAuthRequired surfaces it).
+    //   - Token-less/NO_AUTH → device identity is presented on a dedicated DEVICE_HELLO
+    //     (see handleConnectionEstablished), never an empty-token AUTH (a real JWT server
+    //     would AUTH_FAIL + disconnect it).
+    if (!token) return;
 
-    // NO_AUTH mode (no token, no provider) sends AUTH{token:'', deviceToken} so a
-    // device-identity-aware server can present-or-mint. A legacy server ignores
-    // this frame; the caller arms a grace timer to proceed auth-optional.
-    const authMessage: AuthMessage = { type: 'AUTH', token: token ?? '' };
+    // Credentialed AUTH: bundle the persisted deviceToken so the server present-or-mints
+    // the device identity in the same round-trip and returns it on AUTH_ACK.
+    const authMessage: AuthMessage = { type: 'AUTH', token };
     if (this.deviceToken) {
       authMessage.deviceToken = this.deviceToken;
     }
     this.sendMessage(authMessage);
+  }
+
+  /**
+   * Present the device credential on a dedicated DEVICE_HELLO frame (token-less path).
+   * Orthogonal to AUTH so a JWT server silently drops it (Phase-1 non-AUTH) rather than
+   * tearing the connection down. Awaits the persisted-credential load so a cold restart
+   * re-presents the same identity.
+   */
+  private async sendDeviceHello(): Promise<void> {
+    await this.ensureDeviceCredentialLoaded();
+    const hello: DeviceHelloMessage = { type: 'DEVICE_HELLO' };
+    if (this.deviceToken) {
+      hello.deviceToken = this.deviceToken;
+    }
+    this.sendMessage(hello);
+  }
+
+  /**
+   * DEVICE_ACK received: persist the server-issued device identity and complete the
+   * connection auth-optional (NO_AUTH stays unauthenticated — no JWT principal).
+   */
+  private handleDeviceAck(message: DeviceAckMessage): void {
+    logger.info('Device identity acknowledged');
+    this.deviceAckPending = false;
+    if (this.authRequiredGraceTimer) {
+      clearTimeout(this.authRequiredGraceTimer);
+      this.authRequiredGraceTimer = null;
+    }
+    this.persistDeviceCredential(message);
+    // DEVICE_ACK does not authenticate a principal; reuse the SYNCING → CONNECTED wiring.
+    this.handleAuthAck();
   }
 
   /**
@@ -1019,13 +1057,14 @@ export class SyncEngine {
     // Emit to generic listeners (used by EventJournalReader)
     this.emitMessage(message);
 
-    // Message-first legacy inference: while an opportunistic NO_AUTH device-ack is
-    // pending, any server message that is not AUTH_ACK (nor AUTH_REQUIRED, which
-    // has its own handler) means the server predates device identity — proceed
-    // auth-optional immediately instead of waiting out the grace timeout.
+    // Message-first legacy inference: while a token-less DEVICE_HELLO awaits its
+    // DEVICE_ACK, any server message that is not DEVICE_ACK (nor AUTH_REQUIRED, which
+    // has its own handler and means "this is a JWT server") indicates a server that
+    // predates device identity — proceed auth-optional immediately instead of waiting
+    // out the grace timeout.
     if (
       this.deviceAckPending &&
-      message.type !== 'AUTH_ACK' &&
+      message.type !== 'DEVICE_ACK' &&
       message.type !== 'AUTH_REQUIRED'
     ) {
       this.deviceAckPending = false;

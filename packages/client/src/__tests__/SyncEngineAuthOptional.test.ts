@@ -140,20 +140,21 @@ describe('SyncEngine — auth-optional fast path', () => {
     engine = new SyncEngine(config);
 
     // Flush the setTimeout(..., 0) that fires onopen, triggering handleConnectionEstablished.
-    // This sends the opportunistic NO_AUTH AUTH and arms the 500ms grace timer.
+    // This sends the token-less DEVICE_HELLO and arms the 500ms grace timer.
     await jest.advanceTimersByTimeAsync(0);
     await Promise.resolve();
 
-    // NO_AUTH now presents an opportunistic AUTH{token:''} and moves to AUTHENTICATING.
+    // Token-less connect presents a DEVICE_HELLO (NOT an empty-token AUTH) and moves to
+    // AUTHENTICATING.
     expect(engine.getConnectionState()).toBe(SyncState.AUTHENTICATING);
     const ws = MockWebSocket.getLastInstance()!;
-    const optimisticAuth = ws.sentMessages.find((m) => m.type === 'AUTH');
-    expect(optimisticAuth).toBeDefined();
-    expect(optimisticAuth?.token).toBe('');
+    expect(ws.sentMessages.find((m) => m.type === 'AUTH')).toBeUndefined();
+    const hello = ws.sentMessages.find((m) => m.type === 'DEVICE_HELLO');
+    expect(hello).toBeDefined();
     // No persisted device credential → no deviceToken presented.
-    expect(optimisticAuth?.deviceToken).toBeUndefined();
+    expect(hello?.deviceToken).toBeUndefined();
 
-    // Advance past the 500ms grace window — legacy server sent no AUTH_ACK.
+    // Advance past the 500ms grace window — legacy server sent no DEVICE_ACK.
     jest.advanceTimersByTime(500);
     await Promise.resolve(); // let any microtasks flush
 
@@ -200,11 +201,10 @@ describe('SyncEngine — auth-optional fast path', () => {
 
     expect(engine.getConnectionState()).toBe(SyncState.AUTHENTICATING);
 
-    // Only the opportunistic NO_AUTH AUTH{token:''} was sent; no credentialed AUTH
-    // follows because there is still no token.
-    const authFrames = ws.sentMessages.filter((m) => m.type === 'AUTH');
-    expect(authFrames).toHaveLength(1);
-    expect(authFrames[0]?.token).toBe('');
+    // Only the token-less DEVICE_HELLO was sent; no AUTH frame follows because there is
+    // still no token (a real JWT server would AUTH_FAIL an empty-token AUTH).
+    expect(ws.sentMessages.filter((m) => m.type === 'AUTH')).toHaveLength(0);
+    expect(ws.sentMessages.filter((m) => m.type === 'DEVICE_HELLO')).toHaveLength(1);
 
     engine.close();
   });

@@ -1,10 +1,14 @@
 /**
  * Tests for SyncEngine server-issued device credential handling.
  *
+ * A token-less client presents its device credential on a dedicated DEVICE_HELLO
+ * frame (NOT an empty-token AUTH, which a real JWT server would AUTH_FAIL + tear
+ * down) and receives it back on DEVICE_ACK.
+ *
  * Covers:
- *   (a) deviceToken from AUTH_ACK is persisted and presented on the next AUTH
- *   (b) AUTH_ACK without a deviceToken keeps the existing (persisted) token
- *   (c) legacy server (no AUTH_ACK, or a non-AUTH_ACK message first) proceeds
+ *   (a) deviceToken from DEVICE_ACK is persisted and presented on the next DEVICE_HELLO
+ *   (b) DEVICE_ACK without a deviceToken keeps the existing (persisted) token
+ *   (c) legacy server (no DEVICE_ACK, or a non-DEVICE_ACK message first) proceeds
  *       without a device identity and never errors/hangs
  */
 
@@ -67,6 +71,10 @@ class MockWebSocket {
 
   static getLastInstance(): MockWebSocket | undefined {
     return MockWebSocket.instances[MockWebSocket.instances.length - 1];
+  }
+
+  deviceHelloFrames(): any[] {
+    return this.sentMessages.filter((m) => m.type === 'DEVICE_HELLO');
   }
 
   authFrames(): any[] {
@@ -141,24 +149,26 @@ describe('SyncEngine — server-issued device credential', () => {
   }
 
   // ────────────────────────────────────────────
-  // (a) deviceToken minted on AUTH_ACK is persisted and re-presented
+  // (a) deviceToken minted on DEVICE_ACK is persisted and re-presented
   // ────────────────────────────────────────────
-  it('(a) persists a minted deviceToken from AUTH_ACK and presents it on the next AUTH', async () => {
+  it('(a) persists a minted deviceToken from DEVICE_ACK and presents it on the next DEVICE_HELLO', async () => {
     const meta = new Map<string, any>();
     const { config, storage } = makeConfig(meta);
     engine = new SyncEngine(config);
 
-    // Open: NO_AUTH connect sends opportunistic AUTH{token:''} with no deviceToken yet.
+    // Open: token-less connect sends a DEVICE_HELLO with no deviceToken yet — and
+    // NOT an empty-token AUTH (which a JWT server would reject).
     await jest.advanceTimersByTimeAsync(0);
 
     const ws1 = MockWebSocket.getLastInstance()!;
-    const firstAuth = ws1.authFrames()[0];
-    expect(firstAuth?.token).toBe('');
-    expect(firstAuth?.deviceToken).toBeUndefined();
+    expect(ws1.authFrames()).toHaveLength(0);
+    const firstHello = ws1.deviceHelloFrames()[0];
+    expect(firstHello).toBeDefined();
+    expect(firstHello?.deviceToken).toBeUndefined();
 
-    // Server mints a device identity and returns it on AUTH_ACK.
+    // Server mints a device identity and returns it on DEVICE_ACK.
     ws1.simulateMessage({
-      type: 'AUTH_ACK',
+      type: 'DEVICE_ACK',
       deviceId: 'dev-1',
       deviceToken: 'dev-1.secretHex',
     });
@@ -178,16 +188,15 @@ describe('SyncEngine — server-issued device credential', () => {
 
     const ws2 = MockWebSocket.getLastInstance()!;
     expect(ws2).not.toBe(ws1);
-    const reconnectAuth = ws2.authFrames()[0];
-    expect(reconnectAuth).toBeDefined();
-    expect(reconnectAuth?.token).toBe('');
-    expect(reconnectAuth?.deviceToken).toBe('dev-1.secretHex');
+    const reconnectHello = ws2.deviceHelloFrames()[0];
+    expect(reconnectHello).toBeDefined();
+    expect(reconnectHello?.deviceToken).toBe('dev-1.secretHex');
   });
 
   // ────────────────────────────────────────────
-  // (b) AUTH_ACK without deviceToken keeps the existing token
+  // (b) DEVICE_ACK without deviceToken keeps the existing token
   // ────────────────────────────────────────────
-  it('(b) keeps the existing persisted token when AUTH_ACK carries no deviceToken (re-bind)', async () => {
+  it('(b) keeps the existing persisted token when DEVICE_ACK carries no deviceToken (re-bind)', async () => {
     const meta = new Map<string, any>([
       ['deviceToken', 'existing.tok'],
       ['deviceId', 'existing-dev'],
@@ -196,17 +205,17 @@ describe('SyncEngine — server-issued device credential', () => {
     engine = new SyncEngine(config);
 
     // loadOpLog reads the persisted credential before the socket opens; the first
-    // AUTH must present it.
+    // DEVICE_HELLO must present it.
     await jest.advanceTimersByTimeAsync(0);
 
     const ws1 = MockWebSocket.getLastInstance()!;
-    const firstAuth = ws1.authFrames()[0];
-    expect(firstAuth?.deviceToken).toBe('existing.tok');
+    const firstHello = ws1.deviceHelloFrames()[0];
+    expect(firstHello?.deviceToken).toBe('existing.tok');
 
     storage.setMeta.mockClear();
 
-    // Server re-binds the already-valid token: AUTH_ACK with deviceId but NO deviceToken.
-    ws1.simulateMessage({ type: 'AUTH_ACK', deviceId: 'existing-dev' });
+    // Server re-binds the already-valid token: DEVICE_ACK with deviceId but NO deviceToken.
+    ws1.simulateMessage({ type: 'DEVICE_ACK', deviceId: 'existing-dev' });
     await jest.advanceTimersByTimeAsync(0);
 
     expect(engine.getConnectionState()).toBe(SyncState.CONNECTED);
@@ -222,20 +231,20 @@ describe('SyncEngine — server-issued device credential', () => {
     await jest.runAllTimersAsync();
 
     const ws2 = MockWebSocket.getLastInstance()!;
-    expect(ws2.authFrames()[0]?.deviceToken).toBe('existing.tok');
+    expect(ws2.deviceHelloFrames()[0]?.deviceToken).toBe('existing.tok');
   });
 
   // ────────────────────────────────────────────
-  // (c1) legacy server sends no AUTH_ACK → proceeds via grace timeout
+  // (c1) legacy server sends no DEVICE_ACK → proceeds via grace timeout
   // ────────────────────────────────────────────
-  it('(c1) proceeds to CONNECTED without a device identity when a legacy server never sends AUTH_ACK', async () => {
+  it('(c1) proceeds to CONNECTED without a device identity when a legacy server never sends DEVICE_ACK', async () => {
     const meta = new Map<string, any>();
     const { config, storage } = makeConfig(meta);
     engine = new SyncEngine(config);
 
     await jest.advanceTimersByTimeAsync(0);
 
-    // No AUTH_ACK arrives; grace window elapses.
+    // No DEVICE_ACK arrives; grace window elapses.
     jest.advanceTimersByTime(500);
     await Promise.resolve();
 
@@ -246,9 +255,9 @@ describe('SyncEngine — server-issued device credential', () => {
   });
 
   // ────────────────────────────────────────────
-  // (c2) legacy server sends a non-AUTH_ACK message first → message-first inference
+  // (c2) legacy server sends a non-DEVICE_ACK message first → message-first inference
   // ────────────────────────────────────────────
-  it('(c2) infers a legacy server from a non-AUTH_ACK first message and proceeds before the grace timeout', async () => {
+  it('(c2) infers a legacy server from a non-DEVICE_ACK first message and proceeds before the grace timeout', async () => {
     const meta = new Map<string, any>();
     const { config, storage } = makeConfig(meta);
     engine = new SyncEngine(config);
@@ -258,7 +267,7 @@ describe('SyncEngine — server-issued device credential', () => {
     expect(engine.getConnectionState()).toBe(SyncState.AUTHENTICATING);
 
     const ws1 = MockWebSocket.getLastInstance()!;
-    // A legacy server that predates device identity emits a non-AUTH_ACK frame.
+    // A legacy server that predates device identity emits a non-DEVICE_ACK frame.
     ws1.simulateMessage({ type: 'PONG' });
     await Promise.resolve();
 
