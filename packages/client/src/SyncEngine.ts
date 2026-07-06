@@ -3,6 +3,8 @@ import type { EntryProcessorDef, EntryProcessorResult, SearchOptions } from '@to
 import type { LWWRecord, ORMapRecord, Timestamp } from '@topgunbuild/core';
 import type {
   AuthFailMessage,
+  AuthMessage,
+  AuthAckMessage,
   OpAckMessage,
   OpRejectedMessage,
   ErrorMessage,
@@ -197,6 +199,22 @@ export class SyncEngine {
   private authToken: string | null = null;
   private tokenProvider: (() => Promise<string | null>) | null = null;
   private onAuthRequired: ((error: AuthRequiredError) => void) | null = null;
+
+  // Server-issued device identity. The deviceToken is an opaque credential the
+  // client presents on AUTH so the server can rebind the same device identity
+  // across reconnects/restarts; the server returns (and may rotate) it on
+  // AUTH_ACK. Both are persisted durably via the storage adapter's meta store so
+  // they survive process restarts. The token is opaque — never parsed by the client.
+  private deviceToken: string | null = null;
+  private deviceId: string | null = null;
+  // Memoized in-flight load of the persisted device credential, so the boot load
+  // (loadOpLog) and the auth path share a single read and the credential is
+  // guaranteed available before the first AUTH is presented.
+  private deviceCredentialLoadPromise: Promise<void> | null = null;
+  // True while an opportunistic NO_AUTH AUTH{token:''} awaits its AUTH_ACK. Used
+  // to infer a legacy (pre-device-identity) server: any non-AUTH_ACK message (or
+  // the grace timeout) while this is set means proceed auth-optional without a deviceId.
+  private deviceAckPending = false;
 
   // Grace timer: gives the server a bounded window to send AUTH_REQUIRED after WS open.
   // If AUTH_REQUIRED arrives, the timer is cancelled and existing auth behaviour runs.
@@ -398,7 +416,7 @@ export class SyncEngine {
       {
         sendAuth: () => this.sendAuth(),
         handleAuthRequired: () => this.handleAuthRequired(),
-        handleAuthAck: () => this.handleAuthAck(),
+        handleAuthAck: (msg) => this.handleAuthAck(msg),
         handleAuthFail: (msg) => this.handleAuthFail(msg),
         handleOpAck: (msg) => this.handleOpAck(msg),
         handleQueryResp: (msg) => this.handleQueryResp(msg),
@@ -428,6 +446,11 @@ export class SyncEngine {
     this.webSocketManager.connect();
 
     this.loadOpLog();
+
+    // Kick off the device-credential read independently of loadOpLog so it does
+    // not delay the op-log rebuild (loadOpLog resets this.opLog). sendAuth awaits
+    // the same memoized promise before presenting the credential.
+    void this.ensureDeviceCredentialLoaded();
   }
 
   // ============================================
@@ -448,14 +471,22 @@ export class SyncEngine {
       return;
     }
 
-    // Auth-optional wait: allow the server AUTH_REQUIRED_GRACE_MS to send
-    // AUTH_REQUIRED. If nothing arrives, assume auth-optional and drive to CONNECTED.
+    // NO_AUTH mode (no token, no provider). Send an opportunistic
+    // AUTH{token:'', deviceToken} so a device-identity-aware server can
+    // present-or-mint a device identity and return it on AUTH_ACK. A legacy
+    // server predating device identity ignores this frame, so also arm the grace
+    // timer: if no AUTH_ACK (nor AUTH_REQUIRED) arrives we proceed auth-optional
+    // (degraded-to-legacy) and never hang.
     logger.info(
       { graceMs: this.AUTH_REQUIRED_GRACE_MS },
-      'Connection established. Waiting briefly for AUTH_REQUIRED...',
+      'Connection established (NO_AUTH). Presenting device credential; waiting briefly for AUTH_ACK...',
     );
+    this.stateMachine.transition(SyncState.AUTHENTICATING);
+    this.deviceAckPending = true;
+    this.sendAuth();
     this.authRequiredGraceTimer = setTimeout(() => {
       this.authRequiredGraceTimer = null;
+      this.deviceAckPending = false;
       this.completeAuthOptionalConnection();
     }, this.AUTH_REQUIRED_GRACE_MS);
   }
@@ -494,9 +525,11 @@ export class SyncEngine {
       return;
     }
 
-    logger.info('No AUTH_REQUIRED received within grace window — assuming auth-optional server.');
+    logger.info('No AUTH_ACK received within grace window — assuming auth-optional legacy server.');
+    this.deviceAckPending = false;
     // Traverse the canonical pre-auth → ready path (no new state transitions added).
     this.stateMachine.transition(SyncState.AUTHENTICATING);
+    // No message: proceed without a deviceId (degraded-to-legacy).
     this.handleAuthAck(); // Reuses existing SYNCING → CONNECTED wiring.
   }
 
@@ -512,6 +545,8 @@ export class SyncEngine {
    * produce an "Invalid state transition" log and violate AC #4.
    */
   private handleAuthRequired(): void {
+    // The server demands JWT auth — abandon the opportunistic device-ack wait.
+    this.deviceAckPending = false;
     if (this.authRequiredGraceTimer) {
       clearTimeout(this.authRequiredGraceTimer);
       this.authRequiredGraceTimer = null;
@@ -617,6 +652,61 @@ export class SyncEngine {
   // ============================================
   // Op Log Management
   // ============================================
+
+  /**
+   * Load the persisted server-issued device credential (token + id) from durable
+   * meta storage into memory, at most once. Runs on boot (via loadOpLog) and is
+   * also awaited lazily in sendAuth to close the race where the connection opens
+   * before loadOpLog resolves — so a persisted deviceToken is always presented.
+   */
+  private ensureDeviceCredentialLoaded(): Promise<void> {
+    if (!this.deviceCredentialLoadPromise) {
+      this.deviceCredentialLoadPromise = this.loadDeviceCredential();
+    }
+    return this.deviceCredentialLoadPromise;
+  }
+
+  private async loadDeviceCredential(): Promise<void> {
+    try {
+      const token = await this.storageAdapter.getMeta('deviceToken');
+      if (typeof token === 'string' && token.length > 0) {
+        this.deviceToken = token;
+      }
+      const id = await this.storageAdapter.getMeta('deviceId');
+      if (typeof id === 'string' && id.length > 0) {
+        this.deviceId = id;
+      }
+    } catch (err) {
+      // A storage read failure must not block auth — the server will present-or-mint
+      // a fresh identity if we present nothing (fail-open).
+      logger.warn({ err }, 'Failed to load persisted device credential');
+    }
+  }
+
+  /**
+   * Persist a device credential carried on AUTH_ACK. `deviceToken` is present only
+   * when the server minted or rotated the credential; when absent (a plain re-bind
+   * of an already-valid token) the existing token is kept, never cleared.
+   */
+  private persistDeviceCredential(message: AuthAckMessage): void {
+    // The credential is now authoritative in memory; mark the boot-time load
+    // satisfied so it cannot later overwrite these values.
+    if (!this.deviceCredentialLoadPromise) {
+      this.deviceCredentialLoadPromise = Promise.resolve();
+    }
+    if (message.deviceId && message.deviceId !== this.deviceId) {
+      this.deviceId = message.deviceId;
+      this.storageAdapter
+        .setMeta('deviceId', message.deviceId)
+        .catch((err) => logger.warn({ err }, 'Failed to persist deviceId'));
+    }
+    if (message.deviceToken) {
+      this.deviceToken = message.deviceToken;
+      this.storageAdapter
+        .setMeta('deviceToken', message.deviceToken)
+        .catch((err) => logger.warn({ err }, 'Failed to persist deviceToken'));
+    }
+  }
 
   private async loadOpLog(): Promise<void> {
     const storedTimestamp = await this.storageAdapter.getMeta('lastSyncTimestamp');
@@ -817,13 +907,27 @@ export class SyncEngine {
       }
     }
 
-    const token = this.authToken;
-    if (!token) return; // Don't send anonymous auth anymore
+    // Ensure the persisted device credential is loaded before presenting it, so a
+    // cold restart rebinds the same identity even if the socket opened before the
+    // boot-time load resolved. Shares the single memoized read with loadOpLog.
+    await this.ensureDeviceCredentialLoaded();
 
-    this.sendMessage({
-      type: 'AUTH',
-      token,
-    });
+    const token = this.authToken;
+
+    // JWT mode: a token provider is configured but yielded no token — park in
+    // AUTHENTICATING rather than sending anonymous auth (preserves the contract
+    // that resolved the earlier no-token deadlock). The onAuthRequired warn path
+    // surfaces the missing credential.
+    if (!token && this.tokenProvider) return;
+
+    // NO_AUTH mode (no token, no provider) sends AUTH{token:'', deviceToken} so a
+    // device-identity-aware server can present-or-mint. A legacy server ignores
+    // this frame; the caller arms a grace timer to proceed auth-optional.
+    const authMessage: AuthMessage = { type: 'AUTH', token: token ?? '' };
+    if (this.deviceToken) {
+      authMessage.deviceToken = this.deviceToken;
+    }
+    this.sendMessage(authMessage);
   }
 
   /**
@@ -915,6 +1019,20 @@ export class SyncEngine {
     // Emit to generic listeners (used by EventJournalReader)
     this.emitMessage(message);
 
+    // Message-first legacy inference: while an opportunistic NO_AUTH device-ack is
+    // pending, any server message that is not AUTH_ACK (nor AUTH_REQUIRED, which
+    // has its own handler) means the server predates device identity — proceed
+    // auth-optional immediately instead of waiting out the grace timeout.
+    if (
+      this.deviceAckPending &&
+      message.type !== 'AUTH_ACK' &&
+      message.type !== 'AUTH_REQUIRED'
+    ) {
+      this.deviceAckPending = false;
+      this.completeAuthOptionalConnection();
+      // Fall through so the triggering message is still routed normally.
+    }
+
     // Handle BATCH specially (recursive unbatch)
     if (message.type === 'BATCH') {
       await this.handleBatch(message as BatchMessage);
@@ -965,8 +1083,23 @@ export class SyncEngine {
     }
   }
 
-  private handleAuthAck(): void {
+  private handleAuthAck(message?: AuthAckMessage): void {
     logger.info('Authenticated successfully');
+
+    // A real AUTH_ACK resolves the opportunistic device handshake — cancel the
+    // legacy grace timer and clear the pending flag so it cannot fire later.
+    this.deviceAckPending = false;
+    if (this.authRequiredGraceTimer) {
+      clearTimeout(this.authRequiredGraceTimer);
+      this.authRequiredGraceTimer = null;
+    }
+
+    // Persist any server-issued device credential carried on the ack. Absent
+    // deviceToken (plain re-bind) keeps the existing token.
+    if (message) {
+      this.persistDeviceCredential(message);
+    }
+
     const wasAuthenticated = this.isAuthenticated();
 
     // Transition to SYNCING state

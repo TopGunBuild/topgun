@@ -5,6 +5,7 @@
 
 import type { IMessageRouter } from './types';
 import type {
+  AuthAckMessage,
   AuthFailMessage,
   OpAckMessage,
   OpRejectedMessage,
@@ -38,7 +39,7 @@ import type {
 export interface MessageHandlerDelegates {
   sendAuth(): Promise<void>;
   handleAuthRequired(): void;
-  handleAuthAck(): void;
+  handleAuthAck(message?: AuthAckMessage): void;
   handleAuthFail(message: AuthFailMessage): void;
   handleOpAck(message: OpAckMessage): void;
   handleOpRejected(message: OpRejectedMessage): void;
@@ -184,7 +185,7 @@ export function registerClientMessageHandlers(
   router.registerHandlers({
     // AUTH handlers
     AUTH_REQUIRED: () => delegates.handleAuthRequired(),
-    AUTH_ACK: () => delegates.handleAuthAck(),
+    AUTH_ACK: (msg) => delegates.handleAuthAck(msg),
     AUTH_FAIL: (msg) => delegates.handleAuthFail(msg),
 
     // HEARTBEAT - handled by WebSocketManager, no-op here
