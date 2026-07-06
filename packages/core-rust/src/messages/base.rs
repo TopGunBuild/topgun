@@ -265,14 +265,14 @@ pub struct AuthMessage {
     pub device_token: Option<String>,
 }
 
-/// Device-credential presentation, sent by a token-less client (NO_AUTH, or a
+/// Device-credential presentation, sent by a token-less client (`NO_AUTH`, or a
 /// JWT client before it has a token) to obtain a server-issued device identity.
 ///
 /// Kept ORTHOGONAL to `AUTH`: presenting device identity by overloading the `AUTH`
 /// token field collides with JWT validation (a JWT server treats any `AUTH` as a JWT
 /// attempt, fails an empty token, and tears the connection down). `DeviceHello` is a
 /// distinct message the JWT Phase-1 loop silently drops (non-`AUTH`), so a token-less
-/// client can present it without risking teardown; a NO_AUTH server handles it in
+/// client can present it without risking teardown; a `NO_AUTH` server handles it in
 /// Phase 2 and replies `DEVICE_ACK`.
 ///
 /// Maps to `DeviceHelloMessageSchema` in `base-schemas.ts`.

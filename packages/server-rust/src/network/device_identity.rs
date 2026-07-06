@@ -50,7 +50,10 @@ impl std::fmt::Debug for DeviceBinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DeviceBinding")
             .field("device_id", &self.device_id)
-            .field("minted_token", &self.minted_token.as_ref().map(|_| "<redacted>"))
+            .field(
+                "minted_token",
+                &self.minted_token.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -378,8 +381,14 @@ mod tests {
             minted_token: Some("dev-1.deadbeefcafe".to_string()),
         };
         let dbg = format!("{b:?}");
-        assert!(!dbg.contains("deadbeefcafe"), "secret leaked via Debug: {dbg}");
-        assert!(dbg.contains("<redacted>"), "Debug must mark the token redacted");
+        assert!(
+            !dbg.contains("deadbeefcafe"),
+            "secret leaked via Debug: {dbg}"
+        );
+        assert!(
+            dbg.contains("<redacted>"),
+            "Debug must mark the token redacted"
+        );
     }
 
     #[tokio::test]
@@ -393,16 +402,12 @@ mod tests {
         struct AllFieldsVisitor(String);
         impl tracing::field::Visit for AllFieldsVisitor {
             fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-                self.0.push_str(field.name());
-                self.0.push('=');
-                self.0.push_str(value);
-                self.0.push(' ');
+                use std::fmt::Write as _;
+                let _ = write!(self.0, "{}={value} ", field.name());
             }
             fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                self.0.push_str(field.name());
-                self.0.push('=');
-                self.0.push_str(&format!("{value:?}"));
-                self.0.push(' ');
+                use std::fmt::Write as _;
+                let _ = write!(self.0, "{}={value:?} ", field.name());
             }
         }
         #[derive(Clone)]
@@ -430,7 +435,10 @@ mod tests {
         let token = minted.minted_token.clone().expect("mint returns a token");
         let (_dev, secret_hex) = token.split_once('.').unwrap();
         // Verify/re-bind path.
-        let _ = s.present_or_mint(Some("alice"), Some(&token)).await.unwrap();
+        let _ = s
+            .present_or_mint(Some("alice"), Some(&token))
+            .await
+            .unwrap();
 
         drop(guard);
         let logged = sink.lock().unwrap().clone();

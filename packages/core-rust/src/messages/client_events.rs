@@ -139,7 +139,7 @@ pub struct AuthAckData {
 ///
 /// The server's reply to `DEVICE_HELLO`: carries the bound `deviceId` and, when a
 /// credential was freshly minted/rotated, the new opaque `deviceToken`. Orthogonal to
-/// `AUTH_ACK` — a NO_AUTH connection stays `principal = None` while still receiving a
+/// `AUTH_ACK` — a `NO_AUTH` connection stays `principal = None` while still receiving a
 /// server-issued device identity here.
 ///
 /// Maps to `DeviceAckMessageSchema` in `client-message-schemas.ts`.

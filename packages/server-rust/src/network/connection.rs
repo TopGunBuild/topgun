@@ -403,11 +403,14 @@ impl ConnectionRegistry {
     ) -> Option<ConnectionId> {
         // Reverse index first so a racing `remove()` for this same connection can
         // always find the key to release. Overwriting a prior key for this
-        // connection is impossible under one-shot binding (bind happens once).
+        // connection is impossible under one-shot binding (bind happens once). Keep a
+        // copy for the post-insert liveness re-check; the original `identity_key` is
+        // moved into the forward-ownership insert below.
+        let key_recheck = identity_key.clone();
         self.conn_identity
             .insert(connection_id, identity_key.clone());
         // Atomic swap: `insert` returns the prior owner under the shard lock.
-        let displaced = match self.device_ownership.insert(identity_key.clone(), connection_id) {
+        let displaced = match self.device_ownership.insert(identity_key, connection_id) {
             Some(prev) if prev != connection_id => Some(prev),
             _ => None,
         };
@@ -419,9 +422,9 @@ impl ConnectionRegistry {
         // covered: either `remove` clears ownership (owner == us), or this re-check does.
         if self.connections.get(&connection_id).is_none() {
             self.device_ownership
-                .remove_if(&identity_key, |_, owner| *owner == connection_id);
+                .remove_if(&key_recheck, |_, owner| *owner == connection_id);
             self.conn_identity
-                .remove_if(&connection_id, |_, k| *k == identity_key);
+                .remove_if(&connection_id, |_, k| *k == key_recheck);
         }
         displaced
     }
@@ -1074,7 +1077,9 @@ mod tests {
         // The connection goes away (its socket closed) before it claims ownership.
         registry.remove(dead_id);
         let key = "identity-D".to_string();
-        assert!(registry.claim_device_ownership(key.clone(), dead_id).is_none());
+        assert!(registry
+            .claim_device_ownership(key.clone(), dead_id)
+            .is_none());
         assert!(
             !registry.is_current_owner(&key, dead_id),
             "ownership must not be pinned to a disconnected connection"
