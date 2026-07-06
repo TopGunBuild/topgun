@@ -198,13 +198,17 @@ describe('SyncEngine', () => {
       expect(authMessage?.token).toBe('test-token');
     });
 
-    test('should NOT send AUTH immediately if no token', async () => {
+    test('sends an opportunistic AUTH with an empty token when no token is configured (NO_AUTH present-or-mint)', async () => {
       syncEngine = new SyncEngine(config);
       await jest.runAllTimersAsync();
 
       const ws = MockWebSocket.getLastInstance();
       const authMessage = ws?.sentMessages.find((m) => m.type === 'AUTH');
-      expect(authMessage).toBeUndefined();
+      // NO_AUTH clients present AUTH{token:''} so a device-identity-aware server
+      // can present-or-mint; no JWT is sent and no device credential exists yet.
+      expect(authMessage).toBeDefined();
+      expect(authMessage?.token).toBe('');
+      expect(authMessage?.deviceToken).toBeUndefined();
     });
 
     test('should schedule reconnect after disconnect', async () => {
