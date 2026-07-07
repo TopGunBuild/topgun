@@ -191,7 +191,16 @@ export class IDBAdapter implements IStorageAdapter {
 
   async getAllMetaKeys(): Promise<string[]> {
     await this.waitForReady();
-    return ((await this.db?.getAllKeys('meta_store')) as string[]) || [];
+    if (!this.db) {
+      // Throw rather than silently return [] — the caller (SyncEngine's held-map
+      // snapshot) treats the result as the COMPLETE universe of persisted OR-Map
+      // stores for its covering-epoch ACK barrier. An empty answer from an
+      // unavailable database would look like "no persisted stores" and let the
+      // ACK advance past stores this device actually holds; the throw routes
+      // into the engine's fail-closed path (ACKs suppressed for the connection).
+      throw new Error('IDBAdapter.getAllMetaKeys called before database is ready');
+    }
+    return (await this.db.getAllKeys('meta_store')) as string[];
   }
 
   // ============================================

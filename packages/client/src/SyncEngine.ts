@@ -149,15 +149,13 @@ export interface SyncEngineConfig {
  * Extracts the server epoch a pushed event confirms, for the confirmed-apply cursor.
  *
  * Forward-compatible with the prune-wiring epoch stamping: the server does not yet
- * stamp an `epoch` on delta events, so this returns 0 today (no cursor to confirm) —
- * `handleServerEvent`/`handleServerBatchEvent` call `emitConfirmedApply` directly with
- * this value, NOT through `applyMapCoverage`'s cross-map min-barrier, and are
- * therefore correctly inert (0 never advances the cursor). If the wire ever DOES
- * stamp a non-zero epoch on live push events, that direct-call path must be routed
- * through `applyMapCoverage(mapName, epoch)` instead, or it reopens the same
- * cross-map ACK-inflation gap the covering-epoch min-barrier fixes for sync
- * responses — a single map's live event could then license an ACK past a tombstone
- * some OTHER held map has not received.
+ * stamp an `epoch` on live delta events, so this returns 0 today (a zero epoch is
+ * dropped by `applyMapCoverage`, so the push path is inert until the wire stamps
+ * one). `handleServerEvent`/`handleServerBatchEvent` route this value through
+ * `applyMapCoverage(mapName, epoch)` — the cross-map min-barrier — NEVER through
+ * `emitConfirmedApply` directly, so when epoch stamping on push events lands, a
+ * single map's live event cannot license a device-wide ACK past a tombstone some
+ * OTHER held map has not received.
  */
 function epochOfServerEvent(payload: unknown): number {
   const epoch = (payload as { epoch?: unknown } | null)?.epoch;
@@ -233,6 +231,14 @@ export class SyncEngine {
   // before the first sync of a connection — applyMapCoverage treats that (and an
   // empty snapshot) as "nothing to confirm coverage over" and never ACKs.
   private heldOrMapNames: Set<string> | null = null;
+  // Fail-closed marker: true when this connection's held-set enumeration FAILED
+  // (storage adapter error). While set, applyMapCoverage never emits an ACK — a
+  // partial held-set (in-memory maps only, persisted stores unknown) would run
+  // the min-barrier over an incomplete universe, which is the exact cross-map
+  // ACK-inflation hole reopened through a different door. Reset per connection.
+  private heldSetIncomplete = false;
+  // De-noises the fail-closed path: warn once per connection, not per apply.
+  private heldSetIncompleteWarned = false;
   private authToken: string | null = null;
   private tokenProvider: (() => Promise<string | null>) | null = null;
   private onAuthRequired: ((error: AuthRequiredError) => void) | null = null;
@@ -792,10 +798,17 @@ export class SyncEngine {
     this.maps.set(mapName, map);
     if (map instanceof ORMap && this.heldOrMapNames && !this.heldOrMapNames.has(mapName)) {
       // A map opened AFTER this connection's held-set snapshot joins the barrier
-      // with coverage 0 — it blocks further ACK advance until it syncs (safe: it
-      // never retracts an ALREADY-emitted higher ACK, since an empty-at-open
-      // local map has nothing to resurrect), but it also never retroactively
-      // widens or narrows the snapshot the barrier was computed from.
+      // with coverage 0 — it blocks further ACK advance until it syncs, but any
+      // PREVIOUSLY-emitted higher ACK deliberately stands unretracted. That is
+      // sound because the only map this path can add is a GENUINELY-NEW one: it
+      // is empty at open (no prior local state, no tombstones it could be
+      // missing), so there is nothing an already-emitted ACK could have
+      // over-claimed about it and nothing to resurrect. The dangerous sibling
+      // case — a PERSISTED store from a prior session that the snapshot failed
+      // to see — is NOT handled here and never reaches this path: enumeration
+      // failure fail-closes the whole connection's ACKs via heldSetIncomplete
+      // (see startMerkleSync), and a successful enumeration puts every
+      // persisted store in the snapshot before the first ACK can fire.
       this.heldOrMapNames.add(mapName);
       if (!this.orMapCoverage.has(mapName)) {
         this.orMapCoverage.set(mapName, 0);
@@ -812,6 +825,14 @@ export class SyncEngine {
    * Snapshot semantics are mandatory (see startMerkleSync): a racily/lazily
    * discovered non-empty store must never be missing from the FIRST snapshot
    * taken this connection, or the exact cross-map ACK-inflation gap reopens.
+   *
+   * THROWS on enumeration failure — deliberately fail-closed. Swallowing the
+   * error and returning the in-memory-maps-only subset would hand the
+   * min-barrier a PARTIAL held-set: a persisted store the snapshot silently
+   * missed could then hold un-received tombstones while the device's ACK
+   * advances past them — the exact inflation hole this snapshot exists to
+   * close. The caller (startMerkleSync) converts the throw into a
+   * connection-wide ACK suppression (heldSetIncomplete) instead.
    */
   private async computeHeldOrMapNames(): Promise<Set<string>> {
     const held = new Set<string>();
@@ -820,19 +841,12 @@ export class SyncEngine {
         held.add(mapName);
       }
     }
-    try {
-      const metaKeys = await this.storageAdapter.getAllMetaKeys();
-      for (const key of metaKeys) {
-        const match = /^__sys__:(.+):tombstones$/.exec(key);
-        if (match) {
-          held.add(match[1]);
-        }
+    const metaKeys = await this.storageAdapter.getAllMetaKeys();
+    for (const key of metaKeys) {
+      const match = /^__sys__:(.+):tombstones$/.exec(key);
+      if (match) {
+        held.add(match[1]);
       }
-    } catch (err) {
-      logger.error(
-        { err },
-        'Failed to enumerate persisted ORMap stores for the covering-epoch held-set snapshot',
-      );
     }
     return held;
   }
@@ -902,8 +916,31 @@ export class SyncEngine {
   private applyMapCoverage(mapName: string, epoch: number): void {
     if (!(epoch > 0)) return;
     const current = this.orMapCoverage.get(mapName) ?? 0;
-    if (epoch <= current) return;
-    this.orMapCoverage.set(mapName, epoch);
+    if (epoch > current) {
+      this.orMapCoverage.set(mapName, epoch);
+    }
+    // NOTE: a non-advancing epoch still falls through to the min/emit below —
+    // emitConfirmedApply advances lastAckedEpoch ONLY when the ACK frame was
+    // actually sent, so a previously-FAILED send (socket unavailable) must be
+    // re-attempted the next time the same coverage is re-proven, or that epoch's
+    // ACK would be dropped forever (the cursor is cumulative-monotonic).
+
+    if (this.heldSetIncomplete) {
+      // Fail-closed: this connection's held-set enumeration failed, so the
+      // barrier's universe is unknown — a min over a PARTIAL set could advance
+      // the ACK past a persisted store's un-received tombstones (the exact
+      // inflation hole). Suppress every ACK until a later connection snapshots
+      // successfully; the server cursor is monotone, keeping its old value
+      // (correct, conservative).
+      if (!this.heldSetIncompleteWarned) {
+        this.heldSetIncompleteWarned = true;
+        logger.warn(
+          { mapName, epoch },
+          'ORMap covering-epoch ACK suppressed for this connection: held-set enumeration failed (fail-closed)',
+        );
+      }
+      return;
+    }
 
     if (!this.heldOrMapNames || this.heldOrMapNames.size === 0) {
       // No snapshot yet, or nothing held: an untracked device pins nothing
@@ -1038,17 +1075,36 @@ export class SyncEngine {
     // map discovered later (registerMap) joins with coverage 0 and can only
     // narrow, never retroactively widen, an already-computed barrier.
     this.orMapCoverage = new Map();
-    this.heldOrMapNames = await this.computeHeldOrMapNames();
-    for (const mapName of this.heldOrMapNames) {
-      this.orMapCoverage.set(mapName, 0);
+    this.heldOrMapNames = null;
+    this.heldSetIncomplete = false;
+    this.heldSetIncompleteWarned = false;
+    try {
+      this.heldOrMapNames = await this.computeHeldOrMapNames();
+    } catch (err) {
+      // Fail-closed: NEVER run the barrier over a partial snapshot. Data sync
+      // for the maps this process HAS open still proceeds below (safe — sync
+      // only pulls state, the barrier only gates the confirmed-apply ACK);
+      // covering-epoch ACKs stay suppressed for the whole connection, so the
+      // server's monotone cursor simply keeps its previous value.
+      this.heldSetIncomplete = true;
+      logger.error(
+        { err },
+        'ORMap held-set enumeration failed: covering-epoch ACKs disabled for this connection (fail-closed); data sync continues',
+      );
     }
 
-    // Instantiate + restore every persisted-but-not-yet-opened OR-Map so it can
-    // be synced (liveness — otherwise an abandoned local store permanently
-    // stalls the min-barrier for every OTHER held map on this device).
-    for (const mapName of this.heldOrMapNames) {
-      if (!(this.maps.get(mapName) instanceof ORMap)) {
-        await this.instantiateAndRestoreOrMap(mapName);
+    if (this.heldOrMapNames) {
+      for (const mapName of this.heldOrMapNames) {
+        this.orMapCoverage.set(mapName, 0);
+      }
+
+      // Instantiate + restore every persisted-but-not-yet-opened OR-Map so it can
+      // be synced (liveness — otherwise an abandoned local store permanently
+      // stalls the min-barrier for every OTHER held map on this device).
+      for (const mapName of this.heldOrMapNames) {
+        if (!(this.maps.get(mapName) instanceof ORMap)) {
+          await this.instantiateAndRestoreOrMap(mapName);
+        }
       }
     }
 
@@ -1509,16 +1565,18 @@ export class SyncEngine {
     // Modified to support ORMap
     const { mapName, eventType, key, record, orRecord, orTag } = message.payload;
     await this.applyServerEvent(mapName, eventType, key, record, orRecord, orTag);
-    // Apply-not-receive: the ACK is emitted ONLY after applyServerEvent's durable
-    // IndexedDB commit above has resolved — never on receive.
-    this.emitConfirmedApply(epochOfServerEvent(message.payload));
+    // Apply-not-receive: coverage is reported ONLY after applyServerEvent's durable
+    // IndexedDB commit above has resolved — never on receive. Routed through the
+    // cross-map min-barrier (NOT emitConfirmedApply directly): a live push proves
+    // delivery for THIS map only, so it may advance this map's coverage but must
+    // never license a device-wide ACK past another held map's coverage.
+    this.applyMapCoverage(mapName, epochOfServerEvent(message.payload));
   }
 
   private async handleServerBatchEvent(message: ServerBatchEventMessage): Promise<void> {
     // === OPTIMIZATION: Batch event processing ===
     // Server sends multiple events in a single message for efficiency
     const { events } = message.payload;
-    let highestEpoch = 0;
     for (const event of events) {
       await this.applyServerEvent(
         event.mapName,
@@ -1528,11 +1586,13 @@ export class SyncEngine {
         event.orRecord,
         event.orTag,
       );
-      highestEpoch = Math.max(highestEpoch, epochOfServerEvent(event));
+      // Apply-not-receive + cross-map barrier: report each event's epoch as
+      // coverage for ITS OWN map, only after that event's awaits above have
+      // durably committed. A batch-wide "highest epoch" emitted directly would
+      // bypass the min-barrier — one map's event licensing an ACK past another
+      // held map's coverage, the exact cross-map inflation bug.
+      this.applyMapCoverage(event.mapName, epochOfServerEvent(event));
     }
-    // Apply-not-receive: confirm the whole batch ONLY after every event above has been
-    // durably committed to IndexedDB (all the awaits have resolved).
-    this.emitConfirmedApply(highestEpoch);
   }
 
   /**
@@ -1540,10 +1600,14 @@ export class SyncEngine {
    * applied. Per the apply-not-receive contract, callers MUST invoke this ONLY after
    * the covered server batch has been durably committed to IndexedDB.
    *
+   * ONLY `applyMapCoverage` may call this method. The confirmed-apply cursor is
+   * device-wide while delivery evidence is per-map, so every ACK MUST pass through
+   * the cross-map min-barrier — a direct call from any per-map code path (sync
+   * response handler, live push event, future wire additions) would let a single
+   * map's delivery license an ACK past another held map's coverage, reintroducing
+   * the cross-map ACK-inflation resurrection vector the barrier exists to close.
+   *
    * The cursor is cumulative-monotonic: a non-advancing (or zero) epoch is never sent.
-   * Server epoch stamping on the delta wire lands with the prune wiring; until then
-   * server events carry no epoch, so `appliedEpoch` is 0 and no ACK is emitted (the
-   * plumbing is inert, not incorrect).
    */
   private emitConfirmedApply(appliedEpoch: number): void {
     if (appliedEpoch <= this.lastAckedEpoch) return;

@@ -260,6 +260,16 @@ describe('IDBAdapter', () => {
       const keys = await adapter.getAllMetaKeys();
       expect(keys.sort()).toEqual(['__sys__:tags:tombstones', 'lastSyncTimestamp']);
     });
+
+    it('throws (never silently returns []) when the database is unavailable', async () => {
+      // The result feeds SyncEngine's covering-epoch held-map snapshot, which
+      // treats it as the COMPLETE universe of persisted OR-Map stores — a silent
+      // [] would look like "no persisted stores" and inflate the ACK barrier.
+      const uninitializedAdapter = new IDBAdapter();
+      await expect(uninitializedAdapter.getAllMetaKeys()).rejects.toThrow(
+        'before database is ready',
+      );
+    });
   });
 
   describe('opLog operations', () => {

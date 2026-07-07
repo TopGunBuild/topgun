@@ -1346,25 +1346,37 @@ describe('SyncEngine', () => {
   });
 
   describe('Confirmed-apply ACK (apply-not-receive)', () => {
+    // Uses an OR-Map + a driven held-set snapshot: since the cross-map
+    // min-barrier landed, the confirmed-apply ACK is only reachable THROUGH
+    // the barrier (epochs are OR-tombstone machinery; an engine holding no
+    // OR-Maps deliberately never ACKs). With a single held OR-Map the
+    // observable apply-not-receive behavior is unchanged from the original
+    // contract these tests pin.
     async function startEngineWithMap() {
       syncEngine = new SyncEngine(config);
       const hlc = syncEngine.getHLC();
-      const lwwMap = new LWWMap<string, any>(hlc);
-      syncEngine.registerMap('users', lwwMap);
+      const orMap = new ORMap<string, any>(hlc);
+      syncEngine.registerMap('users', orMap);
       await jest.runAllTimersAsync();
       const ws = MockWebSocket.getLastInstance()!;
-      ws.sentMessages = []; // clear the auth/hello handshake frames
+      // Drive the held-set snapshot + sync-init kickoff deterministically
+      // (same rationale as the min-barrier block's helper below).
+      await (syncEngine as any).startMerkleSync();
+      ws.sentMessages = []; // clear the auth/hello handshake + sync-init frames
       return ws;
     }
 
+    let eventSeq = 0;
     function batchEvent(key: string, epoch?: number) {
+      eventSeq += 1;
       return {
         mapName: 'users',
-        eventType: 'PUT' as const,
+        eventType: 'OR_ADD' as const,
         key,
-        record: {
+        orRecord: {
           value: { k: key },
-          timestamp: { millis: Date.now(), counter: 1, nodeId: 'remote' },
+          tag: `${Date.now()}:${eventSeq}:remote`,
+          timestamp: { millis: Date.now(), counter: eventSeq, nodeId: 'remote' },
         },
         ...(epoch !== undefined ? { epoch } : {}),
       };
@@ -1589,6 +1601,54 @@ describe('SyncEngine', () => {
       expect((syncEngine as any).orMapCoverage.get('other_map')).toBe(0);
       expect((syncEngine as any).heldOrMapNames.has('tags')).toBe(true);
       expect((syncEngine as any).heldOrMapNames.has('other_map')).toBe(true);
+    });
+
+    test('held-set enumeration failure fail-closes ALL ACKs on the connection (never a partial barrier)', async () => {
+      // A storage-adapter failure must never degrade to an in-memory-only
+      // held-set: a persisted store the snapshot silently missed could hold
+      // un-received tombstones while the device's ACK advances past them.
+      mockStorage.getAllMetaKeys.mockRejectedValue(new Error('idb unavailable'));
+
+      const ws = await startEngineWithOrMaps(['tags', 'other_map']);
+      expect((syncEngine as any).heldSetIncomplete).toBe(true);
+
+      // Even after EVERY in-memory map proves coverage, no ACK may be emitted —
+      // the universe the MIN ranges over is unknown for this connection.
+      (syncEngine as any).applyMapCoverage('tags', 5);
+      (syncEngine as any).applyMapCoverage('other_map', 5);
+      expect(acksOn(ws)).toEqual([]);
+
+      // A later connection whose enumeration succeeds recovers normally.
+      mockStorage.getAllMetaKeys.mockResolvedValue([]);
+      await (syncEngine as any).startMerkleSync();
+      ws.sentMessages = [];
+      expect((syncEngine as any).heldSetIncomplete).toBe(false);
+      (syncEngine as any).applyMapCoverage('tags', 6);
+      (syncEngine as any).applyMapCoverage('other_map', 6);
+      expect(acksOn(ws)).toEqual([6]);
+    });
+
+    test('server push events route their epoch through the min-barrier, never around it', async () => {
+      const ws = await startEngineWithOrMaps(['tags', 'other_map']);
+
+      // A live SERVER_EVENT for 'tags' carrying an epoch proves delivery for
+      // 'tags' ONLY — with 'other_map' still uncovered, no device-wide ACK.
+      await (syncEngine as any).handleServerEvent({
+        type: 'SERVER_EVENT',
+        payload: { mapName: 'tags', eventType: 'OR_ADD', key: 'k', epoch: 7 },
+      });
+      expect(acksOn(ws)).toEqual([]);
+
+      // A batch event covering 'other_map' at the same epoch completes the MIN;
+      // the ACK is exactly MIN(7, 7) — the batch's own epochs also went through
+      // the barrier per-event (no batch-wide highest-epoch shortcut).
+      await (syncEngine as any).handleServerBatchEvent({
+        type: 'SERVER_BATCH_EVENT',
+        payload: {
+          events: [{ mapName: 'other_map', eventType: 'OR_ADD', key: 'k2', epoch: 7 }],
+        },
+      });
+      expect(acksOn(ws)).toEqual([7]);
     });
   });
 });
