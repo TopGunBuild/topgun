@@ -1844,11 +1844,22 @@ fn build_services(
     );
     // Operator-tunable epoch width (stamped tombstone ops per epoch), surfaced in
     // the config log so the active value is confirmable without reading source.
-    let epoch_width = std::env::var("TOPGUN_EPOCH_WIDTH")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|w| *w > 0)
-        .unwrap_or(topgun_server::tombstone_frontier_impl::DEFAULT_EPOCH_WIDTH);
+    // An invalid/zero value falls back to the default LOUDLY — a silent fallback
+    // would leave the operator believing their setting took effect.
+    let epoch_width = match std::env::var("TOPGUN_EPOCH_WIDTH") {
+        Ok(raw) => match raw.parse::<u64>() {
+            Ok(w) if w > 0 => w,
+            _ => {
+                tracing::warn!(
+                    rejected_value = %raw,
+                    default = topgun_server::tombstone_frontier_impl::DEFAULT_EPOCH_WIDTH,
+                    "invalid TOPGUN_EPOCH_WIDTH (expected a positive integer); using the default"
+                );
+                topgun_server::tombstone_frontier_impl::DEFAULT_EPOCH_WIDTH
+            }
+        },
+        Err(_) => topgun_server::tombstone_frontier_impl::DEFAULT_EPOCH_WIDTH,
+    };
     frontier.set_epoch_width(epoch_width);
     tracing::info!(
         epoch_width = frontier.epoch_width(),
