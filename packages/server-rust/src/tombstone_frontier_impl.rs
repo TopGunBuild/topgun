@@ -67,8 +67,28 @@ use topgun_core::types::Value;
 use crate::network::connection::ConnectionId;
 use crate::storage::map_data_store::MapDataStore;
 use crate::storage::record::RecordValue;
-use crate::tombstone_frontier::{CausalFrontier, ClientId, Epoch};
+use crate::tombstone_frontier::{CausalFrontier, ClientId, Epoch, GateToken, PruneSafety};
 use std::sync::Arc;
+
+/// Default epoch width (stamped tombstone ops per epoch) when
+/// `TOPGUN_EPOCH_WIDTH` is unset. The server-authoritative epoch counter
+/// advances one step per this many genuinely-new tombstones, in lockstep with
+/// the cursor-tracked op sequence — never by a timer.
+pub const DEFAULT_EPOCH_WIDTH: u64 = 1000;
+
+/// The storage location of a stamped tombstone: the `(map, key)` its OR-Map
+/// record lives under plus the tombstone `tag`. The server-side `epoch → tags`
+/// index stores these so a wholesale epoch-drop prune can remove each tag from
+/// its record in storage (RAM + redb).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TombstoneRef {
+    /// The OR-Map name the tombstone belongs to.
+    pub map: String,
+    /// The key within the map whose OR-Map record holds the tombstone.
+    pub key: String,
+    /// The observed-remove tombstone tag (`"millis:counter:nodeId"`).
+    pub tag: String,
+}
 
 /// Reserved redb map namespace for the durable confirmed-apply cursors.
 ///
@@ -94,8 +114,39 @@ struct FrontierState {
     delivered: HashMap<ConnectionId, Epoch>,
     /// The server's current max stamped epoch — the final belt-and-suspenders
     /// bound against a claim for an epoch the server never stamped. Injectable;
-    /// defaults to `u64::MAX` (inert) until 342b provides the real counter.
+    /// defaults to `u64::MAX` (inert) until the first tombstone is stamped, after
+    /// which each stamp sets it to the real (highest) stamped epoch.
     current_max_epoch: Epoch,
+    /// Server-authoritative op sequence: increments once per genuinely-new
+    /// tombstone stamped. The epoch is derived from this so "cursor past epoch N"
+    /// implies "delivered-and-applied every tombstone stamped ≤ N" (epoch↔seq
+    /// lockstep — never a timer, never a non-`OR_REMOVE` trigger). Starts at 0;
+    /// the first stamp makes it 1.
+    op_seq: u64,
+    /// Width of an epoch in stamped ops (`TOPGUN_EPOCH_WIDTH`, clamped `>= 1`).
+    /// The epoch counter advances one step per this many stamped tombstones.
+    epoch_width: u64,
+    /// Highest epoch the server has stamped (0 = none yet). Conveyed to clients
+    /// as the covering epoch and fed into `current_max_epoch` as the ACK bound.
+    /// Always `>= 1` once any tombstone is stamped — 0 is the reserved
+    /// "no/uncomputable epoch" sentinel and no tombstone is ever stamped 0.
+    current_epoch: Epoch,
+    /// RAM-only `epoch → tombstone refs` index (pure CACHE — never durable on the
+    /// hot path; unclean recovery rebuilds it in SPEC-342j). Keyed by the ACTUAL
+    /// stamped epoch; key 0 is never inserted, so the prune sweep (which iterates
+    /// these keys, never a `0..=max` range) can never touch the sentinel.
+    epoch_tags: HashMap<Epoch, Vec<TombstoneRef>>,
+    /// RAM-only `epoch → max op-seq` index: the highest op sequence stamped in
+    /// each epoch. Maintained for SPEC-342j's byte-durability watermark
+    /// (flushed-seq → epoch mapping); not consumed by the dark prune here.
+    epoch_max_seq: HashMap<Epoch, u64>,
+    /// Injectable byte-durability watermark. Constant 0 in production — no real
+    /// source is wired in THIS child (SPEC-342j supplies it), so the call-site
+    /// prune conjunction `is_epoch_prune_eligible(E) && watermark >= E` never
+    /// licenses a prune for any stamped epoch (all `>= 1`): the machinery is
+    /// structurally dark, no feature flag. ONLY tests set it, to exercise the
+    /// real drop path.
+    durable_epoch_watermark: Epoch,
 }
 
 impl FrontierState {
@@ -104,6 +155,12 @@ impl FrontierState {
             cursors: HashMap::new(),
             delivered: HashMap::new(),
             current_max_epoch: Epoch::MAX,
+            op_seq: 0,
+            epoch_width: DEFAULT_EPOCH_WIDTH,
+            current_epoch: 0,
+            epoch_tags: HashMap::new(),
+            epoch_max_seq: HashMap::new(),
+            durable_epoch_watermark: 0,
         }
     }
 
@@ -163,6 +220,90 @@ impl FrontierState {
         }
         let entry = self.cursors.entry(client.clone()).or_insert(0);
         *entry = (*entry).max(epoch);
+    }
+
+    /// Stamp the current server epoch onto a genuinely-new tombstone at the moment
+    /// the server applies its `OR_REMOVE`. Server-authoritative: the epoch is
+    /// derived from the op sequence this stamp advances — NEVER from the client
+    /// tag's `millis`. Records the tombstone ref under its epoch and updates the
+    /// max-seq index. Returns the stamped epoch (always `>= 1`: 0 is the reserved
+    /// "no/uncomputable epoch" sentinel and is never stamped).
+    fn stamp_tombstone(&mut self, map: &str, key: &str, tag: &str) -> Epoch {
+        // Pre-increment BEFORE deriving the epoch so op_seq is `>= 1` here and the
+        // first stamp lands in epoch 1, never epoch 0 (R3(g-i)).
+        self.op_seq += 1;
+        let width = self.epoch_width.max(1);
+        // (op_seq - 1) / width + 1 is `>= 1` for every op_seq `>= 1` — no tombstone
+        // is ever stamped 0. Advances ONE step per `width` stamped ops, in lockstep
+        // with the cursor-tracked op sequence (never a timer).
+        let epoch = (self.op_seq - 1) / width + 1;
+        self.current_epoch = epoch;
+        // Feed the ACK clamp bound with the real counter: a client can never confirm
+        // past what the server has actually stamped. (Before the first stamp
+        // `current_max_epoch` is the inert `u64::MAX`; now it tracks the counter.)
+        self.current_max_epoch = epoch;
+        self.epoch_tags
+            .entry(epoch)
+            .or_default()
+            .push(TombstoneRef {
+                map: map.to_string(),
+                key: key.to_string(),
+                tag: tag.to_string(),
+            });
+        let slot = self.epoch_max_seq.entry(epoch).or_insert(0);
+        *slot = (*slot).max(self.op_seq);
+        epoch
+    }
+
+    /// Drain the tombstone refs of every currently prune-eligible epoch out of the
+    /// RAM index for the caller to drop from storage, under the FULL call-site
+    /// conjunction `is_epoch_prune_eligible(E) && durable_epoch_watermark >= E`.
+    ///
+    /// Iterates the index's ACTUAL keys — NEVER a `0..=max` range — so the reserved
+    /// sentinel epoch 0 (never inserted) can never be swept even if a bound
+    /// evaluated true at 0. DARK by construction: with `durable_epoch_watermark ==
+    /// 0` the conjunction is false for every stamped epoch (all `>= 1`), so this
+    /// returns empty in production; tests inject a watermark to exercise the drop.
+    fn drain_prunable(&mut self) -> Vec<TombstoneRef> {
+        let watermark = self.durable_epoch_watermark;
+        let eligible: Vec<Epoch> = self
+            .epoch_tags
+            .keys()
+            .copied()
+            .filter(|&e| self.is_epoch_prune_eligible(e) && watermark >= e)
+            .collect();
+        let mut drained = Vec::new();
+        for e in eligible {
+            if let Some(refs) = self.epoch_tags.remove(&e) {
+                drained.extend(refs);
+            }
+            self.epoch_max_seq.remove(&e);
+        }
+        drained
+    }
+}
+
+impl PruneSafety for FrontierState {
+    fn is_epoch_prune_eligible(&self, epoch: Epoch) -> bool {
+        // The 342a contract: fold over the low-water-mark ONLY. The durability fence
+        // is the CALL-SITE second conjunct (`drain_prunable`), NEVER here. Epoch 0 is
+        // the reserved "no/uncomputable epoch" sentinel — reject it at the trait
+        // level too (belt-and-suspenders per R3(g)) so a future consumer that
+        // bypasses the call-site conjunction cannot prune the sentinel.
+        if epoch == 0 {
+            return false;
+        }
+        self.low_water_mark() >= epoch
+    }
+
+    fn gate_decision_holds_at_commit(&self, token: GateToken) -> bool {
+        // The push-diff re-admission gate is SPEC-342c's; THIS child does not wire
+        // it. Provide the conservative commit-time re-check the trait contract
+        // mandates so `PruneSafety` is fully implemented: the gate-time not-forgotten
+        // decision still holds only if the client is still tracked. No prune fires in
+        // this child (dark by construction), so no additional freshness check is
+        // needed here — 342c strengthens this when it wires the gate.
+        self.is_tracked(&token.client)
     }
 }
 
@@ -365,6 +506,66 @@ impl TombstoneFrontier {
     /// not per-connection, and survive across reconnects via rehydration).
     pub fn remove_connection(&self, conn: ConnectionId) {
         self.lock().delivered.remove(&conn);
+    }
+
+    /// Stamp a genuinely-new tombstone with the current server epoch at `OR_REMOVE`
+    /// apply time. Server-authoritative — NEVER derived from the client tag's
+    /// `millis`. Returns the stamped epoch (`>= 1`). See
+    /// [`FrontierState::stamp_tombstone`].
+    pub fn stamp_tombstone(&self, map: &str, key: &str, tag: &str) -> Epoch {
+        self.lock().stamp_tombstone(map, key, tag)
+    }
+
+    /// The current (highest) server-stamped epoch, or 0 if none stamped yet. This is
+    /// the covering epoch conveyed in OR-Map sync responses.
+    #[must_use]
+    pub fn current_epoch(&self) -> Epoch {
+        self.lock().current_epoch
+    }
+
+    /// The dark-by-construction durability watermark. Returns 0 in production — no
+    /// real byte-durability source is wired in this child (SPEC-342j supplies it),
+    /// so the call-site prune conjunction never licenses a prune for any stamped
+    /// epoch (all `>= 1`). ONLY tests inject a non-zero value.
+    #[must_use]
+    pub fn durable_epoch_watermark(&self) -> Epoch {
+        self.lock().durable_epoch_watermark
+    }
+
+    /// Test-only injection of the durability watermark to exercise the real drop
+    /// path. Production NEVER calls this — the watermark stays constant 0 (dark by
+    /// construction). The real byte-durability source lands in SPEC-342j.
+    pub fn set_durable_epoch_watermark(&self, watermark: Epoch) {
+        self.lock().durable_epoch_watermark = watermark;
+    }
+
+    /// Whether `epoch` is prune-eligible under the low-water-mark fold ONLY (the
+    /// 342a contract). The durability fence is the SECOND call-site conjunct in
+    /// [`Self::drain_prunable_tombstones`], never here.
+    #[must_use]
+    pub fn is_epoch_prune_eligible(&self, epoch: Epoch) -> bool {
+        self.lock().is_epoch_prune_eligible(epoch)
+    }
+
+    /// Drain the tombstone refs of every currently prune-eligible epoch (BOTH
+    /// call-site conjuncts) out of the RAM index, for the caller to drop from
+    /// storage (RAM + redb) under the per-key writer. DARK by construction: returns
+    /// empty in production (`durable_epoch_watermark == 0`).
+    #[must_use]
+    pub fn drain_prunable_tombstones(&self) -> Vec<TombstoneRef> {
+        self.lock().drain_prunable()
+    }
+
+    /// Set the epoch width (stamped ops per epoch, clamped `>= 1`). Wired from the
+    /// bin's `TOPGUN_EPOCH_WIDTH`; also settable in tests.
+    pub fn set_epoch_width(&self, width: u64) {
+        self.lock().epoch_width = width.max(1);
+    }
+
+    /// The configured epoch width (for the startup config log line / tests).
+    #[must_use]
+    pub fn epoch_width(&self) -> u64 {
+        self.lock().epoch_width
     }
 }
 
@@ -658,6 +859,150 @@ mod tests {
         f.remove_connection(CONN_A);
         assert_eq!(f.delivered(CONN_A), 0, "delivered dropped on disconnect");
         assert_eq!(f.cursor(&c), Some(30), "cursor survives the disconnect");
+    }
+
+    // -- Epoch machinery (342b): stamping, epoch↔sequence lockstep, and the
+    //    dark-by-construction prune conjunction. --
+
+    /// AC2: the epoch is stamped server-authoritatively from the op sequence,
+    /// NEVER derived from the client tag's `millis` — a wildly skewed-clock tag
+    /// lands in the SAME sequential bucket a monotonic-clock tag would.
+    #[tokio::test]
+    async fn stamp_is_server_authoritative_not_from_tag_millis() {
+        let f = frontier();
+        f.set_epoch_width(1); // one epoch per stamp, so buckets are 1, 2, 3, ...
+                              // A far-future skewed tag then a far-past tag: their millis differ by eons,
+                              // yet the epochs are strictly sequential (server-authoritative).
+        let e1 = f.stamp_tombstone("m", "k1", "99999999999999:0:skewed");
+        let e2 = f.stamp_tombstone("m", "k2", "1:0:past");
+        assert_eq!(
+            e1, 1,
+            "first stamp is epoch 1 (never the reserved sentinel 0)"
+        );
+        assert_eq!(
+            e2, 2,
+            "second stamp is epoch 2 — sequential, not tag-millis-derived"
+        );
+        assert_eq!(f.current_epoch(), 2);
+    }
+
+    /// The epoch counter advances in lockstep with the op sequence at
+    /// `EPOCH_WIDTH` granularity: `width` stamps share one epoch, the next
+    /// `width` roll to the next. The first epoch is always 1 (never 0).
+    #[tokio::test]
+    async fn epoch_advances_in_lockstep_with_op_sequence() {
+        let f = frontier();
+        f.set_epoch_width(3);
+        let epochs: Vec<Epoch> = (0..7)
+            .map(|i| f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n")))
+            .collect();
+        assert_eq!(epochs, vec![1, 1, 1, 2, 2, 2, 3]);
+    }
+
+    /// AC3(i): a single tracked-and-behind client pins an epoch fleet-wide — an
+    /// epoch above the lagging client's cursor is NOT prune-eligible even with
+    /// the durability watermark wide open, because the low-water-mark is the MIN
+    /// across ALL tracked clients.
+    #[tokio::test]
+    async fn one_behind_client_pins_epoch_fleet_wide() {
+        let f = frontier();
+        f.set_epoch_width(1);
+        for i in 0..5 {
+            f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n")); // epochs 1..=5
+        }
+        let ahead: ClientId = "a5:alice|dev-ahead".into();
+        let behind: ClientId = "a5:alice|dev-behind".into();
+        f.set_delivered(CONN_A, 100);
+        f.set_delivered(CONN_B, 100);
+        assert!(f.confirm_apply_ack(&ahead, 5, CONN_A).await);
+        assert!(f.confirm_apply_ack(&behind, 2, CONN_B).await);
+        assert_eq!(f.low_water_mark(), 2, "the behind client pins the LWM at 2");
+        // Open the durability watermark fully so ONLY the LWM half gates.
+        f.set_durable_epoch_watermark(1000);
+        assert!(f.is_epoch_prune_eligible(2), "epoch 2 <= LWM");
+        assert!(
+            !f.is_epoch_prune_eligible(3),
+            "epoch 3 pinned fleet-wide by the behind client"
+        );
+        let drained = f.drain_prunable_tombstones();
+        let dropped: Vec<&str> = drained.iter().map(|r| r.tag.as_str()).collect();
+        assert_eq!(
+            drained.len(),
+            2,
+            "only epochs 1..=2 drained; 3..=5 pinned fleet-wide by the behind client"
+        );
+        assert!(dropped.contains(&"0:0:n") && dropped.contains(&"1:0:n"));
+    }
+
+    /// AC3(ii): the watermark conjunct is load-bearing — with the LWM past every
+    /// stamped epoch but the injected durability watermark BELOW some of them,
+    /// the epochs above the watermark stay un-pruned (byte-durability fence).
+    #[tokio::test]
+    async fn lwm_past_but_watermark_behind_keeps_epoch_unpruned() {
+        let f = frontier();
+        f.set_epoch_width(1);
+        for i in 0..5 {
+            f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n"));
+        }
+        let c: ClientId = "a5:alice|dev-1".into();
+        f.set_delivered(CONN_A, 100);
+        assert!(f.confirm_apply_ack(&c, 5, CONN_A).await);
+        assert_eq!(f.low_water_mark(), 5, "LWM past every stamped epoch");
+        // The watermark only reaches epoch 2: epochs 3..=5 must stay.
+        f.set_durable_epoch_watermark(2);
+        let drained = f.drain_prunable_tombstones();
+        assert_eq!(
+            drained.len(),
+            2,
+            "only epochs 1..=2 (<= watermark) drop; 3..=5 fenced by the watermark conjunct"
+        );
+    }
+
+    /// `AC3a`: dark-by-construction — with the production watermark (constant 0),
+    /// NOTHING is ever prune-eligible even when the only tracked client has
+    /// confirmed PAST every stamped epoch. Tombstones only accumulate (today's
+    /// behavior, now with epochs stamped and ACKs flowing). Also asserts the
+    /// first stamped epoch is `>= 1` and that the reserved sentinel epoch 0 is
+    /// structurally safe (never eligible; no tag indexed under key 0).
+    #[tokio::test]
+    async fn dark_by_construction_no_prune_with_zero_watermark() {
+        let f = frontier();
+        f.set_epoch_width(1);
+        let first = f.stamp_tombstone("m", "k0", "0:0:n");
+        for i in 1..5 {
+            f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n"));
+        }
+        assert_eq!(
+            first, 1,
+            "first stamped epoch is 1, never the reserved sentinel 0"
+        );
+        assert_eq!(
+            f.durable_epoch_watermark(),
+            0,
+            "production durability watermark is constant 0 (dark by construction)"
+        );
+        let c: ClientId = "a5:alice|dev-1".into();
+        f.set_delivered(CONN_A, 100);
+        // Confirm PAST every stamped epoch — the claim is clamped by the real
+        // counter (current_max_epoch == 5) to exactly 5.
+        assert!(f.confirm_apply_ack(&c, 100, CONN_A).await);
+        assert_eq!(
+            f.low_water_mark(),
+            5,
+            "client confirmed past every stamped epoch (clamped to the max stamped epoch)"
+        );
+        // Dark: the watermark conjunct blocks — NOTHING drains, even though every
+        // tracked client is past every stamped epoch.
+        assert!(
+            f.drain_prunable_tombstones().is_empty(),
+            "no prune fires while the durability watermark is 0 — tombstones only accumulate"
+        );
+        // The reserved sentinel epoch 0 is safe by structure: never eligible at the
+        // trait level, and nothing is ever indexed under key 0.
+        assert!(
+            !f.is_epoch_prune_eligible(0),
+            "epoch 0 is never prune-eligible (reserved sentinel)"
+        );
     }
 }
 
