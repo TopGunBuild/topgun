@@ -97,7 +97,20 @@ pub struct TombstoneRef {
 /// `_topgun_` convention (matches `is_valid_map_name`, does not end in
 /// `__backup`). The record KEY is the opaque `ClientId` (`frontier_client_id`
 /// encoding).
-pub const CURSOR_MAP: &str = "_topgun_tombstone_cursors";
+///
+/// `_v2`: one-shot poison-purge, version-bumped by the SPEC-342b cross-map
+/// covering-epoch fix. Before that fix a client's device-wide cursor could be
+/// confirmed off a SINGLE OR-Map's sync completion while the epoch counter and
+/// cursor are GLOBAL across all OR-Maps — an inflated claim that could outrun
+/// what the client actually received for other held maps. Those inflated
+/// cursors are already durably persisted under the pre-bump keyspace and would
+/// otherwise survive a clean restart straight into 342j's prune activation.
+/// Renaming the keyspace makes every pre-bump row permanently unreachable
+/// (never migrated, never read again) rather than trusted — a "loss" here is
+/// the SAME safe fallback the whole cursor model already relies on (unknown →
+/// forgotten → full resync), so no migration is needed. Orphaned pre-bump rows
+/// are reclaimed later by 342f's TTL sweep.
+pub const CURSOR_MAP: &str = "_topgun_tombstone_cursors_v2";
 
 /// In-memory state of the causal frontier. Implements the [`CausalFrontier`]
 /// contract from 342a; guarded by a `Mutex` inside [`TombstoneFrontier`] for
@@ -1228,5 +1241,52 @@ mod persistence_tests {
         let fresh: ClientId = "a5:alice|brand-new".into();
         f.rehydrate(&fresh).await;
         assert!(!f.is_tracked(&fresh), "no persisted cursor → untracked");
+    }
+
+    /// One-shot poison-purge (SPEC-342b Review v1 Major fix): a cursor persisted
+    /// under the PRE-bump keyspace name (before the cross-map ACK-inflation fix)
+    /// is never read back after the version bump — an inflated pre-barrier cursor
+    /// cannot silently resurrect via rehydration. The row is orphaned, not
+    /// migrated; 342f's TTL sweep reclaims it later.
+    #[tokio::test]
+    async fn pre_bump_keyspace_cursor_is_never_rehydrated_after_version_bump() {
+        const PRE_BUMP_CURSOR_MAP: &str = "_topgun_tombstone_cursors";
+        assert_ne!(
+            CURSOR_MAP, PRE_BUMP_CURSOR_MAP,
+            "guard against an accidental revert of the keyspace version bump"
+        );
+
+        let (path, _dir) = temp_store();
+        let c: ClientId = "a5:alice|dev-1".into();
+
+        // Simulate an inflated cursor left over from BEFORE the version bump,
+        // written directly under the retired pre-bump map name (not the live
+        // `CURSOR_MAP` constant).
+        let store = Arc::new(RedbDataStore::new(&path).expect("open"));
+        let record = RecordValue::Lww {
+            value: Value::Bytes(encode_epoch(999)),
+            timestamp: Timestamp {
+                millis: 1,
+                counter: 0,
+                node_id: String::new(),
+            },
+        };
+        store
+            .add(PRE_BUMP_CURSOR_MAP, &c, &record, 0, 1)
+            .await
+            .expect("write pre-bump row");
+
+        let f = TombstoneFrontier::new(Some(store));
+        f.rehydrate(&c).await;
+        assert!(
+            !f.is_tracked(&c),
+            "a cursor under the retired pre-bump keyspace must never be rehydrated \
+             into the live frontier — it is unreachable by construction, not honored"
+        );
+        assert_eq!(
+            f.cursor(&c),
+            None,
+            "no inflated pre-bump cursor resurrected"
+        );
     }
 }
