@@ -53,7 +53,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
         // the full tombstone set up to the covering epoch (the OR-Map leaf hash
         // covers the tombstone tags). Confirm it now so an up-to-date client
         // still advances its cursor instead of pinning the server low-water-mark.
-        this.confirmCoveringEpoch(coveringEpoch);
+        this.confirmCoveringEpoch(mapName, coveringEpoch);
       }
     }
     // Update HLC with server timestamp
@@ -64,13 +64,15 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
 
   /**
    * ACK the conveyed covering epoch after the client has durably applied the
-   * matching OR-Map sync data. A no-op when the server conveyed no epoch (nothing
-   * stamped yet). The underlying ACK is cumulative-monotonic, so a non-advancing
-   * epoch is dropped by the emitter.
+   * matching OR-Map sync data for `mapName`. A no-op when the server conveyed no
+   * epoch (nothing stamped yet). The underlying device-wide ACK is
+   * cumulative-monotonic AND gated by the cross-map min-barrier (see
+   * `SyncEngine.applyMapCoverage`) — this call reports only THIS map's coverage,
+   * it does not by itself guarantee a CLIENT_APPLY_ACK is sent.
    */
-  private confirmCoveringEpoch(coveringEpoch?: number): void {
+  private confirmCoveringEpoch(mapName: string, coveringEpoch?: number): void {
     if (typeof coveringEpoch === 'number' && Number.isFinite(coveringEpoch) && coveringEpoch > 0) {
-      this.config.onCoveringEpochApplied(coveringEpoch);
+      this.config.onCoveringEpochApplied(mapName, coveringEpoch);
     }
   }
 
@@ -150,7 +152,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
 
       // The leaf entries (including their tombstone tags) are now durably
       // applied — confirm the covering epoch so the server's cursor advances.
-      this.confirmCoveringEpoch(coveringEpoch);
+      this.confirmCoveringEpoch(mapName, coveringEpoch);
 
       // Now push any local records that server might not have
       const keysToCheck = entries.map((e: { key: string }) => e.key);
@@ -193,7 +195,7 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
 
       // The diff entries (including tombstone tags) are now durably applied —
       // confirm the covering epoch so the server's cursor advances.
-      this.confirmCoveringEpoch(coveringEpoch);
+      this.confirmCoveringEpoch(mapName, coveringEpoch);
     }
   }
 

@@ -1078,15 +1078,18 @@ export interface ORMapSyncHandlerConfig {
   persistTombstones: (mapName: string) => Promise<void>;
 
   /**
-   * Confirm to the server that the client has durably applied the OR-Map sync
-   * data up to `epoch` (the covering epoch conveyed on the sync response). Wired
-   * by SyncEngine to `emitConfirmedApply`, which sends a monotonic
-   * CLIENT_APPLY_ACK. Called AFTER the response's entries are persisted —
-   * including on an empty diff (root already matches), so an up-to-date client
-   * still advances its confirmed-apply cursor instead of pinning the server's
-   * low-water-mark forever.
+   * Confirm to the server that `mapName`'s OR-Map sync data is durably applied
+   * up to `epoch` (the covering epoch conveyed on the sync response). Wired by
+   * SyncEngine to `applyMapCoverage`, which folds this map's coverage into the
+   * device-wide MIN across every OR-Map this device holds (the per-connection
+   * held-map snapshot) before emitting a monotonic CLIENT_APPLY_ACK — a single
+   * map's sync completion can never on its own license an ACK that outruns
+   * another held map's actual delivery (the cross-map ACK-inflation fix).
+   * Called AFTER the response's entries are persisted — including on an empty
+   * diff (root already matches), so an up-to-date map still contributes its
+   * coverage instead of permanently pinning the barrier at 0.
    */
-  onCoveringEpochApplied: (epoch: number) => void;
+  onCoveringEpochApplied: (mapName: string, epoch: number) => void;
 }
 
 // ============================================

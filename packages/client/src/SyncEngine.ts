@@ -149,9 +149,15 @@ export interface SyncEngineConfig {
  * Extracts the server epoch a pushed event confirms, for the confirmed-apply cursor.
  *
  * Forward-compatible with the prune-wiring epoch stamping: the server does not yet
- * stamp an `epoch` on delta events, so this returns 0 today (no cursor to confirm).
- * When epoch stamping lands, the client reads it here and confirms it after durable
- * commit — no further client change needed.
+ * stamp an `epoch` on delta events, so this returns 0 today (no cursor to confirm) —
+ * `handleServerEvent`/`handleServerBatchEvent` call `emitConfirmedApply` directly with
+ * this value, NOT through `applyMapCoverage`'s cross-map min-barrier, and are
+ * therefore correctly inert (0 never advances the cursor). If the wire ever DOES
+ * stamp a non-zero epoch on live push events, that direct-call path must be routed
+ * through `applyMapCoverage(mapName, epoch)` instead, or it reopens the same
+ * cross-map ACK-inflation gap the covering-epoch min-barrier fixes for sync
+ * responses — a single map's live event could then license an ACK past a tombstone
+ * some OTHER held map has not received.
  */
 function epochOfServerEvent(payload: unknown): number {
   const epoch = (payload as { epoch?: unknown } | null)?.epoch;
@@ -216,6 +222,17 @@ export class SyncEngine {
   // re-sent. Distinct from lastSyncTimestamp (a delta-sync optimization hint) — this is
   // the apply-not-receive confirmation the server's per-device causal frontier reads.
   private lastAckedEpoch: number = 0;
+  // Per-OR-Map coverage: highest covering epoch durably applied for that map on
+  // THIS connection. The device-wide CLIENT_APPLY_ACK is gated by the MIN across
+  // `heldOrMapNames` (never a single map's own coverage) — the cross-map
+  // covering-epoch ACK-inflation fix. Reset every connection in startMerkleSync.
+  private orMapCoverage: Map<string, number> = new Map();
+  // Consistent snapshot of every OR-Map this device holds locally (open
+  // instances UNION persisted-but-not-yet-opened stores), taken ONCE per
+  // connection in startMerkleSync BEFORE any covering-epoch ACK can fire. `null`
+  // before the first sync of a connection — applyMapCoverage treats that (and an
+  // empty snapshot) as "nothing to confirm coverage over" and never ACKs.
+  private heldOrMapNames: Set<string> | null = null;
   private authToken: string | null = null;
   private tokenProvider: (() => Promise<string | null>) | null = null;
   private onAuthRequired: ((error: AuthRequiredError) => void) | null = null;
@@ -409,10 +426,12 @@ export class SyncEngine {
       // reload — same canonical helpers as the local-write + applyServerEvent paths.
       persistKey: (name, key) => this.persistORMapKey(name, key),
       persistTombstones: (name) => this.persistORMapTombstones(name),
-      // Confirm the covering epoch conveyed on an OR-Map sync response AFTER its
-      // data is durably applied (including on an empty diff) so the server's
-      // per-device cursor advances and does not pin the tombstone low-water-mark.
-      onCoveringEpochApplied: (epoch) => this.emitConfirmedApply(epoch),
+      // Fold this map's covering epoch into the device-wide MIN across every
+      // held OR-Map (see applyMapCoverage) AFTER its data is durably applied
+      // (including on an empty diff), so the server's per-device cursor advances
+      // only once every held map has proven delivery — never off a single map's
+      // sync completion.
+      onCoveringEpochApplied: (mapName, epoch) => this.applyMapCoverage(mapName, epoch),
     });
 
     // Initialize Conflict Resolver client
@@ -552,7 +571,9 @@ export class SyncEngine {
       return;
     }
 
-    logger.info('No DEVICE_ACK received within grace window — assuming auth-optional legacy server.');
+    logger.info(
+      'No DEVICE_ACK received within grace window — assuming auth-optional legacy server.',
+    );
     this.deviceAckPending = false;
     // Traverse the canonical pre-auth → ready path (no new state transitions added).
     this.stateMachine.transition(SyncState.AUTHENTICATING);
@@ -769,6 +790,149 @@ export class SyncEngine {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- map value type is erased in the registry; callers get typed instances via TopGunClient.getMap/getORMap overloads
   public registerMap(mapName: string, map: LWWMap<any, any> | ORMap<any, any>): void {
     this.maps.set(mapName, map);
+    if (map instanceof ORMap && this.heldOrMapNames && !this.heldOrMapNames.has(mapName)) {
+      // A map opened AFTER this connection's held-set snapshot joins the barrier
+      // with coverage 0 — it blocks further ACK advance until it syncs (safe: it
+      // never retracts an ALREADY-emitted higher ACK, since an empty-at-open
+      // local map has nothing to resurrect), but it also never retroactively
+      // widens or narrows the snapshot the barrier was computed from.
+      this.heldOrMapNames.add(mapName);
+      if (!this.orMapCoverage.has(mapName)) {
+        this.orMapCoverage.set(mapName, 0);
+      }
+    }
+  }
+
+  /**
+   * The consistent snapshot of every OR-Map this device holds locally: OR-Map
+   * instances already registered in `this.maps`, UNION the OR-Map stores the
+   * storage adapter has persisted from a prior session but this process has not
+   * (yet) instantiated via `getORMap()`. Enumerated from the reserved
+   * `__sys__:{mapName}:tombstones` meta-key convention (see `TopGunClient`).
+   * Snapshot semantics are mandatory (see startMerkleSync): a racily/lazily
+   * discovered non-empty store must never be missing from the FIRST snapshot
+   * taken this connection, or the exact cross-map ACK-inflation gap reopens.
+   */
+  private async computeHeldOrMapNames(): Promise<Set<string>> {
+    const held = new Set<string>();
+    for (const [mapName, map] of this.maps) {
+      if (map instanceof ORMap) {
+        held.add(mapName);
+      }
+    }
+    try {
+      const metaKeys = await this.storageAdapter.getAllMetaKeys();
+      for (const key of metaKeys) {
+        const match = /^__sys__:(.+):tombstones$/.exec(key);
+        if (match) {
+          held.add(match[1]);
+        }
+      }
+    } catch (err) {
+      logger.error(
+        { err },
+        'Failed to enumerate persisted ORMap stores for the covering-epoch held-set snapshot',
+      );
+    }
+    return held;
+  }
+
+  /**
+   * Instantiate + restore a persisted-but-not-yet-opened OR-Map by name so
+   * `startMerkleSync` can sync it even though the application has not called
+   * `getORMap()` on it this session. Registers the instance in `this.maps`
+   * (mirrors `TopGunClient.getORMap`'s restore path via `registerMap`) so a
+   * later `getORMap()` call finds live, already-synced state. Liveness fix:
+   * without this, an abandoned local store would permanently stall the
+   * covering-epoch min-barrier for every OTHER held map on this device.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ORMap generic params are erased at the registry level; restored instance is later re-typed by TopGunClient.getORMap's overload
+  private async instantiateAndRestoreOrMap(mapName: string): Promise<ORMap<any, any>> {
+    const existing = this.maps.get(mapName);
+    if (existing instanceof ORMap) {
+      return existing;
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ORMap generic params are erased at the registry level; actual types are supplied by the caller's later getORMap() overload
+    const map = new ORMap<any, any>(this.hlc);
+    this.registerMap(mapName, map);
+
+    try {
+      const tombstoneKey = `__sys__:${mapName}:tombstones`;
+      const tombstones = await this.storageAdapter.getMeta(tombstoneKey);
+      if (Array.isArray(tombstones)) {
+        for (const tag of tombstones) {
+          map.applyTombstone(tag);
+        }
+      }
+
+      const keys = await this.storageAdapter.getAllKeys();
+      const prefix = `${mapName}:`;
+      for (const fullKey of keys) {
+        if (!fullKey.startsWith(prefix)) continue;
+        const keyPart = fullKey.substring(prefix.length);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- restored KV value shape is validated by the Array.isArray guard below; ORMapRecord value type is erased at the storage layer
+        const data = await this.storageAdapter.get<any>(fullKey);
+        if (Array.isArray(data)) {
+          for (const record of data as ORMapRecord<unknown>[]) {
+            map.apply(keyPart, record);
+          }
+        }
+      }
+    } catch (err) {
+      logger.error(
+        { mapName, err },
+        'Failed to restore a persisted-but-not-instantiated ORMap for covering-epoch sync',
+      );
+    }
+
+    return map;
+  }
+
+  /**
+   * Record that `mapName`'s OR-Map data is durably applied through `epoch` on
+   * this connection, then re-derive the device-wide confirmed-apply cursor as
+   * the MIN coverage across every OR-Map this device holds (the held-set
+   * snapshot from startMerkleSync). A held map with no completed sync this
+   * connection contributes 0, so the MIN stalls at 0 until every held map has
+   * synced at least once — this is the fix for the cross-map covering-epoch
+   * ACK-inflation bug: a single map's sync completion can no longer license an
+   * ACK that outruns another held map's actual delivery.
+   */
+  private applyMapCoverage(mapName: string, epoch: number): void {
+    if (!(epoch > 0)) return;
+    const current = this.orMapCoverage.get(mapName) ?? 0;
+    if (epoch <= current) return;
+    this.orMapCoverage.set(mapName, epoch);
+
+    if (!this.heldOrMapNames || this.heldOrMapNames.size === 0) {
+      // No snapshot yet, or nothing held: an untracked device pins nothing
+      // server-side (safe) — never ACK without a held-set to confirm coverage over.
+      return;
+    }
+
+    let minCoverage = Number.POSITIVE_INFINITY;
+    for (const held of this.heldOrMapNames) {
+      const coverage = this.orMapCoverage.get(held) ?? 0;
+      if (coverage < minCoverage) minCoverage = coverage;
+      if (minCoverage <= 0) break;
+    }
+    if (!Number.isFinite(minCoverage)) minCoverage = 0;
+
+    if (minCoverage <= 0) {
+      // At least one held map has not completed a sync on this connection yet —
+      // stall the ACK rather than advance past a map we have not heard back
+      // from (this is the documented one-slow-map liveness degradation: it
+      // self-resolves once that map syncs, or eventually via MaxRetention
+      // forgetting an unreachable device).
+      logger.warn(
+        { mapName, epoch, heldMapCount: this.heldOrMapNames.size },
+        'ORMap covering-epoch ACK stalled: at least one held map has not completed sync on this connection',
+      );
+      return;
+    }
+
+    this.emitConfirmedApply(minCoverage);
   }
 
   public async recordOperation(
@@ -866,7 +1030,28 @@ export class SyncEngine {
     });
   }
 
-  private startMerkleSync(): void {
+  private async startMerkleSync(): Promise<void> {
+    // Snapshot semantics are MANDATORY: fix the held-map set (and therefore the
+    // covering-epoch ACK min-barrier) once, before the first sync round-trip on
+    // this connection sends anything — no message goes out before this resolves,
+    // so no covering-epoch ACK can fire against a stale or partial snapshot. A
+    // map discovered later (registerMap) joins with coverage 0 and can only
+    // narrow, never retroactively widen, an already-computed barrier.
+    this.orMapCoverage = new Map();
+    this.heldOrMapNames = await this.computeHeldOrMapNames();
+    for (const mapName of this.heldOrMapNames) {
+      this.orMapCoverage.set(mapName, 0);
+    }
+
+    // Instantiate + restore every persisted-but-not-yet-opened OR-Map so it can
+    // be synced (liveness — otherwise an abandoned local store permanently
+    // stalls the min-barrier for every OTHER held map on this device).
+    for (const mapName of this.heldOrMapNames) {
+      if (!(this.maps.get(mapName) instanceof ORMap)) {
+        await this.instantiateAndRestoreOrMap(mapName);
+      }
+    }
+
     for (const [mapName, map] of this.maps) {
       if (map instanceof LWWMap) {
         this.merkleSyncHandler.sendSyncInit(mapName, this.lastSyncTimestamp);
@@ -1191,7 +1376,11 @@ export class SyncEngine {
     // Only re-subscribe on first authentication to prevent UI flickering
     if (!wasAuthenticated) {
       this.webSocketManager.startHeartbeat();
-      this.startMerkleSync();
+      // Fire-and-forget: the held-map snapshot + persisted-store restore are
+      // async, but nothing here depends on their completion — sendSyncInit
+      // messages go out once the snapshot resolves, still well before any
+      // response (and therefore any covering-epoch ACK) could arrive.
+      this.startMerkleSync().catch((err) => logger.error({ err }, 'startMerkleSync failed'));
       // Re-subscribe all queries via QueryManager
       this.queryManager.resubscribeAll();
       // Re-subscribe topics via TopicManager

@@ -10,6 +10,7 @@ import { ORMapSyncHandler } from '../ORMapSyncHandler';
 describe('ORMapSyncHandler covering-epoch ACK', () => {
   function makeHandler(map: ORMap<string, string>) {
     const acked: number[] = [];
+    const ackedForMap: Array<{ mapName: string; epoch: number }> = [];
     const handler = new ORMapSyncHandler({
       getMap: () => map,
       sendMessage: () => true,
@@ -17,19 +18,25 @@ describe('ORMapSyncHandler covering-epoch ACK', () => {
       onTimestampUpdate: async () => {},
       persistKey: async () => {},
       persistTombstones: async () => {},
-      onCoveringEpochApplied: (epoch) => acked.push(epoch),
+      onCoveringEpochApplied: (mapName, epoch) => {
+        acked.push(epoch);
+        ackedForMap.push({ mapName, epoch });
+      },
     });
-    return { handler, acked };
+    return { handler, acked, ackedForMap };
   }
 
   test('empty diff (root matches) confirms the conveyed covering epoch', async () => {
     const map = new ORMap<string, string>(new HLC('n1'));
-    const { handler, acked } = makeHandler(map);
+    const { handler, acked, ackedForMap } = makeHandler(map);
     const rootHash = map.getMerkleTree().getRootHash();
 
     await handler.handleORMapSyncRespRoot({ mapName: 'tags', rootHash, coveringEpoch: 5 });
 
     expect(acked).toEqual([5]);
+    // The map name is reported alongside the epoch — SyncEngine's cross-map
+    // min-barrier (applyMapCoverage) folds coverage PER map, not globally.
+    expect(ackedForMap).toEqual([{ mapName: 'tags', epoch: 5 }]);
   });
 
   test('root MISMATCH does NOT ACK at root time (client lacks the set until leaves)', async () => {

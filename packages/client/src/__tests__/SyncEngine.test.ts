@@ -87,6 +87,7 @@ function createMockStorageAdapter(): jest.Mocked<IStorageAdapter> {
     deleteOp: jest.fn().mockResolvedValue(undefined),
     commitWrite: jest.fn().mockResolvedValue(1),
     getAllKeys: jest.fn().mockResolvedValue([]),
+    getAllMetaKeys: jest.fn().mockResolvedValue([]),
   };
 }
 
@@ -1361,7 +1362,10 @@ describe('SyncEngine', () => {
         mapName: 'users',
         eventType: 'PUT' as const,
         key,
-        record: { value: { k: key }, timestamp: { millis: Date.now(), counter: 1, nodeId: 'remote' } },
+        record: {
+          value: { k: key },
+          timestamp: { millis: Date.now(), counter: 1, nodeId: 'remote' },
+        },
         ...(epoch !== undefined ? { epoch } : {}),
       };
     }
@@ -1458,6 +1462,133 @@ describe('SyncEngine', () => {
       // suppressed by the prior identity's epoch.
       (syncEngine as any).setAuthToken('new-token-for-a-different-principal');
       expect((syncEngine as any).lastAckedEpoch).toBe(0);
+    });
+  });
+
+  // Review v1 Major fix: the covering-epoch ACK is a device-wide cursor, but was
+  // previously confirmed off a SINGLE OR-Map's sync completion — a client could
+  // ACK past a tombstone stamped for an OTHER held map it had never received.
+  // These tests exercise the per-map min-barrier (SyncEngine.applyMapCoverage)
+  // that gates every covering-epoch ACK on ALL held OR-Maps having proven
+  // delivery, not just the map that happened to sync first.
+  describe('Cross-map covering-epoch ACK min-barrier', () => {
+    async function startEngineWithOrMaps(mapNames: string[]) {
+      syncEngine = new SyncEngine(config);
+      const hlc = syncEngine.getHLC();
+      for (const name of mapNames) {
+        syncEngine.registerMap(name, new ORMap<string, any>(hlc));
+      }
+      // Let the mock WebSocket finish its async open (see MockWebSocket's
+      // constructor setTimeout) so sendMessage can actually transmit below.
+      await jest.runAllTimersAsync();
+      const ws = MockWebSocket.getLastInstance()!;
+      // Directly drive the (now async) held-set snapshot + sync-init kickoff —
+      // the exact call handleAuthAck makes fire-and-forget — rather than
+      // relying on the ~500ms auth-optional grace-timer race under fake
+      // timers, so the snapshot is deterministically resolved before the test
+      // body runs.
+      await (syncEngine as any).startMerkleSync();
+      ws.sentMessages = []; // clear the auth/hello handshake + sync-init frames
+      return ws;
+    }
+
+    function acksOn(ws: any): number[] {
+      return ws.sentMessages
+        .filter((m: any) => m.type === 'CLIENT_APPLY_ACK')
+        .map((m: any) => m.cursor);
+    }
+
+    test('(a) ACK never exceeds the MIN coverage across held maps (multi-map interleaving)', async () => {
+      const ws = await startEngineWithOrMaps(['tags', 'other_map']);
+
+      // 'tags' completes its sync round-trip first and conveys covering epoch 5.
+      (syncEngine as any).applyMapCoverage('tags', 5);
+      // The barrier stalls: 'other_map' has not synced on this connection yet,
+      // so its coverage is still 0 — the MIN across the held set is 0.
+      expect(acksOn(ws)).toEqual([]);
+
+      // 'other_map' now completes at the same covering epoch.
+      (syncEngine as any).applyMapCoverage('other_map', 5);
+      expect(acksOn(ws)).toEqual([5]);
+    });
+
+    test('(a) the barrier advances incrementally to the current MIN, never past a lagging map', async () => {
+      const ws = await startEngineWithOrMaps(['tags', 'other_map']);
+
+      (syncEngine as any).applyMapCoverage('tags', 10);
+      expect(acksOn(ws)).toEqual([]); // other_map still 0
+
+      (syncEngine as any).applyMapCoverage('other_map', 3);
+      expect(acksOn(ws)).toEqual([3]); // MIN(10, 3)
+
+      (syncEngine as any).applyMapCoverage('tags', 20);
+      expect(acksOn(ws)).toEqual([3]); // still MIN(20, 3) = 3, no new ACK
+
+      (syncEngine as any).applyMapCoverage('other_map', 7);
+      expect(acksOn(ws)).toEqual([3, 7]); // MIN(20, 7) = 7 advances
+    });
+
+    test('(b) a persisted-but-not-instantiated ORMap store is enumerated into the held-set and blocks the ACK until it syncs', async () => {
+      mockStorage.getAllMetaKeys.mockResolvedValue(['__sys__:archive:tombstones']);
+      mockStorage.getMeta.mockResolvedValue([]);
+      mockStorage.getAllKeys.mockResolvedValue([]);
+
+      const ws = await startEngineWithOrMaps(['tags']);
+
+      // 'archive' was never registered via registerMap this session — it is only
+      // discoverable through the storage adapter's persisted meta keys.
+      (syncEngine as any).applyMapCoverage('tags', 5);
+      expect(acksOn(ws)).toEqual([]); // 'archive' held but unsynced this connection
+
+      (syncEngine as any).applyMapCoverage('archive', 5);
+      expect(acksOn(ws)).toEqual([5]);
+    });
+
+    test('(c) an empty held-set emits no ACK at all', async () => {
+      const ws = await startEngineWithOrMaps([]);
+      (syncEngine as any).applyMapCoverage('stray-map', 5);
+      expect(acksOn(ws)).toEqual([]);
+    });
+
+    test('(d) a map opened AFTER the connection snapshot joins with coverage 0 and blocks further advance', async () => {
+      const ws = await startEngineWithOrMaps(['tags']);
+
+      (syncEngine as any).applyMapCoverage('tags', 5);
+      expect(acksOn(ws)).toEqual([5]);
+
+      // A second OR-Map is opened mid-connection (e.g. client.getORMap('late')),
+      // AFTER the held-set snapshot was already taken.
+      const hlc = syncEngine!.getHLC();
+      syncEngine!.registerMap('late', new ORMap<string, any>(hlc));
+
+      // Further advances on the already-covered map are blocked by 'late's
+      // fresh 0 coverage — the barrier never retroactively narrows OR widens,
+      // it just now includes 'late' at 0.
+      (syncEngine as any).applyMapCoverage('tags', 9);
+      expect(acksOn(ws)).toEqual([5]); // no new ACK
+
+      // Once 'late' reports its own coverage, the MIN can advance again.
+      (syncEngine as any).applyMapCoverage('late', 9);
+      expect(acksOn(ws)).toEqual([5, 9]);
+    });
+
+    test('held-set snapshot + coverage reset once per connection: a reconnect re-derives both fresh', async () => {
+      await startEngineWithOrMaps(['tags', 'other_map']);
+      (syncEngine as any).applyMapCoverage('tags', 5);
+      (syncEngine as any).applyMapCoverage('other_map', 5);
+      expect((syncEngine as any).orMapCoverage.get('tags')).toBe(5);
+      expect((syncEngine as any).orMapCoverage.get('other_map')).toBe(5);
+
+      // Simulate a fresh connection (new held-map snapshot + coverage reset).
+      await (syncEngine as any).startMerkleSync();
+
+      // Both maps' coverage resets to 0 on the new connection — a stale
+      // cross-connection coverage value must never silently license an ACK on
+      // the new connection without a fresh sync round-trip proving delivery.
+      expect((syncEngine as any).orMapCoverage.get('tags')).toBe(0);
+      expect((syncEngine as any).orMapCoverage.get('other_map')).toBe(0);
+      expect((syncEngine as any).heldOrMapNames.has('tags')).toBe(true);
+      expect((syncEngine as any).heldOrMapNames.has('other_map')).toBe(true);
     });
   });
 });
