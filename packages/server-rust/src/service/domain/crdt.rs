@@ -1184,19 +1184,27 @@ fn read_or_map_state(value: Option<RecordValue>) -> (Vec<OrMapEntry>, Vec<String
 /// exercise this drop path. SPEC-342j supplies the real watermark that activates
 /// the prune. Shared by the OR write path (`crdt.rs`) and the SYNC leaf
 /// (`sync.rs`).
+///
+/// A ref whose storage drop FAILS (read or write error) is handed back to the
+/// frontier via `restore_tombstone_ref` so a later sweep retries it — dropping
+/// it here would orphan the tag un-prunable in storage forever, since the drain
+/// already removed its index entry.
 pub(crate) async fn prune_epoch_tombstones(
     frontier: &TombstoneFrontier,
     factory: &RecordStoreFactory,
     key_writer: &KeyWriterRegistry,
 ) {
-    for r in frontier.drain_prunable_tombstones() {
+    for (epoch, r) in frontier.drain_prunable_tombstones() {
         let store = factory.get_or_create(&r.map, hash_to_partition(&r.key));
         // Serialize the drop against concurrent OR writes on this key.
         let _guard = key_writer.acquire(&r.map, &r.key).await;
         let existing = match store.get(&r.key, false).await {
             Ok(v) => v,
             Err(e) => {
-                tracing::debug!(map = %r.map, key = %r.key, "prune read failed: {e}");
+                // Operator-visible: a swallowed storage error on the prune path
+                // would silently stall tombstone reclamation.
+                tracing::warn!(map = %r.map, key = %r.key, epoch, "prune read failed, re-indexing tombstone for retry: {e}");
+                frontier.restore_tombstone_ref(epoch, r);
                 continue;
             }
         };
@@ -1216,7 +1224,8 @@ pub(crate) async fn prune_epoch_tombstones(
                 )
                 .await
             {
-                tracing::debug!(map = %r.map, key = %r.key, "prune put failed: {e}");
+                tracing::warn!(map = %r.map, key = %r.key, epoch, "prune put failed, re-indexing tombstone for retry: {e}");
+                frontier.restore_tombstone_ref(epoch, r);
             }
         }
     }
@@ -2791,45 +2800,49 @@ mod tests {
 
     /// AC4 (OR write path): the wholesale epoch-drop prune is wired into the
     /// `OR_REMOVE` write path (the sweep runs after each apply). With an injected
-    /// durability watermark and the low-water-mark past the epoch, a subsequent
-    /// `OR_REMOVE` fires the sweep and drops the earlier epoch's tombstone from
-    /// storage; a still-pinned higher epoch survives. DARK by default — the
-    /// injected watermark exercises the real drop path.
+    /// durability watermark and the low-water-mark STRICTLY past the epoch, a
+    /// subsequent `OR_REMOVE` fires the sweep and drops the earlier epoch's
+    /// tombstone from storage; a not-strictly-past epoch survives. DARK by
+    /// default — the injected watermark exercises the real drop path.
     #[tokio::test]
     async fn ac4_prune_wired_into_or_write_path() {
         let (svc, factory, frontier) = make_service_with_frontier();
 
-        // Add + remove tag T1 on k1 -> stamps epoch 1; the tombstone is stored.
-        Arc::clone(&svc)
-            .oneshot(or_add_op("m", "k1", "v1", "T1"))
-            .await
-            .unwrap();
-        Arc::clone(&svc)
-            .oneshot(or_remove_op("m", "k1", "T1"))
-            .await
-            .unwrap();
+        // Add + remove T1 on k1 -> epoch 1; T2 on k2 -> epoch 2. Both stored.
+        for (key, val, tag) in [("k1", "v1", "T1"), ("k2", "v2", "T2")] {
+            Arc::clone(&svc)
+                .oneshot(or_add_op("m", key, val, tag))
+                .await
+                .unwrap();
+            Arc::clone(&svc)
+                .oneshot(or_remove_op("m", key, tag))
+                .await
+                .unwrap();
+        }
         let (_, tombs) = read_or_map(&factory, "m", "k1").await;
         assert!(
             tombs.contains(&"T1".to_string()),
             "tombstone stored after OR_REMOVE (dark: watermark 0 -> no prune yet)"
         );
-        assert_eq!(frontier.current_epoch(), 1, "epoch 1 stamped for T1");
+        assert_eq!(frontier.current_epoch(), 2, "epochs 1..=2 stamped");
 
-        // Raise the LWM past epoch 1 and open the durability watermark.
+        // Raise the LWM strictly past epoch 1 (cursor 2 > 1) and open the
+        // durability watermark.
         let c: String = "a5:alice|dev-1".into();
         frontier.set_delivered(ConnectionId(1), 100);
-        assert!(frontier.confirm_apply_ack(&c, 1, ConnectionId(1)).await);
-        assert!(frontier.low_water_mark() >= 1);
+        assert!(frontier.confirm_apply_ack(&c, 2, ConnectionId(1)).await);
+        assert_eq!(frontier.low_water_mark(), 2);
         frontier.set_durable_epoch_watermark(1000);
 
-        // Fire the sweep via an OR_REMOVE on a DIFFERENT key. Its own new tombstone
-        // lands in epoch 2 (LWM 1 < 2 -> pinned); epoch 1's T1 is dropped.
+        // Fire the sweep via an OR_REMOVE on a THIRD key. Its own new tombstone
+        // lands in epoch 3 (pinned); epoch 2 is pinned too (LWM 2 not strictly
+        // past 2); epoch 1's T1 is dropped.
         Arc::clone(&svc)
-            .oneshot(or_add_op("m", "k2", "v2", "T2"))
+            .oneshot(or_add_op("m", "k3", "v3", "T3"))
             .await
             .unwrap();
         Arc::clone(&svc)
-            .oneshot(or_remove_op("m", "k2", "T2"))
+            .oneshot(or_remove_op("m", "k3", "T3"))
             .await
             .unwrap();
 
@@ -2841,7 +2854,7 @@ mod tests {
         let (_, tombs_k2) = read_or_map(&factory, "m", "k2").await;
         assert!(
             tombs_k2.contains(&"T2".to_string()),
-            "epoch-2 tombstone still pinned fleet-wide (LWM 1 < 2)"
+            "epoch-2 tombstone still pinned (LWM 2 not strictly past epoch 2)"
         );
     }
 

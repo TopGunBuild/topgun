@@ -258,28 +258,52 @@ impl FrontierState {
     /// Drain the tombstone refs of every currently prune-eligible epoch out of the
     /// RAM index for the caller to drop from storage, under the FULL call-site
     /// conjunction `is_epoch_prune_eligible(E) && durable_epoch_watermark >= E`.
+    /// Each ref is returned WITH its epoch so a caller whose storage drop fails
+    /// can re-insert it via [`Self::restore`] — a drained-but-not-dropped tag must
+    /// never lose its index entry (that would orphan it un-prunable forever).
     ///
     /// Iterates the index's ACTUAL keys — NEVER a `0..=max` range — so the reserved
     /// sentinel epoch 0 (never inserted) can never be swept even if a bound
     /// evaluated true at 0. DARK by construction: with `durable_epoch_watermark ==
     /// 0` the conjunction is false for every stamped epoch (all `>= 1`), so this
     /// returns empty in production; tests inject a watermark to exercise the drop.
-    fn drain_prunable(&mut self) -> Vec<TombstoneRef> {
+    fn drain_prunable(&mut self) -> Vec<(Epoch, TombstoneRef)> {
         let watermark = self.durable_epoch_watermark;
+        // Production dark fast-path: with the constant-0 watermark NO epoch can pass
+        // the conjunction (all stamped epochs are >= 1), so skip the per-epoch
+        // low-water-mark fold entirely — this runs on every OR_REMOVE and every
+        // SYNC-leaf request.
+        if watermark == 0 {
+            return Vec::new();
+        }
         let eligible: Vec<Epoch> = self
             .epoch_tags
             .keys()
             .copied()
-            .filter(|&e| self.is_epoch_prune_eligible(e) && watermark >= e)
+            // Cheap watermark conjunct first so it short-circuits the LWM fold.
+            .filter(|&e| watermark >= e && self.is_epoch_prune_eligible(e))
             .collect();
         let mut drained = Vec::new();
         for e in eligible {
             if let Some(refs) = self.epoch_tags.remove(&e) {
-                drained.extend(refs);
+                drained.extend(refs.into_iter().map(|r| (e, r)));
             }
             self.epoch_max_seq.remove(&e);
         }
         drained
+    }
+
+    /// Re-insert a drained tombstone ref whose storage drop FAILED, so the tag is
+    /// retried on a later sweep instead of being orphaned un-prunable in storage.
+    /// The `epoch_max_seq` entry is re-created best-effort (the index is a pure
+    /// RAM cache — SPEC-342j's unclean-recovery rebuild is the authoritative
+    /// recovery for any imprecision here).
+    fn restore(&mut self, epoch: Epoch, tombstone_ref: TombstoneRef) {
+        self.epoch_tags
+            .entry(epoch)
+            .or_default()
+            .push(tombstone_ref);
+        self.epoch_max_seq.entry(epoch).or_insert(0);
     }
 }
 
@@ -293,7 +317,13 @@ impl PruneSafety for FrontierState {
         if epoch == 0 {
             return false;
         }
-        self.low_water_mark() >= epoch
+        // STRICT `>` per the 342a contract ("advanced PAST epoch"): the conveyed
+        // covering epoch is `current_epoch`, which may still be ACCUMULATING new
+        // tombstones (width > 1) — a cursor AT epoch E therefore proves delivery
+        // complete only through E-1. Inclusive `>=` would let a still-open epoch be
+        // pruned after a new tombstone lands in it post-ACK. Pruning N requires the
+        // fleet-wide MIN cursor >= N+1, i.e. every tracked client applied all of N.
+        self.low_water_mark() > epoch
     }
 
     fn gate_decision_holds_at_commit(&self, token: GateToken) -> bool {
@@ -533,27 +563,40 @@ impl TombstoneFrontier {
     }
 
     /// Test-only injection of the durability watermark to exercise the real drop
-    /// path. Production NEVER calls this — the watermark stays constant 0 (dark by
-    /// construction). The real byte-durability source lands in SPEC-342j.
+    /// path. `#[cfg(test)]`-gated so PRODUCTION code structurally cannot activate
+    /// the prune early — the watermark stays constant 0 (dark by construction).
+    /// SPEC-342j replaces this with the real byte-durability watermark source.
+    #[cfg(test)]
     pub fn set_durable_epoch_watermark(&self, watermark: Epoch) {
         self.lock().durable_epoch_watermark = watermark;
     }
 
     /// Whether `epoch` is prune-eligible under the low-water-mark fold ONLY (the
-    /// 342a contract). The durability fence is the SECOND call-site conjunct in
+    /// 342a contract — STRICT: eligible once the LWM advanced PAST `epoch`). The
+    /// durability fence is the SECOND call-site conjunct in
     /// [`Self::drain_prunable_tombstones`], never here.
     #[must_use]
     pub fn is_epoch_prune_eligible(&self, epoch: Epoch) -> bool {
         self.lock().is_epoch_prune_eligible(epoch)
     }
 
-    /// Drain the tombstone refs of every currently prune-eligible epoch (BOTH
-    /// call-site conjuncts) out of the RAM index, for the caller to drop from
-    /// storage (RAM + redb) under the per-key writer. DARK by construction: returns
-    /// empty in production (`durable_epoch_watermark == 0`).
+    /// Drain every currently prune-eligible epoch's tombstone refs (BOTH call-site
+    /// conjuncts) out of the RAM index, tagged with their epoch, for the caller to
+    /// drop from storage (RAM + redb) under the per-key writer. A ref whose storage
+    /// drop fails MUST be handed back via [`Self::restore_tombstone_ref`] so it is
+    /// retried later rather than orphaned un-prunable. DARK by construction:
+    /// returns empty in production (`durable_epoch_watermark == 0`).
     #[must_use]
-    pub fn drain_prunable_tombstones(&self) -> Vec<TombstoneRef> {
+    pub fn drain_prunable_tombstones(&self) -> Vec<(Epoch, TombstoneRef)> {
         self.lock().drain_prunable()
+    }
+
+    /// Re-insert a drained tombstone ref whose storage drop FAILED (see
+    /// [`Self::drain_prunable_tombstones`]). The index entry is restored so a later
+    /// sweep retries the drop; `epoch_max_seq` is re-created best-effort (pure RAM
+    /// cache — SPEC-342j's rebuild is the authoritative recovery).
+    pub fn restore_tombstone_ref(&self, epoch: Epoch, tombstone_ref: TombstoneRef) {
+        self.lock().restore(epoch, tombstone_ref);
     }
 
     /// Set the epoch width (stamped ops per epoch, clamped `>= 1`). Wired from the
@@ -915,21 +958,24 @@ mod tests {
         f.set_delivered(CONN_A, 100);
         f.set_delivered(CONN_B, 100);
         assert!(f.confirm_apply_ack(&ahead, 5, CONN_A).await);
-        assert!(f.confirm_apply_ack(&behind, 2, CONN_B).await);
-        assert_eq!(f.low_water_mark(), 2, "the behind client pins the LWM at 2");
+        assert!(f.confirm_apply_ack(&behind, 3, CONN_B).await);
+        assert_eq!(f.low_water_mark(), 3, "the behind client pins the LWM at 3");
         // Open the durability watermark fully so ONLY the LWM half gates.
         f.set_durable_epoch_watermark(1000);
-        assert!(f.is_epoch_prune_eligible(2), "epoch 2 <= LWM");
+        assert!(
+            f.is_epoch_prune_eligible(2),
+            "LWM 3 > epoch 2 (strictly past)"
+        );
         assert!(
             !f.is_epoch_prune_eligible(3),
-            "epoch 3 pinned fleet-wide by the behind client"
+            "epoch 3 pinned fleet-wide: the behind cursor AT 3 is not strictly past it"
         );
         let drained = f.drain_prunable_tombstones();
-        let dropped: Vec<&str> = drained.iter().map(|r| r.tag.as_str()).collect();
+        let dropped: Vec<&str> = drained.iter().map(|(_, r)| r.tag.as_str()).collect();
         assert_eq!(
             drained.len(),
             2,
-            "only epochs 1..=2 drained; 3..=5 pinned fleet-wide by the behind client"
+            "only epochs 1..=2 (strictly below the LWM) drained; 3..=5 pinned fleet-wide"
         );
         assert!(dropped.contains(&"0:0:n") && dropped.contains(&"1:0:n"));
     }
@@ -947,14 +993,16 @@ mod tests {
         let c: ClientId = "a5:alice|dev-1".into();
         f.set_delivered(CONN_A, 100);
         assert!(f.confirm_apply_ack(&c, 5, CONN_A).await);
-        assert_eq!(f.low_water_mark(), 5, "LWM past every stamped epoch");
-        // The watermark only reaches epoch 2: epochs 3..=5 must stay.
+        assert_eq!(f.low_water_mark(), 5, "LWM strictly past epochs 1..=4");
+        // Epochs 1..=4 are LWM-eligible (strict >), but the watermark only reaches
+        // epoch 2: epochs 3..=4 must stay despite being LWM-eligible — the
+        // watermark conjunct is load-bearing, not decorative.
         f.set_durable_epoch_watermark(2);
         let drained = f.drain_prunable_tombstones();
         assert_eq!(
             drained.len(),
             2,
-            "only epochs 1..=2 (<= watermark) drop; 3..=5 fenced by the watermark conjunct"
+            "only epochs 1..=2 (<= watermark) drop; 3..=4 LWM-eligible but watermark-fenced"
         );
     }
 
@@ -1003,6 +1051,64 @@ mod tests {
             !f.is_epoch_prune_eligible(0),
             "epoch 0 is never prune-eligible (reserved sentinel)"
         );
+    }
+
+    /// Eligibility is STRICT per the 342a contract ("advanced PAST epoch"): a
+    /// cursor AT epoch E does not make E eligible — E may still be accumulating
+    /// tombstones (width > 1) the client never received. Only LWM == E+1 proves
+    /// all of E is delivered fleet-wide.
+    #[tokio::test]
+    async fn eligibility_is_strictly_past_not_inclusive() {
+        let f = frontier();
+        f.set_epoch_width(1);
+        // Stamp epochs 1..=3 so the counter (and the ACK clamp) reach 3.
+        for i in 0..3 {
+            f.stamp_tombstone("m", &format!("k{i}"), &format!("{i}:0:n"));
+        }
+        let c: ClientId = "a5:alice|dev-1".into();
+        f.set_delivered(CONN_A, 100);
+        assert!(f.confirm_apply_ack(&c, 2, CONN_A).await);
+        assert_eq!(f.low_water_mark(), 2);
+        assert!(
+            !f.is_epoch_prune_eligible(2),
+            "LWM == epoch is NOT eligible (strict)"
+        );
+        assert!(
+            f.is_epoch_prune_eligible(1),
+            "LWM == epoch + 1 is eligible (strictly past)"
+        );
+    }
+
+    /// A drained ref whose storage drop failed is handed back via
+    /// `restore_tombstone_ref` and re-drained on the next sweep — a
+    /// drained-but-not-dropped tag must never lose its index entry (that would
+    /// orphan it un-prunable in storage forever).
+    #[tokio::test]
+    async fn restore_tombstone_ref_round_trips_through_drain() {
+        let f = frontier();
+        f.set_epoch_width(1);
+        f.stamp_tombstone("m", "k1", "T1"); // epoch 1
+        f.stamp_tombstone("m", "k2", "T2"); // epoch 2 (keeps counter/clamp at 2)
+        let c: ClientId = "a5:alice|dev-1".into();
+        f.set_delivered(CONN_A, 100);
+        assert!(f.confirm_apply_ack(&c, 2, CONN_A).await); // LWM 2 > 1
+        f.set_durable_epoch_watermark(1000);
+
+        let drained = f.drain_prunable_tombstones();
+        assert_eq!(drained.len(), 1, "epoch 1's ref drained");
+        let (epoch, r) = drained.into_iter().next().unwrap();
+        assert_eq!((epoch, r.tag.as_str()), (1, "T1"));
+
+        // Index entry is gone: a second sweep finds nothing.
+        assert!(f.drain_prunable_tombstones().is_empty());
+
+        // Simulate a failed storage drop: hand the ref back; the next sweep
+        // returns it again (retry instead of permanent orphan).
+        f.restore_tombstone_ref(epoch, r);
+        let retried = f.drain_prunable_tombstones();
+        assert_eq!(retried.len(), 1);
+        assert_eq!(retried[0].0, 1);
+        assert_eq!(retried[0].1.tag, "T1");
     }
 }
 

@@ -261,6 +261,15 @@ impl SyncService {
     /// it on EVERY OR-Map response (root/leaf/diff) — including the empty-diff
     /// root — is what lets an up-to-date client still advance its cursor instead
     /// of pinning the low-water-mark forever (empty-diff liveness).
+    ///
+    /// ORDERING IS LOAD-BEARING: every caller MUST read the covering epoch BEFORE
+    /// computing the root hash / collecting the entries it rides with. The
+    /// conveyed epoch must never postdate the state snapshot in the same response:
+    /// a concurrent `OR_REMOVE` stamped between the data read and a later epoch
+    /// read would make the client ACK an epoch whose tombstones it never received,
+    /// breaking the cursor-implies-delivered invariant the prune rests on. Reading
+    /// the epoch first errs conservative (the data may be NEWER than the epoch,
+    /// so the client under-claims — safe).
     fn covering_epoch(&self, conn: Option<ConnectionId>) -> Option<u64> {
         let frontier = self.frontier.as_ref()?;
         let epoch = frontier.current_epoch();
@@ -733,6 +742,10 @@ impl SyncService {
     ) -> Result<OperationResponse, OperationError> {
         let map_name = payload.map_name;
 
+        // Epoch BEFORE data: the conveyed epoch must never postdate the root it
+        // rides with (see `covering_epoch` — ordering is load-bearing).
+        let covering_epoch = self.covering_epoch(ctx.connection_id);
+
         // Reuse any session already built by the LWW SYNC_INIT for this map; build
         // one now if not yet cached. force_rebuild=false so a concurrent or prior
         // LWW SYNC_INIT's session is shared rather than discarded.
@@ -744,7 +757,6 @@ impl SyncService {
             self.merkle_manager.aggregate_ormap_root_hash(&map_name)
         };
 
-        let covering_epoch = self.covering_epoch(ctx.connection_id);
         Ok(OperationResponse::Message(Box::new(
             Message::ORMapSyncRespRoot(ORMapSyncRespRoot {
                 payload: ORMapSyncRespRootPayload {
@@ -780,6 +792,11 @@ impl SyncService {
         // emitted leaf naturally carries the reduced set. DARK by construction (the
         // frontier watermark is constant 0) — drops nothing in production.
         self.run_leaf_prune().await;
+
+        // Epoch BEFORE data: read once here, before any leaf entries are collected,
+        // so the conveyed epoch can never postdate the entry sets the leaf
+        // responses below carry (see `covering_epoch` — ordering is load-bearing).
+        let covering_epoch = self.covering_epoch(ctx.connection_id);
 
         // Durable-index path: reuse the session built during ORMapSyncInit (or
         // SYNC_INIT) for THIS connection. OR-Map tombstones yield no leaf in the
@@ -855,7 +872,6 @@ impl SyncService {
                         }
                     }
                 }
-                let covering_epoch = self.covering_epoch(ctx.connection_id);
                 return Ok(OperationResponse::Message(Box::new(
                     Message::ORMapSyncRespLeaf(ORMapSyncRespLeaf {
                         payload: ORMapSyncRespLeafPayload {
@@ -933,7 +949,6 @@ impl SyncService {
                             }
                         }
                     }
-                    let covering_epoch = self.covering_epoch(ctx.connection_id);
                     Ok(OperationResponse::Message(Box::new(
                         Message::ORMapSyncRespLeaf(ORMapSyncRespLeaf {
                             payload: ORMapSyncRespLeafPayload {
@@ -1030,7 +1045,6 @@ impl SyncService {
                     }
                 }
             }
-            let covering_epoch = self.covering_epoch(ctx.connection_id);
             return Ok(OperationResponse::Message(Box::new(
                 Message::ORMapSyncRespLeaf(ORMapSyncRespLeaf {
                     payload: ORMapSyncRespLeafPayload {
@@ -1069,6 +1083,10 @@ impl SyncService {
     ) -> Result<OperationResponse, OperationError> {
         let map_name = payload.payload.map_name;
         let keys = payload.payload.keys;
+
+        // Epoch BEFORE data: the conveyed epoch must never postdate the entries
+        // collected below (see `covering_epoch` — ordering is load-bearing).
+        let covering_epoch = self.covering_epoch(ctx.connection_id);
 
         let mut entries = Vec::new();
 
@@ -1136,7 +1154,6 @@ impl SyncService {
             }
         }
 
-        let covering_epoch = self.covering_epoch(ctx.connection_id);
         Ok(OperationResponse::Message(Box::new(
             Message::ORMapDiffResponse(ORMapDiffResponse {
                 payload: ORMapDiffResponsePayload {
@@ -1451,10 +1468,13 @@ mod tests {
             .unwrap();
         // Stamp the tombstone so the epoch index knows its (map, key, tag) location.
         assert_eq!(frontier.stamp_tombstone(map, key, tomb), 1);
-        // Raise the LWM past epoch 1 and open the durability watermark.
+        // A second stamp advances the counter to 2 so the LWM can move STRICTLY
+        // past epoch 1 (eligibility is strict: LWM must exceed the epoch).
+        assert_eq!(frontier.stamp_tombstone(map, "k2", "T2"), 2);
+        // Raise the LWM strictly past epoch 1 and open the durability watermark.
         let c: String = "a5:alice|dev-1".into();
         frontier.set_delivered(ConnectionId(1), 100);
-        assert!(frontier.confirm_apply_ack(&c, 1, ConnectionId(1)).await);
+        assert!(frontier.confirm_apply_ack(&c, 2, ConnectionId(1)).await);
         frontier.set_durable_epoch_watermark(1000);
 
         // Invoke the OR-Map leaf handler — the prune sweep fires at its top.
