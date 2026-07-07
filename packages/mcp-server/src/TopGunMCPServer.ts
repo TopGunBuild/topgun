@@ -338,6 +338,10 @@ class InMemoryStorageAdapter implements IStorageAdapter {
     return Array.from(this.data.keys());
   }
 
+  async getAllMetaKeys(): Promise<string[]> {
+    return Array.from(this.meta.keys());
+  }
+
   async getMeta(key: string): Promise<unknown | undefined> {
     return this.meta.get(key);
   }

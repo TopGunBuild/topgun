@@ -189,6 +189,11 @@ export class IDBAdapter implements IStorageAdapter {
     return ((await this.db?.getAllKeys('kv_store')) as string[]) || [];
   }
 
+  async getAllMetaKeys(): Promise<string[]> {
+    await this.waitForReady();
+    return ((await this.db?.getAllKeys('meta_store')) as string[]) || [];
+  }
+
   // ============================================
   // Write Operations - Queue if not ready
   // ============================================

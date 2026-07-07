@@ -242,6 +242,26 @@ describe('IDBAdapter', () => {
     });
   });
 
+  describe('getAllMetaKeys operation', () => {
+    beforeEach(async () => {
+      await adapter.initialize(getUniqueDbName());
+    });
+
+    it('should return empty array when no meta keys exist', async () => {
+      const keys = await adapter.getAllMetaKeys();
+      expect(keys).toEqual([]);
+    });
+
+    it('should return all stored meta keys, not kv keys', async () => {
+      await adapter.put('kvKey', 'kvValue');
+      await adapter.setMeta('__sys__:tags:tombstones', ['t1', 't2']);
+      await adapter.setMeta('lastSyncTimestamp', 123);
+
+      const keys = await adapter.getAllMetaKeys();
+      expect(keys.sort()).toEqual(['__sys__:tags:tombstones', 'lastSyncTimestamp']);
+    });
+  });
+
   describe('opLog operations', () => {
     beforeEach(async () => {
       await adapter.initialize(getUniqueDbName());

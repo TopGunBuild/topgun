@@ -75,6 +75,10 @@ class MemoryStorageAdapter implements IStorageAdapter {
   async getAllKeys(): Promise<string[]> {
     return Array.from(this.kvStore.keys());
   }
+
+  async getAllMetaKeys(): Promise<string[]> {
+    return Array.from(this.metaStore.keys());
+  }
 }
 
 // Install a MockWebSocket for this file. These tests exercise local persistence

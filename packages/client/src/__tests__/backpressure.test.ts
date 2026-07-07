@@ -50,6 +50,7 @@ function createMockStorage(): IStorageAdapter {
     put: jest.fn().mockResolvedValue(undefined),
     remove: jest.fn().mockResolvedValue(undefined),
     getAllKeys: jest.fn().mockResolvedValue([]),
+    getAllMetaKeys: jest.fn().mockResolvedValue([]),
     getMeta: jest.fn().mockResolvedValue(null),
     setMeta: jest.fn().mockResolvedValue(undefined),
     appendOpLog: jest.fn().mockImplementation(() => {

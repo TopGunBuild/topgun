@@ -92,4 +92,16 @@ export interface IStorageAdapter {
 
   // Iteration
   getAllKeys(): Promise<string[]>;
+
+  /**
+   * Every key currently in the meta store, including reserved `__sys__:`-prefixed
+   * keys (e.g. `__sys__:{mapName}:tombstones`). Mirrors {@link getAllKeys} for the
+   * `kv` namespace. Used to enumerate OR-Map stores a prior session persisted but
+   * this process has not yet instantiated via `getORMap()` — the consistent
+   * held-map snapshot the covering-epoch ACK min-barrier reads (see
+   * `SyncEngine.computeHeldOrMapNames`). A held OR-Map this process never learns
+   * about would otherwise be silently excluded from the barrier, reopening the
+   * exact cross-map ACK-inflation gap the barrier exists to close.
+   */
+  getAllMetaKeys(): Promise<string[]>;
 }

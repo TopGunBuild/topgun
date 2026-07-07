@@ -91,6 +91,7 @@ function createMockStorageAdapter(): jest.Mocked<IStorageAdapter> {
     deleteOp: jest.fn().mockResolvedValue(undefined),
     commitWrite: jest.fn().mockResolvedValue(1),
     getAllKeys: jest.fn().mockResolvedValue([]),
+    getAllMetaKeys: jest.fn().mockResolvedValue([]),
   };
 }
 
