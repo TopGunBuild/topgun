@@ -409,6 +409,10 @@ export class SyncEngine {
       // reload — same canonical helpers as the local-write + applyServerEvent paths.
       persistKey: (name, key) => this.persistORMapKey(name, key),
       persistTombstones: (name) => this.persistORMapTombstones(name),
+      // Confirm the covering epoch conveyed on an OR-Map sync response AFTER its
+      // data is durably applied (including on an empty diff) so the server's
+      // per-device cursor advances and does not pin the tombstone low-water-mark.
+      onCoveringEpochApplied: (epoch) => this.emitConfirmedApply(epoch),
     });
 
     // Initialize Conflict Resolver client

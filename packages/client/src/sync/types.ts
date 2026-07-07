@@ -1076,6 +1076,17 @@ export interface ORMapSyncHandlerConfig {
    * Persist an ORMap's tombstone set. Wired by SyncEngine to `persistORMapTombstones`.
    */
   persistTombstones: (mapName: string) => Promise<void>;
+
+  /**
+   * Confirm to the server that the client has durably applied the OR-Map sync
+   * data up to `epoch` (the covering epoch conveyed on the sync response). Wired
+   * by SyncEngine to `emitConfirmedApply`, which sends a monotonic
+   * CLIENT_APPLY_ACK. Called AFTER the response's entries are persisted —
+   * including on an empty diff (root already matches), so an up-to-date client
+   * still advances its confirmed-apply cursor instead of pinning the server's
+   * low-water-mark forever.
+   */
+  onCoveringEpochApplied: (epoch: number) => void;
 }
 
 // ============================================
