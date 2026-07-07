@@ -61,12 +61,15 @@ use dashmap::DashMap;
 use tracing::Instrument;
 
 use crate::network::connection::{ConnectionId, ConnectionKind, ConnectionRegistry};
+use crate::service::domain::crdt::prune_epoch_tombstones;
+use crate::service::domain::key_writer::KeyWriterRegistry;
 use crate::service::operation::{service_names, Operation, OperationError, OperationResponse};
 use crate::service::registry::{ManagedService, ServiceContext};
 use crate::storage::map_data_store::{DurableMerkleIndex, MapDataStore, MerkleSession};
 use crate::storage::merkle_sync::MerkleSyncManager;
 use crate::storage::record::RecordValue;
 use crate::storage::{CallerProvenance, ExpiryPolicy, RecordStoreFactory};
+use crate::tombstone_frontier_impl::TombstoneFrontier;
 
 // ---------------------------------------------------------------------------
 // value_to_rmpv conversion helper
@@ -140,6 +143,16 @@ pub struct SyncService {
     durable_store: Option<Arc<dyn MapDataStore>>,
     /// Per-`(map, connection)` session cache; entries released on disconnect.
     session_registry: Arc<SyncSessionRegistry>,
+    /// Shared causal frontier: conveys the covering epoch on OR-Map sync
+    /// responses and drives the SYNC-leaf prune. `None` when epoch machinery is
+    /// not wired (tests / null-store). MUST be the SAME `Arc<TombstoneFrontier>`
+    /// shared with `CrdtService` so the covering epoch and low-water-mark are one
+    /// authority.
+    frontier: Option<Arc<TombstoneFrontier>>,
+    /// Shared per-key writer, the SAME registry `CrdtService` holds, so a
+    /// SYNC-leaf prune sweep and an OR write on a key serialize against each
+    /// other. `None` when the frontier is not wired.
+    key_writer: Option<Arc<KeyWriterRegistry>>,
 }
 
 /// Per-`(map_name, connection_id)` cache of materialised Merkle sync sessions.
@@ -218,6 +231,55 @@ impl SyncService {
             durable_index: None,
             durable_store: None,
             session_registry,
+            frontier: None,
+            key_writer: None,
+        }
+    }
+
+    /// Wire the shared causal frontier + per-key writer so OR-Map sync responses
+    /// convey the covering epoch (feeding the client ACK loop and the `342e`
+    /// `delivered_conn` clamp) and the SYNC-leaf prune can run. Production wiring
+    /// MUST pass the SAME `Arc`s held by `AppState` / `CrdtService`; a second
+    /// frontier or writer would fork the epoch authority / re-open the prune race.
+    /// `SyncService::new`'s signature is unchanged (builder, like
+    /// `with_durable_index`).
+    #[must_use]
+    pub fn with_frontier(
+        mut self,
+        frontier: Arc<TombstoneFrontier>,
+        key_writer: Arc<KeyWriterRegistry>,
+    ) -> Self {
+        self.frontier = Some(frontier);
+        self.key_writer = Some(key_writer);
+        self
+    }
+
+    /// The covering epoch to convey on an OR-Map sync response for `conn`: the
+    /// server's current max stamped epoch (`None` when nothing stamped yet or no
+    /// frontier is wired). Also records it as delivered on `conn` so the client's
+    /// subsequent `CLIENT_APPLY_ACK` passes the `342e` delivered-clamp. Conveying
+    /// it on EVERY OR-Map response (root/leaf/diff) — including the empty-diff
+    /// root — is what lets an up-to-date client still advance its cursor instead
+    /// of pinning the low-water-mark forever (empty-diff liveness).
+    fn covering_epoch(&self, conn: Option<ConnectionId>) -> Option<u64> {
+        let frontier = self.frontier.as_ref()?;
+        let epoch = frontier.current_epoch();
+        if epoch == 0 {
+            return None;
+        }
+        if let Some(c) = conn {
+            frontier.set_delivered(c, epoch);
+        }
+        Some(epoch)
+    }
+
+    /// Run the wholesale epoch-drop prune over the SYNC-leaf path. DARK by
+    /// construction (the frontier watermark is constant 0), so this drops nothing
+    /// in production; tests inject a watermark to exercise the drop. No-op unless
+    /// BOTH the frontier and the shared per-key writer are wired.
+    async fn run_leaf_prune(&self) {
+        if let (Some(frontier), Some(key_writer)) = (&self.frontier, &self.key_writer) {
+            prune_epoch_tombstones(frontier, &self.record_store_factory, key_writer).await;
         }
     }
 
@@ -682,12 +744,14 @@ impl SyncService {
             self.merkle_manager.aggregate_ormap_root_hash(&map_name)
         };
 
+        let covering_epoch = self.covering_epoch(ctx.connection_id);
         Ok(OperationResponse::Message(Box::new(
             Message::ORMapSyncRespRoot(ORMapSyncRespRoot {
                 payload: ORMapSyncRespRootPayload {
                     map_name,
                     root_hash,
                     timestamp: ctx.timestamp.clone(),
+                    covering_epoch,
                 },
             }),
         )))
@@ -710,6 +774,12 @@ impl SyncService {
     ) -> Result<OperationResponse, OperationError> {
         let map_name = payload.payload.map_name;
         let path = payload.payload.path;
+
+        // Wholesale epoch-drop prune wired into the SYNC-leaf path: drop
+        // prune-eligible tombstones from storage BEFORE the leaf is read, so the
+        // emitted leaf naturally carries the reduced set. DARK by construction (the
+        // frontier watermark is constant 0) — drops nothing in production.
+        self.run_leaf_prune().await;
 
         // Durable-index path: reuse the session built during ORMapSyncInit (or
         // SYNC_INIT) for THIS connection. OR-Map tombstones yield no leaf in the
@@ -785,12 +855,14 @@ impl SyncService {
                         }
                     }
                 }
+                let covering_epoch = self.covering_epoch(ctx.connection_id);
                 return Ok(OperationResponse::Message(Box::new(
                     Message::ORMapSyncRespLeaf(ORMapSyncRespLeaf {
                         payload: ORMapSyncRespLeafPayload {
                             map_name,
                             path,
                             entries,
+                            covering_epoch,
                         },
                     }),
                 )));
@@ -861,12 +933,14 @@ impl SyncService {
                             }
                         }
                     }
+                    let covering_epoch = self.covering_epoch(ctx.connection_id);
                     Ok(OperationResponse::Message(Box::new(
                         Message::ORMapSyncRespLeaf(ORMapSyncRespLeaf {
                             payload: ORMapSyncRespLeafPayload {
                                 map_name,
                                 path,
                                 entries,
+                                covering_epoch,
                             },
                         }),
                     )))
@@ -956,12 +1030,14 @@ impl SyncService {
                     }
                 }
             }
+            let covering_epoch = self.covering_epoch(ctx.connection_id);
             return Ok(OperationResponse::Message(Box::new(
                 Message::ORMapSyncRespLeaf(ORMapSyncRespLeaf {
                     payload: ORMapSyncRespLeafPayload {
                         map_name,
                         path,
                         entries,
+                        covering_epoch,
                     },
                 }),
             )));
@@ -988,7 +1064,7 @@ impl SyncService {
     /// nested `.payload` field.
     async fn handle_ormap_diff_request(
         &self,
-        _ctx: &crate::service::operation::OperationContext,
+        ctx: &crate::service::operation::OperationContext,
         payload: messages::ORMapDiffRequest,
     ) -> Result<OperationResponse, OperationError> {
         let map_name = payload.payload.map_name;
@@ -1060,9 +1136,14 @@ impl SyncService {
             }
         }
 
+        let covering_epoch = self.covering_epoch(ctx.connection_id);
         Ok(OperationResponse::Message(Box::new(
             Message::ORMapDiffResponse(ORMapDiffResponse {
-                payload: ORMapDiffResponsePayload { map_name, entries },
+                payload: ORMapDiffResponsePayload {
+                    map_name,
+                    entries,
+                    covering_epoch,
+                },
             }),
         )))
     }
@@ -1316,6 +1397,154 @@ mod tests {
             record_store_factory,
             connection_registry,
         ))
+    }
+
+    fn make_sync_service_with_frontier() -> (
+        Arc<SyncService>,
+        Arc<RecordStoreFactory>,
+        Arc<TombstoneFrontier>,
+    ) {
+        let factory = make_factory();
+        let frontier = Arc::new(TombstoneFrontier::new(None));
+        frontier.set_epoch_width(1); // one epoch per stamp, for precise control
+        let key_writer = Arc::new(KeyWriterRegistry::new());
+        let svc = Arc::new(
+            SyncService::new(
+                Arc::new(MerkleSyncManager::default()),
+                Arc::clone(&factory),
+                Arc::new(ConnectionRegistry::new()),
+            )
+            .with_frontier(Arc::clone(&frontier), key_writer),
+        );
+        (svc, factory, frontier)
+    }
+
+    /// AC4 (SYNC-leaf site): the wholesale epoch-drop prune is wired into the
+    /// OR-Map SYNC-leaf path (`handle_ormap_merkle_req_bucket` runs the sweep at
+    /// entry). With an injected durability watermark and the low-water-mark past
+    /// the stamped epoch, invoking the leaf handler drops the tombstone from
+    /// storage while the live record survives. DARK by default (watermark 0); the
+    /// injected watermark exercises the real drop path.
+    #[tokio::test]
+    async fn ac4_prune_wired_into_sync_leaf() {
+        use crate::storage::record::OrMapEntry as StoreOrMapEntry;
+        let (svc, factory, frontier) = make_sync_service_with_frontier();
+        let map = "omap";
+        let key = "k1";
+        let tomb = "T1";
+        let store = factory.get_or_create(map, hash_to_partition(key));
+        store
+            .put(
+                key,
+                RecordValue::OrMap {
+                    records: vec![StoreOrMapEntry {
+                        value: Value::Int(1),
+                        tag: "R1".to_string(),
+                        timestamp: make_timestamp(),
+                    }],
+                    tombstones: vec![tomb.to_string()],
+                },
+                ExpiryPolicy::NONE,
+                CallerProvenance::CrdtMerge,
+            )
+            .await
+            .unwrap();
+        // Stamp the tombstone so the epoch index knows its (map, key, tag) location.
+        assert_eq!(frontier.stamp_tombstone(map, key, tomb), 1);
+        // Raise the LWM past epoch 1 and open the durability watermark.
+        let c: String = "a5:alice|dev-1".into();
+        frontier.set_delivered(ConnectionId(1), 100);
+        assert!(frontier.confirm_apply_ack(&c, 1, ConnectionId(1)).await);
+        frontier.set_durable_epoch_watermark(1000);
+
+        // Invoke the OR-Map leaf handler — the prune sweep fires at its top.
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(ConnectionId(1));
+        Arc::clone(&svc)
+            .oneshot(Operation::ORMapMerkleReqBucket {
+                ctx,
+                payload: topgun_core::messages::ORMapMerkleReqBucket {
+                    payload: topgun_core::messages::ORMapMerkleReqBucketPayload {
+                        map_name: map.to_string(),
+                        path: String::new(),
+                    },
+                },
+            })
+            .await
+            .expect("bucket handler");
+
+        match store.get(key, false).await.unwrap().map(|r| r.value) {
+            Some(RecordValue::OrMap {
+                records,
+                tombstones,
+            }) => {
+                assert!(
+                    tombstones.is_empty(),
+                    "epoch-1 tombstone pruned from storage via the SYNC-leaf path"
+                );
+                assert_eq!(records.len(), 1, "the live record survives the prune");
+            }
+            other => panic!("expected OrMap, got {other:?}"),
+        }
+    }
+
+    /// `AC3b` (server half): once an epoch is stamped, the OR-Map `SYNC_INIT`
+    /// root response conveys the covering epoch AND records it as delivered on the
+    /// connection, so the client's subsequent `CLIENT_APPLY_ACK` passes the
+    /// delivered-clamp — this is what lets an empty-diff client advance. Before
+    /// any stamp, no covering epoch is conveyed (nothing to confirm).
+    #[tokio::test]
+    async fn ac3b_covering_epoch_conveyed_and_marked_delivered() {
+        let (svc, _factory, frontier) = make_sync_service_with_frontier();
+        let conn = ConnectionId(7);
+
+        let ormap_root = |svc: Arc<SyncService>, conn: ConnectionId| async move {
+            let mut ctx = make_ctx(service_names::SYNC);
+            ctx.connection_id = Some(conn);
+            match svc
+                .oneshot(Operation::ORMapSyncInit {
+                    ctx,
+                    payload: topgun_core::messages::ORMapSyncInit {
+                        map_name: "omap".to_string(),
+                        root_hash: 0,
+                        bucket_hashes: HashMap::new(),
+                        last_sync_timestamp: None,
+                    },
+                })
+                .await
+                .expect("ORMapSyncInit")
+            {
+                OperationResponse::Message(m) => match *m {
+                    Message::ORMapSyncRespRoot(r) => r.payload,
+                    o => panic!("expected ORMapSyncRespRoot, got {o:?}"),
+                },
+                o => panic!("expected Message, got {o:?}"),
+            }
+        };
+
+        // Before any stamp: no covering epoch, nothing delivered.
+        let root0 = ormap_root(Arc::clone(&svc), conn).await;
+        assert_eq!(
+            root0.covering_epoch, None,
+            "no epoch stamped -> no covering epoch conveyed"
+        );
+        assert_eq!(frontier.delivered(conn), 0);
+
+        // Stamp two epochs; SYNC_INIT now conveys the current max (2) and marks it
+        // delivered on the connection for the ACK clamp.
+        frontier.stamp_tombstone("omap", "k1", "T1");
+        frontier.stamp_tombstone("omap", "k2", "T2");
+        let root = ormap_root(Arc::clone(&svc), conn).await;
+        assert_eq!(
+            root.covering_epoch,
+            Some(2),
+            "covering epoch = current max stamped epoch"
+        );
+        assert_eq!(
+            frontier.delivered(conn),
+            2,
+            "conveyed epoch recorded as delivered so the client ACK passes the clamp"
+        );
     }
 
     // -------------------------------------------------------------------------
