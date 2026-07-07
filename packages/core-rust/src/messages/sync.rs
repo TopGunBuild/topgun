@@ -275,6 +275,21 @@ pub struct ORMapSyncRespRootPayload {
     pub root_hash: u32,
     /// Server timestamp at time of response.
     pub timestamp: Timestamp,
+    /// The server's current max stamped tombstone epoch covered by this response
+    /// (the "covering epoch"). Additive, server → client only: the client ACKs
+    /// this via `ClientApplyAckMessage.cursor` after durably applying the sync
+    /// data — INCLUDING on an empty diff (root hash already matches), so an
+    /// up-to-date client still advances its cursor instead of pinning the
+    /// low-water-mark forever. `None`/omitted when the server has stamped no
+    /// tombstone yet (nothing to confirm). An unsigned integer decoded via the
+    /// `serde_number` helper so a TS `msgpackr` whole-number decodes directly as
+    /// a `u64`.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "serde_number::deserialize_option_u64"
+    )]
+    pub covering_epoch: Option<u64>,
 }
 
 /// `ORMap` sync response containing the root hash.
@@ -351,6 +366,16 @@ pub struct ORMapSyncRespLeafPayload {
     pub path: String,
     /// The leaf entries for this bucket.
     pub entries: Vec<ORMapEntry>,
+    /// The server's current max stamped tombstone epoch covered by this leaf
+    /// (the "covering epoch"). The client ACKs it after durably applying the
+    /// leaf entries. Additive, server → client only. See
+    /// [`ORMapSyncRespRootPayload::covering_epoch`].
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "serde_number::deserialize_option_u64"
+    )]
+    pub covering_epoch: Option<u64>,
 }
 
 /// `ORMap` sync response containing leaf-level entries.
@@ -397,6 +422,16 @@ pub struct ORMapDiffResponsePayload {
     pub map_name: String,
     /// The diff entries.
     pub entries: Vec<ORMapEntry>,
+    /// The server's current max stamped tombstone epoch covered by this diff
+    /// (the "covering epoch"). The client ACKs it after durably applying the
+    /// diff entries. Additive, server → client only. See
+    /// [`ORMapSyncRespRootPayload::covering_epoch`].
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "serde_number::deserialize_option_u64"
+    )]
+    pub covering_epoch: Option<u64>,
 }
 
 /// `ORMap` diff response with entries for requested keys.
@@ -752,6 +787,7 @@ mod tests {
                     counter: 0,
                     node_id: "node-1".to_string(),
                 },
+                covering_epoch: None,
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
@@ -803,9 +839,79 @@ mod tests {
                     }],
                     tombstones: vec!["old-tag".to_string()],
                 }],
+                covering_epoch: Some(7),
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
+    }
+
+    #[test]
+    fn ormap_covering_epoch_omitted_when_none() {
+        // The additive covering-epoch field must be omitted from the wire when
+        // None so the byte layout is unchanged for a server that stamps nothing.
+        let msg = ORMapSyncRespRoot {
+            payload: ORMapSyncRespRootPayload {
+                map_name: "tags".to_string(),
+                root_hash: 1,
+                timestamp: Timestamp {
+                    millis: 1,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
+                covering_epoch: None,
+            },
+        };
+        let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
+        let val: rmpv::Value = rmp_serde::from_slice(&bytes).expect("deserialize");
+        let payload = val
+            .as_map()
+            .and_then(|m| {
+                m.iter()
+                    .find(|(k, _)| k.as_str() == Some("payload"))
+                    .map(|(_, v)| v)
+            })
+            .expect("payload");
+        let has_covering = payload
+            .as_map()
+            .expect("payload map")
+            .iter()
+            .any(|(k, _)| k.as_str() == Some("coveringEpoch"));
+        assert!(!has_covering, "coveringEpoch omitted when None");
+    }
+
+    #[test]
+    fn ormap_covering_epoch_is_camel_case_integer_not_float() {
+        // When present, coveringEpoch is a camelCase MsgPack integer (u64), never
+        // coerced through f64 — a value beyond f64's exact integer range proves it.
+        let msg = ORMapSyncRespLeaf {
+            payload: ORMapSyncRespLeafPayload {
+                map_name: "tags".to_string(),
+                path: "0".to_string(),
+                entries: vec![],
+                covering_epoch: Some(9_007_199_254_740_993), // 2^53 + 1
+            },
+        };
+        let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
+        let val: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode");
+        let payload = val
+            .as_map()
+            .and_then(|m| {
+                m.iter()
+                    .find(|(k, _)| k.as_str() == Some("payload"))
+                    .map(|(_, v)| v)
+            })
+            .expect("payload");
+        let (_, covering) = payload
+            .as_map()
+            .expect("payload map")
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("coveringEpoch"))
+            .expect("coveringEpoch present (camelCase)");
+        assert!(
+            matches!(covering, rmpv::Value::Integer(_)),
+            "coveringEpoch must be MsgPack Integer, got {covering:?}"
+        );
+        assert_eq!(roundtrip_named(&msg), msg, "value survives round-trip");
     }
 
     #[test]
@@ -829,6 +935,7 @@ mod tests {
                     records: vec![],
                     tombstones: vec![],
                 }],
+                covering_epoch: None,
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
