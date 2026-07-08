@@ -78,7 +78,15 @@ function createMockStorageAdapter(): jest.Mocked<IStorageAdapter> {
     get: jest.fn().mockResolvedValue(undefined),
     put: jest.fn().mockResolvedValue(undefined),
     remove: jest.fn().mockResolvedValue(undefined),
-    getMeta: jest.fn().mockResolvedValue(undefined),
+    // Default to an already-migrated device: the one-time OR-Map marker backfill
+    // (SyncEngine.backfillLegacyOrMapMarkers) is gated on this flag, so unrelated
+    // tests are not perturbed by its startup keyspace scan. Backfill-specific tests
+    // override getMeta to leave the flag unset.
+    getMeta: jest
+      .fn()
+      .mockImplementation((key: string) =>
+        Promise.resolve(key === '__sys__:ormapBackfillDone' ? true : undefined),
+      ),
     setMeta: jest.fn().mockResolvedValue(undefined),
     batchPut: jest.fn().mockResolvedValue(undefined),
     appendOpLog: jest.fn().mockResolvedValue(1),
@@ -1396,6 +1404,11 @@ describe('SyncEngine', () => {
         payload: { events: [batchEvent('a', 5), batchEvent('b', 3)] },
       }) as Promise<void>;
 
+      // Let the marker-first `setMeta` (eager `:ormap` existence marker, written
+      // before the gated `put` on the first server-origin persist for this map)
+      // settle so the gated `put` is actually reached before we assert on it.
+      await jest.advanceTimersByTimeAsync(0);
+
       // Before the durable commit resolves, no ACK has been sent (not on receive).
       expect(ws.sentMessages.find((m) => m.type === 'CLIENT_APPLY_ACK')).toBeUndefined();
 
@@ -1649,6 +1662,198 @@ describe('SyncEngine', () => {
         },
       });
       expect(acksOn(ws)).toEqual([7]);
+    });
+  });
+
+  describe('OR-Map existence marker + legacy backfill (add-only enumeration gap)', () => {
+    const rec = (n: number) => ({
+      value: { n },
+      tag: `1:${n}:node`,
+      timestamp: { millis: n, counter: 0, nodeId: 'node' },
+    });
+
+    // A storage adapter whose kv + meta stores are real Maps, so a marker written
+    // by backfill / the persist helpers is actually observable by a later
+    // enumeration — the integration the plain jest.fn mock cannot exercise.
+    function statefulStorage(seed?: {
+      kv?: Record<string, unknown>;
+      meta?: Record<string, unknown>;
+    }): jest.Mocked<IStorageAdapter> {
+      const kv = new Map<string, unknown>(Object.entries(seed?.kv ?? {}));
+      const meta = new Map<string, unknown>(Object.entries(seed?.meta ?? {}));
+      const s = createMockStorageAdapter();
+      s.get.mockImplementation(async (k: string) => kv.get(k));
+      s.put.mockImplementation(async (k: string, v: unknown) => {
+        kv.set(k, v);
+      });
+      s.remove.mockImplementation(async (k: string) => {
+        kv.delete(k);
+      });
+      s.getAllKeys.mockImplementation(async () => [...kv.keys()]);
+      s.getMeta.mockImplementation(async (k: string) => meta.get(k));
+      s.setMeta.mockImplementation(async (k: string, v: unknown) => {
+        meta.set(k, v);
+      });
+      s.getAllMetaKeys.mockImplementation(async () => [...meta.keys()]);
+      s.commitWrite.mockImplementation(async (mutations) => {
+        for (const m of mutations) {
+          const store = m.store === 'meta' ? meta : kv;
+          if (m.type === 'remove') store.delete(m.key);
+          else store.set(m.key, m.value);
+        }
+        return 1;
+      });
+      return s;
+    }
+
+    async function startEngine(storage: jest.Mocked<IStorageAdapter>, openMaps: string[] = []) {
+      config.storageAdapter = storage;
+      syncEngine = new SyncEngine(config);
+      const hlc = syncEngine.getHLC();
+      for (const name of openMaps) {
+        syncEngine.registerMap(name, new ORMap<string, unknown>(hlc));
+      }
+      await jest.runAllTimersAsync();
+      const ws = MockWebSocket.getLastInstance()!;
+      await (syncEngine as any).startMerkleSync();
+      ws.sentMessages = [];
+      return ws;
+    }
+
+    function acksOn(ws: any): number[] {
+      return ws.sentMessages
+        .filter((m: any) => m.type === 'CLIENT_APPLY_ACK')
+        .map((m: any) => m.cursor);
+    }
+
+    test('THE REGRESSION: a legacy add-only persisted store (records, no :tombstones, no :ormap marker) is discovered by backfill and blocks the device ACK', async () => {
+      // Pre-fix device: `shared` was written add-only in a prior session (kv records
+      // only), never removed → no `:tombstones` key, and predates the eager marker →
+      // no `:ormap` marker. Backfill has not run (done-flag unset). This is the exact
+      // store the old snapshot missed, letting the device ACK past its un-received
+      // tombstones (the reopened cross-map resurrection vector).
+      const storage = statefulStorage({ kv: { 'shared:k1': [rec(1)] } });
+
+      const ws = await startEngine(storage, ['tags']);
+
+      // Backfill stamped the marker and it is now enumerated into the held-set.
+      expect(await storage.getMeta('__sys__:shared:ormap')).toBe(1);
+      expect((syncEngine as any).heldOrMapNames.has('shared')).toBe(true);
+
+      // 'tags' conveying the server-wide covering epoch no longer licenses a device
+      // ACK: 'shared' is held and unsynced this connection, so the MIN stalls at 0.
+      (syncEngine as any).applyMapCoverage('tags', 5);
+      expect(acksOn(ws)).toEqual([]);
+
+      // Only once 'shared' proves its own delivery does the ACK advance.
+      (syncEngine as any).applyMapCoverage('shared', 5);
+      expect(acksOn(ws)).toEqual([5]);
+    });
+
+    test('local OR write stamps the eager :ormap marker transactionally (in the commitWrite), once per session', async () => {
+      const storage = statefulStorage();
+      config.storageAdapter = storage;
+      syncEngine = new SyncEngine(config);
+      syncEngine.registerMap('notes', new ORMap<string, unknown>(syncEngine.getHLC()));
+
+      const r = rec(1);
+      const mutations = [
+        { store: 'kv' as const, type: 'put' as const, key: 'notes:k', value: [r] },
+      ];
+      await syncEngine.recordOperation(
+        'notes',
+        'OR_ADD',
+        'k',
+        { orRecord: r as any, timestamp: r.timestamp as any },
+        mutations,
+      );
+
+      // Marker landed in the SAME commit as the data (atomic — no crash window).
+      const firstCommit = storage.commitWrite.mock.calls[0][0];
+      expect(firstCommit).toContainEqual({
+        store: 'meta',
+        type: 'put',
+        key: '__sys__:notes:ormap',
+        value: 1,
+      });
+      expect(await storage.getMeta('__sys__:notes:ormap')).toBe(1);
+
+      // Second write to the same map does NOT re-stamp the marker (session guard).
+      await syncEngine.recordOperation(
+        'notes',
+        'OR_ADD',
+        'k2',
+        { orRecord: rec(2) as any, timestamp: rec(2).timestamp as any },
+        [{ store: 'kv', type: 'put', key: 'notes:k2', value: [rec(2)] }],
+      );
+      const secondCommit = storage.commitWrite.mock.calls[1][0];
+      expect(secondCommit.some((m) => m.key === '__sys__:notes:ormap')).toBe(false);
+    });
+
+    test('server-origin persist writes the :ormap marker BEFORE the data (crash-safe ordering)', async () => {
+      const storage = statefulStorage();
+      config.storageAdapter = storage;
+      syncEngine = new SyncEngine(config);
+      const orMap = new ORMap<string, unknown>(syncEngine.getHLC());
+      orMap.apply('k', rec(1) as any);
+      syncEngine.registerMap('recv', orMap);
+
+      await syncEngine.persistORMapKey('recv', 'k');
+
+      const markerCallIdx = storage.setMeta.mock.calls.findIndex(
+        (c) => c[0] === '__sys__:recv:ormap',
+      );
+      expect(markerCallIdx).toBeGreaterThanOrEqual(0);
+      const markerOrder = storage.setMeta.mock.invocationCallOrder[markerCallIdx];
+      const putOrder = storage.put.mock.invocationCallOrder[0];
+      // Marker-first: a crash between them leaves the map DISCOVERABLE, never a
+      // durable record with no marker (which would reopen the invisible-store hole).
+      expect(markerOrder).toBeLessThan(putOrder);
+    });
+
+    test('backfill discriminates OR (array) from LWW (object) and is gated by the durable done-flag', async () => {
+      const storage = statefulStorage({
+        kv: {
+          'orm:1': [rec(1)],
+          'lww:1': { value: 42, timestamp: { millis: 1, counter: 0, nodeId: 'n' } },
+        },
+      });
+
+      await startEngine(storage);
+
+      expect(await storage.getMeta('__sys__:orm:ormap')).toBe(1); // array → OR, marked
+      expect(await storage.getMeta('__sys__:lww:ormap')).toBeUndefined(); // object → LWW, not marked
+      expect(await storage.getMeta('__sys__:ormapBackfillDone')).toBe(true);
+
+      // A second connection does NOT re-scan the keyspace (done-flag gates it): no
+      // further get() calls are issued by backfill (the OR store is already in
+      // this.maps from the first restore, so nothing re-reads it either).
+      const getCallsBefore = storage.get.mock.calls.length;
+      await (syncEngine as any).startMerkleSync();
+      expect(storage.get.mock.calls.length).toBe(getCallsBefore);
+    });
+
+    test('backfill failure fail-closes the connection (ACKs suppressed, done-flag left unset for retry)', async () => {
+      const storage = statefulStorage({ kv: { 'x:1': [rec(1)] } });
+      // The one-time scan's keyspace read fails — enumeration must NOT silently
+      // proceed over a partial universe. Persistent (not Once) so both the auth-
+      // driven fire-and-forget startMerkleSync AND the explicit one below see it.
+      storage.getAllKeys.mockRejectedValue(new Error('idb unavailable'));
+
+      const ws = await startEngine(storage);
+
+      expect((syncEngine as any).heldSetIncomplete).toBe(true);
+      // Done-flag left unset → the migration retries on the next connection.
+      expect(await storage.getMeta('__sys__:ormapBackfillDone')).toBeUndefined();
+      // No ACK may be emitted — the held universe is unknown for this connection.
+      (syncEngine as any).applyMapCoverage('x', 5);
+      expect(acksOn(ws)).toEqual([]);
+
+      // A later connection whose scan succeeds recovers and stamps the marker.
+      storage.getAllKeys.mockImplementation(async () => ['x:1']);
+      await (syncEngine as any).startMerkleSync();
+      expect((syncEngine as any).heldSetIncomplete).toBe(false);
+      expect(await storage.getMeta('__sys__:x:ormap')).toBe(1);
     });
   });
 });

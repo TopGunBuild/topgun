@@ -162,6 +162,26 @@ function epochOfServerEvent(payload: unknown): number {
   return typeof epoch === 'number' && Number.isFinite(epoch) && epoch > 0 ? epoch : 0;
 }
 
+// Eager per-OR-Map existence marker. Written at the FIRST durable OR-state write
+// for a map (both the local-write commit AND the server-origin persist helpers),
+// so the covering-epoch held-set snapshot can discover EVERY persisted OR-Map —
+// including an add-only map that never wrote a `:tombstones` meta-key. Without
+// this, a lazily-opened add-only store is invisible to the snapshot and the
+// device ACK can advance past its un-received tombstones (the cross-map
+// resurrection vector). See `computeHeldOrMapNames` / `ensureOrMapMarker`.
+const orMapMarkerKey = (mapName: string): string => `__sys__:${mapName}:ormap`;
+// Set ONCE after the legacy-store backfill scan succeeds. Its ABSENCE forces the
+// backfill to (re-)run inside `computeHeldOrMapNames`; a scan failure leaves it
+// unset so the next connection retries — and the throw fail-closes this
+// connection's ACKs. Deliberately NOT of the form `__sys__:*:ormap|tombstones`
+// so it is never matched as a held-map name by the enumeration regex.
+const ORMAP_BACKFILL_DONE_KEY = '__sys__:ormapBackfillDone';
+// Discovers a held OR-Map name from either meta-marker: the eager `:ormap`
+// existence marker (post-fix + backfilled stores) OR the legacy `:tombstones`
+// key (belt-and-suspenders — a pre-fix store that HAS a tombstone but somehow
+// escaped backfill is still discoverable).
+const HELD_ORMAP_META_RE = /^__sys__:(.+):(?:ormap|tombstones)$/;
+
 export class SyncEngine {
   private readonly nodeId: string;
   private readonly storageAdapter: IStorageAdapter;
@@ -239,6 +259,13 @@ export class SyncEngine {
   private heldSetIncomplete = false;
   // De-noises the fail-closed path: warn once per connection, not per apply.
   private heldSetIncompleteWarned = false;
+  // Once-per-SESSION guard for the eager `:ormap` existence marker: names whose
+  // marker we have already ensured this process lifetime. The marker is durable,
+  // so re-ensuring after a restart is a harmless idempotent setMeta; this Set
+  // just keeps the common OR-write path from issuing a redundant marker write on
+  // every add/remove. NOT reset per connection (the durable marker outlives a
+  // reconnect).
+  private markedOrMaps: Set<string> = new Set();
   private authToken: string | null = null;
   private tokenProvider: (() => Promise<string | null>) | null = null;
   private onAuthRequired: ((error: AuthRequiredError) => void) | null = null;
@@ -807,8 +834,13 @@ export class SyncEngine {
       // case — a PERSISTED store from a prior session that the snapshot failed
       // to see — is NOT handled here and never reaches this path: enumeration
       // failure fail-closes the whole connection's ACKs via heldSetIncomplete
-      // (see startMerkleSync), and a successful enumeration puts every
-      // persisted store in the snapshot before the first ACK can fire.
+      // (see startMerkleSync), and a successful enumeration now puts EVERY
+      // persisted OR-Map in the snapshot before the first ACK can fire — every
+      // durably-written OR-Map carries an eager `:ormap` existence marker (both
+      // write seams) and legacy pre-marker stores are stamped by the one-time
+      // backfill, so even an add-only persisted store (no `:tombstones` key) is
+      // discovered. A map surfacing here is therefore genuinely-new, not a missed
+      // persisted one.
       this.heldOrMapNames.add(mapName);
       if (!this.orMapCoverage.has(mapName)) {
         this.orMapCoverage.set(mapName, 0);
@@ -820,13 +852,22 @@ export class SyncEngine {
    * The consistent snapshot of every OR-Map this device holds locally: OR-Map
    * instances already registered in `this.maps`, UNION the OR-Map stores the
    * storage adapter has persisted from a prior session but this process has not
-   * (yet) instantiated via `getORMap()`. Enumerated from the reserved
-   * `__sys__:{mapName}:tombstones` meta-key convention (see `TopGunClient`).
+   * (yet) instantiated via `getORMap()`. Enumerated from the reserved OR-Map
+   * meta-keys — the eager `:ormap` existence marker (written at the first durable
+   * OR write, so add-only stores are included) OR the legacy `:tombstones` key.
    * Snapshot semantics are mandatory (see startMerkleSync): a racily/lazily
    * discovered non-empty store must never be missing from the FIRST snapshot
    * taken this connection, or the exact cross-map ACK-inflation gap reopens.
    *
-   * THROWS on enumeration failure — deliberately fail-closed. Swallowing the
+   * Runs the one-time legacy-store backfill FIRST (idempotent, gated by a durable
+   * done-flag) so a pre-fix add-only store — which has neither marker — is stamped
+   * with a `:ormap` marker before enumeration reads it. Backfill inside the snapshot
+   * computation (not a separate suppress-until-migrated flag) makes held-set
+   * incompleteness impossible at EVERY instant: either the backfill has completed
+   * and every persisted OR-Map carries a marker, or it throws and this connection
+   * fail-closes below.
+   *
+   * THROWS on enumeration/backfill failure — deliberately fail-closed. Swallowing the
    * error and returning the in-memory-maps-only subset would hand the
    * min-barrier a PARTIAL held-set: a persisted store the snapshot silently
    * missed could then hold un-received tombstones while the device's ACK
@@ -835,6 +876,7 @@ export class SyncEngine {
    * connection-wide ACK suppression (heldSetIncomplete) instead.
    */
   private async computeHeldOrMapNames(): Promise<Set<string>> {
+    await this.backfillLegacyOrMapMarkers();
     const held = new Set<string>();
     for (const [mapName, map] of this.maps) {
       if (map instanceof ORMap) {
@@ -843,12 +885,66 @@ export class SyncEngine {
     }
     const metaKeys = await this.storageAdapter.getAllMetaKeys();
     for (const key of metaKeys) {
-      const match = /^__sys__:(.+):tombstones$/.exec(key);
+      const match = HELD_ORMAP_META_RE.exec(key);
       if (match) {
         held.add(match[1]);
       }
     }
     return held;
+  }
+
+  /**
+   * One-time migration for stores persisted BEFORE the eager `:ormap` marker
+   * existed. A pre-fix add-only OR-Map has KV records but no `:ormap` marker and
+   * (being add-only) no `:tombstones` key either, so it is invisible to the
+   * held-set snapshot — the cross-map ACK-inflation vector for legacy data. This
+   * scans the KV keyspace once, attributes every OR-Map by data shape, and stamps
+   * its marker so subsequent snapshots discover it in O(1).
+   *
+   * Correctness notes:
+   * - Scans ALL keys (never a sample): a missed add-only map with a single key is
+   *   exactly the bug. A name is classified OR the moment ANY key under its prefix
+   *   holds an ARRAY (the ORMap records-array shape; an LWWRecord is always a single
+   *   object, never a bare array), so a `:`-prefix collision (TODO-577) with an LWW
+   *   value only ever ADDS a phantom OR name (over-conservative: coverage 0 until it
+   *   syncs), never hides a real one.
+   * - Gated by a durable done-flag set ONLY on success. A throw propagates to
+   *   `computeHeldOrMapNames` → the connection fail-closes (heldSetIncomplete) and
+   *   the scan is retried on the next connection. This makes the upgrade path safe
+   *   even though the server cursor keyspace was reset to `_v2` (a fresh cursor has
+   *   no conservative fallback, so an unmarked legacy add-only map would otherwise
+   *   let the device build inflated ACKs on first prune).
+   */
+  private async backfillLegacyOrMapMarkers(): Promise<void> {
+    if (await this.storageAdapter.getMeta(ORMAP_BACKFILL_DONE_KEY)) return;
+
+    const keys = await this.storageAdapter.getAllKeys();
+    const orNames = new Set<string>();
+    for (const fullKey of keys) {
+      const ci = fullKey.indexOf(':');
+      if (ci <= 0) continue;
+      const name = fullKey.substring(0, ci);
+      if (orNames.has(name)) continue; // already attributed OR — skip redundant reads
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- shape is discriminated by Array.isArray below; the OR-Map records-array vs LWWRecord-object distinction is all we need
+      const value = await this.storageAdapter.get<any>(fullKey);
+      if (Array.isArray(value)) {
+        orNames.add(name);
+      }
+    }
+
+    for (const name of orNames) {
+      await this.storageAdapter.setMeta(orMapMarkerKey(name), 1);
+      this.markedOrMaps.add(name);
+    }
+    // Set the done-flag LAST — only a fully-successful scan is recorded, so any
+    // failure above leaves it unset and the migration retries next connection.
+    await this.storageAdapter.setMeta(ORMAP_BACKFILL_DONE_KEY, true);
+    if (orNames.size > 0) {
+      logger.info(
+        { orMapNames: Array.from(orNames) },
+        'Backfilled OR-Map existence markers for legacy persisted stores',
+      );
+    }
   }
 
   /**
@@ -1005,6 +1101,21 @@ export class SyncEngine {
       synced: false,
     };
 
+    // Stamp the eager OR-Map existence marker in the SAME transaction as the first
+    // durable OR write for this map (local-write seam). Bundling it into `mutations`
+    // makes marker-and-data atomic — no crash window in which the records are durable
+    // but the marker (and therefore the held-set membership) is not. Once per session,
+    // and the in-memory guard is set only AFTER the commit succeeds (below) so a
+    // rejected commit does not leave the map flagged-but-unmarked.
+    const stampingOrMapMarker =
+      (opType === 'OR_ADD' || opType === 'OR_REMOVE') &&
+      mutations !== undefined &&
+      mutations.length > 0 &&
+      !this.markedOrMaps.has(mapName);
+    if (stampingOrMapMarker && mutations) {
+      mutations.unshift({ store: 'meta', type: 'put', key: orMapMarkerKey(mapName), value: 1 });
+    }
+
     // Commit-first ordering: persist durably BEFORE touching the in-memory opLog. If the
     // commit rejects, no op is pushed — the in-memory opLog and the durable op_log stay
     // consistent (no op-without-record in either layer) — and we rethrow so the caller's
@@ -1017,6 +1128,11 @@ export class SyncEngine {
         : // eslint-disable-next-line @typescript-eslint/no-explicit-any -- IStorageAdapter.appendOpLog accepts any; the op log entry is typed internally but the adapter interface is backend-agnostic
           await this.storageAdapter.appendOpLog(opLogEntry as any);
     opLogEntry.id = String(id);
+    // Commit succeeded and the marker (if any) is now durable — arm the guard so we
+    // don't re-stamp it on every subsequent write to this map.
+    if (stampingOrMapMarker) {
+      this.markedOrMaps.add(mapName);
+    }
 
     this.opLog.push(opLogEntry as OpLogEntry);
     // Notify per-record sync-state tracker on fresh local write.
@@ -1705,6 +1821,12 @@ export class SyncEngine {
   public async persistORMapKey(mapName: string, key: string): Promise<void> {
     const map = this.maps.get(mapName);
     if (!(map instanceof ORMap)) return;
+    // Marker BEFORE data: the server-origin persist path writes marker and data as
+    // two separate storage calls (no transaction here). Writing the marker first
+    // means a crash in between leaves the map DISCOVERABLE (marker present, coverage
+    // 0, ACKs stalled until it syncs) — over-conservative but safe. The reverse order
+    // would leave durable records with no marker, reopening the invisible-store hole.
+    await this.ensureOrMapMarker(mapName);
     const records = map.getRecords(key);
     if (records.length > 0) {
       await this.storageAdapter.put(`${mapName}:${key}`, records);
@@ -1717,7 +1839,21 @@ export class SyncEngine {
   public async persistORMapTombstones(mapName: string): Promise<void> {
     const map = this.maps.get(mapName);
     if (!(map instanceof ORMap)) return;
+    await this.ensureOrMapMarker(mapName);
     await this.storageAdapter.setMeta(`__sys__:${mapName}:tombstones`, map.getTombstones());
+  }
+
+  /**
+   * Idempotently write the eager `:ormap` existence marker for `mapName` (once per
+   * session). Shared by the server-origin persist helpers; the local-write seam
+   * stamps the marker transactionally inside `recordOperation` instead. Keeping BOTH
+   * durable-write seams marked is what makes the held-set snapshot complete for the
+   * add-only class — the local path does NOT flow through these helpers.
+   */
+  private async ensureOrMapMarker(mapName: string): Promise<void> {
+    if (this.markedOrMaps.has(mapName)) return;
+    await this.storageAdapter.setMeta(orMapMarkerKey(mapName), 1);
+    this.markedOrMaps.add(mapName);
   }
 
   /**
@@ -1897,6 +2033,16 @@ export class SyncEngine {
     for (const key of mapKeys) {
       await this.storageAdapter.remove(key);
     }
+    // Drop the session guard so a later write re-stamps the durable marker. The
+    // reserved OR-Map meta (`:ormap` existence marker + `:tombstones` set) is left
+    // in place: the meta interface has no delete primitive (only setMeta, which
+    // stores undefined rather than removing the key), and a lingering marker only
+    // makes a fully-cleared map a self-healing PHANTOM in the next snapshot —
+    // included with coverage 0, then cleared to nothing and its empty sync conveys
+    // a covering epoch that advances coverage. Over-conservative, never incorrect,
+    // and pre-existing for `:tombstones`. A real meta-delete (`removeMeta`) is
+    // tracked as a follow-up rather than paid for with an adapter-wide cascade here.
+    this.markedOrMaps.delete(mapName);
     logger.info(
       { mapName, removedStorageCount: mapKeys.length },
       'Reset map: Cleared memory and storage',
