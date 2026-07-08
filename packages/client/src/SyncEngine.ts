@@ -905,9 +905,19 @@ export class SyncEngine {
    * - Scans ALL keys (never a sample): a missed add-only map with a single key is
    *   exactly the bug. A name is classified OR the moment ANY key under its prefix
    *   holds an ARRAY (the ORMap records-array shape; an LWWRecord is always a single
-   *   object, never a bare array), so a `:`-prefix collision (TODO-577) with an LWW
-   *   value only ever ADDS a phantom OR name (over-conservative: coverage 0 until it
-   *   syncs), never hides a real one.
+   *   object, never a bare array), so a `:`-prefix collision (TODO-577) between the
+   *   FIRST-colon-split name and an LWW *value* only ever ADDS a phantom OR name
+   *   (over-conservative: coverage 0 until it syncs), never hides a real one.
+   * - KNOWN GAP (TODO-577, latent until the durability watermark activates): the
+   *   first-colon split (`indexOf(':')`) means a map whose NAME contains a colon
+   *   (`"a:b"`, data key `"a:b:k"`) is attributed to `"a"`, so its own `:ormap`
+   *   marker is never stamped. If a sibling `"a"` also exists and syncs while `"a:b"`
+   *   is never re-opened this session, the min-barrier CAN advance past `"a:b"`'s
+   *   un-received tombstones — i.e. this colon-in-NAME case CAN hide a real map,
+   *   unlike the colon-in-value case above. Legacy-backfill-only (every post-fix map
+   *   stamps its marker under its full name; `HELD_ORMAP_META_RE`'s greedy capture
+   *   recovers colon names correctly). Closed by forbidding `:` in map names or an
+   *   injective key scheme — see TODO-577.
    * - Gated by a durable done-flag set ONLY on success. A throw propagates to
    *   `computeHeldOrMapNames` → the connection fail-closes (heldSetIncomplete) and
    *   the scan is retried on the next connection. This makes the upgrade path safe
