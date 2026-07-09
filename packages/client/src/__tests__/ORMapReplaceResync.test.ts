@@ -17,6 +17,8 @@ class MemoryAdapter implements IStorageAdapter {
   public meta = new Map<string, unknown>();
   public ops: StorageOpLogEntry[] = [];
   public deletedOpIds: number[] = [];
+  // Op ids whose durable delete must FAIL (to exercise the fail-closed abort path).
+  public failDeleteOpIds = new Set<number>();
 
   async initialize(): Promise<void> {}
   async close(): Promise<void> {}
@@ -55,6 +57,9 @@ class MemoryAdapter implements IStorageAdapter {
     this.ops = this.ops.filter((o) => (o.id ?? 0) > lastId);
   }
   async deleteOp(id: number): Promise<void> {
+    if (this.failDeleteOpIds.has(id)) {
+      throw new Error(`simulated durable deleteOp failure for id ${id}`);
+    }
     this.deletedOpIds.push(id);
     this.ops = this.ops.filter((o) => o.id !== id);
   }
@@ -154,5 +159,67 @@ describe('SyncEngine REPLACE resync — pending-oplog HLC discard (AC15)', () =>
 
     const remaining = eng.opLog.map((o: OpLogEntry) => `${o.mapName}:${o.id}`);
     expect(remaining).toEqual(['other:3']);
+  });
+
+  test('a subsumed op whose durable delete FAILS aborts the resync (op survives in BOTH memory and disk — never dropped-from-memory-but-kept-on-disk)', async () => {
+    const adapter = new MemoryAdapter();
+    const engine = new SyncEngine({
+      nodeId: 'n1',
+      connectionProvider: new NullConnectionProvider(),
+      storageAdapter: adapter,
+    });
+    await new Promise((r) => setTimeout(r, 25));
+
+    const hlc = new HLC('n1');
+    const preTs = hlc.now();
+    const boundary = hlc.now(); // strictly after preTs
+
+    const map = new ORMap<string, string>(hlc);
+    engine.registerMap('tags', map);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test seeds the private opLog
+    const eng = engine as any;
+    eng.opLog.push(orOp('1', 'kPre', '10:0:n1', preTs));
+    adapter.ops.push({ id: 1 } as StorageOpLogEntry);
+    // Force the durable delete of the subsumed op to fail.
+    adapter.failDeleteOpIds.add(1);
+
+    await expect(eng.replaceOrMapFromSnapshot('tags', boundary)).rejects.toThrow();
+
+    // Fail-closed: the subsumed op must NOT have been dropped from memory while
+    // surviving on disk — it stays recoverable in BOTH layers so the retried resync
+    // re-attempts its durable delete rather than resurrecting it on the next restart.
+    const remainingIds = eng.opLog.map((o: OpLogEntry) => o.id);
+    expect(remainingIds).toContain('1');
+    expect(adapter.ops.some((o) => o.id === 1)).toBe(true);
+    expect(adapter.deletedOpIds).not.toContain(1);
+  });
+
+  test('a subsumed op with a non-numeric id is a HARD failure (abort), not a silent skip that leaves it durably retained', async () => {
+    const adapter = new MemoryAdapter();
+    const engine = new SyncEngine({
+      nodeId: 'n1',
+      connectionProvider: new NullConnectionProvider(),
+      storageAdapter: adapter,
+    });
+    await new Promise((r) => setTimeout(r, 25));
+
+    const hlc = new HLC('n1');
+    const preTs = hlc.now();
+    const boundary = hlc.now();
+
+    const map = new ORMap<string, string>(hlc);
+    engine.registerMap('tags', map);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test seeds the private opLog
+    const eng = engine as any;
+    eng.opLog.push(orOp('not-a-number', 'kPre', '10:0:n1', preTs));
+
+    await expect(eng.replaceOrMapFromSnapshot('tags', boundary)).rejects.toThrow();
+
+    // The un-addressable op stays in memory (not silently spliced) — it is never
+    // dropped-from-memory-but-kept-on-disk.
+    const remainingIds = eng.opLog.map((o: OpLogEntry) => o.id);
+    expect(remainingIds).toContain('not-a-number');
   });
 });

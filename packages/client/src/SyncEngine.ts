@@ -1903,8 +1903,19 @@ export class SyncEngine {
       // follows re-persists the server-authoritative records + tombstones.
       await this.persistORMapTombstones(mapName);
     }
-    // Discard pending pre-snapshot OR ops (subsumed); keep at-or-after ops.
-    const idsToDelete: number[] = [];
+    // Discard pending pre-snapshot OR ops (subsumed by the authoritative snapshot);
+    // keep at-or-after ops so they re-drive through the gated write path.
+    //
+    // Fail-closed / atomic discard. `saveOpLog()` does NOT persist the opLog — it only
+    // writes the lastSyncTimestamp meta — so `storageAdapter.deleteOp(id)` is the ONLY
+    // durable removal of a subsumed op. Delete DURABLY FIRST, then splice from memory
+    // (never the reverse): a delete failure must never drop an op from memory while it
+    // survives on disk, because on restart that op reloads and re-drives through the
+    // gated write path, resurrecting the removed value once the server prunes its
+    // tombstone. If ANY subsumed op fails to delete durably, ABORT the whole REPLACE
+    // (throw) so the snapshot pull does not proceed on an inconsistent durable state;
+    // the resync is retried on the next sync round.
+    let discardedOps = 0;
     for (let i = this.opLog.length - 1; i >= 0; i--) {
       const op = this.opLog[i];
       if (op.mapName !== mapName) continue;
@@ -1912,24 +1923,32 @@ export class SyncEngine {
       const precedesSnapshot = snapshotBoundary
         ? HLC.compare(op.timestamp, snapshotBoundary) < 0
         : true;
-      if (precedesSnapshot) {
-        const numericId = parseInt(op.id, 10);
-        if (!isNaN(numericId)) idsToDelete.push(numericId);
-        this.opLog.splice(i, 1);
-      }
-    }
-    for (const id of idsToDelete) {
-      await this.storageAdapter
-        .deleteOp(id)
-        .catch((err) =>
-          logger.error({ err, id }, 'REPLACE resync: failed to delete subsumed pending op'),
+      if (!precedesSnapshot) continue;
+
+      // Op ids are always numeric: appendOpLog/commitWrite return a number
+      // (IndexedDB autoincrement) that recordOperation stores as `String(id)`. A
+      // non-numeric subsumed id therefore cannot be addressed for a durable delete;
+      // treat it as a HARD failure (abort), never a silent skip that would leave the
+      // op recoverable-and-forgotten on disk.
+      const numericId = parseInt(op.id, 10);
+      if (isNaN(numericId)) {
+        logger.error(
+          { mapName, opId: op.id },
+          'REPLACE resync: subsumed pending op has a non-numeric id; aborting rather than leaving it durably retained',
         );
-    }
-    if (idsToDelete.length > 0) {
-      await this.saveOpLog();
+        throw new Error(
+          `REPLACE resync aborted: subsumed pending op ${op.id} has a non-numeric id (cannot durably delete)`,
+        );
+      }
+      // Durable delete FIRST; do NOT swallow failure — an unresolved rejection
+      // propagates out of REPLACE (aborting it), leaving this op in BOTH memory and
+      // disk so state never diverges.
+      await this.storageAdapter.deleteOp(numericId);
+      this.opLog.splice(i, 1);
+      discardedOps++;
     }
     logger.info(
-      { mapName, discardedKeys: persistedKeys.length, discardedOps: idsToDelete.length },
+      { mapName, discardedKeys: persistedKeys.length, discardedOps },
       'ORMap REPLACE resync: discarded local state + subsumed pending ops, pulling snapshot',
     );
   }
