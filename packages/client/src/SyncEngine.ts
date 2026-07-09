@@ -465,6 +465,12 @@ export class SyncEngine {
       // only once every held map has proven delivery — never off a single map's
       // sync completion.
       onCoveringEpochApplied: (mapName, epoch) => this.applyMapCoverage(mapName, epoch),
+      // Authoritative full-snapshot REPLACE resync for a forgotten/regressed client:
+      // discard local OR-Map state + subsumed pending ops before pulling the snapshot.
+      onFullResync: (mapName, snapshotBoundary) =>
+        this.replaceOrMapFromSnapshot(mapName, snapshotBoundary),
+      // Report the confirmed-apply cursor on ORMAP_SYNC_INIT (regressed-replica detection).
+      getClaimedEpoch: () => this.lastAckedEpoch,
     });
 
     // Initialize Conflict Resolver client
@@ -1851,6 +1857,78 @@ export class SyncEngine {
     if (!(map instanceof ORMap)) return;
     await this.ensureOrMapMarker(mapName);
     await this.storageAdapter.setMeta(`__sys__:${mapName}:tombstones`, map.getTombstones());
+  }
+
+  /**
+   * Authoritative full-snapshot REPLACE resync for `mapName` (SPEC-342c R10). The
+   * server has FORGOTTEN or found this client REGRESSED, so an additive merge could
+   * re-admit a record whose tombstone was already pruned. DISCARD the materialized
+   * local OR-Map state (in memory AND durable per-key records + tombstone set) and
+   * every pending-oplog OR op for this map whose HLC PRECEDES the snapshot boundary
+   * — those are subsumed by the server snapshot and replaying them through the write
+   * path would resurrect the removed value. Pending ops AT-OR-AFTER the boundary are
+   * KEPT and re-driven through the normal gated push path (the server admits them
+   * once the client is re-tracked at the snapshot epoch).
+   *
+   * The comparable is the pending op's own HLC timestamp (stamped at op-creation)
+   * vs the snapshot's HLC boundary returned on the REPLACE root — REPLACE discards
+   * the materialized map where tag→add-epoch metadata lived, and un-acked pending
+   * ops carry no server-assigned epoch, so the HLC boundary is the client-side
+   * comparable. Trade-off: a regressed client's legitimate un-synced local writes
+   * preceding the boundary are silently discarded — a deliberate data-loss trade-off
+   * (the no-resurrection invariant dominates), not an invariant violation.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- snapshotBoundary is an HLC Timestamp forwarded from the sync root; compared via HLC.compare
+  private async replaceOrMapFromSnapshot(mapName: string, snapshotBoundary?: any): Promise<void> {
+    const map = this.maps.get(mapName);
+    // Capture the persisted keys BEFORE clearing so their durable records can be
+    // removed too — otherwise a reload would re-materialize the discarded state.
+    let persistedKeys: string[] = [];
+    if (map instanceof ORMap) {
+      persistedKeys = map.allKeys().map((k) => String(k));
+      map.clear(); // discard materialized local OR-Map state (authoritative REPLACE)
+    }
+    for (const key of persistedKeys) {
+      await this.storageAdapter
+        .remove(`${mapName}:${key}`)
+        .catch((err) =>
+          logger.error({ err, mapName, key }, 'REPLACE resync: failed to remove persisted OR-Map key'),
+        );
+    }
+    if (map instanceof ORMap) {
+      // Reset the persisted (now-empty) tombstone set; the snapshot pull that
+      // follows re-persists the server-authoritative records + tombstones.
+      await this.persistORMapTombstones(mapName);
+    }
+    // Discard pending pre-snapshot OR ops (subsumed); keep at-or-after ops.
+    const idsToDelete: number[] = [];
+    for (let i = this.opLog.length - 1; i >= 0; i--) {
+      const op = this.opLog[i];
+      if (op.mapName !== mapName) continue;
+      if (op.opType !== 'OR_ADD' && op.opType !== 'OR_REMOVE') continue;
+      const precedesSnapshot = snapshotBoundary
+        ? HLC.compare(op.timestamp, snapshotBoundary) < 0
+        : true;
+      if (precedesSnapshot) {
+        const numericId = parseInt(op.id, 10);
+        if (!isNaN(numericId)) idsToDelete.push(numericId);
+        this.opLog.splice(i, 1);
+      }
+    }
+    for (const id of idsToDelete) {
+      await this.storageAdapter
+        .deleteOp(id)
+        .catch((err) =>
+          logger.error({ err, id }, 'REPLACE resync: failed to delete subsumed pending op'),
+        );
+    }
+    if (idsToDelete.length > 0) {
+      await this.saveOpLog();
+    }
+    logger.info(
+      { mapName, discardedKeys: persistedKeys.length, discardedOps: idsToDelete.length },
+      'ORMap REPLACE resync: discarded local state + subsumed pending ops, pulling snapshot',
+    );
   }
 
   /**

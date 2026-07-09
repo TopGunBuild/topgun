@@ -26,12 +26,34 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
     mapName: string;
     rootHash: number;
     coveringEpoch?: number;
+    fullResync?: boolean;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- server timestamp shape is implementation-defined (HLC or raw ms); passed through to onTimestampUpdate without inspection
     timestamp?: any;
   }): Promise<void> {
-    const { mapName, rootHash, coveringEpoch, timestamp } = payload;
+    const { mapName, rootHash, coveringEpoch, fullResync, timestamp } = payload;
     const map = this.config.getMap(mapName);
     if (map instanceof ORMap) {
+      if (fullResync) {
+        // Authoritative REPLACE resync: the server has FORGOTTEN or found this
+        // client REGRESSED, so an incremental delta could re-admit a record whose
+        // tombstone was already pruned (the server no longer holds the per-tag
+        // epoch to suppress it). DISCARD the materialized local OR-Map AND every
+        // pending pre-snapshot op, then pull the full server snapshot: the now-empty
+        // local tree makes the merkle walk transfer the server's entire state. The
+        // covering epoch is deliberately NOT confirmed here — it is confirmed only
+        // after the snapshot leaves are durably applied, which is what re-enables
+        // this client's ACKs server-side (delivered_conn set on resync completion).
+        await this.config.onFullResync(mapName, timestamp);
+        logger.info({ mapName }, 'ORMap full-resync REPLACE: discarded local state, pulling snapshot');
+        this.config.sendMessage({
+          type: 'ORMAP_MERKLE_REQ_BUCKET',
+          payload: { mapName, path: '' },
+        });
+        if (timestamp) {
+          await this.config.onTimestampUpdate(timestamp);
+        }
+        return;
+      }
       const localTree = map.getMerkleTree();
       const localRootHash = localTree.getRootHash();
 
@@ -269,6 +291,9 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
         rootHash,
         bucketHashes,
         lastSyncTimestamp,
+        // Report the client's confirmed-apply cursor so the server can detect a
+        // REGRESSED replica (claim < stored cursor) and route it to a full resync.
+        claimedEpoch: this.config.getClaimedEpoch(),
       });
     }
   }

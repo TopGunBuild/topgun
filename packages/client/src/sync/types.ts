@@ -975,6 +975,11 @@ export interface IORMapSyncHandler {
   handleORMapSyncRespRoot(payload: {
     mapName: string;
     rootHash: number;
+    coveringEpoch?: number;
+    // When true, the server has FORGOTTEN/REGRESSED this client: perform an
+    // authoritative full-snapshot REPLACE resync (discard local + pending
+    // pre-snapshot ops, adopt the server snapshot) instead of an incremental delta.
+    fullResync?: boolean;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- sync timestamp is an HLC-encoded value whose exact shape is validated in the sync handler, not at the interface boundary
     timestamp?: any;
   }): Promise<void>;
@@ -1090,6 +1095,26 @@ export interface ORMapSyncHandlerConfig {
    * coverage instead of permanently pinning the barrier at 0.
    */
   onCoveringEpochApplied: (mapName: string, epoch: number) => void;
+
+  /**
+   * Perform an authoritative full-snapshot REPLACE resync for `mapName`: DISCARD
+   * the materialized local OR-Map state AND every pending-oplog op for this map
+   * whose HLC precedes `snapshotBoundary` (those are subsumed by the server
+   * snapshot — replaying them after the tombstone was pruned would resurrect via
+   * the write path). Ops at-or-after the boundary are KEPT and re-driven through
+   * the normal gated push path. Wired by SyncEngine to `replaceOrMapFromSnapshot`.
+   * Invoked BEFORE the client pulls the server snapshot (its now-empty tree makes
+   * the merkle walk transfer the full server state).
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- snapshotBoundary is an HLC Timestamp; typed as any here to avoid a hard cross-package import in this types file
+  onFullResync: (mapName: string, snapshotBoundary: any) => Promise<void>;
+
+  /**
+   * The client's locally-persisted confirmed-apply cursor (its `lastAckedEpoch`),
+   * reported on ORMAP_SYNC_INIT as `claimedEpoch` so the server can detect a
+   * REGRESSED replica (`claim < stored_cursor`). Wired by SyncEngine.
+   */
+  getClaimedEpoch: () => number;
 }
 
 // ============================================

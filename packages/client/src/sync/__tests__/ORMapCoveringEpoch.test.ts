@@ -11,9 +11,15 @@ describe('ORMapSyncHandler covering-epoch ACK', () => {
   function makeHandler(map: ORMap<string, string>) {
     const acked: number[] = [];
     const ackedForMap: Array<{ mapName: string; epoch: number }> = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- captured sent messages have no fixed shape at the test boundary
+    const sent: any[] = [];
+    const fullResyncs: Array<{ mapName: string; boundary: unknown }> = [];
     const handler = new ORMapSyncHandler({
       getMap: () => map,
-      sendMessage: () => true,
+      sendMessage: (msg) => {
+        sent.push(msg);
+        return true;
+      },
       hlc: new HLC('n1'),
       onTimestampUpdate: async () => {},
       persistKey: async () => {},
@@ -22,8 +28,12 @@ describe('ORMapSyncHandler covering-epoch ACK', () => {
         acked.push(epoch);
         ackedForMap.push({ mapName, epoch });
       },
+      onFullResync: async (mapName, boundary) => {
+        fullResyncs.push({ mapName, boundary });
+      },
+      getClaimedEpoch: () => 42,
     });
-    return { handler, acked, ackedForMap };
+    return { handler, acked, ackedForMap, sent, fullResyncs };
   }
 
   test('empty diff (root matches) confirms the conveyed covering epoch', async () => {
@@ -89,6 +99,41 @@ describe('ORMapSyncHandler covering-epoch ACK', () => {
     });
 
     expect(acked).toEqual([3]);
+  });
+
+  test('fullResync routes to REPLACE: discards local, pulls snapshot, does NOT ACK at root', async () => {
+    const map = new ORMap<string, string>(new HLC('n1'));
+    map.add('list1', 'stale'); // some local state to discard
+    const { handler, acked, sent, fullResyncs } = makeHandler(map);
+    const boundary = new HLC('n1').now();
+
+    // Even though the covering epoch is conveyed, a full_resync must NOT confirm it
+    // at root time — the ACK is deferred to post-snapshot apply (delivered_conn on
+    // completion). It must trigger the REPLACE discard and pull the snapshot.
+    await handler.handleORMapSyncRespRoot({
+      mapName: 'tags',
+      rootHash: 999,
+      coveringEpoch: 5,
+      fullResync: true,
+      timestamp: boundary,
+    });
+
+    expect(acked).toEqual([]); // no covering-epoch ACK on a REPLACE root
+    expect(fullResyncs).toEqual([{ mapName: 'tags', boundary }]);
+    // Pulls the full snapshot via a merkle bucket request at the root path.
+    expect(sent).toContainEqual({
+      type: 'ORMAP_MERKLE_REQ_BUCKET',
+      payload: { mapName: 'tags', path: '' },
+    });
+  });
+
+  test('sendSyncInit reports the confirmed-apply cursor as claimedEpoch', () => {
+    const map = new ORMap<string, string>(new HLC('n1'));
+    const { handler, sent } = makeHandler(map);
+    handler.sendSyncInit('tags', 0);
+    const init = sent.find((m) => m.type === 'ORMAP_SYNC_INIT');
+    expect(init).toBeDefined();
+    expect(init.claimedEpoch).toBe(42);
   });
 
   test('a missing / zero covering epoch is never ACKed (nothing stamped)', async () => {
