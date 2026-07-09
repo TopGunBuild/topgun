@@ -78,6 +78,9 @@ class MemoryStorageAdapter implements IStorageAdapter {
   async getAllKeys(): Promise<string[]> {
     return Array.from(this.kv.keys());
   }
+  async getAllMetaKeys(): Promise<string[]> {
+    return Array.from(this.meta.keys());
+  }
 }
 
 /**

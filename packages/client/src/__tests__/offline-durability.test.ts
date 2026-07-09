@@ -255,6 +255,9 @@ describe('Offline durability (SPEC-321 — F3/F4/F5/F6)', () => {
         onTimestampUpdate: async () => {},
         persistKey,
         persistTombstones,
+        onCoveringEpochApplied: () => {},
+        onFullResync: async () => {},
+        getClaimedEpoch: () => 0,
       });
 
       await handler.handleORMapDiffResponse({

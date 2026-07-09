@@ -95,6 +95,10 @@ class MemoryStorageAdapter implements IStorageAdapter {
   async getAllKeys(): Promise<string[]> {
     return Array.from(this.data.keys());
   }
+
+  async getAllMetaKeys(): Promise<string[]> {
+    return Array.from(this.meta.keys());
+  }
 }
 
 describe('TopGunAdapter', () => {

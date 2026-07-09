@@ -975,6 +975,11 @@ export interface IORMapSyncHandler {
   handleORMapSyncRespRoot(payload: {
     mapName: string;
     rootHash: number;
+    coveringEpoch?: number;
+    // When true, the server has FORGOTTEN/REGRESSED this client: perform an
+    // authoritative full-snapshot REPLACE resync (discard local + pending
+    // pre-snapshot ops, adopt the server snapshot) instead of an incremental delta.
+    fullResync?: boolean;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- sync timestamp is an HLC-encoded value whose exact shape is validated in the sync handler, not at the interface boundary
     timestamp?: any;
   }): Promise<void>;
@@ -1076,6 +1081,40 @@ export interface ORMapSyncHandlerConfig {
    * Persist an ORMap's tombstone set. Wired by SyncEngine to `persistORMapTombstones`.
    */
   persistTombstones: (mapName: string) => Promise<void>;
+
+  /**
+   * Confirm to the server that `mapName`'s OR-Map sync data is durably applied
+   * up to `epoch` (the covering epoch conveyed on the sync response). Wired by
+   * SyncEngine to `applyMapCoverage`, which folds this map's coverage into the
+   * device-wide MIN across every OR-Map this device holds (the per-connection
+   * held-map snapshot) before emitting a monotonic CLIENT_APPLY_ACK — a single
+   * map's sync completion can never on its own license an ACK that outruns
+   * another held map's actual delivery (the cross-map ACK-inflation fix).
+   * Called AFTER the response's entries are persisted — including on an empty
+   * diff (root already matches), so an up-to-date map still contributes its
+   * coverage instead of permanently pinning the barrier at 0.
+   */
+  onCoveringEpochApplied: (mapName: string, epoch: number) => void;
+
+  /**
+   * Perform an authoritative full-snapshot REPLACE resync for `mapName`: DISCARD
+   * the materialized local OR-Map state AND every pending-oplog op for this map
+   * whose HLC precedes `snapshotBoundary` (those are subsumed by the server
+   * snapshot — replaying them after the tombstone was pruned would resurrect via
+   * the write path). Ops at-or-after the boundary are KEPT and re-driven through
+   * the normal gated push path. Wired by SyncEngine to `replaceOrMapFromSnapshot`.
+   * Invoked BEFORE the client pulls the server snapshot (its now-empty tree makes
+   * the merkle walk transfer the full server state).
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- snapshotBoundary is an HLC Timestamp; typed as any here to avoid a hard cross-package import in this types file
+  onFullResync: (mapName: string, snapshotBoundary: any) => Promise<void>;
+
+  /**
+   * The client's locally-persisted confirmed-apply cursor (its `lastAckedEpoch`),
+   * reported on ORMAP_SYNC_INIT as `claimedEpoch` so the server can detect a
+   * REGRESSED replica (`claim < stored_cursor`). Wired by SyncEngine.
+   */
+  getClaimedEpoch: () => number;
 }
 
 // ============================================

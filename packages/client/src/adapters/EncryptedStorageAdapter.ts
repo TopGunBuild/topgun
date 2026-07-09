@@ -439,6 +439,11 @@ export class EncryptedStorageAdapter implements IStorageAdapter {
     return this.wrapped.getAllKeys();
   }
 
+  // Key names are never encrypted (only values are) — a plain passthrough is correct.
+  async getAllMetaKeys(): Promise<string[]> {
+    return this.wrapped.getAllMetaKeys();
+  }
+
   // --- Helpers ---
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- type guard accepts unknown/any to check structural shape at runtime; narrowing produces the typed result

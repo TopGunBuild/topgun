@@ -22,7 +22,7 @@ pub mod messaging;
 
 pub use base::{
     AggFunc, Aggregation, AuthMessage, AuthRequiredMessage, ChangeEventType, ClientOp,
-    PredicateNode, PredicateOp, Query, SortDirection, WriteConcern,
+    DeviceHelloMessage, PredicateNode, PredicateOp, Query, SortDirection, WriteConcern,
 };
 
 pub use cluster::{
@@ -55,19 +55,19 @@ pub use search::{
 };
 
 pub use sync::{
-    BatchMessage, ClientOpMessage, MerkleReqBucketMessage, MerkleReqBucketPayload,
-    ORMapDiffRequest, ORMapDiffRequestPayload, ORMapDiffResponse, ORMapDiffResponsePayload,
-    ORMapEntry, ORMapMerkleReqBucket, ORMapMerkleReqBucketPayload, ORMapPushDiff,
-    ORMapPushDiffPayload, ORMapSyncInit, ORMapSyncRespBuckets, ORMapSyncRespBucketsPayload,
-    ORMapSyncRespLeaf, ORMapSyncRespLeafPayload, ORMapSyncRespRoot, ORMapSyncRespRootPayload,
-    OpAckMessage, OpAckPayload, OpBatchMessage, OpBatchPayload, OpRejectedMessage,
-    OpRejectedPayload, OpResult, SyncInitMessage, SyncLeafRecord, SyncRespBucketsMessage,
-    SyncRespBucketsPayload, SyncRespLeafMessage, SyncRespLeafPayload, SyncRespRootMessage,
-    SyncRespRootPayload,
+    BatchMessage, ClientApplyAckMessage, ClientOpMessage, MerkleReqBucketMessage,
+    MerkleReqBucketPayload, ORMapDiffRequest, ORMapDiffRequestPayload, ORMapDiffResponse,
+    ORMapDiffResponsePayload, ORMapEntry, ORMapMerkleReqBucket, ORMapMerkleReqBucketPayload,
+    ORMapPushDiff, ORMapPushDiffPayload, ORMapSyncInit, ORMapSyncRespBuckets,
+    ORMapSyncRespBucketsPayload, ORMapSyncRespLeaf, ORMapSyncRespLeafPayload, ORMapSyncRespRoot,
+    ORMapSyncRespRootPayload, OpAckMessage, OpAckPayload, OpBatchMessage, OpBatchPayload,
+    OpRejectedMessage, OpRejectedPayload, OpResult, SyncInitMessage, SyncLeafRecord,
+    SyncRespBucketsMessage, SyncRespBucketsPayload, SyncRespLeafMessage, SyncRespLeafPayload,
+    SyncRespRootMessage, SyncRespRootPayload,
 };
 
 pub use client_events::{
-    AuthAckData, AuthFailData, ErrorPayload, GcPrunePayload, LockGrantedPayload,
+    AuthAckData, AuthFailData, DeviceAckData, ErrorPayload, GcPrunePayload, LockGrantedPayload,
     LockReleasedPayload, QueryUpdatePayload, ServerBatchEventPayload, ServerEventPayload,
     ServerEventType, SyncResetRequiredPayload,
 };
@@ -120,6 +120,11 @@ pub enum Message {
     #[serde(rename = "AUTH_REQUIRED")]
     AuthRequired(AuthRequiredMessage),
 
+    /// Client presents a device credential for present-or-mint, orthogonally to
+    /// JWT `AUTH` (the JWT Phase-1 loop silently drops this non-`AUTH` frame).
+    #[serde(rename = "DEVICE_HELLO")]
+    DeviceHello(DeviceHelloMessage),
+
     // --- sync domain (20 variants) ---
     /// Single client operation.
     #[serde(rename = "CLIENT_OP")]
@@ -132,6 +137,13 @@ pub enum Message {
     /// Client initiates LWW sync with merkle tree root.
     #[serde(rename = "SYNC_INIT")]
     SyncInit(SyncInitMessage),
+
+    /// Client confirms it has received AND durably applied all server epochs up to
+    /// and including `cursor`. Feeds the per-device causal frontier that licenses
+    /// tombstone pruning; carries no identity field (server-derived from the
+    /// authenticated connection).
+    #[serde(rename = "CLIENT_APPLY_ACK")]
+    ClientApplyAck(ClientApplyAckMessage),
 
     /// Server responds with merkle root comparison.
     #[serde(rename = "SYNC_RESP_ROOT")]
@@ -456,6 +468,11 @@ pub enum Message {
     /// Server acknowledges authentication.
     #[serde(rename = "AUTH_ACK")]
     AuthAck(AuthAckData),
+
+    /// Server's reply to `DEVICE_HELLO`: the bound device identity (and a freshly
+    /// minted credential, when one was issued).
+    #[serde(rename = "DEVICE_ACK")]
+    DeviceAck(DeviceAckData),
 
     /// Server rejects authentication.
     #[serde(rename = "AUTH_FAIL")]

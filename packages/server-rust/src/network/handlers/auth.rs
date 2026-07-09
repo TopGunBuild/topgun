@@ -376,6 +376,7 @@ mod tests {
         let auth_msg = AuthMessage {
             token,
             protocol_version: None,
+            device_token: None,
         };
         let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
@@ -391,6 +392,7 @@ mod tests {
         let auth_msg = AuthMessage {
             token,
             protocol_version: None,
+            device_token: None,
         };
         let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(result.is_err(), "expected Err for expired token");
@@ -409,6 +411,7 @@ mod tests {
         let auth_msg = AuthMessage {
             token,
             protocol_version: None,
+            device_token: None,
         };
         let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(
@@ -425,6 +428,7 @@ mod tests {
         let auth_msg = AuthMessage {
             token,
             protocol_version: None,
+            device_token: None,
         };
         let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(
@@ -445,6 +449,7 @@ mod tests {
         let auth_msg = AuthMessage {
             token,
             protocol_version: None,
+            device_token: None,
         };
         let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(result.is_err(), "expected Err when sub is missing");
@@ -548,6 +553,7 @@ RQIDAQAB
         let auth_msg = AuthMessage {
             token,
             protocol_version: None,
+            device_token: None,
         };
         let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(
@@ -568,6 +574,7 @@ RQIDAQAB
         let auth_msg = AuthMessage {
             token,
             protocol_version: None,
+            device_token: None,
         };
         let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(
@@ -614,6 +621,7 @@ RQIDAQAB
         let auth_msg = AuthMessage {
             token,
             protocol_version: None,
+            device_token: None,
         };
         let _ = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         let msg = rx.try_recv().expect("AUTH_FAIL should be sent");
@@ -641,6 +649,7 @@ RQIDAQAB
         let auth_msg = AuthMessage {
             token,
             protocol_version: None,
+            device_token: None,
         };
         let _ = handler.handle_auth(&auth_msg, &tx, 60, true).await;
         let msg = rx.try_recv().expect("AUTH_FAIL should be sent");
@@ -668,6 +677,7 @@ RQIDAQAB
         let auth_msg = AuthMessage {
             token,
             protocol_version: None,
+            device_token: None,
         };
         let _ = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         let msg = rx.try_recv().expect("AUTH_FAIL should be sent");
@@ -724,6 +734,7 @@ RQIDAQAB
         let auth_msg = AuthMessage {
             token,
             protocol_version: None,
+            device_token: None,
         };
         handler.handle_auth(&auth_msg, &tx, 60, false).await
     }
@@ -826,6 +837,7 @@ RQIDAQAB
         let auth_msg = AuthMessage {
             token,
             protocol_version: None,
+            device_token: None,
         };
         let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(result.is_err(), "expected Err when validator rejects");
@@ -850,6 +862,7 @@ RQIDAQAB
         let auth_msg = AuthMessage {
             token,
             protocol_version: None,
+            device_token: None,
         };
         let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(
@@ -874,6 +887,7 @@ RQIDAQAB
         let auth_msg = AuthMessage {
             token,
             protocol_version: None,
+            device_token: None,
         };
         let _ = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         let msg = rx.try_recv().expect("AUTH_FAIL should be sent");
@@ -908,6 +922,7 @@ RQIDAQAB
         let auth_msg = AuthMessage {
             token,
             protocol_version: None,
+            device_token: None,
         };
         let _ = handler.handle_auth(&auth_msg, &tx, 60, true).await;
         let msg = rx.try_recv().expect("AUTH_FAIL should be sent");

@@ -66,6 +66,10 @@ class MockStorageAdapter implements IStorageAdapter {
   async getAllKeys(): Promise<string[]> {
     return Array.from(this.store.keys());
   }
+
+  async getAllMetaKeys(): Promise<string[]> {
+    return Array.from(this.meta.keys());
+  }
 }
 
 describe('EncryptedStorageAdapter', () => {

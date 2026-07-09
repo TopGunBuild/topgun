@@ -5,7 +5,9 @@
 
 import type { IMessageRouter } from './types';
 import type {
+  AuthAckMessage,
   AuthFailMessage,
+  DeviceAckMessage,
   OpAckMessage,
   OpRejectedMessage,
   ErrorMessage,
@@ -38,7 +40,8 @@ import type {
 export interface MessageHandlerDelegates {
   sendAuth(): Promise<void>;
   handleAuthRequired(): void;
-  handleAuthAck(): void;
+  handleAuthAck(message?: AuthAckMessage): void;
+  handleDeviceAck(message: DeviceAckMessage): void;
   handleAuthFail(message: AuthFailMessage): void;
   handleOpAck(message: OpAckMessage): void;
   handleOpRejected(message: OpRejectedMessage): void;
@@ -132,6 +135,7 @@ export interface ManagerDelegates {
 export const CLIENT_MESSAGE_TYPES = [
   'AUTH_REQUIRED',
   'AUTH_ACK',
+  'DEVICE_ACK',
   'AUTH_FAIL',
   'PONG',
   'OP_ACK',
@@ -184,7 +188,8 @@ export function registerClientMessageHandlers(
   router.registerHandlers({
     // AUTH handlers
     AUTH_REQUIRED: () => delegates.handleAuthRequired(),
-    AUTH_ACK: () => delegates.handleAuthAck(),
+    AUTH_ACK: (msg) => delegates.handleAuthAck(msg),
+    DEVICE_ACK: (msg) => delegates.handleDeviceAck(msg as DeviceAckMessage),
     AUTH_FAIL: (msg) => delegates.handleAuthFail(msg),
 
     // HEARTBEAT - handled by WebSocketManager, no-op here

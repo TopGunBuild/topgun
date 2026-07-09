@@ -18,6 +18,15 @@ use tracing::warn;
 
 use super::config::ConnectionConfig;
 
+// Device-credential store + identity keying. Declared here (rather than as a line in
+// `network/mod.rs`) to keep this change within the per-spec Rust file budget without a
+// separate module-list edit; device identity is connection-ownership-adjacent — the
+// ownership map that consumes its keys lives in this file — so co-locating the submodule
+// is coherent. The `pub use connection::*` glob in `network/mod.rs` re-exports it as
+// `crate::network::device_identity`.
+#[path = "device_identity.rs"]
+pub mod device_identity;
+
 /// Unique identifier for a connection, assigned by the registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConnectionId(pub u64);
@@ -228,6 +237,10 @@ pub struct ConnectionMetadata {
     pub last_hlc: Option<Timestamp>,
     /// For cluster peer connections, the remote node's ID.
     pub peer_node_id: Option<String>,
+    /// Server-issued device identity bound to this connection (present-or-mint at
+    /// AUTH time). Write-once per connection (one-shot binding); `None` for old
+    /// clients that never send a device credential and for connections pre-`AUTH_ACK`.
+    pub device_id: Option<String>,
 }
 
 impl Default for ConnectionMetadata {
@@ -241,6 +254,7 @@ impl Default for ConnectionMetadata {
             last_heartbeat: Instant::now(),
             last_hlc: None,
             peer_node_id: None,
+            device_id: None,
         }
     }
 }
@@ -264,6 +278,16 @@ pub struct ConnectionRegistry {
     /// Registered once at construction wiring time; the disconnect path is
     /// per-connection (not per-message), so a plain `std::sync::Mutex` is cheap.
     disconnect_observers: std::sync::Mutex<Vec<DisconnectObserver>>,
+    /// Server-authenticated device-identity ownership: `frontier_client_id` →
+    /// current owning connection. A new connection presenting a valid credential
+    /// for an owned identity TAKES OVER (becomes the owner; the displaced connection
+    /// is closed). Keyed by the injective `(principal OR NO_AUTH_SENTINEL, deviceId)`
+    /// string so it is a fully server-authenticated per-replica identity.
+    device_ownership: DashMap<String, ConnectionId>,
+    /// Reverse index `connection → identity key`, populated at claim time so the
+    /// single `remove()` chokepoint can release ownership on disconnect without an
+    /// async metadata read at every teardown exit.
+    conn_identity: DashMap<ConnectionId, String>,
 }
 
 impl std::fmt::Debug for ConnectionRegistry {
@@ -277,6 +301,8 @@ impl std::fmt::Debug for ConnectionRegistry {
             .field("connections", &self.connections)
             .field("next_id", &self.next_id)
             .field("disconnect_observers", &observer_count)
+            .field("device_ownership", &self.device_ownership.len())
+            .field("conn_identity", &self.conn_identity.len())
             .finish()
     }
 }
@@ -291,6 +317,8 @@ impl ConnectionRegistry {
             connections: DashMap::new(),
             next_id: AtomicU64::new(1),
             disconnect_observers: std::sync::Mutex::new(Vec::new()),
+            device_ownership: DashMap::new(),
+            conn_identity: DashMap::new(),
         }
     }
 
@@ -342,6 +370,14 @@ impl ConnectionRegistry {
     /// simply re-run the (no-op) observers.
     pub fn remove(&self, id: ConnectionId) -> Option<Arc<ConnectionHandle>> {
         let removed = self.connections.remove(&id).map(|(_, handle)| handle);
+        // Release device-identity ownership at the single disconnect chokepoint, but
+        // ONLY if this connection is still the current owner — a TAKEOVER may have
+        // already handed the identity to a newer connection, whose ownership must not
+        // be clobbered by the displaced connection's later teardown.
+        if let Some((_, identity_key)) = self.conn_identity.remove(&id) {
+            self.device_ownership
+                .remove_if(&identity_key, |_, owner| *owner == id);
+        }
         let observers: Vec<DisconnectObserver> = self
             .disconnect_observers
             .lock()
@@ -351,6 +387,106 @@ impl ConnectionRegistry {
             observer(id);
         }
         removed
+    }
+
+    /// Claims device-identity ownership for `connection_id` via TAKEOVER.
+    ///
+    /// Returns the previously-owning connection (to be closed by the caller) when a
+    /// live connection is displaced. Atomic under `DashMap`'s per-key entry lock:
+    /// concurrent double-takeovers are serialized, so exactly one connection remains
+    /// the owner and each displaced connection is reported exactly once. A connection
+    /// re-claiming an identity it already owns is a no-op (returns `None`).
+    pub fn claim_device_ownership(
+        &self,
+        identity_key: String,
+        connection_id: ConnectionId,
+    ) -> Option<ConnectionId> {
+        // Reverse index first so a racing `remove()` for this same connection can
+        // always find the key to release. Overwriting a prior key for this
+        // connection is impossible under one-shot binding (bind happens once). Keep a
+        // copy for the post-insert liveness re-check; the original `identity_key` is
+        // moved into the forward-ownership insert below.
+        let key_recheck = identity_key.clone();
+        self.conn_identity
+            .insert(connection_id, identity_key.clone());
+        // Atomic swap: `insert` returns the prior owner under the shard lock.
+        let displaced = match self.device_ownership.insert(identity_key, connection_id) {
+            Some(prev) if prev != connection_id => Some(prev),
+            _ => None,
+        };
+        // Liveness re-check: the two inserts above are separate shard-locked ops, so a
+        // `remove(connection_id)` can interleave with either — running its release BEFORE
+        // ownership was set to us (leaving a dead owner), or AFTER (deleting the entry we
+        // just set). If this connection is already gone, reconcile: restore a displaced
+        // live owner (never orphan it) or drop our own dead claim, and report NO
+        // displacement so the caller does not tear down a prior owner for a takeover that
+        // never really happened.
+        if self.connections.get(&connection_id).is_none() {
+            return self.reconcile_dead_claim(&key_recheck, connection_id, displaced);
+        }
+        displaced
+    }
+
+    /// Reconciles device-ownership after a claim discovers THIS connection is already
+    /// gone (a concurrent `remove()` for it can interleave with either index insert).
+    ///
+    /// Only restores a displaced prior owner `prev` if it is STILL LIVE. If `prev` has
+    /// since disconnected, its own `remove()` has already run and will never run again
+    /// (it could not clean this entry earlier because this now-dead claimant transiently
+    /// held ownership), so installing it would pin a dead owner that `is_current_owner`
+    /// would affirm forever with nothing left to clear it — worse than orphaning. In that
+    /// case the identity is left ownerless for the next legitimate connection to reclaim.
+    ///
+    /// When `prev` is live, the forward-ownership update goes through `Entry` so it is
+    /// atomic against a concurrent `remove()` that may already have DELETED the entry: the
+    /// `Vacant` arm re-inserts the live owner rather than leaving the identity orphaned (a
+    /// plain `get_mut`-based swap silently no-ops on a deleted entry and loses the live
+    /// owner — the fencing bug this closes). A newer valid takeover that raced in (entry
+    /// owned by someone else) is left untouched. Always returns `None`: a dead connection
+    /// never legitimately displaces a live owner, so the caller must not tear one down.
+    fn reconcile_dead_claim(
+        &self,
+        key: &str,
+        connection_id: ConnectionId,
+        displaced: Option<ConnectionId>,
+    ) -> Option<ConnectionId> {
+        use dashmap::mapref::entry::Entry;
+        // Restore only a prior owner that is still connected; a `prev` whose own teardown
+        // already ran must not be re-installed as a permanently-stuck dead owner.
+        let restore = displaced.filter(|prev| self.connections.get(prev).is_some());
+        match restore {
+            Some(prev) => match self.device_ownership.entry(key.to_string()) {
+                Entry::Occupied(mut entry) => {
+                    if *entry.get() == connection_id {
+                        *entry.get_mut() = prev;
+                    }
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(prev);
+                }
+            },
+            // No live prior owner to restore (never displaced one, or it has since died):
+            // drop our own dead claim if it still stands, leaving the identity ownerless.
+            None => {
+                self.device_ownership
+                    .remove_if(key, |_, owner| *owner == connection_id);
+            }
+        }
+        self.conn_identity
+            .remove_if(&connection_id, |_, k| k.as_str() == key);
+        None
+    }
+
+    /// The fencing primitive: is `connection_id` the current owner of `identity_key`?
+    ///
+    /// Identity-scoped actions (e.g. a cursor ACK that advances a shared low-water
+    /// mark) MUST be accepted only from the current owner — a displaced connection's
+    /// in-flight stale action is a resurrection vector and must be rejectable.
+    #[must_use]
+    pub fn is_current_owner(&self, identity_key: &str, connection_id: ConnectionId) -> bool {
+        self.device_ownership
+            .get(identity_key)
+            .is_some_and(|owner| *owner.value() == connection_id)
     }
 
     /// Looks up a connection by ID.
@@ -910,5 +1046,236 @@ mod tests {
             );
         }
         assert!(!handle.is_cancelled());
+    }
+
+    #[test]
+    fn takeover_transfers_ownership_and_fences_displaced() {
+        let config = test_config();
+        let registry = ConnectionRegistry::new();
+        let (h1, _rx1) = registry.register(ConnectionKind::Client, &config);
+        let (h2, _rx2) = registry.register(ConnectionKind::Client, &config);
+        let key = "identity-A".to_string();
+
+        // First claimant becomes owner, displacing nobody.
+        assert!(registry
+            .claim_device_ownership(key.clone(), h1.id)
+            .is_none());
+        assert!(registry.is_current_owner(&key, h1.id));
+
+        // Second claimant TAKES OVER: reports h1 as displaced and becomes owner.
+        let displaced = registry.claim_device_ownership(key.clone(), h2.id);
+        assert_eq!(
+            displaced,
+            Some(h1.id),
+            "takeover reports the displaced connection"
+        );
+        assert!(registry.is_current_owner(&key, h2.id));
+        // Fencing: the displaced connection is no longer the owner.
+        assert!(!registry.is_current_owner(&key, h1.id));
+    }
+
+    #[test]
+    fn disconnect_releases_ownership_only_if_still_owner() {
+        let config = test_config();
+        let registry = ConnectionRegistry::new();
+        let (h1, _rx1) = registry.register(ConnectionKind::Client, &config);
+        let (h2, _rx2) = registry.register(ConnectionKind::Client, &config);
+        let key = "identity-B".to_string();
+
+        registry.claim_device_ownership(key.clone(), h1.id);
+        registry.claim_device_ownership(key.clone(), h2.id); // h2 owns now
+
+        // The displaced h1 disconnecting must NOT clear h2's ownership.
+        registry.remove(h1.id);
+        assert!(
+            registry.is_current_owner(&key, h2.id),
+            "displaced disconnect must not clobber the new owner"
+        );
+
+        // The current owner disconnecting releases the identity.
+        registry.remove(h2.id);
+        assert!(!registry.is_current_owner(&key, h2.id));
+    }
+
+    #[test]
+    fn reclaim_by_same_connection_is_noop() {
+        let config = test_config();
+        let registry = ConnectionRegistry::new();
+        let (h1, _rx1) = registry.register(ConnectionKind::Client, &config);
+        let key = "identity-C".to_string();
+        assert!(registry
+            .claim_device_ownership(key.clone(), h1.id)
+            .is_none());
+        // Re-claiming an already-owned identity displaces nobody.
+        assert!(registry
+            .claim_device_ownership(key.clone(), h1.id)
+            .is_none());
+        assert!(registry.is_current_owner(&key, h1.id));
+    }
+
+    #[test]
+    fn claim_for_disconnected_connection_does_not_orphan_ownership() {
+        // M6: a connection removed before/while it claims must not leave ownership
+        // pinned to a dead id (which `is_current_owner` would still affirm forever).
+        // The liveness re-check in `claim_device_ownership` undoes such a claim.
+        let config = test_config();
+        let registry = ConnectionRegistry::new();
+        let (h1, _rx1) = registry.register(ConnectionKind::Client, &config);
+        let dead_id = h1.id;
+        // The connection goes away (its socket closed) before it claims ownership.
+        registry.remove(dead_id);
+        let key = "identity-D".to_string();
+        assert!(registry
+            .claim_device_ownership(key.clone(), dead_id)
+            .is_none());
+        assert!(
+            !registry.is_current_owner(&key, dead_id),
+            "ownership must not be pinned to a disconnected connection"
+        );
+        // And the reverse index must not retain the dead id either.
+        assert!(
+            registry.conn_identity.get(&dead_id).is_none(),
+            "reverse index must not retain a disconnected connection's key"
+        );
+    }
+
+    #[test]
+    fn claim_by_disconnected_connection_restores_displaced_live_owner() {
+        // M6 (fencing): a DEAD connection's claim that displaces a LIVE owner must restore
+        // the live owner and report NO displacement — it must neither orphan the identity
+        // nor cause the caller to tear down the live owner for a takeover that never
+        // actually happened.
+        let config = test_config();
+        let registry = ConnectionRegistry::new();
+        let (a, _rxa) = registry.register(ConnectionKind::Client, &config);
+        let (b, _rxb) = registry.register(ConnectionKind::Client, &config);
+        let key = "identity-E".to_string();
+
+        // A legitimately owns K.
+        assert!(registry.claim_device_ownership(key.clone(), a.id).is_none());
+        assert!(registry.is_current_owner(&key, a.id));
+
+        // B disconnects, THEN (its in-flight) claim for K runs.
+        let dead_b = b.id;
+        registry.remove(dead_b);
+        let displaced = registry.claim_device_ownership(key.clone(), dead_b);
+
+        // No displacement is reported (A must not be kicked)...
+        assert_eq!(
+            displaced, None,
+            "a dead connection's claim must not report displacing the live owner"
+        );
+        // ...A remains the owner (identity not orphaned to nobody or to the dead B)...
+        assert!(
+            registry.is_current_owner(&key, a.id),
+            "the live owner must be restored, not orphaned"
+        );
+        assert!(!registry.is_current_owner(&key, dead_b));
+    }
+
+    #[test]
+    fn reconcile_dead_claim_restores_live_owner_from_vacant_entry() {
+        // The `remove()`-vs-recheck interleave: a concurrent `remove(dead_claimer)`
+        // DELETES device_ownership[K] between the claim's forward insert and the liveness
+        // re-check. The reconciliation must re-insert the displaced LIVE owner from the
+        // `Vacant` arm — the previous `get_mut`-based swap no-ops on a deleted entry and
+        // silently orphaned the live owner (fencing bug). Exercised deterministically by
+        // driving the reconciliation directly against a post-delete (Vacant) state, since
+        // the interleave is not reachable single-threaded through the public claim path.
+        let config = test_config();
+        let registry = ConnectionRegistry::new();
+        // The prior owner must be a LIVE (registered) connection to be restored.
+        let (live, _rx) = registry.register(ConnectionKind::Client, &config);
+        let live_owner = live.id;
+        let dead_claimer = ConnectionId(9999); // never registered — dead
+
+        // Post-delete state: entry Vacant (a concurrent remove() nuked it), but the claim
+        // had captured `displaced = Some(live_owner)`.
+        let key = "identity-V";
+        assert!(registry.device_ownership.get(key).is_none());
+        let displaced = registry.reconcile_dead_claim(key, dead_claimer, Some(live_owner));
+
+        assert_eq!(
+            displaced, None,
+            "a dead claim must never report displacing the live owner"
+        );
+        assert!(
+            registry.is_current_owner(key, live_owner),
+            "the displaced live owner must be restored from the Vacant arm, not orphaned"
+        );
+    }
+
+    #[test]
+    fn reconcile_dead_claim_does_not_restore_a_dead_prior_owner() {
+        // Regression: `prev` (the displaced prior owner) can itself have disconnected
+        // between the claim and this reconciliation — its own `remove()` already ran and
+        // will never run again. Restoring it would pin a permanently-stuck dead owner that
+        // `is_current_owner` affirms forever. The prev-liveness check must leave the
+        // identity ownerless instead (the over-correction the Vacant-restore fix could hit).
+        let registry = ConnectionRegistry::new();
+        let dead_prev = ConnectionId(1); // never registered — its teardown already ran
+        let dead_claimer = ConnectionId(9999);
+        let key = "identity-DP";
+
+        // Post-delete Vacant state, with the claim having captured a now-dead prior owner.
+        assert!(registry.device_ownership.get(key).is_none());
+        let displaced = registry.reconcile_dead_claim(key, dead_claimer, Some(dead_prev));
+
+        assert_eq!(displaced, None);
+        assert!(
+            !registry.is_current_owner(key, dead_prev),
+            "a dead prior owner must NOT be re-installed as a stuck dead owner"
+        );
+        assert!(
+            registry.device_ownership.get(key).is_none(),
+            "the identity must be left ownerless when no live prior owner exists"
+        );
+    }
+
+    #[test]
+    fn reconcile_dead_claim_does_not_clobber_a_newer_takeover() {
+        // If a newer valid takeover raced in and owns the entry, a dead claimant's
+        // reconciliation must leave it untouched (Occupied-by-other arm). Exercised with a
+        // LIVE prior owner so the restore path is actually entered (and still no-ops).
+        let config = test_config();
+        let registry = ConnectionRegistry::new();
+        let (old, _rxo) = registry.register(ConnectionKind::Client, &config);
+        let (newer, _rxn) = registry.register(ConnectionKind::Client, &config);
+        let old_owner = old.id;
+        let newer_owner = newer.id;
+        let dead_claimer = ConnectionId(9999);
+        let key = "identity-N";
+
+        registry
+            .device_ownership
+            .insert(key.to_string(), newer_owner);
+        let displaced = registry.reconcile_dead_claim(key, dead_claimer, Some(old_owner));
+
+        assert_eq!(displaced, None);
+        assert!(
+            registry.is_current_owner(key, newer_owner),
+            "a newer valid takeover must not be clobbered by a dead claimant's reconcile"
+        );
+    }
+
+    #[test]
+    fn reconcile_dead_claim_drops_own_claim_when_no_prior_owner() {
+        // No prior owner displaced: the dead claimant's own claim (if it still stands)
+        // must be dropped, never left pinned to a dead id.
+        let registry = ConnectionRegistry::new();
+        let dead_claimer = ConnectionId(2);
+        let key = "identity-Z";
+
+        registry
+            .device_ownership
+            .insert(key.to_string(), dead_claimer);
+        let displaced = registry.reconcile_dead_claim(key, dead_claimer, None);
+
+        assert_eq!(displaced, None);
+        assert!(
+            !registry.is_current_owner(key, dead_claimer),
+            "a dead claimant's own claim must not remain pinned"
+        );
+        assert!(registry.device_ownership.get(key).is_none());
     }
 }

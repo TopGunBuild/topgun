@@ -25,12 +25,38 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
   public async handleORMapSyncRespRoot(payload: {
     mapName: string;
     rootHash: number;
+    coveringEpoch?: number;
+    fullResync?: boolean;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- server timestamp shape is implementation-defined (HLC or raw ms); passed through to onTimestampUpdate without inspection
     timestamp?: any;
   }): Promise<void> {
-    const { mapName, rootHash, timestamp } = payload;
+    const { mapName, rootHash, coveringEpoch, fullResync, timestamp } = payload;
     const map = this.config.getMap(mapName);
     if (map instanceof ORMap) {
+      if (fullResync) {
+        // Authoritative REPLACE resync: the server has FORGOTTEN or found this
+        // client REGRESSED, so an incremental delta could re-admit a record whose
+        // tombstone was already pruned (the server no longer holds the per-tag
+        // epoch to suppress it). DISCARD the materialized local OR-Map AND every
+        // pending pre-snapshot op, then pull the full server snapshot: the now-empty
+        // local tree makes the merkle walk transfer the server's entire state. The
+        // covering epoch is deliberately NOT confirmed here — it is confirmed only
+        // after the snapshot leaves are durably applied, which is what re-enables
+        // this client's ACKs server-side (delivered_conn set on resync completion).
+        await this.config.onFullResync(mapName, timestamp);
+        logger.info(
+          { mapName },
+          'ORMap full-resync REPLACE: discarded local state, pulling snapshot',
+        );
+        this.config.sendMessage({
+          type: 'ORMAP_MERKLE_REQ_BUCKET',
+          payload: { mapName, path: '' },
+        });
+        if (timestamp) {
+          await this.config.onTimestampUpdate(timestamp);
+        }
+        return;
+      }
       const localTree = map.getMerkleTree();
       const localRootHash = localTree.getRootHash();
 
@@ -43,13 +69,35 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
           type: 'ORMAP_MERKLE_REQ_BUCKET',
           payload: { mapName, path: '' },
         });
+        // Empty-diff liveness does NOT apply here: the roots differ, so the
+        // client does not yet hold the covering-epoch tombstone set. It ACKs the
+        // covering epoch only AFTER applying the leaves/diff that follow.
       } else {
         logger.info({ mapName }, 'ORMap is in sync');
+        // Empty diff: the roots match, so the client demonstrably already holds
+        // the full tombstone set up to the covering epoch (the OR-Map leaf hash
+        // covers the tombstone tags). Confirm it now so an up-to-date client
+        // still advances its cursor instead of pinning the server low-water-mark.
+        this.confirmCoveringEpoch(mapName, coveringEpoch);
       }
     }
     // Update HLC with server timestamp
     if (timestamp) {
       await this.config.onTimestampUpdate(timestamp);
+    }
+  }
+
+  /**
+   * ACK the conveyed covering epoch after the client has durably applied the
+   * matching OR-Map sync data for `mapName`. A no-op when the server conveyed no
+   * epoch (nothing stamped yet). The underlying device-wide ACK is
+   * cumulative-monotonic AND gated by the cross-map min-barrier (see
+   * `SyncEngine.applyMapCoverage`) — this call reports only THIS map's coverage,
+   * it does not by itself guarantee a CLIENT_APPLY_ACK is sent.
+   */
+  private confirmCoveringEpoch(mapName: string, coveringEpoch?: number): void {
+    if (typeof coveringEpoch === 'number' && Number.isFinite(coveringEpoch) && coveringEpoch > 0) {
+      this.config.onCoveringEpochApplied(mapName, coveringEpoch);
     }
   }
 
@@ -100,10 +148,11 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
    */
   public async handleORMapSyncRespLeaf(payload: {
     mapName: string;
+    coveringEpoch?: number;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- records in the leaf entries are raw ORMapRecord objects decoded from msgpack; value type is erased at the sync protocol layer
     entries: Array<{ key: string; records: any[]; tombstones: string[] }>;
   }): Promise<void> {
-    const { mapName, entries } = payload;
+    const { mapName, coveringEpoch, entries } = payload;
     const map = this.config.getMap(mapName);
     if (map instanceof ORMap) {
       let totalAdded = 0;
@@ -126,6 +175,10 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
         );
       }
 
+      // The leaf entries (including their tombstone tags) are now durably
+      // applied — confirm the covering epoch so the server's cursor advances.
+      this.confirmCoveringEpoch(mapName, coveringEpoch);
+
       // Now push any local records that server might not have
       const keysToCheck = entries.map((e: { key: string }) => e.key);
       await this.pushORMapDiff(mapName, keysToCheck, map);
@@ -138,10 +191,11 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
    */
   public async handleORMapDiffResponse(payload: {
     mapName: string;
+    coveringEpoch?: number;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- records in the diff response are raw ORMapRecord objects decoded from msgpack; value type is erased at the sync protocol layer
     entries: Array<{ key: string; records: any[]; tombstones: string[] }>;
   }): Promise<void> {
-    const { mapName, entries } = payload;
+    const { mapName, coveringEpoch, entries } = payload;
     const map = this.config.getMap(mapName);
     if (map instanceof ORMap) {
       let totalAdded = 0;
@@ -163,6 +217,10 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
           'Merged ORMap diff from server',
         );
       }
+
+      // The diff entries (including tombstone tags) are now durably applied —
+      // confirm the covering epoch so the server's cursor advances.
+      this.confirmCoveringEpoch(mapName, coveringEpoch);
     }
   }
 
@@ -236,6 +294,9 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
         rootHash,
         bucketHashes,
         lastSyncTimestamp,
+        // Report the client's confirmed-apply cursor so the server can detect a
+        // REGRESSED replica (claim < stored cursor) and route it to a full resync.
+        claimedEpoch: this.config.getClaimedEpoch(),
       });
     }
   }

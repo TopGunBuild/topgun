@@ -139,7 +139,10 @@ jobs:
     # workflow_dispatch added so an on-demand manual run exercises this gate too.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 30 (was 15): a cold-cache release build of the load harness alone can eat most of
+    # 15 minutes on hosted runners — every nightly run Jun 28..Jul 6 died as a timeout
+    # cancellation before reaching the scenarios. Matches the vector gate's budget.
+    timeout-minutes: 30
     # Informational only — does not block merges while baseline stability is validated
     continue-on-error: true
     steps:
@@ -174,7 +177,7 @@ jobs:
             --connections 200 \
             --duration 15 \
             --interval 50 \
-            --json-output results-faw.json
+            --json-output "$GITHUB_WORKSPACE/results-faw.json"
 
       - name: Run fire-and-forget scenario
         run: |
@@ -184,7 +187,7 @@ jobs:
             --duration 15 \
             --interval 0 \
             --fire-and-forget \
-            --json-output results-faf.json
+            --json-output "$GITHUB_WORKSPACE/results-faf.json"
 
       - name: Validate results against baseline
         run: |
@@ -278,7 +281,7 @@ jobs:
           cargo bench --bench load_harness -- \
             --scenario vector_search --vector-mode build \
             --vector-count 10000 --vector-dim 384 \
-            --json-output results-vec-build.json
+            --json-output "$GITHUB_WORKSPACE/results-vec-build.json"
 
       - name: Run vector query scenario
         run: |
@@ -286,14 +289,14 @@ jobs:
             --scenario vector_search --vector-mode query \
             --vector-count 10000 --vector-dim 384 \
             --vector-k 10 --duration 10 \
-            --json-output results-vec-query.json
+            --json-output "$GITHUB_WORKSPACE/results-vec-query.json"
 
       - name: Run vector optimize scenario
         run: |
           cargo bench --bench load_harness -- \
             --scenario vector_search --vector-mode optimize \
             --vector-count 10000 --vector-dim 384 \
-            --json-output results-vec-optimize.json
+            --json-output "$GITHUB_WORKSPACE/results-vec-optimize.json"
 
       - name: Run vector hybrid scenario
         run: |
@@ -301,7 +304,7 @@ jobs:
             --scenario vector_search --vector-mode hybrid \
             --vector-count 10000 --vector-dim 384 \
             --duration 10 \
-            --json-output results-vec-hybrid.json
+            --json-output "$GITHUB_WORKSPACE/results-vec-hybrid.json"
 
       - name: Validate results against baseline
         run: |

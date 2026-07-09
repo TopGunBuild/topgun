@@ -165,6 +165,12 @@ pub struct AppState {
     /// to the default `./vector_indexes.json`; tests inject a temp path here
     /// instead of mutating the process environment (test-isolation seam).
     pub vector_index_path: Option<std::path::PathBuf>,
+    /// Durable per-device confirmed-apply causal frontier — the cursor store fed by
+    /// client→server `CLIENT_APPLY_ACK` frames and rehydrated on connection
+    /// establishment. Its fleet-wide minimum is the prune low-water-mark (consumed
+    /// downstream by the prune wiring). `None` in network-only tests and until the
+    /// storage layer is wired.
+    pub frontier: Option<Arc<crate::tombstone_frontier_impl::TombstoneFrontier>>,
 }
 
 impl AppState {
@@ -223,6 +229,9 @@ impl AppState {
             // None → default path. Tests that persist descriptors override this
             // with a temp path instead of mutating TOPGUN_VECTOR_INDEX_PATH.
             vector_index_path: None,
+            // Wired in production alongside the storage layer; None in network-only
+            // tests (ACK handling / rehydration then no-op).
+            frontier: None,
         }
     }
 }

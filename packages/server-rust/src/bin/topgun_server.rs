@@ -820,6 +820,7 @@ async fn main() -> anyhow::Result<()> {
             search_registry,
             hybrid_search_registry,
             journal_store,
+            frontier,
         ) = build_services(
             node_id.clone(),
             Arc::clone(&cluster_state),
@@ -864,6 +865,7 @@ async fn main() -> anyhow::Result<()> {
                 search_registry,
                 hybrid_search_registry,
                 journal_store,
+                frontier,
             ),
             Some(cluster_state),
         )
@@ -884,6 +886,7 @@ async fn main() -> anyhow::Result<()> {
             search_registry,
             hybrid_search_registry,
             journal_store,
+            frontier,
         ) = build_services(
             node_id.clone(),
             Arc::clone(&cs),
@@ -907,6 +910,7 @@ async fn main() -> anyhow::Result<()> {
                 search_registry,
                 hybrid_search_registry,
                 journal_store,
+                frontier,
             ),
             None,
         )
@@ -925,6 +929,7 @@ async fn main() -> anyhow::Result<()> {
         search_registry,
         hybrid_search_registry,
         journal_store,
+        frontier,
     ) = cluster_state_for_services;
 
     // Spawn the eviction orchestrator after services are wired so it observes
@@ -1052,6 +1057,10 @@ async fn main() -> anyhow::Result<()> {
         jwt_secret,
         cluster_state: cluster_state_for_app,
         store_factory: Some(Arc::clone(&record_store_factory)),
+        // The SAME causal frontier instance CrdtService/SyncService received in
+        // build_services — a single epoch-counter + low-water-mark authority, NOT a
+        // second frontier.
+        frontier: Some(Arc::clone(&frontier)),
         server_config: Some(Arc::new(ArcSwap::from_pointee(ServerConfig {
             node_id: node_id.clone(),
             ..ServerConfig::default()
@@ -1332,6 +1341,7 @@ type BuildServicesResult = (
     Arc<SearchRegistry>,
     Arc<HybridSearchRegistry>,
     Arc<JournalStore>,
+    Arc<topgun_server::tombstone_frontier_impl::TombstoneFrontier>,
 );
 
 /// Cluster-mode parameters passed to [`build_services`] when starting with `--seed-nodes`.
@@ -1821,6 +1831,42 @@ fn build_services(
         "event journal initialized"
     );
 
+    // Shared causal frontier + per-key writer, constructed ONCE here so the same
+    // instances flow into CrdtService (epoch stamping + OR-write prune),
+    // SyncService (covering-epoch conveyance + SYNC-leaf prune), and AppState (the
+    // durable per-device cursor store). A second frontier would fork the epoch
+    // authority — stamping epochs no client ever ACKs — and two per-key writers
+    // over one store would let a prune and an OR write race.
+    let frontier = Arc::new(
+        topgun_server::tombstone_frontier_impl::TombstoneFrontier::new(Some(
+            record_store_factory.data_store(),
+        )),
+    );
+    // Operator-tunable epoch width (stamped tombstone ops per epoch), surfaced in
+    // the config log so the active value is confirmable without reading source.
+    // An invalid/zero value falls back to the default LOUDLY — a silent fallback
+    // would leave the operator believing their setting took effect.
+    let epoch_width = match std::env::var("TOPGUN_EPOCH_WIDTH") {
+        Ok(raw) => match raw.parse::<u64>() {
+            Ok(w) if w > 0 => w,
+            _ => {
+                tracing::warn!(
+                    rejected_value = %raw,
+                    default = topgun_server::tombstone_frontier_impl::DEFAULT_EPOCH_WIDTH,
+                    "invalid TOPGUN_EPOCH_WIDTH (expected a positive integer); using the default"
+                );
+                topgun_server::tombstone_frontier_impl::DEFAULT_EPOCH_WIDTH
+            }
+        },
+        Err(_) => topgun_server::tombstone_frontier_impl::DEFAULT_EPOCH_WIDTH,
+    };
+    frontier.set_epoch_width(epoch_width);
+    tracing::info!(
+        epoch_width = frontier.epoch_width(),
+        "tombstone epoch counter initialized (prune dark until SPEC-342j supplies the durability watermark)"
+    );
+    let key_writer = Arc::new(topgun_server::service::domain::key_writer::KeyWriterRegistry::new());
+
     // Arc-wrap all domain services so they can be shared across N+1 worker pipelines.
     let crdt_svc = Arc::new(
         CrdtService::new(
@@ -1830,7 +1876,9 @@ fn build_services(
             Arc::clone(&query_registry),
             Arc::new(SchemaService::new()),
         )
-        .with_journal(Arc::clone(&journal_store)),
+        .with_journal(Arc::clone(&journal_store))
+        .with_frontier(Arc::clone(&frontier))
+        .with_key_writer(Arc::clone(&key_writer)),
     );
     // Wire the durable Merkle index so SYNC tree-walk reads resolve from the
     // persisted backend, not the eviction-coupled in-memory tree.
@@ -1847,7 +1895,11 @@ fn build_services(
         merkle_manager,
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
-    );
+    )
+    // Same frontier + per-key writer as CrdtService: covering-epoch conveyance
+    // reads the epoch counter CrdtService stamps, and the SYNC-leaf prune
+    // serializes against OR writes on the shared writer.
+    .with_frontier(Arc::clone(&frontier), Arc::clone(&key_writer));
     let sync_svc = Arc::new(if datastore_for_merkle_seed.is_null() {
         sync_base
     } else {
@@ -1968,6 +2020,7 @@ fn build_services(
         search_registry_arc,
         hybrid_search_registry_arc,
         journal_store_arc,
+        frontier,
     )
 }
 

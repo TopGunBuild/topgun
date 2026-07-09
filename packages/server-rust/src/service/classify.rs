@@ -537,6 +537,23 @@ impl OperationService {
             Message::AuthRequired(_) => Err(ClassifyError::AuthMessage {
                 variant: "AuthRequired",
             }),
+            // Device-identity handshake frames are handled at the websocket layer and
+            // never reach the data plane; classify them as non-dispatchable so a stray
+            // one is rejected rather than routed. DEVICE_HELLO is client→server (like
+            // Auth); DEVICE_ACK is server→client (like AuthAck).
+            Message::DeviceHello(_) => Err(ClassifyError::AuthMessage {
+                variant: "DeviceHello",
+            }),
+            Message::DeviceAck(_) => Err(ClassifyError::ServerToClient {
+                variant: "DeviceAck",
+            }),
+            // Confirmed-apply ACK is an identity-scoped control frame handled at the
+            // websocket layer (advances the per-device causal frontier under ownership
+            // fencing); it never reaches the data plane. Classify as non-dispatchable so
+            // a stray one is rejected rather than routed. Client→server, like Auth.
+            Message::ClientApplyAck(_) => Err(ClassifyError::AuthMessage {
+                variant: "ClientApplyAck",
+            }),
         }
     }
 }
@@ -689,6 +706,7 @@ mod tests {
         let msg = Message::Auth(topgun_core::messages::AuthMessage {
             token: "test-token".to_string(),
             protocol_version: None,
+            device_token: None,
         });
         let err = svc.classify(msg, None, CallerOrigin::Client).unwrap_err();
         assert!(matches!(
@@ -816,6 +834,7 @@ mod tests {
             root_hash: 0,
             bucket_hashes: HashMap::new(),
             last_sync_timestamp: None,
+            claimed_epoch: None,
         });
         let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
         assert!(

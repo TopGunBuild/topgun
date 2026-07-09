@@ -259,6 +259,30 @@ pub struct AuthMessage {
     pub token: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub protocol_version: Option<u32>,
+    // Opaque server-issued device credential presented for present-or-mint device binding.
+    // Additive/optional so old clients that never send it still authenticate.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub device_token: Option<String>,
+}
+
+/// Device-credential presentation, sent by a token-less client (`NO_AUTH`, or a
+/// JWT client before it has a token) to obtain a server-issued device identity.
+///
+/// Kept ORTHOGONAL to `AUTH`: presenting device identity by overloading the `AUTH`
+/// token field collides with JWT validation (a JWT server treats any `AUTH` as a JWT
+/// attempt, fails an empty token, and tears the connection down). `DeviceHello` is a
+/// distinct message the JWT Phase-1 loop silently drops (non-`AUTH`), so a token-less
+/// client can present it without risking teardown; a `NO_AUTH` server handles it in
+/// Phase 2 and replies `DEVICE_ACK`.
+///
+/// Maps to `DeviceHelloMessageSchema` in `base-schemas.ts`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceHelloMessage {
+    /// Opaque server-issued device credential presented for present-or-mint.
+    /// Absent on a first-ever presentation (the server mints a fresh identity).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub device_token: Option<String>,
 }
 
 /// Authentication required message sent by server to client.
@@ -670,6 +694,7 @@ mod tests {
         let msg = AuthMessage {
             token: "jwt-token-here".to_string(),
             protocol_version: Some(1),
+            device_token: None,
         };
         assert_eq!(roundtrip_named(&msg), msg);
     }
@@ -679,6 +704,7 @@ mod tests {
         let msg = AuthMessage {
             token: "some-token".to_string(),
             protocol_version: None,
+            device_token: None,
         };
         assert_eq!(roundtrip_named(&msg), msg);
     }
@@ -698,6 +724,7 @@ mod tests {
         let msg = AuthMessage {
             token: "t".to_string(),
             protocol_version: None,
+            device_token: None,
         };
         let bytes = rmp_serde::to_vec_named(&msg).unwrap();
         let val: rmpv::Value = rmp_serde::from_slice(&bytes).unwrap();

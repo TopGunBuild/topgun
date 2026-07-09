@@ -204,6 +204,7 @@ mod tests {
             last_heartbeat: Instant::now(),
             last_hlc: None,
             peer_node_id: None,
+            device_id: None,
         }
     }
 

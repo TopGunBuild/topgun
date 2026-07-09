@@ -40,6 +40,9 @@ class MemoryStorageAdapter implements IStorageAdapter {
   async getMeta(key: string): Promise<any> {
     return this.metaStore.get(key);
   }
+  async getAllMetaKeys(): Promise<string[]> {
+    return [...this.metaStore.keys()];
+  }
 
   async setMeta(key: string, value: any): Promise<void> {
     this.metaStore.set(key, value);

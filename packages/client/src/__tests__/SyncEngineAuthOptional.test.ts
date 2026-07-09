@@ -91,6 +91,7 @@ function createMockStorageAdapter(): jest.Mocked<IStorageAdapter> {
     deleteOp: jest.fn().mockResolvedValue(undefined),
     commitWrite: jest.fn().mockResolvedValue(1),
     getAllKeys: jest.fn().mockResolvedValue([]),
+    getAllMetaKeys: jest.fn().mockResolvedValue([]),
   };
 }
 
@@ -136,27 +137,29 @@ describe('SyncEngine — auth-optional fast path', () => {
   // ────────────────────────────────────────────
   // Case 1: No token, no AUTH_REQUIRED
   // ────────────────────────────────────────────
-  it('case 1: reaches CONNECTED within grace window when server sends no AUTH_REQUIRED and no token is configured', async () => {
+  it('case 1: reaches CONNECTED within grace window when server sends no AUTH_ACK and no token is configured', async () => {
     engine = new SyncEngine(config);
 
     // Flush the setTimeout(..., 0) that fires onopen, triggering handleConnectionEstablished.
-    // This sets up the 500ms grace timer but does NOT fire it yet.
-    jest.advanceTimersByTime(0);
+    // This sends the token-less DEVICE_HELLO and arms the 500ms grace timer.
+    await jest.advanceTimersByTimeAsync(0);
     await Promise.resolve();
 
-    // State should still be CONNECTING at this point (grace timer not yet expired).
-    expect(engine.getConnectionState()).toBe(SyncState.CONNECTING);
+    // Token-less connect presents a DEVICE_HELLO (NOT an empty-token AUTH) and moves to
+    // AUTHENTICATING.
+    expect(engine.getConnectionState()).toBe(SyncState.AUTHENTICATING);
+    const ws = MockWebSocket.getLastInstance()!;
+    expect(ws.sentMessages.find((m) => m.type === 'AUTH')).toBeUndefined();
+    const hello = ws.sentMessages.find((m) => m.type === 'DEVICE_HELLO');
+    expect(hello).toBeDefined();
+    // No persisted device credential → no deviceToken presented.
+    expect(hello?.deviceToken).toBeUndefined();
 
-    // Advance past the 500ms grace window.
+    // Advance past the 500ms grace window — legacy server sent no DEVICE_ACK.
     jest.advanceTimersByTime(500);
     await Promise.resolve(); // let any microtasks flush
 
-    // No AUTH frame should have been sent.
-    const ws = MockWebSocket.getLastInstance()!;
-    const authFrame = ws.sentMessages.find((m) => m.type === 'AUTH');
-    expect(authFrame).toBeUndefined();
-
-    // Client should have reached CONNECTED.
+    // Client should have reached CONNECTED (degraded-to-legacy).
     expect(engine.getConnectionState()).toBe(SyncState.CONNECTED);
 
     // AC-4a: Exact observed transition sequence via history (includes CONNECTING which
@@ -181,7 +184,7 @@ describe('SyncEngine — auth-optional fast path', () => {
 
     // Flush onopen (0ms timer), which sets the 500ms grace timer.
     // Flush 0ms timers (onopen) without advancing the 500ms grace timer.
-    jest.advanceTimersByTime(0);
+    await jest.advanceTimersByTimeAsync(0);
     await Promise.resolve();
 
     // Simulate AUTH_REQUIRED arriving at t=100ms (before 500ms grace expires).
@@ -199,9 +202,10 @@ describe('SyncEngine — auth-optional fast path', () => {
 
     expect(engine.getConnectionState()).toBe(SyncState.AUTHENTICATING);
 
-    // No AUTH frame should have been sent (no token).
-    const authFrame = ws.sentMessages.find((m) => m.type === 'AUTH');
-    expect(authFrame).toBeUndefined();
+    // Only the token-less DEVICE_HELLO was sent; no AUTH frame follows because there is
+    // still no token (a real JWT server would AUTH_FAIL an empty-token AUTH).
+    expect(ws.sentMessages.filter((m) => m.type === 'AUTH')).toHaveLength(0);
+    expect(ws.sentMessages.filter((m) => m.type === 'DEVICE_HELLO')).toHaveLength(1);
 
     engine.close();
   });
@@ -213,7 +217,7 @@ describe('SyncEngine — auth-optional fast path', () => {
     engine = new SyncEngine(config);
 
     // Flush 0ms timers (onopen) without advancing the 500ms grace timer.
-    jest.advanceTimersByTime(0);
+    await jest.advanceTimersByTimeAsync(0);
     await Promise.resolve();
 
     // AUTH_REQUIRED arrives at t=100ms.
@@ -235,14 +239,16 @@ describe('SyncEngine — auth-optional fast path', () => {
     // State must still be AUTHENTICATING immediately after setAuthToken.
     expect(engine.getConnectionState()).toBe(SyncState.AUTHENTICATING);
 
-    // AUTH frame must have been sent.
-    const authFrame = ws.sentMessages.find((m) => m.type === 'AUTH');
-    expect(authFrame).toBeDefined();
-    expect(authFrame?.token).toBe('xyz');
+    // Credentialed AUTH frame must have been sent (after the earlier opportunistic
+    // AUTH{token:''} from the NO_AUTH connect path).
+    const authFrames = ws.sentMessages.filter((m) => m.type === 'AUTH');
+    const credentialedAuth = authFrames[authFrames.length - 1];
+    expect(credentialedAuth).toBeDefined();
+    expect(credentialedAuth?.token).toBe('xyz');
 
     // Simulate AUTH_ACK → transitions to CONNECTED.
     ws.simulateMessage({ type: 'AUTH_ACK' });
-    jest.advanceTimersByTime(0);
+    await jest.advanceTimersByTimeAsync(0);
     await Promise.resolve();
 
     expect(engine.getConnectionState()).toBe(SyncState.CONNECTED);
@@ -276,7 +282,7 @@ describe('SyncEngine — auth-optional fast path', () => {
     // Flush onopen — triggers handleConnectionEstablished which sees the token
     // and sends AUTH immediately without a grace timer.
     // Flush 0ms timers (onopen) without advancing the 500ms grace timer.
-    jest.advanceTimersByTime(0);
+    await jest.advanceTimersByTimeAsync(0);
     await Promise.resolve();
 
     const ws = MockWebSocket.getLastInstance()!;
@@ -297,7 +303,7 @@ describe('SyncEngine — auth-optional fast path', () => {
 
     ws.simulateMessage({ type: 'AUTH_ACK' });
     // Flush 0ms timers (onopen) without advancing the 500ms grace timer.
-    jest.advanceTimersByTime(0);
+    await jest.advanceTimersByTimeAsync(0);
     await Promise.resolve();
 
     expect(engine.getConnectionState()).toBe(SyncState.CONNECTED);
@@ -315,15 +321,15 @@ describe('SyncEngine — auth-optional fast path', () => {
     engine.setTokenProvider(async () => 'provider-token');
 
     // Flush 0ms timers (onopen) without advancing the 500ms grace timer.
-    jest.advanceTimersByTime(0);
+    await jest.advanceTimersByTimeAsync(0);
     await Promise.resolve();
 
     const ws = MockWebSocket.getLastInstance()!;
 
     // tokenProvider is async — advance timers and flush promises.
-    jest.advanceTimersByTime(0);
+    await jest.advanceTimersByTimeAsync(0);
     // Flush 0ms timers (onopen) without advancing the 500ms grace timer.
-    jest.advanceTimersByTime(0);
+    await jest.advanceTimersByTimeAsync(0);
     await Promise.resolve();
 
     const authFrame = ws.sentMessages.find((m) => m.type === 'AUTH');
@@ -332,7 +338,7 @@ describe('SyncEngine — auth-optional fast path', () => {
 
     ws.simulateMessage({ type: 'AUTH_ACK' });
     // Flush 0ms timers (onopen) without advancing the 500ms grace timer.
-    jest.advanceTimersByTime(0);
+    await jest.advanceTimersByTimeAsync(0);
     await Promise.resolve();
 
     expect(engine.getConnectionState()).toBe(SyncState.CONNECTED);
@@ -346,12 +352,13 @@ describe('SyncEngine — auth-optional fast path', () => {
   it('case 6: clears grace timer when WS disconnects during the grace window', async () => {
     engine = new SyncEngine(config);
 
-    // Flush onopen — grace timer is now set (but hasn't fired yet).
+    // Flush onopen — opportunistic AUTH sent + grace timer set (not yet fired).
     // Flush 0ms timers (onopen) without advancing the 500ms grace timer.
-    jest.advanceTimersByTime(0);
+    await jest.advanceTimersByTimeAsync(0);
     await Promise.resolve();
 
-    expect(engine.getConnectionState()).toBe(SyncState.CONNECTING);
+    // NO_AUTH connect path moves to AUTHENTICATING while awaiting AUTH_ACK.
+    expect(engine.getConnectionState()).toBe(SyncState.AUTHENTICATING);
 
     // Disconnect at t=100ms (before grace expires).
     jest.advanceTimersByTime(100);
@@ -414,7 +421,7 @@ describe('SyncEngine — auth-optional fast path', () => {
     engine.setAuthToken('xyz');
 
     // Flush 0ms timers (onopen) without advancing the 500ms grace timer.
-    jest.advanceTimersByTime(0);
+    await jest.advanceTimersByTimeAsync(0);
     await Promise.resolve();
 
     const ws = MockWebSocket.getLastInstance()!;

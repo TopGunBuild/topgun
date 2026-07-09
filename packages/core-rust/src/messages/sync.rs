@@ -81,6 +81,32 @@ pub struct SyncInitMessage {
     pub last_sync_timestamp: Option<u64>,
 }
 
+/// Client → server confirmed-apply ACK.
+///
+/// A cumulative-monotonic cursor: `cursor` is the highest server epoch the client
+/// has confirmed it has **received AND durably applied** (inclusive — "applied ≤
+/// cursor"). It feeds the server's per-device causal frontier, whose fleet-wide
+/// minimum licenses tombstone pruning.
+///
+/// The message carries **NO identity field** by design: the server derives the
+/// authenticated `(principal, deviceId)` replica identity from the connection
+/// state, never from the wire, so a client cannot advance another client's cursor
+/// (nor even name which cursor its ACK advances). This is the load-bearing
+/// spoofing-CLEAN property — there is simply no identity on the wire to forge.
+///
+/// FLAT message — `cursor` is directly on the message, no payload wrapper. Maps to
+/// `ClientApplyAckMessageSchema` in `sync-schemas.ts`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientApplyAckMessage {
+    /// Highest server epoch the client has confirmed received-and-durably-applied
+    /// (inclusive). An unsigned integer decoded via the `serde_number` integer
+    /// helper so a TS `msgpackr` whole-number decodes directly as a `u64` (never
+    /// coerced through `f64`).
+    #[serde(deserialize_with = "serde_number::deserialize_u64")]
+    pub cursor: u64,
+}
+
 /// Payload for sync root hash response.
 ///
 /// Maps to the `payload` of `SyncRespRootMessageSchema` in `sync-schemas.ts`.
@@ -234,6 +260,19 @@ pub struct ORMapSyncInit {
         deserialize_with = "serde_number::deserialize_option_u64"
     )]
     pub last_sync_timestamp: Option<u64>,
+    /// The client's locally-persisted confirmed-apply cursor (highest epoch it has
+    /// durably applied), reported at sync-init so the server can detect a REGRESSED
+    /// replica (a backup-restore clone whose claim is BELOW its server-stored
+    /// cursor) and route it through the authoritative full-snapshot REPLACE resync.
+    /// Additive, client → server only; `None`/omitted from a client that has never
+    /// confirmed an epoch. An unsigned integer decoded via the `serde_number`
+    /// helper so a TS `msgpackr` whole-number decodes directly as a `u64`.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "serde_number::deserialize_option_u64"
+    )]
+    pub claimed_epoch: Option<u64>,
 }
 
 /// Payload for `ORMap` sync root hash response.
@@ -249,6 +288,32 @@ pub struct ORMapSyncRespRootPayload {
     pub root_hash: u32,
     /// Server timestamp at time of response.
     pub timestamp: Timestamp,
+    /// The server's current max stamped tombstone epoch covered by this response
+    /// (the "covering epoch"). Additive, server → client only: the client ACKs
+    /// this via `ClientApplyAckMessage.cursor` after durably applying the sync
+    /// data — INCLUDING on an empty diff (root hash already matches), so an
+    /// up-to-date client still advances its cursor instead of pinning the
+    /// low-water-mark forever. `None`/omitted when the server has stamped no
+    /// tombstone yet (nothing to confirm). An unsigned integer decoded via the
+    /// `serde_number` helper so a TS `msgpackr` whole-number decodes directly as
+    /// a `u64`.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "serde_number::deserialize_option_u64"
+    )]
+    pub covering_epoch: Option<u64>,
+    /// When `true`, this root response directs the client to perform an
+    /// authoritative full-snapshot REPLACE resync: DISCARD its local OR-Map state
+    /// for this map and adopt the server snapshot (NOT an additive CRDT merge). Set
+    /// only for a FORGOTTEN / unknown / REGRESSED client — after tombstone pruning
+    /// the server retains no per-tag→epoch knowledge, so an additive merge with a
+    /// stale replica could not distinguish a genuine add from a resurrected pruned
+    /// tag. Additive, server → client only, omitted (defaults `false`) for the
+    /// normal incremental-sync path. See the client REPLACE + pending-oplog
+    /// discard-preceding logic keyed off this flag.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub full_resync: bool,
 }
 
 /// `ORMap` sync response containing the root hash.
@@ -325,6 +390,16 @@ pub struct ORMapSyncRespLeafPayload {
     pub path: String,
     /// The leaf entries for this bucket.
     pub entries: Vec<ORMapEntry>,
+    /// The server's current max stamped tombstone epoch covered by this leaf
+    /// (the "covering epoch"). The client ACKs it after durably applying the
+    /// leaf entries. Additive, server → client only. See
+    /// [`ORMapSyncRespRootPayload::covering_epoch`].
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "serde_number::deserialize_option_u64"
+    )]
+    pub covering_epoch: Option<u64>,
 }
 
 /// `ORMap` sync response containing leaf-level entries.
@@ -371,6 +446,16 @@ pub struct ORMapDiffResponsePayload {
     pub map_name: String,
     /// The diff entries.
     pub entries: Vec<ORMapEntry>,
+    /// The server's current max stamped tombstone epoch covered by this diff
+    /// (the "covering epoch"). The client ACKs it after durably applying the
+    /// diff entries. Additive, server → client only. See
+    /// [`ORMapSyncRespRootPayload::covering_epoch`].
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "serde_number::deserialize_option_u64"
+    )]
+    pub covering_epoch: Option<u64>,
 }
 
 /// `ORMap` diff response with entries for requested keys.
@@ -522,6 +607,56 @@ mod tests {
     // ---- Client operation messages ----
 
     #[test]
+    fn client_apply_ack_message_roundtrip() {
+        let msg = ClientApplyAckMessage { cursor: 42 };
+        assert_eq!(roundtrip_named(&msg), msg);
+    }
+
+    #[test]
+    fn client_apply_ack_cursor_is_msgpack_integer_not_float() {
+        // The cursor MUST decode as a MsgPack integer (u64), never coerced through
+        // f64 — a large value that loses precision in f64 proves the integer path.
+        let msg = ClientApplyAckMessage {
+            cursor: 9_007_199_254_740_993, // 2^53 + 1: not representable in f64
+        };
+        let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
+        let raw: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode");
+        let map = raw.as_map().expect("map");
+        let (_, cursor_val) = map
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("cursor"))
+            .expect("cursor key present");
+        assert!(
+            matches!(cursor_val, rmpv::Value::Integer(_)),
+            "cursor must be MsgPack Integer, got {cursor_val:?}"
+        );
+        assert_eq!(
+            roundtrip_named(&msg),
+            msg,
+            "value survives round-trip exactly"
+        );
+    }
+
+    #[test]
+    fn client_apply_ack_as_message_has_single_type_discriminant() {
+        // The enum owns the `type` tag; the inner struct must NOT carry its own,
+        // and the discriminant must be CLIENT_APPLY_ACK.
+        let msg = crate::messages::Message::ClientApplyAck(ClientApplyAckMessage { cursor: 7 });
+        let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
+        let raw: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode");
+        let map = raw.as_map().expect("map");
+        let type_keys: Vec<_> = map
+            .iter()
+            .filter(|(k, _)| k.as_str() == Some("type"))
+            .collect();
+        assert_eq!(type_keys.len(), 1, "exactly one `type` key");
+        assert_eq!(type_keys[0].1.as_str(), Some("CLIENT_APPLY_ACK"));
+        let decoded: crate::messages::Message =
+            rmp_serde::from_slice(&bytes).expect("dispatch by type");
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
     fn client_op_message_roundtrip() {
         let msg = ClientOpMessage {
             payload: ClientOp {
@@ -661,6 +796,7 @@ mod tests {
             root_hash: 999,
             bucket_hashes,
             last_sync_timestamp: Some(1_700_000_000_000),
+            claimed_epoch: Some(7),
         };
         assert_eq!(roundtrip_named(&msg), msg);
     }
@@ -676,6 +812,8 @@ mod tests {
                     counter: 0,
                     node_id: "node-1".to_string(),
                 },
+                covering_epoch: None,
+                full_resync: false,
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
@@ -727,9 +865,80 @@ mod tests {
                     }],
                     tombstones: vec!["old-tag".to_string()],
                 }],
+                covering_epoch: Some(7),
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
+    }
+
+    #[test]
+    fn ormap_covering_epoch_omitted_when_none() {
+        // The additive covering-epoch field must be omitted from the wire when
+        // None so the byte layout is unchanged for a server that stamps nothing.
+        let msg = ORMapSyncRespRoot {
+            payload: ORMapSyncRespRootPayload {
+                map_name: "tags".to_string(),
+                root_hash: 1,
+                timestamp: Timestamp {
+                    millis: 1,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
+                covering_epoch: None,
+                full_resync: false,
+            },
+        };
+        let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
+        let val: rmpv::Value = rmp_serde::from_slice(&bytes).expect("deserialize");
+        let payload = val
+            .as_map()
+            .and_then(|m| {
+                m.iter()
+                    .find(|(k, _)| k.as_str() == Some("payload"))
+                    .map(|(_, v)| v)
+            })
+            .expect("payload");
+        let has_covering = payload
+            .as_map()
+            .expect("payload map")
+            .iter()
+            .any(|(k, _)| k.as_str() == Some("coveringEpoch"));
+        assert!(!has_covering, "coveringEpoch omitted when None");
+    }
+
+    #[test]
+    fn ormap_covering_epoch_is_camel_case_integer_not_float() {
+        // When present, coveringEpoch is a camelCase MsgPack integer (u64), never
+        // coerced through f64 — a value beyond f64's exact integer range proves it.
+        let msg = ORMapSyncRespLeaf {
+            payload: ORMapSyncRespLeafPayload {
+                map_name: "tags".to_string(),
+                path: "0".to_string(),
+                entries: vec![],
+                covering_epoch: Some(9_007_199_254_740_993), // 2^53 + 1
+            },
+        };
+        let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
+        let val: rmpv::Value = rmpv::decode::read_value(&mut &bytes[..]).expect("decode");
+        let payload = val
+            .as_map()
+            .and_then(|m| {
+                m.iter()
+                    .find(|(k, _)| k.as_str() == Some("payload"))
+                    .map(|(_, v)| v)
+            })
+            .expect("payload");
+        let (_, covering) = payload
+            .as_map()
+            .expect("payload map")
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("coveringEpoch"))
+            .expect("coveringEpoch present (camelCase)");
+        assert!(
+            matches!(covering, rmpv::Value::Integer(_)),
+            "coveringEpoch must be MsgPack Integer, got {covering:?}"
+        );
+        assert_eq!(roundtrip_named(&msg), msg, "value survives round-trip");
     }
 
     #[test]
@@ -753,6 +962,7 @@ mod tests {
                     records: vec![],
                     tombstones: vec![],
                 }],
+                covering_epoch: None,
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);

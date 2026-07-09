@@ -23,14 +23,16 @@ use futures_util::stream::{SplitSink, StreamExt};
 use tokio::sync::mpsc;
 use topgun_core::hash_to_partition;
 use topgun_core::messages::{
-    AuthAckData, ErrorPayload, Message as TopGunMessage, OpAckMessage, OpAckPayload, WriteConcern,
+    AuthAckData, DeviceAckData, ErrorPayload, Message as TopGunMessage, OpAckMessage, OpAckPayload,
+    WriteConcern,
 };
 use tracing::{debug, warn};
 
 use super::auth::AuthHandler;
 use super::decode;
 use super::AppState;
-use crate::network::connection::ConnectionId;
+use crate::network::connection::{ConnectionHandle, ConnectionId};
+use crate::network::device_identity::{frontier_client_id, DeviceIdentityStore};
 use crate::network::{ConnectionKind, OutboundMessage};
 use crate::service::classify::OperationService;
 use crate::service::dispatch::PartitionDispatcher;
@@ -197,9 +199,24 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                     }
                                     authenticated.store(true, Ordering::Release);
 
-                                    // Send AUTH_ACK with userId via the outbound channel
+                                    // Device identity present-or-mint (fail-open — never blocks
+                                    // auth). One-shot here is structural: this arm runs once then
+                                    // `break 'auth`s, so there is no second JWT-mode bind site.
+                                    let (device_id, device_token) = bind_device_identity(
+                                        &state,
+                                        &handle,
+                                        conn_id,
+                                        Some(&principal.id),
+                                        auth_msg.device_token.as_deref(),
+                                    )
+                                    .await;
+
+                                    // Send AUTH_ACK with userId + any device identity via the
+                                    // outbound channel.
                                     let ack_msg = TopGunMessage::AuthAck(AuthAckData {
                                         user_id: Some(principal.id.clone()),
+                                        device_id,
+                                        device_token,
                                         ..Default::default()
                                     });
                                     if let Ok(bytes) = rmp_serde::to_vec_named(&ack_msg) {
@@ -321,6 +338,53 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     }
                 };
 
+                // Device-credential presentation, handled at the websocket layer (both
+                // modes). A token-less client (NO_AUTH, or a JWT client before it has a
+                // token) sends DEVICE_HELLO as its first frame instead of an empty-token
+                // AUTH — the latter collides with JWT validation and a JWT server would
+                // AUTH_FAIL + tear the connection down. DEVICE_HELLO is a distinct,
+                // non-AUTH frame: a JWT server drops it in Phase 1 (never reaching here),
+                // and here we run present-or-mint and reply DEVICE_ACK. It NEVER enters
+                // data-plane dispatch. The identity namespace follows the connection's
+                // authenticated principal (Some in the unlikely JWT-in-Phase-2 case, None
+                // → sentinel in NO_AUTH).
+                if let TopGunMessage::DeviceHello(ref hello) = tg_msg {
+                    // One-shot binding (explicit Phase-2 guard): once an identity is bound,
+                    // drop any further DEVICE_HELLO so in-flight identity-scoped state is
+                    // never silently re-attributed. This also makes the handler a safe
+                    // no-op for an already-authenticated JWT connection (bound in Phase 1).
+                    // The read loop is sequential, so the first bind wins and later frames
+                    // observe device_id = Some.
+                    let already_bound = handle.metadata.read().await.device_id.is_some();
+                    if already_bound {
+                        debug!(
+                            "dropping repeat DEVICE_HELLO on bound connection {:?}",
+                            conn_id
+                        );
+                        continue;
+                    }
+                    let (device_id, device_token) = bind_device_identity(
+                        &state,
+                        &handle,
+                        conn_id,
+                        principal.as_ref().map(|p| p.id.as_str()),
+                        hello.device_token.as_deref(),
+                    )
+                    .await;
+                    // Reply DEVICE_ACK only when an identity was actually bound (a store
+                    // must be wired); network-only test servers stay identity-less.
+                    if device_id.is_some() {
+                        let ack = TopGunMessage::DeviceAck(DeviceAckData {
+                            device_id,
+                            device_token,
+                        });
+                        if let Ok(bytes) = rmp_serde::to_vec_named(&ack) {
+                            let _ = handle.tx.send(OutboundMessage::Binary(bytes)).await;
+                        }
+                    }
+                    continue;
+                }
+
                 // Per-connection inbound op-rate limit. Cost = number of ops the
                 // frame carries (a batch counts as its op count) so one peer's
                 // flood is throttled fairly. On exceed we send a 429 back-off and
@@ -348,6 +412,24 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         // fine — the client is already getting backpressure.
                         let _ = handle.try_send(OutboundMessage::Binary(bytes));
                     }
+                    continue;
+                }
+
+                // Confirmed-apply ACK: advance the per-device causal frontier inline.
+                // Identity-scoped and connection-ownership-fenced, so it is handled here
+                // (it needs the connection's device identity + the ownership registry,
+                // both in `state`/`handle`) rather than in the spawned data-plane
+                // dispatch task. The read loop is sequential, so cursor monotonicity is
+                // naturally preserved across a connection's ACK stream.
+                if let TopGunMessage::ClientApplyAck(ref ack) = tg_msg {
+                    handle_client_apply_ack(
+                        &state,
+                        &handle,
+                        conn_id,
+                        principal.as_ref(),
+                        ack.cursor,
+                    )
+                    .await;
                     continue;
                 }
 
@@ -411,6 +493,117 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     debug!("WebSocket disconnected: {:?}", conn_id);
 }
 
+/// Runs device-credential present-or-mint and binds the resulting identity to the
+/// connection (one-shot `device_id`) plus connection ownership (TAKEOVER).
+///
+/// Returns `(device_id, minted_token)` for the `AUTH_ACK`. **Fail-open:** a missing
+/// store or any storage error leaves the connection identity-less (`device_id` stays
+/// `None`) and NEVER blocks authentication — an attacker can always claim "no token"
+/// anyway, so failing an honest user out buys no security.
+///
+/// `principal_id` is `Some` in JWT mode and `None` in `NO_AUTH` mode (keyed under the
+/// frontier sentinel namespace). The caller guarantees the one-shot precondition
+/// (JWT: structural single Phase-1 bind; `NO_AUTH`: explicit pre-call guard), so this
+/// only sets `device_id` when it is still `None`.
+async fn bind_device_identity(
+    state: &AppState,
+    handle: &Arc<ConnectionHandle>,
+    conn_id: ConnectionId,
+    principal_id: Option<&str>,
+    presented: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let Some(factory) = state.store_factory.as_ref() else {
+        return (None, None);
+    };
+    let dev_store = DeviceIdentityStore::new(factory.data_store());
+    // present_or_mint tags the no-auth namespace structurally from the `None` principal;
+    // no content sentinel is substituted here (a JWT `sub` can never forge the tag).
+    match dev_store.present_or_mint(principal_id, presented).await {
+        Ok(binding) => {
+            {
+                let mut meta = handle.metadata.write().await;
+                if meta.device_id.is_none() {
+                    meta.device_id = Some(binding.device_id.clone());
+                }
+            }
+            // TAKEOVER: a valid credential for an already-owned identity displaces the
+            // prior connection, which is closed so its in-flight identity-scoped
+            // actions can be fenced out by `is_current_owner`.
+            let identity_key = frontier_client_id(principal_id, &binding.device_id);
+            if let Some(displaced) = state
+                .registry
+                .claim_device_ownership(identity_key.clone(), conn_id)
+            {
+                if let Some(old) = state.registry.get(displaced) {
+                    old.cancel();
+                }
+                warn!(
+                    "device-identity takeover on {:?}: displaced {:?}",
+                    conn_id, displaced
+                );
+            }
+            // Rehydrate any persisted confirmed-apply cursor for this KNOWN identity
+            // into the in-memory frontier BEFORE any ACK, so a reconnecting device pins
+            // the prune low-water-mark at its true cursor instead of falling through the
+            // "unknown == forgotten" path (which pins nothing and would let the LWM jump
+            // forward). A freshly-minted identity has no persisted cursor and correctly
+            // stays untracked (unknown → gated). Best-effort: no store → no-op.
+            if let Some(frontier) = state.frontier.as_ref() {
+                frontier.rehydrate(&identity_key).await;
+            }
+            (Some(binding.device_id), binding.minted_token)
+        }
+        Err(e) => {
+            debug!(
+                "device present-or-mint failed for {:?}: {} (fail-open, identity-less)",
+                conn_id, e
+            );
+            (None, None)
+        }
+    }
+}
+
+/// Handles a client→server confirmed-apply ACK: advances the per-device causal
+/// frontier under the bounded, monotone, connection-ownership-fenced rule.
+///
+/// The replica identity is derived ENTIRELY from server-authenticated connection
+/// state — the authenticated `principal` plus the server-issued `device_id` — never
+/// from the wire (the ACK carries only `cursor`). The ACK is accepted ONLY from the
+/// connection that currently OWNS the identity (342i `is_current_owner` fencing), so
+/// a displaced (taken-over) connection's in-flight stale ACK cannot advance the
+/// shared cursor past the current owner's durable state. Identity-less connections
+/// and rejected stale ACKs are dropped at `debug` (not errors) — they pin nothing.
+async fn handle_client_apply_ack(
+    state: &AppState,
+    handle: &Arc<ConnectionHandle>,
+    conn_id: ConnectionId,
+    principal: Option<&Principal>,
+    claimed: u64,
+) {
+    let Some(frontier) = state.frontier.as_ref() else {
+        return; // frontier not wired (network-only tests) — ACK is a no-op
+    };
+    let device_id = { handle.metadata.read().await.device_id.clone() };
+    let Some(device_id) = device_id else {
+        debug!(
+            "dropping confirmed-apply ACK from identity-less {:?}",
+            conn_id
+        );
+        return;
+    };
+    let client = frontier_client_id(principal.map(|p| p.id.as_str()), &device_id);
+    if !state.registry.is_current_owner(&client, conn_id) {
+        debug!(
+            "rejecting stale confirmed-apply ACK from non-owner {:?}",
+            conn_id
+        );
+        return;
+    }
+    if frontier.confirm_apply_ack(&client, claimed, conn_id).await {
+        debug!(conn = ?conn_id, cursor = claimed, "confirmed-apply cursor advanced");
+    }
+}
+
 /// Releases all session-scoped registry state for a disconnecting connection.
 ///
 /// Invoked at every exit point in `handle_socket` BEFORE `registry.remove(conn_id)`
@@ -444,6 +637,11 @@ fn release_session_state(state: &AppState, conn_id: ConnectionId) {
     }
     if let Some(ref reg) = state.hybrid_search_registry {
         let _ = reg.unregister_by_connection(conn_id);
+    }
+    // Drop this connection's per-connection `delivered` clamp state; the per-identity
+    // cursors are untouched (they survive reconnect via rehydration).
+    if let Some(ref frontier) = state.frontier {
+        frontier.remove_connection(conn_id);
     }
 }
 

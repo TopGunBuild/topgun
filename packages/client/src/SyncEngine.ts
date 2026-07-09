@@ -3,6 +3,10 @@ import type { EntryProcessorDef, EntryProcessorResult, SearchOptions } from '@to
 import type { LWWRecord, ORMapRecord, Timestamp } from '@topgunbuild/core';
 import type {
   AuthFailMessage,
+  AuthMessage,
+  AuthAckMessage,
+  DeviceHelloMessage,
+  DeviceAckMessage,
   OpAckMessage,
   OpRejectedMessage,
   ErrorMessage,
@@ -141,6 +145,43 @@ export interface SyncEngineConfig {
 // connection provider in TopGunClient. This avoids the "two sources of truth, one
 // dead" trap where editing the wrong half changed nothing.
 
+/**
+ * Extracts the server epoch a pushed event confirms, for the confirmed-apply cursor.
+ *
+ * Forward-compatible with the prune-wiring epoch stamping: the server does not yet
+ * stamp an `epoch` on live delta events, so this returns 0 today (a zero epoch is
+ * dropped by `applyMapCoverage`, so the push path is inert until the wire stamps
+ * one). `handleServerEvent`/`handleServerBatchEvent` route this value through
+ * `applyMapCoverage(mapName, epoch)` — the cross-map min-barrier — NEVER through
+ * `emitConfirmedApply` directly, so when epoch stamping on push events lands, a
+ * single map's live event cannot license a device-wide ACK past a tombstone some
+ * OTHER held map has not received.
+ */
+function epochOfServerEvent(payload: unknown): number {
+  const epoch = (payload as { epoch?: unknown } | null)?.epoch;
+  return typeof epoch === 'number' && Number.isFinite(epoch) && epoch > 0 ? epoch : 0;
+}
+
+// Eager per-OR-Map existence marker. Written at the FIRST durable OR-state write
+// for a map (both the local-write commit AND the server-origin persist helpers),
+// so the covering-epoch held-set snapshot can discover EVERY persisted OR-Map —
+// including an add-only map that never wrote a `:tombstones` meta-key. Without
+// this, a lazily-opened add-only store is invisible to the snapshot and the
+// device ACK can advance past its un-received tombstones (the cross-map
+// resurrection vector). See `computeHeldOrMapNames` / `ensureOrMapMarker`.
+const orMapMarkerKey = (mapName: string): string => `__sys__:${mapName}:ormap`;
+// Set ONCE after the legacy-store backfill scan succeeds. Its ABSENCE forces the
+// backfill to (re-)run inside `computeHeldOrMapNames`; a scan failure leaves it
+// unset so the next connection retries — and the throw fail-closes this
+// connection's ACKs. Deliberately NOT of the form `__sys__:*:ormap|tombstones`
+// so it is never matched as a held-map name by the enumeration regex.
+const ORMAP_BACKFILL_DONE_KEY = '__sys__:ormapBackfillDone';
+// Discovers a held OR-Map name from either meta-marker: the eager `:ormap`
+// existence marker (post-fix + backfilled stores) OR the legacy `:tombstones`
+// key (belt-and-suspenders — a pre-fix store that HAS a tombstone but somehow
+// escaped backfill is still discoverable).
+const HELD_ORMAP_META_RE = /^__sys__:(.+):(?:ormap|tombstones)$/;
+
 export class SyncEngine {
   private readonly nodeId: string;
   private readonly storageAdapter: IStorageAdapter;
@@ -194,9 +235,56 @@ export class SyncEngine {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- maps registry holds heterogeneous LWWMap and ORMap instances; value types differ per map name
   private maps: Map<string, LWWMap<any, any> | ORMap<any, any>> = new Map();
   private lastSyncTimestamp: number = 0;
+  // Highest server epoch this client has confirmed to the server via CLIENT_APPLY_ACK.
+  // The confirmed-apply cursor is cumulative-monotonic: a non-advancing epoch is never
+  // re-sent. Distinct from lastSyncTimestamp (a delta-sync optimization hint) — this is
+  // the apply-not-receive confirmation the server's per-device causal frontier reads.
+  private lastAckedEpoch: number = 0;
+  // Per-OR-Map coverage: highest covering epoch durably applied for that map on
+  // THIS connection. The device-wide CLIENT_APPLY_ACK is gated by the MIN across
+  // `heldOrMapNames` (never a single map's own coverage) — the cross-map
+  // covering-epoch ACK-inflation fix. Reset every connection in startMerkleSync.
+  private orMapCoverage: Map<string, number> = new Map();
+  // Consistent snapshot of every OR-Map this device holds locally (open
+  // instances UNION persisted-but-not-yet-opened stores), taken ONCE per
+  // connection in startMerkleSync BEFORE any covering-epoch ACK can fire. `null`
+  // before the first sync of a connection — applyMapCoverage treats that (and an
+  // empty snapshot) as "nothing to confirm coverage over" and never ACKs.
+  private heldOrMapNames: Set<string> | null = null;
+  // Fail-closed marker: true when this connection's held-set enumeration FAILED
+  // (storage adapter error). While set, applyMapCoverage never emits an ACK — a
+  // partial held-set (in-memory maps only, persisted stores unknown) would run
+  // the min-barrier over an incomplete universe, which is the exact cross-map
+  // ACK-inflation hole reopened through a different door. Reset per connection.
+  private heldSetIncomplete = false;
+  // De-noises the fail-closed path: warn once per connection, not per apply.
+  private heldSetIncompleteWarned = false;
+  // Once-per-SESSION guard for the eager `:ormap` existence marker: names whose
+  // marker we have already ensured this process lifetime. The marker is durable,
+  // so re-ensuring after a restart is a harmless idempotent setMeta; this Set
+  // just keeps the common OR-write path from issuing a redundant marker write on
+  // every add/remove. NOT reset per connection (the durable marker outlives a
+  // reconnect).
+  private markedOrMaps: Set<string> = new Set();
   private authToken: string | null = null;
   private tokenProvider: (() => Promise<string | null>) | null = null;
   private onAuthRequired: ((error: AuthRequiredError) => void) | null = null;
+
+  // Server-issued device identity. The deviceToken is an opaque credential the
+  // client presents on AUTH so the server can rebind the same device identity
+  // across reconnects/restarts; the server returns (and may rotate) it on
+  // AUTH_ACK. Both are persisted durably via the storage adapter's meta store so
+  // they survive process restarts. The token is opaque — never parsed by the client.
+  private deviceToken: string | null = null;
+  private deviceId: string | null = null;
+  // Memoized in-flight load of the persisted device credential, so the boot load
+  // (loadOpLog) and the auth path share a single read and the credential is
+  // guaranteed available before the first AUTH is presented.
+  private deviceCredentialLoadPromise: Promise<void> | null = null;
+  // True while a token-less DEVICE_HELLO awaits its DEVICE_ACK. Used to infer a legacy
+  // (pre-device-identity) server: any non-DEVICE_ACK message (or the grace timeout)
+  // while this is set means proceed auth-optional without a deviceId.
+  private deviceAckPending = false;
 
   // Grace timer: gives the server a bounded window to send AUTH_REQUIRED after WS open.
   // If AUTH_REQUIRED arrives, the timer is cancelled and existing auth behaviour runs.
@@ -371,6 +459,18 @@ export class SyncEngine {
       // reload — same canonical helpers as the local-write + applyServerEvent paths.
       persistKey: (name, key) => this.persistORMapKey(name, key),
       persistTombstones: (name) => this.persistORMapTombstones(name),
+      // Fold this map's covering epoch into the device-wide MIN across every
+      // held OR-Map (see applyMapCoverage) AFTER its data is durably applied
+      // (including on an empty diff), so the server's per-device cursor advances
+      // only once every held map has proven delivery — never off a single map's
+      // sync completion.
+      onCoveringEpochApplied: (mapName, epoch) => this.applyMapCoverage(mapName, epoch),
+      // Authoritative full-snapshot REPLACE resync for a forgotten/regressed client:
+      // discard local OR-Map state + subsumed pending ops before pulling the snapshot.
+      onFullResync: (mapName, snapshotBoundary) =>
+        this.replaceOrMapFromSnapshot(mapName, snapshotBoundary),
+      // Report the confirmed-apply cursor on ORMAP_SYNC_INIT (regressed-replica detection).
+      getClaimedEpoch: () => this.lastAckedEpoch,
     });
 
     // Initialize Conflict Resolver client
@@ -398,7 +498,8 @@ export class SyncEngine {
       {
         sendAuth: () => this.sendAuth(),
         handleAuthRequired: () => this.handleAuthRequired(),
-        handleAuthAck: () => this.handleAuthAck(),
+        handleAuthAck: (msg) => this.handleAuthAck(msg),
+        handleDeviceAck: (msg) => this.handleDeviceAck(msg),
         handleAuthFail: (msg) => this.handleAuthFail(msg),
         handleOpAck: (msg) => this.handleOpAck(msg),
         handleQueryResp: (msg) => this.handleQueryResp(msg),
@@ -428,6 +529,11 @@ export class SyncEngine {
     this.webSocketManager.connect();
 
     this.loadOpLog();
+
+    // Kick off the device-credential read independently of loadOpLog so it does
+    // not delay the op-log rebuild (loadOpLog resets this.opLog). sendAuth awaits
+    // the same memoized promise before presenting the credential.
+    void this.ensureDeviceCredentialLoaded();
   }
 
   // ============================================
@@ -448,14 +554,24 @@ export class SyncEngine {
       return;
     }
 
-    // Auth-optional wait: allow the server AUTH_REQUIRED_GRACE_MS to send
-    // AUTH_REQUIRED. If nothing arrives, assume auth-optional and drive to CONNECTED.
+    // Token-less connect (no token, no provider). Present the device credential on a
+    // dedicated DEVICE_HELLO frame — NOT an empty-token AUTH, which a real JWT server
+    // treats as a JWT attempt, fails, and tears the connection down. DEVICE_HELLO is a
+    // distinct non-AUTH frame: a device-aware NO_AUTH server present-or-mints and replies
+    // DEVICE_ACK; a JWT server silently drops it and (separately) sends AUTH_REQUIRED, so
+    // the connection survives and Case 3 (supply a token later) still works; a legacy
+    // server ignores it. Arm the grace timer so a legacy/no-reply server still proceeds
+    // auth-optional instead of hanging.
     logger.info(
       { graceMs: this.AUTH_REQUIRED_GRACE_MS },
-      'Connection established. Waiting briefly for AUTH_REQUIRED...',
+      'Connection established (token-less). Presenting device credential; waiting briefly for DEVICE_ACK...',
     );
+    this.stateMachine.transition(SyncState.AUTHENTICATING);
+    this.deviceAckPending = true;
+    this.sendDeviceHello();
     this.authRequiredGraceTimer = setTimeout(() => {
       this.authRequiredGraceTimer = null;
+      this.deviceAckPending = false;
       this.completeAuthOptionalConnection();
     }, this.AUTH_REQUIRED_GRACE_MS);
   }
@@ -494,9 +610,13 @@ export class SyncEngine {
       return;
     }
 
-    logger.info('No AUTH_REQUIRED received within grace window — assuming auth-optional server.');
+    logger.info(
+      'No DEVICE_ACK received within grace window — assuming auth-optional legacy server.',
+    );
+    this.deviceAckPending = false;
     // Traverse the canonical pre-auth → ready path (no new state transitions added).
     this.stateMachine.transition(SyncState.AUTHENTICATING);
+    // No message: proceed without a deviceId (degraded-to-legacy).
     this.handleAuthAck(); // Reuses existing SYNCING → CONNECTED wiring.
   }
 
@@ -512,6 +632,8 @@ export class SyncEngine {
    * produce an "Invalid state transition" log and violate AC #4.
    */
   private handleAuthRequired(): void {
+    // The server demands JWT auth — abandon the opportunistic device-ack wait.
+    this.deviceAckPending = false;
     if (this.authRequiredGraceTimer) {
       clearTimeout(this.authRequiredGraceTimer);
       this.authRequiredGraceTimer = null;
@@ -618,6 +740,62 @@ export class SyncEngine {
   // Op Log Management
   // ============================================
 
+  /**
+   * Load the persisted server-issued device credential (token + id) from durable
+   * meta storage into memory, at most once. Runs on boot (via loadOpLog) and is
+   * also awaited lazily in sendAuth to close the race where the connection opens
+   * before loadOpLog resolves — so a persisted deviceToken is always presented.
+   */
+  private ensureDeviceCredentialLoaded(): Promise<void> {
+    if (!this.deviceCredentialLoadPromise) {
+      this.deviceCredentialLoadPromise = this.loadDeviceCredential();
+    }
+    return this.deviceCredentialLoadPromise;
+  }
+
+  private async loadDeviceCredential(): Promise<void> {
+    try {
+      const token = await this.storageAdapter.getMeta('deviceToken');
+      if (typeof token === 'string' && token.length > 0) {
+        this.deviceToken = token;
+      }
+      const id = await this.storageAdapter.getMeta('deviceId');
+      if (typeof id === 'string' && id.length > 0) {
+        this.deviceId = id;
+      }
+    } catch (err) {
+      // A storage read failure must not block auth — the server will present-or-mint
+      // a fresh identity if we present nothing (fail-open).
+      logger.warn({ err }, 'Failed to load persisted device credential');
+    }
+  }
+
+  /**
+   * Persist a device credential carried on AUTH_ACK (credentialed path) or DEVICE_ACK
+   * (token-less path). `deviceToken` is present only when the server minted or rotated
+   * the credential; when absent (a plain re-bind of an already-valid token) the existing
+   * token is kept, never cleared.
+   */
+  private persistDeviceCredential(message: AuthAckMessage | DeviceAckMessage): void {
+    // The credential is now authoritative in memory; mark the boot-time load
+    // satisfied so it cannot later overwrite these values.
+    if (!this.deviceCredentialLoadPromise) {
+      this.deviceCredentialLoadPromise = Promise.resolve();
+    }
+    if (message.deviceId && message.deviceId !== this.deviceId) {
+      this.deviceId = message.deviceId;
+      this.storageAdapter
+        .setMeta('deviceId', message.deviceId)
+        .catch((err) => logger.warn({ err }, 'Failed to persist deviceId'));
+    }
+    if (message.deviceToken) {
+      this.deviceToken = message.deviceToken;
+      this.storageAdapter
+        .setMeta('deviceToken', message.deviceToken)
+        .catch((err) => logger.warn({ err }, 'Failed to persist deviceToken'));
+    }
+  }
+
   private async loadOpLog(): Promise<void> {
     const storedTimestamp = await this.storageAdapter.getMeta('lastSyncTimestamp');
     if (storedTimestamp) {
@@ -651,6 +829,259 @@ export class SyncEngine {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- map value type is erased in the registry; callers get typed instances via TopGunClient.getMap/getORMap overloads
   public registerMap(mapName: string, map: LWWMap<any, any> | ORMap<any, any>): void {
     this.maps.set(mapName, map);
+    if (map instanceof ORMap && this.heldOrMapNames && !this.heldOrMapNames.has(mapName)) {
+      // A map opened AFTER this connection's held-set snapshot joins the barrier
+      // with coverage 0 — it blocks further ACK advance until it syncs, but any
+      // PREVIOUSLY-emitted higher ACK deliberately stands unretracted. That is
+      // sound because the only map this path can add is a GENUINELY-NEW one: it
+      // is empty at open (no prior local state, no tombstones it could be
+      // missing), so there is nothing an already-emitted ACK could have
+      // over-claimed about it and nothing to resurrect. The dangerous sibling
+      // case — a PERSISTED store from a prior session that the snapshot failed
+      // to see — is NOT handled here and never reaches this path: enumeration
+      // failure fail-closes the whole connection's ACKs via heldSetIncomplete
+      // (see startMerkleSync), and a successful enumeration now puts EVERY
+      // persisted OR-Map in the snapshot before the first ACK can fire — every
+      // durably-written OR-Map carries an eager `:ormap` existence marker (both
+      // write seams) and legacy pre-marker stores are stamped by the one-time
+      // backfill, so even an add-only persisted store (no `:tombstones` key) is
+      // discovered. A map surfacing here is therefore genuinely-new, not a missed
+      // persisted one.
+      this.heldOrMapNames.add(mapName);
+      if (!this.orMapCoverage.has(mapName)) {
+        this.orMapCoverage.set(mapName, 0);
+      }
+    }
+  }
+
+  /**
+   * The consistent snapshot of every OR-Map this device holds locally: OR-Map
+   * instances already registered in `this.maps`, UNION the OR-Map stores the
+   * storage adapter has persisted from a prior session but this process has not
+   * (yet) instantiated via `getORMap()`. Enumerated from the reserved OR-Map
+   * meta-keys — the eager `:ormap` existence marker (written at the first durable
+   * OR write, so add-only stores are included) OR the legacy `:tombstones` key.
+   * Snapshot semantics are mandatory (see startMerkleSync): a racily/lazily
+   * discovered non-empty store must never be missing from the FIRST snapshot
+   * taken this connection, or the exact cross-map ACK-inflation gap reopens.
+   *
+   * Runs the one-time legacy-store backfill FIRST (idempotent, gated by a durable
+   * done-flag) so a pre-fix add-only store — which has neither marker — is stamped
+   * with a `:ormap` marker before enumeration reads it. Backfill inside the snapshot
+   * computation (not a separate suppress-until-migrated flag) makes held-set
+   * incompleteness impossible at EVERY instant: either the backfill has completed
+   * and every persisted OR-Map carries a marker, or it throws and this connection
+   * fail-closes below.
+   *
+   * THROWS on enumeration/backfill failure — deliberately fail-closed. Swallowing the
+   * error and returning the in-memory-maps-only subset would hand the
+   * min-barrier a PARTIAL held-set: a persisted store the snapshot silently
+   * missed could then hold un-received tombstones while the device's ACK
+   * advances past them — the exact inflation hole this snapshot exists to
+   * close. The caller (startMerkleSync) converts the throw into a
+   * connection-wide ACK suppression (heldSetIncomplete) instead.
+   */
+  private async computeHeldOrMapNames(): Promise<Set<string>> {
+    await this.backfillLegacyOrMapMarkers();
+    const held = new Set<string>();
+    for (const [mapName, map] of this.maps) {
+      if (map instanceof ORMap) {
+        held.add(mapName);
+      }
+    }
+    const metaKeys = await this.storageAdapter.getAllMetaKeys();
+    for (const key of metaKeys) {
+      const match = HELD_ORMAP_META_RE.exec(key);
+      if (match) {
+        held.add(match[1]);
+      }
+    }
+    return held;
+  }
+
+  /**
+   * One-time migration for stores persisted BEFORE the eager `:ormap` marker
+   * existed. A pre-fix add-only OR-Map has KV records but no `:ormap` marker and
+   * (being add-only) no `:tombstones` key either, so it is invisible to the
+   * held-set snapshot — the cross-map ACK-inflation vector for legacy data. This
+   * scans the KV keyspace once, attributes every OR-Map by data shape, and stamps
+   * its marker so subsequent snapshots discover it in O(1).
+   *
+   * Correctness notes:
+   * - Scans ALL keys (never a sample): a missed add-only map with a single key is
+   *   exactly the bug. A name is classified OR the moment ANY key under its prefix
+   *   holds an ARRAY (the ORMap records-array shape; an LWWRecord is always a single
+   *   object, never a bare array), so a `:`-prefix collision (TODO-577) between the
+   *   FIRST-colon-split name and an LWW *value* only ever ADDS a phantom OR name
+   *   (over-conservative: coverage 0 until it syncs), never hides a real one.
+   * - KNOWN GAP (TODO-577, latent until the durability watermark activates): the
+   *   first-colon split (`indexOf(':')`) means a map whose NAME contains a colon
+   *   (`"a:b"`, data key `"a:b:k"`) is attributed to `"a"`, so its own `:ormap`
+   *   marker is never stamped. If a sibling `"a"` also exists and syncs while `"a:b"`
+   *   is never re-opened this session, the min-barrier CAN advance past `"a:b"`'s
+   *   un-received tombstones — i.e. this colon-in-NAME case CAN hide a real map,
+   *   unlike the colon-in-value case above. Legacy-backfill-only (every post-fix map
+   *   stamps its marker under its full name; `HELD_ORMAP_META_RE`'s greedy capture
+   *   recovers colon names correctly). Closed by forbidding `:` in map names or an
+   *   injective key scheme — see TODO-577.
+   * - Gated by a durable done-flag set ONLY on success. A throw propagates to
+   *   `computeHeldOrMapNames` → the connection fail-closes (heldSetIncomplete) and
+   *   the scan is retried on the next connection. This makes the upgrade path safe
+   *   even though the server cursor keyspace was reset to `_v2` (a fresh cursor has
+   *   no conservative fallback, so an unmarked legacy add-only map would otherwise
+   *   let the device build inflated ACKs on first prune).
+   */
+  private async backfillLegacyOrMapMarkers(): Promise<void> {
+    if (await this.storageAdapter.getMeta(ORMAP_BACKFILL_DONE_KEY)) return;
+
+    const keys = await this.storageAdapter.getAllKeys();
+    const orNames = new Set<string>();
+    for (const fullKey of keys) {
+      const ci = fullKey.indexOf(':');
+      if (ci <= 0) continue;
+      const name = fullKey.substring(0, ci);
+      if (orNames.has(name)) continue; // already attributed OR — skip redundant reads
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- shape is discriminated by Array.isArray below; the OR-Map records-array vs LWWRecord-object distinction is all we need
+      const value = await this.storageAdapter.get<any>(fullKey);
+      if (Array.isArray(value)) {
+        orNames.add(name);
+      }
+    }
+
+    for (const name of orNames) {
+      await this.storageAdapter.setMeta(orMapMarkerKey(name), 1);
+      this.markedOrMaps.add(name);
+    }
+    // Set the done-flag LAST — only a fully-successful scan is recorded, so any
+    // failure above leaves it unset and the migration retries next connection.
+    await this.storageAdapter.setMeta(ORMAP_BACKFILL_DONE_KEY, true);
+    if (orNames.size > 0) {
+      logger.info(
+        { orMapNames: Array.from(orNames) },
+        'Backfilled OR-Map existence markers for legacy persisted stores',
+      );
+    }
+  }
+
+  /**
+   * Instantiate + restore a persisted-but-not-yet-opened OR-Map by name so
+   * `startMerkleSync` can sync it even though the application has not called
+   * `getORMap()` on it this session. Registers the instance in `this.maps`
+   * (mirrors `TopGunClient.getORMap`'s restore path via `registerMap`) so a
+   * later `getORMap()` call finds live, already-synced state. Liveness fix:
+   * without this, an abandoned local store would permanently stall the
+   * covering-epoch min-barrier for every OTHER held map on this device.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ORMap generic params are erased at the registry level; restored instance is later re-typed by TopGunClient.getORMap's overload
+  private async instantiateAndRestoreOrMap(mapName: string): Promise<ORMap<any, any>> {
+    const existing = this.maps.get(mapName);
+    if (existing instanceof ORMap) {
+      return existing;
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ORMap generic params are erased at the registry level; actual types are supplied by the caller's later getORMap() overload
+    const map = new ORMap<any, any>(this.hlc);
+    this.registerMap(mapName, map);
+
+    try {
+      const tombstoneKey = `__sys__:${mapName}:tombstones`;
+      const tombstones = await this.storageAdapter.getMeta(tombstoneKey);
+      if (Array.isArray(tombstones)) {
+        for (const tag of tombstones) {
+          map.applyTombstone(tag);
+        }
+      }
+
+      const keys = await this.storageAdapter.getAllKeys();
+      const prefix = `${mapName}:`;
+      for (const fullKey of keys) {
+        if (!fullKey.startsWith(prefix)) continue;
+        const keyPart = fullKey.substring(prefix.length);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- restored KV value shape is validated by the Array.isArray guard below; ORMapRecord value type is erased at the storage layer
+        const data = await this.storageAdapter.get<any>(fullKey);
+        if (Array.isArray(data)) {
+          for (const record of data as ORMapRecord<unknown>[]) {
+            map.apply(keyPart, record);
+          }
+        }
+      }
+    } catch (err) {
+      logger.error(
+        { mapName, err },
+        'Failed to restore a persisted-but-not-instantiated ORMap for covering-epoch sync',
+      );
+    }
+
+    return map;
+  }
+
+  /**
+   * Record that `mapName`'s OR-Map data is durably applied through `epoch` on
+   * this connection, then re-derive the device-wide confirmed-apply cursor as
+   * the MIN coverage across every OR-Map this device holds (the held-set
+   * snapshot from startMerkleSync). A held map with no completed sync this
+   * connection contributes 0, so the MIN stalls at 0 until every held map has
+   * synced at least once — this is the fix for the cross-map covering-epoch
+   * ACK-inflation bug: a single map's sync completion can no longer license an
+   * ACK that outruns another held map's actual delivery.
+   */
+  private applyMapCoverage(mapName: string, epoch: number): void {
+    if (!(epoch > 0)) return;
+    const current = this.orMapCoverage.get(mapName) ?? 0;
+    if (epoch > current) {
+      this.orMapCoverage.set(mapName, epoch);
+    }
+    // NOTE: a non-advancing epoch still falls through to the min/emit below —
+    // emitConfirmedApply advances lastAckedEpoch ONLY when the ACK frame was
+    // actually sent, so a previously-FAILED send (socket unavailable) must be
+    // re-attempted the next time the same coverage is re-proven, or that epoch's
+    // ACK would be dropped forever (the cursor is cumulative-monotonic).
+
+    if (this.heldSetIncomplete) {
+      // Fail-closed: this connection's held-set enumeration failed, so the
+      // barrier's universe is unknown — a min over a PARTIAL set could advance
+      // the ACK past a persisted store's un-received tombstones (the exact
+      // inflation hole). Suppress every ACK until a later connection snapshots
+      // successfully; the server cursor is monotone, keeping its old value
+      // (correct, conservative).
+      if (!this.heldSetIncompleteWarned) {
+        this.heldSetIncompleteWarned = true;
+        logger.warn(
+          { mapName, epoch },
+          'ORMap covering-epoch ACK suppressed for this connection: held-set enumeration failed (fail-closed)',
+        );
+      }
+      return;
+    }
+
+    if (!this.heldOrMapNames || this.heldOrMapNames.size === 0) {
+      // No snapshot yet, or nothing held: an untracked device pins nothing
+      // server-side (safe) — never ACK without a held-set to confirm coverage over.
+      return;
+    }
+
+    let minCoverage = Number.POSITIVE_INFINITY;
+    for (const held of this.heldOrMapNames) {
+      const coverage = this.orMapCoverage.get(held) ?? 0;
+      if (coverage < minCoverage) minCoverage = coverage;
+      if (minCoverage <= 0) break;
+    }
+    if (!Number.isFinite(minCoverage)) minCoverage = 0;
+
+    if (minCoverage <= 0) {
+      // At least one held map has not completed a sync on this connection yet —
+      // stall the ACK rather than advance past a map we have not heard back
+      // from (this is the documented one-slow-map liveness degradation: it
+      // self-resolves once that map syncs, or eventually via MaxRetention
+      // forgetting an unreachable device).
+      logger.warn(
+        { mapName, epoch, heldMapCount: this.heldOrMapNames.size },
+        'ORMap covering-epoch ACK stalled: at least one held map has not completed sync on this connection',
+      );
+      return;
+    }
+
+    this.emitConfirmedApply(minCoverage);
   }
 
   public async recordOperation(
@@ -686,6 +1117,21 @@ export class SyncEngine {
       synced: false,
     };
 
+    // Stamp the eager OR-Map existence marker in the SAME transaction as the first
+    // durable OR write for this map (local-write seam). Bundling it into `mutations`
+    // makes marker-and-data atomic — no crash window in which the records are durable
+    // but the marker (and therefore the held-set membership) is not. Once per session,
+    // and the in-memory guard is set only AFTER the commit succeeds (below) so a
+    // rejected commit does not leave the map flagged-but-unmarked.
+    const stampingOrMapMarker =
+      (opType === 'OR_ADD' || opType === 'OR_REMOVE') &&
+      mutations !== undefined &&
+      mutations.length > 0 &&
+      !this.markedOrMaps.has(mapName);
+    if (stampingOrMapMarker && mutations) {
+      mutations.unshift({ store: 'meta', type: 'put', key: orMapMarkerKey(mapName), value: 1 });
+    }
+
     // Commit-first ordering: persist durably BEFORE touching the in-memory opLog. If the
     // commit rejects, no op is pushed — the in-memory opLog and the durable op_log stay
     // consistent (no op-without-record in either layer) — and we rethrow so the caller's
@@ -698,6 +1144,11 @@ export class SyncEngine {
         : // eslint-disable-next-line @typescript-eslint/no-explicit-any -- IStorageAdapter.appendOpLog accepts any; the op log entry is typed internally but the adapter interface is backend-agnostic
           await this.storageAdapter.appendOpLog(opLogEntry as any);
     opLogEntry.id = String(id);
+    // Commit succeeded and the marker (if any) is now durable — arm the guard so we
+    // don't re-stamp it on every subsequent write to this map.
+    if (stampingOrMapMarker) {
+      this.markedOrMaps.add(mapName);
+    }
 
     this.opLog.push(opLogEntry as OpLogEntry);
     // Notify per-record sync-state tracker on fresh local write.
@@ -748,7 +1199,47 @@ export class SyncEngine {
     });
   }
 
-  private startMerkleSync(): void {
+  private async startMerkleSync(): Promise<void> {
+    // Snapshot semantics are MANDATORY: fix the held-map set (and therefore the
+    // covering-epoch ACK min-barrier) once, before the first sync round-trip on
+    // this connection sends anything — no message goes out before this resolves,
+    // so no covering-epoch ACK can fire against a stale or partial snapshot. A
+    // map discovered later (registerMap) joins with coverage 0 and can only
+    // narrow, never retroactively widen, an already-computed barrier.
+    this.orMapCoverage = new Map();
+    this.heldOrMapNames = null;
+    this.heldSetIncomplete = false;
+    this.heldSetIncompleteWarned = false;
+    try {
+      this.heldOrMapNames = await this.computeHeldOrMapNames();
+    } catch (err) {
+      // Fail-closed: NEVER run the barrier over a partial snapshot. Data sync
+      // for the maps this process HAS open still proceeds below (safe — sync
+      // only pulls state, the barrier only gates the confirmed-apply ACK);
+      // covering-epoch ACKs stay suppressed for the whole connection, so the
+      // server's monotone cursor simply keeps its previous value.
+      this.heldSetIncomplete = true;
+      logger.error(
+        { err },
+        'ORMap held-set enumeration failed: covering-epoch ACKs disabled for this connection (fail-closed); data sync continues',
+      );
+    }
+
+    if (this.heldOrMapNames) {
+      for (const mapName of this.heldOrMapNames) {
+        this.orMapCoverage.set(mapName, 0);
+      }
+
+      // Instantiate + restore every persisted-but-not-yet-opened OR-Map so it can
+      // be synced (liveness — otherwise an abandoned local store permanently
+      // stalls the min-barrier for every OTHER held map on this device).
+      for (const mapName of this.heldOrMapNames) {
+        if (!(this.maps.get(mapName) instanceof ORMap)) {
+          await this.instantiateAndRestoreOrMap(mapName);
+        }
+      }
+    }
+
     for (const [mapName, map] of this.maps) {
       if (map instanceof LWWMap) {
         this.merkleSyncHandler.sendSyncInit(mapName, this.lastSyncTimestamp);
@@ -761,6 +1252,11 @@ export class SyncEngine {
   public setAuthToken(token: string): void {
     this.authToken = token;
     this.tokenProvider = null;
+    // A new token may name a different principal, whose server-side per-device cursor
+    // is independent. Reset the local confirmed-apply high-water-mark so ACKs for the
+    // new identity are not suppressed by the prior identity's epoch (server-side
+    // monotone-max makes a redundant re-ACK under the same principal a harmless no-op).
+    this.lastAckedEpoch = 0;
 
     const state = this.stateMachine.getState();
     if (state === SyncState.AUTHENTICATING) {
@@ -817,13 +1313,68 @@ export class SyncEngine {
       }
     }
 
-    const token = this.authToken;
-    if (!token) return; // Don't send anonymous auth anymore
+    // Ensure the persisted device credential is loaded before presenting it, so a
+    // cold restart rebinds the same identity even if the socket opened before the
+    // boot-time load resolved. Shares the single memoized read with loadOpLog.
+    await this.ensureDeviceCredentialLoaded();
 
-    this.sendMessage({
-      type: 'AUTH',
-      token,
-    });
+    const token = this.authToken;
+
+    // No token to present. Two cases, both "do not send an AUTH frame":
+    //   - JWT-with-provider that yielded nothing → park in AUTHENTICATING (preserves the
+    //     contract that resolved the earlier no-token deadlock; onAuthRequired surfaces it).
+    //   - Token-less/NO_AUTH → device identity is presented on a dedicated DEVICE_HELLO
+    //     (see handleConnectionEstablished), never an empty-token AUTH (a real JWT server
+    //     would AUTH_FAIL + disconnect it).
+    if (!token) return;
+
+    // Credentialed AUTH: bundle the persisted deviceToken so the server present-or-mints
+    // the device identity in the same round-trip and returns it on AUTH_ACK.
+    const authMessage: AuthMessage = { type: 'AUTH', token };
+    if (this.deviceToken) {
+      authMessage.deviceToken = this.deviceToken;
+    }
+    this.sendMessage(authMessage);
+  }
+
+  /**
+   * Present the device credential on a dedicated DEVICE_HELLO frame (token-less path).
+   * Orthogonal to AUTH so a JWT server silently drops it (Phase-1 non-AUTH) rather than
+   * tearing the connection down. Awaits the persisted-credential load so a cold restart
+   * re-presents the same identity.
+   */
+  private async sendDeviceHello(): Promise<void> {
+    await this.ensureDeviceCredentialLoaded();
+    const hello: DeviceHelloMessage = { type: 'DEVICE_HELLO' };
+    if (this.deviceToken) {
+      hello.deviceToken = this.deviceToken;
+    }
+    this.sendMessage(hello);
+  }
+
+  /**
+   * DEVICE_ACK received: persist the server-issued device identity and complete the
+   * connection auth-optional (NO_AUTH stays unauthenticated — no JWT principal).
+   */
+  private handleDeviceAck(message: DeviceAckMessage): void {
+    logger.info('Device identity acknowledged');
+    // Always persist the server-issued identity — it is ours to keep even if this
+    // DEVICE_ACK arrives late (after the grace timer already completed the connection).
+    this.persistDeviceCredential(message);
+    // If the opportunistic device-ack wait has already ended (grace timer fired,
+    // AUTH_REQUIRED arrived, or a real AUTH_ACK landed), the connection is past
+    // AUTHENTICATING — a late DEVICE_ACK must not re-drive the auth state machine
+    // (which would spuriously bounce CONNECTED → SYNCING and re-run post-auth wiring).
+    if (!this.deviceAckPending) {
+      return;
+    }
+    this.deviceAckPending = false;
+    if (this.authRequiredGraceTimer) {
+      clearTimeout(this.authRequiredGraceTimer);
+      this.authRequiredGraceTimer = null;
+    }
+    // DEVICE_ACK does not authenticate a principal; reuse the SYNCING → CONNECTED wiring.
+    this.handleAuthAck();
   }
 
   /**
@@ -915,6 +1466,21 @@ export class SyncEngine {
     // Emit to generic listeners (used by EventJournalReader)
     this.emitMessage(message);
 
+    // Message-first legacy inference: while a token-less DEVICE_HELLO awaits its
+    // DEVICE_ACK, any server message that is not DEVICE_ACK (nor AUTH_REQUIRED, which
+    // has its own handler and means "this is a JWT server") indicates a server that
+    // predates device identity — proceed auth-optional immediately instead of waiting
+    // out the grace timeout.
+    if (
+      this.deviceAckPending &&
+      message.type !== 'DEVICE_ACK' &&
+      message.type !== 'AUTH_REQUIRED'
+    ) {
+      this.deviceAckPending = false;
+      this.completeAuthOptionalConnection();
+      // Fall through so the triggering message is still routed normally.
+    }
+
     // Handle BATCH specially (recursive unbatch)
     if (message.type === 'BATCH') {
       await this.handleBatch(message as BatchMessage);
@@ -965,8 +1531,23 @@ export class SyncEngine {
     }
   }
 
-  private handleAuthAck(): void {
+  private handleAuthAck(message?: AuthAckMessage): void {
     logger.info('Authenticated successfully');
+
+    // A real AUTH_ACK resolves the opportunistic device handshake — cancel the
+    // legacy grace timer and clear the pending flag so it cannot fire later.
+    this.deviceAckPending = false;
+    if (this.authRequiredGraceTimer) {
+      clearTimeout(this.authRequiredGraceTimer);
+      this.authRequiredGraceTimer = null;
+    }
+
+    // Persist any server-issued device credential carried on the ack. Absent
+    // deviceToken (plain re-bind) keeps the existing token.
+    if (message) {
+      this.persistDeviceCredential(message);
+    }
+
     const wasAuthenticated = this.isAuthenticated();
 
     // Transition to SYNCING state
@@ -983,7 +1564,11 @@ export class SyncEngine {
     // Only re-subscribe on first authentication to prevent UI flickering
     if (!wasAuthenticated) {
       this.webSocketManager.startHeartbeat();
-      this.startMerkleSync();
+      // Fire-and-forget: the held-map snapshot + persisted-store restore are
+      // async, but nothing here depends on their completion — sendSyncInit
+      // messages go out once the snapshot resolves, still well before any
+      // response (and therefore any covering-epoch ACK) could arrive.
+      this.startMerkleSync().catch((err) => logger.error({ err }, 'startMerkleSync failed'));
       // Re-subscribe all queries via QueryManager
       this.queryManager.resubscribeAll();
       // Re-subscribe topics via TopicManager
@@ -1112,6 +1697,12 @@ export class SyncEngine {
     // Modified to support ORMap
     const { mapName, eventType, key, record, orRecord, orTag } = message.payload;
     await this.applyServerEvent(mapName, eventType, key, record, orRecord, orTag);
+    // Apply-not-receive: coverage is reported ONLY after applyServerEvent's durable
+    // IndexedDB commit above has resolved — never on receive. Routed through the
+    // cross-map min-barrier (NOT emitConfirmedApply directly): a live push proves
+    // delivery for THIS map only, so it may advance this map's coverage but must
+    // never license a device-wide ACK past another held map's coverage.
+    this.applyMapCoverage(mapName, epochOfServerEvent(message.payload));
   }
 
   private async handleServerBatchEvent(message: ServerBatchEventMessage): Promise<void> {
@@ -1127,6 +1718,38 @@ export class SyncEngine {
         event.orRecord,
         event.orTag,
       );
+      // Apply-not-receive + cross-map barrier: report each event's epoch as
+      // coverage for ITS OWN map, only after that event's awaits above have
+      // durably committed. A batch-wide "highest epoch" emitted directly would
+      // bypass the min-barrier — one map's event licensing an ACK past another
+      // held map's coverage, the exact cross-map inflation bug.
+      this.applyMapCoverage(event.mapName, epochOfServerEvent(event));
+    }
+  }
+
+  /**
+   * Emit a confirmed-apply ACK for the highest server epoch this client has durably
+   * applied. Per the apply-not-receive contract, callers MUST invoke this ONLY after
+   * the covered server batch has been durably committed to IndexedDB.
+   *
+   * ONLY `applyMapCoverage` may call this method. The confirmed-apply cursor is
+   * device-wide while delivery evidence is per-map, so every ACK MUST pass through
+   * the cross-map min-barrier — a direct call from any per-map code path (sync
+   * response handler, live push event, future wire additions) would let a single
+   * map's delivery license an ACK past another held map's coverage, reintroducing
+   * the cross-map ACK-inflation resurrection vector the barrier exists to close.
+   *
+   * The cursor is cumulative-monotonic: a non-advancing (or zero) epoch is never sent.
+   */
+  private emitConfirmedApply(appliedEpoch: number): void {
+    if (appliedEpoch <= this.lastAckedEpoch) return;
+    // Advance the local high-water-mark ONLY if the ACK actually went out. sendMessage
+    // returns false when the socket cannot take it (disconnected / buffer full); if we
+    // advanced regardless, that epoch's ACK would be dropped and never re-sent (the
+    // cursor is cumulative-monotonic — a lower epoch is never re-emitted), leaving the
+    // server's cursor stuck. A later applied epoch will re-attempt the ACK.
+    if (this.sendMessage({ type: 'CLIENT_APPLY_ACK', cursor: appliedEpoch })) {
+      this.lastAckedEpoch = appliedEpoch;
     }
   }
 
@@ -1214,6 +1837,12 @@ export class SyncEngine {
   public async persistORMapKey(mapName: string, key: string): Promise<void> {
     const map = this.maps.get(mapName);
     if (!(map instanceof ORMap)) return;
+    // Marker BEFORE data: the server-origin persist path writes marker and data as
+    // two separate storage calls (no transaction here). Writing the marker first
+    // means a crash in between leaves the map DISCOVERABLE (marker present, coverage
+    // 0, ACKs stalled until it syncs) — over-conservative but safe. The reverse order
+    // would leave durable records with no marker, reopening the invisible-store hole.
+    await this.ensureOrMapMarker(mapName);
     const records = map.getRecords(key);
     if (records.length > 0) {
       await this.storageAdapter.put(`${mapName}:${key}`, records);
@@ -1226,7 +1855,121 @@ export class SyncEngine {
   public async persistORMapTombstones(mapName: string): Promise<void> {
     const map = this.maps.get(mapName);
     if (!(map instanceof ORMap)) return;
+    await this.ensureOrMapMarker(mapName);
     await this.storageAdapter.setMeta(`__sys__:${mapName}:tombstones`, map.getTombstones());
+  }
+
+  /**
+   * Authoritative full-snapshot REPLACE resync for `mapName` (SPEC-342c R10). The
+   * server has FORGOTTEN or found this client REGRESSED, so an additive merge could
+   * re-admit a record whose tombstone was already pruned. DISCARD the materialized
+   * local OR-Map state (in memory AND durable per-key records + tombstone set) and
+   * every pending-oplog OR op for this map whose HLC PRECEDES the snapshot boundary
+   * — those are subsumed by the server snapshot and replaying them through the write
+   * path would resurrect the removed value. Pending ops AT-OR-AFTER the boundary are
+   * KEPT and re-driven through the normal gated push path (the server admits them
+   * once the client is re-tracked at the snapshot epoch).
+   *
+   * The comparable is the pending op's own HLC timestamp (stamped at op-creation)
+   * vs the snapshot's HLC boundary returned on the REPLACE root — REPLACE discards
+   * the materialized map where tag→add-epoch metadata lived, and un-acked pending
+   * ops carry no server-assigned epoch, so the HLC boundary is the client-side
+   * comparable. Trade-off: a regressed client's legitimate un-synced local writes
+   * preceding the boundary are silently discarded — a deliberate data-loss trade-off
+   * (the no-resurrection invariant dominates), not an invariant violation.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- snapshotBoundary is an HLC Timestamp forwarded from the sync root; compared via HLC.compare
+  private async replaceOrMapFromSnapshot(mapName: string, snapshotBoundary?: any): Promise<void> {
+    const map = this.maps.get(mapName);
+    // Capture the persisted keys BEFORE clearing so their durable records can be
+    // removed too — otherwise a reload would re-materialize the discarded state.
+    let persistedKeys: string[] = [];
+    if (map instanceof ORMap) {
+      persistedKeys = map.allKeys().map((k) => String(k));
+    }
+    // Fail-closed durable removal, and BEFORE discarding the in-memory state.
+    // `remove` is the ONLY durable deletion of a materialized OR-Map record, so
+    // this must be atomic-or-abort for the SAME reason as the pending-op discard
+    // below: a swallowed failure would strand an orphan record on disk while its
+    // tombstone is cleared → on restart the orphan re-materializes with no
+    // suppressing tombstone → merkle re-push → resurrection once the server prunes
+    // the tombstone. The removal runs BEFORE `map.clear()` so an abort leaves BOTH
+    // memory and disk intact (the resync retries next round and re-discovers the
+    // keys from the still-populated in-memory map); clearing memory first would
+    // erase the record of WHICH keys to re-remove, stranding the orphan
+    // un-removable on retry. Do NOT swallow the rejection — it propagates out of
+    // REPLACE, aborting it, so the snapshot pull never proceeds on inconsistent
+    // durable state.
+    for (const key of persistedKeys) {
+      await this.storageAdapter.remove(`${mapName}:${key}`);
+    }
+    if (map instanceof ORMap) {
+      map.clear(); // discard materialized local OR-Map state (authoritative REPLACE)
+      // Reset the persisted (now-empty) tombstone set; the snapshot pull that
+      // follows re-persists the server-authoritative records + tombstones.
+      await this.persistORMapTombstones(mapName);
+    }
+    // Discard pending pre-snapshot OR ops (subsumed by the authoritative snapshot);
+    // keep at-or-after ops so they re-drive through the gated write path.
+    //
+    // Fail-closed / atomic discard. `saveOpLog()` does NOT persist the opLog — it only
+    // writes the lastSyncTimestamp meta — so `storageAdapter.deleteOp(id)` is the ONLY
+    // durable removal of a subsumed op. Delete DURABLY FIRST, then splice from memory
+    // (never the reverse): a delete failure must never drop an op from memory while it
+    // survives on disk, because on restart that op reloads and re-drives through the
+    // gated write path, resurrecting the removed value once the server prunes its
+    // tombstone. If ANY subsumed op fails to delete durably, ABORT the whole REPLACE
+    // (throw) so the snapshot pull does not proceed on an inconsistent durable state;
+    // the resync is retried on the next sync round.
+    let discardedOps = 0;
+    for (let i = this.opLog.length - 1; i >= 0; i--) {
+      const op = this.opLog[i];
+      if (op.mapName !== mapName) continue;
+      if (op.opType !== 'OR_ADD' && op.opType !== 'OR_REMOVE') continue;
+      const precedesSnapshot = snapshotBoundary
+        ? HLC.compare(op.timestamp, snapshotBoundary) < 0
+        : true;
+      if (!precedesSnapshot) continue;
+
+      // Op ids are always numeric: appendOpLog/commitWrite return a number
+      // (IndexedDB autoincrement) that recordOperation stores as `String(id)`. A
+      // non-numeric subsumed id therefore cannot be addressed for a durable delete;
+      // treat it as a HARD failure (abort), never a silent skip that would leave the
+      // op recoverable-and-forgotten on disk.
+      const numericId = parseInt(op.id, 10);
+      if (isNaN(numericId)) {
+        logger.error(
+          { mapName, opId: op.id },
+          'REPLACE resync: subsumed pending op has a non-numeric id; aborting rather than leaving it durably retained',
+        );
+        throw new Error(
+          `REPLACE resync aborted: subsumed pending op ${op.id} has a non-numeric id (cannot durably delete)`,
+        );
+      }
+      // Durable delete FIRST; do NOT swallow failure — an unresolved rejection
+      // propagates out of REPLACE (aborting it), leaving this op in BOTH memory and
+      // disk so state never diverges.
+      await this.storageAdapter.deleteOp(numericId);
+      this.opLog.splice(i, 1);
+      discardedOps++;
+    }
+    logger.info(
+      { mapName, discardedKeys: persistedKeys.length, discardedOps },
+      'ORMap REPLACE resync: discarded local state + subsumed pending ops, pulling snapshot',
+    );
+  }
+
+  /**
+   * Idempotently write the eager `:ormap` existence marker for `mapName` (once per
+   * session). Shared by the server-origin persist helpers; the local-write seam
+   * stamps the marker transactionally inside `recordOperation` instead. Keeping BOTH
+   * durable-write seams marked is what makes the held-set snapshot complete for the
+   * add-only class — the local path does NOT flow through these helpers.
+   */
+  private async ensureOrMapMarker(mapName: string): Promise<void> {
+    if (this.markedOrMaps.has(mapName)) return;
+    await this.storageAdapter.setMeta(orMapMarkerKey(mapName), 1);
+    this.markedOrMaps.add(mapName);
   }
 
   /**
@@ -1406,6 +2149,16 @@ export class SyncEngine {
     for (const key of mapKeys) {
       await this.storageAdapter.remove(key);
     }
+    // Drop the session guard so a later write re-stamps the durable marker. The
+    // reserved OR-Map meta (`:ormap` existence marker + `:tombstones` set) is left
+    // in place: the meta interface has no delete primitive (only setMeta, which
+    // stores undefined rather than removing the key), and a lingering marker only
+    // makes a fully-cleared map a self-healing PHANTOM in the next snapshot —
+    // included with coverage 0, then cleared to nothing and its empty sync conveys
+    // a covering epoch that advances coverage. Over-conservative, never incorrect,
+    // and pre-existing for `:tombstones`. A real meta-delete (`removeMeta`) is
+    // tracked as a follow-up rather than paid for with an adapter-wide cascade here.
+    this.markedOrMaps.delete(mapName);
     logger.info(
       { mapName, removedStorageCount: mapKeys.length },
       'Reset map: Cleared memory and storage',

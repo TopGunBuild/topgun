@@ -78,7 +78,15 @@ function createMockStorageAdapter(): jest.Mocked<IStorageAdapter> {
     get: jest.fn().mockResolvedValue(undefined),
     put: jest.fn().mockResolvedValue(undefined),
     remove: jest.fn().mockResolvedValue(undefined),
-    getMeta: jest.fn().mockResolvedValue(undefined),
+    // Default to an already-migrated device: the one-time OR-Map marker backfill
+    // (SyncEngine.backfillLegacyOrMapMarkers) is gated on this flag, so unrelated
+    // tests are not perturbed by its startup keyspace scan. Backfill-specific tests
+    // override getMeta to leave the flag unset.
+    getMeta: jest
+      .fn()
+      .mockImplementation((key: string) =>
+        Promise.resolve(key === '__sys__:ormapBackfillDone' ? true : undefined),
+      ),
     setMeta: jest.fn().mockResolvedValue(undefined),
     batchPut: jest.fn().mockResolvedValue(undefined),
     appendOpLog: jest.fn().mockResolvedValue(1),
@@ -87,6 +95,7 @@ function createMockStorageAdapter(): jest.Mocked<IStorageAdapter> {
     deleteOp: jest.fn().mockResolvedValue(undefined),
     commitWrite: jest.fn().mockResolvedValue(1),
     getAllKeys: jest.fn().mockResolvedValue([]),
+    getAllMetaKeys: jest.fn().mockResolvedValue([]),
   };
 }
 
@@ -198,13 +207,18 @@ describe('SyncEngine', () => {
       expect(authMessage?.token).toBe('test-token');
     });
 
-    test('should NOT send AUTH immediately if no token', async () => {
+    test('presents a DEVICE_HELLO (not an empty-token AUTH) when no token is configured (token-less present-or-mint)', async () => {
       syncEngine = new SyncEngine(config);
       await jest.runAllTimersAsync();
 
       const ws = MockWebSocket.getLastInstance();
-      const authMessage = ws?.sentMessages.find((m) => m.type === 'AUTH');
-      expect(authMessage).toBeUndefined();
+      // Token-less clients present device identity on a dedicated DEVICE_HELLO — never an
+      // empty-token AUTH (a real JWT server would AUTH_FAIL + disconnect that). No JWT is
+      // sent and no device credential exists yet.
+      expect(ws?.sentMessages.find((m) => m.type === 'AUTH')).toBeUndefined();
+      const hello = ws?.sentMessages.find((m) => m.type === 'DEVICE_HELLO');
+      expect(hello).toBeDefined();
+      expect(hello?.deviceToken).toBeUndefined();
     });
 
     test('should schedule reconnect after disconnect', async () => {
@@ -1336,6 +1350,510 @@ describe('SyncEngine', () => {
       const sentTimestamp = opBatch.payload.ops[0].timestamp;
       expect(Number.isFinite(sentTimestamp.millis)).toBe(true);
       expect(sentTimestamp.millis).toBeGreaterThan(0);
+    });
+  });
+
+  describe('Confirmed-apply ACK (apply-not-receive)', () => {
+    // Uses an OR-Map + a driven held-set snapshot: since the cross-map
+    // min-barrier landed, the confirmed-apply ACK is only reachable THROUGH
+    // the barrier (epochs are OR-tombstone machinery; an engine holding no
+    // OR-Maps deliberately never ACKs). With a single held OR-Map the
+    // observable apply-not-receive behavior is unchanged from the original
+    // contract these tests pin.
+    async function startEngineWithMap() {
+      syncEngine = new SyncEngine(config);
+      const hlc = syncEngine.getHLC();
+      const orMap = new ORMap<string, any>(hlc);
+      syncEngine.registerMap('users', orMap);
+      await jest.runAllTimersAsync();
+      const ws = MockWebSocket.getLastInstance()!;
+      // Drive the held-set snapshot + sync-init kickoff deterministically
+      // (same rationale as the min-barrier block's helper below).
+      await (syncEngine as any).startMerkleSync();
+      ws.sentMessages = []; // clear the auth/hello handshake + sync-init frames
+      return ws;
+    }
+
+    let eventSeq = 0;
+    function batchEvent(key: string, epoch?: number) {
+      eventSeq += 1;
+      return {
+        mapName: 'users',
+        eventType: 'OR_ADD' as const,
+        key,
+        orRecord: {
+          value: { k: key },
+          tag: `${Date.now()}:${eventSeq}:remote`,
+          timestamp: { millis: Date.now(), counter: eventSeq, nodeId: 'remote' },
+        },
+        ...(epoch !== undefined ? { epoch } : {}),
+      };
+    }
+
+    test('emits CLIENT_APPLY_ACK with the highest epoch ONLY after durable commit', async () => {
+      const ws = await startEngineWithMap();
+
+      // Gate the durable put so we can observe ordering: the ACK must NOT be sent
+      // until the IndexedDB commit resolves (apply-not-receive).
+      let resolvePut!: () => void;
+      mockStorage.put.mockImplementationOnce(
+        () => new Promise<void>((r) => (resolvePut = () => r())),
+      );
+
+      const applied = (syncEngine as any).handleServerBatchEvent({
+        payload: { events: [batchEvent('a', 5), batchEvent('b', 3)] },
+      }) as Promise<void>;
+
+      // Let the marker-first `setMeta` (eager `:ormap` existence marker, written
+      // before the gated `put` on the first server-origin persist for this map)
+      // settle so the gated `put` is actually reached before we assert on it.
+      await jest.advanceTimersByTimeAsync(0);
+
+      // Before the durable commit resolves, no ACK has been sent (not on receive).
+      expect(ws.sentMessages.find((m) => m.type === 'CLIENT_APPLY_ACK')).toBeUndefined();
+
+      resolvePut();
+      await applied;
+
+      const ack = ws.sentMessages.find((m) => m.type === 'CLIENT_APPLY_ACK');
+      expect(ack).toBeDefined();
+      expect(ack.cursor).toBe(5); // the highest epoch in the batch, inclusive
+    });
+
+    test('cursor is cumulative-monotonic: a non-advancing epoch is not re-sent', async () => {
+      const ws = await startEngineWithMap();
+
+      await (syncEngine as any).handleServerBatchEvent({
+        payload: { events: [batchEvent('a', 5)] },
+      });
+      // A lower/equal epoch later must NOT send another ACK.
+      await (syncEngine as any).handleServerBatchEvent({
+        payload: { events: [batchEvent('b', 4)] },
+      });
+      let acks = ws.sentMessages.filter((m) => m.type === 'CLIENT_APPLY_ACK');
+      expect(acks.map((m) => m.cursor)).toEqual([5]);
+
+      // A higher epoch advances the cursor and sends a fresh ACK.
+      await (syncEngine as any).handleServerBatchEvent({
+        payload: { events: [batchEvent('c', 7)] },
+      });
+      acks = ws.sentMessages.filter((m) => m.type === 'CLIENT_APPLY_ACK');
+      expect(acks.map((m) => m.cursor)).toEqual([5, 7]);
+    });
+
+    test('epoch-less events (current server wire) emit no ACK (inert, not incorrect)', async () => {
+      const ws = await startEngineWithMap();
+      await (syncEngine as any).handleServerBatchEvent({
+        payload: { events: [batchEvent('a'), batchEvent('b')] },
+      });
+      expect(ws.sentMessages.find((m) => m.type === 'CLIENT_APPLY_ACK')).toBeUndefined();
+    });
+
+    test('a failed ACK send does not advance the cursor; a later apply retries it', async () => {
+      await startEngineWithMap();
+      const sendSpy = jest.spyOn(syncEngine as any, 'sendMessage');
+
+      // The socket cannot take the ACK (disconnected / buffer full): sendMessage
+      // returns false for the ACK frame. The cursor must NOT advance — else the ACK
+      // for this epoch is dropped forever (monotone: a lower epoch is never re-sent).
+      sendSpy.mockImplementation((m: any) => m?.type !== 'CLIENT_APPLY_ACK');
+      await (syncEngine as any).handleServerBatchEvent({
+        payload: { events: [batchEvent('a', 5)] },
+      });
+      expect((syncEngine as any).lastAckedEpoch).toBe(0);
+
+      // Socket recovers; the next apply of the same epoch re-attempts the ACK.
+      const acks: number[] = [];
+      sendSpy.mockImplementation((m: any) => {
+        if (m?.type === 'CLIENT_APPLY_ACK') acks.push(m.cursor);
+        return true;
+      });
+      await (syncEngine as any).handleServerBatchEvent({
+        payload: { events: [batchEvent('a', 5)] },
+      });
+      expect(acks).toEqual([5]);
+      expect((syncEngine as any).lastAckedEpoch).toBe(5);
+    });
+
+    test('setAuthToken resets the confirmed-apply cursor (new principal → independent cursor)', async () => {
+      await startEngineWithMap();
+      await (syncEngine as any).handleServerBatchEvent({
+        payload: { events: [batchEvent('a', 5)] },
+      });
+      expect((syncEngine as any).lastAckedEpoch).toBe(5);
+
+      // A new token may name a different principal, whose server-side cursor is
+      // independent — the local high-water-mark must reset so its ACKs are not
+      // suppressed by the prior identity's epoch.
+      (syncEngine as any).setAuthToken('new-token-for-a-different-principal');
+      expect((syncEngine as any).lastAckedEpoch).toBe(0);
+    });
+  });
+
+  // Review v1 Major fix: the covering-epoch ACK is a device-wide cursor, but was
+  // previously confirmed off a SINGLE OR-Map's sync completion — a client could
+  // ACK past a tombstone stamped for an OTHER held map it had never received.
+  // These tests exercise the per-map min-barrier (SyncEngine.applyMapCoverage)
+  // that gates every covering-epoch ACK on ALL held OR-Maps having proven
+  // delivery, not just the map that happened to sync first.
+  describe('Cross-map covering-epoch ACK min-barrier', () => {
+    async function startEngineWithOrMaps(mapNames: string[]) {
+      syncEngine = new SyncEngine(config);
+      const hlc = syncEngine.getHLC();
+      for (const name of mapNames) {
+        syncEngine.registerMap(name, new ORMap<string, any>(hlc));
+      }
+      // Let the mock WebSocket finish its async open (see MockWebSocket's
+      // constructor setTimeout) so sendMessage can actually transmit below.
+      await jest.runAllTimersAsync();
+      const ws = MockWebSocket.getLastInstance()!;
+      // Directly drive the (now async) held-set snapshot + sync-init kickoff —
+      // the exact call handleAuthAck makes fire-and-forget — rather than
+      // relying on the ~500ms auth-optional grace-timer race under fake
+      // timers, so the snapshot is deterministically resolved before the test
+      // body runs.
+      await (syncEngine as any).startMerkleSync();
+      ws.sentMessages = []; // clear the auth/hello handshake + sync-init frames
+      return ws;
+    }
+
+    function acksOn(ws: any): number[] {
+      return ws.sentMessages
+        .filter((m: any) => m.type === 'CLIENT_APPLY_ACK')
+        .map((m: any) => m.cursor);
+    }
+
+    test('(a) ACK never exceeds the MIN coverage across held maps (multi-map interleaving)', async () => {
+      const ws = await startEngineWithOrMaps(['tags', 'other_map']);
+
+      // 'tags' completes its sync round-trip first and conveys covering epoch 5.
+      (syncEngine as any).applyMapCoverage('tags', 5);
+      // The barrier stalls: 'other_map' has not synced on this connection yet,
+      // so its coverage is still 0 — the MIN across the held set is 0.
+      expect(acksOn(ws)).toEqual([]);
+
+      // 'other_map' now completes at the same covering epoch.
+      (syncEngine as any).applyMapCoverage('other_map', 5);
+      expect(acksOn(ws)).toEqual([5]);
+    });
+
+    test('(a) the barrier advances incrementally to the current MIN, never past a lagging map', async () => {
+      const ws = await startEngineWithOrMaps(['tags', 'other_map']);
+
+      (syncEngine as any).applyMapCoverage('tags', 10);
+      expect(acksOn(ws)).toEqual([]); // other_map still 0
+
+      (syncEngine as any).applyMapCoverage('other_map', 3);
+      expect(acksOn(ws)).toEqual([3]); // MIN(10, 3)
+
+      (syncEngine as any).applyMapCoverage('tags', 20);
+      expect(acksOn(ws)).toEqual([3]); // still MIN(20, 3) = 3, no new ACK
+
+      (syncEngine as any).applyMapCoverage('other_map', 7);
+      expect(acksOn(ws)).toEqual([3, 7]); // MIN(20, 7) = 7 advances
+    });
+
+    test('(b) a persisted-but-not-instantiated ORMap store is enumerated into the held-set and blocks the ACK until it syncs', async () => {
+      mockStorage.getAllMetaKeys.mockResolvedValue(['__sys__:archive:tombstones']);
+      mockStorage.getMeta.mockResolvedValue([]);
+      mockStorage.getAllKeys.mockResolvedValue([]);
+
+      const ws = await startEngineWithOrMaps(['tags']);
+
+      // 'archive' was never registered via registerMap this session — it is only
+      // discoverable through the storage adapter's persisted meta keys.
+      (syncEngine as any).applyMapCoverage('tags', 5);
+      expect(acksOn(ws)).toEqual([]); // 'archive' held but unsynced this connection
+
+      (syncEngine as any).applyMapCoverage('archive', 5);
+      expect(acksOn(ws)).toEqual([5]);
+    });
+
+    test('(c) an empty held-set emits no ACK at all', async () => {
+      const ws = await startEngineWithOrMaps([]);
+      (syncEngine as any).applyMapCoverage('stray-map', 5);
+      expect(acksOn(ws)).toEqual([]);
+    });
+
+    test('(d) a map opened AFTER the connection snapshot joins with coverage 0 and blocks further advance', async () => {
+      const ws = await startEngineWithOrMaps(['tags']);
+
+      (syncEngine as any).applyMapCoverage('tags', 5);
+      expect(acksOn(ws)).toEqual([5]);
+
+      // A second OR-Map is opened mid-connection (e.g. client.getORMap('late')),
+      // AFTER the held-set snapshot was already taken.
+      const hlc = syncEngine!.getHLC();
+      syncEngine!.registerMap('late', new ORMap<string, any>(hlc));
+
+      // Further advances on the already-covered map are blocked by 'late's
+      // fresh 0 coverage — the barrier never retroactively narrows OR widens,
+      // it just now includes 'late' at 0.
+      (syncEngine as any).applyMapCoverage('tags', 9);
+      expect(acksOn(ws)).toEqual([5]); // no new ACK
+
+      // Once 'late' reports its own coverage, the MIN can advance again.
+      (syncEngine as any).applyMapCoverage('late', 9);
+      expect(acksOn(ws)).toEqual([5, 9]);
+    });
+
+    test('held-set snapshot + coverage reset once per connection: a reconnect re-derives both fresh', async () => {
+      await startEngineWithOrMaps(['tags', 'other_map']);
+      (syncEngine as any).applyMapCoverage('tags', 5);
+      (syncEngine as any).applyMapCoverage('other_map', 5);
+      expect((syncEngine as any).orMapCoverage.get('tags')).toBe(5);
+      expect((syncEngine as any).orMapCoverage.get('other_map')).toBe(5);
+
+      // Simulate a fresh connection (new held-map snapshot + coverage reset).
+      await (syncEngine as any).startMerkleSync();
+
+      // Both maps' coverage resets to 0 on the new connection — a stale
+      // cross-connection coverage value must never silently license an ACK on
+      // the new connection without a fresh sync round-trip proving delivery.
+      expect((syncEngine as any).orMapCoverage.get('tags')).toBe(0);
+      expect((syncEngine as any).orMapCoverage.get('other_map')).toBe(0);
+      expect((syncEngine as any).heldOrMapNames.has('tags')).toBe(true);
+      expect((syncEngine as any).heldOrMapNames.has('other_map')).toBe(true);
+    });
+
+    test('held-set enumeration failure fail-closes ALL ACKs on the connection (never a partial barrier)', async () => {
+      // A storage-adapter failure must never degrade to an in-memory-only
+      // held-set: a persisted store the snapshot silently missed could hold
+      // un-received tombstones while the device's ACK advances past them.
+      mockStorage.getAllMetaKeys.mockRejectedValue(new Error('idb unavailable'));
+
+      const ws = await startEngineWithOrMaps(['tags', 'other_map']);
+      expect((syncEngine as any).heldSetIncomplete).toBe(true);
+
+      // Even after EVERY in-memory map proves coverage, no ACK may be emitted —
+      // the universe the MIN ranges over is unknown for this connection.
+      (syncEngine as any).applyMapCoverage('tags', 5);
+      (syncEngine as any).applyMapCoverage('other_map', 5);
+      expect(acksOn(ws)).toEqual([]);
+
+      // A later connection whose enumeration succeeds recovers normally.
+      mockStorage.getAllMetaKeys.mockResolvedValue([]);
+      await (syncEngine as any).startMerkleSync();
+      ws.sentMessages = [];
+      expect((syncEngine as any).heldSetIncomplete).toBe(false);
+      (syncEngine as any).applyMapCoverage('tags', 6);
+      (syncEngine as any).applyMapCoverage('other_map', 6);
+      expect(acksOn(ws)).toEqual([6]);
+    });
+
+    test('server push events route their epoch through the min-barrier, never around it', async () => {
+      const ws = await startEngineWithOrMaps(['tags', 'other_map']);
+
+      // A live SERVER_EVENT for 'tags' carrying an epoch proves delivery for
+      // 'tags' ONLY — with 'other_map' still uncovered, no device-wide ACK.
+      await (syncEngine as any).handleServerEvent({
+        type: 'SERVER_EVENT',
+        payload: { mapName: 'tags', eventType: 'OR_ADD', key: 'k', epoch: 7 },
+      });
+      expect(acksOn(ws)).toEqual([]);
+
+      // A batch event covering 'other_map' at the same epoch completes the MIN;
+      // the ACK is exactly MIN(7, 7) — the batch's own epochs also went through
+      // the barrier per-event (no batch-wide highest-epoch shortcut).
+      await (syncEngine as any).handleServerBatchEvent({
+        type: 'SERVER_BATCH_EVENT',
+        payload: {
+          events: [{ mapName: 'other_map', eventType: 'OR_ADD', key: 'k2', epoch: 7 }],
+        },
+      });
+      expect(acksOn(ws)).toEqual([7]);
+    });
+  });
+
+  describe('OR-Map existence marker + legacy backfill (add-only enumeration gap)', () => {
+    const rec = (n: number) => ({
+      value: { n },
+      tag: `1:${n}:node`,
+      timestamp: { millis: n, counter: 0, nodeId: 'node' },
+    });
+
+    // A storage adapter whose kv + meta stores are real Maps, so a marker written
+    // by backfill / the persist helpers is actually observable by a later
+    // enumeration — the integration the plain jest.fn mock cannot exercise.
+    function statefulStorage(seed?: {
+      kv?: Record<string, unknown>;
+      meta?: Record<string, unknown>;
+    }): jest.Mocked<IStorageAdapter> {
+      const kv = new Map<string, unknown>(Object.entries(seed?.kv ?? {}));
+      const meta = new Map<string, unknown>(Object.entries(seed?.meta ?? {}));
+      const s = createMockStorageAdapter();
+      s.get.mockImplementation(async (k: string) => kv.get(k));
+      s.put.mockImplementation(async (k: string, v: unknown) => {
+        kv.set(k, v);
+      });
+      s.remove.mockImplementation(async (k: string) => {
+        kv.delete(k);
+      });
+      s.getAllKeys.mockImplementation(async () => [...kv.keys()]);
+      s.getMeta.mockImplementation(async (k: string) => meta.get(k));
+      s.setMeta.mockImplementation(async (k: string, v: unknown) => {
+        meta.set(k, v);
+      });
+      s.getAllMetaKeys.mockImplementation(async () => [...meta.keys()]);
+      s.commitWrite.mockImplementation(async (mutations) => {
+        for (const m of mutations) {
+          const store = m.store === 'meta' ? meta : kv;
+          if (m.type === 'remove') store.delete(m.key);
+          else store.set(m.key, m.value);
+        }
+        return 1;
+      });
+      return s;
+    }
+
+    async function startEngine(storage: jest.Mocked<IStorageAdapter>, openMaps: string[] = []) {
+      config.storageAdapter = storage;
+      syncEngine = new SyncEngine(config);
+      const hlc = syncEngine.getHLC();
+      for (const name of openMaps) {
+        syncEngine.registerMap(name, new ORMap<string, unknown>(hlc));
+      }
+      await jest.runAllTimersAsync();
+      const ws = MockWebSocket.getLastInstance()!;
+      await (syncEngine as any).startMerkleSync();
+      ws.sentMessages = [];
+      return ws;
+    }
+
+    function acksOn(ws: any): number[] {
+      return ws.sentMessages
+        .filter((m: any) => m.type === 'CLIENT_APPLY_ACK')
+        .map((m: any) => m.cursor);
+    }
+
+    test('THE REGRESSION: a legacy add-only persisted store (records, no :tombstones, no :ormap marker) is discovered by backfill and blocks the device ACK', async () => {
+      // Pre-fix device: `shared` was written add-only in a prior session (kv records
+      // only), never removed → no `:tombstones` key, and predates the eager marker →
+      // no `:ormap` marker. Backfill has not run (done-flag unset). This is the exact
+      // store the old snapshot missed, letting the device ACK past its un-received
+      // tombstones (the reopened cross-map resurrection vector).
+      const storage = statefulStorage({ kv: { 'shared:k1': [rec(1)] } });
+
+      const ws = await startEngine(storage, ['tags']);
+
+      // Backfill stamped the marker and it is now enumerated into the held-set.
+      expect(await storage.getMeta('__sys__:shared:ormap')).toBe(1);
+      expect((syncEngine as any).heldOrMapNames.has('shared')).toBe(true);
+
+      // 'tags' conveying the server-wide covering epoch no longer licenses a device
+      // ACK: 'shared' is held and unsynced this connection, so the MIN stalls at 0.
+      (syncEngine as any).applyMapCoverage('tags', 5);
+      expect(acksOn(ws)).toEqual([]);
+
+      // Only once 'shared' proves its own delivery does the ACK advance.
+      (syncEngine as any).applyMapCoverage('shared', 5);
+      expect(acksOn(ws)).toEqual([5]);
+    });
+
+    test('local OR write stamps the eager :ormap marker transactionally (in the commitWrite), once per session', async () => {
+      const storage = statefulStorage();
+      config.storageAdapter = storage;
+      syncEngine = new SyncEngine(config);
+      syncEngine.registerMap('notes', new ORMap<string, unknown>(syncEngine.getHLC()));
+
+      const r = rec(1);
+      const mutations = [
+        { store: 'kv' as const, type: 'put' as const, key: 'notes:k', value: [r] },
+      ];
+      await syncEngine.recordOperation(
+        'notes',
+        'OR_ADD',
+        'k',
+        { orRecord: r as any, timestamp: r.timestamp as any },
+        mutations,
+      );
+
+      // Marker landed in the SAME commit as the data (atomic — no crash window).
+      const firstCommit = storage.commitWrite.mock.calls[0][0];
+      expect(firstCommit).toContainEqual({
+        store: 'meta',
+        type: 'put',
+        key: '__sys__:notes:ormap',
+        value: 1,
+      });
+      expect(await storage.getMeta('__sys__:notes:ormap')).toBe(1);
+
+      // Second write to the same map does NOT re-stamp the marker (session guard).
+      await syncEngine.recordOperation(
+        'notes',
+        'OR_ADD',
+        'k2',
+        { orRecord: rec(2) as any, timestamp: rec(2).timestamp as any },
+        [{ store: 'kv', type: 'put', key: 'notes:k2', value: [rec(2)] }],
+      );
+      const secondCommit = storage.commitWrite.mock.calls[1][0];
+      expect(secondCommit.some((m) => m.key === '__sys__:notes:ormap')).toBe(false);
+    });
+
+    test('server-origin persist writes the :ormap marker BEFORE the data (crash-safe ordering)', async () => {
+      const storage = statefulStorage();
+      config.storageAdapter = storage;
+      syncEngine = new SyncEngine(config);
+      const orMap = new ORMap<string, unknown>(syncEngine.getHLC());
+      orMap.apply('k', rec(1) as any);
+      syncEngine.registerMap('recv', orMap);
+
+      await syncEngine.persistORMapKey('recv', 'k');
+
+      const markerCallIdx = storage.setMeta.mock.calls.findIndex(
+        (c) => c[0] === '__sys__:recv:ormap',
+      );
+      expect(markerCallIdx).toBeGreaterThanOrEqual(0);
+      const markerOrder = storage.setMeta.mock.invocationCallOrder[markerCallIdx];
+      const putOrder = storage.put.mock.invocationCallOrder[0];
+      // Marker-first: a crash between them leaves the map DISCOVERABLE, never a
+      // durable record with no marker (which would reopen the invisible-store hole).
+      expect(markerOrder).toBeLessThan(putOrder);
+    });
+
+    test('backfill discriminates OR (array) from LWW (object) and is gated by the durable done-flag', async () => {
+      const storage = statefulStorage({
+        kv: {
+          'orm:1': [rec(1)],
+          'lww:1': { value: 42, timestamp: { millis: 1, counter: 0, nodeId: 'n' } },
+        },
+      });
+
+      await startEngine(storage);
+
+      expect(await storage.getMeta('__sys__:orm:ormap')).toBe(1); // array → OR, marked
+      expect(await storage.getMeta('__sys__:lww:ormap')).toBeUndefined(); // object → LWW, not marked
+      expect(await storage.getMeta('__sys__:ormapBackfillDone')).toBe(true);
+
+      // A second connection does NOT re-scan the keyspace (done-flag gates it): no
+      // further get() calls are issued by backfill (the OR store is already in
+      // this.maps from the first restore, so nothing re-reads it either).
+      const getCallsBefore = storage.get.mock.calls.length;
+      await (syncEngine as any).startMerkleSync();
+      expect(storage.get.mock.calls.length).toBe(getCallsBefore);
+    });
+
+    test('backfill failure fail-closes the connection (ACKs suppressed, done-flag left unset for retry)', async () => {
+      const storage = statefulStorage({ kv: { 'x:1': [rec(1)] } });
+      // The one-time scan's keyspace read fails — enumeration must NOT silently
+      // proceed over a partial universe. Persistent (not Once) so both the auth-
+      // driven fire-and-forget startMerkleSync AND the explicit one below see it.
+      storage.getAllKeys.mockRejectedValue(new Error('idb unavailable'));
+
+      const ws = await startEngine(storage);
+
+      expect((syncEngine as any).heldSetIncomplete).toBe(true);
+      // Done-flag left unset → the migration retries on the next connection.
+      expect(await storage.getMeta('__sys__:ormapBackfillDone')).toBeUndefined();
+      // No ACK may be emitted — the held universe is unknown for this connection.
+      (syncEngine as any).applyMapCoverage('x', 5);
+      expect(acksOn(ws)).toEqual([]);
+
+      // A later connection whose scan succeeds recovers and stamps the marker.
+      storage.getAllKeys.mockImplementation(async () => ['x:1']);
+      await (syncEngine as any).startMerkleSync();
+      expect((syncEngine as any).heldSetIncomplete).toBe(false);
+      expect(await storage.getMeta('__sys__:x:ormap')).toBe(1);
     });
   });
 });

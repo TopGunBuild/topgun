@@ -11,6 +11,7 @@ describe('ClientMessageHandlers', () => {
         sendAuth: jest.fn(),
         handleAuthRequired: jest.fn(),
         handleAuthAck: jest.fn(),
+        handleDeviceAck: jest.fn(),
         handleAuthFail: jest.fn(),
         handleOpAck: jest.fn(),
         handleQueryResp: jest.fn(),
@@ -75,6 +76,7 @@ describe('ClientMessageHandlers', () => {
         sendAuth: jest.fn(),
         handleAuthRequired: jest.fn(),
         handleAuthAck: jest.fn(),
+        handleDeviceAck: jest.fn(),
         handleAuthFail: jest.fn(),
         handleOpAck: jest.fn(),
         handleQueryResp: jest.fn(),
@@ -133,6 +135,7 @@ describe('ClientMessageHandlers', () => {
         sendAuth: jest.fn(),
         handleAuthRequired: jest.fn(),
         handleAuthAck: jest.fn(),
+        handleDeviceAck: jest.fn(),
         handleAuthFail: jest.fn(),
         handleOpAck: jest.fn(),
         handleQueryResp: jest.fn(),
@@ -190,6 +193,7 @@ describe('ClientMessageHandlers', () => {
         sendAuth: jest.fn(),
         handleAuthRequired: jest.fn(),
         handleAuthAck: jest.fn(),
+        handleDeviceAck: jest.fn(),
         handleAuthFail: jest.fn(),
         handleOpAck: jest.fn(),
         handleQueryResp: jest.fn(),
@@ -251,8 +255,12 @@ describe('ClientMessageHandlers', () => {
   });
 
   describe('CLIENT_MESSAGE_TYPES', () => {
-    it('should contain 37 message types', () => {
-      expect(CLIENT_MESSAGE_TYPES.length).toBe(37);
+    it('should contain 38 message types', () => {
+      expect(CLIENT_MESSAGE_TYPES.length).toBe(38);
+    });
+
+    it('should include DEVICE_ACK', () => {
+      expect(CLIENT_MESSAGE_TYPES).toContain('DEVICE_ACK');
     });
 
     it('should include vector search types', () => {

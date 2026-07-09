@@ -23,6 +23,7 @@ use tracing::Instrument;
 
 use crate::network::connection::{ConnectionId, ConnectionMetadata, ConnectionRegistry};
 use crate::service::domain::journal::JournalStore;
+use crate::service::domain::key_writer::KeyWriterRegistry;
 use crate::service::domain::predicate::{
     evaluate_predicate, evaluate_where, value_to_rmpv, EvalContext,
 };
@@ -34,6 +35,7 @@ use crate::service::registry::{ManagedService, ServiceContext};
 use crate::service::security::WriteAdmission;
 use crate::storage::record::{OrMapEntry, RecordValue};
 use crate::storage::{CallerProvenance, ExpiryPolicy, RecordStoreFactory};
+use crate::tombstone_frontier_impl::TombstoneFrontier;
 use crate::traits::SchemaProvider;
 
 // ---------------------------------------------------------------------------
@@ -78,6 +80,31 @@ pub struct CrdtService {
     /// unit tests that do not exercise the journal — `record_journal` is then a
     /// no-op, so the journal never perturbs CRDT-only test behaviour.
     journal: Option<Arc<JournalStore>>,
+    /// Per-KEY single-writer registry. Serializes the `OR_ADD` apply RMW
+    /// (`store.get` -> merge -> `store.put`) so concurrent `OR_ADD`s on the
+    /// SAME key cannot both read the pre-mutation state and race to `put`,
+    /// which would silently drop one add (SPEC-333b lost-update race).
+    /// Internal-only: not exposed via `new()` so existing call sites are
+    /// unaffected.
+    ///
+    /// Correctness precondition: this registry is owned per `CrdtService`, and a
+    /// `CrdtService` is 1:1 with its backing store (`record_store_factory`) — one
+    /// service is constructed over each store and registered as the router's sole
+    /// CRDT handle. Serialization therefore covers every `OR_ADD` that can reach
+    /// that store. If a future deployment ever constructs a SECOND `CrdtService`
+    /// over the SAME store (e.g. in-process sharding), it MUST share this same
+    /// registry — two registries over one store would mint distinct mutexes per
+    /// key and reopen the lost-update race.
+    key_writer: Arc<KeyWriterRegistry>,
+    /// Optional shared causal frontier. When present (production wiring), each
+    /// genuinely-new tombstone is stamped with the current server epoch at
+    /// `OR_REMOVE` apply, and the wholesale epoch-drop prune is run over the OR
+    /// write path. `None` in unit tests that do not exercise epoch stamping — the
+    /// stamp/prune then no-op. This MUST be the SAME `Arc<TombstoneFrontier>`
+    /// held in `AppState` and shared with `SyncService`, so the epoch counter and
+    /// the low-water-mark it reads are one authority (a second frontier would
+    /// stamp epochs no client ever ACKs).
+    frontier: Option<Arc<TombstoneFrontier>>,
 }
 
 impl CrdtService {
@@ -97,6 +124,8 @@ impl CrdtService {
             query_registry,
             schema_provider,
             journal: None,
+            key_writer: Arc::new(KeyWriterRegistry::new()),
+            frontier: None,
         }
     }
 
@@ -107,6 +136,27 @@ impl CrdtService {
     #[must_use]
     pub fn with_journal(mut self, journal: Arc<JournalStore>) -> Self {
         self.journal = Some(journal);
+        self
+    }
+
+    /// Attaches the shared causal frontier, enabling server-authoritative epoch
+    /// stamping at `OR_REMOVE` apply and the dark wholesale prune over the OR
+    /// write path. Production wiring MUST pass the SAME `Arc<TombstoneFrontier>`
+    /// held in `AppState` and shared with `SyncService`.
+    #[must_use]
+    pub fn with_frontier(mut self, frontier: Arc<TombstoneFrontier>) -> Self {
+        self.frontier = Some(frontier);
+        self
+    }
+
+    /// Replaces the internal per-key writer with a SHARED registry, so a prune
+    /// sweep run from `SyncService` and an `OR` write run here serialize per key
+    /// against each other. Production wiring passes the SAME
+    /// `Arc<KeyWriterRegistry>` into both services; without sharing, a SYNC-leaf
+    /// prune and an OR write on the same key would mint distinct mutexes and race.
+    #[must_use]
+    pub fn with_key_writer(mut self, key_writer: Arc<KeyWriterRegistry>) -> Self {
+        self.key_writer = key_writer;
         self
     }
 }
@@ -234,6 +284,15 @@ impl CrdtService {
             None
         };
 
+        // Defence-in-depth op-path gate (R4, non-load-bearing, dark until 342j): drop
+        // a forgotten client's OR-bearing op before it merges. Belt-and-suspenders to
+        // the load-bearing ORMapPushDiff gate; vacuous on OR_ADD (tag is regenerated).
+        if self.op_path_gated(op, ctx.connection_id).await {
+            return Ok(OperationResponse::Ack {
+                call_id: ctx.call_id,
+            });
+        }
+
         // Read old value before mutation for query broadcast filtering.
         let old_rmpv_value = self
             .read_old_value_for_queries(&op.map_name, &op.key, partition_id)
@@ -299,6 +358,12 @@ impl CrdtService {
             // Each op gets its own partition based on its key (OpBatch ctx has
             // partition_id=None because the batch contains keys for many partitions).
             for op in ops {
+                // Defence-in-depth op-path gate (R4, non-load-bearing, dark until
+                // 342j; inert for the non-connection HTTP/anonymous paths where
+                // `connection_id` is None). Skip a forgotten client's OR-bearing op.
+                if self.op_path_gated(op, ctx.connection_id).await {
+                    continue;
+                }
                 let sanitized_ts = self.write_validator.sanitize_hlc();
                 self.apply_batch_op(op, Some(&sanitized_ts), ctx.connection_id)
                     .await?;
@@ -331,6 +396,12 @@ impl CrdtService {
             }
             // All ops validated — apply them sequentially with sanitized timestamps.
             for op in ops {
+                // Defence-in-depth op-path gate (R4, non-load-bearing, dark until
+                // 342j; inert for the non-connection HTTP/anonymous paths where
+                // `connection_id` is None). Skip a forgotten client's OR-bearing op.
+                if self.op_path_gated(op, ctx.connection_id).await {
+                    continue;
+                }
                 let sanitized_ts = self.write_validator.sanitize_hlc();
                 self.apply_batch_op(op, Some(&sanitized_ts), ctx.connection_id)
                     .await?;
@@ -349,6 +420,12 @@ impl CrdtService {
                 self.validate_schema_for_op(op)?;
             }
             for op in ops {
+                // Defence-in-depth op-path gate (R4, non-load-bearing, dark until
+                // 342j; inert for the non-connection HTTP/anonymous paths where
+                // `connection_id` is None). Skip a forgotten client's OR-bearing op.
+                if self.op_path_gated(op, ctx.connection_id).await {
+                    continue;
+                }
                 let sanitized_ts = self.write_validator.sanitize_hlc();
                 self.apply_batch_op(op, Some(&sanitized_ts), ctx.connection_id)
                     .await?;
@@ -394,6 +471,54 @@ impl CrdtService {
         // Clone out of the lock immediately so we don't hold the read guard across async ops.
         let snapshot = handle.metadata.read().await.clone();
         Ok(snapshot)
+    }
+
+    /// Defence-in-depth op-path gate (R4 — NON-load-bearing, DARK until SPEC-342j).
+    ///
+    /// Whether an OR-bearing op arriving on a direct client connection must be
+    /// dropped because the connection's server-authenticated `(principal, deviceId)`
+    /// identity is forgotten. This mirrors the sync-path push-diff gate purely as
+    /// belt-and-suspenders: the load-bearing re-admission surface is `ORMapPushDiff`,
+    /// and the `OR_ADD` apply path below REGENERATES the tag from the sanitized server
+    /// timestamp, so a same-tag op-path resurrection cannot even carry a client's
+    /// original tag through to the store (the test would be vacuous). Returns `false`
+    /// (never gates) for a non-client caller (no connection → HTTP/anonymous/system
+    /// trusted paths) and while the durability watermark is 0 (dark by construction).
+    async fn op_path_gated(&self, op: &ClientOp, conn: Option<ConnectionId>) -> bool {
+        let is_or = matches!(&op.or_record, Some(Some(_))) || matches!(&op.or_tag, Some(Some(_)));
+        if !is_or {
+            return false;
+        }
+        let Some(conn) = conn else {
+            return false;
+        };
+        let Some(frontier) = self.frontier.as_ref() else {
+            return false;
+        };
+        if !frontier.is_protection_active() {
+            return false;
+        }
+        // A vanished connection → treat as unknown → forgotten.
+        let Some(handle) = self.connection_registry.get(conn) else {
+            return true;
+        };
+        let (device_id, principal_id) = {
+            let meta = handle.metadata.read().await;
+            (
+                meta.device_id.clone(),
+                meta.principal.as_ref().map(|p| p.id.clone()),
+            )
+        };
+        match device_id {
+            None => true, // no server-issued device identity → unknown → forgotten
+            Some(device_id) => {
+                let client = crate::network::device_identity::frontier_client_id(
+                    principal_id.as_deref(),
+                    &device_id,
+                );
+                frontier.is_forgotten(&client)
+            }
+        }
     }
 
     /// Applies a single `ClientOp` to the `RecordStore` and returns the `ServerEventPayload`
@@ -467,6 +592,14 @@ impl CrdtService {
                 (entry, or_rec.clone())
             };
 
+            // Serialize the compound read-modify-write per key: without this, two
+            // concurrent OR_ADDs on the SAME key could each read the pre-mutation
+            // state below and race to `store.put`, with the second `put` silently
+            // clobbering the first's merge and losing an update (SPEC-333b). Held
+            // across `store.get` through the single `store.put` merge-commit only —
+            // does NOT cover the OR_REMOVE RMW below (342b's responsibility).
+            let key_guard = self.key_writer.acquire(&op.map_name, &op.key).await;
+
             // Read existing OR-Map state so the new entry is merged in rather than replacing.
             // OR-Map add-wins semantics require all concurrent additions to be preserved,
             // while observed-remove semantics require an already-tombstoned tag to stay
@@ -509,6 +642,13 @@ impl CrdtService {
                 .await
                 .map_err(OperationError::Internal)?;
 
+            // Release the per-key writer lock the instant the merge-commit `put`
+            // returns: the critical region is exactly `store.get` -> `store.put`.
+            // The payload construction below only clones already-owned locals and
+            // touches no shared store state, so holding the lock across it would
+            // needlessly serialize unrelated writers to this key.
+            drop(key_guard);
+
             Ok(ServerEventPayload {
                 map_name: op.map_name.clone(),
                 event_type: ServerEventType::OR_ADD,
@@ -526,11 +666,16 @@ impl CrdtService {
                 .expect("or_tag is Some(Some(_))");
 
             // OR_REMOVE is tag-based; no timestamp sanitization needed.
+            // Serialize the OR_REMOVE RMW per key (the same primitive as OR_ADD) so
+            // the tombstone append and any concurrent prune sweep on this key preserve
+            // tombstone-set monotonicity (no pruned tag flickering back in mid-window).
+            let key_guard = self.key_writer.acquire(&op.map_name, &op.key).await;
+
             // Read-modify-write over the unified OrMap shape: drop only the matched tag
             // from records (preserving every concurrent survivor) and append the removed
             // tag to the tombstone set. Writing the legacy destructive OrTombstones blob
             // here would clobber all concurrent records, which is the data-loss bug.
-            let record_value = {
+            let (record_value, stamped_new_tombstone) = {
                 let existing = store
                     .get(&op.key, false)
                     .await
@@ -538,36 +683,23 @@ impl CrdtService {
                 let (mut records, mut tombstones) = read_or_map_state(existing.map(|r| r.value));
 
                 records.retain(|e| e.tag != *tag);
-                // The tombstone set grows unbounded here today: it is NOT pruned on
-                // this path. Pruning a tag is only safe once every replica that could
-                // still hold the matching add has observed this remove, and a
-                // single node with transient reconnecting clients has no
-                // causal-stability / delivery-ack tracking to know that. A
-                // time-threshold prune is unsafe for any horizon — a client
-                // offline longer than the horizon reconnects, delta-syncs without
-                // the dropped tombstone, and resurrects the removed value. A loud,
-                // bounded-memory OOM is preferable to silent CRDT corruption, so
-                // for the single-node demo tier we accept linear tombstone growth.
-                // The real bound is designed: epoch/generation GC (M4) prunes an
-                // entire epoch's tombstone set wholesale once the low-water-mark
-                // across ALL tracked clients has passed it. The prune wiring, the
-                // forgotten-client pre-apply gate, and the confirmed-apply ACK
-                // protocol it depends on are the downstream implementation
-                // (TODO-566; contract in core-rust tombstone_frontier.rs). Until
-                // that lands, the soak memory monitor is calibrated to flag this
-                // growth rather than mask it.
-                // Dedup: a re-issued remove must not duplicate the tombstone.
-                if !tombstones.contains(tag) {
+                // Dedup: a re-issued remove must not duplicate the tombstone. Only a
+                // genuinely-new tag is counted and epoch-stamped.
+                let is_new = !tombstones.contains(tag);
+                if is_new {
                     tombstones.push(tag.clone());
                     // Feeds the residency-independent soak leak gauge: counted here
                     // on the write path (once per genuinely-new tag) so eviction and
                     // rehydration of the record never move this number.
                     crate::storage::record::add_tombstone_bytes(tag.len() as u64);
                 }
-                RecordValue::OrMap {
-                    records,
-                    tombstones,
-                }
+                (
+                    RecordValue::OrMap {
+                        records,
+                        tombstones,
+                    },
+                    is_new,
+                )
             };
             store
                 .put(
@@ -578,6 +710,30 @@ impl CrdtService {
                 )
                 .await
                 .map_err(OperationError::Internal)?;
+
+            // Stamp the genuinely-new tombstone with the current server epoch —
+            // server-authoritative, derived from the epoch counter, NEVER from the
+            // client tag's `millis`. The wire `tombstones: Vec<String>` byte layout is
+            // unchanged; the epoch lives only in the server-side frontier index.
+            if stamped_new_tombstone {
+                if let Some(frontier) = self.frontier.as_ref() {
+                    frontier.stamp_tombstone(&op.map_name, &op.key, tag);
+                }
+            }
+
+            // Release the per-key writer before the prune sweep re-acquires it: the
+            // sweep takes the same per-key writer per dropped tag, so holding it here
+            // would self-deadlock on this key.
+            drop(key_guard);
+
+            // Wholesale epoch-drop prune over the OR write path. DARK by construction:
+            // the frontier's `durable_epoch_watermark` is constant 0 in this child, so
+            // the call-site conjunction never licenses a prune for any stamped epoch —
+            // this drains nothing until SPEC-342j supplies the real watermark.
+            if let Some(frontier) = self.frontier.as_ref() {
+                prune_epoch_tombstones(frontier, &self.record_store_factory, &self.key_writer)
+                    .await;
+            }
 
             Ok(ServerEventPayload {
                 map_name: op.map_name.clone(),
@@ -1086,6 +1242,67 @@ fn read_or_map_state(value: Option<RecordValue>) -> (Vec<OrMapEntry>, Vec<String
         }) => (records, tombstones),
         Some(RecordValue::OrTombstones { tags }) => (Vec::new(), tags),
         _ => (Vec::new(), Vec::new()),
+    }
+}
+
+/// Run the wholesale epoch-drop prune over the storage backing `factory`.
+///
+/// Drains every currently prune-eligible epoch's tombstone refs out of the
+/// frontier index (BOTH call-site conjuncts —
+/// `is_epoch_prune_eligible(E) && durable_epoch_watermark >= E`) and drops each
+/// tag from its OR-Map record in storage (RAM + redb) under the per-key writer,
+/// so a concurrent OR write on the same key cannot flicker a pruned tag back in.
+///
+/// DARK by construction in THIS child: the frontier's `durable_epoch_watermark`
+/// is constant 0, so the drained set is always empty in production — nothing is
+/// ever dropped. Tests inject a watermark (`set_durable_epoch_watermark`) to
+/// exercise this drop path. SPEC-342j supplies the real watermark that activates
+/// the prune. Shared by the OR write path (`crdt.rs`) and the SYNC leaf
+/// (`sync.rs`).
+///
+/// A ref whose storage drop FAILS (read or write error) is handed back to the
+/// frontier via `restore_tombstone_ref` so a later sweep retries it — dropping
+/// it here would orphan the tag un-prunable in storage forever, since the drain
+/// already removed its index entry.
+pub(crate) async fn prune_epoch_tombstones(
+    frontier: &TombstoneFrontier,
+    factory: &RecordStoreFactory,
+    key_writer: &KeyWriterRegistry,
+) {
+    for (epoch, r) in frontier.drain_prunable_tombstones() {
+        let store = factory.get_or_create(&r.map, hash_to_partition(&r.key));
+        // Serialize the drop against concurrent OR writes on this key.
+        let _guard = key_writer.acquire(&r.map, &r.key).await;
+        let existing = match store.get(&r.key, false).await {
+            Ok(v) => v,
+            Err(e) => {
+                // Operator-visible: a swallowed storage error on the prune path
+                // would silently stall tombstone reclamation.
+                tracing::warn!(map = %r.map, key = %r.key, epoch, "prune read failed, re-indexing tombstone for retry: {e}");
+                frontier.restore_tombstone_ref(epoch, r);
+                continue;
+            }
+        };
+        let (records, mut tombstones) = read_or_map_state(existing.map(|rec| rec.value));
+        let before = tombstones.len();
+        tombstones.retain(|t| t != &r.tag);
+        if tombstones.len() != before {
+            if let Err(e) = store
+                .put(
+                    &r.key,
+                    RecordValue::OrMap {
+                        records,
+                        tombstones,
+                    },
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::CrdtMerge,
+                )
+                .await
+            {
+                tracing::warn!(map = %r.map, key = %r.key, epoch, "prune put failed, re-indexing tombstone for retry: {e}");
+                frontier.restore_tombstone_ref(epoch, r);
+            }
+        }
     }
 }
 
@@ -2633,6 +2850,89 @@ mod tests {
         (svc, factory)
     }
 
+    fn make_service_with_frontier() -> (
+        Arc<CrdtService>,
+        Arc<RecordStoreFactory>,
+        Arc<TombstoneFrontier>,
+    ) {
+        let factory = make_factory();
+        let registry = Arc::new(ConnectionRegistry::new());
+        let query_registry = Arc::new(QueryRegistry::new());
+        let frontier = Arc::new(TombstoneFrontier::new(None));
+        frontier.set_epoch_width(1); // one epoch per stamped tombstone
+        let svc = Arc::new(
+            CrdtService::new(
+                Arc::clone(&factory),
+                registry,
+                make_validator(),
+                query_registry,
+                Arc::new(SchemaService::new()),
+            )
+            .with_frontier(Arc::clone(&frontier)),
+        );
+        (svc, factory, frontier)
+    }
+
+    /// AC4 (OR write path): the wholesale epoch-drop prune is wired into the
+    /// `OR_REMOVE` write path (the sweep runs after each apply). With an injected
+    /// durability watermark and the low-water-mark STRICTLY past the epoch, a
+    /// subsequent `OR_REMOVE` fires the sweep and drops the earlier epoch's
+    /// tombstone from storage; a not-strictly-past epoch survives. DARK by
+    /// default — the injected watermark exercises the real drop path.
+    #[tokio::test]
+    async fn ac4_prune_wired_into_or_write_path() {
+        let (svc, factory, frontier) = make_service_with_frontier();
+
+        // Add + remove T1 on k1 -> epoch 1; T2 on k2 -> epoch 2. Both stored.
+        for (key, val, tag) in [("k1", "v1", "T1"), ("k2", "v2", "T2")] {
+            Arc::clone(&svc)
+                .oneshot(or_add_op("m", key, val, tag))
+                .await
+                .unwrap();
+            Arc::clone(&svc)
+                .oneshot(or_remove_op("m", key, tag))
+                .await
+                .unwrap();
+        }
+        let (_, tombs) = read_or_map(&factory, "m", "k1").await;
+        assert!(
+            tombs.contains(&"T1".to_string()),
+            "tombstone stored after OR_REMOVE (dark: watermark 0 -> no prune yet)"
+        );
+        assert_eq!(frontier.current_epoch(), 2, "epochs 1..=2 stamped");
+
+        // Raise the LWM strictly past epoch 1 (cursor 2 > 1) and open the
+        // durability watermark.
+        let c: String = "a5:alice|dev-1".into();
+        frontier.set_delivered(ConnectionId(1), 100);
+        assert!(frontier.confirm_apply_ack(&c, 2, ConnectionId(1)).await);
+        assert_eq!(frontier.low_water_mark(), 2);
+        frontier.set_durable_epoch_watermark(1000);
+
+        // Fire the sweep via an OR_REMOVE on a THIRD key. Its own new tombstone
+        // lands in epoch 3 (pinned); epoch 2 is pinned too (LWM 2 not strictly
+        // past 2); epoch 1's T1 is dropped.
+        Arc::clone(&svc)
+            .oneshot(or_add_op("m", "k3", "v3", "T3"))
+            .await
+            .unwrap();
+        Arc::clone(&svc)
+            .oneshot(or_remove_op("m", "k3", "T3"))
+            .await
+            .unwrap();
+
+        let (_, tombs_k1) = read_or_map(&factory, "m", "k1").await;
+        assert!(
+            !tombs_k1.contains(&"T1".to_string()),
+            "epoch-1 tombstone pruned from storage via the OR write path"
+        );
+        let (_, tombs_k2) = read_or_map(&factory, "m", "k2").await;
+        assert!(
+            tombs_k2.contains(&"T2".to_string()),
+            "epoch-2 tombstone still pinned (LWM 2 not strictly past epoch 2)"
+        );
+    }
+
     /// Reads back the stored OR-Map for a key at its hash partition.
     async fn read_or_map(
         factory: &Arc<RecordStoreFactory>,
@@ -2872,6 +3172,52 @@ mod tests {
             vec!["tag-x"],
             "tag-x must remain tombstoned; tombstones={tombstones:?}"
         );
+    }
+
+    // AC6 (SPEC-342d / SPEC-333b): N concurrent OR_ADDs on the SAME key must
+    // all survive — the per-key writer lock now serializes the
+    // `store.get` -> merge -> `store.put` RMW inside `apply_single_op`'s
+    // OR_ADD branch, so no concurrent add can read stale pre-mutation state
+    // and clobber another add's merge on `put`. This proves OR_ADD-vs-OR_ADD
+    // ONLY — it does NOT prove OR_ADD-vs-OR_REMOVE interleaving is race-free
+    // (that remains 342b's responsibility, see module Context).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_or_adds_on_same_key_lose_no_update() {
+        for _ in 0..10 {
+            let (svc, factory) = make_service_with_factory();
+            let key = "concurrent-or-add-key";
+            let n = 20usize;
+
+            let mut handles = Vec::new();
+            for i in 0..n {
+                let svc = Arc::clone(&svc);
+                let tag = format!("t{i}");
+                let value = format!("v{i}");
+                handles.push(tokio::spawn(async move {
+                    svc.oneshot(or_add_op("tags", key, &value, &tag))
+                        .await
+                        .unwrap();
+                }));
+            }
+
+            futures_util::future::join_all(handles)
+                .await
+                .into_iter()
+                .for_each(|r| r.expect("task panicked"));
+
+            let (tags, tombstones) = read_or_map(&factory, "tags", key).await;
+            assert_eq!(
+                tags.len(),
+                n,
+                "all {n} concurrent OR_ADDs on the same key must survive with no lost update, \
+                 got {} survivors: {tags:?}",
+                tags.len()
+            );
+            assert!(
+                tombstones.is_empty(),
+                "no removes issued; tombstones must stay empty"
+            );
+        }
     }
 
     // AC3 (i): apply_single_op convergence — same op set delivered in DIFFERENT

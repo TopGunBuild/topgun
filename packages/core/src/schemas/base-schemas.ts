@@ -128,8 +128,23 @@ export const AuthMessageSchema = z.object({
   type: z.literal('AUTH'),
   token: z.string(),
   protocolVersion: z.number().optional(),
+  // Opaque server-issued device credential presented for present-or-mint binding.
+  deviceToken: z.string().optional(),
 });
 export type AuthMessage = z.infer<typeof AuthMessageSchema>;
+
+/**
+ * DEVICE_HELLO: Client presents a device credential for present-or-mint,
+ * orthogonally to JWT AUTH. A token-less client sends this instead of an
+ * empty-token AUTH (which a JWT server would AUTH_FAIL + disconnect); the JWT
+ * Phase-1 loop silently drops this non-AUTH frame, so the connection survives.
+ */
+export const DeviceHelloMessageSchema = z.object({
+  type: z.literal('DEVICE_HELLO'),
+  // Absent on a first-ever presentation (server mints a fresh identity).
+  deviceToken: z.string().optional(),
+});
+export type DeviceHelloMessage = z.infer<typeof DeviceHelloMessageSchema>;
 
 /**
  * AUTH_REQUIRED: Server tells client that authentication is needed.

@@ -33,6 +33,18 @@ export const SyncInitMessageSchema = z.object({
 });
 export type SyncInitMessage = z.infer<typeof SyncInitMessageSchema>;
 
+// Client -> server confirmed-apply ACK. A cumulative-monotonic cursor: `cursor`
+// is the highest server epoch the client has confirmed it received AND durably
+// applied (inclusive — "applied <= cursor"). It feeds the server's per-device
+// causal frontier that licenses tombstone pruning. Carries NO identity field by
+// design — the server derives the authenticated (principal, deviceId) replica
+// identity from the connection, never from the wire.
+export const ClientApplyAckMessageSchema = z.object({
+  type: z.literal('CLIENT_APPLY_ACK'),
+  cursor: z.number(),
+});
+export type ClientApplyAckMessage = z.infer<typeof ClientApplyAckMessageSchema>;
+
 export const SyncRespRootMessageSchema = z.object({
   type: z.literal('SYNC_RESP_ROOT'),
   payload: z.object({
@@ -111,6 +123,12 @@ export const ORMapSyncRespRootSchema = z.object({
     mapName: z.string(),
     rootHash: z.number(),
     timestamp: TimestampSchema,
+    // Server → client only: the current max stamped tombstone epoch this
+    // response covers. The client ACKs it via CLIENT_APPLY_ACK after durable
+    // apply — including on an empty diff (root already matches) so an up-to-date
+    // client still advances its cursor. Omitted when the server has stamped no
+    // tombstone yet. Additive; the wire byte layout is unchanged when absent.
+    coveringEpoch: z.number().int().nonnegative().optional(),
   }),
 });
 export type ORMapSyncRespRoot = z.infer<typeof ORMapSyncRespRootSchema>;
@@ -140,6 +158,9 @@ export const ORMapSyncRespLeafSchema = z.object({
     mapName: z.string(),
     path: z.string(),
     entries: z.array(ORMapEntrySchema),
+    // Server → client only: covering epoch for this leaf; the client ACKs it
+    // after durably applying the entries. See ORMapSyncRespRootSchema.
+    coveringEpoch: z.number().int().nonnegative().optional(),
   }),
 });
 export type ORMapSyncRespLeaf = z.infer<typeof ORMapSyncRespLeafSchema>;
@@ -158,6 +179,9 @@ export const ORMapDiffResponseSchema = z.object({
   payload: z.object({
     mapName: z.string(),
     entries: z.array(ORMapEntrySchema),
+    // Server → client only: covering epoch for this diff; the client ACKs it
+    // after durably applying the entries. See ORMapSyncRespRootSchema.
+    coveringEpoch: z.number().int().nonnegative().optional(),
   }),
 });
 export type ORMapDiffResponse = z.infer<typeof ORMapDiffResponseSchema>;

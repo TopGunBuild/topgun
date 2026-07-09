@@ -61,12 +61,17 @@ use dashmap::DashMap;
 use tracing::Instrument;
 
 use crate::network::connection::{ConnectionId, ConnectionKind, ConnectionRegistry};
+use crate::network::device_identity::frontier_client_id;
+use crate::service::domain::crdt::prune_epoch_tombstones;
+use crate::service::domain::key_writer::KeyWriterRegistry;
 use crate::service::operation::{service_names, Operation, OperationError, OperationResponse};
 use crate::service::registry::{ManagedService, ServiceContext};
 use crate::storage::map_data_store::{DurableMerkleIndex, MapDataStore, MerkleSession};
 use crate::storage::merkle_sync::MerkleSyncManager;
 use crate::storage::record::RecordValue;
 use crate::storage::{CallerProvenance, ExpiryPolicy, RecordStoreFactory};
+use crate::tombstone_frontier::{ClientId, GateToken};
+use crate::tombstone_frontier_impl::TombstoneFrontier;
 
 // ---------------------------------------------------------------------------
 // value_to_rmpv conversion helper
@@ -140,6 +145,16 @@ pub struct SyncService {
     durable_store: Option<Arc<dyn MapDataStore>>,
     /// Per-`(map, connection)` session cache; entries released on disconnect.
     session_registry: Arc<SyncSessionRegistry>,
+    /// Shared causal frontier: conveys the covering epoch on OR-Map sync
+    /// responses and drives the SYNC-leaf prune. `None` when epoch machinery is
+    /// not wired (tests / null-store). MUST be the SAME `Arc<TombstoneFrontier>`
+    /// shared with `CrdtService` so the covering epoch and low-water-mark are one
+    /// authority.
+    frontier: Option<Arc<TombstoneFrontier>>,
+    /// Shared per-key writer, the SAME registry `CrdtService` holds, so a
+    /// SYNC-leaf prune sweep and an OR write on a key serialize against each
+    /// other. `None` when the frontier is not wired.
+    key_writer: Option<Arc<KeyWriterRegistry>>,
 }
 
 /// Per-`(map_name, connection_id)` cache of materialised Merkle sync sessions.
@@ -218,6 +233,150 @@ impl SyncService {
             durable_index: None,
             durable_store: None,
             session_registry,
+            frontier: None,
+            key_writer: None,
+        }
+    }
+
+    /// Wire the shared causal frontier + per-key writer so OR-Map sync responses
+    /// convey the covering epoch (feeding the client ACK loop and the `342e`
+    /// `delivered_conn` clamp) and the SYNC-leaf prune can run. Production wiring
+    /// MUST pass the SAME `Arc`s held by `AppState` / `CrdtService`; a second
+    /// frontier or writer would fork the epoch authority / re-open the prune race.
+    /// `SyncService::new`'s signature is unchanged (builder, like
+    /// `with_durable_index`).
+    #[must_use]
+    pub fn with_frontier(
+        mut self,
+        frontier: Arc<TombstoneFrontier>,
+        key_writer: Arc<KeyWriterRegistry>,
+    ) -> Self {
+        self.frontier = Some(frontier);
+        self.key_writer = Some(key_writer);
+        self
+    }
+
+    /// The covering epoch to convey on an OR-Map sync response for `conn`: the
+    /// server's current max stamped epoch (`None` when nothing stamped yet or no
+    /// frontier is wired). Also records it as delivered on `conn` so the client's
+    /// subsequent `CLIENT_APPLY_ACK` passes the `342e` delivered-clamp. Conveying
+    /// it on EVERY OR-Map response (root/leaf/diff) — including the empty-diff
+    /// root — is what lets an up-to-date client still advance its cursor instead
+    /// of pinning the low-water-mark forever (empty-diff liveness).
+    ///
+    /// ORDERING IS LOAD-BEARING: every caller MUST read the covering epoch BEFORE
+    /// computing the root hash / collecting the entries it rides with. The
+    /// conveyed epoch must never postdate the state snapshot in the same response:
+    /// a concurrent `OR_REMOVE` stamped between the data read and a later epoch
+    /// read would make the client ACK an epoch whose tombstones it never received,
+    /// breaking the cursor-implies-delivered invariant the prune rests on. Reading
+    /// the epoch first errs conservative (the data may be NEWER than the epoch,
+    /// so the client under-claims — safe).
+    fn covering_epoch(&self, conn: Option<ConnectionId>, gated: bool) -> Option<u64> {
+        let frontier = self.frontier.as_ref()?;
+        let epoch = frontier.current_epoch();
+        if epoch == 0 {
+            return None;
+        }
+        // Convey the epoch as metadata for EVERY client, but ADVANCE `delivered_conn`
+        // ONLY for a not-gated (tracked, non-forgotten, non-regressed) client. For a
+        // gated (forgotten/unknown/regressed) client `set_delivered` is DEFERRED to
+        // post-snapshot-resync completion (its `CLIENT_APPLY_ACK`): eagerly advancing
+        // it here would re-enable the client's ACKs before it received the full
+        // snapshot, re-admitting it via the sync path BEFORE any push (independent of
+        // the push-diff gate). `delivered_conn` must advance only on resync completion.
+        if !gated {
+            if let Some(c) = conn {
+                frontier.set_delivered(c, epoch);
+            }
+        }
+        Some(epoch)
+    }
+
+    /// Resolve the server-authenticated `(principal, deviceId)` frontier identity for
+    /// a connection, or `None` when the connection carries no server-issued device
+    /// identity (an unknown client → forgotten treatment by the caller). Reads BOTH
+    /// principal and `device_id` off the connection's OWN metadata — the same values the
+    /// device-ownership claim keyed on — NEVER a wire-asserted / tag-embedded identity,
+    /// preserving G9 identity-spoofing-CLEAN.
+    async fn resolve_client_id(&self, conn: Option<ConnectionId>) -> Option<ClientId> {
+        let conn = conn?;
+        let handle = self.connection_registry.get(conn)?;
+        let meta = handle.metadata.read().await;
+        let device_id = meta.device_id.clone()?;
+        let principal_id = meta.principal.as_ref().map(|p| p.id.clone());
+        Some(frontier_client_id(principal_id.as_deref(), &device_id))
+    }
+
+    /// Whether `conn` must be routed through the full-snapshot REPLACE resync AND have
+    /// its eager `set_delivered` suppressed (a gated client). True only while the gate
+    /// is ACTIVE (SPEC-342j watermark raised — dark by construction until then) and the
+    /// connection resolves to a forgotten/unknown/regressed identity. `claimed_epoch`
+    /// (present only on the sync-init path) enables the regressed-replica check
+    /// (`claim < stored_cursor`); the merkle/diff handlers pass `None`.
+    async fn sync_gated(&self, conn: Option<ConnectionId>, claimed_epoch: Option<u64>) -> bool {
+        let Some(frontier) = self.frontier.as_ref() else {
+            return false;
+        };
+        // Dark by construction: while the durability watermark is 0 nothing can be
+        // pruned, so a re-admission cannot resurrect anything and full-resync routing
+        // would only force needless re-syncs on un-migrated clients. The routing goes
+        // live together with the prune (gate-before-activation).
+        if !frontier.is_protection_active() {
+            return false;
+        }
+        match self.resolve_client_id(conn).await {
+            None => true, // unknown identity → forgotten treatment → full resync
+            Some(client) => {
+                frontier.is_forgotten(&client)
+                    // is_regressed is read-only — it NEVER rolls the stored cursor back
+                    // (342a monotonicity); a regressed replica is routed through the same
+                    // full-resync at its stale-high cursor unchanged.
+                    || claimed_epoch.is_some_and(|claim| frontier.is_regressed(&client, claim))
+            }
+        }
+    }
+
+    /// Gating decision for the merkle-bucket / diff-request CONTINUATION handlers,
+    /// which run AFTER the sync-init has routed a gated client to a full-resync.
+    ///
+    /// These handlers cannot re-run the regressed check: the client reports its
+    /// `claimed_epoch` only on `ORMapSyncInit`, so a REGRESSED replica (stale-HIGH
+    /// stored cursor, `is_forgotten` = false) would slip past the base `sync_gated`
+    /// here and have its `delivered_conn` eagerly advanced mid-resync — re-enabling
+    /// its ACKs/admission BEFORE the snapshot lands, violating R8/R9 ("`delivered_conn`
+    /// advances only on snapshot-resync completion"). To close that, gate additionally
+    /// on the NOT-YET-ADMITTED signal `delivered(conn) == 0`: a connection that has not
+    /// completed its sync/resync admission (fresh, forgotten, or mid-resync) has
+    /// `delivered == 0` until its `CLIENT_APPLY_ACK` advances it (R8) — the SAME signal
+    /// the push-diff gate uses (a not-gated healthy client had `delivered` set > 0 by
+    /// `covering_epoch` at its own non-gated sync-init, so it is unaffected). Dark by
+    /// construction: only bites while the durability watermark is raised.
+    async fn sync_gated_continuation(&self, conn: Option<ConnectionId>) -> bool {
+        if self.sync_gated(conn, None).await {
+            return true;
+        }
+        let Some(frontier) = self.frontier.as_ref() else {
+            return false;
+        };
+        if !frontier.is_protection_active() {
+            return false;
+        }
+        match conn {
+            // `sync_gated` already returns true for an unknown identity (None conn),
+            // so reaching here with None would be unexpected; fail closed.
+            None => true,
+            Some(c) => frontier.delivered(c) == 0,
+        }
+    }
+
+    /// Run the wholesale epoch-drop prune over the SYNC-leaf path. DARK by
+    /// construction (the frontier watermark is constant 0), so this drops nothing
+    /// in production; tests inject a watermark to exercise the drop. No-op unless
+    /// BOTH the frontier and the shared per-key writer are wired.
+    async fn run_leaf_prune(&self) {
+        if let (Some(frontier), Some(key_writer)) = (&self.frontier, &self.key_writer) {
+            prune_epoch_tombstones(frontier, &self.record_store_factory, key_writer).await;
         }
     }
 
@@ -663,13 +822,41 @@ impl SyncService {
     /// builds a fresh session now (`force_rebuild=false` with a cache miss triggers
     /// a build). Falls back to the in-memory `MerkleSyncManager` aggregate when no
     /// durable index is configured.
-    #[allow(clippy::unused_async)] // declared async for uniformity with other handlers
     async fn handle_ormap_sync_init(
         &self,
         ctx: &crate::service::operation::OperationContext,
         payload: messages::ORMapSyncInit,
     ) -> Result<OperationResponse, OperationError> {
         let map_name = payload.map_name;
+
+        // Forgotten/unknown/regressed detection (R6/R7): a gated client is routed
+        // through an authoritative FULL-snapshot REPLACE resync (never an incremental
+        // delta), and its eager `set_delivered` is suppressed (deferred to resync
+        // completion). `claimed_epoch` carries the client's locally-persisted cursor so
+        // a REGRESSED replica (a backup-restore clone, `claim < stored_cursor`) is
+        // caught here too — routed through the same full-resync WITHOUT advancing
+        // `delivered_conn` and WITHOUT rolling the stored cursor back.
+        // Fail-closed on sync-INIT ONLY: a client that omits `claimed_epoch`
+        // (None) cannot be regressed-checked (`is_regressed` needs a claim), so
+        // under active protection it must be treated as gated and forced through
+        // the full-snapshot REPLACE resync rather than eagerly re-admitted. A
+        // fresh client with no local state (None) correctly gets a cheap
+        // full-resync. The None⇒gated OR is applied HERE at the sync-init call
+        // site only — the merkle-bucket / diff continuations legitimately pass
+        // None as post-init reads and must keep the plain `sync_gated` semantics
+        // (gate only on is_forgotten), so this must NOT move into `sync_gated`.
+        let protection_active = self
+            .frontier
+            .as_ref()
+            .is_some_and(|f| f.is_protection_active());
+        let gated = self
+            .sync_gated(ctx.connection_id, payload.claimed_epoch)
+            .await
+            || (protection_active && payload.claimed_epoch.is_none());
+
+        // Epoch BEFORE data: the conveyed epoch must never postdate the root it
+        // rides with (see `covering_epoch` — ordering is load-bearing).
+        let covering_epoch = self.covering_epoch(ctx.connection_id, gated);
 
         // Reuse any session already built by the LWW SYNC_INIT for this map; build
         // one now if not yet cached. force_rebuild=false so a concurrent or prior
@@ -688,6 +875,10 @@ impl SyncService {
                     map_name,
                     root_hash,
                     timestamp: ctx.timestamp.clone(),
+                    covering_epoch,
+                    // Directs a gated client to DISCARD its local OR-Map and adopt the
+                    // server snapshot (authoritative REPLACE), never an additive merge.
+                    full_resync: gated,
                 },
             }),
         )))
@@ -710,6 +901,24 @@ impl SyncService {
     ) -> Result<OperationResponse, OperationError> {
         let map_name = payload.payload.map_name;
         let path = payload.payload.path;
+
+        // Wholesale epoch-drop prune wired into the SYNC-leaf path: drop
+        // prune-eligible tombstones from storage BEFORE the leaf is read, so the
+        // emitted leaf naturally carries the reduced set. DARK by construction (the
+        // frontier watermark is constant 0) — drops nothing in production.
+        self.run_leaf_prune().await;
+
+        // Gate `set_delivered` for a forgotten/unknown/regressed client (R9): the
+        // covering epoch is still conveyed as metadata, but `delivered_conn` is not
+        // advanced here — deferred to full-resync completion. Uses the continuation
+        // form so a REGRESSED replica mid-resync (undetectable here without a claim)
+        // is also gated via the not-yet-admitted `delivered == 0` signal.
+        let gated = self.sync_gated_continuation(ctx.connection_id).await;
+
+        // Epoch BEFORE data: read once here, before any leaf entries are collected,
+        // so the conveyed epoch can never postdate the entry sets the leaf
+        // responses below carry (see `covering_epoch` — ordering is load-bearing).
+        let covering_epoch = self.covering_epoch(ctx.connection_id, gated);
 
         // Durable-index path: reuse the session built during ORMapSyncInit (or
         // SYNC_INIT) for THIS connection. OR-Map tombstones yield no leaf in the
@@ -791,6 +1000,7 @@ impl SyncService {
                             map_name,
                             path,
                             entries,
+                            covering_epoch,
                         },
                     }),
                 )));
@@ -867,6 +1077,7 @@ impl SyncService {
                                 map_name,
                                 path,
                                 entries,
+                                covering_epoch,
                             },
                         }),
                     )))
@@ -962,6 +1173,7 @@ impl SyncService {
                         map_name,
                         path,
                         entries,
+                        covering_epoch,
                     },
                 }),
             )));
@@ -988,11 +1200,21 @@ impl SyncService {
     /// nested `.payload` field.
     async fn handle_ormap_diff_request(
         &self,
-        _ctx: &crate::service::operation::OperationContext,
+        ctx: &crate::service::operation::OperationContext,
         payload: messages::ORMapDiffRequest,
     ) -> Result<OperationResponse, OperationError> {
         let map_name = payload.payload.map_name;
         let keys = payload.payload.keys;
+
+        // Gate `set_delivered` for a forgotten/unknown/regressed client (R9): convey
+        // the covering epoch as metadata only, do not advance `delivered_conn`. Uses
+        // the continuation form so a REGRESSED replica mid-resync (undetectable here
+        // without a claim) is also gated via the not-yet-admitted `delivered == 0`.
+        let gated = self.sync_gated_continuation(ctx.connection_id).await;
+
+        // Epoch BEFORE data: the conveyed epoch must never postdate the entries
+        // collected below (see `covering_epoch` — ordering is load-bearing).
+        let covering_epoch = self.covering_epoch(ctx.connection_id, gated);
 
         let mut entries = Vec::new();
 
@@ -1062,7 +1284,11 @@ impl SyncService {
 
         Ok(OperationResponse::Message(Box::new(
             Message::ORMapDiffResponse(ORMapDiffResponse {
-                payload: ORMapDiffResponsePayload { map_name, entries },
+                payload: ORMapDiffResponsePayload {
+                    map_name,
+                    entries,
+                    covering_epoch,
+                },
             }),
         )))
     }
@@ -1071,6 +1297,7 @@ impl SyncService {
     ///
     /// `ORMapPushDiff` is a WRAPPED message: `map_name` and `entries` live in a
     /// nested `.payload` field.
+    #[allow(clippy::too_many_lines)] // gate setup + per-entry merge + broadcast + prune site in one coherent handler
     async fn handle_ormap_push_diff(
         &self,
         ctx: &crate::service::operation::OperationContext,
@@ -1082,12 +1309,100 @@ impl SyncService {
         let map_name = payload.payload.map_name;
         let entries = payload.payload.entries;
 
+        // ---- Forgotten-client pre-apply gate (fires BEFORE any merge) ----
+        //
+        // Wired but DARK by construction until SPEC-342j raises the durability
+        // watermark (`is_protection_active`): while dark, no tombstone can be pruned,
+        // so a re-admitted record is still suppressed by the live tombstone set
+        // (remove-wins) and blocking would only break an un-migrated client — the
+        // pre-342j write path is preserved verbatim. Once active, the gate blocks a
+        // forgotten/unknown client's push BEFORE the merge (gating BOTH the inbound
+        // tombstone union and the inbound records) and holds the per-key single-writer
+        // from the gate decision through the `store.put` commit to close the
+        // `.await`-window TOCTOU. It goes live TOGETHER with the prune
+        // (gate-before-activation — no prune-without-gate window).
+        let gate_active = self
+            .frontier
+            .as_ref()
+            .is_some_and(|f| f.is_protection_active());
+        let gate = if gate_active {
+            // Fail-closed (R12): an ACTIVE gate needs the shared per-key writer to hold
+            // the gate→commit TOCTOU span. Absent it, reject the whole push rather than
+            // merge under a best-effort no-lock path.
+            let (Some(frontier), Some(key_writer)) =
+                (self.frontier.as_ref(), self.key_writer.as_ref())
+            else {
+                return Ok(OperationResponse::Ack {
+                    call_id: ctx.call_id,
+                });
+            };
+            // Resolve the server-authenticated identity ONCE for the batch (R13:
+            // per-message decision, re-checked per key under the writer lock below).
+            // Unknown identity → forgotten → reject the whole push; the client is
+            // steered to a full-snapshot REPLACE resync by the sync path.
+            let Some(client) = self.resolve_client_id(ctx.connection_id).await else {
+                return Ok(OperationResponse::Ack {
+                    call_id: ctx.call_id,
+                });
+            };
+            if frontier.is_forgotten(&client) {
+                return Ok(OperationResponse::Ack {
+                    call_id: ctx.call_id,
+                });
+            }
+            // A connection must complete its (non-gated) sync or full-resync
+            // admission before any push merges — `delivered_conn` is the
+            // post-resync admission signal (R8/R9), advanced only on
+            // snapshot-resync completion (or eagerly by `covering_epoch` for a
+            // NOT-gated client), never for a gated one. A not-yet-admitted
+            // connection (`delivered == 0`) that flushes a queued push BEFORE
+            // finishing its sync/resync would carry a high STORED cursor
+            // (`is_forgotten` = false) yet still be pre-admission — holding it
+            // here until REPLACE completes closes R10 point-1 (a regressed
+            // replica's direct push is held until the resync lands).
+            let Some(conn_id) = ctx.connection_id else {
+                // `resolve_client_id` already returned Some, which proves
+                // `connection_id` is Some; an unexpected None is treated as
+                // fail-closed reject rather than admitted.
+                return Ok(OperationResponse::Ack {
+                    call_id: ctx.call_id,
+                });
+            };
+            if frontier.delivered(conn_id) == 0 {
+                return Ok(OperationResponse::Ack {
+                    call_id: ctx.call_id,
+                });
+            }
+            Some((frontier, key_writer, client))
+        } else {
+            None
+        };
+
         for entry in &entries {
             // Each entry's key determines its storage partition.
             let key_partition = hash_to_partition(&entry.key);
             let store = self
                 .record_store_factory
                 .get_or_create(&map_name, key_partition);
+            // Acquire the per-key single-writer BEFORE the gate re-check and hold it
+            // through the `store.put` merge-commit below (R5/R13). The commit-time
+            // re-check re-evaluates the LAG-AWARE forgotten status under the held guard
+            // via `gate_decision_holds_at_commit`, so a client that crosses the
+            // forget-lag-K threshold mid-batch (a concurrent stamp advancing
+            // `current_epoch`, or an active forget) between the batch gate and this key
+            // is caught here and its key skipped — not merged.
+            let _key_guard = if let Some((frontier, key_writer, client)) = &gate {
+                let guard = key_writer.acquire(&map_name, &entry.key).await;
+                let token = GateToken {
+                    client: (*client).clone(),
+                };
+                if !frontier.gate_decision_holds_at_commit(token) {
+                    continue; // now forgotten → skip this key (guard drops)
+                }
+                Some(guard)
+            } else {
+                None
+            };
             // Read-modify-write: fold inbound records + tombstones into the
             // locally-stored OR-Map rather than blind-clobbering it. Discarding
             // either side would resurrect removed entries (remove-wins broken) or
@@ -1133,6 +1448,13 @@ impl SyncService {
                 }
                 merged_records.push(crate::storage::record::OrMapEntry {
                     value: crate::service::domain::crdt::rmpv_to_value(&r.value),
+                    // Tag stays verbatim (OR identity — re-stamping breaks fleet tag
+                    // identity / CRDT convergence). The `timestamp` field is copied
+                    // verbatim too and is an ACCEPTED-AS-UNTRUSTED, client-supplied
+                    // value used only for LWW tie-breaking WITHIN this OR entry — the
+                    // server neither re-stamps nor clamps it (the bounded default;
+                    // authenticity of the identity is enforced by the connection-keyed
+                    // gate above, not by trusting this field).
                     tag: r.tag.clone(),
                     timestamp: r.timestamp.clone(),
                 });
@@ -1176,6 +1498,15 @@ impl SyncService {
                     .broadcast(&bytes, ConnectionKind::Client);
             }
         }
+
+        // Third prune site (R2): wire the wholesale epoch-drop prune into the
+        // push-diff merge path. DARK by construction — the frontier's durability
+        // watermark is constant 0 in this child, so the call-site conjunction never
+        // licenses a prune for any stamped epoch (all `>= 1`): this drops ZERO epochs
+        // until SPEC-342j supplies the real watermark. Runs AFTER the per-key guards
+        // above are dropped (the sweep re-acquires the same per-key writer per dropped
+        // tag, so holding a key guard here would self-deadlock).
+        self.run_leaf_prune().await;
 
         Ok(OperationResponse::Ack {
             call_id: ctx.call_id,
@@ -1316,6 +1647,158 @@ mod tests {
             record_store_factory,
             connection_registry,
         ))
+    }
+
+    fn make_sync_service_with_frontier() -> (
+        Arc<SyncService>,
+        Arc<RecordStoreFactory>,
+        Arc<TombstoneFrontier>,
+    ) {
+        let factory = make_factory();
+        let frontier = Arc::new(TombstoneFrontier::new(None));
+        frontier.set_epoch_width(1); // one epoch per stamp, for precise control
+        let key_writer = Arc::new(KeyWriterRegistry::new());
+        let svc = Arc::new(
+            SyncService::new(
+                Arc::new(MerkleSyncManager::default()),
+                Arc::clone(&factory),
+                Arc::new(ConnectionRegistry::new()),
+            )
+            .with_frontier(Arc::clone(&frontier), key_writer),
+        );
+        (svc, factory, frontier)
+    }
+
+    /// AC4 (SYNC-leaf site): the wholesale epoch-drop prune is wired into the
+    /// OR-Map SYNC-leaf path (`handle_ormap_merkle_req_bucket` runs the sweep at
+    /// entry). With an injected durability watermark and the low-water-mark past
+    /// the stamped epoch, invoking the leaf handler drops the tombstone from
+    /// storage while the live record survives. DARK by default (watermark 0); the
+    /// injected watermark exercises the real drop path.
+    #[tokio::test]
+    async fn ac4_prune_wired_into_sync_leaf() {
+        use crate::storage::record::OrMapEntry as StoreOrMapEntry;
+        let (svc, factory, frontier) = make_sync_service_with_frontier();
+        let map = "omap";
+        let key = "k1";
+        let tomb = "T1";
+        let store = factory.get_or_create(map, hash_to_partition(key));
+        store
+            .put(
+                key,
+                RecordValue::OrMap {
+                    records: vec![StoreOrMapEntry {
+                        value: Value::Int(1),
+                        tag: "R1".to_string(),
+                        timestamp: make_timestamp(),
+                    }],
+                    tombstones: vec![tomb.to_string()],
+                },
+                ExpiryPolicy::NONE,
+                CallerProvenance::CrdtMerge,
+            )
+            .await
+            .unwrap();
+        // Stamp the tombstone so the epoch index knows its (map, key, tag) location.
+        assert_eq!(frontier.stamp_tombstone(map, key, tomb), 1);
+        // A second stamp advances the counter to 2 so the LWM can move STRICTLY
+        // past epoch 1 (eligibility is strict: LWM must exceed the epoch).
+        assert_eq!(frontier.stamp_tombstone(map, "k2", "T2"), 2);
+        // Raise the LWM strictly past epoch 1 and open the durability watermark.
+        let c: String = "a5:alice|dev-1".into();
+        frontier.set_delivered(ConnectionId(1), 100);
+        assert!(frontier.confirm_apply_ack(&c, 2, ConnectionId(1)).await);
+        frontier.set_durable_epoch_watermark(1000);
+
+        // Invoke the OR-Map leaf handler — the prune sweep fires at its top.
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(ConnectionId(1));
+        Arc::clone(&svc)
+            .oneshot(Operation::ORMapMerkleReqBucket {
+                ctx,
+                payload: topgun_core::messages::ORMapMerkleReqBucket {
+                    payload: topgun_core::messages::ORMapMerkleReqBucketPayload {
+                        map_name: map.to_string(),
+                        path: String::new(),
+                    },
+                },
+            })
+            .await
+            .expect("bucket handler");
+
+        match store.get(key, false).await.unwrap().map(|r| r.value) {
+            Some(RecordValue::OrMap {
+                records,
+                tombstones,
+            }) => {
+                assert!(
+                    tombstones.is_empty(),
+                    "epoch-1 tombstone pruned from storage via the SYNC-leaf path"
+                );
+                assert_eq!(records.len(), 1, "the live record survives the prune");
+            }
+            other => panic!("expected OrMap, got {other:?}"),
+        }
+    }
+
+    /// `AC3b` (server half): once an epoch is stamped, the OR-Map `SYNC_INIT`
+    /// root response conveys the covering epoch AND records it as delivered on the
+    /// connection, so the client's subsequent `CLIENT_APPLY_ACK` passes the
+    /// delivered-clamp — this is what lets an empty-diff client advance. Before
+    /// any stamp, no covering epoch is conveyed (nothing to confirm).
+    #[tokio::test]
+    async fn ac3b_covering_epoch_conveyed_and_marked_delivered() {
+        let (svc, _factory, frontier) = make_sync_service_with_frontier();
+        let conn = ConnectionId(7);
+
+        let ormap_root = |svc: Arc<SyncService>, conn: ConnectionId| async move {
+            let mut ctx = make_ctx(service_names::SYNC);
+            ctx.connection_id = Some(conn);
+            match svc
+                .oneshot(Operation::ORMapSyncInit {
+                    ctx,
+                    payload: topgun_core::messages::ORMapSyncInit {
+                        map_name: "omap".to_string(),
+                        root_hash: 0,
+                        bucket_hashes: HashMap::new(),
+                        last_sync_timestamp: None,
+                        claimed_epoch: None,
+                    },
+                })
+                .await
+                .expect("ORMapSyncInit")
+            {
+                OperationResponse::Message(m) => match *m {
+                    Message::ORMapSyncRespRoot(r) => r.payload,
+                    o => panic!("expected ORMapSyncRespRoot, got {o:?}"),
+                },
+                o => panic!("expected Message, got {o:?}"),
+            }
+        };
+
+        // Before any stamp: no covering epoch, nothing delivered.
+        let root0 = ormap_root(Arc::clone(&svc), conn).await;
+        assert_eq!(
+            root0.covering_epoch, None,
+            "no epoch stamped -> no covering epoch conveyed"
+        );
+        assert_eq!(frontier.delivered(conn), 0);
+
+        // Stamp two epochs; SYNC_INIT now conveys the current max (2) and marks it
+        // delivered on the connection for the ACK clamp.
+        frontier.stamp_tombstone("omap", "k1", "T1");
+        frontier.stamp_tombstone("omap", "k2", "T2");
+        let root = ormap_root(Arc::clone(&svc), conn).await;
+        assert_eq!(
+            root.covering_epoch,
+            Some(2),
+            "covering epoch = current max stamped epoch"
+        );
+        assert_eq!(
+            frontier.delivered(conn),
+            2,
+            "conveyed epoch recorded as delivered so the client ACK passes the clamp"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -1666,6 +2149,7 @@ mod tests {
                 root_hash: 0,
                 bucket_hashes: Default::default(),
                 last_sync_timestamp: None,
+                claimed_epoch: None,
             },
         };
 
@@ -1695,6 +2179,7 @@ mod tests {
                 root_hash: 0,
                 bucket_hashes: Default::default(),
                 last_sync_timestamp: None,
+                claimed_epoch: None,
             },
         };
 
@@ -3794,5 +4279,501 @@ mod tests {
             0,
             "after all connections disconnect the session cache is empty (the TODO-545 bound)"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // SPEC-342c — forgotten-client re-admission gate + sync-path closures
+    // -----------------------------------------------------------------------
+
+    use crate::network::config::ConnectionConfig;
+    use topgun_core::messages::{ORMapEntry, ORMapPushDiff, ORMapPushDiffPayload};
+    use topgun_core::ORMapRecord as WireOrRecord;
+
+    /// A service wired with a frontier + per-key writer PLUS the shared connection
+    /// registry exposed so a test can register a device-bound connection whose
+    /// `(principal, deviceId)` identity `resolve_client_id` will find.
+    fn make_gated_service() -> (
+        Arc<SyncService>,
+        Arc<RecordStoreFactory>,
+        Arc<TombstoneFrontier>,
+        Arc<ConnectionRegistry>,
+    ) {
+        let factory = make_factory();
+        let frontier = Arc::new(TombstoneFrontier::new(None));
+        frontier.set_epoch_width(1);
+        let key_writer = Arc::new(KeyWriterRegistry::new());
+        let registry = Arc::new(ConnectionRegistry::new());
+        let svc = Arc::new(
+            SyncService::new(
+                Arc::new(MerkleSyncManager::default()),
+                Arc::clone(&factory),
+                Arc::clone(&registry),
+            )
+            .with_frontier(Arc::clone(&frontier), key_writer),
+        );
+        (svc, factory, frontier, registry)
+    }
+
+    /// Register a client connection bound to `device_id` (no principal → `NO_AUTH`
+    /// sentinel), returning its `ConnectionId` and the `frontier_client_id` the
+    /// gate will derive for it.
+    async fn register_device(
+        reg: &ConnectionRegistry,
+        device_id: &str,
+    ) -> (ConnectionId, ClientId) {
+        let (handle, _rx) = reg.register(ConnectionKind::Client, &ConnectionConfig::default());
+        handle.metadata.write().await.device_id = Some(device_id.to_string());
+        let client = frontier_client_id(None, device_id);
+        (handle.id, client)
+    }
+
+    fn push_op(ctx: OperationContext, map: &str, key: &str, tag: &str) -> Operation {
+        Operation::ORMapPushDiff {
+            ctx,
+            payload: ORMapPushDiff {
+                payload: ORMapPushDiffPayload {
+                    map_name: map.to_string(),
+                    entries: vec![ORMapEntry {
+                        key: key.to_string(),
+                        records: vec![WireOrRecord {
+                            value: rmpv::Value::Integer(1.into()),
+                            timestamp: make_timestamp(),
+                            tag: tag.to_string(),
+                            ttl_ms: None,
+                        }],
+                        tombstones: vec![],
+                    }],
+                },
+            },
+        }
+    }
+
+    async fn stored_record_count(factory: &RecordStoreFactory, map: &str, key: &str) -> usize {
+        let store = factory.get_or_create(map, hash_to_partition(key));
+        match store.get(key, false).await.unwrap().map(|r| r.value) {
+            Some(RecordValue::OrMap { records, .. }) => records.len(),
+            _ => 0,
+        }
+    }
+
+    /// AC5: with protection ACTIVE, a push from a FORGOTTEN/unknown client (a
+    /// device-bound connection whose identity is untracked) is rejected BEFORE the
+    /// merge — nothing is stored. (Dark until 342j: without the watermark the same
+    /// push would merge; asserted by the tracked-client test below.)
+    #[tokio::test]
+    async fn ac5_forgotten_client_push_blocked_before_merge() {
+        let (svc, factory, frontier, registry) = make_gated_service();
+        let (conn, _client) = register_device(&registry, "dev-forgotten").await;
+        frontier.stamp_tombstone("omap", "seed", "seed-tag"); // current_epoch = 1
+        frontier.set_durable_epoch_watermark(1000); // protection active
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(conn);
+        Arc::clone(&svc)
+            .oneshot(push_op(ctx, "omap", "k1", "R1"))
+            .await
+            .expect("ack");
+        assert_eq!(
+            stored_record_count(&factory, "omap", "k1").await,
+            0,
+            "a forgotten client's push must be rejected before merge (no record stored)"
+        );
+    }
+
+    /// AC5/AC6/AC16: a NOT-forgotten (tracked) client's push is admitted and merges
+    /// under the per-key writer span even with protection active — the guarded
+    /// gate→commit path stores the record.
+    #[tokio::test]
+    async fn ac6_tracked_client_push_merges_under_guard() {
+        let (svc, factory, frontier, registry) = make_gated_service();
+        let (conn, client) = register_device(&registry, "dev-tracked").await;
+        frontier.stamp_tombstone("omap", "seed", "seed-tag"); // current_epoch = 1
+        frontier.set_delivered(conn, 100);
+        assert!(frontier.confirm_apply_ack(&client, 1, conn).await, "track");
+        frontier.set_durable_epoch_watermark(1000); // protection active
+        assert!(!frontier.is_forgotten(&client));
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(conn);
+        Arc::clone(&svc)
+            .oneshot(push_op(ctx, "omap", "k1", "R1"))
+            .await
+            .expect("ack");
+        assert_eq!(
+            stored_record_count(&factory, "omap", "k1").await,
+            1,
+            "a tracked client's push merges under the per-key gate→commit span"
+        );
+    }
+
+    /// AC17 (fail-closed, identity dimension): an unknown identity (a connection
+    /// with NO server-issued `device_id`) is treated as forgotten and rejected under
+    /// active protection — the gate never silently admits an unverifiable client.
+    #[tokio::test]
+    async fn ac17_unknown_identity_push_rejected_failclosed() {
+        let (svc, factory, frontier, registry) = make_gated_service();
+        // A connection with no device_id → resolve_client_id == None → forgotten.
+        let (handle, _rx) = registry.register(ConnectionKind::Client, &ConnectionConfig::default());
+        frontier.stamp_tombstone("omap", "seed", "seed-tag");
+        frontier.set_durable_epoch_watermark(1000);
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(handle.id);
+        Arc::clone(&svc)
+            .oneshot(push_op(ctx, "omap", "k1", "R1"))
+            .await
+            .expect("ack");
+        assert_eq!(
+            stored_record_count(&factory, "omap", "k1").await,
+            0,
+            "unknown (no device identity) → forgotten → push rejected (fail-closed)"
+        );
+    }
+
+    /// AC4 (third prune site): the push-diff merge path wires the wholesale
+    /// epoch-drop prune, DARK by construction — with the production watermark (0) a
+    /// push-diff drops ZERO epochs even though the low-water-mark is past a stamped
+    /// epoch. The stamped tombstone survives.
+    #[tokio::test]
+    async fn ac4_push_diff_prune_site_dark() {
+        use crate::storage::record::OrMapEntry as StoreOrMapEntry;
+        let (svc, factory, frontier, registry) = make_gated_service();
+        let (conn, client) = register_device(&registry, "dev-1").await;
+        let map = "omap";
+        let key = "k1";
+        let store = factory.get_or_create(map, hash_to_partition(key));
+        store
+            .put(
+                key,
+                RecordValue::OrMap {
+                    records: vec![StoreOrMapEntry {
+                        value: Value::Int(1),
+                        tag: "R1".to_string(),
+                        timestamp: make_timestamp(),
+                    }],
+                    tombstones: vec!["T1".to_string()],
+                },
+                ExpiryPolicy::NONE,
+                CallerProvenance::CrdtMerge,
+            )
+            .await
+            .unwrap();
+        frontier.stamp_tombstone(map, key, "T1"); // epoch 1
+        frontier.stamp_tombstone(map, "k2", "T2"); // epoch 2 → counter can pass 1
+        frontier.set_delivered(conn, 100);
+        assert!(frontier.confirm_apply_ack(&client, 2, conn).await);
+        assert!(
+            frontier.is_epoch_prune_eligible(1),
+            "LWM strictly past epoch 1"
+        );
+        // Watermark stays 0 (production dark). Push an unrelated key so the merge
+        // path — and thus the third prune site — runs.
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(conn);
+        Arc::clone(&svc)
+            .oneshot(push_op(ctx, map, "k3", "R3"))
+            .await
+            .expect("ack");
+        match store.get(key, false).await.unwrap().map(|r| r.value) {
+            Some(RecordValue::OrMap { tombstones, .. }) => assert_eq!(
+                tombstones,
+                vec!["T1".to_string()],
+                "DARK by construction: the third prune site drops zero epochs at watermark 0"
+            ),
+            other => panic!("expected OrMap, got {other:?}"),
+        }
+    }
+
+    /// AC7: a forgotten/unknown client's OR-Map `SYNC_INIT` is routed to a FULL
+    /// snapshot REPLACE resync (`full_resync = true`) instead of an incremental
+    /// delta, once protection is active. A tracked client gets the normal path.
+    #[tokio::test]
+    async fn ac7_forgotten_sync_init_routes_full_resync() {
+        let (svc, _factory, frontier, registry) = make_gated_service();
+        let (conn, _client) = register_device(&registry, "dev-forgotten").await;
+        frontier.stamp_tombstone("omap", "seed", "seed-tag");
+        frontier.set_durable_epoch_watermark(1000);
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(conn);
+        let resp = Arc::clone(&svc)
+            .oneshot(Operation::ORMapSyncInit {
+                ctx,
+                payload: topgun_core::messages::ORMapSyncInit {
+                    map_name: "omap".to_string(),
+                    root_hash: 0,
+                    bucket_hashes: HashMap::new(),
+                    last_sync_timestamp: None,
+                    claimed_epoch: None,
+                },
+            })
+            .await
+            .expect("root");
+        match resp {
+            OperationResponse::Message(m) => match *m {
+                Message::ORMapSyncRespRoot(r) => assert!(
+                    r.payload.full_resync,
+                    "forgotten client routed to full-snapshot REPLACE resync"
+                ),
+                other => panic!("expected root, got {other:?}"),
+            },
+            other => panic!("expected message, got {other:?}"),
+        }
+    }
+
+    /// AC8: a REGRESSED replica (sync-init `claimed_epoch` BELOW its stored cursor,
+    /// e.g. a backup-restore clone) is routed to full-resync WITHOUT advancing
+    /// `delivered_conn` and WITHOUT rolling the stored cursor back (342a monotonicity).
+    #[tokio::test]
+    async fn ac8_regressed_replica_routed_no_rollback_no_delivered() {
+        let (svc, _factory, frontier, registry) = make_gated_service();
+        let (conn, client) = register_device(&registry, "dev-clone").await;
+        // Establish a real cursor at 100 on an earlier connection.
+        frontier.set_delivered(ConnectionId(999), 100);
+        assert!(
+            frontier
+                .confirm_apply_ack(&client, 100, ConnectionId(999))
+                .await
+        );
+        for i in 0..5 {
+            frontier.stamp_tombstone("omap", &format!("s{i}"), &format!("t{i}"));
+        }
+        frontier.set_durable_epoch_watermark(1000);
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(conn);
+        let resp = Arc::clone(&svc)
+            .oneshot(Operation::ORMapSyncInit {
+                ctx,
+                payload: topgun_core::messages::ORMapSyncInit {
+                    map_name: "omap".to_string(),
+                    root_hash: 0,
+                    bucket_hashes: HashMap::new(),
+                    last_sync_timestamp: None,
+                    claimed_epoch: Some(5), // 5 < stored 100 → regressed
+                },
+            })
+            .await
+            .expect("root");
+        match resp {
+            OperationResponse::Message(m) => match *m {
+                Message::ORMapSyncRespRoot(r) => {
+                    assert!(r.payload.full_resync, "regressed replica → full resync");
+                }
+                other => panic!("expected root, got {other:?}"),
+            },
+            other => panic!("expected message, got {other:?}"),
+        }
+        assert_eq!(
+            frontier.cursor(&client),
+            Some(100),
+            "stored cursor NEVER rolled back for a regressed replica (342a monotonicity)"
+        );
+        assert_eq!(
+            frontier.delivered(conn),
+            0,
+            "delivered_conn NOT advanced for a gated (regressed) client"
+        );
+    }
+
+    /// AC10: a plain `SYNC_INIT` by a forgotten client does NOT advance its
+    /// `delivered_conn` (covering epoch conveyed as metadata only) — the sync-path
+    /// re-admission door is closed. A tracked client DOES advance it.
+    #[tokio::test]
+    async fn ac10_forgotten_sync_init_does_not_advance_delivered() {
+        let (svc, _factory, frontier, registry) = make_gated_service();
+        let (fconn, _fclient) = register_device(&registry, "dev-forgotten").await;
+        let (tconn, tclient) = register_device(&registry, "dev-tracked").await;
+        frontier.stamp_tombstone("omap", "seed", "seed-tag"); // current_epoch = 1
+        frontier.set_delivered(tconn, 100);
+        assert!(frontier.confirm_apply_ack(&tclient, 1, tconn).await);
+        // Reset delivered so we observe the sync-init's effect specifically.
+        frontier.remove_connection(tconn);
+        frontier.set_durable_epoch_watermark(1000);
+
+        let sync_init = |conn: ConnectionId, claimed_epoch: Option<u64>| {
+            let mut ctx = make_ctx(service_names::SYNC);
+            ctx.connection_id = Some(conn);
+            Operation::ORMapSyncInit {
+                ctx,
+                payload: topgun_core::messages::ORMapSyncInit {
+                    map_name: "omap".to_string(),
+                    root_hash: 12345, // mismatch so no ACK, only the covering-epoch conveyance matters
+                    bucket_hashes: HashMap::new(),
+                    last_sync_timestamp: None,
+                    claimed_epoch,
+                },
+            }
+        };
+        // The forgotten client is gated by identity; the tracked client reports its
+        // real cursor (Some(1)) so it is NOT caught by the sync-init None⇒gated
+        // fail-closed rule (a None claim under active protection is treated as gated).
+        Arc::clone(&svc)
+            .oneshot(sync_init(fconn, None))
+            .await
+            .expect("ok");
+        Arc::clone(&svc)
+            .oneshot(sync_init(tconn, Some(1)))
+            .await
+            .expect("ok");
+        assert_eq!(
+            frontier.delivered(fconn),
+            0,
+            "forgotten client's sync-init must NOT advance delivered_conn (R9 gating)"
+        );
+        assert_eq!(
+            frontier.delivered(tconn),
+            1,
+            "tracked client's sync-init DOES advance delivered_conn (eager set_delivered retained)"
+        );
+    }
+
+    /// Continuation-handler R8 gate: a REGRESSED replica mid-resync — high STORED
+    /// cursor (so `is_forgotten` = false) on a NEW connection that has NOT completed
+    /// admission (`delivered_conn == 0`) — must NOT have its `delivered_conn` advanced
+    /// by an `ORMapMerkleReqBucket` during the full-resync pull. The continuation
+    /// handlers pass no `claimed_epoch`, so the regressed check cannot re-run there;
+    /// the not-yet-admitted (`delivered == 0`) gate closes the door instead. Without
+    /// it, `covering_epoch` would eagerly `set_delivered` mid-resync, re-enabling the
+    /// client's ACKs/admission before the snapshot lands (R8/R9 violation).
+    #[tokio::test]
+    async fn regressed_replica_merkle_bucket_does_not_advance_delivered() {
+        let (svc, _factory, frontier, registry) = make_gated_service();
+        let (conn, client) = register_device(&registry, "dev-regressed-cont").await;
+        // Establish a HIGH stored cursor (100) on an EARLIER connection so
+        // `is_forgotten(client)` reads false, WITHOUT admitting the new connection
+        // (its `delivered` stays 0 — the mid-resync / not-yet-admitted state).
+        frontier.set_delivered(ConnectionId(999), 100);
+        assert!(
+            frontier
+                .confirm_apply_ack(&client, 100, ConnectionId(999))
+                .await
+        );
+        frontier.stamp_tombstone("omap", "seed", "seed-tag"); // current_epoch = 1
+        frontier.set_durable_epoch_watermark(1000); // protection active
+        assert!(
+            !frontier.is_forgotten(&client),
+            "high cursor → not forgotten"
+        );
+
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(conn);
+        Arc::clone(&svc)
+            .oneshot(Operation::ORMapMerkleReqBucket {
+                ctx,
+                payload: topgun_core::messages::ORMapMerkleReqBucket {
+                    payload: topgun_core::messages::ORMapMerkleReqBucketPayload {
+                        map_name: "omap".to_string(),
+                        path: String::new(),
+                    },
+                },
+            })
+            .await
+            .expect("bucket ok");
+
+        assert_eq!(
+            frontier.delivered(conn),
+            0,
+            "a not-yet-admitted (regressed mid-resync) connection's merkle-bucket must NOT advance delivered_conn (R8 continuation gate)"
+        );
+    }
+
+    /// Push-diff admission: a client whose STORED cursor is high (`is_forgotten` =
+    /// false) but whose NEW connection has NOT completed its admission
+    /// (`delivered_conn == 0`) must have its push HELD before merge. This closes the
+    /// R10 point-1 window: a regressed / not-yet-resynced replica that flushes a
+    /// queued push BEFORE finishing its full-resync would carry a high stored cursor
+    /// (so `is_forgotten` reads false) yet still be pre-admission — the
+    /// `delivered_conn > 0` requirement holds it until the REPLACE resync completes.
+    #[tokio::test]
+    async fn push_held_until_connection_admitted_delivered_conn_zero() {
+        let (svc, factory, frontier, registry) = make_gated_service();
+        let (conn, client) = register_device(&registry, "dev-readmitting").await;
+        // Establish a HIGH stored cursor on an EARLIER connection so is_forgotten is
+        // false, WITHOUT admitting the new connection (its delivered stays 0).
+        frontier.set_delivered(ConnectionId(999), 100);
+        assert!(
+            frontier
+                .confirm_apply_ack(&client, 100, ConnectionId(999))
+                .await
+        );
+        frontier.stamp_tombstone("omap", "seed", "seed-tag"); // current_epoch = 1
+        frontier.set_durable_epoch_watermark(1000); // protection active
+        assert!(
+            !frontier.is_forgotten(&client),
+            "high stored cursor → not forgotten"
+        );
+        assert_eq!(
+            frontier.delivered(conn),
+            0,
+            "the new connection has not completed admission"
+        );
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(conn);
+        Arc::clone(&svc)
+            .oneshot(push_op(ctx, "omap", "k1", "R1"))
+            .await
+            .expect("ack");
+        assert_eq!(
+            stored_record_count(&factory, "omap", "k1").await,
+            0,
+            "a not-yet-admitted connection's push is held before merge (delivered_conn == 0)"
+        );
+
+        // Once the connection completes admission (delivered_conn > 0), the same push
+        // merges — proving the hold is specifically the admission gate, not the cursor.
+        frontier.set_delivered(conn, 100);
+        let mut ctx2 = make_ctx(service_names::SYNC);
+        ctx2.connection_id = Some(conn);
+        Arc::clone(&svc)
+            .oneshot(push_op(ctx2, "omap", "k1", "R1"))
+            .await
+            .expect("ack");
+        assert_eq!(
+            stored_record_count(&factory, "omap", "k1").await,
+            1,
+            "after admission (delivered_conn > 0) the push merges"
+        );
+    }
+
+    /// Sync-INIT fail-closed: a client that omits `claimed_epoch` (None) under active
+    /// protection is forced through the full-snapshot REPLACE resync EVEN when it is
+    /// otherwise tracked / not-forgotten / not-regressed — a None claim cannot be
+    /// regressed-checked, so it is treated as gated at the sync-init call site. This
+    /// rule lives ONLY at sync-init; the merkle/diff continuations keep passing None
+    /// as post-init reads (asserted non-gated by the merkle prune test).
+    #[tokio::test]
+    async fn sync_init_none_claim_forces_full_resync_failclosed() {
+        let (svc, _factory, frontier, registry) = make_gated_service();
+        let (conn, client) = register_device(&registry, "dev-tracked").await;
+        // Make the client genuinely tracked, not forgotten, not regressed.
+        frontier.set_delivered(conn, 100);
+        assert!(frontier.confirm_apply_ack(&client, 100, conn).await);
+        frontier.stamp_tombstone("omap", "seed", "seed-tag"); // current_epoch = 1
+        frontier.set_durable_epoch_watermark(1000); // protection active
+        assert!(
+            !frontier.is_forgotten(&client),
+            "tracked client is not forgotten"
+        );
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(conn);
+        let resp = Arc::clone(&svc)
+            .oneshot(Operation::ORMapSyncInit {
+                ctx,
+                payload: topgun_core::messages::ORMapSyncInit {
+                    map_name: "omap".to_string(),
+                    root_hash: 0,
+                    bucket_hashes: HashMap::new(),
+                    last_sync_timestamp: None,
+                    claimed_epoch: None, // omitted → fail-closed gated under active protection
+                },
+            })
+            .await
+            .expect("root");
+        match resp {
+            OperationResponse::Message(m) => match *m {
+                Message::ORMapSyncRespRoot(r) => assert!(
+                    r.payload.full_resync,
+                    "a None claim under active protection → fail-closed full-resync"
+                ),
+                other => panic!("expected root, got {other:?}"),
+            },
+            other => panic!("expected message, got {other:?}"),
+        }
     }
 }

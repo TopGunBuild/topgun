@@ -35,11 +35,16 @@ export * from './hybrid-search-schemas';
 
 // Union MessageSchema (combines all message types)
 import { z } from 'zod';
-import { AuthMessageSchema, AuthRequiredMessageSchema } from './base-schemas';
+import {
+  AuthMessageSchema,
+  AuthRequiredMessageSchema,
+  DeviceHelloMessageSchema,
+} from './base-schemas';
 import {
   ClientOpMessageSchema,
   OpBatchMessageSchema,
   SyncInitMessageSchema,
+  ClientApplyAckMessageSchema,
   SyncRespRootMessageSchema,
   SyncRespBucketsMessageSchema,
   SyncRespLeafMessageSchema,
@@ -118,6 +123,7 @@ import {
   QueryUpdateMessageSchema,
   GcPruneMessageSchema,
   AuthAckMessageSchema,
+  DeviceAckMessageSchema,
   AuthFailMessageSchema,
   ErrorMessageSchema,
   LockGrantedMessageSchema,
@@ -137,10 +143,12 @@ export const MessageSchema = z.discriminatedUnion('type', [
   // --- Base ---
   AuthMessageSchema,
   AuthRequiredMessageSchema,
+  DeviceHelloMessageSchema,
   // --- Sync ---
   ClientOpMessageSchema,
   OpBatchMessageSchema,
   SyncInitMessageSchema,
+  ClientApplyAckMessageSchema,
   SyncRespRootMessageSchema,
   SyncRespBucketsMessageSchema,
   SyncRespLeafMessageSchema,
@@ -230,6 +238,7 @@ export const MessageSchema = z.discriminatedUnion('type', [
   ServerBatchEventMessageSchema,
   GcPruneMessageSchema,
   AuthAckMessageSchema,
+  DeviceAckMessageSchema,
   AuthFailMessageSchema,
   ErrorMessageSchema,
   LockGrantedMessageSchema,

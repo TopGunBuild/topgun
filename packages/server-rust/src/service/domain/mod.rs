@@ -12,6 +12,9 @@ pub use coordination_lock::{LockError, LockOutcome, LockRegistry};
 pub mod crdt;
 pub use crdt::CrdtService;
 
+pub mod key_writer;
+pub use key_writer::KeyWriterRegistry;
+
 pub mod sync;
 pub use sync::SyncService;
 
