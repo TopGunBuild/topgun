@@ -318,6 +318,7 @@ impl SoakClient {
             root_hash: 0,
             bucket_hashes: HashMap::new(),
             last_sync_timestamp: None,
+            claimed_epoch: None,
         });
         send_encoded(&mut self.ws, &init).await?;
         let root = match recv_decoded(&mut self.ws, "ORMAP_SYNC_RESP_ROOT").await? {

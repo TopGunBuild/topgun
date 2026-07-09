@@ -834,6 +834,7 @@ mod tests {
             root_hash: 0,
             bucket_hashes: HashMap::new(),
             last_sync_timestamp: None,
+            claimed_epoch: None,
         });
         let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
         assert!(

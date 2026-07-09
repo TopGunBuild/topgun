@@ -76,6 +76,16 @@ use std::sync::Arc;
 /// the cursor-tracked op sequence — never by a timer.
 pub const DEFAULT_EPOCH_WIDTH: u64 = 1000;
 
+/// Default max cursor-lag (in epochs) before a tracked client is treated as
+/// forgotten by the re-admission gate. Retention is expressed in cursor LAG, not
+/// wall-clock (a lagging cursor is what pins tombstones). A tracked client whose
+/// cursor lags MORE than this many epochs behind the current server epoch is
+/// forgotten (its reconnect push is gated → full-resync). RAM pressure MAY
+/// dynamically tighten this at runtime; the operator override is a follow-up env
+/// wiring (`TOPGUN_FORGET_MAX_LAG_EPOCHS`) — the default is a safe implementation
+/// detail here.
+pub const DEFAULT_FORGET_LAG_EPOCHS: u64 = 1000;
+
 /// The storage location of a stamped tombstone: the `(map, key)` its OR-Map
 /// record lives under plus the tombstone `tag`. The server-side `epoch → tags`
 /// index stores these so a wholesale epoch-drop prune can remove each tag from
@@ -159,7 +169,19 @@ struct FrontierState {
     /// licenses a prune for any stamped epoch (all `>= 1`): the machinery is
     /// structurally dark, no feature flag. ONLY tests set it, to exercise the
     /// real drop path.
+    ///
+    /// This watermark ALSO gates the re-admission gate's active blocking (see
+    /// [`TombstoneFrontier::is_protection_active`]): a forgotten client's push can
+    /// only resurrect a value whose tombstone was PRUNED, and pruning is licensed
+    /// only once this watermark is non-zero. While it is 0 (dark by construction)
+    /// no tombstone can be dropped, so blocking a re-admission would gratuitously
+    /// break an un-migrated client for no safety gain — the gate is fully WIRED but
+    /// transparent, going live together with the prune (gate-before-activation).
     durable_epoch_watermark: Epoch,
+    /// Max cursor-lag (epochs) before a tracked client is forgotten by the gate.
+    /// Defaults to [`DEFAULT_FORGET_LAG_EPOCHS`]; settable so RAM pressure / an
+    /// operator override can tighten it.
+    forget_lag_epochs: u64,
 }
 
 impl FrontierState {
@@ -174,6 +196,22 @@ impl FrontierState {
             epoch_tags: HashMap::new(),
             epoch_max_seq: HashMap::new(),
             durable_epoch_watermark: 0,
+            forget_lag_epochs: DEFAULT_FORGET_LAG_EPOCHS,
+        }
+    }
+
+    /// Whether `client` is FORGOTTEN for re-admission-gate purposes: either
+    /// UNKNOWN (never tracked — "unknown == forgotten" per the 342a contract) OR a
+    /// tracked client whose cursor has lagged MORE than `forget_lag_epochs` behind
+    /// the current server epoch. This is the lag-aware predicate the gate uses at
+    /// gate time AND re-checks at commit time (via `gate_decision_holds_at_commit`),
+    /// so a client that crosses the lag threshold mid-handler (a concurrent stamp
+    /// advancing `current_epoch`) is caught at commit — closing the lag-driven
+    /// gate→commit TOCTOU the stock `is_tracked`-only check would miss.
+    fn is_forgotten(&self, client: &ClientId) -> bool {
+        match self.cursors.get(client) {
+            None => true,
+            Some(&cursor) => self.current_epoch.saturating_sub(cursor) > self.forget_lag_epochs,
         }
     }
 
@@ -340,13 +378,15 @@ impl PruneSafety for FrontierState {
     }
 
     fn gate_decision_holds_at_commit(&self, token: GateToken) -> bool {
-        // The push-diff re-admission gate is SPEC-342c's; THIS child does not wire
-        // it. Provide the conservative commit-time re-check the trait contract
-        // mandates so `PruneSafety` is fully implemented: the gate-time not-forgotten
-        // decision still holds only if the client is still tracked. No prune fires in
-        // this child (dark by construction), so no additional freshness check is
-        // needed here — 342c strengthens this when it wires the gate.
-        self.is_tracked(&token.client)
+        // Lag-aware commit-time re-check: the gate-time not-forgotten decision still
+        // holds only if the client is STILL not forgotten NOW — i.e. still tracked AND
+        // not lagged past the forget threshold. Using the lag-aware `is_forgotten`
+        // (not the bare `is_tracked`) closes BOTH TOCTOU surfaces: an active
+        // `forget_client` eviction (untracked → forgotten) AND a client crossing the
+        // cursor-lag-K threshold between gate and commit because a concurrent stamp
+        // advanced `current_epoch`. The stock `is_tracked`-only check caught only the
+        // first; the second is the live surface in this child (prune is dark).
+        !self.is_forgotten(&token.client)
     }
 }
 
@@ -516,6 +556,37 @@ impl TombstoneFrontier {
         self.lock().is_tracked(client)
     }
 
+    /// Whether `client` is FORGOTTEN for re-admission-gate purposes — UNKNOWN
+    /// (never tracked → "unknown == forgotten") OR lagged more than
+    /// `forget_lag_epochs` behind the current server epoch. The re-admission gate
+    /// reads this at gate time; `gate_decision_holds_at_commit` re-checks the same
+    /// predicate at commit time under the per-key writer. See
+    /// [`FrontierState::is_forgotten`].
+    #[must_use]
+    pub fn is_forgotten(&self, client: &ClientId) -> bool {
+        self.lock().is_forgotten(client)
+    }
+
+    /// Whether re-admission protection is ACTIVE. True once the durability
+    /// watermark is non-zero (SPEC-342j activation). While it is 0 (dark by
+    /// construction) the forgotten-client gate is fully wired but transparent: no
+    /// tombstone can be pruned, so a re-admission cannot resurrect anything and
+    /// blocking would only break an un-migrated client. The gate's active blocking
+    /// goes live together with the prune (gate-before-activation — no
+    /// prune-without-gate window ever exists, and equally no
+    /// gratuitous-block-without-prune window).
+    #[must_use]
+    pub fn is_protection_active(&self) -> bool {
+        self.lock().durable_epoch_watermark > 0
+    }
+
+    /// Set the max cursor-lag (epochs) before a tracked client is forgotten by the
+    /// gate (RAM-pressure tightening / operator override). Clamped implicitly by
+    /// the caller. See [`DEFAULT_FORGET_LAG_EPOCHS`].
+    pub fn set_forget_lag_epochs(&self, lag: u64) {
+        self.lock().forget_lag_epochs = lag;
+    }
+
     /// The tracked cursor for `client`, if any. Test/introspection helper.
     #[must_use]
     pub fn cursor(&self, client: &ClientId) -> Option<Epoch> {
@@ -591,6 +662,17 @@ impl TombstoneFrontier {
     #[must_use]
     pub fn is_epoch_prune_eligible(&self, epoch: Epoch) -> bool {
         self.lock().is_epoch_prune_eligible(epoch)
+    }
+
+    /// Commit-time re-check for the push-diff re-admission gate: whether the
+    /// not-forgotten decision certified at gate time STILL holds now. Consumes the
+    /// `GateToken` by value (single-use). Lag-aware — see
+    /// [`FrontierState::is_forgotten`] and the extended
+    /// `gate_decision_holds_at_commit` impl. Called under the per-key writer held
+    /// from the gate decision through the merge-commit `store.put`.
+    #[must_use]
+    pub fn gate_decision_holds_at_commit(&self, token: GateToken) -> bool {
+        self.lock().gate_decision_holds_at_commit(token)
     }
 
     /// Drain every currently prune-eligible epoch's tombstone refs (BOTH call-site

@@ -260,6 +260,19 @@ pub struct ORMapSyncInit {
         deserialize_with = "serde_number::deserialize_option_u64"
     )]
     pub last_sync_timestamp: Option<u64>,
+    /// The client's locally-persisted confirmed-apply cursor (highest epoch it has
+    /// durably applied), reported at sync-init so the server can detect a REGRESSED
+    /// replica (a backup-restore clone whose claim is BELOW its server-stored
+    /// cursor) and route it through the authoritative full-snapshot REPLACE resync.
+    /// Additive, client → server only; `None`/omitted from a client that has never
+    /// confirmed an epoch. An unsigned integer decoded via the `serde_number`
+    /// helper so a TS `msgpackr` whole-number decodes directly as a `u64`.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "serde_number::deserialize_option_u64"
+    )]
+    pub claimed_epoch: Option<u64>,
 }
 
 /// Payload for `ORMap` sync root hash response.
@@ -290,6 +303,17 @@ pub struct ORMapSyncRespRootPayload {
         deserialize_with = "serde_number::deserialize_option_u64"
     )]
     pub covering_epoch: Option<u64>,
+    /// When `true`, this root response directs the client to perform an
+    /// authoritative full-snapshot REPLACE resync: DISCARD its local OR-Map state
+    /// for this map and adopt the server snapshot (NOT an additive CRDT merge). Set
+    /// only for a FORGOTTEN / unknown / REGRESSED client — after tombstone pruning
+    /// the server retains no per-tag→epoch knowledge, so an additive merge with a
+    /// stale replica could not distinguish a genuine add from a resurrected pruned
+    /// tag. Additive, server → client only, omitted (defaults `false`) for the
+    /// normal incremental-sync path. See the client REPLACE + pending-oplog
+    /// discard-preceding logic keyed off this flag.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub full_resync: bool,
 }
 
 /// `ORMap` sync response containing the root hash.
@@ -772,6 +796,7 @@ mod tests {
             root_hash: 999,
             bucket_hashes,
             last_sync_timestamp: Some(1_700_000_000_000),
+            claimed_epoch: Some(7),
         };
         assert_eq!(roundtrip_named(&msg), msg);
     }
@@ -788,6 +813,7 @@ mod tests {
                     node_id: "node-1".to_string(),
                 },
                 covering_epoch: None,
+                full_resync: false,
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
@@ -859,6 +885,7 @@ mod tests {
                     node_id: "n".to_string(),
                 },
                 covering_epoch: None,
+                full_resync: false,
             },
         };
         let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
