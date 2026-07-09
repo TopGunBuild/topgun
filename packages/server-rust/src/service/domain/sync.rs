@@ -67,8 +67,10 @@ use crate::service::operation::{service_names, Operation, OperationError, Operat
 use crate::service::registry::{ManagedService, ServiceContext};
 use crate::storage::map_data_store::{DurableMerkleIndex, MapDataStore, MerkleSession};
 use crate::storage::merkle_sync::MerkleSyncManager;
+use crate::network::device_identity::frontier_client_id;
 use crate::storage::record::RecordValue;
 use crate::storage::{CallerProvenance, ExpiryPolicy, RecordStoreFactory};
+use crate::tombstone_frontier::{ClientId, GateToken};
 use crate::tombstone_frontier_impl::TombstoneFrontier;
 
 // ---------------------------------------------------------------------------
@@ -270,16 +272,69 @@ impl SyncService {
     /// breaking the cursor-implies-delivered invariant the prune rests on. Reading
     /// the epoch first errs conservative (the data may be NEWER than the epoch,
     /// so the client under-claims — safe).
-    fn covering_epoch(&self, conn: Option<ConnectionId>) -> Option<u64> {
+    fn covering_epoch(&self, conn: Option<ConnectionId>, gated: bool) -> Option<u64> {
         let frontier = self.frontier.as_ref()?;
         let epoch = frontier.current_epoch();
         if epoch == 0 {
             return None;
         }
-        if let Some(c) = conn {
-            frontier.set_delivered(c, epoch);
+        // Convey the epoch as metadata for EVERY client, but ADVANCE `delivered_conn`
+        // ONLY for a not-gated (tracked, non-forgotten, non-regressed) client. For a
+        // gated (forgotten/unknown/regressed) client `set_delivered` is DEFERRED to
+        // post-snapshot-resync completion (its `CLIENT_APPLY_ACK`): eagerly advancing
+        // it here would re-enable the client's ACKs before it received the full
+        // snapshot, re-admitting it via the sync path BEFORE any push (independent of
+        // the push-diff gate). `delivered_conn` must advance only on resync completion.
+        if !gated {
+            if let Some(c) = conn {
+                frontier.set_delivered(c, epoch);
+            }
         }
         Some(epoch)
+    }
+
+    /// Resolve the server-authenticated `(principal, deviceId)` frontier identity for
+    /// a connection, or `None` when the connection carries no server-issued device
+    /// identity (an unknown client → forgotten treatment by the caller). Reads BOTH
+    /// principal and device_id off the connection's OWN metadata — the same values the
+    /// device-ownership claim keyed on — NEVER a wire-asserted / tag-embedded identity,
+    /// preserving G9 identity-spoofing-CLEAN.
+    async fn resolve_client_id(&self, conn: Option<ConnectionId>) -> Option<ClientId> {
+        let conn = conn?;
+        let handle = self.connection_registry.get(conn)?;
+        let meta = handle.metadata.read().await;
+        let device_id = meta.device_id.clone()?;
+        let principal_id = meta.principal.as_ref().map(|p| p.id.clone());
+        Some(frontier_client_id(principal_id.as_deref(), &device_id))
+    }
+
+    /// Whether `conn` must be routed through the full-snapshot REPLACE resync AND have
+    /// its eager `set_delivered` suppressed (a gated client). True only while the gate
+    /// is ACTIVE (SPEC-342j watermark raised — dark by construction until then) and the
+    /// connection resolves to a forgotten/unknown/regressed identity. `claimed_epoch`
+    /// (present only on the sync-init path) enables the regressed-replica check
+    /// (`claim < stored_cursor`); the merkle/diff handlers pass `None`.
+    async fn sync_gated(&self, conn: Option<ConnectionId>, claimed_epoch: Option<u64>) -> bool {
+        let Some(frontier) = self.frontier.as_ref() else {
+            return false;
+        };
+        // Dark by construction: while the durability watermark is 0 nothing can be
+        // pruned, so a re-admission cannot resurrect anything and full-resync routing
+        // would only force needless re-syncs on un-migrated clients. The routing goes
+        // live together with the prune (gate-before-activation).
+        if !frontier.is_protection_active() {
+            return false;
+        }
+        match self.resolve_client_id(conn).await {
+            None => true, // unknown identity → forgotten treatment → full resync
+            Some(client) => {
+                frontier.is_forgotten(&client)
+                    // is_regressed is read-only — it NEVER rolls the stored cursor back
+                    // (342a monotonicity); a regressed replica is routed through the same
+                    // full-resync at its stale-high cursor unchanged.
+                    || claimed_epoch.is_some_and(|claim| frontier.is_regressed(&client, claim))
+            }
+        }
     }
 
     /// Run the wholesale epoch-drop prune over the SYNC-leaf path. DARK by
@@ -734,7 +789,6 @@ impl SyncService {
     /// builds a fresh session now (`force_rebuild=false` with a cache miss triggers
     /// a build). Falls back to the in-memory `MerkleSyncManager` aggregate when no
     /// durable index is configured.
-    #[allow(clippy::unused_async)] // declared async for uniformity with other handlers
     async fn handle_ormap_sync_init(
         &self,
         ctx: &crate::service::operation::OperationContext,
@@ -742,9 +796,20 @@ impl SyncService {
     ) -> Result<OperationResponse, OperationError> {
         let map_name = payload.map_name;
 
+        // Forgotten/unknown/regressed detection (R6/R7): a gated client is routed
+        // through an authoritative FULL-snapshot REPLACE resync (never an incremental
+        // delta), and its eager `set_delivered` is suppressed (deferred to resync
+        // completion). `claimed_epoch` carries the client's locally-persisted cursor so
+        // a REGRESSED replica (a backup-restore clone, `claim < stored_cursor`) is
+        // caught here too — routed through the same full-resync WITHOUT advancing
+        // `delivered_conn` and WITHOUT rolling the stored cursor back.
+        let gated = self
+            .sync_gated(ctx.connection_id, payload.claimed_epoch)
+            .await;
+
         // Epoch BEFORE data: the conveyed epoch must never postdate the root it
         // rides with (see `covering_epoch` — ordering is load-bearing).
-        let covering_epoch = self.covering_epoch(ctx.connection_id);
+        let covering_epoch = self.covering_epoch(ctx.connection_id, gated);
 
         // Reuse any session already built by the LWW SYNC_INIT for this map; build
         // one now if not yet cached. force_rebuild=false so a concurrent or prior
@@ -764,6 +829,9 @@ impl SyncService {
                     root_hash,
                     timestamp: ctx.timestamp.clone(),
                     covering_epoch,
+                    // Directs a gated client to DISCARD its local OR-Map and adopt the
+                    // server snapshot (authoritative REPLACE), never an additive merge.
+                    full_resync: gated,
                 },
             }),
         )))
@@ -793,10 +861,15 @@ impl SyncService {
         // frontier watermark is constant 0) — drops nothing in production.
         self.run_leaf_prune().await;
 
+        // Gate `set_delivered` for a forgotten/unknown/regressed client (R9): the
+        // covering epoch is still conveyed as metadata, but `delivered_conn` is not
+        // advanced here — deferred to full-resync completion.
+        let gated = self.sync_gated(ctx.connection_id, None).await;
+
         // Epoch BEFORE data: read once here, before any leaf entries are collected,
         // so the conveyed epoch can never postdate the entry sets the leaf
         // responses below carry (see `covering_epoch` — ordering is load-bearing).
-        let covering_epoch = self.covering_epoch(ctx.connection_id);
+        let covering_epoch = self.covering_epoch(ctx.connection_id, gated);
 
         // Durable-index path: reuse the session built during ORMapSyncInit (or
         // SYNC_INIT) for THIS connection. OR-Map tombstones yield no leaf in the
@@ -1084,9 +1157,13 @@ impl SyncService {
         let map_name = payload.payload.map_name;
         let keys = payload.payload.keys;
 
+        // Gate `set_delivered` for a forgotten/unknown/regressed client (R9): convey
+        // the covering epoch as metadata only, do not advance `delivered_conn`.
+        let gated = self.sync_gated(ctx.connection_id, None).await;
+
         // Epoch BEFORE data: the conveyed epoch must never postdate the entries
         // collected below (see `covering_epoch` — ordering is load-bearing).
-        let covering_epoch = self.covering_epoch(ctx.connection_id);
+        let covering_epoch = self.covering_epoch(ctx.connection_id, gated);
 
         let mut entries = Vec::new();
 
@@ -1180,12 +1257,78 @@ impl SyncService {
         let map_name = payload.payload.map_name;
         let entries = payload.payload.entries;
 
+        // ---- Forgotten-client pre-apply gate (fires BEFORE any merge) ----
+        //
+        // Wired but DARK by construction until SPEC-342j raises the durability
+        // watermark (`is_protection_active`): while dark, no tombstone can be pruned,
+        // so a re-admitted record is still suppressed by the live tombstone set
+        // (remove-wins) and blocking would only break an un-migrated client — the
+        // pre-342j write path is preserved verbatim. Once active, the gate blocks a
+        // forgotten/unknown client's push BEFORE the merge (gating BOTH the inbound
+        // tombstone union and the inbound records) and holds the per-key single-writer
+        // from the gate decision through the `store.put` commit to close the
+        // `.await`-window TOCTOU. It goes live TOGETHER with the prune
+        // (gate-before-activation — no prune-without-gate window).
+        let gate_active = self
+            .frontier
+            .as_ref()
+            .is_some_and(|f| f.is_protection_active());
+        let gate = if gate_active {
+            // Fail-closed (R12): an ACTIVE gate needs the shared per-key writer to hold
+            // the gate→commit TOCTOU span. Absent it, reject the whole push rather than
+            // merge under a best-effort no-lock path.
+            let (Some(frontier), Some(key_writer)) =
+                (self.frontier.as_ref(), self.key_writer.as_ref())
+            else {
+                return Ok(OperationResponse::Ack {
+                    call_id: ctx.call_id,
+                });
+            };
+            // Resolve the server-authenticated identity ONCE for the batch (R13:
+            // per-message decision, re-checked per key under the writer lock below).
+            // Unknown identity → forgotten → reject the whole push; the client is
+            // steered to a full-snapshot REPLACE resync by the sync path.
+            let Some(client) = self.resolve_client_id(ctx.connection_id).await else {
+                return Ok(OperationResponse::Ack {
+                    call_id: ctx.call_id,
+                });
+            };
+            if frontier.is_forgotten(&client) {
+                return Ok(OperationResponse::Ack {
+                    call_id: ctx.call_id,
+                });
+            }
+            Some((frontier, key_writer, client))
+        } else {
+            None
+        };
+
         for entry in &entries {
             // Each entry's key determines its storage partition.
             let key_partition = hash_to_partition(&entry.key);
             let store = self
                 .record_store_factory
                 .get_or_create(&map_name, key_partition);
+            // Acquire the per-key single-writer BEFORE the gate re-check and hold it
+            // through the `store.put` merge-commit below (R5/R13). The commit-time
+            // re-check re-evaluates the LAG-AWARE forgotten status under the held guard
+            // via `gate_decision_holds_at_commit`, so a client that crosses the
+            // forget-lag-K threshold mid-batch (a concurrent stamp advancing
+            // `current_epoch`, or an active forget) between the batch gate and this key
+            // is caught here and its key skipped — not merged.
+            let _key_guard = if let Some((frontier, key_writer, client)) = &gate {
+                let guard = key_writer.acquire(&map_name, &entry.key).await;
+                let token = GateToken {
+                    client: (*client).clone(),
+                    epoch_at_gate: frontier.current_epoch(),
+                };
+                if !frontier.gate_decision_holds_at_commit(token) {
+                    continue; // now forgotten → skip this key (guard drops)
+                }
+                Some(guard)
+            } else {
+                None
+            };
             // Read-modify-write: fold inbound records + tombstones into the
             // locally-stored OR-Map rather than blind-clobbering it. Discarding
             // either side would resurrect removed entries (remove-wins broken) or
@@ -1231,6 +1374,13 @@ impl SyncService {
                 }
                 merged_records.push(crate::storage::record::OrMapEntry {
                     value: crate::service::domain::crdt::rmpv_to_value(&r.value),
+                    // Tag stays verbatim (OR identity — re-stamping breaks fleet tag
+                    // identity / CRDT convergence). The `timestamp` field is copied
+                    // verbatim too and is an ACCEPTED-AS-UNTRUSTED, client-supplied
+                    // value used only for LWW tie-breaking WITHIN this OR entry — the
+                    // server neither re-stamps nor clamps it (the bounded default;
+                    // authenticity of the identity is enforced by the connection-keyed
+                    // gate above, not by trusting this field).
                     tag: r.tag.clone(),
                     timestamp: r.timestamp.clone(),
                 });
@@ -1274,6 +1424,15 @@ impl SyncService {
                     .broadcast(&bytes, ConnectionKind::Client);
             }
         }
+
+        // Third prune site (R2): wire the wholesale epoch-drop prune into the
+        // push-diff merge path. DARK by construction — the frontier's durability
+        // watermark is constant 0 in this child, so the call-site conjunction never
+        // licenses a prune for any stamped epoch (all `>= 1`): this drops ZERO epochs
+        // until SPEC-342j supplies the real watermark. Runs AFTER the per-key guards
+        // above are dropped (the sweep re-acquires the same per-key writer per dropped
+        // tag, so holding a key guard here would self-deadlock).
+        self.run_leaf_prune().await;
 
         Ok(OperationResponse::Ack {
             call_id: ctx.call_id,
@@ -1529,6 +1688,7 @@ mod tests {
                         root_hash: 0,
                         bucket_hashes: HashMap::new(),
                         last_sync_timestamp: None,
+                        claimed_epoch: None,
                     },
                 })
                 .await
@@ -1915,6 +2075,7 @@ mod tests {
                 root_hash: 0,
                 bucket_hashes: Default::default(),
                 last_sync_timestamp: None,
+                claimed_epoch: None,
             },
         };
 
@@ -1944,6 +2105,7 @@ mod tests {
                 root_hash: 0,
                 bucket_hashes: Default::default(),
                 last_sync_timestamp: None,
+                claimed_epoch: None,
             },
         };
 
