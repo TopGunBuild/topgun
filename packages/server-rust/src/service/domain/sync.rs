@@ -337,6 +337,39 @@ impl SyncService {
         }
     }
 
+    /// Gating decision for the merkle-bucket / diff-request CONTINUATION handlers,
+    /// which run AFTER the sync-init has routed a gated client to a full-resync.
+    ///
+    /// These handlers cannot re-run the regressed check: the client reports its
+    /// `claimed_epoch` only on `ORMapSyncInit`, so a REGRESSED replica (stale-HIGH
+    /// stored cursor, `is_forgotten` = false) would slip past the base `sync_gated`
+    /// here and have its `delivered_conn` eagerly advanced mid-resync — re-enabling
+    /// its ACKs/admission BEFORE the snapshot lands, violating R8/R9 ("`delivered_conn`
+    /// advances only on snapshot-resync completion"). To close that, gate additionally
+    /// on the NOT-YET-ADMITTED signal `delivered(conn) == 0`: a connection that has not
+    /// completed its sync/resync admission (fresh, forgotten, or mid-resync) has
+    /// `delivered == 0` until its `CLIENT_APPLY_ACK` advances it (R8) — the SAME signal
+    /// the push-diff gate uses (a not-gated healthy client had `delivered` set > 0 by
+    /// `covering_epoch` at its own non-gated sync-init, so it is unaffected). Dark by
+    /// construction: only bites while the durability watermark is raised.
+    async fn sync_gated_continuation(&self, conn: Option<ConnectionId>) -> bool {
+        if self.sync_gated(conn, None).await {
+            return true;
+        }
+        let Some(frontier) = self.frontier.as_ref() else {
+            return false;
+        };
+        if !frontier.is_protection_active() {
+            return false;
+        }
+        match conn {
+            // `sync_gated` already returns true for an unknown identity (None conn),
+            // so reaching here with None would be unexpected; fail closed.
+            None => true,
+            Some(c) => frontier.delivered(c) == 0,
+        }
+    }
+
     /// Run the wholesale epoch-drop prune over the SYNC-leaf path. DARK by
     /// construction (the frontier watermark is constant 0), so this drops nothing
     /// in production; tests inject a watermark to exercise the drop. No-op unless
@@ -877,8 +910,10 @@ impl SyncService {
 
         // Gate `set_delivered` for a forgotten/unknown/regressed client (R9): the
         // covering epoch is still conveyed as metadata, but `delivered_conn` is not
-        // advanced here — deferred to full-resync completion.
-        let gated = self.sync_gated(ctx.connection_id, None).await;
+        // advanced here — deferred to full-resync completion. Uses the continuation
+        // form so a REGRESSED replica mid-resync (undetectable here without a claim)
+        // is also gated via the not-yet-admitted `delivered == 0` signal.
+        let gated = self.sync_gated_continuation(ctx.connection_id).await;
 
         // Epoch BEFORE data: read once here, before any leaf entries are collected,
         // so the conveyed epoch can never postdate the entry sets the leaf
@@ -1172,8 +1207,10 @@ impl SyncService {
         let keys = payload.payload.keys;
 
         // Gate `set_delivered` for a forgotten/unknown/regressed client (R9): convey
-        // the covering epoch as metadata only, do not advance `delivered_conn`.
-        let gated = self.sync_gated(ctx.connection_id, None).await;
+        // the covering epoch as metadata only, do not advance `delivered_conn`. Uses
+        // the continuation form so a REGRESSED replica mid-resync (undetectable here
+        // without a claim) is also gated via the not-yet-admitted `delivered == 0`.
+        let gated = self.sync_gated_continuation(ctx.connection_id).await;
 
         // Epoch BEFORE data: the conveyed epoch must never postdate the entries
         // collected below (see `covering_epoch` — ordering is load-bearing).
@@ -4583,6 +4620,56 @@ mod tests {
             frontier.delivered(tconn),
             1,
             "tracked client's sync-init DOES advance delivered_conn (eager set_delivered retained)"
+        );
+    }
+
+    /// Continuation-handler R8 gate: a REGRESSED replica mid-resync — high STORED
+    /// cursor (so `is_forgotten` = false) on a NEW connection that has NOT completed
+    /// admission (`delivered_conn == 0`) — must NOT have its `delivered_conn` advanced
+    /// by an `ORMapMerkleReqBucket` during the full-resync pull. The continuation
+    /// handlers pass no `claimed_epoch`, so the regressed check cannot re-run there;
+    /// the not-yet-admitted (`delivered == 0`) gate closes the door instead. Without
+    /// it, `covering_epoch` would eagerly `set_delivered` mid-resync, re-enabling the
+    /// client's ACKs/admission before the snapshot lands (R8/R9 violation).
+    #[tokio::test]
+    async fn regressed_replica_merkle_bucket_does_not_advance_delivered() {
+        let (svc, _factory, frontier, registry) = make_gated_service();
+        let (conn, client) = register_device(&registry, "dev-regressed-cont").await;
+        // Establish a HIGH stored cursor (100) on an EARLIER connection so
+        // `is_forgotten(client)` reads false, WITHOUT admitting the new connection
+        // (its `delivered` stays 0 — the mid-resync / not-yet-admitted state).
+        frontier.set_delivered(ConnectionId(999), 100);
+        assert!(
+            frontier
+                .confirm_apply_ack(&client, 100, ConnectionId(999))
+                .await
+        );
+        frontier.stamp_tombstone("omap", "seed", "seed-tag"); // current_epoch = 1
+        frontier.set_durable_epoch_watermark(1000); // protection active
+        assert!(
+            !frontier.is_forgotten(&client),
+            "high cursor → not forgotten"
+        );
+
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(conn);
+        Arc::clone(&svc)
+            .oneshot(Operation::ORMapMerkleReqBucket {
+                ctx,
+                payload: topgun_core::messages::ORMapMerkleReqBucket {
+                    payload: topgun_core::messages::ORMapMerkleReqBucketPayload {
+                        map_name: "omap".to_string(),
+                        path: String::new(),
+                    },
+                },
+            })
+            .await
+            .expect("bucket ok");
+
+        assert_eq!(
+            frontier.delivered(conn),
+            0,
+            "a not-yet-admitted (regressed mid-resync) connection's merkle-bucket must NOT advance delivered_conn (R8 continuation gate)"
         );
     }
 
