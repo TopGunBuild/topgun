@@ -1321,7 +1321,6 @@ impl SyncService {
                 let guard = key_writer.acquire(&map_name, &entry.key).await;
                 let token = GateToken {
                     client: (*client).clone(),
-                    epoch_at_gate: frontier.current_epoch(),
                 };
                 if !frontier.gate_decision_holds_at_commit(token) {
                     continue; // now forgotten → skip this key (guard drops)

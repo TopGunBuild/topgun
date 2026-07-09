@@ -98,29 +98,27 @@ pub struct MaxRetention {
 /// consumes it **by value**, so the type being non-`Clone` makes the by-value move a genuine
 /// single-use / linear value — a `Clone` would let a caller clone-then-consume and submit two
 /// merge-commits off one gate pass, making the by-value signature theater. If an audit/log path
-/// needs the gate-time fields after the move, read them off the token *before* consuming it (the
-/// fields are readable — see the accepted-forgeability note below).
+/// needs the gate-time field after the move, read it off the token *before* consuming it (the
+/// field is readable — see the accepted-forgeability note below).
 ///
 /// Note: this single-use shape hardens the *stated intent*; it is NOT required for RE-ADMISSION
 /// correctness. Re-admission safety comes from the commit-time RE-CHECK in
-/// [`PruneSafety::gate_decision_holds_at_commit`] (a replayed/reconstructed token re-runs a fresh
-/// freshness predicate against the current world = idempotent CRDT merge, not resurrection), not
-/// from token unforgeability.
+/// [`PruneSafety::gate_decision_holds_at_commit`], which does a LIVE `is_forgotten` re-read of the
+/// client against the CURRENT epoch (a replayed/reconstructed token re-runs a fresh freshness
+/// predicate against the current world = idempotent CRDT merge, not resurrection), not from token
+/// unforgeability. The token carries only the client identity; the freshness signal is read live
+/// at commit, never from a snapshotted gate-time epoch.
 #[derive(Debug, PartialEq, Eq)]
 pub struct GateToken {
     /// The client whose not-forgotten status the gate certified.
     ///
     /// Kept `pub` by an **accepted-forgeability decision**: a holder can reconstruct a `GateToken`
-    /// from these fields regardless of the dropped `Clone`. This is accepted because forgeability
+    /// from this field regardless of the dropped `Clone`. This is accepted because forgeability
     /// is **not** load-bearing — RE-ADMISSION safety is the commit-time RE-CHECK under the per-key
     /// single-writer (see [`PruneSafety::gate_decision_holds_at_commit`]), not token
-    /// unforgeability. Public fields also serve as the sanctioned post-consume read path (read the
-    /// gate-time fields off the token before the by-value move).
+    /// unforgeability. The public field also serves as the sanctioned post-consume read path (read
+    /// the client off the token before the by-value move).
     pub client: ClientId,
-    /// The current epoch observed at gate time; the merge-commit re-checks that no prune sweep has
-    /// since advanced the low-water-mark past a tombstone this payload still needs. `pub` under the
-    /// same accepted-forgeability decision documented on `client`.
-    pub epoch_at_gate: Epoch,
 }
 
 /// Per-client causal frontier: the tracked cursors whose minimum licenses pruning.
