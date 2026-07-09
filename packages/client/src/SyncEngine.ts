@@ -1886,19 +1886,25 @@ export class SyncEngine {
     let persistedKeys: string[] = [];
     if (map instanceof ORMap) {
       persistedKeys = map.allKeys().map((k) => String(k));
-      map.clear(); // discard materialized local OR-Map state (authoritative REPLACE)
     }
+    // Fail-closed durable removal, and BEFORE discarding the in-memory state.
+    // `remove` is the ONLY durable deletion of a materialized OR-Map record, so
+    // this must be atomic-or-abort for the SAME reason as the pending-op discard
+    // below: a swallowed failure would strand an orphan record on disk while its
+    // tombstone is cleared → on restart the orphan re-materializes with no
+    // suppressing tombstone → merkle re-push → resurrection once the server prunes
+    // the tombstone. The removal runs BEFORE `map.clear()` so an abort leaves BOTH
+    // memory and disk intact (the resync retries next round and re-discovers the
+    // keys from the still-populated in-memory map); clearing memory first would
+    // erase the record of WHICH keys to re-remove, stranding the orphan
+    // un-removable on retry. Do NOT swallow the rejection — it propagates out of
+    // REPLACE, aborting it, so the snapshot pull never proceeds on inconsistent
+    // durable state.
     for (const key of persistedKeys) {
-      await this.storageAdapter
-        .remove(`${mapName}:${key}`)
-        .catch((err) =>
-          logger.error(
-            { err, mapName, key },
-            'REPLACE resync: failed to remove persisted OR-Map key',
-          ),
-        );
+      await this.storageAdapter.remove(`${mapName}:${key}`);
     }
     if (map instanceof ORMap) {
+      map.clear(); // discard materialized local OR-Map state (authoritative REPLACE)
       // Reset the persisted (now-empty) tombstone set; the snapshot pull that
       // follows re-persists the server-authoritative records + tombstones.
       await this.persistORMapTombstones(mapName);

@@ -19,6 +19,9 @@ class MemoryAdapter implements IStorageAdapter {
   public deletedOpIds: number[] = [];
   // Op ids whose durable delete must FAIL (to exercise the fail-closed abort path).
   public failDeleteOpIds = new Set<number>();
+  // Storage keys whose durable `remove` must FAIL (to exercise the materialized-key
+  // fail-closed abort path).
+  public failRemoveKeys = new Set<string>();
 
   async initialize(): Promise<void> {}
   async close(): Promise<void> {}
@@ -30,6 +33,9 @@ class MemoryAdapter implements IStorageAdapter {
     this.kv.set(key, value);
   }
   async remove(key: string): Promise<void> {
+    if (this.failRemoveKeys.has(key)) {
+      throw new Error(`simulated durable remove failure for key ${key}`);
+    }
     this.kv.delete(key);
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -193,6 +199,35 @@ describe('SyncEngine REPLACE resync — pending-oplog HLC discard (AC15)', () =>
     expect(remainingIds).toContain('1');
     expect(adapter.ops.some((o) => o.id === 1)).toBe(true);
     expect(adapter.deletedOpIds).not.toContain(1);
+  });
+
+  test('a materialized-key durable remove FAILURE aborts the resync (in-memory state + tombstones intact — no orphan-on-disk after clearing the tombstone)', async () => {
+    const adapter = new MemoryAdapter();
+    const engine = new SyncEngine({
+      nodeId: 'n1',
+      connectionProvider: new NullConnectionProvider(),
+      storageAdapter: adapter,
+    });
+    await new Promise((r) => setTimeout(r, 25));
+
+    const hlc = new HLC('n1');
+    const map = new ORMap<string, string>(hlc);
+    map.add('kOrphan', 'stale'); // local materialized state to discard
+    engine.registerMap('tags', map);
+
+    // Force the durable removal of the materialized record to fail.
+    adapter.failRemoveKeys.add('tags:kOrphan');
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test reaches the private REPLACE
+    const eng = engine as any;
+    await expect(eng.replaceOrMapFromSnapshot('tags', hlc.now())).rejects.toThrow();
+
+    // Fail-closed: the in-memory map must NOT have been cleared while the durable
+    // record survives — clearing first would strand an un-removable orphan on disk
+    // (with its tombstone cleared) that re-materializes + re-pushes after restart →
+    // resurrection. Aborting BEFORE the clear keeps memory and disk consistent so
+    // the retried resync re-discovers the key and re-attempts its removal.
+    expect(map.allKeys()).toContain('kOrphan');
   });
 
   test('a subsumed op with a non-numeric id is a HARD failure (abort), not a silent skip that leaves it durably retained', async () => {
