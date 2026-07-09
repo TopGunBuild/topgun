@@ -44,7 +44,10 @@ export class ORMapSyncHandler implements IORMapSyncHandler {
         // after the snapshot leaves are durably applied, which is what re-enables
         // this client's ACKs server-side (delivered_conn set on resync completion).
         await this.config.onFullResync(mapName, timestamp);
-        logger.info({ mapName }, 'ORMap full-resync REPLACE: discarded local state, pulling snapshot');
+        logger.info(
+          { mapName },
+          'ORMap full-resync REPLACE: discarded local state, pulling snapshot',
+        );
         this.config.sendMessage({
           type: 'ORMAP_MERKLE_REQ_BUCKET',
           payload: { mapName, path: '' },

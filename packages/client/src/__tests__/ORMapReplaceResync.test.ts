@@ -123,7 +123,6 @@ describe('SyncEngine REPLACE resync — pending-oplog HLC discard (AC15)', () =>
     eng.opLog.push(orOp('2', 'kPost', '30:0:n1', postTs));
     adapter.ops.push({ id: 1 } as StorageOpLogEntry, { id: 2 } as StorageOpLogEntry);
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- exercise the private REPLACE path directly
     await eng.replaceOrMapFromSnapshot('tags', boundary);
 
     const remainingIds = eng.opLog.map((o: OpLogEntry) => o.id);
@@ -151,7 +150,6 @@ describe('SyncEngine REPLACE resync — pending-oplog HLC discard (AC15)', () =>
     // A pending op for ANOTHER map must be untouched.
     eng.opLog.push({ ...orOp('3', 'c', '3:0:n1', hlc.now()), mapName: 'other' });
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await eng.replaceOrMapFromSnapshot('tags', undefined);
 
     const remaining = eng.opLog.map((o: OpLogEntry) => `${o.mapName}:${o.id}`);

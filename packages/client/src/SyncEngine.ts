@@ -1892,7 +1892,10 @@ export class SyncEngine {
       await this.storageAdapter
         .remove(`${mapName}:${key}`)
         .catch((err) =>
-          logger.error({ err, mapName, key }, 'REPLACE resync: failed to remove persisted OR-Map key'),
+          logger.error(
+            { err, mapName, key },
+            'REPLACE resync: failed to remove persisted OR-Map key',
+          ),
         );
     }
     if (map instanceof ORMap) {

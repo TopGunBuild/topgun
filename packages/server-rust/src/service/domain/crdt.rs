@@ -479,14 +479,13 @@ impl CrdtService {
     /// dropped because the connection's server-authenticated `(principal, deviceId)`
     /// identity is forgotten. This mirrors the sync-path push-diff gate purely as
     /// belt-and-suspenders: the load-bearing re-admission surface is `ORMapPushDiff`,
-    /// and the OR_ADD apply path below REGENERATES the tag from the sanitized server
+    /// and the `OR_ADD` apply path below REGENERATES the tag from the sanitized server
     /// timestamp, so a same-tag op-path resurrection cannot even carry a client's
     /// original tag through to the store (the test would be vacuous). Returns `false`
     /// (never gates) for a non-client caller (no connection → HTTP/anonymous/system
     /// trusted paths) and while the durability watermark is 0 (dark by construction).
     async fn op_path_gated(&self, op: &ClientOp, conn: Option<ConnectionId>) -> bool {
-        let is_or =
-            matches!(&op.or_record, Some(Some(_))) || matches!(&op.or_tag, Some(Some(_)));
+        let is_or = matches!(&op.or_record, Some(Some(_))) || matches!(&op.or_tag, Some(Some(_)));
         if !is_or {
             return false;
         }
@@ -499,9 +498,9 @@ impl CrdtService {
         if !frontier.is_protection_active() {
             return false;
         }
-        let handle = match self.connection_registry.get(conn) {
-            Some(h) => h,
-            None => return true, // vanished connection → treat as unknown → forgotten
+        // A vanished connection → treat as unknown → forgotten.
+        let Some(handle) = self.connection_registry.get(conn) else {
+            return true;
         };
         let (device_id, principal_id) = {
             let meta = handle.metadata.read().await;

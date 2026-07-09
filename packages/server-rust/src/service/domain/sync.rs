@@ -61,13 +61,13 @@ use dashmap::DashMap;
 use tracing::Instrument;
 
 use crate::network::connection::{ConnectionId, ConnectionKind, ConnectionRegistry};
+use crate::network::device_identity::frontier_client_id;
 use crate::service::domain::crdt::prune_epoch_tombstones;
 use crate::service::domain::key_writer::KeyWriterRegistry;
 use crate::service::operation::{service_names, Operation, OperationError, OperationResponse};
 use crate::service::registry::{ManagedService, ServiceContext};
 use crate::storage::map_data_store::{DurableMerkleIndex, MapDataStore, MerkleSession};
 use crate::storage::merkle_sync::MerkleSyncManager;
-use crate::network::device_identity::frontier_client_id;
 use crate::storage::record::RecordValue;
 use crate::storage::{CallerProvenance, ExpiryPolicy, RecordStoreFactory};
 use crate::tombstone_frontier::{ClientId, GateToken};
@@ -296,7 +296,7 @@ impl SyncService {
     /// Resolve the server-authenticated `(principal, deviceId)` frontier identity for
     /// a connection, or `None` when the connection carries no server-issued device
     /// identity (an unknown client → forgotten treatment by the caller). Reads BOTH
-    /// principal and device_id off the connection's OWN metadata — the same values the
+    /// principal and `device_id` off the connection's OWN metadata — the same values the
     /// device-ownership claim keyed on — NEVER a wire-asserted / tag-embedded identity,
     /// preserving G9 identity-spoofing-CLEAN.
     async fn resolve_client_id(&self, conn: Option<ConnectionId>) -> Option<ClientId> {
@@ -1246,6 +1246,7 @@ impl SyncService {
     ///
     /// `ORMapPushDiff` is a WRAPPED message: `map_name` and `entries` live in a
     /// nested `.payload` field.
+    #[allow(clippy::too_many_lines)] // gate setup + per-entry merge + broadcast + prune site in one coherent handler
     async fn handle_ormap_push_diff(
         &self,
         ctx: &crate::service::operation::OperationContext,
@@ -4240,10 +4241,13 @@ mod tests {
         (svc, factory, frontier, registry)
     }
 
-    /// Register a client connection bound to `device_id` (no principal → NO_AUTH
+    /// Register a client connection bound to `device_id` (no principal → `NO_AUTH`
     /// sentinel), returning its `ConnectionId` and the `frontier_client_id` the
     /// gate will derive for it.
-    async fn register_device(reg: &ConnectionRegistry, device_id: &str) -> (ConnectionId, ClientId) {
+    async fn register_device(
+        reg: &ConnectionRegistry,
+        device_id: &str,
+    ) -> (ConnectionId, ClientId) {
         let (handle, _rx) = reg.register(ConnectionKind::Client, &ConnectionConfig::default());
         handle.metadata.write().await.device_id = Some(device_id.to_string());
         let client = frontier_client_id(None, device_id);
@@ -4328,7 +4332,7 @@ mod tests {
     }
 
     /// AC17 (fail-closed, identity dimension): an unknown identity (a connection
-    /// with NO server-issued device_id) is treated as forgotten and rejected under
+    /// with NO server-issued `device_id`) is treated as forgotten and rejected under
     /// active protection — the gate never silently admits an unverifiable client.
     #[tokio::test]
     async fn ac17_unknown_identity_push_rejected_failclosed() {
@@ -4404,7 +4408,7 @@ mod tests {
         }
     }
 
-    /// AC7: a forgotten/unknown client's OR-Map SYNC_INIT is routed to a FULL
+    /// AC7: a forgotten/unknown client's OR-Map `SYNC_INIT` is routed to a FULL
     /// snapshot REPLACE resync (`full_resync = true`) instead of an incremental
     /// delta, once protection is active. A tracked client gets the normal path.
     #[tokio::test]
@@ -4449,7 +4453,11 @@ mod tests {
         let (conn, client) = register_device(&registry, "dev-clone").await;
         // Establish a real cursor at 100 on an earlier connection.
         frontier.set_delivered(ConnectionId(999), 100);
-        assert!(frontier.confirm_apply_ack(&client, 100, ConnectionId(999)).await);
+        assert!(
+            frontier
+                .confirm_apply_ack(&client, 100, ConnectionId(999))
+                .await
+        );
         for i in 0..5 {
             frontier.stamp_tombstone("omap", &format!("s{i}"), &format!("t{i}"));
         }
@@ -4472,7 +4480,7 @@ mod tests {
         match resp {
             OperationResponse::Message(m) => match *m {
                 Message::ORMapSyncRespRoot(r) => {
-                    assert!(r.payload.full_resync, "regressed replica → full resync")
+                    assert!(r.payload.full_resync, "regressed replica → full resync");
                 }
                 other => panic!("expected root, got {other:?}"),
             },
@@ -4490,7 +4498,7 @@ mod tests {
         );
     }
 
-    /// AC10: a plain SYNC_INIT by a forgotten client does NOT advance its
+    /// AC10: a plain `SYNC_INIT` by a forgotten client does NOT advance its
     /// `delivered_conn` (covering epoch conveyed as metadata only) — the sync-path
     /// re-admission door is closed. A tracked client DOES advance it.
     #[tokio::test]
@@ -4519,8 +4527,14 @@ mod tests {
                 },
             }
         };
-        Arc::clone(&svc).oneshot(sync_init(fconn)).await.expect("ok");
-        Arc::clone(&svc).oneshot(sync_init(tconn)).await.expect("ok");
+        Arc::clone(&svc)
+            .oneshot(sync_init(fconn))
+            .await
+            .expect("ok");
+        Arc::clone(&svc)
+            .oneshot(sync_init(tconn))
+            .await
+            .expect("ok");
         assert_eq!(
             frontier.delivered(fconn),
             0,
