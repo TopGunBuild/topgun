@@ -55,16 +55,16 @@ export class MemoryStorageAdapter implements IStorageAdapter {
   }
 
   async getPendingOps(): Promise<OpLogEntry[]> {
-    return this.opLog.filter(e => e.synced === 0);
+    return this.opLog.filter((e) => e.synced === 0);
   }
 
   async markOpsSynced(lastId: number): Promise<void> {
     // Delete acked ops — the durable record is the source of truth (matches IDBAdapter).
-    this.opLog = this.opLog.filter(e => e.id > lastId);
+    this.opLog = this.opLog.filter((e) => e.id > lastId);
   }
 
   async deleteOp(id: number): Promise<void> {
-    this.opLog = this.opLog.filter(e => e.id !== id);
+    this.opLog = this.opLog.filter((e) => e.id !== id);
   }
 
   async commitWrite(mutations: StorageMutation[], op: Omit<OpLogEntry, 'id'>): Promise<number> {
