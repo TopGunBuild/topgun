@@ -32,9 +32,7 @@ async function waitForState(
     if (client.getConnectionState() === state) return;
     await waitForSync(100);
   }
-  throw new Error(
-    `Timed out waiting for ${state}; last state = ${client.getConnectionState()}`,
-  );
+  throw new Error(`Timed out waiting for ${state}; last state = ${client.getConnectionState()}`);
 }
 
 describe('Integration: device identity vs a real JWT server', () => {

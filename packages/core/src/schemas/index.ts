@@ -35,7 +35,11 @@ export * from './hybrid-search-schemas';
 
 // Union MessageSchema (combines all message types)
 import { z } from 'zod';
-import { AuthMessageSchema, AuthRequiredMessageSchema, DeviceHelloMessageSchema } from './base-schemas';
+import {
+  AuthMessageSchema,
+  AuthRequiredMessageSchema,
+  DeviceHelloMessageSchema,
+} from './base-schemas';
 import {
   ClientOpMessageSchema,
   OpBatchMessageSchema,
