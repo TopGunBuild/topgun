@@ -803,9 +803,23 @@ impl SyncService {
         // a REGRESSED replica (a backup-restore clone, `claim < stored_cursor`) is
         // caught here too — routed through the same full-resync WITHOUT advancing
         // `delivered_conn` and WITHOUT rolling the stored cursor back.
+        // Fail-closed on sync-INIT ONLY: a client that omits `claimed_epoch`
+        // (None) cannot be regressed-checked (`is_regressed` needs a claim), so
+        // under active protection it must be treated as gated and forced through
+        // the full-snapshot REPLACE resync rather than eagerly re-admitted. A
+        // fresh client with no local state (None) correctly gets a cheap
+        // full-resync. The None⇒gated OR is applied HERE at the sync-init call
+        // site only — the merkle-bucket / diff continuations legitimately pass
+        // None as post-init reads and must keep the plain `sync_gated` semantics
+        // (gate only on is_forgotten), so this must NOT move into `sync_gated`.
+        let protection_active = self
+            .frontier
+            .as_ref()
+            .is_some_and(|f| f.is_protection_active());
         let gated = self
             .sync_gated(ctx.connection_id, payload.claimed_epoch)
-            .await;
+            .await
+            || (protection_active && payload.claimed_epoch.is_none());
 
         // Epoch BEFORE data: the conveyed epoch must never postdate the root it
         // rides with (see `covering_epoch` — ordering is load-bearing).
@@ -1295,6 +1309,29 @@ impl SyncService {
                 });
             };
             if frontier.is_forgotten(&client) {
+                return Ok(OperationResponse::Ack {
+                    call_id: ctx.call_id,
+                });
+            }
+            // A connection must complete its (non-gated) sync or full-resync
+            // admission before any push merges — `delivered_conn` is the
+            // post-resync admission signal (R8/R9), advanced only on
+            // snapshot-resync completion (or eagerly by `covering_epoch` for a
+            // NOT-gated client), never for a gated one. A not-yet-admitted
+            // connection (`delivered == 0`) that flushes a queued push BEFORE
+            // finishing its sync/resync would carry a high STORED cursor
+            // (`is_forgotten` = false) yet still be pre-admission — holding it
+            // here until REPLACE completes closes R10 point-1 (a regressed
+            // replica's direct push is held until the resync lands).
+            let Some(conn_id) = ctx.connection_id else {
+                // `resolve_client_id` already returned Some, which proves
+                // `connection_id` is Some; an unexpected None is treated as
+                // fail-closed reject rather than admitted.
+                return Ok(OperationResponse::Ack {
+                    call_id: ctx.call_id,
+                });
+            };
+            if frontier.delivered(conn_id) == 0 {
                 return Ok(OperationResponse::Ack {
                     call_id: ctx.call_id,
                 });
@@ -4512,7 +4549,7 @@ mod tests {
         frontier.remove_connection(tconn);
         frontier.set_durable_epoch_watermark(1000);
 
-        let sync_init = |conn: ConnectionId| {
+        let sync_init = |conn: ConnectionId, claimed_epoch: Option<u64>| {
             let mut ctx = make_ctx(service_names::SYNC);
             ctx.connection_id = Some(conn);
             Operation::ORMapSyncInit {
@@ -4522,16 +4559,19 @@ mod tests {
                     root_hash: 12345, // mismatch so no ACK, only the covering-epoch conveyance matters
                     bucket_hashes: HashMap::new(),
                     last_sync_timestamp: None,
-                    claimed_epoch: None,
+                    claimed_epoch,
                 },
             }
         };
+        // The forgotten client is gated by identity; the tracked client reports its
+        // real cursor (Some(1)) so it is NOT caught by the sync-init None⇒gated
+        // fail-closed rule (a None claim under active protection is treated as gated).
         Arc::clone(&svc)
-            .oneshot(sync_init(fconn))
+            .oneshot(sync_init(fconn, None))
             .await
             .expect("ok");
         Arc::clone(&svc)
-            .oneshot(sync_init(tconn))
+            .oneshot(sync_init(tconn, Some(1)))
             .await
             .expect("ok");
         assert_eq!(
@@ -4544,5 +4584,109 @@ mod tests {
             1,
             "tracked client's sync-init DOES advance delivered_conn (eager set_delivered retained)"
         );
+    }
+
+    /// Push-diff admission: a client whose STORED cursor is high (`is_forgotten` =
+    /// false) but whose NEW connection has NOT completed its admission
+    /// (`delivered_conn == 0`) must have its push HELD before merge. This closes the
+    /// R10 point-1 window: a regressed / not-yet-resynced replica that flushes a
+    /// queued push BEFORE finishing its full-resync would carry a high stored cursor
+    /// (so `is_forgotten` reads false) yet still be pre-admission — the
+    /// `delivered_conn > 0` requirement holds it until the REPLACE resync completes.
+    #[tokio::test]
+    async fn push_held_until_connection_admitted_delivered_conn_zero() {
+        let (svc, factory, frontier, registry) = make_gated_service();
+        let (conn, client) = register_device(&registry, "dev-readmitting").await;
+        // Establish a HIGH stored cursor on an EARLIER connection so is_forgotten is
+        // false, WITHOUT admitting the new connection (its delivered stays 0).
+        frontier.set_delivered(ConnectionId(999), 100);
+        assert!(
+            frontier
+                .confirm_apply_ack(&client, 100, ConnectionId(999))
+                .await
+        );
+        frontier.stamp_tombstone("omap", "seed", "seed-tag"); // current_epoch = 1
+        frontier.set_durable_epoch_watermark(1000); // protection active
+        assert!(
+            !frontier.is_forgotten(&client),
+            "high stored cursor → not forgotten"
+        );
+        assert_eq!(
+            frontier.delivered(conn),
+            0,
+            "the new connection has not completed admission"
+        );
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(conn);
+        Arc::clone(&svc)
+            .oneshot(push_op(ctx, "omap", "k1", "R1"))
+            .await
+            .expect("ack");
+        assert_eq!(
+            stored_record_count(&factory, "omap", "k1").await,
+            0,
+            "a not-yet-admitted connection's push is held before merge (delivered_conn == 0)"
+        );
+
+        // Once the connection completes admission (delivered_conn > 0), the same push
+        // merges — proving the hold is specifically the admission gate, not the cursor.
+        frontier.set_delivered(conn, 100);
+        let mut ctx2 = make_ctx(service_names::SYNC);
+        ctx2.connection_id = Some(conn);
+        Arc::clone(&svc)
+            .oneshot(push_op(ctx2, "omap", "k1", "R1"))
+            .await
+            .expect("ack");
+        assert_eq!(
+            stored_record_count(&factory, "omap", "k1").await,
+            1,
+            "after admission (delivered_conn > 0) the push merges"
+        );
+    }
+
+    /// Sync-INIT fail-closed: a client that omits `claimed_epoch` (None) under active
+    /// protection is forced through the full-snapshot REPLACE resync EVEN when it is
+    /// otherwise tracked / not-forgotten / not-regressed — a None claim cannot be
+    /// regressed-checked, so it is treated as gated at the sync-init call site. This
+    /// rule lives ONLY at sync-init; the merkle/diff continuations keep passing None
+    /// as post-init reads (asserted non-gated by the merkle prune test).
+    #[tokio::test]
+    async fn sync_init_none_claim_forces_full_resync_failclosed() {
+        let (svc, _factory, frontier, registry) = make_gated_service();
+        let (conn, client) = register_device(&registry, "dev-tracked").await;
+        // Make the client genuinely tracked, not forgotten, not regressed.
+        frontier.set_delivered(conn, 100);
+        assert!(frontier.confirm_apply_ack(&client, 100, conn).await);
+        frontier.stamp_tombstone("omap", "seed", "seed-tag"); // current_epoch = 1
+        frontier.set_durable_epoch_watermark(1000); // protection active
+        assert!(
+            !frontier.is_forgotten(&client),
+            "tracked client is not forgotten"
+        );
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(conn);
+        let resp = Arc::clone(&svc)
+            .oneshot(Operation::ORMapSyncInit {
+                ctx,
+                payload: topgun_core::messages::ORMapSyncInit {
+                    map_name: "omap".to_string(),
+                    root_hash: 0,
+                    bucket_hashes: HashMap::new(),
+                    last_sync_timestamp: None,
+                    claimed_epoch: None, // omitted → fail-closed gated under active protection
+                },
+            })
+            .await
+            .expect("root");
+        match resp {
+            OperationResponse::Message(m) => match *m {
+                Message::ORMapSyncRespRoot(r) => assert!(
+                    r.payload.full_resync,
+                    "a None claim under active protection → fail-closed full-resync"
+                ),
+                other => panic!("expected root, got {other:?}"),
+            },
+            other => panic!("expected message, got {other:?}"),
+        }
     }
 }
