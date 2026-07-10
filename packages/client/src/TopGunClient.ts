@@ -46,6 +46,7 @@ import type { HybridSearchSubscribeOptions } from './HybridSearchHandle';
 import { HybridQueryHandle } from './HybridQueryHandle';
 import type { HybridQueryFilter } from './HybridQueryHandle';
 import { logger } from './utils/logger';
+import { assertValidMapName, keyBelongsToLongerHeldName } from './utils/mapName';
 import { SyncState } from './SyncState';
 import type { StateChangeEvent } from './SyncStateMachine';
 import type {
@@ -635,6 +636,9 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
   public getMap<K = string, V = any>(name: string): LWWMap<K, V>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- implementation signature uses any to satisfy both overloads; actual type flows from the selected overload
   public getMap(name: string): LWWMap<any, any> {
+    // Reject an invalid name BEFORE any registry/restore side effect so a
+    // rejected name leaves this.maps and the sync registry untouched.
+    assertValidMapName(name);
     if (this.maps.has(name)) {
       const map = this.maps.get(name);
       if (map instanceof LWWMap) {
@@ -728,6 +732,9 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
   public getORMap<K = string, V = any>(name: string): ORMap<K, V>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- implementation signature uses any to satisfy both overloads; actual type flows from the selected overload
   public getORMap(name: string): ORMap<any, any> {
+    // Reject an invalid name BEFORE any registry/restore side effect so a
+    // rejected name leaves this.maps and the sync registry untouched.
+    assertValidMapName(name);
     if (this.maps.has(name)) {
       const map = this.maps.get(name);
       if (map instanceof ORMap) {
@@ -826,9 +833,18 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
       // 2. Restore Items
       const keys = await this.storageAdapter.getAllKeys();
       const mapPrefix = `${name}:`;
+      // Longest-held-name discriminator: the flat key scheme is not injective
+      // for legacy colon-named stores, so a key matched by prefix `name:` may
+      // actually belong to a LONGER held name (e.g. `a:b:k` belongs to `a:b`,
+      // not `a`). Share the held-set from the SyncEngine so this seam and
+      // instantiateAndRestoreOrMap skip the same keys.
+      const heldNames = this.syncEngine.getHeldOrMapNames();
       for (const fullKey of keys) {
         if (fullKey.startsWith(mapPrefix)) {
           const keyPart = fullKey.substring(mapPrefix.length);
+          if (keyBelongsToLongerHeldName(name, keyPart, heldNames)) {
+            continue;
+          }
 
           const data = await this.storageAdapter.get(fullKey);
           if (Array.isArray(data)) {
