@@ -17,7 +17,10 @@
  * AND by the non-throwing oplog-restore filter (which must shed, not throw).
  */
 export function isValidMapName(name: string): boolean {
-  if (name.length === 0) return false;
+  // Guard non-string input first: the untyped getMap/getORMap overloads let a
+  // JS caller pass a non-string, which would otherwise throw a cryptic
+  // `undefined.length` TypeError instead of a clear map-name rejection.
+  if (typeof name !== 'string' || name.length === 0) return false;
   if (name.includes(':')) return false;
   return true;
 }
@@ -30,9 +33,9 @@ export function isValidMapName(name: string): boolean {
  */
 export function assertValidMapName(name: string): void {
   if (isValidMapName(name)) return;
-  if (name.length === 0) {
+  if (typeof name !== 'string' || name.length === 0) {
     throw new Error(
-      'Invalid map name: name must not be empty. A map name is its durable storage-key prefix and cannot be blank.',
+      'Invalid map name: name must not be empty and must be a string. A map name is its durable storage-key prefix and cannot be blank.',
     );
   }
   throw new Error(
