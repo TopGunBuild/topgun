@@ -1421,7 +1421,7 @@ mod tests {
 #[cfg(all(test, feature = "redb"))]
 mod persistence_tests {
     use super::*;
-    use crate::storage::datastores::RedbDataStore;
+    use crate::storage::datastores::{RedbDataStore, WriteBehindConfig, WriteBehindDataStore};
 
     const CONN_A: ConnectionId = ConnectionId(1);
 
@@ -1429,6 +1429,13 @@ mod persistence_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("frontier.redb");
         (path, dir)
+    }
+
+    fn ormap_with_tombstones(tags: &[&str]) -> RecordValue {
+        RecordValue::OrMap {
+            records: Vec::new(),
+            tombstones: tags.iter().map(|t| (*t).to_string()).collect(),
+        }
     }
 
     /// The persisted cursor survives a full store close + reopen (redb durability),
@@ -1581,5 +1588,162 @@ mod persistence_tests {
             None,
             "no inflated pre-bump cursor resurrected"
         );
+    }
+
+    /// AC3d: kill -9 recovery. The RAM epoch index is lost across a restart; the
+    /// rebuild re-stamps every live tombstone into a fresh maximally-lagging
+    /// `E_rec` that exceeds every persisted cursor epoch (the load-bearing term)
+    /// and `ceil(flushed/EPOCH_WIDTH)`. Nothing is prune-eligible until clients
+    /// re-confirm past `E_rec`; `effective_low_water_mark` is the durable-backed
+    /// clamp every consumer reads.
+    #[tokio::test]
+    async fn ac3d_kill9_recovery_rebuilds_into_maximally_lagging_e_rec() {
+        let (path, _dir) = temp_store();
+        let store: Arc<dyn MapDataStore> = Arc::new(RedbDataStore::new(&path).expect("open"));
+
+        // Durable live tombstones (survive the crash in redb): 3 tags over 2 keys.
+        store
+            .add("mymap", "k1", &ormap_with_tombstones(&["T1", "T2"]), 0, 1)
+            .await
+            .unwrap();
+        store
+            .add("mymap", "k2", &ormap_with_tombstones(&["T3"]), 0, 1)
+            .await
+            .unwrap();
+
+        // A client confirmed up to epoch 50 pre-crash (durable cursor).
+        let client: ClientId = "a5:alice|dev-1".into();
+        {
+            let f = TombstoneFrontier::new(Some(Arc::clone(&store)));
+            f.set_delivered(CONN_A, 1000);
+            assert!(f.confirm_apply_ack(&client, 50, CONN_A).await);
+            assert_eq!(f.cursor(&client), Some(50));
+            // kill -9: drop the frontier — the RAM epoch index is gone.
+        }
+
+        // Fresh frontier over the same durable store: the RAM index is empty, so
+        // the watermark is 0 (prune dark, gate transparent) BEFORE the rebuild —
+        // the recovery-ordering invariant (R12(e)).
+        let f = TombstoneFrontier::new(Some(Arc::clone(&store)));
+        assert_eq!(
+            f.durable_epoch_watermark(),
+            0,
+            "empty index → watermark 0 (dark) until the pre-listener rebuild completes"
+        );
+        assert!(
+            !f.is_protection_active(),
+            "protection is transparent until the rebuild runs"
+        );
+
+        // Rebuild (invoked in the pre-listener window by the bin).
+        let e_rec = f.rebuild_from_durable_store().await.unwrap();
+
+        // E_rec exceeds every persisted cursor epoch (50) AND ceil(flushed/WIDTH)=0.
+        let width = f.epoch_width();
+        assert!(
+            e_rec > 50,
+            "E_rec {e_rec} must exceed the max persisted cursor epoch 50 (the load-bearing term)"
+        );
+        assert!(e_rec > 0u64.div_ceil(width), "E_rec exceeds ceil(flushed/EPOCH_WIDTH)");
+        assert_eq!(e_rec, 51, "E_rec = 1 + max(cursor 50, flushed-epochs 0, hint 0)");
+
+        // The recovery epoch's bytes are already durable (redb), so the watermark
+        // computes to E_rec — protection is now ACTIVE (gate + prune go live).
+        assert_eq!(
+            f.durable_epoch_watermark(),
+            e_rec,
+            "recovery epoch is byte-durable; the watermark is E_rec"
+        );
+        assert!(f.is_protection_active(), "protection active after the rebuild");
+
+        // No client has re-confirmed yet: LWM 0 → nothing prunable.
+        assert_eq!(f.low_water_mark(), 0, "no client reconnected yet");
+        assert!(
+            f.drain_prunable_tombstones().is_empty(),
+            "nothing prunable until every tracked client re-confirms past E_rec"
+        );
+
+        // The rehydrated client sits at its STALE cursor 50 (< E_rec): the whole
+        // corpus stays pinned (no premature prune of a freshly-numbered epoch).
+        f.rehydrate(&client).await;
+        assert_eq!(f.low_water_mark(), 50, "rehydrated at the stale pre-crash cursor");
+        assert!(
+            f.drain_prunable_tombstones().is_empty(),
+            "a stale cursor below E_rec pins the maximally-lagging recovery epoch"
+        );
+
+        // effective_LWM is the durable-backed clamp min(persisted_LWM, watermark).
+        assert_eq!(
+            f.effective_low_water_mark(),
+            50,
+            "effective LWM = min(persisted_LWM 50, durable_epoch_watermark E_rec) = 50"
+        );
+    }
+
+    /// AC3e: activation end-to-end. With the REAL prefix-complete watermark, a
+    /// full loop (write → remove → clients ACK past the epoch → bytes durable)
+    /// actually PRUNES — inverting the 342b AC3a dark-mode test: dark while the
+    /// tombstone is still buffered, then a genuine prune once its bytes flush.
+    #[tokio::test]
+    async fn ac3e_activation_end_to_end_prune_fires_with_real_watermark() {
+        let (path, _dir) = temp_store();
+        let inner: Arc<dyn MapDataStore> = Arc::new(RedbDataStore::new(&path).expect("open"));
+        // 60s delays: writes stay buffered (not byte-durable) until we hard_flush.
+        let config = WriteBehindConfig {
+            write_delay_ms: 60_000,
+            flush_interval_ms: 60_000,
+            shutdown_timeout_ms: 5_000,
+            ..WriteBehindConfig::default()
+        };
+        let store = WriteBehindDataStore::new(inner, config);
+        let store_dyn: Arc<dyn MapDataStore> = Arc::clone(&store) as Arc<dyn MapDataStore>;
+        let f = TombstoneFrontier::new(Some(Arc::clone(&store_dyn)));
+        f.set_epoch_width(1);
+
+        // Mirror the crdt OR_REMOVE path: write the tombstone bytes, then stamp.
+        store_dyn
+            .add("m", "k1", &ormap_with_tombstones(&["T1"]), 0, 1)
+            .await
+            .unwrap();
+        let e1 = f.stamp_tombstone("m", "k1", "T1");
+        store_dyn
+            .add("m", "k2", &ormap_with_tombstones(&["T2"]), 0, 1)
+            .await
+            .unwrap();
+        let e2 = f.stamp_tombstone("m", "k2", "T2");
+        assert_eq!((e1, e2), (1, 2));
+
+        // A client confirms PAST every stamped epoch (clamped to the max, 2).
+        let c: ClientId = "a5:alice|dev-1".into();
+        f.set_delivered(CONN_A, 100);
+        assert!(f.confirm_apply_ack(&c, 100, CONN_A).await);
+        assert_eq!(f.low_water_mark(), 2, "client confirmed past every stamped epoch");
+
+        // DARK before byte durability: the tombstones are still buffered, so the
+        // flushed watermark has not advanced — nothing prunes (this is the AC3a
+        // conjunct, now gated on the REAL watermark, not a constant 0).
+        assert!(
+            f.drain_prunable_tombstones().is_empty(),
+            "with the real watermark an un-flushed tombstone is NOT prunable"
+        );
+        assert!(
+            !f.is_protection_active(),
+            "no epoch is byte-durable yet → protection still transparent"
+        );
+
+        // Make the tombstone bytes durable in the inner store.
+        store.hard_flush().await.unwrap();
+
+        // ACTIVATION: LWM strictly past epoch 1 AND its bytes durable → epoch 1
+        // PRUNES; epoch 2 is the current epoch (LWM not strictly past it), retained.
+        assert!(f.is_protection_active(), "a byte-durable epoch activates protection");
+        let drained = f.drain_prunable_tombstones();
+        let tags: Vec<&str> = drained.iter().map(|(_, r)| r.tag.as_str()).collect();
+        assert_eq!(
+            drained.len(),
+            1,
+            "epoch 1 (strictly below LWM 2, byte-durable) actually prunes with the real watermark"
+        );
+        assert_eq!(tags, vec!["T1"], "the drained tombstone is epoch 1's tag");
     }
 }

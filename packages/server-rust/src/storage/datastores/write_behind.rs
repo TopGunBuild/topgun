@@ -1413,9 +1413,12 @@ impl MapDataStore for WriteBehindDataStore {
         // Remove from staging
         self.staging.remove(&(map.to_string(), key.to_string()));
 
-        // Decrement pending count if the key was actually in the queue
-        if removed.is_some() {
+        // Decrement pending count and resolve the buffered entry's durability
+        // sequence if the key was actually in the queue — this direct flush
+        // supersedes it, so its sequence must not stall the flushed watermark.
+        if let Some(removed) = &removed {
             self.pending_count.fetch_sub(1, Ordering::Relaxed);
+            self.resolve_pending(removed.sequence);
         }
 
         // Persist the caller-provided value directly to the inner store
@@ -1428,6 +1431,7 @@ impl MapDataStore for WriteBehindDataStore {
         self.staging.clear();
         self.sequence.store(0, Ordering::Relaxed);
         self.pending_count.store(0, Ordering::Relaxed);
+        self.pending_seqs().clear();
         self.inner.reset();
     }
 
@@ -2024,6 +2028,102 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, SpyCall::Add { map, key } if map == "map1" && key == "key1")),
             "Inner store should have received the flush_key add call"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AC3c: the flushed watermark is PREFIX-COMPLETE — it never exposes a value
+    // above a still-pending (un-flushed) sequence, even when a HIGHER sequence
+    // is resolved out of order below it. A max-with-holes watermark would admit
+    // a mid-range-hole kill -9 tombstone resurrection; this proves no hole is
+    // ever exposed.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn ac3c_flushed_watermark_prefix_complete_never_exposes_hole() {
+        let inner: Arc<dyn MapDataStore> = Arc::new(SpyDataStore::new());
+        // Long delays so the background flush loop never touches our injected
+        // pending set — this test drives resolution deterministically.
+        let config = WriteBehindConfig {
+            write_delay_ms: 60_000,
+            flush_interval_ms: 60_000,
+            ..WriteBehindConfig::default()
+        };
+        let store = WriteBehindDataStore::new(inner, config);
+
+        // Three writes enqueued: sequences 1, 2, 3 pending, nothing flushed yet.
+        store.track_pending(1);
+        store.track_pending(2);
+        store.track_pending(3);
+        assert_eq!(
+            store.flushed_watermark(),
+            1,
+            "smallest pending sequence is the watermark — everything below it is resolved"
+        );
+
+        // Resolve the MIDDLE sequence (2) out of order: 1 is still pending, so
+        // the watermark must NOT jump past the hole at 1 to 2 or 3.
+        store.resolve_pending(2);
+        assert_eq!(
+            store.flushed_watermark(),
+            1,
+            "out-of-order resolve of 2 must not expose a value above the still-pending 1"
+        );
+
+        // Resolve the lowest (1): now 1 and 2 are resolved, only 3 pends, so the
+        // watermark advances to exactly 3 — never skipping over an un-flushed seq.
+        store.resolve_pending(1);
+        assert_eq!(
+            store.flushed_watermark(),
+            3,
+            "watermark advances to the next pending sequence, 3 — prefix stays complete"
+        );
+
+        // Resolve the last: nothing pending, watermark is the full assigned counter.
+        store.resolve_pending(3);
+        assert_eq!(
+            store.flushed_watermark(),
+            store.assigned_write_sequence(),
+            "with nothing pending the watermark is the assigned-sequence counter"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AC3c (real path): a genuine add → in-order background/hard flush advances
+    // the watermark monotonically, and a still-buffered write holds it back.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn ac3c_real_flush_advances_watermark_only_on_byte_durability() {
+        let inner: Arc<dyn MapDataStore> = Arc::new(SpyDataStore::new());
+        let config = WriteBehindConfig {
+            write_delay_ms: 60_000,
+            flush_interval_ms: 60_000,
+            shutdown_timeout_ms: 5_000,
+            ..WriteBehindConfig::default()
+        };
+        let store = WriteBehindDataStore::new(inner, config);
+
+        let val = dummy_value();
+        store.add("m", "k1", &val, 0, 1).await.unwrap();
+        store.add("m", "k2", &val, 0, 1).await.unwrap();
+
+        // Both writes are buffered (write_delay is 60s), so the watermark sits at
+        // the lowest pending sequence — no byte durability yet.
+        let assigned = store.assigned_write_sequence();
+        assert!(
+            store.flushed_watermark() < assigned,
+            "buffered writes are not byte-durable: watermark {} must be below assigned {}",
+            store.flushed_watermark(),
+            assigned
+        );
+
+        // Drain everything to the inner store (deterministic byte durability).
+        store.hard_flush().await.unwrap();
+        assert_eq!(
+            store.flushed_watermark(),
+            assigned,
+            "after a full drain every assigned sequence is durable, so the watermark reaches it"
         );
     }
 
@@ -2918,5 +3018,191 @@ mod tests {
             store.load("m", "k").await.unwrap().is_none(),
             "equal-seq restage applies (idempotent same-write update)"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Durability / crash-recovery tests (R12(b) WAL-retention + AC3f double-crash)
+// ---------------------------------------------------------------------------
+
+#[cfg(all(test, feature = "redb"))]
+mod durability_tests {
+    use super::*;
+    use crate::storage::datastores::RedbDataStore;
+    use crate::storage::wal::{WalRecovery, WalWriter};
+
+    /// An OR-Map record carrying a single tombstone and no active records — the
+    /// "element removed" state whose bytes the durability fence must never let a
+    /// prune drop before they are durable.
+    fn ormap_tombstone(tag: &str) -> RecordValue {
+        RecordValue::OrMap {
+            records: Vec::new(),
+            tombstones: vec![tag.to_string()],
+        }
+    }
+
+    fn buffered_config() -> WriteBehindConfig {
+        // 60s delays so a write stays buffered (WAL-fsynced, not yet flushed to
+        // the inner store) until we explicitly drain — the exact crash window.
+        WriteBehindConfig {
+            write_delay_ms: 60_000,
+            flush_interval_ms: 60_000,
+            shutdown_timeout_ms: 5_000,
+            ..WriteBehindConfig::default()
+        }
+    }
+
+    /// R12(b): an un-flushed frame is NEVER discarded — a tombstone's bytes are
+    /// always in the inner store OR still in the WAL, never both-lost. A WAL-GC
+    /// change that deleted an unapplied frame would break this guard.
+    #[tokio::test]
+    async fn r12b_wal_retains_unflushed_tombstone_frame_until_applied() {
+        let wal_dir = tempfile::tempdir().unwrap();
+        let redb_dir = tempfile::tempdir().unwrap();
+        let inner: Arc<dyn MapDataStore> =
+            Arc::new(RedbDataStore::new(&redb_dir.path().join("d.redb")).unwrap());
+        let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+        let store = WriteBehindDataStore::new_with_wal(
+            Arc::clone(&inner),
+            buffered_config(),
+            Some(WalBootstrap {
+                wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                sequence_start: 1,
+            }),
+        );
+
+        store
+            .add("m", "k1", &ormap_tombstone("T1"), 0, 1)
+            .await
+            .unwrap();
+        let partition = partition_for("m", "k1");
+
+        // Buffered: the WAL frame is fsynced but the inner store has not seen it.
+        // R12(b) requires the WAL to still hold the frame (never both-lost).
+        assert!(
+            !wal.unapplied(partition).await.unwrap().is_empty(),
+            "un-flushed tombstone frame must be retained in the WAL"
+        );
+        assert!(
+            inner.load("m", "k1").await.unwrap().is_none(),
+            "the buffered tombstone is not yet in the inner store"
+        );
+
+        // Drain to the inner store; only NOW is the frame eligible for release.
+        store.hard_flush().await.unwrap();
+        assert!(
+            wal.unapplied(partition).await.unwrap().is_empty(),
+            "once the bytes are durable in the inner store the frame is applied/releasable"
+        );
+        assert!(
+            matches!(
+                inner.load("m", "k1").await.unwrap(),
+                Some(RecordValue::OrMap { tombstones, .. }) if tombstones == vec!["T1".to_string()]
+            ),
+            "tombstone bytes are durable in the inner store after the drain"
+        );
+    }
+
+    /// AC3f: crash after WAL-fsync but before inner-store flush, recover, crash
+    /// AGAIN during recovery (before the frame is marked applied) — the tombstone
+    /// bytes are recoverable at every step (WAL retention held) and no removed
+    /// element is resurrected.
+    #[tokio::test]
+    async fn ac3f_double_crash_wal_retention_recovers_tombstone_no_resurrection() {
+        let wal_dir = tempfile::tempdir().unwrap();
+        let redb_dir = tempfile::tempdir().unwrap();
+        let redb_path = redb_dir.path().join("d.redb");
+        let partition = partition_for("m", "k1");
+
+        // --- Crash 1: after WAL fsync, before inner-store flush ---
+        {
+            // Emulate the write path's WAL-append-before-ack for a tombstone,
+            // then a kill -9 STRICTLY before the background flush reaches the inner
+            // store: fsync the frame, drop the writer, touch no inner store. (Going
+            // through WriteBehindDataStore here would leave its background flush task
+            // holding the inner-store handle — a real crash releases it; the direct
+            // append is the faithful "frame fsynced, inner never written" window.)
+            let wal =
+                WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+            let entry = WalEntry {
+                map: "m".to_string(),
+                key: "k1".to_string(),
+                op: WalOp::Store {
+                    value: WalStorePayload::Record(ormap_tombstone("T1")),
+                    expiration_time: None,
+                },
+                timestamp: None,
+                sequence: 1,
+            };
+            wal.append(partition, &entry).await.unwrap();
+        }
+
+        // --- Crash 2: DURING recovery — replay the still-unapplied frame into the
+        // inner store, then "die" before marking it applied. ---
+        {
+            let inner: Arc<dyn MapDataStore> = Arc::new(RedbDataStore::new(&redb_path).unwrap());
+            let wal =
+                WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+            let unapplied = wal.unapplied(partition).await.unwrap();
+            assert!(
+                !unapplied.is_empty(),
+                "the un-flushed tombstone frame survived crash 1 in the WAL (R12(b))"
+            );
+            for entry in &unapplied {
+                if let WalOp::Store {
+                    value: WalStorePayload::Record(rv),
+                    expiration_time,
+                } = &entry.op
+                {
+                    let exp = expiration_time.unwrap_or(0);
+                    inner.add(&entry.map, &entry.key, rv, exp, 1).await.unwrap();
+                }
+            }
+            // Process "crashes" HERE — no mark_applied.
+            assert!(
+                matches!(
+                    inner.load("m", "k1").await.unwrap(),
+                    Some(RecordValue::OrMap { tombstones, .. }) if tombstones == vec!["T1".to_string()]
+                ),
+                "tombstone recovered into the inner store mid-recovery"
+            );
+        }
+
+        // --- Recovery completes: crash 2 never marked the frame applied, so R12(b)
+        // still holds it; a full WalRecovery replays it again (idempotent) and
+        // finally marks it applied. The tombstone survives BOTH crashes. ---
+        {
+            let inner: Arc<dyn MapDataStore> = Arc::new(RedbDataStore::new(&redb_path).unwrap());
+            let wal =
+                WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+            assert!(
+                !wal.unapplied(partition).await.unwrap().is_empty(),
+                "crash 2 did not mark the frame applied, so WAL retention still holds it"
+            );
+            let recovery = WalRecovery::new(Arc::clone(&wal), Vec::new());
+            recovery.run(Arc::clone(&inner)).await.unwrap();
+
+            match inner.load("m", "k1").await.unwrap() {
+                Some(RecordValue::OrMap {
+                    records,
+                    tombstones,
+                }) => {
+                    assert_eq!(
+                        tombstones,
+                        vec!["T1".to_string()],
+                        "tombstone present after both crashes — the removal is preserved"
+                    );
+                    assert!(
+                        records.is_empty(),
+                        "no active record resurrected for the removed element"
+                    );
+                }
+                other => panic!("expected the OR-Map tombstone to survive both crashes, got {other:?}"),
+            }
+            assert!(
+                wal.unapplied(partition).await.unwrap().is_empty(),
+                "a completed recovery marks the frame applied"
+            );
+        }
     }
 }
