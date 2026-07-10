@@ -932,6 +932,33 @@ async fn main() -> anyhow::Result<()> {
         frontier,
     ) = cluster_state_for_services;
 
+    // Unclean-recovery rebuild of the tombstone epoch index.
+    // The RAM epoch index is never persisted on the hot path, so after WAL recovery
+    // it is empty: re-stamp every live tombstone into ONE fresh maximally-lagging
+    // recovery epoch and bump the epoch counter past every persisted client cursor,
+    // so nothing is prune-eligible — and no stale high cursor prematurely licenses a
+    // prune of a freshly-numbered epoch — until every tracked client re-confirms.
+    //
+    // This MUST run in the pre-listener window: strictly BEFORE set_ready()/serve()
+    // below, so `durable_epoch_watermark` stays 0 (prune dark, gate transparent)
+    // until the rebuild completes and a reconnecting client never observes a
+    // half-rebuilt index. It runs on the live run() path (this binary hand-builds
+    // its own router — the invoke is on that path, not a secondary router, so the
+    // dual-router trap does not apply). A scan failure is FATAL: continuing with an
+    // empty index and a un-bumped counter would let a rehydrated stale-high cursor
+    // prune a new epoch → resurrection. Fail closed, matching WAL-recovery.
+    match frontier.rebuild_from_durable_store().await {
+        Ok(recovery_epoch) => tracing::info!(
+            target: "topgun_server::bootstrap",
+            recovery_epoch,
+            "tombstone epoch index rebuilt (pre-listener); prune fenced maximally-lagging until clients re-confirm"
+        ),
+        Err(err) => {
+            eprintln!("FATAL: tombstone epoch index rebuild failed: {err}");
+            std::process::exit(1);
+        }
+    }
+
     // Spawn the eviction orchestrator after services are wired so it observes
     // every store the factory will create. The orchestrator terminates within
     // one `interval_ms` of `shutdown_tx.send(true)` via the cloned receiver

@@ -215,6 +215,9 @@ export async function createRustTestContext(
  */
 function waitForPort(proc: child_process.ChildProcess, timeoutMs: number): Promise<number> {
   return new Promise((resolve, reject) => {
+    if (process.env.SERVER_LOG_PASSTHROUGH) {
+      proc.stdout!.on('data', (d) => process.stderr.write(d));
+    }
     const rl = readline.createInterface({ input: proc.stdout! });
 
     let settled = false;

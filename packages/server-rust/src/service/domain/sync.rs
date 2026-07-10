@@ -854,6 +854,19 @@ impl SyncService {
             .await
             || (protection_active && payload.claimed_epoch.is_none());
 
+        // A gated routing must also RESTORE the not-yet-admitted signal on a
+        // REUSED connection: an earlier healthy round on this same socket may
+        // have set `delivered > 0`, which the continuation/push gates key on —
+        // without the reset a regressed replica would slip past them mid-resync
+        // and could pull incremental deltas across pruned tombstones instead of
+        // the authoritative REPLACE. Strictly conservative (only defers
+        // re-admission until the snapshot lands and a fresh ACK arrives).
+        if gated {
+            if let (Some(frontier), Some(conn)) = (self.frontier.as_ref(), ctx.connection_id) {
+                frontier.reset_delivered(conn);
+            }
+        }
+
         // Epoch BEFORE data: the conveyed epoch must never postdate the root it
         // rides with (see `covering_epoch` — ordering is load-bearing).
         let covering_epoch = self.covering_epoch(ctx.connection_id, gated);
@@ -4568,6 +4581,68 @@ mod tests {
             frontier.delivered(conn),
             0,
             "delivered_conn NOT advanced for a gated (regressed) client"
+        );
+    }
+
+    /// Reused-connection regressed bypass (the pre-activation defense-in-depth):
+    /// a connection that already completed a HEALTHY round (`delivered > 0` on
+    /// THIS socket) and then issues a REGRESSED sync-init must not slip past the
+    /// continuation gate on the stale admitted signal — the gated routing resets
+    /// `delivered(conn)` to 0 so `sync_gated_continuation` holds until the
+    /// REPLACE snapshot lands and a fresh ACK re-admits.
+    #[tokio::test]
+    async fn regressed_sync_init_on_reused_connection_resets_delivered() {
+        let (svc, _factory, frontier, registry) = make_gated_service();
+        let (conn, client) = register_device(&registry, "dev-reused-clone").await;
+        // Healthy earlier round ON THE SAME connection: delivered > 0, cursor at 100.
+        frontier.set_delivered(conn, 100);
+        assert!(frontier.confirm_apply_ack(&client, 100, conn).await);
+        for i in 0..5 {
+            frontier.stamp_tombstone("omap", &format!("s{i}"), &format!("t{i}"));
+        }
+        frontier.set_durable_epoch_watermark(1000);
+        // Without the reset, the stale admitted signal would let continuations pass.
+        assert!(
+            !svc.sync_gated_continuation(Some(conn)).await,
+            "healthy admitted connection passes continuations (precondition)"
+        );
+        let mut ctx = make_ctx(service_names::SYNC);
+        ctx.connection_id = Some(conn);
+        let resp = Arc::clone(&svc)
+            .oneshot(Operation::ORMapSyncInit {
+                ctx,
+                payload: topgun_core::messages::ORMapSyncInit {
+                    map_name: "omap".to_string(),
+                    root_hash: 0,
+                    bucket_hashes: HashMap::new(),
+                    last_sync_timestamp: None,
+                    claimed_epoch: Some(5), // 5 < stored 100 → regressed
+                },
+            })
+            .await
+            .expect("root");
+        match resp {
+            OperationResponse::Message(m) => match *m {
+                Message::ORMapSyncRespRoot(r) => {
+                    assert!(r.payload.full_resync, "regressed replica → full resync");
+                }
+                other => panic!("expected root, got {other:?}"),
+            },
+            other => panic!("expected message, got {other:?}"),
+        }
+        assert_eq!(
+            frontier.delivered(conn),
+            0,
+            "gated sync-init on a REUSED connection resets the admitted signal"
+        );
+        assert!(
+            svc.sync_gated_continuation(Some(conn)).await,
+            "continuations are gated again until the REPLACE completes + fresh ACK"
+        );
+        assert_eq!(
+            frontier.cursor(&client),
+            Some(100),
+            "stored cursor still never rolled back"
         );
     }
 

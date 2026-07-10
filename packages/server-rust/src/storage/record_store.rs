@@ -234,7 +234,12 @@ pub trait RecordStore: Send + Sync {
 
     /// Flush pending writes to the backing `MapDataStore`.
     ///
-    /// Returns the sequence number of the last flushed operation.
+    /// Returns the sequence number of the last QUEUED (assigned) operation, or 0
+    /// if empty — NOT the last flushed one. The implementation delegates to
+    /// [`MapDataStore::soft_flush`], which notifies the background flush loop and
+    /// returns the current assigned-sequence counter; the actual flush completes
+    /// asynchronously. A caller that needs a real byte-durability signal must use
+    /// [`MapDataStore::flushed_watermark`], not this return value.
     async fn soft_flush(&self) -> anyhow::Result<u64>;
 
     /// Access the underlying `StorageEngine` (Layer 1).

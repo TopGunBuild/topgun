@@ -4,10 +4,10 @@
 //! in per-partition coalesced queues and flushing them on a configurable schedule.
 //! An optional WAL ensures every acked write is durable before the ack is returned.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -425,6 +425,17 @@ pub struct WriteBehindDataStore {
     wal: Option<Arc<dyn Wal>>,
     /// WAL sequence counter, monotonically increasing per-entry for ordering.
     wal_sequence: AtomicU64,
+    /// Entry sequences ASSIGNED but not yet RESOLVED — a write is resolved when
+    /// its bytes reach the inner store (flushed) OR a later write to the same key
+    /// coalesces it away (retired, its data carried forward by the survivor).
+    ///
+    /// The smallest still-pending sequence is the PREFIX-COMPLETE flushed
+    /// watermark (see [`flushed_watermark`](MapDataStore::flushed_watermark)):
+    /// every sequence below it is resolved, with no mid-range hole. This is the
+    /// real byte-durability signal the tombstone frontier fences the prune on —
+    /// NOT the last-assigned counter, which advances at enqueue and would let a
+    /// prune drop a tombstone still buffered in RAM.
+    pending_seqs: Mutex<BTreeSet<u64>>,
 }
 
 /// WAL plus the live sequence counter's starting value, threaded into
@@ -487,6 +498,7 @@ impl WriteBehindDataStore {
             is_shutdown: AtomicBool::new(false),
             wal,
             wal_sequence: AtomicU64::new(wal_sequence_start),
+            pending_seqs: Mutex::new(BTreeSet::new()),
         });
 
         // Spawn background flush loop with a clone of the Arc
@@ -496,9 +508,44 @@ impl WriteBehindDataStore {
         store
     }
 
-    /// Returns the next sequence number for ordering.
-    fn next_sequence(&self) -> u64 {
-        self.sequence.fetch_add(1, Ordering::Relaxed)
+    /// Assign the next ordering sequence AND record it pending byte-durability in
+    /// one atomic step, under the `pending_seqs` lock. Folding the `fetch_add` and
+    /// the set insert under the same lock `flushed_watermark()` reads is what makes
+    /// the watermark prefix-complete under concurrency: a separate bump-then-track
+    /// leaves a window where the counter is already incremented but the set is
+    /// still empty, during which `flushed_watermark()`'s empty-set branch would
+    /// return `sequence.load()` — a value ABOVE the just-assigned, still-buffered
+    /// sequence (a mid-range hole that could license pruning a non-durable
+    /// tombstone). Returns the assigned sequence.
+    fn assign_tracked_sequence(&self) -> u64 {
+        let mut pending = self.pending_seqs();
+        let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
+        pending.insert(seq);
+        seq
+    }
+
+    /// Lock the pending-sequence set, recovering from a poisoned mutex (a prior
+    /// panic while holding it leaves a consistent set — a stale entry only holds
+    /// the watermark back, the safe direction).
+    fn pending_seqs(&self) -> std::sync::MutexGuard<'_, BTreeSet<u64>> {
+        self.pending_seqs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Record `seq` as enqueued-but-not-yet-durable. Test-only injector for
+    /// exercising the watermark deterministically; production assigns and tracks
+    /// atomically via [`assign_tracked_sequence`](Self::assign_tracked_sequence).
+    #[cfg(test)]
+    fn track_pending(&self, seq: u64) {
+        self.pending_seqs().insert(seq);
+    }
+
+    /// Mark `seq` resolved — its bytes are durable in the inner store (flushed)
+    /// or it was superseded by a coalescing write (retired). This is what lets
+    /// the prefix-complete flushed watermark advance past `seq`.
+    fn resolve_pending(&self, seq: u64) {
+        self.pending_seqs().remove(&seq);
     }
 
     /// Snapshot the pending staging entries for one map as a key-sorted map of
@@ -541,10 +588,10 @@ impl WriteBehindDataStore {
 
     /// Stage the latest buffered `value` for `(map, key)` under sequence `seq`,
     /// keeping monotonicity: a write only replaces the slot if its `seq` is at
-    /// least the slot's current `seq`. `seq` is `next_sequence()`, strictly
-    /// increasing per call, so a higher `seq` is always the later write. Two
-    /// concurrent writers on the same key can otherwise interleave between
-    /// `next_sequence()` and this insert and let the older write clobber the
+    /// least the slot's current `seq`. `seq` is from `assign_tracked_sequence()`,
+    /// strictly increasing per call, so a higher `seq` is always the later write.
+    /// Two concurrent writers on the same key can otherwise interleave between
+    /// the sequence assignment and this insert and let the older write clobber the
     /// newer staged value (a plain `insert` is last-writer-wins by wall-clock,
     /// not by `seq`). The monotonic guard makes the slot's `seq` truthful, which
     /// is the identity [`clear_staging_if_current`] relies on.
@@ -669,6 +716,11 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                         // way -- it counts enqueues, one decrement per drained entry.
                         store.clear_staging_if_current(&entry.map, &entry.key, entry.sequence);
                         store.pending_count.fetch_sub(1, Ordering::Relaxed);
+                        // Bytes are now durable in the inner store — resolve the
+                        // sequence so the prefix-complete flushed watermark can
+                        // advance past it. This is the ONLY signal that advances
+                        // the tombstone durability fence.
+                        store.resolve_pending(entry.sequence);
                         // Mark the WAL entry applied so a clean restart does not
                         // re-replay writes that are already durable in the inner store.
                         if let Some(wal) = &store.wal {
@@ -717,6 +769,11 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                             // entry's terminal discard.
                             store.clear_staging_if_current(&entry.map, &entry.key, entry.sequence);
                             store.pending_count.fetch_sub(1, Ordering::Relaxed);
+                            // Terminal discard: the sequence will never flush, so
+                            // resolve it to unstall the watermark. Its bytes remain
+                            // in the WAL until GC (R12(b)), so this does not lose
+                            // durability — a discarded write is a re-sync event.
+                            store.resolve_pending(entry.sequence);
                         }
                     }
                 }
@@ -795,7 +852,9 @@ impl MapDataStore for WriteBehindDataStore {
         };
         self.wal_append(partition_id, &wal_entry).await?;
 
-        let entry_seq = self.next_sequence();
+        // Assign and track the durability sequence atomically (see
+        // `assign_tracked_sequence`) BEFORE the entry enters the queue.
+        let entry_seq = self.assign_tracked_sequence();
         let entry = DelayedEntry {
             map: map.to_string(),
             key: key.to_string(),
@@ -810,19 +869,30 @@ impl MapDataStore for WriteBehindDataStore {
         };
 
         // Insert into partition queue, preserving original store_time on coalesce
-        let mut queue = self.queues.entry(partition_id).or_default();
-
-        // If coalescing, preserve the original store_time
         let staging_key = (map.to_string(), key.to_string());
-        if let Some(existing) = queue.value_mut().remove(map, key) {
-            let mut coalesced = entry;
-            coalesced.store_time = existing.store_time;
-            let _ = queue.value_mut().insert(coalesced);
-            // No pending_count change on coalesce
-        } else {
-            let _ = queue.value_mut().insert(entry);
-            // New key -- increment pending count
-            self.pending_count.fetch_add(1, Ordering::Relaxed);
+        let retired_seq = {
+            let mut queue = self.queues.entry(partition_id).or_default();
+            // If coalescing, preserve the original store_time
+            if let Some(existing) = queue.value_mut().remove(map, key) {
+                let retired = existing.sequence;
+                let mut coalesced = entry;
+                coalesced.store_time = existing.store_time;
+                let _ = queue.value_mut().insert(coalesced);
+                // No pending_count change on coalesce
+                Some(retired)
+            } else {
+                let _ = queue.value_mut().insert(entry);
+                // New key -- increment pending count
+                self.pending_count.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        };
+
+        // Retire the coalesced-away predecessor (its data is carried forward by
+        // this write). Done after releasing the partition-queue lock so the
+        // pending-set lock is never nested under it.
+        if let Some(retired) = retired_seq {
+            self.resolve_pending(retired);
         }
 
         // Update staging area for read-your-writes
@@ -880,7 +950,8 @@ impl MapDataStore for WriteBehindDataStore {
         };
         self.wal_append(partition_id, &wal_entry).await?;
 
-        let entry_seq = self.next_sequence();
+        // Assign and track the durability sequence atomically before queuing.
+        let entry_seq = self.assign_tracked_sequence();
         let entry = DelayedEntry {
             map: map.to_string(),
             key: key.to_string(),
@@ -891,17 +962,25 @@ impl MapDataStore for WriteBehindDataStore {
             wal_sequence: wal_seq,
         };
 
-        let mut queue = self.queues.entry(partition_id).or_default();
-
         let staging_key = (map.to_string(), key.to_string());
-        if let Some(existing) = queue.value_mut().remove(map, key) {
-            let mut coalesced = entry;
-            coalesced.store_time = existing.store_time;
-            let _ = queue.value_mut().insert(coalesced);
-            // No pending_count change on coalesce
-        } else {
-            let _ = queue.value_mut().insert(entry);
-            self.pending_count.fetch_add(1, Ordering::Relaxed);
+        let retired_seq = {
+            let mut queue = self.queues.entry(partition_id).or_default();
+            if let Some(existing) = queue.value_mut().remove(map, key) {
+                let retired = existing.sequence;
+                let mut coalesced = entry;
+                coalesced.store_time = existing.store_time;
+                let _ = queue.value_mut().insert(coalesced);
+                // No pending_count change on coalesce
+                Some(retired)
+            } else {
+                let _ = queue.value_mut().insert(entry);
+                self.pending_count.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        };
+
+        if let Some(retired) = retired_seq {
+            self.resolve_pending(retired);
         }
 
         // Pending delete marker in staging
@@ -996,7 +1075,8 @@ impl MapDataStore for WriteBehindDataStore {
             };
             self.wal_append(partition_id, &wal_entry).await?;
 
-            let entry_seq = self.next_sequence();
+            // Assign and track the durability sequence atomically before queuing.
+            let entry_seq = self.assign_tracked_sequence();
             let entry = DelayedEntry {
                 map: map.to_string(),
                 key: key.clone(),
@@ -1007,16 +1087,28 @@ impl MapDataStore for WriteBehindDataStore {
                 wal_sequence: wal_seq,
             };
 
-            let mut queue = self.queues.entry(partition_id).or_default();
-
             let staging_key = (map.to_string(), key.clone());
-            if let Some(existing) = queue.value_mut().remove(map, key) {
-                let mut coalesced = entry;
-                coalesced.store_time = existing.store_time;
-                let _ = queue.value_mut().insert(coalesced);
-            } else {
-                let _ = queue.value_mut().insert(entry);
-                self.pending_count.fetch_add(1, Ordering::Relaxed);
+            let retired_seq = {
+                let mut queue = self.queues.entry(partition_id).or_default();
+                if let Some(existing) = queue.value_mut().remove(map, key) {
+                    let retired = existing.sequence;
+                    let mut coalesced = entry;
+                    coalesced.store_time = existing.store_time;
+                    let _ = queue.value_mut().insert(coalesced);
+                    Some(retired)
+                } else {
+                    let _ = queue.value_mut().insert(entry);
+                    self.pending_count.fetch_add(1, Ordering::Relaxed);
+                    None
+                }
+            };
+
+            // Retire the coalesced-away predecessor so its durability sequence does
+            // not stall the flushed watermark forever (a leaked pending sequence
+            // would permanently pin the prune). Done after the queue lock is
+            // released so the pending-set lock is never nested under it.
+            if let Some(retired) = retired_seq {
+                self.resolve_pending(retired);
             }
 
             let (smap, skey) = staging_key;
@@ -1172,6 +1264,28 @@ impl MapDataStore for WriteBehindDataStore {
         Ok(self.sequence.load(Ordering::Relaxed))
     }
 
+    fn assigned_write_sequence(&self) -> u64 {
+        // One past the highest sequence handed out — an upper bound on any
+        // in-flight write's sequence. The tombstone frontier snapshots this at
+        // stamp time; because the tombstone's own byte-write was enqueued (and
+        // thus assigned a sequence) strictly before the stamp, this is `>=` it.
+        self.sequence.load(Ordering::Relaxed)
+    }
+
+    fn flushed_watermark(&self) -> u64 {
+        // Prefix-complete: the smallest still-pending sequence is the first
+        // un-resolved write; every sequence below it is durable (flushed) or
+        // retired (coalesced away). With nothing pending, all assigned writes
+        // are resolved, so the watermark is the full assigned counter. This can
+        // NEVER expose a value above an un-flushed sequence — the property that
+        // makes `stamped_seq <= flushed_watermark()` a sound durability fence.
+        let pending = self.pending_seqs();
+        match pending.iter().next().copied() {
+            Some(min_pending) => min_pending,
+            None => self.sequence.load(Ordering::Relaxed),
+        }
+    }
+
     async fn hard_flush(&self) -> anyhow::Result<()> {
         // Mark the store as shutting down so any straggler writes are rejected
         // rather than queued behind the drain.
@@ -1242,6 +1356,7 @@ impl MapDataStore for WriteBehindDataStore {
                     Ok(Ok(())) => {
                         self.staging.remove(&(entry.map.clone(), entry.key.clone()));
                         self.pending_count.fetch_sub(1, Ordering::Relaxed);
+                        self.resolve_pending(entry.sequence);
                         // Mark WAL applied so a restart after clean shutdown is
                         // a no-op rather than re-replaying already-durable writes.
                         if let Some(wal) = &self.wal {
@@ -1324,9 +1439,12 @@ impl MapDataStore for WriteBehindDataStore {
         // Remove from staging
         self.staging.remove(&(map.to_string(), key.to_string()));
 
-        // Decrement pending count if the key was actually in the queue
-        if removed.is_some() {
+        // Decrement pending count and resolve the buffered entry's durability
+        // sequence if the key was actually in the queue — this direct flush
+        // supersedes it, so its sequence must not stall the flushed watermark.
+        if let Some(removed) = &removed {
             self.pending_count.fetch_sub(1, Ordering::Relaxed);
+            self.resolve_pending(removed.sequence);
         }
 
         // Persist the caller-provided value directly to the inner store
@@ -1339,6 +1457,7 @@ impl MapDataStore for WriteBehindDataStore {
         self.staging.clear();
         self.sequence.store(0, Ordering::Relaxed);
         self.pending_count.store(0, Ordering::Relaxed);
+        self.pending_seqs().clear();
         self.inner.reset();
     }
 
@@ -1935,6 +2054,144 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, SpyCall::Add { map, key } if map == "map1" && key == "key1")),
             "Inner store should have received the flush_key add call"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AC3c: the flushed watermark is PREFIX-COMPLETE — it never exposes a value
+    // above a still-pending (un-flushed) sequence, even when a HIGHER sequence
+    // is resolved out of order below it. A max-with-holes watermark would admit
+    // a mid-range-hole kill -9 tombstone resurrection; this proves no hole is
+    // ever exposed.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn ac3c_flushed_watermark_prefix_complete_never_exposes_hole() {
+        let inner: Arc<dyn MapDataStore> = Arc::new(SpyDataStore::new());
+        // Long delays so the background flush loop never touches our injected
+        // pending set — this test drives resolution deterministically.
+        let config = WriteBehindConfig {
+            write_delay_ms: 60_000,
+            flush_interval_ms: 60_000,
+            ..WriteBehindConfig::default()
+        };
+        let store = WriteBehindDataStore::new(inner, config);
+
+        // Three writes enqueued: sequences 1, 2, 3 pending, nothing flushed yet.
+        store.track_pending(1);
+        store.track_pending(2);
+        store.track_pending(3);
+        assert_eq!(
+            store.flushed_watermark(),
+            1,
+            "smallest pending sequence is the watermark — everything below it is resolved"
+        );
+
+        // Resolve the MIDDLE sequence (2) out of order: 1 is still pending, so
+        // the watermark must NOT jump past the hole at 1 to 2 or 3.
+        store.resolve_pending(2);
+        assert_eq!(
+            store.flushed_watermark(),
+            1,
+            "out-of-order resolve of 2 must not expose a value above the still-pending 1"
+        );
+
+        // Resolve the lowest (1): now 1 and 2 are resolved, only 3 pends, so the
+        // watermark advances to exactly 3 — never skipping over an un-flushed seq.
+        store.resolve_pending(1);
+        assert_eq!(
+            store.flushed_watermark(),
+            3,
+            "watermark advances to the next pending sequence, 3 — prefix stays complete"
+        );
+
+        // Resolve the last: nothing pending, watermark is the full assigned counter.
+        store.resolve_pending(3);
+        assert_eq!(
+            store.flushed_watermark(),
+            store.assigned_write_sequence(),
+            "with nothing pending the watermark is the assigned-sequence counter"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AC3c (real path): a genuine add → in-order background/hard flush advances
+    // the watermark monotonically, and a still-buffered write holds it back.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn ac3c_real_flush_advances_watermark_only_on_byte_durability() {
+        let inner: Arc<dyn MapDataStore> = Arc::new(SpyDataStore::new());
+        let config = WriteBehindConfig {
+            write_delay_ms: 60_000,
+            flush_interval_ms: 60_000,
+            shutdown_timeout_ms: 5_000,
+            ..WriteBehindConfig::default()
+        };
+        let store = WriteBehindDataStore::new(inner, config);
+
+        let val = dummy_value();
+        store.add("m", "k1", &val, 0, 1).await.unwrap();
+        store.add("m", "k2", &val, 0, 1).await.unwrap();
+
+        // Both writes are buffered (write_delay is 60s), so the watermark sits at
+        // the lowest pending sequence — no byte durability yet.
+        let assigned = store.assigned_write_sequence();
+        assert!(
+            store.flushed_watermark() < assigned,
+            "buffered writes are not byte-durable: watermark {} must be below assigned {}",
+            store.flushed_watermark(),
+            assigned
+        );
+
+        // Drain everything to the inner store (deterministic byte durability).
+        store.hard_flush().await.unwrap();
+        assert_eq!(
+            store.flushed_watermark(),
+            assigned,
+            "after a full drain every assigned sequence is durable, so the watermark reaches it"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // A batch `remove_all` that coalesces a still-buffered write MUST resolve the
+    // retired sequence — otherwise it leaks in the pending set forever and pins
+    // the flushed watermark below it, permanently stalling the tombstone prune.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn remove_all_coalesce_resolves_retired_sequence_no_watermark_stall() {
+        let inner: Arc<dyn MapDataStore> = Arc::new(SpyDataStore::new());
+        let config = WriteBehindConfig {
+            write_delay_ms: 60_000,
+            flush_interval_ms: 60_000,
+            shutdown_timeout_ms: 5_000,
+            ..WriteBehindConfig::default()
+        };
+        let store = WriteBehindDataStore::new(inner, config);
+
+        // A buffered add for k1: its sequence is the lowest pending, so the
+        // watermark sits at it (nothing below it is durable yet).
+        store.add("m", "k1", &dummy_value(), 0, 1).await.unwrap();
+        let add_seq = store.flushed_watermark();
+
+        // A batch remove of the SAME key coalesces the buffered add. The retired
+        // add sequence must be resolved so the watermark can advance past it —
+        // before the fix it leaked and the watermark stayed pinned at `add_seq`.
+        store.remove_all("m", &["k1".to_string()]).await.unwrap();
+        assert!(
+            store.flushed_watermark() > add_seq,
+            "coalesced-away add sequence {add_seq} must be resolved, not leaked: watermark is {}",
+            store.flushed_watermark()
+        );
+
+        // And after a full drain the watermark reaches the assigned counter —
+        // proving no pending sequence was orphaned by the coalesce.
+        store.hard_flush().await.unwrap();
+        assert_eq!(
+            store.flushed_watermark(),
+            store.assigned_write_sequence(),
+            "no orphaned pending sequence after coalesce + drain"
         );
     }
 
@@ -2829,5 +3086,190 @@ mod tests {
             store.load("m", "k").await.unwrap().is_none(),
             "equal-seq restage applies (idempotent same-write update)"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Durability / crash-recovery tests (R12(b) WAL-retention + AC3f double-crash)
+// ---------------------------------------------------------------------------
+
+#[cfg(all(test, feature = "redb"))]
+mod durability_tests {
+    use super::*;
+    use crate::storage::datastores::RedbDataStore;
+    use crate::storage::wal::{WalRecovery, WalWriter};
+
+    /// An OR-Map record carrying a single tombstone and no active records — the
+    /// "element removed" state whose bytes the durability fence must never let a
+    /// prune drop before they are durable.
+    fn ormap_tombstone(tag: &str) -> RecordValue {
+        RecordValue::OrMap {
+            records: Vec::new(),
+            tombstones: vec![tag.to_string()],
+        }
+    }
+
+    fn buffered_config() -> WriteBehindConfig {
+        // 60s delays so a write stays buffered (WAL-fsynced, not yet flushed to
+        // the inner store) until we explicitly drain — the exact crash window.
+        WriteBehindConfig {
+            write_delay_ms: 60_000,
+            flush_interval_ms: 60_000,
+            shutdown_timeout_ms: 5_000,
+            ..WriteBehindConfig::default()
+        }
+    }
+
+    /// `R12(b)`: an un-flushed frame is NEVER discarded — a tombstone's bytes are
+    /// always in the inner store OR still in the WAL, never both-lost. A WAL-GC
+    /// change that deleted an unapplied frame would break this guard.
+    #[tokio::test]
+    async fn r12b_wal_retains_unflushed_tombstone_frame_until_applied() {
+        let wal_dir = tempfile::tempdir().unwrap();
+        let redb_dir = tempfile::tempdir().unwrap();
+        let inner: Arc<dyn MapDataStore> =
+            Arc::new(RedbDataStore::new(redb_dir.path().join("d.redb")).unwrap());
+        let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+        let store = WriteBehindDataStore::new_with_wal(
+            Arc::clone(&inner),
+            buffered_config(),
+            Some(WalBootstrap {
+                wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                sequence_start: 1,
+            }),
+        );
+
+        store
+            .add("m", "k1", &ormap_tombstone("T1"), 0, 1)
+            .await
+            .unwrap();
+        let partition = partition_for("m", "k1");
+
+        // Buffered: the WAL frame is fsynced but the inner store has not seen it.
+        // R12(b) requires the WAL to still hold the frame (never both-lost).
+        assert!(
+            !wal.unapplied(partition).await.unwrap().is_empty(),
+            "un-flushed tombstone frame must be retained in the WAL"
+        );
+        assert!(
+            inner.load("m", "k1").await.unwrap().is_none(),
+            "the buffered tombstone is not yet in the inner store"
+        );
+
+        // Drain to the inner store; only NOW is the frame eligible for release.
+        store.hard_flush().await.unwrap();
+        assert!(
+            wal.unapplied(partition).await.unwrap().is_empty(),
+            "once the bytes are durable in the inner store the frame is applied/releasable"
+        );
+        assert!(
+            matches!(
+                inner.load("m", "k1").await.unwrap(),
+                Some(RecordValue::OrMap { tombstones, .. }) if tombstones == vec!["T1".to_string()]
+            ),
+            "tombstone bytes are durable in the inner store after the drain"
+        );
+    }
+
+    /// `AC3f`: crash after WAL-fsync but before inner-store flush, recover, crash
+    /// AGAIN during recovery (before the frame is marked applied) — the tombstone
+    /// bytes are recoverable at every step (WAL retention held) and no removed
+    /// element is resurrected.
+    #[tokio::test]
+    async fn ac3f_double_crash_wal_retention_recovers_tombstone_no_resurrection() {
+        let wal_dir = tempfile::tempdir().unwrap();
+        let redb_dir = tempfile::tempdir().unwrap();
+        let redb_path = redb_dir.path().join("d.redb");
+        let partition = partition_for("m", "k1");
+
+        // --- Crash 1: after WAL fsync, before inner-store flush ---
+        {
+            // Emulate the write path's WAL-append-before-ack for a tombstone,
+            // then a kill -9 STRICTLY before the background flush reaches the inner
+            // store: fsync the frame, drop the writer, touch no inner store. (Going
+            // through WriteBehindDataStore here would leave its background flush task
+            // holding the inner-store handle — a real crash releases it; the direct
+            // append is the faithful "frame fsynced, inner never written" window.)
+            let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+            let entry = WalEntry {
+                map: "m".to_string(),
+                key: "k1".to_string(),
+                op: WalOp::Store {
+                    value: WalStorePayload::Record(ormap_tombstone("T1")),
+                    expiration_time: None,
+                },
+                timestamp: None,
+                sequence: 1,
+            };
+            wal.append(partition, &entry).await.unwrap();
+        }
+
+        // --- Crash 2: DURING recovery — replay the still-unapplied frame into the
+        // inner store, then "die" before marking it applied. ---
+        {
+            let inner: Arc<dyn MapDataStore> = Arc::new(RedbDataStore::new(&redb_path).unwrap());
+            let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+            let unapplied = wal.unapplied(partition).await.unwrap();
+            assert!(
+                !unapplied.is_empty(),
+                "the un-flushed tombstone frame survived crash 1 in the WAL (R12(b))"
+            );
+            for entry in &unapplied {
+                if let WalOp::Store {
+                    value: WalStorePayload::Record(rv),
+                    expiration_time,
+                } = &entry.op
+                {
+                    let exp = expiration_time.unwrap_or(0);
+                    inner.add(&entry.map, &entry.key, rv, exp, 1).await.unwrap();
+                }
+            }
+            // Process "crashes" HERE — no mark_applied.
+            assert!(
+                matches!(
+                    inner.load("m", "k1").await.unwrap(),
+                    Some(RecordValue::OrMap { tombstones, .. }) if tombstones == vec!["T1".to_string()]
+                ),
+                "tombstone recovered into the inner store mid-recovery"
+            );
+        }
+
+        // --- Recovery completes: crash 2 never marked the frame applied, so R12(b)
+        // still holds it; a full WalRecovery replays it again (idempotent) and
+        // finally marks it applied. The tombstone survives BOTH crashes. ---
+        {
+            let inner: Arc<dyn MapDataStore> = Arc::new(RedbDataStore::new(&redb_path).unwrap());
+            let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+            assert!(
+                !wal.unapplied(partition).await.unwrap().is_empty(),
+                "crash 2 did not mark the frame applied, so WAL retention still holds it"
+            );
+            let recovery = WalRecovery::new(Arc::clone(&wal), Vec::new());
+            recovery.run(Arc::clone(&inner)).await.unwrap();
+
+            match inner.load("m", "k1").await.unwrap() {
+                Some(RecordValue::OrMap {
+                    records,
+                    tombstones,
+                }) => {
+                    assert_eq!(
+                        tombstones,
+                        vec!["T1".to_string()],
+                        "tombstone present after both crashes — the removal is preserved"
+                    );
+                    assert!(
+                        records.is_empty(),
+                        "no active record resurrected for the removed element"
+                    );
+                }
+                other => {
+                    panic!("expected the OR-Map tombstone to survive both crashes, got {other:?}")
+                }
+            }
+            assert!(
+                wal.unapplied(partition).await.unwrap().is_empty(),
+                "a completed recovery marks the frame applied"
+            );
+        }
     }
 }

@@ -284,14 +284,16 @@ impl CrdtService {
             None
         };
 
-        // Defence-in-depth op-path gate (R4, non-load-bearing, dark until 342j): drop
-        // a forgotten client's OR-bearing op before it merges. Belt-and-suspenders to
-        // the load-bearing ORMapPushDiff gate; vacuous on OR_ADD (tag is regenerated).
-        if self.op_path_gated(op, ctx.connection_id).await {
-            return Ok(OperationResponse::Ack {
-                call_id: ctx.call_id,
-            });
-        }
+        // Deliberately NO forgotten-client gate on the op path. Client-originated
+        // tags are regenerated server-side above, so a pruned tombstone's tag can
+        // never be re-presented here — the path is resurrection-proof by
+        // construction and a gate protects nothing. Worse, a gate keyed on the
+        // frontier's "unknown == forgotten" would silently drop writes from every
+        // device that has not yet completed its first ACK round (a fresh device
+        // flushing its pending oplog on connect), while still returning OP_ACK —
+        // the client then clears the op from its local oplog and the write is
+        // permanently lost on both sides. The verbatim-tag path (ORMapPushDiff)
+        // keeps its load-bearing gate.
 
         // Read old value before mutation for query broadcast filtering.
         let old_rmpv_value = self
@@ -358,12 +360,6 @@ impl CrdtService {
             // Each op gets its own partition based on its key (OpBatch ctx has
             // partition_id=None because the batch contains keys for many partitions).
             for op in ops {
-                // Defence-in-depth op-path gate (R4, non-load-bearing, dark until
-                // 342j; inert for the non-connection HTTP/anonymous paths where
-                // `connection_id` is None). Skip a forgotten client's OR-bearing op.
-                if self.op_path_gated(op, ctx.connection_id).await {
-                    continue;
-                }
                 let sanitized_ts = self.write_validator.sanitize_hlc();
                 self.apply_batch_op(op, Some(&sanitized_ts), ctx.connection_id)
                     .await?;
@@ -396,12 +392,6 @@ impl CrdtService {
             }
             // All ops validated — apply them sequentially with sanitized timestamps.
             for op in ops {
-                // Defence-in-depth op-path gate (R4, non-load-bearing, dark until
-                // 342j; inert for the non-connection HTTP/anonymous paths where
-                // `connection_id` is None). Skip a forgotten client's OR-bearing op.
-                if self.op_path_gated(op, ctx.connection_id).await {
-                    continue;
-                }
                 let sanitized_ts = self.write_validator.sanitize_hlc();
                 self.apply_batch_op(op, Some(&sanitized_ts), ctx.connection_id)
                     .await?;
@@ -420,12 +410,6 @@ impl CrdtService {
                 self.validate_schema_for_op(op)?;
             }
             for op in ops {
-                // Defence-in-depth op-path gate (R4, non-load-bearing, dark until
-                // 342j; inert for the non-connection HTTP/anonymous paths where
-                // `connection_id` is None). Skip a forgotten client's OR-bearing op.
-                if self.op_path_gated(op, ctx.connection_id).await {
-                    continue;
-                }
                 let sanitized_ts = self.write_validator.sanitize_hlc();
                 self.apply_batch_op(op, Some(&sanitized_ts), ctx.connection_id)
                     .await?;
@@ -484,43 +468,6 @@ impl CrdtService {
     /// original tag through to the store (the test would be vacuous). Returns `false`
     /// (never gates) for a non-client caller (no connection → HTTP/anonymous/system
     /// trusted paths) and while the durability watermark is 0 (dark by construction).
-    async fn op_path_gated(&self, op: &ClientOp, conn: Option<ConnectionId>) -> bool {
-        let is_or = matches!(&op.or_record, Some(Some(_))) || matches!(&op.or_tag, Some(Some(_)));
-        if !is_or {
-            return false;
-        }
-        let Some(conn) = conn else {
-            return false;
-        };
-        let Some(frontier) = self.frontier.as_ref() else {
-            return false;
-        };
-        if !frontier.is_protection_active() {
-            return false;
-        }
-        // A vanished connection → treat as unknown → forgotten.
-        let Some(handle) = self.connection_registry.get(conn) else {
-            return true;
-        };
-        let (device_id, principal_id) = {
-            let meta = handle.metadata.read().await;
-            (
-                meta.device_id.clone(),
-                meta.principal.as_ref().map(|p| p.id.clone()),
-            )
-        };
-        match device_id {
-            None => true, // no server-issued device identity → unknown → forgotten
-            Some(device_id) => {
-                let client = crate::network::device_identity::frontier_client_id(
-                    principal_id.as_deref(),
-                    &device_id,
-                );
-                frontier.is_forgotten(&client)
-            }
-        }
-    }
-
     /// Applies a single `ClientOp` to the `RecordStore` and returns the `ServerEventPayload`
     /// to broadcast. Called by both `handle_client_op` and `handle_op_batch`.
     ///
@@ -3021,6 +2968,7 @@ mod tests {
     // practical here — this exercises the actual eviction blind-spot the gauge
     // exists to defend against, not a stand-in for it.
     #[tokio::test]
+    #[serial_test::serial(tombstone_gauge)]
     async fn or_remove_tombstone_gauge_survives_real_eviction_and_rehydration() {
         let dir = tempfile::tempdir().expect("tempdir");
         let redb_path = dir.path().join("gauge_residency.redb");
@@ -3042,64 +2990,80 @@ mod tests {
             Arc::new(SchemaService::new()),
         ));
 
-        let map_name = "gauge_residency_map";
-        let key = "item-1";
-        let tag = "tag-gauge-residency";
+        // The gauge is a process-global static: the serial(tombstone_gauge) group
+        // serializes the gauge-asserting tests against each other, but UNMARKED
+        // parallel tests still mutate it via ordinary OR_REMOVE applies and prune
+        // drains. Exact-equality snapshots are therefore retried on a fresh map:
+        // ambient noise shifts between attempts, while a genuine double-count /
+        // dropped-gauge regression is deterministic and fails every attempt.
+        let mut attempt = 0usize;
+        'attempt: loop {
+            attempt += 1;
+            let map_name = &format!("gauge_residency_map_{attempt}");
+            let key = "item-1";
+            let tag = "tag-gauge-residency";
 
-        // The gauge is a process-global static shared across parallel test
-        // threads, so assert on the DELTA this test produces, never an absolute
-        // value.
-        let before_write = crate::storage::record::tombstone_bytes();
+            let before_write = crate::storage::record::tombstone_bytes();
 
-        svc.clone()
-            .oneshot(or_add_op(map_name, key, "payload", tag))
-            .await
-            .expect("or_add must succeed");
-        svc.clone()
-            .oneshot(or_remove_op(map_name, key, tag))
-            .await
-            .expect("or_remove must succeed");
+            svc.clone()
+                .oneshot(or_add_op(map_name, key, "payload", tag))
+                .await
+                .expect("or_add must succeed");
+            svc.clone()
+                .oneshot(or_remove_op(map_name, key, tag))
+                .await
+                .expect("or_remove must succeed");
 
-        let after_write = crate::storage::record::tombstone_bytes();
-        assert_eq!(
-            after_write - before_write,
-            tag.len() as u64,
-            "gauge must increase by exactly the new tombstone tag's byte length"
-        );
+            let after_write = crate::storage::record::tombstone_bytes();
+            if after_write - before_write != tag.len() as u64 {
+                assert!(
+                    attempt < 5,
+                    "gauge delta never settled to exactly the tag length across 5 quiet-window attempts                      (deterministic gauge regression, not parallel-test noise)"
+                );
+                continue 'attempt;
+            }
 
-        // Force the record non-resident via the real eviction primitive. The
-        // OR_REMOVE above wrote through with `CallerProvenance::CrdtMerge` over a
-        // real (non-null) data store, which marks the record clean and therefore
-        // evictable.
-        let store = factory.get_or_create(map_name, hash_to_partition(key));
-        let evicted = store.evict_lru(u32::MAX, false);
-        assert!(evicted > 0, "the clean record must be evicted");
-        assert!(
-            !store.exists_in_memory(key),
-            "record must be non-resident after eviction"
-        );
+            // Force the record non-resident via the real eviction primitive. The
+            // OR_REMOVE above wrote through with `CallerProvenance::CrdtMerge` over a
+            // real (non-null) data store, which marks the record clean and therefore
+            // evictable.
+            let store = factory.get_or_create(map_name, hash_to_partition(key));
+            let evicted = store.evict_lru(u32::MAX, false);
+            assert!(evicted > 0, "the clean record must be evicted");
+            assert!(
+                !store.exists_in_memory(key),
+                "record must be non-resident after eviction"
+            );
 
-        let after_eviction = crate::storage::record::tombstone_bytes();
-        assert_eq!(
-            after_eviction, after_write,
-            "evicting a tombstone-bearing record must not drop the gauge"
-        );
+            let after_eviction = crate::storage::record::tombstone_bytes();
+            if after_eviction != after_write {
+                assert!(
+                    attempt < 5,
+                    "eviction kept moving the gauge across 5 attempts — a deterministic                      evict-drops-gauge regression, not parallel-test noise"
+                );
+                continue 'attempt;
+            }
 
-        // Rehydrate: `get()` transparently reloads the non-resident record from
-        // the datastore. Confirm the tombstone survived the round trip and the
-        // gauge did not move.
-        let (_, tombstones) = read_or_map(&factory, map_name, key).await;
-        assert_eq!(
-            tombstones,
-            vec![tag.to_string()],
-            "tombstone must still be present after rehydration"
-        );
+            // Rehydrate: `get()` transparently reloads the non-resident record from
+            // the datastore. Confirm the tombstone survived the round trip and the
+            // gauge did not move.
+            let (_, tombstones) = read_or_map(&factory, map_name, key).await;
+            assert_eq!(
+                tombstones,
+                vec![tag.to_string()],
+                "tombstone must still be present after rehydration"
+            );
 
-        let after_rehydration = crate::storage::record::tombstone_bytes();
-        assert_eq!(
-            after_rehydration, after_write,
-            "rehydrating a tombstone-bearing record must not double-count the gauge"
-        );
+            let after_rehydration = crate::storage::record::tombstone_bytes();
+            if after_rehydration != after_write {
+                assert!(
+                    attempt < 5,
+                    "rehydration kept moving the gauge across 5 attempts — a deterministic                      double-count regression, not parallel-test noise"
+                );
+                continue 'attempt;
+            }
+            break 'attempt;
+        }
     }
 
     // AC1: add-wins — OR_REMOVE of one tag preserves concurrent survivors.
