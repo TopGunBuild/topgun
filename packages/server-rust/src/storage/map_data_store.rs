@@ -277,6 +277,40 @@ pub trait MapDataStore: Send + Sync {
     /// Returns the sequence number of the last queued operation, or 0 if empty.
     async fn soft_flush(&self) -> anyhow::Result<u64>;
 
+    /// The highest write-ordering sequence this store has ASSIGNED so far
+    /// (one past the last handed-out value), regardless of whether it has been
+    /// flushed to durable storage. This is a cheap synchronous snapshot — the
+    /// same value [`soft_flush`](MapDataStore::soft_flush) returns, but without
+    /// triggering a flush — used by the tombstone frontier to stamp an
+    /// upper-bound sequence onto a genuinely-new tombstone at write time (the
+    /// tombstone's own byte-write was enqueued strictly before this is read, so
+    /// the returned value is `>=` the tombstone's sequence).
+    ///
+    /// The default returns 0, correct for write-through backends that never
+    /// buffer (their writes are durable on return, so there is nothing to fence).
+    fn assigned_write_sequence(&self) -> u64 {
+        0
+    }
+
+    /// The PREFIX-COMPLETE byte-durability watermark: the largest `W` such that
+    /// EVERY write with an assigned sequence `< W` is durable in the inner store
+    /// (flushed) or has been superseded by a later coalesced write (retired).
+    ///
+    /// Prefix-completeness is the load-bearing property: the returned value NEVER
+    /// sits above an un-flushed sequence (no mid-range hole), so a consumer that
+    /// gates on `stamped_seq <= flushed_watermark()` can be certain the stamped
+    /// write's bytes are durable — never a max-with-holes value that would admit
+    /// a `kill -9` tombstone resurrection. It advances ONLY on real inner-store
+    /// byte durability, never on WAL-fsync alone and never from the last-assigned
+    /// sequence.
+    ///
+    /// The default returns 0, which keeps every tombstone byte-undurable from the
+    /// fence's perspective (the safe direction — no prune is ever licensed) for
+    /// write-through backends and test doubles that do not buffer writes.
+    fn flushed_watermark(&self) -> u64 {
+        0
+    }
+
     /// Flush all pending writes immediately in the calling task.
     ///
     /// Called during node shutdown for data safety.
