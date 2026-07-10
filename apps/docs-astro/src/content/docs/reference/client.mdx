@@ -147,6 +147,8 @@ getMap<K = string, V = any>(name: string): LWWMap<K, V>;
 
 Returns an `LWWMap` (last-write-wins CRDT) for the given name. Creates the map on first call and restores its state from storage asynchronously.
 
+Map names may not contain `:` — that character is reserved for the storage layer's internal key namespacing. Keys inside a map (e.g. `'post:123'`) may still contain `:` freely. Calling `getMap` with an empty name or a name containing `:` throws an `Error` immediately, before any storage access.
+
 ```typescript
 const users = client.getMap<string, User>('users');
 users.set('u1', { name: 'Alice' });
@@ -160,7 +162,7 @@ getORMap<K extends keyof TSchema & string>(name: K): ORMap<string, TSchema[K]>;
 getORMap<K = string, V = any>(name: string): ORMap<K, V>;
 ```
 
-Returns an `ORMap` (observed-remove CRDT) for multi-value-per-key data.
+Returns an `ORMap` (observed-remove CRDT) for multi-value-per-key data. The same map-name rule as `getMap` applies: no `:` in the name, keys are unrestricted, and an invalid name throws an `Error` immediately.
 
 ```typescript
 const tags = client.getORMap<string, string>('tags');
