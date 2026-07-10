@@ -541,6 +541,20 @@ impl TombstoneFrontier {
         self.lock().delivered.get(&conn).copied().unwrap_or(0)
     }
 
+    /// Reset `conn`'s delivered watermark to 0 — the NOT-YET-ADMITTED signal.
+    ///
+    /// Called when a sync-init routes the connection through the gated
+    /// full-snapshot REPLACE path: a REUSED connection may carry `delivered > 0`
+    /// from an earlier healthy round on the same socket, which would let the
+    /// continuation/push gates (which key on `delivered == 0`) treat a
+    /// now-gated client as already admitted mid-resync. Resetting is strictly
+    /// conservative: it can only suppress ACK admission until the REPLACE
+    /// snapshot completes and a fresh `CLIENT_APPLY_ACK` re-admits — never
+    /// widen it.
+    pub fn reset_delivered(&self, conn: ConnectionId) {
+        self.lock().delivered.insert(conn, 0);
+    }
+
     /// Confirmed-apply ACK: advance `client`'s cursor under the bounded monotone rule
     /// for an ACK arriving on connection `conn`, persisting the new value best-effort.
     /// Returns `true` iff the stored cursor advanced.
