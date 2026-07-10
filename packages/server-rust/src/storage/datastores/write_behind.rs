@@ -3052,7 +3052,7 @@ mod durability_tests {
         }
     }
 
-    /// R12(b): an un-flushed frame is NEVER discarded — a tombstone's bytes are
+    /// `R12(b)`: an un-flushed frame is NEVER discarded — a tombstone's bytes are
     /// always in the inner store OR still in the WAL, never both-lost. A WAL-GC
     /// change that deleted an unapplied frame would break this guard.
     #[tokio::test]
@@ -3060,7 +3060,7 @@ mod durability_tests {
         let wal_dir = tempfile::tempdir().unwrap();
         let redb_dir = tempfile::tempdir().unwrap();
         let inner: Arc<dyn MapDataStore> =
-            Arc::new(RedbDataStore::new(&redb_dir.path().join("d.redb")).unwrap());
+            Arc::new(RedbDataStore::new(redb_dir.path().join("d.redb")).unwrap());
         let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
         let store = WriteBehindDataStore::new_with_wal(
             Arc::clone(&inner),
@@ -3103,7 +3103,7 @@ mod durability_tests {
         );
     }
 
-    /// AC3f: crash after WAL-fsync but before inner-store flush, recover, crash
+    /// `AC3f`: crash after WAL-fsync but before inner-store flush, recover, crash
     /// AGAIN during recovery (before the frame is marked applied) — the tombstone
     /// bytes are recoverable at every step (WAL retention held) and no removed
     /// element is resurrected.
@@ -3122,8 +3122,7 @@ mod durability_tests {
             // through WriteBehindDataStore here would leave its background flush task
             // holding the inner-store handle — a real crash releases it; the direct
             // append is the faithful "frame fsynced, inner never written" window.)
-            let wal =
-                WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+            let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
             let entry = WalEntry {
                 map: "m".to_string(),
                 key: "k1".to_string(),
@@ -3141,8 +3140,7 @@ mod durability_tests {
         // inner store, then "die" before marking it applied. ---
         {
             let inner: Arc<dyn MapDataStore> = Arc::new(RedbDataStore::new(&redb_path).unwrap());
-            let wal =
-                WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+            let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
             let unapplied = wal.unapplied(partition).await.unwrap();
             assert!(
                 !unapplied.is_empty(),
@@ -3173,8 +3171,7 @@ mod durability_tests {
         // finally marks it applied. The tombstone survives BOTH crashes. ---
         {
             let inner: Arc<dyn MapDataStore> = Arc::new(RedbDataStore::new(&redb_path).unwrap());
-            let wal =
-                WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+            let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
             assert!(
                 !wal.unapplied(partition).await.unwrap().is_empty(),
                 "crash 2 did not mark the frame applied, so WAL retention still holds it"
@@ -3197,7 +3194,9 @@ mod durability_tests {
                         "no active record resurrected for the removed element"
                     );
                 }
-                other => panic!("expected the OR-Map tombstone to survive both crashes, got {other:?}"),
+                other => {
+                    panic!("expected the OR-Map tombstone to survive both crashes, got {other:?}")
+                }
             }
             assert!(
                 wal.unapplied(partition).await.unwrap().is_empty(),

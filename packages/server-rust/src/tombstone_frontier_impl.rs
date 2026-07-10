@@ -734,6 +734,12 @@ impl TombstoneFrontier {
     /// optimization, never a correctness input). Returns the chosen `E_rec` (0
     /// when there is no durable backend, e.g. the Null store or a store-less
     /// test frontier).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the durable keyspace scan (cursor namespace or live
+    /// tombstones) fails; the caller MUST fail closed (an empty index with an
+    /// un-bumped counter would let a stale-high cursor prune a fresh epoch).
     pub async fn rebuild_from_durable_store(&self) -> anyhow::Result<Epoch> {
         let Some(store) = self.store.as_ref() else {
             return Ok(0);
@@ -1590,7 +1596,7 @@ mod persistence_tests {
         );
     }
 
-    /// AC3d: kill -9 recovery. The RAM epoch index is lost across a restart; the
+    /// `AC3d`: kill -9 recovery. The RAM epoch index is lost across a restart; the
     /// rebuild re-stamps every live tombstone into a fresh maximally-lagging
     /// `E_rec` that exceeds every persisted cursor epoch (the load-bearing term)
     /// and `ceil(flushed/EPOCH_WIDTH)`. Nothing is prune-eligible until clients
@@ -1644,8 +1650,14 @@ mod persistence_tests {
             e_rec > 50,
             "E_rec {e_rec} must exceed the max persisted cursor epoch 50 (the load-bearing term)"
         );
-        assert!(e_rec > 0u64.div_ceil(width), "E_rec exceeds ceil(flushed/EPOCH_WIDTH)");
-        assert_eq!(e_rec, 51, "E_rec = 1 + max(cursor 50, flushed-epochs 0, hint 0)");
+        assert!(
+            e_rec > 0u64.div_ceil(width),
+            "E_rec exceeds ceil(flushed/EPOCH_WIDTH)"
+        );
+        assert_eq!(
+            e_rec, 51,
+            "E_rec = 1 + max(cursor 50, flushed-epochs 0, hint 0)"
+        );
 
         // The recovery epoch's bytes are already durable (redb), so the watermark
         // computes to E_rec — protection is now ACTIVE (gate + prune go live).
@@ -1654,7 +1666,10 @@ mod persistence_tests {
             e_rec,
             "recovery epoch is byte-durable; the watermark is E_rec"
         );
-        assert!(f.is_protection_active(), "protection active after the rebuild");
+        assert!(
+            f.is_protection_active(),
+            "protection active after the rebuild"
+        );
 
         // No client has re-confirmed yet: LWM 0 → nothing prunable.
         assert_eq!(f.low_water_mark(), 0, "no client reconnected yet");
@@ -1666,7 +1681,11 @@ mod persistence_tests {
         // The rehydrated client sits at its STALE cursor 50 (< E_rec): the whole
         // corpus stays pinned (no premature prune of a freshly-numbered epoch).
         f.rehydrate(&client).await;
-        assert_eq!(f.low_water_mark(), 50, "rehydrated at the stale pre-crash cursor");
+        assert_eq!(
+            f.low_water_mark(),
+            50,
+            "rehydrated at the stale pre-crash cursor"
+        );
         assert!(
             f.drain_prunable_tombstones().is_empty(),
             "a stale cursor below E_rec pins the maximally-lagging recovery epoch"
@@ -1680,9 +1699,9 @@ mod persistence_tests {
         );
     }
 
-    /// AC3e: activation end-to-end. With the REAL prefix-complete watermark, a
+    /// `AC3e`: activation end-to-end. With the REAL prefix-complete watermark, a
     /// full loop (write → remove → clients ACK past the epoch → bytes durable)
-    /// actually PRUNES — inverting the 342b AC3a dark-mode test: dark while the
+    /// actually PRUNES — inverting the 342b `AC3a` dark-mode test: dark while the
     /// tombstone is still buffered, then a genuine prune once its bytes flush.
     #[tokio::test]
     async fn ac3e_activation_end_to_end_prune_fires_with_real_watermark() {
@@ -1717,7 +1736,11 @@ mod persistence_tests {
         let c: ClientId = "a5:alice|dev-1".into();
         f.set_delivered(CONN_A, 100);
         assert!(f.confirm_apply_ack(&c, 100, CONN_A).await);
-        assert_eq!(f.low_water_mark(), 2, "client confirmed past every stamped epoch");
+        assert_eq!(
+            f.low_water_mark(),
+            2,
+            "client confirmed past every stamped epoch"
+        );
 
         // DARK before byte durability: the tombstones are still buffered, so the
         // flushed watermark has not advanced — nothing prunes (this is the AC3a
@@ -1736,7 +1759,10 @@ mod persistence_tests {
 
         // ACTIVATION: LWM strictly past epoch 1 AND its bytes durable → epoch 1
         // PRUNES; epoch 2 is the current epoch (LWM not strictly past it), retained.
-        assert!(f.is_protection_active(), "a byte-durable epoch activates protection");
+        assert!(
+            f.is_protection_active(),
+            "a byte-durable epoch activates protection"
+        );
         let drained = f.drain_prunable_tombstones();
         let tags: Vec<&str> = drained.iter().map(|(_, r)| r.tag.as_str()).collect();
         assert_eq!(
