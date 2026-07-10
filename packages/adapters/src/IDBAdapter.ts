@@ -55,6 +55,12 @@ export class IDBAdapter implements IStorageAdapter {
   private async initializeInternal(dbName: string): Promise<void> {
     try {
       this.dbPromise = openDB(dbName, 2, {
+        // Additive-only invariant: this upgrade MUST NOT drop, clear, or rewrite
+        // existing kv_store/meta_store keys. The map-name → storage-key scheme is
+        // kept injective for new data by forbidding ':' in map names at creation
+        // (no destructive key migration); legacy colon-named record data
+        // re-converges from the server, so an existing colon-free store simply
+        // opens and restores all prior records with no data loss.
         upgrade(db) {
           if (!db.objectStoreNames.contains('kv_store')) {
             db.createObjectStore('kv_store', { keyPath: 'key' });

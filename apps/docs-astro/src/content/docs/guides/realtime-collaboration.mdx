@@ -214,7 +214,7 @@ const client = new TopGunClient({
 await client.start();
 
 // Shared map — persistent, CRDT-merged
-const docMap = client.getMap('doc:room-1');
+const docMap = client.getMap('doc-room-1');
 
 docMap.set('block-1', {
   author: 'alice',

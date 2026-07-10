@@ -23,6 +23,7 @@ import type { QueryFilter } from './QueryHandle';
 import type { HybridQueryHandle, HybridQueryFilter } from './HybridQueryHandle';
 import { TopicHandle } from './TopicHandle';
 import { logger } from './utils/logger';
+import { isValidMapName, keyBelongsToLongerHeldName } from './utils/mapName';
 import { SyncStateMachine, StateChangeEvent } from './SyncStateMachine';
 import { SyncState } from './SyncState';
 import type {
@@ -805,16 +806,33 @@ export class SyncEngine {
     const pendingOps = await this.storageAdapter.getPendingOps();
     // Clear and push to existing array (preserves BackpressureController reference)
     this.opLog.length = 0;
+    // The OP_BATCH flush is held-set-independent, so a persisted op under a
+    // forbidden (non-injective) map name is the one path that could reach the
+    // server despite map-creation being forbidden for such names. Shed those
+    // entries at load — non-throwing (never invoke the throwing guard in the
+    // restore loop); an invalid entry is dropped, not fatal.
+    let droppedInvalidName = 0;
     for (const op of pendingOps) {
       const restored = {
         ...op,
         id: String(op.id),
         synced: false,
       } as unknown as OpLogEntry;
+      if (!isValidMapName(restored.mapName)) {
+        droppedInvalidName++;
+        continue;
+      }
       this.opLog.push(restored);
       // Surface restored pending ops to the per-record sync-state tracker so
       // they project to 'pending' or 'local-only' immediately on engine boot.
       this.recordSyncStateTracker.onAppend(restored);
+    }
+
+    if (droppedInvalidName > 0) {
+      logger.warn(
+        { count: droppedInvalidName },
+        'Dropped restored pending operations with an invalid (non-injective) map name; they will not be flushed to the server',
+      );
     }
 
     if (this.opLog.length > 0) {
@@ -881,6 +899,21 @@ export class SyncEngine {
    * close. The caller (startMerkleSync) converts the throw into a
    * connection-wide ACK suppression (heldSetIncomplete) instead.
    */
+  /**
+   * The current connection's held-OR-Map snapshot (or `null` before the first
+   * sync of a connection). Exposed so the `TopGunClient` primary OR-Map restore
+   * path shares the SAME longest-held-name discriminator used by
+   * `instantiateAndRestoreOrMap` — both restore seams must skip a matched key
+   * that belongs to a LONGER held name.
+   *
+   * Returns a defensive copy: this is a public accessor and the discriminator's
+   * correctness depends on the held-set, so callers must never mutate internal
+   * sync state in place.
+   */
+  public getHeldOrMapNames(): Set<string> | null {
+    return this.heldOrMapNames ? new Set(this.heldOrMapNames) : null;
+  }
+
   private async computeHeldOrMapNames(): Promise<Set<string>> {
     await this.backfillLegacyOrMapMarkers();
     const held = new Set<string>();
@@ -911,19 +944,32 @@ export class SyncEngine {
    * - Scans ALL keys (never a sample): a missed add-only map with a single key is
    *   exactly the bug. A name is classified OR the moment ANY key under its prefix
    *   holds an ARRAY (the ORMap records-array shape; an LWWRecord is always a single
-   *   object, never a bare array), so a `:`-prefix collision (TODO-577) between the
-   *   FIRST-colon-split name and an LWW *value* only ever ADDS a phantom OR name
-   *   (over-conservative: coverage 0 until it syncs), never hides a real one.
-   * - KNOWN GAP (TODO-577, latent until the durability watermark activates): the
-   *   first-colon split (`indexOf(':')`) means a map whose NAME contains a colon
-   *   (`"a:b"`, data key `"a:b:k"`) is attributed to `"a"`, so its own `:ormap`
-   *   marker is never stamped. If a sibling `"a"` also exists and syncs while `"a:b"`
-   *   is never re-opened this session, the min-barrier CAN advance past `"a:b"`'s
-   *   un-received tombstones — i.e. this colon-in-NAME case CAN hide a real map,
-   *   unlike the colon-in-value case above. Legacy-backfill-only (every post-fix map
-   *   stamps its marker under its full name; `HELD_ORMAP_META_RE`'s greedy capture
-   *   recovers colon names correctly). Closed by forbidding `:` in map names or an
-   *   injective key scheme — see TODO-577.
+   *   object, never a bare array). The name is derived by the FIRST colon
+   *   (`indexOf(':')`) and this derivation is KEPT deliberately: marking every colon
+   *   prefix instead would stamp a phantom held name for ordinary composite KEYS
+   *   (`tags` + key `post:123` → phantom `tags:post`), which would then prefix-restore
+   *   its sibling's records and push a duplicate polluted server map — strictly worse
+   *   than the residual below.
+   *
+   *   Consequences of first-colon derivation for legacy colon-named maps (`":"` in a
+   *   map NAME is now forbidden at map creation, so this only concerns hypothetical
+   *   pre-forbid stores):
+   *   - Accepted residual: legacy raw `a:b:k` keys prefix-leak into map `a` as key
+   *     `b:k` on restore. This is a pre-existing restore-pollution class inherent to
+   *     the flat non-injective scheme, orthogonal to tombstone prune; the leaked data
+   *     re-converges from the server (authoritative), it does not resurrect anything.
+   *   - Add-only / unmarked legacy `a:b` (no durable `:tombstones`, no pre-forbid
+   *     `:ormap` marker): closed by forbid + unreachability. Post-forbid `a:b` is
+   *     unopenable (getMap/getORMap reject it), unmarked (first-colon backfill stamps
+   *     `a`, never `a:b`), and therefore unheld and never instantiated — so no ACK
+   *     path ever runs under `a:b`.
+   *   - Marked legacy `a:b` (durable `:tombstones` OR a pre-forbid `:ormap` marker):
+   *     surfaced-as-held by the greedy `HELD_ORMAP_META_RE` capture and instantiated
+   *     internally via `instantiateAndRestoreOrMap` (which bypasses the creation
+   *     guard), but safely gated — it enters the snapshot at coverage 0, applies its
+   *     tombstones on restore, is ACK-gated, and the loadOpLog name-filter plus the
+   *     longest-held-name restore-guard block push pollution. Held and gated, NOT
+   *     resurrected.
    * - Gated by a durable done-flag set ONLY on success. A throw propagates to
    *   `computeHeldOrMapNames` → the connection fail-closes (heldSetIncomplete) and
    *   the scan is retried on the next connection. This makes the upgrade path safe
@@ -997,6 +1043,12 @@ export class SyncEngine {
       for (const fullKey of keys) {
         if (!fullKey.startsWith(prefix)) continue;
         const keyPart = fullKey.substring(prefix.length);
+        // Skip a prefix-matched key that actually belongs to a LONGER held name
+        // (the flat scheme is not injective for legacy colon-named stores). The
+        // held-set is the discriminator, shared with TopGunClient.restoreORMap.
+        if (keyBelongsToLongerHeldName(mapName, keyPart, this.heldOrMapNames)) {
+          continue;
+        }
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- restored KV value shape is validated by the Array.isArray guard below; ORMapRecord value type is erased at the storage layer
         const data = await this.storageAdapter.get<any>(fullKey);
         if (Array.isArray(data)) {
