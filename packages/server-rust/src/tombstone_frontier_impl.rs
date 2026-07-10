@@ -159,24 +159,30 @@ struct FrontierState {
     /// stamped epoch; key 0 is never inserted, so the prune sweep (which iterates
     /// these keys, never a `0..=max` range) can never touch the sentinel.
     epoch_tags: HashMap<Epoch, Vec<TombstoneRef>>,
-    /// RAM-only `epoch → max op-seq` index: the highest op sequence stamped in
-    /// each epoch. Maintained for SPEC-342j's byte-durability watermark
-    /// (flushed-seq → epoch mapping); not consumed by the dark prune here.
+    /// RAM-only `epoch → max assigned write-sequence` index: the highest
+    /// write-behind entry sequence (`MapDataStore::assigned_write_sequence`)
+    /// snapshotted when a tombstone was stamped into each epoch. This is the
+    /// bridge between the epoch counter and byte durability: epoch `E` is
+    /// byte-durable once the store's prefix-complete `flushed_watermark()` has
+    /// reached `max(epoch_max_seq[e] for e <= E)`. Since a tombstone's own
+    /// byte-write is enqueued strictly before its stamp, the snapshot is an
+    /// upper bound on that write's sequence — a conservative, never-premature
+    /// fence.
     epoch_max_seq: HashMap<Epoch, u64>,
-    /// Injectable byte-durability watermark. Constant 0 in production — no real
-    /// source is wired in THIS child (SPEC-342j supplies it), so the call-site
-    /// prune conjunction `is_epoch_prune_eligible(E) && watermark >= E` never
-    /// licenses a prune for any stamped epoch (all `>= 1`): the machinery is
-    /// structurally dark, no feature flag. ONLY tests set it, to exercise the
-    /// real drop path.
+    /// Cached byte-durability watermark: `max E such that every stamped epoch
+    /// e <= E has epoch_max_seq[e] <= flushed_watermark`. Recomputed on demand
+    /// from [`FrontierState::compute_durable_epoch_watermark`] against the store's
+    /// live flushed watermark (see [`TombstoneFrontier::refreshed_watermark`]);
+    /// 0 from construction until either the first byte-durable epoch or the
+    /// unclean-recovery rebuild fills the index (R12(e): 0 until the pre-listener
+    /// rebuild completes). Tests with no store inject it directly via
+    /// `set_durable_epoch_watermark` to exercise the drop path in isolation.
     ///
     /// This watermark ALSO gates the re-admission gate's active blocking (see
     /// [`TombstoneFrontier::is_protection_active`]): a forgotten client's push can
     /// only resurrect a value whose tombstone was PRUNED, and pruning is licensed
-    /// only once this watermark is non-zero. While it is 0 (dark by construction)
-    /// no tombstone can be dropped, so blocking a re-admission would gratuitously
-    /// break an un-migrated client for no safety gain — the gate is fully WIRED but
-    /// transparent, going live together with the prune (gate-before-activation).
+    /// only once this watermark is non-zero — so gate and prune activate together
+    /// (gate-before-activation, no prune-without-gate window).
     durable_epoch_watermark: Epoch,
     /// Max cursor-lag (epochs) before a tracked client is forgotten by the gate.
     /// Defaults to [`DEFAULT_FORGET_LAG_EPOCHS`]; settable so RAM pressure / an
@@ -279,7 +285,7 @@ impl FrontierState {
     /// tag's `millis`. Records the tombstone ref under its epoch and updates the
     /// max-seq index. Returns the stamped epoch (always `>= 1`: 0 is the reserved
     /// "no/uncomputable epoch" sentinel and is never stamped).
-    fn stamp_tombstone(&mut self, map: &str, key: &str, tag: &str) -> Epoch {
+    fn stamp_tombstone(&mut self, map: &str, key: &str, tag: &str, write_seq: u64) -> Epoch {
         // Pre-increment BEFORE deriving the epoch so op_seq is `>= 1` here and the
         // first stamp lands in epoch 1, never epoch 0 (R3(g-i)).
         self.op_seq += 1;
@@ -301,9 +307,57 @@ impl FrontierState {
                 key: key.to_string(),
                 tag: tag.to_string(),
             });
+        // Record the durability bound for this epoch: the highest write sequence
+        // the store had assigned at stamp time. The epoch is byte-durable only
+        // once the store's flushed watermark reaches this value.
         let slot = self.epoch_max_seq.entry(epoch).or_insert(0);
-        *slot = (*slot).max(self.op_seq);
+        *slot = (*slot).max(write_seq);
         epoch
+    }
+
+    /// The byte-durability watermark: the greatest `E` such that EVERY stamped
+    /// epoch `e <= E` has its recorded max write-sequence at or below `flushed`.
+    /// Walks the stamped epochs in ascending order and stops at the first whose
+    /// bytes are not yet durable; epochs with no entry (e.g. the empty span an
+    /// `E_rec` recovery restamp leaves below the recovery epoch) hold no
+    /// tombstones and are vacuously durable, so they never block the walk.
+    fn compute_durable_epoch_watermark(&self, flushed: u64) -> Epoch {
+        let mut keys: Vec<Epoch> = self.epoch_max_seq.keys().copied().collect();
+        keys.sort_unstable();
+        let mut watermark = 0;
+        for e in keys {
+            // Index lookup is infallible — `e` came from the key set.
+            if self.epoch_max_seq.get(&e).copied().unwrap_or(u64::MAX) <= flushed {
+                watermark = e;
+            } else {
+                break;
+            }
+        }
+        watermark
+    }
+
+    /// Unclean-recovery rebuild (index-as-cache): drop the RAM epoch index and
+    /// re-stamp EVERY live tombstone into one fresh maximally-lagging recovery
+    /// epoch `e_rec`. All older epochs become empty, so nothing is prunable until
+    /// every tracked client re-confirms past `e_rec`. The recovery epoch's bytes
+    /// are already durable (WAL-replayed into the inner store before this runs),
+    /// so its `epoch_max_seq` is 0 — the low-water-mark, not byte durability, is
+    /// the operative gate.
+    fn rebuild_into_epoch(&mut self, e_rec: Epoch, live: Vec<TombstoneRef>) {
+        self.epoch_tags.clear();
+        self.epoch_max_seq.clear();
+        let width = self.epoch_width.max(1);
+        self.current_epoch = e_rec;
+        self.current_max_epoch = e_rec;
+        // Position op_seq so the NEXT genuinely-new tombstone lands in e_rec + 1,
+        // keeping every epoch below e_rec empty.
+        self.op_seq = e_rec.saturating_mul(width);
+        if !live.is_empty() {
+            self.epoch_max_seq.insert(e_rec, 0);
+            self.epoch_tags.insert(e_rec, live);
+        }
+        // Recomputes from the fresh index on the next watermark read.
+        self.durable_epoch_watermark = 0;
     }
 
     /// Drain the tombstone refs of every currently prune-eligible epoch out of the
@@ -320,10 +374,10 @@ impl FrontierState {
     /// returns empty in production; tests inject a watermark to exercise the drop.
     fn drain_prunable(&mut self) -> Vec<(Epoch, TombstoneRef)> {
         let watermark = self.durable_epoch_watermark;
-        // Production dark fast-path: with the constant-0 watermark NO epoch can pass
-        // the conjunction (all stamped epochs are >= 1), so skip the per-epoch
-        // low-water-mark fold entirely — this runs on every OR_REMOVE and every
-        // SYNC-leaf request.
+        // Fast-path: a 0 watermark (no epoch byte-durable yet, or dark before the
+        // recovery rebuild) means NO stamped epoch (all `>= 1`) can pass the
+        // conjunction, so skip the per-epoch low-water-mark fold entirely — this
+        // runs on every OR_REMOVE and every SYNC-leaf request.
         if watermark == 0 {
             return Vec::new();
         }
@@ -577,7 +631,7 @@ impl TombstoneFrontier {
     /// gratuitous-block-without-prune window).
     #[must_use]
     pub fn is_protection_active(&self) -> bool {
-        self.lock().durable_epoch_watermark > 0
+        self.refreshed_watermark() > 0
     }
 
     /// Set the max cursor-lag (epochs) before a tracked client is forgotten by the
@@ -627,7 +681,87 @@ impl TombstoneFrontier {
     /// `millis`. Returns the stamped epoch (`>= 1`). See
     /// [`FrontierState::stamp_tombstone`].
     pub fn stamp_tombstone(&self, map: &str, key: &str, tag: &str) -> Epoch {
-        self.lock().stamp_tombstone(map, key, tag)
+        // Snapshot the store's highest assigned write sequence as this epoch's
+        // byte-durability bound. Read BEFORE taking the frontier lock (the store
+        // call is independent) and outside it. With no store (tests / Null
+        // backend) the bound is 0; those paths inject the watermark directly.
+        let write_seq = self
+            .store
+            .as_ref()
+            .map_or(0, |s| s.assigned_write_sequence());
+        self.lock().stamp_tombstone(map, key, tag, write_seq)
+    }
+
+    /// Recompute the cached byte-durability watermark from the store's live
+    /// prefix-complete flushed watermark, then return it. Monotone: the cache
+    /// only ever advances. With no store wired (tests / Null backend) the cache
+    /// is left as-is so a test-injected watermark is honored.
+    fn refreshed_watermark(&self) -> Epoch {
+        let flushed = self.store.as_ref().map(|s| s.flushed_watermark());
+        let mut state = self.lock();
+        if let Some(flushed) = flushed {
+            let computed = state.compute_durable_epoch_watermark(flushed);
+            state.durable_epoch_watermark = state.durable_epoch_watermark.max(computed);
+        }
+        state.durable_epoch_watermark
+    }
+
+    /// The recovered/clamped low-water-mark every consumer should read
+    /// (R12(d)): `min(persisted_LWM, durable_epoch_watermark)`. The clamp keeps a
+    /// consumer from acting on an LWM the durable data cannot back — after an
+    /// unclean recovery the byte-durability watermark is `E_rec` and the
+    /// persisted LWM is 0 until clients reconnect, so the clamp is the
+    /// persisted LWM; on the clean-restart continuity path it prevents pruning
+    /// past what is byte-durable.
+    #[must_use]
+    pub fn effective_low_water_mark(&self) -> Epoch {
+        let watermark = self.refreshed_watermark();
+        self.lock().low_water_mark().min(watermark)
+    }
+
+    /// Unclean-recovery rebuild of the epoch index (R12(c)), invoked in the
+    /// pre-listener WAL-recovery window (strictly before `accept()`). Scans the
+    /// durable store for every live OR-Map tombstone and re-stamps them all into
+    /// one fresh maximally-lagging recovery epoch:
+    ///
+    /// `E_rec = 1 + max(persisted counter hint, max epoch referenced by any
+    /// persisted cursor, ceil(flushed_watermark / EPOCH_WIDTH))`.
+    ///
+    /// The max-cursor term is load-bearing: it guarantees no tracked client is
+    /// ever considered already-past `E_rec`, killing the stale-counter-hint
+    /// resurrection trace. The RAM index is never persisted on the hot path, so
+    /// the counter hint is 0 (a clean-shutdown persist could supply one — an
+    /// optimization, never a correctness input). Returns the chosen `E_rec` (0
+    /// when there is no durable backend, e.g. the Null store or a store-less
+    /// test frontier).
+    pub async fn rebuild_from_durable_store(&self) -> anyhow::Result<Epoch> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(0);
+        };
+        if store.is_null() {
+            return Ok(0);
+        }
+        // Load-bearing term: the highest epoch any persisted cursor references
+        // (keyspace scan over the 342e cursor namespace).
+        let max_cursor_epoch = scan_max_cursor_epoch(store.as_ref()).await?;
+        let flushed = store.flushed_watermark();
+        let width = self.lock().epoch_width.max(1);
+        let flushed_epochs = flushed.div_ceil(width);
+        // No persisted counter hint (index is RAM-only on the hot path).
+        let counter_hint = 0u64;
+        let e_rec = 1 + max_cursor_epoch.max(flushed_epochs).max(counter_hint);
+
+        let live = scan_live_tombstones(store.as_ref()).await?;
+        let restamped = live.len();
+        self.lock().rebuild_into_epoch(e_rec, live);
+        debug!(
+            e_rec,
+            max_cursor_epoch,
+            flushed_epochs,
+            restamped,
+            "tombstone epoch index rebuilt into a maximally-lagging recovery epoch"
+        );
+        Ok(e_rec)
     }
 
     /// The current (highest) server-stamped epoch, or 0 if none stamped yet. This is
@@ -637,19 +771,20 @@ impl TombstoneFrontier {
         self.lock().current_epoch
     }
 
-    /// The dark-by-construction durability watermark. Returns 0 in production — no
-    /// real byte-durability source is wired in this child (SPEC-342j supplies it),
-    /// so the call-site prune conjunction never licenses a prune for any stamped
-    /// epoch (all `>= 1`). ONLY tests inject a non-zero value.
+    /// The live byte-durability watermark: `max E such that every stamped epoch
+    /// `e <= E` is durable in the inner store`, recomputed from the store's
+    /// prefix-complete flushed watermark. 0 until the first epoch's bytes are
+    /// durable (or, after an unclean recovery, until the pre-listener rebuild
+    /// fills the index). With no store wired it returns the last injected value.
     #[must_use]
     pub fn durable_epoch_watermark(&self) -> Epoch {
-        self.lock().durable_epoch_watermark
+        self.refreshed_watermark()
     }
 
-    /// Test-only injection of the durability watermark to exercise the real drop
-    /// path. `#[cfg(test)]`-gated so PRODUCTION code structurally cannot activate
-    /// the prune early — the watermark stays constant 0 (dark by construction).
-    /// SPEC-342j replaces this with the real byte-durability watermark source.
+    /// Test-only injection of the durability watermark to exercise the drop path
+    /// on a store-less frontier (`new(None)`), where `refreshed_watermark` leaves
+    /// the cache untouched. Production wires a real store, so the watermark is
+    /// always the computed byte-durability value, never this override.
     #[cfg(test)]
     pub fn set_durable_epoch_watermark(&self, watermark: Epoch) {
         self.lock().durable_epoch_watermark = watermark;
@@ -683,7 +818,17 @@ impl TombstoneFrontier {
     /// returns empty in production (`durable_epoch_watermark == 0`).
     #[must_use]
     pub fn drain_prunable_tombstones(&self) -> Vec<(Epoch, TombstoneRef)> {
-        self.lock().drain_prunable()
+        // Refresh the cached byte-durability watermark from the store's live
+        // flushed watermark, then drain under BOTH call-site conjuncts. Reading
+        // the store's watermark outside the lock keeps the frontier lock hold
+        // short; the field is then updated and consumed under one lock.
+        let flushed = self.store.as_ref().map(|s| s.flushed_watermark());
+        let mut state = self.lock();
+        if let Some(flushed) = flushed {
+            let computed = state.compute_durable_epoch_watermark(flushed);
+            state.durable_epoch_watermark = state.durable_epoch_watermark.max(computed);
+        }
+        state.drain_prunable()
     }
 
     /// Re-insert a drained tombstone ref whose storage drop FAILED (see
@@ -757,6 +902,72 @@ async fn load_cursor(store: &dyn MapDataStore, client: &ClientId) -> anyhow::Res
         }) => Ok(decode_epoch(&bytes)),
         _ => Ok(None),
     }
+}
+
+/// Scan the persisted cursor keyspace ([`CURSOR_MAP`]) and return the highest
+/// epoch any client cursor references, or 0 if none. This is the load-bearing
+/// `max-cursor-epoch` term of `E_rec`: `E_rec` must exceed it so no persisted
+/// client is ever considered already-past the fresh recovery epoch.
+async fn scan_max_cursor_epoch(store: &dyn MapDataStore) -> anyhow::Result<Epoch> {
+    let mut max_epoch: Epoch = 0;
+    let mut batch = store.scan_values(CURSOR_MAP, false, 0).await?;
+    loop {
+        for (_key, value) in &batch.records {
+            if let RecordValue::Lww {
+                value: Value::Bytes(bytes),
+                ..
+            } = value
+            {
+                if let Some(epoch) = decode_epoch(bytes) {
+                    max_epoch = max_epoch.max(epoch);
+                }
+            }
+        }
+        match batch.next_cursor.take() {
+            None => break,
+            Some(cursor) => {
+                batch = store
+                    .scan_values_batched(CURSOR_MAP, false, cursor, 0)
+                    .await?;
+            }
+        }
+    }
+    Ok(max_epoch)
+}
+
+/// Scan the durable keyspace for every live OR-Map tombstone (post WAL-replay),
+/// returning a [`TombstoneRef`] per `(map, key, tag)`. The unclean-recovery
+/// rebuild re-stamps all of these into the fresh recovery epoch. The reserved
+/// internal keyspaces ([`CURSOR_MAP`] and other `_topgun_`-prefixed maps) hold
+/// no OR-Map tombstones (their records are LWW), so they contribute nothing and
+/// are skipped implicitly by the `OrMap` match. Legacy `OrTombstones` blobs are
+/// Merkle-invisible (TODO-559) and out of this child's prune scope, so they are
+/// deliberately NOT re-stamped here.
+async fn scan_live_tombstones(store: &dyn MapDataStore) -> anyhow::Result<Vec<TombstoneRef>> {
+    let mut live = Vec::new();
+    for map in store.list_maps().await? {
+        let mut batch = store.scan_values(&map, false, 0).await?;
+        loop {
+            for (key, value) in &batch.records {
+                if let RecordValue::OrMap { tombstones, .. } = value {
+                    for tag in tombstones {
+                        live.push(TombstoneRef {
+                            map: map.clone(),
+                            key: key.clone(),
+                            tag: tag.clone(),
+                        });
+                    }
+                }
+            }
+            match batch.next_cursor.take() {
+                None => break,
+                Some(cursor) => {
+                    batch = store.scan_values_batched(&map, false, cursor, 0).await?;
+                }
+            }
+        }
+    }
+    Ok(live)
 }
 
 /// Wall-clock milliseconds since the Unix epoch (0 on a clock error).

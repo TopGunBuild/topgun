@@ -4,10 +4,10 @@
 //! in per-partition coalesced queues and flushing them on a configurable schedule.
 //! An optional WAL ensures every acked write is durable before the ack is returned.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -425,6 +425,17 @@ pub struct WriteBehindDataStore {
     wal: Option<Arc<dyn Wal>>,
     /// WAL sequence counter, monotonically increasing per-entry for ordering.
     wal_sequence: AtomicU64,
+    /// Entry sequences ASSIGNED but not yet RESOLVED — a write is resolved when
+    /// its bytes reach the inner store (flushed) OR a later write to the same key
+    /// coalesces it away (retired, its data carried forward by the survivor).
+    ///
+    /// The smallest still-pending sequence is the PREFIX-COMPLETE flushed
+    /// watermark (see [`flushed_watermark`](MapDataStore::flushed_watermark)):
+    /// every sequence below it is resolved, with no mid-range hole. This is the
+    /// real byte-durability signal the tombstone frontier fences the prune on —
+    /// NOT the last-assigned counter, which advances at enqueue and would let a
+    /// prune drop a tombstone still buffered in RAM.
+    pending_seqs: Mutex<BTreeSet<u64>>,
 }
 
 /// WAL plus the live sequence counter's starting value, threaded into
@@ -487,6 +498,7 @@ impl WriteBehindDataStore {
             is_shutdown: AtomicBool::new(false),
             wal,
             wal_sequence: AtomicU64::new(wal_sequence_start),
+            pending_seqs: Mutex::new(BTreeSet::new()),
         });
 
         // Spawn background flush loop with a clone of the Arc
@@ -499,6 +511,28 @@ impl WriteBehindDataStore {
     /// Returns the next sequence number for ordering.
     fn next_sequence(&self) -> u64 {
         self.sequence.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Lock the pending-sequence set, recovering from a poisoned mutex (a prior
+    /// panic while holding it leaves a consistent set — a stale entry only holds
+    /// the watermark back, the safe direction).
+    fn pending_seqs(&self) -> std::sync::MutexGuard<'_, BTreeSet<u64>> {
+        self.pending_seqs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Record `seq` as enqueued-but-not-yet-durable. Called once per assigned
+    /// entry sequence, right after it enters a partition queue.
+    fn track_pending(&self, seq: u64) {
+        self.pending_seqs().insert(seq);
+    }
+
+    /// Mark `seq` resolved — its bytes are durable in the inner store (flushed)
+    /// or it was superseded by a coalescing write (retired). This is what lets
+    /// the prefix-complete flushed watermark advance past `seq`.
+    fn resolve_pending(&self, seq: u64) {
+        self.pending_seqs().remove(&seq);
     }
 
     /// Snapshot the pending staging entries for one map as a key-sorted map of
@@ -669,6 +703,11 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                         // way -- it counts enqueues, one decrement per drained entry.
                         store.clear_staging_if_current(&entry.map, &entry.key, entry.sequence);
                         store.pending_count.fetch_sub(1, Ordering::Relaxed);
+                        // Bytes are now durable in the inner store — resolve the
+                        // sequence so the prefix-complete flushed watermark can
+                        // advance past it. This is the ONLY signal that advances
+                        // the tombstone durability fence.
+                        store.resolve_pending(entry.sequence);
                         // Mark the WAL entry applied so a clean restart does not
                         // re-replay writes that are already durable in the inner store.
                         if let Some(wal) = &store.wal {
@@ -717,6 +756,11 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                             // entry's terminal discard.
                             store.clear_staging_if_current(&entry.map, &entry.key, entry.sequence);
                             store.pending_count.fetch_sub(1, Ordering::Relaxed);
+                            // Terminal discard: the sequence will never flush, so
+                            // resolve it to unstall the watermark. Its bytes remain
+                            // in the WAL until GC (R12(b)), so this does not lose
+                            // durability — a discarded write is a re-sync event.
+                            store.resolve_pending(entry.sequence);
                         }
                     }
                 }
@@ -810,19 +854,32 @@ impl MapDataStore for WriteBehindDataStore {
         };
 
         // Insert into partition queue, preserving original store_time on coalesce
-        let mut queue = self.queues.entry(partition_id).or_default();
-
-        // If coalescing, preserve the original store_time
         let staging_key = (map.to_string(), key.to_string());
-        if let Some(existing) = queue.value_mut().remove(map, key) {
-            let mut coalesced = entry;
-            coalesced.store_time = existing.store_time;
-            let _ = queue.value_mut().insert(coalesced);
-            // No pending_count change on coalesce
-        } else {
-            let _ = queue.value_mut().insert(entry);
-            // New key -- increment pending count
-            self.pending_count.fetch_add(1, Ordering::Relaxed);
+        let retired_seq = {
+            let mut queue = self.queues.entry(partition_id).or_default();
+            // If coalescing, preserve the original store_time
+            if let Some(existing) = queue.value_mut().remove(map, key) {
+                let retired = existing.sequence;
+                let mut coalesced = entry;
+                coalesced.store_time = existing.store_time;
+                let _ = queue.value_mut().insert(coalesced);
+                // No pending_count change on coalesce
+                Some(retired)
+            } else {
+                let _ = queue.value_mut().insert(entry);
+                // New key -- increment pending count
+                self.pending_count.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        };
+
+        // Track this write as pending byte-durability, and retire the
+        // coalesced-away predecessor (its data is carried forward by this
+        // write). Done after releasing the partition-queue lock so the
+        // pending-set lock is never nested under it.
+        self.track_pending(entry_seq);
+        if let Some(retired) = retired_seq {
+            self.resolve_pending(retired);
         }
 
         // Update staging area for read-your-writes
@@ -891,17 +948,26 @@ impl MapDataStore for WriteBehindDataStore {
             wal_sequence: wal_seq,
         };
 
-        let mut queue = self.queues.entry(partition_id).or_default();
-
         let staging_key = (map.to_string(), key.to_string());
-        if let Some(existing) = queue.value_mut().remove(map, key) {
-            let mut coalesced = entry;
-            coalesced.store_time = existing.store_time;
-            let _ = queue.value_mut().insert(coalesced);
-            // No pending_count change on coalesce
-        } else {
-            let _ = queue.value_mut().insert(entry);
-            self.pending_count.fetch_add(1, Ordering::Relaxed);
+        let retired_seq = {
+            let mut queue = self.queues.entry(partition_id).or_default();
+            if let Some(existing) = queue.value_mut().remove(map, key) {
+                let retired = existing.sequence;
+                let mut coalesced = entry;
+                coalesced.store_time = existing.store_time;
+                let _ = queue.value_mut().insert(coalesced);
+                // No pending_count change on coalesce
+                Some(retired)
+            } else {
+                let _ = queue.value_mut().insert(entry);
+                self.pending_count.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        };
+
+        self.track_pending(entry_seq);
+        if let Some(retired) = retired_seq {
+            self.resolve_pending(retired);
         }
 
         // Pending delete marker in staging
@@ -1172,6 +1238,28 @@ impl MapDataStore for WriteBehindDataStore {
         Ok(self.sequence.load(Ordering::Relaxed))
     }
 
+    fn assigned_write_sequence(&self) -> u64 {
+        // One past the highest sequence handed out — an upper bound on any
+        // in-flight write's sequence. The tombstone frontier snapshots this at
+        // stamp time; because the tombstone's own byte-write was enqueued (and
+        // thus assigned a sequence) strictly before the stamp, this is `>=` it.
+        self.sequence.load(Ordering::Relaxed)
+    }
+
+    fn flushed_watermark(&self) -> u64 {
+        // Prefix-complete: the smallest still-pending sequence is the first
+        // un-resolved write; every sequence below it is durable (flushed) or
+        // retired (coalesced away). With nothing pending, all assigned writes
+        // are resolved, so the watermark is the full assigned counter. This can
+        // NEVER expose a value above an un-flushed sequence — the property that
+        // makes `stamped_seq <= flushed_watermark()` a sound durability fence.
+        let pending = self.pending_seqs();
+        match pending.iter().next().copied() {
+            Some(min_pending) => min_pending,
+            None => self.sequence.load(Ordering::Relaxed),
+        }
+    }
+
     async fn hard_flush(&self) -> anyhow::Result<()> {
         // Mark the store as shutting down so any straggler writes are rejected
         // rather than queued behind the drain.
@@ -1242,6 +1330,7 @@ impl MapDataStore for WriteBehindDataStore {
                     Ok(Ok(())) => {
                         self.staging.remove(&(entry.map.clone(), entry.key.clone()));
                         self.pending_count.fetch_sub(1, Ordering::Relaxed);
+                        self.resolve_pending(entry.sequence);
                         // Mark WAL applied so a restart after clean shutdown is
                         // a no-op rather than re-replaying already-durable writes.
                         if let Some(wal) = &self.wal {
