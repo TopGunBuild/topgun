@@ -905,9 +905,13 @@ export class SyncEngine {
    * path shares the SAME longest-held-name discriminator used by
    * `instantiateAndRestoreOrMap` — both restore seams must skip a matched key
    * that belongs to a LONGER held name.
+   *
+   * Returns a defensive copy: this is a public accessor and the discriminator's
+   * correctness depends on the held-set, so callers must never mutate internal
+   * sync state in place.
    */
   public getHeldOrMapNames(): Set<string> | null {
-    return this.heldOrMapNames;
+    return this.heldOrMapNames ? new Set(this.heldOrMapNames) : null;
   }
 
   private async computeHeldOrMapNames(): Promise<Set<string>> {
