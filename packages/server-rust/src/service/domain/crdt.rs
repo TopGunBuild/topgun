@@ -284,14 +284,16 @@ impl CrdtService {
             None
         };
 
-        // Defence-in-depth op-path gate (R4, non-load-bearing, dark until 342j): drop
-        // a forgotten client's OR-bearing op before it merges. Belt-and-suspenders to
-        // the load-bearing ORMapPushDiff gate; vacuous on OR_ADD (tag is regenerated).
-        if self.op_path_gated(op, ctx.connection_id).await {
-            return Ok(OperationResponse::Ack {
-                call_id: ctx.call_id,
-            });
-        }
+        // Deliberately NO forgotten-client gate on the op path. Client-originated
+        // tags are regenerated server-side above, so a pruned tombstone's tag can
+        // never be re-presented here — the path is resurrection-proof by
+        // construction and a gate protects nothing. Worse, a gate keyed on the
+        // frontier's "unknown == forgotten" would silently drop writes from every
+        // device that has not yet completed its first ACK round (a fresh device
+        // flushing its pending oplog on connect), while still returning OP_ACK —
+        // the client then clears the op from its local oplog and the write is
+        // permanently lost on both sides. The verbatim-tag path (ORMapPushDiff)
+        // keeps its load-bearing gate.
 
         // Read old value before mutation for query broadcast filtering.
         let old_rmpv_value = self
@@ -358,12 +360,6 @@ impl CrdtService {
             // Each op gets its own partition based on its key (OpBatch ctx has
             // partition_id=None because the batch contains keys for many partitions).
             for op in ops {
-                // Defence-in-depth op-path gate (R4, non-load-bearing, dark until
-                // 342j; inert for the non-connection HTTP/anonymous paths where
-                // `connection_id` is None). Skip a forgotten client's OR-bearing op.
-                if self.op_path_gated(op, ctx.connection_id).await {
-                    continue;
-                }
                 let sanitized_ts = self.write_validator.sanitize_hlc();
                 self.apply_batch_op(op, Some(&sanitized_ts), ctx.connection_id)
                     .await?;
@@ -396,12 +392,6 @@ impl CrdtService {
             }
             // All ops validated — apply them sequentially with sanitized timestamps.
             for op in ops {
-                // Defence-in-depth op-path gate (R4, non-load-bearing, dark until
-                // 342j; inert for the non-connection HTTP/anonymous paths where
-                // `connection_id` is None). Skip a forgotten client's OR-bearing op.
-                if self.op_path_gated(op, ctx.connection_id).await {
-                    continue;
-                }
                 let sanitized_ts = self.write_validator.sanitize_hlc();
                 self.apply_batch_op(op, Some(&sanitized_ts), ctx.connection_id)
                     .await?;
@@ -420,12 +410,6 @@ impl CrdtService {
                 self.validate_schema_for_op(op)?;
             }
             for op in ops {
-                // Defence-in-depth op-path gate (R4, non-load-bearing, dark until
-                // 342j; inert for the non-connection HTTP/anonymous paths where
-                // `connection_id` is None). Skip a forgotten client's OR-bearing op.
-                if self.op_path_gated(op, ctx.connection_id).await {
-                    continue;
-                }
                 let sanitized_ts = self.write_validator.sanitize_hlc();
                 self.apply_batch_op(op, Some(&sanitized_ts), ctx.connection_id)
                     .await?;
@@ -484,43 +468,6 @@ impl CrdtService {
     /// original tag through to the store (the test would be vacuous). Returns `false`
     /// (never gates) for a non-client caller (no connection → HTTP/anonymous/system
     /// trusted paths) and while the durability watermark is 0 (dark by construction).
-    async fn op_path_gated(&self, op: &ClientOp, conn: Option<ConnectionId>) -> bool {
-        let is_or = matches!(&op.or_record, Some(Some(_))) || matches!(&op.or_tag, Some(Some(_)));
-        if !is_or {
-            return false;
-        }
-        let Some(conn) = conn else {
-            return false;
-        };
-        let Some(frontier) = self.frontier.as_ref() else {
-            return false;
-        };
-        if !frontier.is_protection_active() {
-            return false;
-        }
-        // A vanished connection → treat as unknown → forgotten.
-        let Some(handle) = self.connection_registry.get(conn) else {
-            return true;
-        };
-        let (device_id, principal_id) = {
-            let meta = handle.metadata.read().await;
-            (
-                meta.device_id.clone(),
-                meta.principal.as_ref().map(|p| p.id.clone()),
-            )
-        };
-        match device_id {
-            None => true, // no server-issued device identity → unknown → forgotten
-            Some(device_id) => {
-                let client = crate::network::device_identity::frontier_client_id(
-                    principal_id.as_deref(),
-                    &device_id,
-                );
-                frontier.is_forgotten(&client)
-            }
-        }
-    }
-
     /// Applies a single `ClientOp` to the `RecordStore` and returns the `ServerEventPayload`
     /// to broadcast. Called by both `handle_client_op` and `handle_op_batch`.
     ///
