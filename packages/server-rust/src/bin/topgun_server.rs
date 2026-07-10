@@ -932,7 +932,7 @@ async fn main() -> anyhow::Result<()> {
         frontier,
     ) = cluster_state_for_services;
 
-    // Unclean-recovery rebuild of the tombstone epoch index (SPEC-342j R12(c)/(e)).
+    // Unclean-recovery rebuild of the tombstone epoch index.
     // The RAM epoch index is never persisted on the hot path, so after WAL recovery
     // it is empty: re-stamp every live tombstone into ONE fresh maximally-lagging
     // recovery epoch and bump the epoch counter past every persisted client cursor,
