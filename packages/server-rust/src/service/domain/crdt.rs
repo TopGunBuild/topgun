@@ -2968,6 +2968,7 @@ mod tests {
     // practical here — this exercises the actual eviction blind-spot the gauge
     // exists to defend against, not a stand-in for it.
     #[tokio::test]
+    #[serial_test::serial(tombstone_gauge)]
     async fn or_remove_tombstone_gauge_survives_real_eviction_and_rehydration() {
         let dir = tempfile::tempdir().expect("tempdir");
         let redb_path = dir.path().join("gauge_residency.redb");
@@ -2989,64 +2990,80 @@ mod tests {
             Arc::new(SchemaService::new()),
         ));
 
-        let map_name = "gauge_residency_map";
-        let key = "item-1";
-        let tag = "tag-gauge-residency";
+        // The gauge is a process-global static: the serial(tombstone_gauge) group
+        // serializes the gauge-asserting tests against each other, but UNMARKED
+        // parallel tests still mutate it via ordinary OR_REMOVE applies and prune
+        // drains. Exact-equality snapshots are therefore retried on a fresh map:
+        // ambient noise shifts between attempts, while a genuine double-count /
+        // dropped-gauge regression is deterministic and fails every attempt.
+        let mut attempt = 0usize;
+        'attempt: loop {
+            attempt += 1;
+            let map_name = &format!("gauge_residency_map_{attempt}");
+            let key = "item-1";
+            let tag = "tag-gauge-residency";
 
-        // The gauge is a process-global static shared across parallel test
-        // threads, so assert on the DELTA this test produces, never an absolute
-        // value.
-        let before_write = crate::storage::record::tombstone_bytes();
+            let before_write = crate::storage::record::tombstone_bytes();
 
-        svc.clone()
-            .oneshot(or_add_op(map_name, key, "payload", tag))
-            .await
-            .expect("or_add must succeed");
-        svc.clone()
-            .oneshot(or_remove_op(map_name, key, tag))
-            .await
-            .expect("or_remove must succeed");
+            svc.clone()
+                .oneshot(or_add_op(map_name, key, "payload", tag))
+                .await
+                .expect("or_add must succeed");
+            svc.clone()
+                .oneshot(or_remove_op(map_name, key, tag))
+                .await
+                .expect("or_remove must succeed");
 
-        let after_write = crate::storage::record::tombstone_bytes();
-        assert_eq!(
-            after_write - before_write,
-            tag.len() as u64,
-            "gauge must increase by exactly the new tombstone tag's byte length"
-        );
+            let after_write = crate::storage::record::tombstone_bytes();
+            if after_write - before_write != tag.len() as u64 {
+                assert!(
+                    attempt < 5,
+                    "gauge delta never settled to exactly the tag length across 5 quiet-window attempts                      (deterministic gauge regression, not parallel-test noise)"
+                );
+                continue 'attempt;
+            }
 
-        // Force the record non-resident via the real eviction primitive. The
-        // OR_REMOVE above wrote through with `CallerProvenance::CrdtMerge` over a
-        // real (non-null) data store, which marks the record clean and therefore
-        // evictable.
-        let store = factory.get_or_create(map_name, hash_to_partition(key));
-        let evicted = store.evict_lru(u32::MAX, false);
-        assert!(evicted > 0, "the clean record must be evicted");
-        assert!(
-            !store.exists_in_memory(key),
-            "record must be non-resident after eviction"
-        );
+            // Force the record non-resident via the real eviction primitive. The
+            // OR_REMOVE above wrote through with `CallerProvenance::CrdtMerge` over a
+            // real (non-null) data store, which marks the record clean and therefore
+            // evictable.
+            let store = factory.get_or_create(map_name, hash_to_partition(key));
+            let evicted = store.evict_lru(u32::MAX, false);
+            assert!(evicted > 0, "the clean record must be evicted");
+            assert!(
+                !store.exists_in_memory(key),
+                "record must be non-resident after eviction"
+            );
 
-        let after_eviction = crate::storage::record::tombstone_bytes();
-        assert_eq!(
-            after_eviction, after_write,
-            "evicting a tombstone-bearing record must not drop the gauge"
-        );
+            let after_eviction = crate::storage::record::tombstone_bytes();
+            if after_eviction != after_write {
+                assert!(
+                    attempt < 5,
+                    "eviction kept moving the gauge across 5 attempts — a deterministic                      evict-drops-gauge regression, not parallel-test noise"
+                );
+                continue 'attempt;
+            }
 
-        // Rehydrate: `get()` transparently reloads the non-resident record from
-        // the datastore. Confirm the tombstone survived the round trip and the
-        // gauge did not move.
-        let (_, tombstones) = read_or_map(&factory, map_name, key).await;
-        assert_eq!(
-            tombstones,
-            vec![tag.to_string()],
-            "tombstone must still be present after rehydration"
-        );
+            // Rehydrate: `get()` transparently reloads the non-resident record from
+            // the datastore. Confirm the tombstone survived the round trip and the
+            // gauge did not move.
+            let (_, tombstones) = read_or_map(&factory, map_name, key).await;
+            assert_eq!(
+                tombstones,
+                vec![tag.to_string()],
+                "tombstone must still be present after rehydration"
+            );
 
-        let after_rehydration = crate::storage::record::tombstone_bytes();
-        assert_eq!(
-            after_rehydration, after_write,
-            "rehydrating a tombstone-bearing record must not double-count the gauge"
-        );
+            let after_rehydration = crate::storage::record::tombstone_bytes();
+            if after_rehydration != after_write {
+                assert!(
+                    attempt < 5,
+                    "rehydration kept moving the gauge across 5 attempts — a deterministic                      double-count regression, not parallel-test noise"
+                );
+                continue 'attempt;
+            }
+            break 'attempt;
+        }
     }
 
     // AC1: add-wins — OR_REMOVE of one tag preserves concurrent survivors.
