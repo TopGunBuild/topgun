@@ -508,9 +508,20 @@ impl WriteBehindDataStore {
         store
     }
 
-    /// Returns the next sequence number for ordering.
-    fn next_sequence(&self) -> u64 {
-        self.sequence.fetch_add(1, Ordering::Relaxed)
+    /// Assign the next ordering sequence AND record it pending byte-durability in
+    /// one atomic step, under the `pending_seqs` lock. Folding the `fetch_add` and
+    /// the set insert under the same lock `flushed_watermark()` reads is what makes
+    /// the watermark prefix-complete under concurrency: a separate bump-then-track
+    /// leaves a window where the counter is already incremented but the set is
+    /// still empty, during which `flushed_watermark()`'s empty-set branch would
+    /// return `sequence.load()` — a value ABOVE the just-assigned, still-buffered
+    /// sequence (a mid-range hole that could license pruning a non-durable
+    /// tombstone). Returns the assigned sequence.
+    fn assign_tracked_sequence(&self) -> u64 {
+        let mut pending = self.pending_seqs();
+        let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
+        pending.insert(seq);
+        seq
     }
 
     /// Lock the pending-sequence set, recovering from a poisoned mutex (a prior
@@ -522,8 +533,10 @@ impl WriteBehindDataStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Record `seq` as enqueued-but-not-yet-durable. Called once per assigned
-    /// entry sequence, right after it enters a partition queue.
+    /// Record `seq` as enqueued-but-not-yet-durable. Test-only injector for
+    /// exercising the watermark deterministically; production assigns and tracks
+    /// atomically via [`assign_tracked_sequence`](Self::assign_tracked_sequence).
+    #[cfg(test)]
     fn track_pending(&self, seq: u64) {
         self.pending_seqs().insert(seq);
     }
@@ -575,10 +588,10 @@ impl WriteBehindDataStore {
 
     /// Stage the latest buffered `value` for `(map, key)` under sequence `seq`,
     /// keeping monotonicity: a write only replaces the slot if its `seq` is at
-    /// least the slot's current `seq`. `seq` is `next_sequence()`, strictly
-    /// increasing per call, so a higher `seq` is always the later write. Two
-    /// concurrent writers on the same key can otherwise interleave between
-    /// `next_sequence()` and this insert and let the older write clobber the
+    /// least the slot's current `seq`. `seq` is from `assign_tracked_sequence()`,
+    /// strictly increasing per call, so a higher `seq` is always the later write.
+    /// Two concurrent writers on the same key can otherwise interleave between
+    /// the sequence assignment and this insert and let the older write clobber the
     /// newer staged value (a plain `insert` is last-writer-wins by wall-clock,
     /// not by `seq`). The monotonic guard makes the slot's `seq` truthful, which
     /// is the identity [`clear_staging_if_current`] relies on.
@@ -839,7 +852,9 @@ impl MapDataStore for WriteBehindDataStore {
         };
         self.wal_append(partition_id, &wal_entry).await?;
 
-        let entry_seq = self.next_sequence();
+        // Assign and track the durability sequence atomically (see
+        // `assign_tracked_sequence`) BEFORE the entry enters the queue.
+        let entry_seq = self.assign_tracked_sequence();
         let entry = DelayedEntry {
             map: map.to_string(),
             key: key.to_string(),
@@ -873,11 +888,9 @@ impl MapDataStore for WriteBehindDataStore {
             }
         };
 
-        // Track this write as pending byte-durability, and retire the
-        // coalesced-away predecessor (its data is carried forward by this
-        // write). Done after releasing the partition-queue lock so the
+        // Retire the coalesced-away predecessor (its data is carried forward by
+        // this write). Done after releasing the partition-queue lock so the
         // pending-set lock is never nested under it.
-        self.track_pending(entry_seq);
         if let Some(retired) = retired_seq {
             self.resolve_pending(retired);
         }
@@ -937,7 +950,8 @@ impl MapDataStore for WriteBehindDataStore {
         };
         self.wal_append(partition_id, &wal_entry).await?;
 
-        let entry_seq = self.next_sequence();
+        // Assign and track the durability sequence atomically before queuing.
+        let entry_seq = self.assign_tracked_sequence();
         let entry = DelayedEntry {
             map: map.to_string(),
             key: key.to_string(),
@@ -965,7 +979,6 @@ impl MapDataStore for WriteBehindDataStore {
             }
         };
 
-        self.track_pending(entry_seq);
         if let Some(retired) = retired_seq {
             self.resolve_pending(retired);
         }
@@ -1062,7 +1075,8 @@ impl MapDataStore for WriteBehindDataStore {
             };
             self.wal_append(partition_id, &wal_entry).await?;
 
-            let entry_seq = self.next_sequence();
+            // Assign and track the durability sequence atomically before queuing.
+            let entry_seq = self.assign_tracked_sequence();
             let entry = DelayedEntry {
                 map: map.to_string(),
                 key: key.clone(),
@@ -1073,16 +1087,28 @@ impl MapDataStore for WriteBehindDataStore {
                 wal_sequence: wal_seq,
             };
 
-            let mut queue = self.queues.entry(partition_id).or_default();
-
             let staging_key = (map.to_string(), key.clone());
-            if let Some(existing) = queue.value_mut().remove(map, key) {
-                let mut coalesced = entry;
-                coalesced.store_time = existing.store_time;
-                let _ = queue.value_mut().insert(coalesced);
-            } else {
-                let _ = queue.value_mut().insert(entry);
-                self.pending_count.fetch_add(1, Ordering::Relaxed);
+            let retired_seq = {
+                let mut queue = self.queues.entry(partition_id).or_default();
+                if let Some(existing) = queue.value_mut().remove(map, key) {
+                    let retired = existing.sequence;
+                    let mut coalesced = entry;
+                    coalesced.store_time = existing.store_time;
+                    let _ = queue.value_mut().insert(coalesced);
+                    Some(retired)
+                } else {
+                    let _ = queue.value_mut().insert(entry);
+                    self.pending_count.fetch_add(1, Ordering::Relaxed);
+                    None
+                }
+            };
+
+            // Retire the coalesced-away predecessor so its durability sequence does
+            // not stall the flushed watermark forever (a leaked pending sequence
+            // would permanently pin the prune). Done after the queue lock is
+            // released so the pending-set lock is never nested under it.
+            if let Some(retired) = retired_seq {
+                self.resolve_pending(retired);
             }
 
             let (smap, skey) = staging_key;
@@ -2124,6 +2150,48 @@ mod tests {
             store.flushed_watermark(),
             assigned,
             "after a full drain every assigned sequence is durable, so the watermark reaches it"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // A batch `remove_all` that coalesces a still-buffered write MUST resolve the
+    // retired sequence — otherwise it leaks in the pending set forever and pins
+    // the flushed watermark below it, permanently stalling the tombstone prune.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn remove_all_coalesce_resolves_retired_sequence_no_watermark_stall() {
+        let inner: Arc<dyn MapDataStore> = Arc::new(SpyDataStore::new());
+        let config = WriteBehindConfig {
+            write_delay_ms: 60_000,
+            flush_interval_ms: 60_000,
+            shutdown_timeout_ms: 5_000,
+            ..WriteBehindConfig::default()
+        };
+        let store = WriteBehindDataStore::new(inner, config);
+
+        // A buffered add for k1: its sequence is the lowest pending, so the
+        // watermark sits at it (nothing below it is durable yet).
+        store.add("m", "k1", &dummy_value(), 0, 1).await.unwrap();
+        let add_seq = store.flushed_watermark();
+
+        // A batch remove of the SAME key coalesces the buffered add. The retired
+        // add sequence must be resolved so the watermark can advance past it —
+        // before the fix it leaked and the watermark stayed pinned at `add_seq`.
+        store.remove_all("m", &["k1".to_string()]).await.unwrap();
+        assert!(
+            store.flushed_watermark() > add_seq,
+            "coalesced-away add sequence {add_seq} must be resolved, not leaked: watermark is {}",
+            store.flushed_watermark()
+        );
+
+        // And after a full drain the watermark reaches the assigned counter —
+        // proving no pending sequence was orphaned by the coalesce.
+        store.hard_flush().await.unwrap();
+        assert_eq!(
+            store.flushed_watermark(),
+            store.assigned_write_sequence(),
+            "no orphaned pending sequence after coalesce + drain"
         );
     }
 
