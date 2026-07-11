@@ -546,6 +546,13 @@ impl TombstoneFrontier {
         // must not panic in `tokio::spawn`.
         let (persist_tx, persist_worker) = match store.as_ref() {
             Some(store) if tokio::runtime::Handle::try_current().is_ok() => {
+                // Unbounded on purpose: the messages are tiny (client id + epoch), the
+                // single worker drains them fast (one buffered store write each), and
+                // the `Forget`/`Barrier` variants carry oneshots that must never be
+                // dropped — so a bounded channel could not simply drop-on-full. A
+                // best-effort cursor persist whose loss only costs a resync does not
+                // justify back-pressuring the ACK read loop. Bounding it under a real
+                // sustained-burst OOM budget is a post-soak hardening follow-up.
                 let (tx, rx) = mpsc::unbounded_channel();
                 let handle = tokio::spawn(cursor_persist_worker(Arc::clone(store), rx));
                 (Mutex::new(Some(tx)), Mutex::new(Some(handle)))
@@ -691,22 +698,29 @@ impl TombstoneFrontier {
         claimed: Epoch,
         conn: ConnectionId,
     ) -> bool {
-        // Compute + apply the advance under the lock, then drop it.
-        let advanced = self.lock().advance_on_ack(client, claimed, conn);
-        let Some(epoch) = advanced else {
-            return false;
+        // Compute + apply the advance AND enqueue the offloaded persist while STILL
+        // holding the state lock. The durable write itself is offloaded (the ACK read
+        // loop never awaits redb — that stays off the hot path), but the enqueue must
+        // be under the lock so the worker observes advances and forgets in the SAME
+        // order as their in-memory effects. If the enqueue happened after the lock
+        // dropped, a concurrent `forget_client` could interleave and enqueue its
+        // delete BEFORE this advance, letting the worker delete then re-persist and
+        // resurrect a forgotten cursor. `enqueue_persist` is a non-blocking channel
+        // send, so holding the std Mutex across it is safe (no await under the lock).
+        let advanced = {
+            let mut state = self.lock();
+            let advanced = state.advance_on_ack(client, claimed, conn);
+            if let Some(epoch) = advanced {
+                if !self.enqueue_persist(PersistMsg::Advance {
+                    client: client.clone(),
+                    epoch,
+                }) {
+                    debug!(client = %client, epoch, "cursor advance not enqueued (no persistence worker)");
+                }
+            }
+            advanced
         };
-        // Offload the durable persist onto the background worker: the in-memory
-        // advance above already fed the live LWM under the lock, and the redb write
-        // is a best-effort durability continuation. Awaiting it inline would
-        // head-of-line-block this per-connection ACK read loop under an ACK burst or
-        // a slow disk. A non-blocking enqueue keeps the loop free; the worker's FIFO
-        // serialization + high-water check keep the persisted cursor monotone.
-        self.enqueue_persist(PersistMsg::Advance {
-            client: client.clone(),
-            epoch,
-        });
-        true
+        advanced.is_some()
     }
 
     /// Whether `client` has regressed below `claim` reported at sync-initiation
@@ -798,14 +812,14 @@ impl TombstoneFrontier {
     /// premature prune), and 342f's orphan TTL is the backstop for a genuinely
     /// abandoned row.
     pub async fn forget_client(&self, client: &ClientId) {
-        self.lock().forget_client(client);
-        // Route the durable delete through the SAME worker queue as the offloaded
-        // advances, then await it. FIFO ordering makes the delete run strictly after
-        // every prior offloaded advance for this client, closing the resurrection
-        // window a detached persist would open (a persist landing after the delete
-        // would re-create the stale row). If no worker is wired (no store), this is
-        // a no-op — the in-memory forget above already ran.
+        // Do the in-memory forget AND enqueue the durable delete under the SAME state
+        // lock (see `confirm_apply_ack`): FIFO then orders the delete strictly after
+        // every prior offloaded advance for this client — a late advance can no longer
+        // land after the delete and resurrect the stale row. Enqueue is a non-blocking
+        // send; the `done` oneshot is awaited AFTER the lock drops.
         let rx = {
+            let mut state = self.lock();
+            state.forget_client(client);
             let (done_tx, done_rx) = oneshot::channel();
             if self.enqueue_persist(PersistMsg::Forget {
                 client: client.clone(),
@@ -816,9 +830,22 @@ impl TombstoneFrontier {
                 None
             }
         };
-        if let Some(rx) = rx {
+        match rx {
             // A dropped sender (worker gone) resolves to Err — never hang.
-            let _ = rx.await;
+            Some(rx) => {
+                let _ = rx.await;
+            }
+            // No worker (no store, or already shut down): the delete was NOT enqueued,
+            // so fall back to a direct durable delete. A forgotten client's row must
+            // never survive to be rehydrated at its stale cursor on restart.
+            None => {
+                if let Some(store) = self.store.as_ref() {
+                    let now = i64::try_from(now_millis()).unwrap_or(i64::MAX);
+                    if let Err(e) = store.remove(CURSOR_MAP, client, now).await {
+                        debug!(client = %client, "cursor forget fallback delete failed: {e}");
+                    }
+                }
+            }
         }
     }
 
@@ -1043,12 +1070,20 @@ async fn cursor_persist_worker(
         match msg {
             PersistMsg::Advance { client, epoch } => {
                 if !high_water.contains_key(&client) {
-                    let seed = load_cursor(store.as_ref(), &client)
-                        .await
-                        .ok()
-                        .flatten()
-                        .unwrap_or(0);
-                    high_water.insert(client.clone(), seed);
+                    match load_cursor(store.as_ref(), &client).await {
+                        Ok(seed) => {
+                            high_water.insert(client.clone(), seed.unwrap_or(0));
+                        }
+                        Err(e) => {
+                            // Do NOT seed 0 on a transient load error — that would let
+                            // this advance clobber a higher cursor a previous process
+                            // persisted (monotonicity regression). Skip; a later advance
+                            // re-attempts the seed. Best-effort and safe: a missed
+                            // advance leaves a lower persisted cursor = less prune.
+                            debug!(client = %client, epoch, "cursor seed load failed: {e}; deferring advance");
+                            continue;
+                        }
+                    }
                 }
                 let current = high_water.get(&client).copied().unwrap_or(0);
                 if epoch > current {
@@ -2167,6 +2202,89 @@ mod persistence_tests {
         f.shutdown().await;
     }
 
+    // -----------------------------------------------------------------------
+    // R3(a) — a transient seed-load error must NOT seed the worker high-water to
+    // 0. If it did, a lower advance would clobber a higher cursor a previous
+    // process persisted (a cross-restart monotonicity regression). The worker
+    // instead defers the advance. RED without the fix: seed=0 → 50 > 0 → clobbers
+    // the durable 100 down to 50.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn worker_defers_advance_on_seed_load_error_no_regression() {
+        let (path, _dir) = temp_store();
+        let inner: Arc<dyn MapDataStore> = Arc::new(RedbDataStore::new(&path).expect("open"));
+        let c: ClientId = "a5:alice|dev-1".into();
+        // A previous process persisted a high cursor.
+        persist_cursor(inner.as_ref(), &c, 100).await.unwrap();
+
+        // The worker's store fails every `load`, so the seed load errors.
+        let store: Arc<dyn MapDataStore> =
+            Arc::new(GatedAddStore::new_failing_load(Arc::clone(&inner)));
+        let f = TombstoneFrontier::new(Some(store));
+
+        f.enqueue_advance_for_test(&c, 50);
+        f.quiesce_persists().await;
+
+        // Read the true durable value directly from the inner store: unchanged.
+        assert_eq!(
+            load_cursor(inner.as_ref(), &c).await.unwrap(),
+            Some(100),
+            "a seed-load error defers the advance; the higher durable cursor is not clobbered"
+        );
+        f.shutdown().await;
+    }
+
+    // -----------------------------------------------------------------------
+    // R3 forget-wins under concurrency (STRESS test): an ACK advance racing a
+    // forget for the same client must never resurrect the durable cursor. Both
+    // methods enqueue their durability op WHILE holding the frontier lock, so the
+    // worker sees advances and forgets in the same order as their in-memory effects
+    // — whenever the client ends untracked in memory, its durable row is gone too.
+    // This exercises the concurrent path and guards against gross regressions; it is
+    // NOT a deterministic RED (the pre-fix advance→enqueue window is only a few
+    // instructions, so it is rarely hit). The fix's real guarantee is structural:
+    // the enqueue is inside the frontier lock, so enqueue order == in-memory order.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_confirm_then_forget_never_resurrects_durable_cursor() {
+        for _ in 0..200 {
+            let (path, _dir) = temp_store();
+            let store: Arc<dyn MapDataStore> = Arc::new(RedbDataStore::new(&path).expect("open"));
+            let c: ClientId = "a5:alice|dev-1".into();
+            let f = Arc::new(TombstoneFrontier::new(Some(Arc::clone(&store))));
+            f.set_delivered(CONN_A, 1000);
+
+            let f1 = Arc::clone(&f);
+            let c1 = c.clone();
+            let t1 = tokio::spawn(async move {
+                f1.confirm_apply_ack(&c1, 50, CONN_A).await;
+            });
+            let f2 = Arc::clone(&f);
+            let c2 = c.clone();
+            let t2 = tokio::spawn(async move {
+                f2.forget_client(&c2).await;
+            });
+            let _ = tokio::join!(t1, t2);
+            // Drain any racing advance the worker has not yet processed.
+            f.quiesce_persists().await;
+
+            // Whenever the forget won in memory (client untracked), the durable row
+            // must be absent — a late advance must not have resurrected it. If the
+            // advance re-tracked the client instead, that is legitimate re-admission
+            // and the durable row is allowed.
+            if !f.is_tracked(&c) {
+                assert_eq!(
+                    load_cursor(store.as_ref(), &c).await.unwrap(),
+                    None,
+                    "a forgotten client's durable cursor must not be resurrected by a racing advance"
+                );
+            }
+            f.shutdown().await;
+        }
+    }
+
     // A one-shot gate letting a test park the worker inside the store's `add`.
     struct AddGate {
         /// Fired when a gated `add` is entered (before it delegates).
@@ -2190,7 +2308,9 @@ mod persistence_tests {
     struct GatedAddStore {
         inner: Arc<dyn MapDataStore>,
         gate: Arc<AddGate>,
+        gate_add: std::sync::atomic::AtomicBool,
         gated_once: std::sync::atomic::AtomicBool,
+        fail_load: std::sync::atomic::AtomicBool,
     }
 
     impl GatedAddStore {
@@ -2198,7 +2318,21 @@ mod persistence_tests {
             Self {
                 inner,
                 gate,
+                gate_add: std::sync::atomic::AtomicBool::new(true),
                 gated_once: std::sync::atomic::AtomicBool::new(false),
+                fail_load: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        /// A wrapper whose `load` always errors (no add-gate) — for exercising the
+        /// worker's seed-load-error path.
+        fn new_failing_load(inner: Arc<dyn MapDataStore>) -> Self {
+            Self {
+                inner,
+                gate: Arc::new(AddGate::new()),
+                gate_add: std::sync::atomic::AtomicBool::new(false),
+                gated_once: std::sync::atomic::AtomicBool::new(false),
+                fail_load: std::sync::atomic::AtomicBool::new(true),
             }
         }
     }
@@ -2214,9 +2348,10 @@ mod persistence_tests {
             now: i64,
         ) -> anyhow::Result<()> {
             // Gate only the first add so the barrier/quiesce path is not blocked.
-            if !self
-                .gated_once
-                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            if self.gate_add.load(std::sync::atomic::Ordering::SeqCst)
+                && !self
+                    .gated_once
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
             {
                 self.gate.entered.notify_one();
                 self.gate.release.notified().await;
@@ -2242,6 +2377,9 @@ mod persistence_tests {
             self.inner.remove_backup(map, key, now).await
         }
         async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+            if self.fail_load.load(std::sync::atomic::Ordering::SeqCst) {
+                anyhow::bail!("GatedAddStore: simulated load failure");
+            }
             self.inner.load(map, key).await
         }
         async fn load_all(
