@@ -95,7 +95,7 @@ use topgun_server::storage::impls::StorageConfig;
 use topgun_server::storage::map_data_store::MapDataStore;
 use topgun_server::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
 use topgun_server::storage::mutation_observer::MutationObserver;
-use topgun_server::storage::record::{set_tombstone_bytes, RecordValue};
+use topgun_server::storage::record::{legacy_tombstone_warning, set_tombstone_bytes, RecordValue};
 use topgun_server::storage::wal::{Wal, WalFsyncPolicy, WalRecovery, WalWriter};
 
 // ---------------------------------------------------------------------------
@@ -206,6 +206,11 @@ async fn reconcile_tombstone_bytes(store: Arc<dyn MapDataStore>) {
 
     let mut total: u64 = 0;
     let mut records_scanned: u64 = 0;
+    // Folded into this existing boot-only walk (no second O(keyspace) scan): the
+    // count of legacy tombstone-only blobs, which a clean-slate store never grows
+    // but a rehydrated pre-epoch store still carries. Durable backends only — this
+    // reconcile runs solely under the redb/postgres startup arm.
+    let mut legacy_rows: u64 = 0;
 
     for map in &maps {
         // Walk the whole map: first batch, then follow the cursor until exhausted
@@ -228,10 +233,14 @@ async fn reconcile_tombstone_bytes(store: Arc<dyn MapDataStore>) {
         loop {
             for (_key, value) in &batch.records {
                 records_scanned += 1;
-                if let RecordValue::OrMap { tombstones, .. } = value {
-                    for tag in tombstones {
-                        total += tag.len() as u64;
+                match value {
+                    RecordValue::OrMap { tombstones, .. } => {
+                        for tag in tombstones {
+                            total += tag.len() as u64;
+                        }
                     }
+                    RecordValue::OrTombstones { .. } => legacy_rows += 1,
+                    RecordValue::Lww { .. } => {}
                 }
             }
 
@@ -264,6 +273,14 @@ async fn reconcile_tombstone_bytes(store: Arc<dyn MapDataStore>) {
         maps = maps.len(),
         "OR-Map tombstone-bytes gauge reconciled from persisted keyspace"
     );
+
+    if let Some(warning) = legacy_tombstone_warning(legacy_rows) {
+        tracing::warn!(
+            target: "topgun_server::bootstrap",
+            legacy_tombstone_rows = legacy_rows,
+            "{warning}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
