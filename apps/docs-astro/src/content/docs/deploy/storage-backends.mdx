@@ -160,6 +160,29 @@ Consider isolation when:
 
 The `null` backend is used in the TopGun integration test suite for deterministic, stateless test runs. Source: `bin/topgun_server.rs:109` — `"null"` is one of the three accepted values.
 
+## Tombstone reclamation and legacy stores
+
+When an OR-Map entry is removed, the server keeps a small tombstone so the deletion
+converges across every replica. Tombstones are reclaimed automatically once every
+tracked client has synced past them — no operator action is required on a store
+created by a current server.
+
+Stores first written by a **pre-epoch server** may still carry a legacy
+tombstone corpus in an older on-disk form. That corpus is **excluded from
+garbage collection by design**: it is never eligible for automatic reclamation, so
+it can never resurrect a deleted entry. It is inert and safe to leave in place. On
+startup the server logs a one-line `WARN` reporting how many legacy tombstone rows
+it found.
+
+The supported way to reclaim a legacy corpus is to **recreate the datastore**: stop
+the server, start it against a fresh store (a new `TOPGUN_REDB_PATH`, or an empty
+PostgreSQL database), and let clients reconnect. Because every client holds its own
+authoritative local state, CRDT delta-sync restores the live data on reconnect while
+the stale legacy tombstones are simply not recreated. There is intentionally no
+in-place "drop legacy tombstones" switch — dropping a tombstone while a client still
+holds the matching add is exactly the resurrection hazard the tombstone exists to
+prevent.
+
 ## Switching between backends
 
 Data does **not** auto-migrate between backends. If you switch from `redb` to `postgres` (or vice versa), the server starts with an empty store on the new backend. Clients re-sync their local state on reconnect via MerkleTree delta sync.
