@@ -1278,4 +1278,101 @@ mod tests {
         );
         assert!(registry.device_ownership.get(key).is_none());
     }
+
+    // ------------------------------------------------------------------
+    // Concurrent takeover + death fault injection: the fencing invariant
+    // ("never authorize a displaced/dead connection") must hold under real
+    // multi-threaded interleavings, not just the deterministic post-delete
+    // states above. The two documented residual races are fail-closed — they
+    // may de-authorize a live owner (self-healing) but never install a dead one.
+    // ------------------------------------------------------------------
+
+    /// A newcomer's takeover races its own death. Across every interleaving the
+    /// identity's owner is either a STILL-LIVE connection or absent — never the
+    /// removed newcomer.
+    #[test]
+    fn concurrent_claim_and_death_never_authorizes_dead_owner() {
+        use std::sync::Arc;
+        use std::thread;
+
+        for _ in 0..256 {
+            let registry = Arc::new(ConnectionRegistry::new());
+            let config = test_config();
+            let (owner, _rx0) = registry.register(ConnectionKind::Client, &config);
+            let (newcomer, _rx1) = registry.register(ConnectionKind::Client, &config);
+            let key = "identity-race".to_string();
+            assert!(registry
+                .claim_device_ownership(key.clone(), owner.id)
+                .is_none());
+
+            let n_id = newcomer.id;
+            let (r_a, k_a) = (Arc::clone(&registry), key.clone());
+            let a = thread::spawn(move || {
+                r_a.claim_device_ownership(k_a, n_id); // takeover
+            });
+            let r_b = Arc::clone(&registry);
+            let b = thread::spawn(move || {
+                r_b.remove(n_id); // death, racing the takeover
+            });
+            a.join().unwrap();
+            b.join().unwrap();
+
+            // Fencing invariant: any surviving owner is still live.
+            if let Some(owner_ref) = registry.device_ownership.get(&key) {
+                let owner_id = *owner_ref.value();
+                drop(owner_ref);
+                assert!(
+                    registry.get(owner_id).is_some(),
+                    "ownership never points at a dead connection (fail-closed fencing)"
+                );
+            }
+            // The removed newcomer is gone and is never the affirmed owner.
+            assert!(registry.get(n_id).is_none());
+            assert!(!registry.is_current_owner(&key, n_id));
+        }
+    }
+
+    /// A newcomer takes over while the ORIGINAL owner dies concurrently. The
+    /// surviving owner is the live newcomer or nobody — the dead prior owner is
+    /// never left installed.
+    #[test]
+    fn concurrent_takeover_and_owner_death_preserves_fencing() {
+        use std::sync::Arc;
+        use std::thread;
+
+        for _ in 0..256 {
+            let registry = Arc::new(ConnectionRegistry::new());
+            let config = test_config();
+            let (owner, _rx0) = registry.register(ConnectionKind::Client, &config);
+            let (newcomer, _rx1) = registry.register(ConnectionKind::Client, &config);
+            let key = "identity-race2".to_string();
+            assert!(registry
+                .claim_device_ownership(key.clone(), owner.id)
+                .is_none());
+
+            let (owner_id, new_id) = (owner.id, newcomer.id);
+            let (r_a, k_a) = (Arc::clone(&registry), key.clone());
+            let a = thread::spawn(move || {
+                r_a.claim_device_ownership(k_a, new_id); // takeover by the live newcomer
+            });
+            let r_b = Arc::clone(&registry);
+            let b = thread::spawn(move || {
+                r_b.remove(owner_id); // the original owner dies concurrently
+            });
+            a.join().unwrap();
+            b.join().unwrap();
+
+            if let Some(owner_ref) = registry.device_ownership.get(&key) {
+                let cur = *owner_ref.value();
+                drop(owner_ref);
+                assert!(
+                    registry.get(cur).is_some(),
+                    "surviving owner is always a live connection"
+                );
+            }
+            // The dead prior owner is never left affirmed.
+            assert!(registry.get(owner_id).is_none());
+            assert!(!registry.is_current_owner(&key, owner_id));
+        }
+    }
 }
