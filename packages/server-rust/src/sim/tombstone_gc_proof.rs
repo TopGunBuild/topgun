@@ -513,16 +513,17 @@ mod tests {
     /// push's gate→commit span against the prune drain.
     #[tokio::test(flavor = "multi_thread")]
     async fn interleaved_prune_during_push_never_resurrects() {
-        for round in 0..32u64 {
+        for round in 0..64u64 {
             let (svc, factory, frontier, registry, key_writer) = gated_sync();
             let (conn, client) = register_device(&registry, "dev-toctou").await;
             let (map, key) = ("omap", "k1");
 
-            // An older removed tag (epoch 1) that the sweep is eligible to drop
-            // once the fleet cursor moves strictly past it.
-            seed_or_map(&factory, map, key, &[], &["R1"]).await;
-            frontier.stamp_tombstone(map, key, "R1"); // epoch 1
-            frontier.stamp_tombstone(map, "other", "T2"); // epoch 2 (bump current_epoch)
+            // The key already holds a live record R2 and an OLD removed tag
+            // `T_old` (epoch 1) the sweep is eligible to drop once the fleet
+            // cursor moves strictly past it.
+            seed_or_map(&factory, map, key, &["R2"], &["T_old"]).await;
+            frontier.stamp_tombstone(map, key, "T_old"); // epoch 1 (this key)
+            frontier.stamp_tombstone(map, "other", "T2"); // epoch 2, unrelated key
             track_client(&frontier, &client, conn, 2).await; // LWM 2 > epoch 1 → eligible
             frontier.set_durable_epoch_watermark(1000); // protection active
             assert!(
@@ -530,29 +531,47 @@ mod tests {
                 "epoch 1 is prune-eligible"
             );
 
-            // Concurrently: (A) the admitted client re-pushes R1 carrying its own
-            // tombstone union; (B) the prune sweep drains eligible epochs.
+            // Race, started simultaneously, both mutating THIS key's OR-Map state:
+            //   (A) an admitted push that unions in a NEW tombstone `R1` (and a
+            //       suppressed R1 record), and
+            //   (B) the prune sweep that drops `T_old`.
+            // Both take the per-key single writer (342d). Serialization must yield
+            // exactly {R2 live, tombstones = [R1]} — a torn read would either lose
+            // the prune (T_old survives) or lose the push's union (R1 missing).
+            let barrier = Arc::new(std::sync::Barrier::new(2));
             let push_svc = Arc::clone(&svc);
+            let bp = Arc::clone(&barrier);
             let push = tokio::spawn(async move {
+                bp.wait();
                 push_svc
                     .oneshot(push_entry(make_ctx_conn(conn), map, key, &["R1"], &["R1"]))
                     .await
                     .expect("ack");
             });
-            let (pf, pfac, pkw) = (
+            let (pf, pfac, pkw, bq) = (
                 Arc::clone(&frontier),
                 Arc::clone(&factory),
                 Arc::clone(&key_writer),
+                Arc::clone(&barrier),
             );
             let prune = tokio::spawn(async move {
+                bq.wait();
                 prune_epoch_tombstones(&pf, &pfac, &pkw).await;
             });
             let _ = tokio::join!(push, prune);
 
-            let (live, _t) = stored_or_map(&factory, map, key).await;
-            assert!(
-                !live.contains(&"R1".to_string()),
-                "round {round}: interleaved prune + push never resurrects the removed tag"
+            let (mut live, mut tombs) = stored_or_map(&factory, map, key).await;
+            live.sort();
+            tombs.sort();
+            assert_eq!(
+                live,
+                vec!["R2".to_string()],
+                "round {round}: the pre-existing live record survives; R1 stays suppressed (no resurrection)"
+            );
+            assert_eq!(
+                tombs,
+                vec!["R1".to_string()],
+                "round {round}: per-key writer serialized commit vs prune — T_old pruned AND the pushed union survived (no lost update)"
             );
         }
     }

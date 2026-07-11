@@ -1273,6 +1273,7 @@ mod tests {
 
     use super::*;
     use crate::network::connection::{ConnectionKind, ConnectionRegistry};
+    use crate::network::device_identity::frontier_client_id;
     use crate::service::domain::query::QueryRegistry;
     use crate::service::domain::schema::SchemaService;
     use crate::service::operation::{service_names, OperationContext, OperationResponse};
@@ -2886,38 +2887,98 @@ mod tests {
     /// silently acked-and-dropped. This pins a regression class: `OP_ACK` clears
     /// the client oplog, so any future op-path gate keyed on unknown==forgotten
     /// would turn an ack into permanent client-side data loss.
-    #[tokio::test]
-    async fn oppath_or_writes_from_untracked_device_are_applied_not_dropped() {
-        let (svc, factory, frontier) = make_service_with_frontier();
-        // Arm protection with NO tracked client (an untracked writer would read as
-        // forgotten IF the op path consulted the gate — it must not).
+    /// Build a frontier-gated `CrdtService` with protection ARMED and an
+    /// IDENTIFIABLE-but-untracked device connection bound (device_id set, no
+    /// frontier cursor → reads as forgotten). A future op-path gate keyed on
+    /// connection → resolve_client_id → is_forgotten would consult the frontier
+    /// for this writer and (wrongly) reject — the guard below asserts it must not.
+    async fn armed_service_with_untracked_device(
+    ) -> (Arc<CrdtService>, Arc<RecordStoreFactory>, ConnectionId) {
+        let factory = make_factory();
+        let registry = Arc::new(ConnectionRegistry::new());
+        let query_registry = Arc::new(QueryRegistry::new());
+        let frontier = Arc::new(TombstoneFrontier::new(None));
+        frontier.set_epoch_width(1);
+        let svc = Arc::new(
+            CrdtService::new(
+                Arc::clone(&factory),
+                Arc::clone(&registry),
+                make_validator(),
+                query_registry,
+                Arc::new(SchemaService::new()),
+            )
+            .with_frontier(Arc::clone(&frontier)),
+        );
+        let (handle, _rx) = registry.register(
+            ConnectionKind::Client,
+            &crate::network::config::ConnectionConfig::default(),
+        );
+        handle.metadata.write().await.device_id = Some("dev-untracked".to_string());
+        let conn = handle.id;
         frontier.stamp_tombstone("m", "seed", "seed-tag"); // current_epoch = 1
         frontier.set_durable_epoch_watermark(1000); // protection active
         assert!(frontier.is_protection_active());
+        assert!(
+            frontier.is_forgotten(&frontier_client_id(None, "dev-untracked")),
+            "the writer is untracked (forgotten) from the frontier's view"
+        );
+        (svc, factory, conn)
+    }
 
-        // CLIENT_OP OR_ADD from an untracked writer → applied (a returned response,
-        // never a silent drop; `.expect` fails on any error).
+    #[tokio::test]
+    async fn oppath_or_writes_from_untracked_device_are_applied_not_dropped() {
+        let (svc, factory, conn) = armed_service_with_untracked_device().await;
+
+        // CLIENT_OP OR_ADD from the untracked, identified device → applied + acked
+        // (never a silent drop; `.expect` fails on any error/reject).
+        let or_rec1 = topgun_core::ORMapRecord {
+            value: rmpv::Value::String("v1".into()),
+            timestamp: make_timestamp(),
+            tag: "R1".to_string(),
+            ttl_ms: None,
+        };
+        let mut ctx1 = make_ctx_for_key("k1");
+        ctx1.connection_id = Some(conn);
         Arc::clone(&svc)
-            .oneshot(or_add_op("m", "k1", "v1", "R1"))
+            .oneshot(Operation::ClientOp {
+                ctx: ctx1,
+                payload: topgun_core::messages::ClientOpMessage {
+                    payload: topgun_core::messages::base::ClientOp {
+                        id: Some("add-R1".to_string()),
+                        map_name: "m".to_string(),
+                        key: "k1".to_string(),
+                        op_type: None,
+                        record: None,
+                        or_record: Some(Some(or_rec1)),
+                        or_tag: None,
+                        write_concern: None,
+                        timeout: None,
+                    },
+                },
+            })
             .await
             .expect("client_op must not error");
-        assert!(
-            read_or_map(&factory, "m", "k1")
-                .await
-                .0
-                .contains(&"R1".to_string()),
+        // The write lands (a live record exists). The op path re-stamps the OR tag
+        // from the sanitized server HLC, so the surviving tag is server-issued, not
+        // the client's "R1" — what matters for the data-loss guard is that the write
+        // is applied, never silently acked-and-dropped.
+        assert_eq!(
+            read_or_map(&factory, "m", "k1").await.0.len(),
+            1,
             "untracked device's CLIENT_OP OR_ADD is applied even under active protection"
         );
 
-        // OP_BATCH OR_ADD from an untracked writer → OpAck + applied.
-        let or_rec = topgun_core::ORMapRecord {
+        // OP_BATCH OR_ADD from the same untracked device → OpAck + applied.
+        let or_rec2 = topgun_core::ORMapRecord {
             value: rmpv::Value::String("v2".into()),
             timestamp: make_timestamp(),
             tag: "R2".to_string(),
             ttl_ms: None,
         };
+        let mut ctx2 = make_ctx_for_key("k2");
+        ctx2.connection_id = Some(conn);
         let batch = Operation::OpBatch {
-            ctx: make_ctx(),
+            ctx: ctx2,
             payload: topgun_core::messages::sync::OpBatchMessage {
                 payload: topgun_core::messages::sync::OpBatchPayload {
                     ops: vec![topgun_core::messages::base::ClientOp {
@@ -2926,7 +2987,7 @@ mod tests {
                         key: "k2".to_string(),
                         op_type: None,
                         record: None,
-                        or_record: Some(Some(or_rec)),
+                        or_record: Some(Some(or_rec2)),
                         or_tag: None,
                         write_concern: None,
                         timeout: None,
@@ -2944,8 +3005,9 @@ mod tests {
             matches!(resp, OperationResponse::Message(ref m) if matches!(**m, Message::OpAck(_))),
             "op_batch is acked (the ack that clears the client oplog)"
         );
-        assert!(
-            read_or_map(&factory, "m", "k2").await.0.contains(&"R2".to_string()),
+        assert_eq!(
+            read_or_map(&factory, "m", "k2").await.0.len(),
+            1,
             "untracked device's OP_BATCH OR_ADD is applied — the acked write is durable, not dropped"
         );
     }
