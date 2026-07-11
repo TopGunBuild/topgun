@@ -1439,25 +1439,48 @@ impl MapDataStore for WriteBehindDataStore {
         // Remove from staging
         self.staging.remove(&(map.to_string(), key.to_string()));
 
-        // Decrement pending count and resolve the buffered entry's durability
-        // sequence if the key was actually in the queue — this direct flush
-        // supersedes it, so its sequence must not stall the flushed watermark.
-        if let Some(removed) = &removed {
+        // Decrement pending count if the key was actually in the queue — this
+        // direct flush supersedes the buffered entry, which leaves the queue now.
+        if removed.is_some() {
             self.pending_count.fetch_sub(1, Ordering::Relaxed);
+        }
+
+        // Persist the caller-provided value directly to the inner store.
+        let now = now_millis();
+        let result = self.inner.add(map, key, value, 0, now).await;
+
+        // Resolve the superseded entry's durability sequence ONLY AFTER inner.add
+        // returns — matching the flush-loop ordering. The prefix-complete flushed
+        // watermark must never advance past a sequence whose bytes are not yet
+        // durable in the inner store; resolving before the add would expose it as
+        // flushed while the write is still in flight. On Err the WAL frame still
+        // backstops durability (a discarded write is a re-sync event), so the
+        // sequence MUST still be resolved here — leaving it pending would stall the
+        // watermark forever and freeze the tombstone durability fence.
+        if let Some(removed) = &removed {
             self.resolve_pending(removed.sequence);
         }
 
-        // Persist the caller-provided value directly to the inner store
-        let now = now_millis();
-        self.inner.add(map, key, value, 0, now).await
+        result
     }
 
     fn reset(&self) {
         self.queues.clear();
         self.staging.clear();
-        self.sequence.store(0, Ordering::Relaxed);
         self.pending_count.store(0, Ordering::Relaxed);
-        self.pending_seqs().clear();
+        // Take the pending-sequence lock across BOTH the counter reset and the
+        // set clear. `assign_tracked_sequence` locks `pending_seqs` FIRST and only
+        // then touches `sequence`, so holding the lock here makes reset mutually
+        // exclusive with it. Doing the two as separate operations leaves a window
+        // where a concurrent assign runs between them — counter reset to 0, then
+        // assign takes seq 0 and inserts it, then our clear wipes it — stranding
+        // counter=1 with an empty pending set while seq 0 is still buffered, which
+        // would let the watermark jump past the un-flushed write.
+        {
+            let mut pending = self.pending_seqs();
+            self.sequence.store(0, Ordering::Relaxed);
+            pending.clear();
+        }
         self.inner.reset();
     }
 
@@ -1661,6 +1684,13 @@ mod tests {
         calls: Arc<Mutex<Vec<SpyCall>>>,
         /// Pre-seeded values returned by `load()`.
         seeded: DashMap<(String, String), RecordValue>,
+        /// When set, `add` returns `Err` — simulates an inner-store durability
+        /// failure so the flush error path can be exercised.
+        fail_add: std::sync::atomic::AtomicBool,
+        /// Optional handshake: on the first `add`, signal `entered` then park on
+        /// `proceed` before returning. Lets a test read the outer store's
+        /// `flushed_watermark()` while a flush's inner add is in flight.
+        add_gate: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     }
 
     impl SpyDataStore {
@@ -1668,6 +1698,8 @@ mod tests {
             Self {
                 calls: Arc::new(Mutex::new(Vec::new())),
                 seeded: DashMap::new(),
+                fail_add: std::sync::atomic::AtomicBool::new(false),
+                add_gate: Mutex::new(None),
             }
         }
 
@@ -1679,6 +1711,22 @@ mod tests {
         fn seed(&self, map: &str, key: &str, value: RecordValue) {
             self.seeded
                 .insert((map.to_string(), key.to_string()), value);
+        }
+
+        /// Make every subsequent `add` fail (inner-store durability failure).
+        fn set_fail_add(&self, fail: bool) {
+            self.fail_add
+                .store(fail, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        /// Install a one-shot gate on `add`. Returns `(entered, proceed)`: the
+        /// store fires `entered` when it reaches the gated `add` and then awaits
+        /// `proceed` before returning.
+        fn install_add_gate(&self) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let proceed = Arc::new(tokio::sync::Notify::new());
+            *self.add_gate.lock().unwrap() = Some((Arc::clone(&entered), Arc::clone(&proceed)));
+            (entered, proceed)
         }
     }
 
@@ -1696,6 +1744,16 @@ mod tests {
                 map: map.to_string(),
                 key: key.to_string(),
             });
+            // If a gate is installed, consume it: signal that the add is now in
+            // flight, then park until the test lets it proceed.
+            let gate = self.add_gate.lock().unwrap().take();
+            if let Some((entered, proceed)) = gate {
+                entered.notify_one();
+                proceed.notified().await;
+            }
+            if self.fail_add.load(std::sync::atomic::Ordering::Relaxed) {
+                anyhow::bail!("SpyDataStore: simulated inner-store add failure");
+            }
             Ok(())
         }
 
@@ -2150,6 +2208,145 @@ mod tests {
             store.flushed_watermark(),
             assigned,
             "after a full drain every assigned sequence is durable, so the watermark reaches it"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RED-without-fix: `flush_key` must resolve the superseded sequence AFTER
+    // `inner.add` returns, not before. Gate the inner add so we can observe the
+    // watermark while the flush is parked mid-add — it must still sit at the
+    // buffered sequence. Resolving before the add (the pre-fix bug) advances the
+    // watermark past a write whose bytes are not yet durable, licensing a prune
+    // of a tombstone the inner store has not persisted.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn flush_key_resolves_watermark_after_inner_add_not_before() {
+        let spy = Arc::new(SpyDataStore::new());
+        let (entered, proceed) = spy.install_add_gate();
+        let inner: Arc<dyn MapDataStore> = spy;
+        let config = WriteBehindConfig {
+            write_delay_ms: 60_000,
+            flush_interval_ms: 60_000,
+            ..WriteBehindConfig::default()
+        };
+        let store = WriteBehindDataStore::new(inner, config);
+
+        // Buffer a write so flush_key has a queued (tracked) sequence to supersede.
+        store.add("m", "k", &dummy_value(), 0, 1).await.unwrap();
+        let buffered_seq = store.flushed_watermark();
+        let assigned = store.assigned_write_sequence();
+        assert!(
+            buffered_seq < assigned,
+            "precondition: the buffered write is not yet byte-durable"
+        );
+
+        // Run flush_key concurrently; it parks inside the gated inner add.
+        let flush_store = Arc::clone(&store);
+        let flush = tokio::spawn(async move {
+            flush_store
+                .flush_key("m", "k", &dummy_value_with(42), false)
+                .await
+        });
+
+        // Block until the flush is inside inner.add — bytes are NOT durable yet.
+        entered.notified().await;
+        assert_eq!(
+            store.flushed_watermark(),
+            buffered_seq,
+            "watermark must stay at the buffered sequence while inner.add is in flight — \
+             resolving before the add would falsely report the write as durable"
+        );
+
+        // Let the add complete; the sequence is now durable and resolvable.
+        proceed.notify_one();
+        flush.await.unwrap().unwrap();
+        assert_eq!(
+            store.flushed_watermark(),
+            assigned,
+            "after inner.add returns the resolved sequence lets the watermark advance"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // A failed `inner.add` during `flush_key` must STILL resolve the superseded
+    // sequence. The WAL frame backstops durability on `Err` (a discarded write is
+    // a re-sync event), so leaving the sequence pending would pin the flushed
+    // watermark below it forever and freeze the tombstone durability fence.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn flush_key_error_path_still_resolves_no_watermark_stall() {
+        let spy = Arc::new(SpyDataStore::new());
+        spy.set_fail_add(true);
+        let inner: Arc<dyn MapDataStore> = spy;
+        let config = WriteBehindConfig {
+            write_delay_ms: 60_000,
+            flush_interval_ms: 60_000,
+            ..WriteBehindConfig::default()
+        };
+        let store = WriteBehindDataStore::new(inner, config);
+
+        store.add("m", "k", &dummy_value(), 0, 1).await.unwrap();
+        let assigned = store.assigned_write_sequence();
+        assert!(
+            store.flushed_watermark() < assigned,
+            "precondition: buffered, not durable"
+        );
+
+        // flush_key hits the failing inner.add and surfaces the error ...
+        let result = store.flush_key("m", "k", &dummy_value_with(7), false).await;
+        assert!(
+            result.is_err(),
+            "flush_key must surface the inner-store durability failure"
+        );
+
+        // ... yet the superseded sequence is resolved anyway, so the watermark is
+        // not stalled below the assigned counter.
+        assert_eq!(
+            store.flushed_watermark(),
+            assigned,
+            "error path must resolve the pulled sequence so the watermark still advances"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AC4: `reset` clears the counter and the pending set under a single
+    // `pending_seqs` critical section, so a concurrent `assign_tracked_sequence`
+    // (which locks pending_seqs before touching the counter) cannot interleave and
+    // strand counter=1 with an empty set while a sequence is still buffered. This
+    // checks the resulting consistent postcondition: watermark and counter agree.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn reset_clears_watermark_state_consistently() {
+        let inner: Arc<dyn MapDataStore> = Arc::new(SpyDataStore::new());
+        let config = WriteBehindConfig {
+            write_delay_ms: 60_000,
+            flush_interval_ms: 60_000,
+            ..WriteBehindConfig::default()
+        };
+        let store = WriteBehindDataStore::new(inner, config);
+
+        // Advance the counter and leave writes buffered (pending non-empty).
+        store.add("m", "k1", &dummy_value(), 0, 1).await.unwrap();
+        store.add("m", "k2", &dummy_value(), 0, 1).await.unwrap();
+        assert!(store.assigned_write_sequence() > 0);
+        assert!(store.flushed_watermark() < store.assigned_write_sequence());
+
+        store.reset();
+
+        // After reset the counter is 0 and the pending set is empty, so the
+        // watermark is 0 — no stranded sequence pinning it above the counter.
+        assert_eq!(
+            store.assigned_write_sequence(),
+            0,
+            "reset zeroes the counter"
+        );
+        assert_eq!(
+            store.flushed_watermark(),
+            0,
+            "reset leaves no pending sequence, so the watermark is 0 (counter and set agree)"
         );
     }
 
