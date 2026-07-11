@@ -1278,4 +1278,118 @@ mod tests {
         );
         assert!(registry.device_ownership.get(key).is_none());
     }
+
+    // ------------------------------------------------------------------
+    // Concurrent takeover + death fault injection: the fencing invariant
+    // ("never authorize a displaced/dead connection") must hold under real
+    // multi-threaded interleavings, not just the deterministic post-delete
+    // states above. The two documented residual races are fail-closed — they
+    // may de-authorize a live owner (self-healing) but never install a dead one.
+    // ------------------------------------------------------------------
+
+    /// A newcomer's takeover races its OWN death — the interleaving that drives
+    /// `claim_device_ownership` into `reconcile_dead_claim` (the claim discovers
+    /// this connection is already gone). A `Barrier` starts both threads at once
+    /// to force real contention. Across every interleaving the identity's owner is
+    /// a STILL-LIVE connection (the displaced prior owner, restored — it is never
+    /// removed here) or absent — never the removed newcomer. The reconcile arms
+    /// themselves are covered deterministically by the four `reconcile_dead_claim_*`
+    /// tests above; this asserts the invariant survives real concurrency.
+    #[test]
+    fn concurrent_claim_and_death_never_authorizes_dead_owner() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        for _ in 0..512 {
+            let registry = Arc::new(ConnectionRegistry::new());
+            let config = test_config();
+            let (owner, _rx0) = registry.register(ConnectionKind::Client, &config);
+            let (newcomer, _rx1) = registry.register(ConnectionKind::Client, &config);
+            let key = "identity-race".to_string();
+            assert!(registry
+                .claim_device_ownership(key.clone(), owner.id)
+                .is_none());
+
+            let n_id = newcomer.id;
+            let barrier = Arc::new(Barrier::new(2));
+            let (r_a, k_a, ba) = (Arc::clone(&registry), key.clone(), Arc::clone(&barrier));
+            let a = thread::spawn(move || {
+                ba.wait();
+                r_a.claim_device_ownership(k_a, n_id) // takeover (may see itself already dead)
+            });
+            let (r_b, bb) = (Arc::clone(&registry), Arc::clone(&barrier));
+            let b = thread::spawn(move || {
+                bb.wait();
+                r_b.remove(n_id); // death, racing the takeover
+            });
+            let _claim_displaced = a.join().unwrap();
+            b.join().unwrap();
+
+            // Fencing invariant: any surviving owner is still live (the displaced
+            // prior owner is never removed, so it is always restorable).
+            if let Some(owner_ref) = registry.device_ownership.get(&key) {
+                let owner_id = *owner_ref.value();
+                drop(owner_ref);
+                assert!(
+                    registry.get(owner_id).is_some(),
+                    "ownership never points at a dead connection (fail-closed fencing)"
+                );
+            }
+            // The removed newcomer is gone and is never the affirmed owner.
+            assert!(registry.get(n_id).is_none());
+            assert!(!registry.is_current_owner(&key, n_id));
+        }
+    }
+
+    /// Two LIVE newcomers race to claim the same identity simultaneously. Exactly
+    /// one ends up the owner, it is live, and the loser is fenced out
+    /// (`is_current_owner` false) — the takeover path never leaves the identity
+    /// ownerless, doubly-owned, or owned by the fenced loser. Complements the
+    /// claimant-death reconcile race above with claim-vs-claim contention.
+    #[test]
+    fn concurrent_double_claim_leaves_exactly_one_live_fenced_owner() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        for _ in 0..512 {
+            let registry = Arc::new(ConnectionRegistry::new());
+            let config = test_config();
+            let (n1, _rx0) = registry.register(ConnectionKind::Client, &config);
+            let (n2, _rx1) = registry.register(ConnectionKind::Client, &config);
+            let key = "identity-race2".to_string();
+            let (id1, id2) = (n1.id, n2.id);
+
+            let barrier = Arc::new(Barrier::new(2));
+            let (r_a, k_a, ba) = (Arc::clone(&registry), key.clone(), Arc::clone(&barrier));
+            let a = thread::spawn(move || {
+                ba.wait();
+                r_a.claim_device_ownership(k_a, id1)
+            });
+            let (r_b, k_b, bb) = (Arc::clone(&registry), key.clone(), Arc::clone(&barrier));
+            let b = thread::spawn(move || {
+                bb.wait();
+                r_b.claim_device_ownership(k_b, id2)
+            });
+            a.join().unwrap();
+            b.join().unwrap();
+
+            // Exactly one owner, it is a live connection, and it is one of the two
+            // claimants; the other is fenced out.
+            let owner = registry
+                .device_ownership
+                .get(&key)
+                .map(|r| *r.value())
+                .expect("the identity has a definite owner after both claims");
+            assert!(
+                owner == id1 || owner == id2,
+                "owner is one of the claimants"
+            );
+            assert!(registry.get(owner).is_some(), "the winning owner is live");
+            let loser = if owner == id1 { id2 } else { id1 };
+            assert!(
+                registry.is_current_owner(&key, owner) && !registry.is_current_owner(&key, loser),
+                "exactly one claimant is authorized; the loser is fenced out"
+            );
+        }
+    }
 }

@@ -46,3 +46,4 @@ pub use madsim::rand;
 
 pub mod cluster;
 pub mod network;
+pub mod tombstone_gc_proof;
