@@ -960,23 +960,36 @@ async fn scan_max_cursor_epoch(store: &dyn MapDataStore) -> anyhow::Result<Epoch
 /// rebuild re-stamps all of these into the fresh recovery epoch. The reserved
 /// internal keyspaces ([`CURSOR_MAP`] and other `_topgun_`-prefixed maps) hold
 /// no OR-Map tombstones (their records are LWW), so they contribute nothing and
-/// are skipped implicitly by the `OrMap` match. Legacy `OrTombstones` blobs are
+/// are handled by the explicit `Lww` no-op arm. Legacy `OrTombstones` blobs are
 /// Merkle-invisible (TODO-559) and out of this child's prune scope, so they are
-/// deliberately NOT re-stamped here.
+/// deliberately NOT re-stamped here — an explicit no-op arm makes that exclusion
+/// visible to any future refactor.
 async fn scan_live_tombstones(store: &dyn MapDataStore) -> anyhow::Result<Vec<TombstoneRef>> {
     let mut live = Vec::new();
     for map in store.list_maps().await? {
         let mut batch = store.scan_values(&map, false, 0).await?;
         loop {
             for (key, value) in &batch.records {
-                if let RecordValue::OrMap { tombstones, .. } = value {
-                    for tag in tombstones {
-                        live.push(TombstoneRef {
-                            map: map.clone(),
-                            key: key.clone(),
-                            tag: tag.clone(),
-                        });
+                match value {
+                    RecordValue::OrMap { tombstones, .. } => {
+                        for tag in tombstones {
+                            live.push(TombstoneRef {
+                                map: map.clone(),
+                                key: key.clone(),
+                                tag: tag.clone(),
+                            });
+                        }
                     }
+                    // Legacy tombstone blobs are out of the prune scope: an
+                    // untouched legacy row is deliberately NEVER re-stamped into a
+                    // recovery epoch, so it can never become prune-eligible. An
+                    // explicit no-op arm keeps that invariant visible at the point
+                    // of change — a future "handle every variant" refactor cannot
+                    // silently pull legacy blobs into the epoch index. (A later OR
+                    // write to the key upconverts the record to `OrMap`, after
+                    // which its tags join the protected regime — expected.)
+                    RecordValue::OrTombstones { .. } => {}
+                    RecordValue::Lww { .. } => {}
                 }
             }
             match batch.next_cursor.take() {
@@ -1785,5 +1798,64 @@ mod persistence_tests {
             "epoch 1 (strictly below LWM 2, byte-durable) actually prunes with the real watermark"
         );
         assert_eq!(tags, vec!["T1"], "the drained tombstone is epoch 1's tag");
+    }
+
+    /// An UNTOUCHED legacy `OrTombstones` blob (never rewritten by any OR op) is
+    /// excluded from the frontier epoch scan and NEVER becomes prune-eligible:
+    /// (i) pre-prune, it is absent from the live set `scan_live_tombstones` builds;
+    /// (ii) post-prune, it survives a sweep that reclaims a genuinely stamped epoch.
+    #[tokio::test]
+    async fn ac2_untouched_legacy_ortombstones_never_prune_eligible() {
+        let (path, _dir) = temp_store();
+        let store: Arc<dyn MapDataStore> = Arc::new(RedbDataStore::new(&path).expect("open"));
+
+        // A modern OR-Map tombstone and an untouched legacy blob. The write path
+        // never emits `OrTombstones`, but older servers persisted it — seed it
+        // directly to model a pre-epoch corpus rehydrated on restart.
+        let legacy = RecordValue::OrTombstones {
+            tags: vec!["LEG".to_string()],
+        };
+        store
+            .add("m", "modern", &ormap_with_tombstones(&["MOD"]), 0, 1)
+            .await
+            .unwrap();
+        store.add("m", "legacy", &legacy, 0, 1).await.unwrap();
+
+        // (i) Pre-prune: the epoch scan admits only the modern tag. The legacy blob
+        // never enters the live set, so it can never be stamped into any epoch.
+        let live = scan_live_tombstones(store.as_ref()).await.unwrap();
+        let live_tags: Vec<&str> = live.iter().map(|r| r.tag.as_str()).collect();
+        assert_eq!(
+            live_tags,
+            vec!["MOD"],
+            "the untouched legacy OrTombstones tag is absent from the frontier live set"
+        );
+
+        // Rebuild stamps ONLY the modern tag into the recovery epoch. redb bytes
+        // are durable, so the watermark reaches E_rec and protection activates.
+        let f = TombstoneFrontier::new(Some(Arc::clone(&store)));
+        f.set_epoch_width(1);
+        let e_rec = f.rebuild_from_durable_store().await.unwrap();
+
+        // Drive a client PAST E_rec so the stamped recovery epoch is prune-eligible.
+        f.set_current_max_epoch(e_rec + 1);
+        let c: ClientId = "a5:alice|dev-1".into();
+        f.set_delivered(CONN_A, 1000);
+        assert!(f.confirm_apply_ack(&c, e_rec + 1, CONN_A).await);
+
+        // (ii) Post-prune: the sweep reclaims the stamped epoch, draining ONLY the
+        // modern tag. The legacy blob was never stamped, so no sweep can reach it.
+        let drained = f.drain_prunable_tombstones();
+        let drained_tags: Vec<&str> = drained.iter().map(|(_, r)| r.tag.as_str()).collect();
+        assert_eq!(
+            drained_tags,
+            vec!["MOD"],
+            "only the stamped modern epoch is reclaimed; the legacy tag is never drained"
+        );
+        assert_eq!(
+            store.load("m", "legacy").await.unwrap(),
+            Some(legacy),
+            "the untouched legacy blob survives a sweep that reclaims a stamped epoch"
+        );
     }
 }
