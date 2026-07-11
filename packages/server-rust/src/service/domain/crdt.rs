@@ -2880,6 +2880,76 @@ mod tests {
         );
     }
 
+    /// Op-path data-loss guard: the OR write path has NO forgotten-client gate,
+    /// so a NOT-yet-ACKed (untracked) device's `CLIENT_OP` / `OP_BATCH` OR writes
+    /// are APPLIED and acked even with tombstone protection active — never
+    /// silently acked-and-dropped. This pins a regression class: `OP_ACK` clears
+    /// the client oplog, so any future op-path gate keyed on unknown==forgotten
+    /// would turn an ack into permanent client-side data loss.
+    #[tokio::test]
+    async fn oppath_or_writes_from_untracked_device_are_applied_not_dropped() {
+        let (svc, factory, frontier) = make_service_with_frontier();
+        // Arm protection with NO tracked client (an untracked writer would read as
+        // forgotten IF the op path consulted the gate — it must not).
+        frontier.stamp_tombstone("m", "seed", "seed-tag"); // current_epoch = 1
+        frontier.set_durable_epoch_watermark(1000); // protection active
+        assert!(frontier.is_protection_active());
+
+        // CLIENT_OP OR_ADD from an untracked writer → applied (a returned response,
+        // never a silent drop; `.expect` fails on any error).
+        Arc::clone(&svc)
+            .oneshot(or_add_op("m", "k1", "v1", "R1"))
+            .await
+            .expect("client_op must not error");
+        assert!(
+            read_or_map(&factory, "m", "k1")
+                .await
+                .0
+                .contains(&"R1".to_string()),
+            "untracked device's CLIENT_OP OR_ADD is applied even under active protection"
+        );
+
+        // OP_BATCH OR_ADD from an untracked writer → OpAck + applied.
+        let or_rec = topgun_core::ORMapRecord {
+            value: rmpv::Value::String("v2".into()),
+            timestamp: make_timestamp(),
+            tag: "R2".to_string(),
+            ttl_ms: None,
+        };
+        let batch = Operation::OpBatch {
+            ctx: make_ctx(),
+            payload: topgun_core::messages::sync::OpBatchMessage {
+                payload: topgun_core::messages::sync::OpBatchPayload {
+                    ops: vec![topgun_core::messages::base::ClientOp {
+                        id: Some("batch-R2".to_string()),
+                        map_name: "m".to_string(),
+                        key: "k2".to_string(),
+                        op_type: None,
+                        record: None,
+                        or_record: Some(Some(or_rec)),
+                        or_tag: None,
+                        write_concern: None,
+                        timeout: None,
+                    }],
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+        let resp = Arc::clone(&svc)
+            .oneshot(batch)
+            .await
+            .expect("op_batch must not error");
+        assert!(
+            matches!(resp, OperationResponse::Message(ref m) if matches!(**m, Message::OpAck(_))),
+            "op_batch is acked (the ack that clears the client oplog)"
+        );
+        assert!(
+            read_or_map(&factory, "m", "k2").await.0.contains(&"R2".to_string()),
+            "untracked device's OP_BATCH OR_ADD is applied — the acked write is durable, not dropped"
+        );
+    }
+
     /// Reads back the stored OR-Map for a key at its hash partition.
     async fn read_or_map(
         factory: &Arc<RecordStoreFactory>,
