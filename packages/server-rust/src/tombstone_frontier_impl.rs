@@ -982,14 +982,15 @@ async fn scan_live_tombstones(store: &dyn MapDataStore) -> anyhow::Result<Vec<To
                     }
                     // Legacy tombstone blobs are out of the prune scope: an
                     // untouched legacy row is deliberately NEVER re-stamped into a
-                    // recovery epoch, so it can never become prune-eligible. An
-                    // explicit no-op arm keeps that invariant visible at the point
-                    // of change — a future "handle every variant" refactor cannot
-                    // silently pull legacy blobs into the epoch index. (A later OR
-                    // write to the key upconverts the record to `OrMap`, after
-                    // which its tags join the protected regime — expected.)
-                    RecordValue::OrTombstones { .. } => {}
-                    RecordValue::Lww { .. } => {}
+                    // recovery epoch, so it can never become prune-eligible. LWW
+                    // records carry no OR-Map tombstones. Both are explicit no-op
+                    // arms so the exclusion is visible at the point of change — a
+                    // future "handle every variant" refactor confronts the named
+                    // `OrTombstones` pattern instead of silently pulling legacy
+                    // blobs into the epoch index. (A later OR write to the key
+                    // upconverts the record to `OrMap`, after which its tags join
+                    // the protected regime — expected.)
+                    RecordValue::OrTombstones { .. } | RecordValue::Lww { .. } => {}
                 }
             }
             match batch.next_cursor.take() {
