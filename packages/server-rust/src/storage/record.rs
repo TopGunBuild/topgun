@@ -162,6 +162,27 @@ pub fn set_tombstone_bytes(total: u64) {
     metrics::counter!("topgun_ormap_tombstone_bytes_total").increment(total);
 }
 
+/// The startup warning for a detected legacy [`RecordValue::OrTombstones`] corpus,
+/// or `None` when the store holds none.
+///
+/// Pre-epoch stores are not supported for tombstone reclamation: an untouched
+/// legacy blob is excluded from the epoch scan and so never becomes GC-eligible.
+/// The supported way to reclaim such a corpus is a fresh datastore (server wipe +
+/// clients re-sync). This surfaces that at boot so an operator sees the pinned
+/// bytes are deliberate, not a leak.
+///
+/// Kept a pure `count -> Option<message>` decision so it is unit-testable off the
+/// bin-only boot walk that supplies the count.
+#[must_use]
+pub fn legacy_tombstone_warning(legacy_row_count: u64) -> Option<String> {
+    (legacy_row_count > 0).then(|| {
+        format!(
+            "legacy tombstone corpus present ({legacy_row_count} row(s)) — excluded from GC; \
+             recreate the datastore to reclaim"
+        )
+    })
+}
+
 /// Minimum elapsed milliseconds before a read access updates `last_access_time`.
 ///
 /// Coalesces recency updates to bound write amplification under read-heavy load
@@ -577,5 +598,27 @@ mod or_map_tombstone_tests {
             }
             other => panic!("expected OrTombstones, got {other:?}"),
         }
+    }
+
+    /// The boot-warn decision: a non-zero legacy-row count yields a warning
+    /// carrying the count; a clean store (count 0) yields none, so startup on a
+    /// store with no legacy corpus logs nothing.
+    #[test]
+    fn legacy_tombstone_warning_fires_only_with_a_nonzero_count() {
+        assert_eq!(
+            legacy_tombstone_warning(0),
+            None,
+            "a clean store logs no legacy-corpus warning"
+        );
+
+        let warning = legacy_tombstone_warning(3).expect("legacy rows present → warn");
+        assert!(
+            warning.contains('3'),
+            "the warning reports the accurate legacy-row count"
+        );
+        assert!(
+            warning.contains("excluded from GC") && warning.contains("recreate the datastore"),
+            "the warning states the clean-slate reclamation posture"
+        );
     }
 }
