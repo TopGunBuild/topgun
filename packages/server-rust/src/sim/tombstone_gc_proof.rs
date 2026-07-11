@@ -49,10 +49,10 @@ mod tests {
     use crate::tombstone_frontier_impl::TombstoneFrontier;
 
     // ------------------------------------------------------------------
-    // Harness (mirrors the gated SyncService setup used by the SPEC-342c
-    // sync-path tests; the `sim` module cannot import their `#[cfg(test)]`
-    // private helpers, so it reconstructs the minimal scaffold here and also
-    // hands back the shared `KeyWriterRegistry` for the interleaved-prune test).
+    // Harness (mirrors the gated SyncService setup used by the sync-path
+    // tests; the `sim` module cannot import their `#[cfg(test)]` private
+    // helpers, so it reconstructs the minimal scaffold here and also hands
+    // back the shared `KeyWriterRegistry` for the interleaved-prune test).
     // ------------------------------------------------------------------
 
     fn make_timestamp() -> Timestamp {
@@ -288,9 +288,29 @@ mod tests {
         {
             let (svc, factory, frontier, registry, _kw) = gated_sync();
             let (conn, _client) = register_device(&registry, "dev-forgotten").await;
-            // Tombstone already pruned → the key is empty; nothing suppresses R1.
+
+            // R1 was observed and then REMOVED — while its tombstone is present it
+            // suppresses any re-add via remove-wins carry-tombstone merge (the
+            // `lagging_known_replica_*` sibling proves that leg directly).
+            seed_or_map(&factory, map, key, &[], &["R1"]).await;
+            frontier.stamp_tombstone(map, key, "R1"); // current_epoch = 1
+            assert!(
+                stored_or_map(&factory, map, key)
+                    .await
+                    .1
+                    .contains(&"R1".to_string()),
+                "precondition: R1's removal tombstone is present"
+            );
+
+            // The forgotten client fell past retention, so nothing pins epoch 1 and
+            // R1's tombstone is GC'd. Model the completed prune as the resulting
+            // empty key. (In production a pruned key only exists once the durable-
+            // epoch watermark is set, which ALSO arms the gate — so this pruned-yet-
+            // dark state is a deliberate counterfactual isolating the degradation the
+            // watermark coupling prevents.)
             seed_or_map(&factory, map, key, &[], &[]).await;
-            frontier.stamp_tombstone(map, "seed", "seed-tag"); // current_epoch = 1, still dark
+
+            // The forgotten client returns and re-pushes the removed R1.
             Arc::clone(&svc)
                 .oneshot(push_entry(make_ctx_conn(conn), map, key, &["R1"], &[]))
                 .await
@@ -298,7 +318,7 @@ mod tests {
             let (live, _t) = stored_or_map(&factory, map, key).await;
             assert!(
                 live.contains(&"R1".to_string()),
-                "ABSENT the gate, a forgotten client's stale push resurrects the removed value (documented degradation)"
+                "ABSENT the gate, a forgotten client's stale push resurrects the removed-then-pruned value (documented degradation)"
             );
         }
 
@@ -535,7 +555,7 @@ mod tests {
             //   (A) an admitted push that unions in a NEW tombstone `R1` (and a
             //       suppressed R1 record), and
             //   (B) the prune sweep that drops `T_old`.
-            // Both take the per-key single writer (342d). Serialization must yield
+            // Both take the per-key single writer. Serialization must yield
             // exactly {R2 live, tombstones = [R1]} — a torn read would either lose
             // the prune (T_old survives) or lose the push's union (R1 missing).
             let barrier = Arc::new(std::sync::Barrier::new(2));
