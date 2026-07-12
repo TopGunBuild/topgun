@@ -642,8 +642,9 @@ async fn run_soak(config: &Config) -> i32 {
     );
 
     // --- Assess tombstone-byte growth (direct residency-independent leak
-    // instrument, the bounded-plateau GATE). Coexists with the RSS gate above
-    // as a coarse non-tombstone backstop — neither replaces the other. The
+    // instrument, the bounded-plateau signal — surfaced REPORT-ONLY today, see
+    // the routing note below). Coexists with the RSS gate above as a coarse
+    // non-tombstone backstop — neither replaces the other. The
     // sampling loop already excluded boot-recompute-gap samples (R9(c)), so
     // this series is safe to fit directly.
     let tombstone_samples_snapshot = tombstone_samples.lock().clone();
@@ -1094,9 +1095,11 @@ async fn recovery_checkpoint(
             .push(format!("server failed to restart after kill -9: {e}"));
         paused.store(false, Ordering::SeqCst);
         // Leave the just-pushed gap open (`end_secs = INFINITY`): the run is
-        // already failing via `out.hard`, and an open gap safely excludes
-        // every subsequent tombstone sample rather than risking a stale
-        // pre-reconcile read being treated as trustworthy.
+        // already failing via `out.hard`, and the still-limping server may
+        // serve stale pre-reconcile reads, so excluding subsequent samples is
+        // safer than trusting them. This does NOT blind the sampler forever —
+        // the next `recovery_checkpoint` whose `restart()` reaches health-ready
+        // closes every lingering open gap (see the close-all loop below).
         return Ok(out);
     }
     // Close the boot gap as the FIRST action after `restart()` returns ready
@@ -1104,10 +1107,22 @@ async fn recovery_checkpoint(
     // the new life). Capture the timestamp before taking the lock so lock
     // contention cannot widen the window in which a genuinely-post-reconcile
     // sample would still see the gap open and be wrongly excluded.
+    //
+    // Close EVERY still-open gap, not just the just-pushed one. A prior
+    // `recovery_checkpoint` whose `restart()` FAILED deliberately left its gap
+    // open (`end_secs = INFINITY`) so the still-limping server's stale
+    // pre-reconcile reads stay excluded — but a lone `last_mut()` would close
+    // only this checkpoint's gap and leave that earlier one open forever,
+    // blinding the tombstone sampler for the rest of the run (every later
+    // sample past its `start_secs` would be dropped). Reaching health-ready
+    // here means the gauge is trustworthy again for ALL prior lives, so any
+    // lingering open gap is closed at the same reconcile boundary.
     {
         let gap_end_secs = boot_gap_clock.sampler_start.elapsed().as_secs_f64();
-        if let Some(last) = boot_gap_clock.boot_gaps.lock().last_mut() {
-            last.end_secs = gap_end_secs;
+        for gap in boot_gap_clock.boot_gaps.lock().iter_mut() {
+            if gap.end_secs.is_infinite() {
+                gap.end_secs = gap_end_secs;
+            }
         }
     }
 

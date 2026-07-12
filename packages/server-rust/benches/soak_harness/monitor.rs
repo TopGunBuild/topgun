@@ -285,6 +285,14 @@ fn last_half_window_slope_per_hour(points: &[(f64, f64)]) -> f64 {
 /// six-figure B/h "leak". This span lets the gate suppress that clause until the
 /// fitted window covers enough real time for the per-hour number to mean
 /// anything.
+///
+/// A degenerate last-half window of ≤2 points therefore yields `0.0` and is
+/// intentionally suppressed: a run that produced only one or two samples (a very
+/// short soak) cannot trip even the report-only slope clause regardless of how
+/// linear its growth looks — there is no window to extrapolate over, and the
+/// 120s [`DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS`] floor would suppress it in any
+/// case. Real bounded/72h soaks accumulate hundreds of samples, so this bounds
+/// nothing they rely on.
 fn last_half_window_span_secs(points: &[(f64, f64)]) -> f64 {
     let window = last_half_window(points);
     match (window.first(), window.last()) {
@@ -321,16 +329,19 @@ pub const DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR: f64 = 512.0;
 pub const DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH: f64 = 1.0;
 
 /// Minimum wall-clock span (seconds) of the last-half fit window before the
-/// per-hour slope clause is allowed to hard-fail the run.
+/// per-hour slope clause is surfaced as a (report-only) breach.
 ///
 /// The slope is a per-hour EXTRAPOLATION (bytes/sec × 3600). Over a sub-minute
 /// window the `3600 / span_secs` amplification is enormous: a healthy short run
 /// that has simply not yet had time to plateau (e.g. the 25s blocking CI "Short
 /// no-crash soak", ~6 samples over ~25s with a few KB of ordinary ramp-up)
-/// extrapolates to a six-figure B/h rate and would false-RED. Below this floor
-/// the slope carries no plateau signal — a leak and a not-yet-plateaued healthy
-/// run are indistinguishable — so the clause is suppressed and the run passes on
-/// the blind-monitor + absolute-growth clauses alone.
+/// extrapolates to a six-figure B/h rate and would surface a spurious breach.
+/// Below this floor the slope carries no plateau signal — a leak and a
+/// not-yet-plateaued healthy run are indistinguishable — so the clause is
+/// suppressed (no breach is emitted for it) and the assessment passes on the
+/// blind-monitor + absolute-growth clauses alone. (The breach is report-only
+/// today regardless — see [`DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR`]; this
+/// floor keeps even the report-only signal from crying wolf on a short run.)
 ///
 /// 120s sits well above the smoke run's ~10-15s last-half span (suppressed) and
 /// well below a real bounded soak's window (a 10-60 min live run's last-half
@@ -369,8 +380,8 @@ pub struct TombstoneAssessment {
 ///   treated as noise. Kept minimal (see [`DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH`]
 ///   doc) rather than mirroring the RSS gate's large guard.
 /// * `min_window_secs` — minimum wall-clock span of the last-half fit window
-///   before the per-hour slope clause is allowed to fail the run (see
-///   [`DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS`]). Guards against a
+///   before the per-hour slope clause is surfaced as a (report-only) breach
+///   (see [`DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS`]). Guards against a
 ///   too-short-to-plateau run false-REDing on the per-hour extrapolation of a
 ///   sub-minute window. Pass `0.0` to disable the guard.
 #[allow(clippy::cast_precision_loss)]
