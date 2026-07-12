@@ -16,30 +16,43 @@
 //!    is a HARD gate; the **full-scan QUERY** read-back is a tracked
 //!    *expected-fail* gate pending the datastore-backed full-scan, so the two
 //!    halves are scoped to the capability each actually delivers.
-//! 3. **Bounded memory:** the OR-Map tombstone-bytes gauge
-//!    (`topgun_ormap_tombstone_bytes_total`, scraped from the server's own
+//! 3. **Bounded memory:** the decrementable OR-Map tombstone-bytes gauge
+//!    (`topgun_ormap_tombstone_bytes`, scraped from the server's own
 //!    `GET /metrics`) is sampled every interval and its bounded-plateau slope
 //!    (last-half-window OLS, boot-recompute-gap samples excluded — see
 //!    `monitor.rs`) is computed against a tight per-hour threshold — a direct,
 //!    residency-independent leak signal with no allocator/cache noise floor.
-//!    The slope is surfaced REPORT-ONLY: the exported gauge is additive-only
-//!    (every tombstone-add counts; no prune-side decrement is wired yet, and
-//!    the OR-Map epoch prune is dark until a follow-up supplies the frontier's
-//!    durable-epoch watermark), so under sustained churn it climbs at the
-//!    tombstone-*creation* rate and cannot plateau within a process life —
-//!    hard-gating it would false-RED every healthy long run. Only the
-//!    blind-monitor (zero-sample) clause hard-gates. Server RSS is sampled in
-//!    parallel and asserted against a looser slope as a coarse, non-tombstone
-//!    backstop gate. (Re-promote the slope to a hard gate once the
-//!    prune-activation follow-up makes the gauge track residency and a live
-//!    bounded soak is observed to actually plateau.)
+//!    The slope is a HARD gate: a tracked-and-ACKing client
+//!    (`SoakClient::connect_tracked` + `confirm_apply`) is driven alongside the
+//!    churn clients for the run's duration so the server's per-device causal
+//!    frontier — and therefore its low-water-mark — actually advances, which is
+//!    what lets the epoch-scoped prune fire and the gauge genuinely plateau
+//!    under sustained churn instead of only ever growing. The min-window-span
+//!    guard (`DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS`) keeps a
+//!    too-short-to-plateau run (e.g. the 25s blocking smoke) from false-REDing
+//!    on a not-yet-flattened ramp, and the blind-monitor (zero-sample) clause
+//!    hard-gates independently of the slope. Server RSS is sampled in parallel
+//!    and asserted against a looser slope as a coarse, non-tombstone backstop
+//!    gate. The on-disk data-dir slope (below) remains REPORT-ONLY — bounding
+//!    it is a separate, not-yet-landed follow-up.
 //! 4. **Zero panics:** any panic marker in server output, or any un-requested
 //!    exit, fails the run with the captured context.
 //!
 //! Two **negative controls** prove the harness can actually fail:
 //! `--inject-divergence` makes the convergence check go red, and
 //! `--inject-panic` makes the panic capture go red. A soak that cannot fail
-//! proves nothing.
+//! proves nothing. Two more MODES exist specifically to prove the promoted
+//! tombstone-byte hard gate above is honest: `--no-ack` disables the tracked
+//! client's confirm-apply loop (the low-water-mark then never advances, prune
+//! never fires, and the gate must FAIL under sustained churn), and
+//! `--inject-slow-leak` adds a second, deliberately slow-acking tracked client
+//! whose stale cursor repeatedly caps the fleet-wide low-water-mark — a bounded
+//! ramp-then-catch-up pattern used to calibrate the OLS slope's detection floor
+//! against a small, non-instantaneous leak rather than only total blockage.
+//! Independently of the gauge, `scan_redb_tombstone_corpus` opens the server's
+//! own redb file after it exits and sums the real on-disk tombstone corpus —
+//! the positive control's cross-check against a gauge/corpus divergence (e.g. a
+//! legacy `OrTombstones` blob the hot-path gauge never counted on add).
 //!
 //! See `benches/soak_harness/README.md` for usage and the Hetzner 72h runner.
 
@@ -64,7 +77,7 @@ mod or_noloss;
 mod process;
 mod report;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -72,6 +85,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use parking_lot::Mutex;
+use redb::ReadableTable;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use client::SoakClient;
@@ -88,10 +102,26 @@ use process::{resolve_server_binary, ServerConfig, ServerSupervisor};
 use report::{
     append_progress, utc_timestamp_now, write_report, MemoryReport, ProgressSnapshot, SoakReport,
 };
+use topgun_server::storage::record::RecordValue;
 
 /// Subject index used by the orchestrator's verifier connections. Far above the
 /// churn-client range so it never owns keys or collides with churn auth.
 const VERIFIER_IDX: usize = 1_000_000;
+
+/// Subject index for the tracked-and-ACKing client that drives the server's
+/// low-water-mark forward. Distinct from `VERIFIER_IDX` (and its `+1` sibling)
+/// and the churn-client range so its device identity never collides.
+const TRACKER_IDX: usize = 2_000_000;
+
+/// Subject index for the `--inject-slow-leak` variant's second tracked client.
+const SLOW_LEAK_TRACKER_IDX: usize = 2_000_001;
+
+/// Confirm-apply cadence for the `--inject-slow-leak` tracked client —
+/// deliberately much slower than any reasonable `--confirm-interval`, so its
+/// stale cursor is the binding (minimum) term in the fleet-wide low-water-mark
+/// for most of the run, producing a repeated ramp-then-catch-up pattern rather
+/// than a continuous plateau.
+const SLOW_LEAK_ACK_INTERVAL: Duration = Duration::from_secs(90);
 
 const LWW_MAP: &str = "soak_lww";
 const OR_MAP: &str = "soak_or";
@@ -122,6 +152,24 @@ struct Config {
     progress_output: Option<PathBuf>,
     inject_divergence: bool,
     inject_panic: bool,
+    /// How often the tracked-and-ACKing client (see `TRACKER_IDX`) runs one
+    /// `confirm_apply` round. This is the cadence at which the server's
+    /// per-device causal frontier — and therefore its low-water-mark — can
+    /// advance, which in turn licenses the epoch-scoped tombstone prune.
+    confirm_interval: Duration,
+    /// Negative control: disables the tracked client's confirm-apply loop
+    /// entirely. With no client ever confirming, the low-water-mark stays 0,
+    /// prune never fires, and sustained OR churn must trip the promoted
+    /// tombstone-byte hard gate.
+    no_ack: bool,
+    /// Adds a second tracked client (`SLOW_LEAK_TRACKER_IDX`) that ACKs on a
+    /// much slower cadence than the primary tracker. Because the low-water-mark
+    /// is the MINIMUM cursor across all tracked clients, this caps pruning to
+    /// the slow client's stale confirmations, producing a bounded
+    /// ramp-then-catch-up pattern that exercises the OLS slope gate's
+    /// detection floor against a small, slow leak rather than only the
+    /// `--no-ack` total-blockage case.
+    inject_slow_leak: bool,
     /// Skip the pre-`kill -9` quiesce drain in the recovery checkpoint. When set,
     /// the checkpoint kills the server WITHOUT first letting the write-behind
     /// buffer flush to redb, so post-restart recovery must rely on the WAL alone.
@@ -170,6 +218,9 @@ impl Default for Config {
             progress_output: None,
             inject_divergence: false,
             inject_panic: false,
+            confirm_interval: Duration::from_secs(2),
+            no_ack: false,
+            inject_slow_leak: false,
             no_pre_kill_drain: false,
             mode_requested: false,
         }
@@ -192,6 +243,11 @@ struct SoakMetrics {
     write_errors: AtomicU64,
     reconnects: AtomicU64,
     resends: AtomicU64,
+    /// Count of completed `confirm_apply` rounds that actually ACKed an epoch
+    /// (i.e. `Ok(Some(_))`), across every tracked client. Visibility signal for
+    /// a long soak: this staying at 0 for the whole run means the low-water-mark
+    /// never advanced (expected under `--no-ack`; a bug otherwise).
+    confirms: AtomicU64,
 }
 
 /// Context shared with every churn client task.
@@ -360,6 +416,43 @@ async fn run_soak(config: &Config) -> i32 {
             offline_keys: config.offline_keys,
         };
         churn_handles.push(tokio::spawn(run_churn_client(idx, ctx)));
+    }
+
+    // --- Spawn the tracked-and-ACKing client(s) that drive the server's
+    // low-water-mark ---
+    //
+    // Without at least one client running `connect_tracked` + `confirm_apply`,
+    // the server's per-device causal frontier tracks NO clients at all, so
+    // `low_water_mark()` is vacuously 0 forever and the epoch-scoped prune
+    // never fires regardless of how much churn runs — this is what made the
+    // tombstone-byte slope report-only before this driver existed. The primary
+    // tracker below always spawns (its ack loop is skipped, not the connection,
+    // when `--no-ack` is set — the negative control needs the request/response
+    // shape to still run so a real regression in the harness plumbing itself
+    // would still be caught by other assertions). `--inject-slow-leak` adds a
+    // second tracked client with a much slower ack cadence purely for slope-gate
+    // calibration; see `SLOW_LEAK_ACK_INTERVAL`.
+    churn_handles.push(tokio::spawn(run_tracked_confirm_client(TrackerConfig {
+        supervisor: Arc::clone(&supervisor),
+        jwt_secret: jwt_secret.clone(),
+        stop: Arc::clone(&stop),
+        paused: Arc::clone(&paused),
+        metrics: Arc::clone(&metrics),
+        idx: TRACKER_IDX,
+        confirm_interval: config.confirm_interval,
+        no_ack: config.no_ack,
+    })));
+    if config.inject_slow_leak {
+        churn_handles.push(tokio::spawn(run_tracked_confirm_client(TrackerConfig {
+            supervisor: Arc::clone(&supervisor),
+            jwt_secret: jwt_secret.clone(),
+            stop: Arc::clone(&stop),
+            paused: Arc::clone(&paused),
+            metrics: Arc::clone(&metrics),
+            idx: SLOW_LEAK_TRACKER_IDX,
+            confirm_interval: SLOW_LEAK_ACK_INTERVAL,
+            no_ack: false,
+        })));
     }
 
     // --- Spawn memory + tombstone-bytes + disk samplers ---
@@ -632,6 +725,14 @@ async fn run_soak(config: &Config) -> i32 {
     }
     supervisor.shutdown().await;
 
+    // Positive-control independent corpus assertion (R5): the server process
+    // has just been reaped, so its redb handle is released and this scan can
+    // safely open the same file. REPORT-ONLY (printed in the console summary,
+    // never asserted into `passed`) — see `scan_redb_tombstone_corpus`'s doc
+    // for why a divergence from the gauge's `last_bytes` below is exactly the
+    // failure mode this exists to catch.
+    let redb_tombstone_scan = scan_redb_tombstone_corpus(&data_dir, OR_MAP);
+
     // --- Assess memory (secondary/backstop gate) ---
     let mem_samples = samples.lock().clone();
     let mem = assess(
@@ -642,11 +743,11 @@ async fn run_soak(config: &Config) -> i32 {
     );
 
     // --- Assess tombstone-byte growth (direct residency-independent leak
-    // instrument, the bounded-plateau signal — surfaced REPORT-ONLY today, see
-    // the routing note below). Coexists with the RSS gate above as a coarse
-    // non-tombstone backstop — neither replaces the other. The
-    // sampling loop already excluded boot-recompute-gap samples (R9(c)), so
-    // this series is safe to fit directly.
+    // instrument, the bounded-plateau signal — a HARD gate, see the promotion
+    // note below). Coexists with the RSS gate above as a coarse non-tombstone
+    // backstop — neither replaces the other. The sampling loop already
+    // excluded boot-recompute-gap samples (R9(c)), so this series is safe to
+    // fit directly.
     let tombstone_samples_snapshot = tombstone_samples.lock().clone();
     let tombstones = assess_tombstone_bytes(
         &tombstone_samples_snapshot,
@@ -655,19 +756,28 @@ async fn run_soak(config: &Config) -> i32 {
         DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
     );
 
-    // The tombstone-byte SLOPE clause is REPORT-ONLY (mirrors the disk gate
-    // below), NOT a hard gate. The exported gauge (`add_tombstone_bytes`) is
-    // additive-only: it counts every tombstone-add and is never decremented on
-    // prune (no `sub_tombstone_bytes` call site yet), and the OR-Map epoch
-    // prune is dark until a follow-up supplies the frontier's durable-epoch
-    // watermark. So under the soak's sustained OR churn the gauge climbs at the
-    // tombstone-*creation* rate and cannot plateau within a process life —
-    // hard-gating the slope would false-RED the blocking no-crash Soak Smoke
-    // G4b run and any 10-60 min / 72h soak. The slope is surfaced via
-    // `pending_gates` (an honest, non-failing signal) until the prune-activation
-    // follow-up makes the gauge track residency; re-promote to a hard gate then.
+    // The tombstone-byte SLOPE clause is now a HARD gate (promoted from
+    // report-only): the tracked-and-ACKing client spawned above
+    // (`run_tracked_confirm_client` / `TRACKER_IDX`) drives the server's
+    // per-device causal frontier forward every `confirm_interval`, so the
+    // fleet-wide low-water-mark actually advances and the epoch-scoped prune
+    // fires — the exported gauge (`topgun_ormap_tombstone_bytes`) is
+    // decrementable and is expected to genuinely plateau under sustained churn,
+    // not merely climb at the tombstone-creation rate. Two guards keep this
+    // from false-REDing:
+    //   - the min-window-span guard (`DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS`)
+    //     suppresses the slope clause until the last-half fit window covers
+    //     enough wall-clock time for a per-hour extrapolation to mean anything
+    //     — this is what keeps the 25s blocking Soak Smoke G4b run green even
+    //     though its keyspace has not yet had time to plateau;
+    //   - boot-recompute-gap exclusion (unchanged) keeps a spurious
+    //     post-restart pre-reconcile read from manufacturing a false leak.
     // RSS above remains a coarse, non-tombstone backstop (its large min-growth
     // guard cannot catch a single-digit-MB/KB tombstone leak on a bounded run).
+    // `--no-ack` and `--inject-slow-leak` (see their doc comments on `Config`)
+    // are the negative/slow-leak control modes that prove this gate can
+    // actually fail and actually catches a small sustained leak, not only a
+    // total blockage.
     //
     // The blind-monitor guard hard-gates independently of the slope clause:
     // zero samples means the `/metrics` scrape was dead — a real harness
@@ -696,6 +806,7 @@ async fn run_soak(config: &Config) -> i32 {
         && recovery_failures.is_empty()
         && mem.passed
         && !blind_monitor
+        && tombstones.passed
         && !disk_blind_monitor
         && panic_report.is_none();
 
@@ -711,17 +822,17 @@ async fn run_soak(config: &Config) -> i32 {
             tombstones.reason.clone().unwrap_or_default()
         );
     } else if !tombstones.passed {
-        // Report-only (mirrors the disk slope below): the additive-only gauge
-        // grows at the tombstone-creation rate under sustained churn and cannot
-        // plateau until a follow-up wires prune-side decrement + frontier-
-        // watermark activation, so a slope breach here is the EXPECTED honest
-        // signal, not a regression. Do NOT AND it into `passed`.
-        pending_gates.push(format!(
-            "tombstone-byte growth slope {:.1} bytes/h exceeds {:.1} bytes/h — \
-             EXPECTED until the OR-Map prune-activation follow-up bounds residency \
-             (report-only, did NOT fail the run)",
-            tombstones.slope_bytes_per_hour, DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR
-        ));
+        // HARD gate (promoted from report-only): with the tracked-and-ACKing
+        // client driving the low-water-mark, a sustained slope breach past the
+        // min-window-guarded threshold means the epoch-scoped prune is not
+        // keeping up with (or has stopped) bounding tombstone growth — a real
+        // regression, not an expected/known gap. AND it into `passed`.
+        finished_reason = format!(
+            "tombstone-byte growth slope {:.1} bytes/h exceeds {:.1} bytes/h: {}",
+            tombstones.slope_bytes_per_hour,
+            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+            tombstones.reason.clone().unwrap_or_default()
+        );
     }
     if disk_blind_monitor {
         finished_reason = format!(
@@ -777,7 +888,7 @@ async fn run_soak(config: &Config) -> i32 {
         timestamp: utc_timestamp_now(),
     };
 
-    print_summary(&report, &tombstones, &disk);
+    print_summary(&report, &tombstones, &disk, redb_tombstone_scan);
     if let Some(path) = &config.json_output {
         write_report(path, &report);
         println!("wrote JSON report to {}", path.display());
@@ -792,7 +903,12 @@ async fn run_soak(config: &Config) -> i32 {
     i32::from(!passed)
 }
 
-fn print_summary(r: &SoakReport, tombstones: &TombstoneAssessment, disk: &DiskAssessment) {
+fn print_summary(
+    r: &SoakReport,
+    tombstones: &TombstoneAssessment,
+    disk: &DiskAssessment,
+    redb_tombstone_scan: Option<u64>,
+) {
     println!("\n=== SOAK SUMMARY ===");
     println!(
         "result:            {}",
@@ -817,11 +933,12 @@ fn print_summary(r: &SoakReport, tombstones: &TombstoneAssessment, disk: &DiskAs
         r.memory.slope_mb_per_hour,
         if r.memory.passed { "ok" } else { "FAIL" }
     );
-    // The byte SLOPE is REPORT-ONLY (the additive-only gauge cannot plateau
-    // under sustained churn until the OR-Map prune-activation follow-up wires
-    // residency tracking); only the blind-monitor (zero-sample) clause
-    // hard-gates. See the run-end verdict rationale.
-    let tombstone_role = "slope report-only pending prune-activation; blind-monitor hard-gates";
+    // The byte SLOPE is now a HARD gate: the tracked-and-ACKing client drives
+    // the low-water-mark forward, so the epoch-scoped prune actually fires and
+    // the gauge is expected to plateau under sustained churn (subject to the
+    // min-window-span guard and boot-gap exclusion). See the run-end verdict
+    // rationale.
+    let tombstone_role = "slope + blind-monitor both hard-gate";
     println!(
         "tombstone_bytes:   first={} peak={} last={} slope={:.1}B/h samples={} -> {} ({}){}",
         tombstones.first_bytes,
@@ -836,9 +953,35 @@ fn print_summary(r: &SoakReport, tombstones: &TombstoneAssessment, disk: &DiskAs
             .as_ref()
             .map_or_else(String::new, |r| format!(" reason={r}")),
     );
-    // Same report-only stance as tombstone bytes: the disk slope is EXPECTED to
-    // breach pre-TODO-566 under default OR-churn (linear durable-dir growth by
-    // design); only the blind-monitor (zero-sample) clause hard-gates.
+    // Positive-control cross-check (R5): an independent, gauge-free scan of the
+    // real on-disk tombstone corpus, taken after the server process exited. A
+    // large divergence from `tombstones.last_bytes` above means the exported
+    // gauge is not tracking the true corpus (e.g. an un-migrated legacy
+    // `OrTombstones` blob the hot-path gauge never added on read) — REPORT-ONLY,
+    // never asserted into `passed`.
+    match redb_tombstone_scan {
+        Some(scanned_bytes) => {
+            let gauge_bytes = tombstones.last_bytes;
+            let diverged = scanned_bytes != gauge_bytes;
+            println!(
+                "tombstone_corpus_redb_scan: {scanned_bytes} bytes (independent of gauge; last \
+                 gauge value {gauge_bytes} bytes) -> {} (positive-control cross-check, \
+                 report-only)",
+                if diverged { "DIVERGED" } else { "match" }
+            );
+        }
+        None => {
+            println!(
+                "tombstone_corpus_redb_scan: could not scan (missing/corrupt redb file or \
+                 table) — positive-control cross-check skipped, report-only"
+            );
+        }
+    }
+    // Unlike the tombstone-byte slope above (now a hard gate), the disk slope
+    // stays REPORT-ONLY: it is EXPECTED to breach pre-TODO-566 under default
+    // OR-churn (linear durable-dir growth by design, independent of the
+    // tombstone prune this spec drives); only the blind-monitor (zero-sample)
+    // clause hard-gates.
     let disk_role = "slope report-only until TODO-566; blind-monitor hard-gates";
     println!(
         "disk_mb:           first={:.1} peak={:.1} last={:.1} slope={:.1}MB/h samples={} -> {} ({}){}",
@@ -880,12 +1023,18 @@ fn print_summary(r: &SoakReport, tombstones: &TombstoneAssessment, disk: &DiskAs
 // Tombstone-bytes gauge sampling
 // ---------------------------------------------------------------------------
 
-/// Scrape `topgun_ormap_tombstone_bytes_total` from the real running server's
-/// `GET /metrics` (Prometheus text exposition format). Returns `None` on any
-/// transient failure — connection refused (server mid-restart), non-2xx
-/// status, an unreadable body, or the metric line simply not being present —
-/// so the caller skips the sample instead of recording a bogus point. This
-/// mirrors `sample_rss_mb`'s `None`-on-gone-process contract in `monitor.rs`.
+/// Scrape `topgun_ormap_tombstone_bytes` — the DECREMENTABLE gauge, not the
+/// `_total` monotonic creation-rate counter — from the real running server's
+/// `GET /metrics` (Prometheus text exposition format). The plateau/slope signal
+/// this harness gates on MUST come from the decrementable gauge: the `_total`
+/// counter only ever grows (every add, never subtracted on prune), so fitting
+/// a slope against it would always look like an unbounded leak regardless of
+/// whether pruning is actually keeping tombstone residency bounded. Returns
+/// `None` on any transient failure — connection refused (server mid-restart),
+/// non-2xx status, an unreadable body, or the metric line simply not being
+/// present — so the caller skips the sample instead of recording a bogus
+/// point. This mirrors `sample_rss_mb`'s `None`-on-gone-process contract in
+/// `monitor.rs`.
 async fn scrape_tombstone_bytes(http: &reqwest::Client, port: u16) -> Option<u64> {
     let url = format!("http://127.0.0.1:{port}/metrics");
     let resp = http.get(&url).send().await.ok()?;
@@ -893,16 +1042,19 @@ async fn scrape_tombstone_bytes(http: &reqwest::Client, port: u16) -> Option<u64
         return None;
     }
     let body = resp.text().await.ok()?;
-    parse_tombstone_bytes_total(&body)
+    parse_tombstone_bytes_gauge(&body)
 }
 
-/// Parse the `topgun_ormap_tombstone_bytes_total` sample value out of a
-/// Prometheus text exposition body, skipping `# HELP`/`# TYPE` comment lines
-/// and any blank lines. A metric line is `name value` or `name{labels} value`
-/// (space-separated); this counter carries no labels today, but the label-form
-/// prefix match keeps the parser correct if one is ever added.
-fn parse_tombstone_bytes_total(body: &str) -> Option<u64> {
-    const METRIC: &str = "topgun_ormap_tombstone_bytes_total";
+/// Parse the `topgun_ormap_tombstone_bytes` (decrementable gauge) sample value
+/// out of a Prometheus text exposition body, skipping `# HELP`/`# TYPE` comment
+/// lines and any blank lines. A metric line is `name value` or
+/// `name{labels} value` (space-separated); this gauge carries no labels today,
+/// but the label-form prefix match keeps the parser correct if one is ever
+/// added. Exact-name equality (not a bare prefix match) is what keeps this from
+/// also matching the co-resident `topgun_ormap_tombstone_bytes_total` counter
+/// line the same `/metrics` response carries.
+fn parse_tombstone_bytes_gauge(body: &str) -> Option<u64> {
+    const METRIC: &str = "topgun_ormap_tombstone_bytes";
     // Compute the labelled-series prefix once rather than allocating a fresh
     // `String` per scanned line in the hot scrape loop.
     let labelled_prefix = format!("{METRIC}{{");
@@ -926,6 +1078,74 @@ fn parse_tombstone_bytes_total(body: &str) -> Option<u64> {
         }
     }
     None
+}
+
+/// Independent, gauge-free scan of the OR-Map's on-disk tombstone corpus: the
+/// positive control's cross-check that `topgun_ormap_tombstone_bytes` is
+/// actually tracking the real durable byte total, not merely plateauing
+/// because it drifted out of sync with it.
+///
+/// Opens the server's own redb file directly (`{data_dir}/topgun.redb`, the
+/// same layout `RedbDataStore` writes: table `map__{map}`, msgpack-encoded
+/// `RecordValue` values) and sums the UTF-8 byte length of every tombstoned
+/// tag across BOTH tombstone-carrying shapes: the live `RecordValue::OrMap`'s
+/// `tombstones` field, and the legacy `RecordValue::OrTombstones` blob a
+/// pre-migration server may have left on disk. The legacy shape matters here:
+/// the in-process gauge's `sub_tombstone_bytes` call site lives on the CRDT
+/// write path's `OR_REMOVE`/prune handling for the CURRENT `OrMap` shape only
+/// — a decoded legacy `OrTombstones` blob is folded into the read-side merge
+/// view but never re-adds itself to the gauge, so the gauge can silently drift
+/// BELOW the true corpus (toward its saturating-0 floor) while these bytes
+/// remain resident. Comparing this scan's total against the gauge's last
+/// sampled value is exactly what catches that divergence.
+///
+/// MUST run only after `ServerSupervisor::shutdown` has reaped the child
+/// process: redb is single-writer, so the server's own handle on the file must
+/// already be released before this process can open it. This is therefore a
+/// post-teardown assertion, not a live sampler alongside RSS/tombstone-bytes/
+/// disk above. Returns `None` on any failure (file missing, corrupt header,
+/// table absent) — best-effort, mirroring `sample_rss_mb`/`sample_disk_mb`'s
+/// None-on-failure contract — so a scan failure is reported as "could not
+/// scan", never mistaken for a genuinely empty (zero-byte) corpus.
+fn scan_redb_tombstone_corpus(data_dir: &Path, map: &str) -> Option<u64> {
+    let db_path = data_dir.join("topgun.redb");
+    if !db_path.exists() {
+        return None;
+    }
+    let db = redb::Database::open(&db_path).ok()?;
+    let read_txn = db.begin_read().ok()?;
+    let table_name = format!("map__{map}");
+    let table_def: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new(&table_name);
+    let table = match read_txn.open_table(table_def) {
+        Ok(t) => t,
+        // Never-written table (e.g. no OR-Map write ever landed) contributes 0
+        // tombstone bytes — a real, honest answer, not a scan failure.
+        Err(redb::TableError::TableDoesNotExist(_)) => return Some(0),
+        Err(_) => return None,
+    };
+
+    let mut total_bytes: u64 = 0;
+    let iter = table.iter().ok()?;
+    for entry in iter {
+        let (_key_guard, val_guard) = entry.ok()?;
+        let Ok(value) = rmp_serde::from_slice::<RecordValue>(val_guard.value()) else {
+            // An undecodable value is a corrupt/foreign row, not part of this
+            // scan's remit — skip it rather than aborting the whole scan.
+            continue;
+        };
+        match value {
+            RecordValue::OrMap { tombstones, .. } => {
+                total_bytes += tombstones.iter().map(|t| t.len() as u64).sum::<u64>();
+            }
+            // Legacy pre-migration shape — see the function doc's divergence
+            // rationale for why this is exactly what the gauge can miss.
+            RecordValue::OrTombstones { tags } => {
+                total_bytes += tags.iter().map(|t| t.len() as u64).sum::<u64>();
+            }
+            RecordValue::Lww { .. } => {}
+        }
+    }
+    Some(total_bytes)
 }
 
 // ---------------------------------------------------------------------------
@@ -1444,6 +1664,105 @@ async fn connect_with_retry(ctx: &ChurnCtx, idx: usize) -> Option<SoakClient> {
 }
 
 // ---------------------------------------------------------------------------
+// Tracked confirm-apply client (drives the low-water-mark)
+// ---------------------------------------------------------------------------
+
+/// Configuration for a single tracked-and-ACKing replica. Bundled into one
+/// struct (mirroring `ChurnCtx`/`BootGapClock`) so `run_tracked_confirm_client`
+/// takes one parameter instead of clippy's too-many-arguments threshold.
+struct TrackerConfig {
+    supervisor: Arc<ServerSupervisor>,
+    jwt_secret: String,
+    stop: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    metrics: Arc<SoakMetrics>,
+    idx: usize,
+    confirm_interval: Duration,
+    no_ack: bool,
+}
+
+/// A single tracked-and-ACKing replica: reconnects with `connect_tracked` (so
+/// its `(principal, deviceId)` identity survives across reconnects — the
+/// identity the server's per-device causal frontier keys its cursor on), and
+/// runs `confirm_apply` on `OR_MAP` every `confirm_interval` while connected.
+///
+/// Every acked `confirm_apply` round advances this replica's high-water-mark;
+/// since the server's low-water-mark is the MINIMUM across all tracked
+/// clients, this is what lets the epoch-scoped tombstone prune fire at all.
+/// When `no_ack` is set the confirm-apply call is skipped entirely (not just
+/// the ack) — the connection still exists so the harness's other assertions
+/// keep exercising it, but the server never sees an `ORMAP_SYNC_INIT` from this
+/// replica, so it is never tracked and the low-water-mark stays at its vacuous
+/// 0 for the whole run: the negative control for the promoted hard gate.
+async fn run_tracked_confirm_client(cfg: TrackerConfig) {
+    let mut device_token: Option<String> = None;
+
+    while !cfg.stop.load(Ordering::SeqCst) {
+        while cfg.paused.load(Ordering::SeqCst) && !cfg.stop.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if cfg.stop.load(Ordering::SeqCst) {
+            return;
+        }
+
+        let connect = SoakClient::connect_tracked(
+            cfg.supervisor.addr(),
+            cfg.idx,
+            &cfg.jwt_secret,
+            device_token.clone(),
+        )
+        .await;
+        let Ok(mut client) = connect else {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            continue;
+        };
+
+        let mut session_alive = true;
+        while session_alive && !cfg.stop.load(Ordering::SeqCst) {
+            // Hold across a checkpoint quiesce WITHOUT disconnecting, mirroring
+            // the churn client's active-burst pause behavior — a checkpoint's
+            // quiesced read-back must not race a mid-quiesce reconnect.
+            while cfg.paused.load(Ordering::SeqCst) && !cfg.stop.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if cfg.stop.load(Ordering::SeqCst) {
+                break;
+            }
+
+            if !cfg.no_ack {
+                match client.confirm_apply(OR_MAP).await {
+                    Ok(Some(_)) => {
+                        cfg.metrics.confirms.fetch_add(1, Ordering::Relaxed);
+                    }
+                    // `Ok(None)`: nothing to confirm yet (no tombstone stamped
+                    // yet) — skip, not an error.
+                    Ok(None) => {}
+                    Err(_) => {
+                        session_alive = false;
+                    }
+                }
+            }
+
+            tokio::time::sleep(cfg.confirm_interval).await;
+        }
+
+        // Capture the device token BEFORE dropping so the next reconnect
+        // presents it and keeps the SAME (principal, deviceId) identity —
+        // otherwise every reconnect would mint a fresh, forgotten replica and
+        // the frontier's cursor for it would never accumulate.
+        let token = client.device_token().map(str::to_string);
+        drop(client);
+        if token.is_some() {
+            device_token = token;
+        }
+        if cfg.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Negative control: divergence
 // ---------------------------------------------------------------------------
 
@@ -1628,6 +1947,9 @@ const KNOWN_FLAGS: &[&str] = &[
     "--progress-output",
     "--inject-divergence",
     "--inject-panic",
+    "--confirm-interval",
+    "--no-ack",
+    "--inject-slow-leak",
     "--no-pre-kill-drain",
     "--smoke",
 ];
@@ -1646,7 +1968,9 @@ fn print_usage() {
          \x20 soak_harness --smoke\n\
          \x20 # negative controls (must exit non-zero == assertion RED)\n\
          \x20 soak_harness --inject-divergence\n\
-         \x20 soak_harness --inject-panic\n\n\
+         \x20 soak_harness --inject-panic\n\
+         \x20 soak_harness --no-ack --duration 3600  # tombstone hard-gate must FAIL\n\
+         \x20 soak_harness --inject-slow-leak --duration 3600  # slope detection-floor calibration\n\n\
          See packages/server-rust/benches/soak_harness/README.md for the full flag list\n\
          and the Hetzner 72h runner."
     );
@@ -1773,6 +2097,19 @@ fn parse_args() -> Config {
             }
             "--inject-panic" => {
                 c.inject_panic = true;
+                i += 1;
+            }
+            "--confirm-interval" => {
+                c.confirm_interval =
+                    Duration::from_secs(parse_u64(&need(i, &args, "--confirm-interval")).max(1));
+                i += 2;
+            }
+            "--no-ack" => {
+                c.no_ack = true;
+                i += 1;
+            }
+            "--inject-slow-leak" => {
+                c.inject_slow_leak = true;
                 i += 1;
             }
             "--no-pre-kill-drain" => {
