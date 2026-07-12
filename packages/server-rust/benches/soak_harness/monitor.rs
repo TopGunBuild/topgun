@@ -64,20 +64,23 @@
 //!
 //! Note on gating responsibility: [`assess_tombstone_bytes`] *computes* the byte
 //! verdict (including its `passed` flag), but whether that verdict gates the run
-//! is decided in `main.rs`, not here. The byte **slope** now GATES the run: the
-//! gauge is restart-survivable (`reconcile_tombstone_bytes` in
-//! `bin/topgun_server.rs` re-seeds it via `set_tombstone_bytes` at boot, before
-//! the listener starts accepting connections), so across a crash-enabled run its
-//! series is CONTINUOUS — not a per-life sawtooth — and the OLS slope is a
-//! trustworthy plateau/leak signal. `main.rs` routes a slope breach to a hard
-//! failure (alongside the blind-monitor zero-sample case, which always
-//! hard-gated). The RSS gate above remains a coarse, non-tombstone backstop
-//! (its large min-growth guard means it structurally cannot catch a
-//! single-digit-MB/KB tombstone leak on a bounded run — see that gate's own doc
-//! above) — it is not replaced, just no longer the only hard gate. So this
-//! module's `passed: bool` on [`TombstoneAssessment`] IS load-bearing; see
-//! `main.rs`'s run-end verdict-assembly for exactly how it combines with the
-//! other gates.
+//! is decided in `main.rs`, not here. The byte **slope** is surfaced
+//! REPORT-ONLY, NOT hard-gated. Although the gauge is restart-survivable
+//! (`reconcile_tombstone_bytes` in `bin/topgun_server.rs` re-seeds it via
+//! `set_tombstone_bytes` at boot), it is ADDITIVE-ONLY within a process life:
+//! every tombstone-add increments it and no prune-side decrement is wired yet
+//! (`sub_tombstone_bytes` has no live call site), and the OR-Map epoch prune is
+//! dark until a follow-up supplies the frontier's durable-epoch watermark. So
+//! under sustained OR churn the gauge climbs at the tombstone-*creation* rate
+//! and cannot plateau — hard-gating the slope would false-RED every healthy
+//! long run. `main.rs` therefore routes a slope breach to its `pending_gates`
+//! (honest, non-failing) channel, exactly like the disk gate; only the
+//! blind-monitor zero-sample case hard-gates. The RSS gate above remains a
+//! coarse, non-tombstone backstop. Re-promote the slope to a hard gate once the
+//! prune-activation follow-up makes the gauge track residency and a live
+//! bounded soak is observed to plateau. (This module's `passed: bool` on
+//! [`TombstoneAssessment`] still drives the report-only signal and the
+//! calibration tests below.)
 //!
 //! ## Boot-recompute-gap exclusion
 //!
@@ -299,9 +302,11 @@ fn last_half_window_span_secs(points: &[(f64, f64)]) -> f64 {
 /// Consumed by `main.rs` (the soak loop scrapes `GET /metrics` and calls
 /// [`assess_tombstone_bytes`] with this threshold alongside the RSS `assess`) and
 /// by the `soak_monitor_calibration` integration target's tests — the harness
-/// wiring has landed, so no `allow(dead_code)` is needed here. This is the
-/// bounded-plateau GATE (hard-fails the run on breach); the RSS gate above is
-/// the coarse backstop.
+/// wiring has landed, so no `allow(dead_code)` is needed here. The slope this
+/// threshold measures is surfaced REPORT-ONLY by `main.rs` (the additive-only
+/// gauge cannot plateau under sustained churn until an OR-Map prune-activation
+/// follow-up wires residency tracking); the blind-monitor zero-sample clause is
+/// the only tombstone hard gate today. RSS above is the coarse backstop.
 pub const DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR: f64 = 512.0;
 
 /// Absolute-growth guard (bytes) for the tombstone-byte slope clause.
@@ -472,6 +477,13 @@ pub struct BootGap {
 }
 
 /// True if `elapsed_secs` falls inside any recorded [`BootGap`].
+///
+/// The window is half-open `[start_secs, end_secs)`, and `start_secs` is
+/// recorded just BEFORE the `kill -9`, so a sample from the still-alive
+/// pre-kill process can be excluded. That conservatism is intentional: dropping
+/// a couple of trustworthy pre-kill samples is strictly safer than ever
+/// admitting a post-kill, pre-reconcile spurious low/zero read into the slope
+/// fit — the gap is deliberately a touch wider than the strict kill→ready span.
 fn in_boot_gap(elapsed_secs: f64, boot_gaps: &[BootGap]) -> bool {
     boot_gaps
         .iter()
@@ -939,10 +951,17 @@ mod tests {
         );
     }
 
-    /// AC10: the realistic M4-bounded shape — tombstone bytes grow while the
-    /// churn stream fills the keyspace, then flatten once the bound engages.
-    /// Only the LAST-HALF window should drive the fitted slope (R9(d)), so
-    /// this must PASS even though the run grew substantially earlier.
+    /// The grow-then-flatten shape a residency-tracking gauge WOULD produce once
+    /// the OR-Map bound engages: tombstone bytes grow while the churn stream
+    /// fills the keyspace, then flatten. Only the LAST-HALF window should drive
+    /// the fitted slope (R9(d)), so this PASSes even though the run grew earlier.
+    ///
+    /// NOTE — this validates the OLS/last-half-window MATH only; it is NOT a
+    /// reachable production PASS today. The `bytes` series here is hand-authored
+    /// to flatten, but the live gauge is additive-only and cannot flatten under
+    /// sustained churn (see `calibration_additive_only_gauge_never_plateaus`
+    /// below) — which is exactly why `main.rs` surfaces the slope report-only
+    /// rather than hard-gating it.
     #[test]
     fn calibration_delayed_plateau_grow_then_flatten_passes() {
         let mut samples = Vec::new();
@@ -968,6 +987,41 @@ mod tests {
             a.passed,
             "delayed-plateau (grow-then-flatten) must pass on the last-half-window \
              slope; slope={:.2} reason={:?}",
+            a.slope_bytes_per_hour, a.reason
+        );
+    }
+
+    /// Pins the REAL production shape and the reason the slope is report-only.
+    ///
+    /// The exported gauge (`add_tombstone_bytes`) is additive-only: it counts
+    /// every tombstone-add and is never decremented on prune, and the OR-Map
+    /// epoch prune is dark until a follow-up supplies the frontier watermark.
+    /// So under sustained OR churn the gauge climbs monotonically at the
+    /// tombstone-*creation* rate and never flattens within a process life — the
+    /// grow-then-flatten shape the plateau statistic looks for cannot occur.
+    /// This test feeds exactly that monotone shape (well past the min-window
+    /// floor) and asserts the assessment reports NOT-passed — which is why
+    /// `main.rs` routes this verdict to `pending_gates` (report-only) instead
+    /// of hard-gating the run. When a prune-activation follow-up makes the gauge
+    /// track residency, replace this with a genuine live-plateau PASS test and
+    /// re-promote the slope to a hard gate.
+    #[test]
+    fn calibration_additive_only_gauge_never_plateaus() {
+        // ~6h of steady creation at 5000 B/h — a multi-hour last-half window
+        // (well past the 120s min-window floor), monotone, no flatten. This is
+        // the shape a real sustained-churn soak actually produces today.
+        let samples = linear_bytes_series(1_000, 6, 5_000);
+        let a = assess_tombstone_bytes(
+            &samples,
+            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
+        );
+        assert!(
+            !a.passed,
+            "the additive-only gauge's monotone-growth shape must NOT be reported \
+             as a plateau — this is why the slope is surfaced report-only, not \
+             hard-gated; slope={:.1} reason={:?}",
             a.slope_bytes_per_hour, a.reason
         );
     }

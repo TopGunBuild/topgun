@@ -20,11 +20,19 @@
 //!    (`topgun_ormap_tombstone_bytes_total`, scraped from the server's own
 //!    `GET /metrics`) is sampled every interval and its bounded-plateau slope
 //!    (last-half-window OLS, boot-recompute-gap samples excluded — see
-//!    `monitor.rs`) is asserted against a tight per-hour threshold — a direct,
-//!    residency-independent leak signal with no allocator/cache noise floor,
-//!    and a HARD gate now that the M4 tombstone bound is proven landed. Server
-//!    RSS is sampled in parallel and asserted against a looser slope as a
-//!    coarse, non-tombstone backstop gate; neither replaces the other.
+//!    `monitor.rs`) is computed against a tight per-hour threshold — a direct,
+//!    residency-independent leak signal with no allocator/cache noise floor.
+//!    The slope is surfaced REPORT-ONLY: the exported gauge is additive-only
+//!    (every tombstone-add counts; no prune-side decrement is wired yet, and
+//!    the OR-Map epoch prune is dark until a follow-up supplies the frontier's
+//!    durable-epoch watermark), so under sustained churn it climbs at the
+//!    tombstone-*creation* rate and cannot plateau within a process life —
+//!    hard-gating it would false-RED every healthy long run. Only the
+//!    blind-monitor (zero-sample) clause hard-gates. Server RSS is sampled in
+//!    parallel and asserted against a looser slope as a coarse, non-tombstone
+//!    backstop gate. (Re-promote the slope to a hard gate once the
+//!    prune-activation follow-up makes the gauge track residency and a live
+//!    bounded soak is observed to actually plateau.)
 //! 4. **Zero panics:** any panic marker in server output, or any un-requested
 //!    exit, fails the run with the captured context.
 //!
@@ -646,15 +654,19 @@ async fn run_soak(config: &Config) -> i32 {
         DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
     );
 
-    // The tombstone-byte SLOPE clause is now a HARD GATE, not report-only: the
-    // gauge is restart-survivable (`reconcile_tombstone_bytes` re-seeds it at
-    // boot, see monitor.rs), so its series is continuous across `kill -9`
-    // cycles and a trustworthy plateau/leak signal — not a per-life sawtooth.
-    // The M4 OR-Map tombstone bound is proven landed (342a-g), so a slope
-    // breach here is a genuine regression, not an expected/known leak. RSS
-    // above remains a coarse backstop: its large min-growth guard means it
-    // structurally cannot catch a single-digit-MB/KB tombstone leak on a
-    // bounded run, so it is not a substitute for this gate.
+    // The tombstone-byte SLOPE clause is REPORT-ONLY (mirrors the disk gate
+    // below), NOT a hard gate. The exported gauge (`add_tombstone_bytes`) is
+    // additive-only: it counts every tombstone-add and is never decremented on
+    // prune (no `sub_tombstone_bytes` call site yet), and the OR-Map epoch
+    // prune is dark until a follow-up supplies the frontier's durable-epoch
+    // watermark. So under the soak's sustained OR churn the gauge climbs at the
+    // tombstone-*creation* rate and cannot plateau within a process life —
+    // hard-gating the slope would false-RED the blocking no-crash Soak Smoke
+    // G4b run and any 10-60 min / 72h soak. The slope is surfaced via
+    // `pending_gates` (an honest, non-failing signal) until the prune-activation
+    // follow-up makes the gauge track residency; re-promote to a hard gate then.
+    // RSS above remains a coarse, non-tombstone backstop (its large min-growth
+    // guard cannot catch a single-digit-MB/KB tombstone leak on a bounded run).
     //
     // The blind-monitor guard hard-gates independently of the slope clause:
     // zero samples means the `/metrics` scrape was dead — a real harness
@@ -683,7 +695,6 @@ async fn run_soak(config: &Config) -> i32 {
         && recovery_failures.is_empty()
         && mem.passed
         && !blind_monitor
-        && tombstones.passed
         && !disk_blind_monitor
         && panic_report.is_none();
 
@@ -699,13 +710,17 @@ async fn run_soak(config: &Config) -> i32 {
             tombstones.reason.clone().unwrap_or_default()
         );
     } else if !tombstones.passed {
-        // The bounded-plateau gate (R9(a)): a slope breach here is a genuine
-        // regression against the proven-landed M4 tombstone bound, so it hard
-        // gates the run via `passed` above rather than merely being reported.
-        finished_reason = format!(
-            "tombstone-byte growth assertion failed: {}",
-            tombstones.reason.clone().unwrap_or_default()
-        );
+        // Report-only (mirrors the disk slope below): the additive-only gauge
+        // grows at the tombstone-creation rate under sustained churn and cannot
+        // plateau until a follow-up wires prune-side decrement + frontier-
+        // watermark activation, so a slope breach here is the EXPECTED honest
+        // signal, not a regression. Do NOT AND it into `passed`.
+        pending_gates.push(format!(
+            "tombstone-byte growth slope {:.1} bytes/h exceeds {:.1} bytes/h — \
+             EXPECTED until the OR-Map prune-activation follow-up bounds residency \
+             (report-only, did NOT fail the run)",
+            tombstones.slope_bytes_per_hour, DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR
+        ));
     }
     if disk_blind_monitor {
         finished_reason = format!(
@@ -801,10 +816,11 @@ fn print_summary(r: &SoakReport, tombstones: &TombstoneAssessment, disk: &DiskAs
         r.memory.slope_mb_per_hour,
         if r.memory.passed { "ok" } else { "FAIL" }
     );
-    // The byte SLOPE is now a bounded-plateau HARD GATE (the M4 tombstone
-    // bound is proven landed) alongside the blind-monitor (zero-sample)
-    // clause. See the run-end verdict rationale.
-    let tombstone_role = "slope + blind-monitor both hard-gate";
+    // The byte SLOPE is REPORT-ONLY (the additive-only gauge cannot plateau
+    // under sustained churn until the OR-Map prune-activation follow-up wires
+    // residency tracking); only the blind-monitor (zero-sample) clause
+    // hard-gates. See the run-end verdict rationale.
+    let tombstone_role = "slope report-only pending prune-activation; blind-monitor hard-gates";
     println!(
         "tombstone_bytes:   first={} peak={} last={} slope={:.1}B/h samples={} -> {} ({}){}",
         tombstones.first_bytes,
@@ -1083,6 +1099,11 @@ async fn recovery_checkpoint(
         // pre-reconcile read being treated as trustworthy.
         return Ok(out);
     }
+    // Close the boot gap as the FIRST action after `restart()` returns ready
+    // (health-ready ⇒ `reconcile_tombstone_bytes` has re-seeded the gauge for
+    // the new life). Capture the timestamp before taking the lock so lock
+    // contention cannot widen the window in which a genuinely-post-reconcile
+    // sample would still see the gap open and be wrongly excluded.
     {
         let gap_end_secs = boot_gap_clock.sampler_start.elapsed().as_secs_f64();
         if let Some(last) = boot_gap_clock.boot_gaps.lock().last_mut() {
