@@ -56,7 +56,7 @@
 //! pins the low-water-mark at its true confirmed-apply cursor instead of falling
 //! through the "unknown == forgotten" path (which would let the LWM jump forward).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use tracing::{debug, warn};
@@ -730,7 +730,16 @@ impl TombstoneFrontier {
                     client: client.clone(),
                     epoch,
                 }) {
-                    debug!(client = %client, epoch, "cursor advance not enqueued (no persistence worker)");
+                    // Distinguish the two no-worker cases: with no durable store the
+                    // miss is expected (memory-only mode, debug), but with a store
+                    // configured it means the worker already shut down while ACKs are
+                    // still arriving — every such advance is non-durable and will be
+                    // re-earned by resync after restart, which operators should see.
+                    if self.store.is_some() {
+                        warn!(client = %client, epoch, "cursor advance not persisted (persistence worker stopped)");
+                    } else {
+                        debug!(client = %client, epoch, "cursor advance not enqueued (no durable store)");
+                    }
                 }
             }
             advanced
@@ -1091,12 +1100,20 @@ async fn cursor_persist_worker(
     mut rx: mpsc::UnboundedReceiver<PersistMsg>,
 ) {
     let mut high_water: HashMap<ClientId, Epoch> = HashMap::new();
+    // Clients whose seed load has already warned. A PERSISTENT store read fault
+    // stalls a client's cursor durability indefinitely (each advance defers), and
+    // this arm runs per-ACK — so surface the FIRST failure per client at `warn!`
+    // for operators and keep the per-advance repeats at `debug!` to avoid flooding
+    // the hot path. A later successful seed clears the flag so a NEW fault warns
+    // again. Bounded by client count, like `high_water`.
+    let mut seed_load_warned: HashSet<ClientId> = HashSet::new();
     while let Some(msg) = rx.recv().await {
         match msg {
             PersistMsg::Advance { client, epoch } => {
                 if !high_water.contains_key(&client) {
                     match load_cursor(store.as_ref(), &client).await {
                         Ok(seed) => {
+                            seed_load_warned.remove(&client);
                             high_water.insert(client.clone(), seed.unwrap_or(0));
                         }
                         Err(e) => {
@@ -1105,7 +1122,11 @@ async fn cursor_persist_worker(
                             // persisted (monotonicity regression). Skip; a later advance
                             // re-attempts the seed. Best-effort and safe: a missed
                             // advance leaves a lower persisted cursor = less prune.
-                            debug!(client = %client, epoch, "cursor seed load failed: {e}; deferring advance");
+                            if seed_load_warned.insert(client.clone()) {
+                                warn!(client = %client, epoch, "cursor seed load failed: {e}; deferring advance (repeats logged at debug)");
+                            } else {
+                                debug!(client = %client, epoch, "cursor seed load failed: {e}; deferring advance");
+                            }
                             continue;
                         }
                     }
