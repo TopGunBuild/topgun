@@ -49,10 +49,12 @@
 //!
 //! ## Tombstone-byte gate: same slope idea, no detection floor
 //!
-//! `topgun_ormap_tombstone_bytes_total` (sampled over HTTP from `GET /metrics`)
-//! is a direct, residency-independent count of tombstone bytes on the write
-//! path — unlike RSS it carries no allocator retention, no read/GC jitter, and
-//! no cache-warmup wobble. Every unit of observed growth is either a newly
+//! `topgun_ormap_tombstone_bytes` (the DECREMENTABLE gauge, sampled over HTTP
+//! from `GET /metrics` — distinct from the monotonic `_total` creation-rate
+//! counter also exported on the same endpoint) is a direct,
+//! residency-independent count of tombstone bytes on the write path — unlike
+//! RSS it carries no allocator retention, no read/GC jitter, and no
+//! cache-warmup wobble. Every unit of observed growth is either a newly
 //! inserted tombstone or nothing; there is no noise floor to wait out. That is
 //! why [`assess_tombstone_bytes`] uses a much tighter per-hour threshold than
 //! the RSS gate AND does not replicate RSS's large min-growth guard (see
@@ -64,23 +66,32 @@
 //!
 //! Note on gating responsibility: [`assess_tombstone_bytes`] *computes* the byte
 //! verdict (including its `passed` flag), but whether that verdict gates the run
-//! is decided in `main.rs`, not here. The byte **slope** is surfaced
-//! REPORT-ONLY, NOT hard-gated. Although the gauge is restart-survivable
-//! (`reconcile_tombstone_bytes` in `bin/topgun_server.rs` re-seeds it via
-//! `set_tombstone_bytes` at boot), it is ADDITIVE-ONLY within a process life:
-//! every tombstone-add increments it and no prune-side decrement is wired yet
-//! (`sub_tombstone_bytes` has no live call site), and the OR-Map epoch prune is
-//! dark until a follow-up supplies the frontier's durable-epoch watermark. So
-//! under sustained OR churn the gauge climbs at the tombstone-*creation* rate
-//! and cannot plateau — hard-gating the slope would false-RED every healthy
-//! long run. `main.rs` therefore routes a slope breach to its `pending_gates`
-//! (honest, non-failing) channel, exactly like the disk gate; only the
-//! blind-monitor zero-sample case hard-gates. The RSS gate above remains a
-//! coarse, non-tombstone backstop. Re-promote the slope to a hard gate once the
-//! prune-activation follow-up makes the gauge track residency and a live
-//! bounded soak is observed to plateau. (This module's `passed: bool` on
-//! [`TombstoneAssessment`] still drives the report-only signal and the
-//! calibration tests below.)
+//! is decided in `main.rs`, not here. The byte **slope** is now a HARD gate
+//! there. The gauge is restart-survivable (`reconcile_tombstone_bytes` in
+//! `bin/topgun_server.rs` re-seeds it via `set_tombstone_bytes` at boot) AND
+//! decrementable within a process life: every tombstone-add increments it and
+//! a successful prune-drop decrements it (`sub_tombstone_bytes`, wired on the
+//! CRDT write path's remove/prune handling). Decrementing alone is not
+//! sufficient for a plateau, though — the prune only fires once the server's
+//! per-device causal frontier low-water-mark has advanced past a tombstone's
+//! epoch, and the low-water-mark is vacuously 0 (prune NOTHING) until at least
+//! one client actually runs the confirm-apply protocol. `main.rs` therefore
+//! also drives a tracked-and-ACKing client (`SoakClient::connect_tracked` +
+//! `confirm_apply`) alongside the churn clients for the run's duration, which
+//! is what makes the gauge's plateau — and thus the hard gate — reachable in
+//! practice rather than merely possible in principle. `main.rs`'s `--no-ack`
+//! and `--inject-slow-leak` modes are the negative/slow-leak controls that
+//! exercise this: disabling the tracked client's ack loop pins the
+//! low-water-mark at 0 and must trip the gate, and a deliberately
+//! slow-acking second tracked client calibrates the OLS slope's detection
+//! floor against a small, non-instantaneous leak. The blind-monitor
+//! zero-sample case remains a second, independent hard gate (an unreachable
+//! `/metrics` scrape is a harness defect regardless of leak magnitude). The
+//! RSS gate above remains a coarse, non-tombstone backstop. (This module's
+//! `passed: bool` on [`TombstoneAssessment`] drives both the hard-gate
+//! decision in `main.rs` and the calibration tests below — the assessment
+//! itself does not know or care whether its caller treats a breach as
+//! report-only or hard-gating.)
 //!
 //! ## Boot-recompute-gap exclusion
 //!
@@ -311,10 +322,12 @@ fn last_half_window_span_secs(points: &[(f64, f64)]) -> f64 {
 /// [`assess_tombstone_bytes`] with this threshold alongside the RSS `assess`) and
 /// by the `soak_monitor_calibration` integration target's tests — the harness
 /// wiring has landed, so no `allow(dead_code)` is needed here. The slope this
-/// threshold measures is surfaced REPORT-ONLY by `main.rs` (the additive-only
-/// gauge cannot plateau under sustained churn until an OR-Map prune-activation
-/// follow-up wires residency tracking); the blind-monitor zero-sample clause is
-/// the only tombstone hard gate today. RSS above is the coarse backstop.
+/// threshold measures is a HARD gate in `main.rs`: the decrementable gauge is
+/// expected to plateau under sustained churn now that a tracked-and-ACKing
+/// client drives the server's low-water-mark forward (see the module-level
+/// "Tombstone-byte gate" doc above), subject to the min-window-span guard and
+/// boot-gap exclusion. The blind-monitor zero-sample clause is a second,
+/// independent hard gate. RSS above is the coarse backstop.
 pub const DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR: f64 = 512.0;
 
 /// Absolute-growth guard (bytes) for the tombstone-byte slope clause.
@@ -967,12 +980,14 @@ mod tests {
     /// fills the keyspace, then flatten. Only the LAST-HALF window should drive
     /// the fitted slope (R9(d)), so this PASSes even though the run grew earlier.
     ///
-    /// NOTE — this validates the OLS/last-half-window MATH only; it is NOT a
-    /// reachable production PASS today. The `bytes` series here is hand-authored
-    /// to flatten, but the live gauge is additive-only and cannot flatten under
-    /// sustained churn (see `calibration_additive_only_gauge_never_plateaus`
-    /// below) — which is exactly why `main.rs` surfaces the slope report-only
-    /// rather than hard-gating it.
+    /// NOTE — this validates the OLS/last-half-window MATH directly on a
+    /// hand-authored series; it does not itself drive a live server. A real
+    /// run reaches this same grow-then-flatten shape once the tracked-and-ACKing
+    /// client (`main.rs`'s `SoakClient::connect_tracked` + `confirm_apply`)
+    /// advances the low-water-mark far enough for the epoch-scoped prune to
+    /// engage — see `calibration_additive_only_gauge_never_plateaus` below for
+    /// the contrasting shape produced when nothing drives the low-water-mark
+    /// (e.g. `main.rs`'s `--no-ack` negative control).
     #[test]
     fn calibration_delayed_plateau_grow_then_flatten_passes() {
         let mut samples = Vec::new();
@@ -1002,25 +1017,21 @@ mod tests {
         );
     }
 
-    /// Pins the REAL production shape and the reason the slope is report-only.
-    ///
-    /// The exported gauge (`add_tombstone_bytes`) is additive-only: it counts
-    /// every tombstone-add and is never decremented on prune, and the OR-Map
-    /// epoch prune is dark until a follow-up supplies the frontier watermark.
-    /// So under sustained OR churn the gauge climbs monotonically at the
-    /// tombstone-*creation* rate and never flattens within a process life — the
-    /// grow-then-flatten shape the plateau statistic looks for cannot occur.
-    /// This test feeds exactly that monotone shape (well past the min-window
-    /// floor) and asserts the assessment reports NOT-passed — which is why
-    /// `main.rs` routes this verdict to `pending_gates` (report-only) instead
-    /// of hard-gating the run. When a prune-activation follow-up makes the gauge
-    /// track residency, replace this with a genuine live-plateau PASS test and
-    /// re-promote the slope to a hard gate.
+    /// Pins the shape produced when NOTHING drives the low-water-mark forward —
+    /// exactly `main.rs`'s `--no-ack` negative control (or, pre-this-spec, every
+    /// production run, since no client ever ran the confirm-apply protocol at
+    /// all): with the low-water-mark vacuously 0, the epoch-scoped prune never
+    /// fires, so the gauge climbs monotonically at the tombstone-*creation* rate
+    /// and never flattens — the grow-then-flatten shape the plateau statistic
+    /// looks for cannot occur. This test feeds exactly that monotone shape (well
+    /// past the min-window floor) and asserts the assessment reports NOT-passed
+    /// — which is precisely the hard-gate failure `main.rs` now asserts on for
+    /// this scenario (see the module doc's "Tombstone-byte gate" section).
     #[test]
     fn calibration_additive_only_gauge_never_plateaus() {
         // ~6h of steady creation at 5000 B/h — a multi-hour last-half window
         // (well past the 120s min-window floor), monotone, no flatten. This is
-        // the shape a real sustained-churn soak actually produces today.
+        // the shape an unbounded (no-driver / `--no-ack`) soak produces.
         let samples = linear_bytes_series(1_000, 6, 5_000);
         let a = assess_tombstone_bytes(
             &samples,
@@ -1030,9 +1041,9 @@ mod tests {
         );
         assert!(
             !a.passed,
-            "the additive-only gauge's monotone-growth shape must NOT be reported \
-             as a plateau — this is why the slope is surfaced report-only, not \
-             hard-gated; slope={:.1} reason={:?}",
+            "an unbounded monotone-growth shape (no low-water-mark driver) must \
+             NOT be reported as a plateau — this is the hard-gate FAIL `main.rs` \
+             now asserts on; slope={:.1} reason={:?}",
             a.slope_bytes_per_hour, a.reason
         );
     }
