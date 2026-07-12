@@ -53,9 +53,12 @@ static OR_TOMBSTONE_BYTES: AtomicU64 = AtomicU64::new(0);
 static TOMBSTONE_ADD_FIRED: AtomicBool = AtomicBool::new(false);
 
 /// Adds `n` bytes to the process-global OR-Map tombstone-bytes gauge and
-/// emits the same delta to the `topgun_ormap_tombstone_bytes_total`
-/// Prometheus counter (mirrors the `topgun_operations_total` emit pattern in
-/// `service/middleware/metrics.rs`).
+/// emits the same delta to both exported Prometheus series: the
+/// `topgun_ormap_tombstone_bytes_total` monotonic creation-rate counter
+/// (mirrors the `topgun_operations_total` emit pattern in
+/// `service/middleware/metrics.rs`), and the `topgun_ormap_tombstone_bytes`
+/// gauge — the decrementable series a prune path can move back down, and the
+/// one the soak monitor's plateau/slope fit reads over `GET /metrics`.
 ///
 /// Call sites pass `tag.len() as u64` — the tombstone's contribution is its
 /// removed tag's UTF-8 byte length, which is the direct measure of what grows
@@ -71,34 +74,40 @@ pub fn add_tombstone_bytes(n: u64) {
     TOMBSTONE_ADD_FIRED.store(true, Ordering::Release);
     OR_TOMBSTONE_BYTES.fetch_add(n, Ordering::Relaxed);
     metrics::counter!("topgun_ormap_tombstone_bytes_total").increment(n);
+    // Precision loss only above 2^53 bytes of tombstone data on one process —
+    // not a real-world concern for this monitoring signal.
+    #[allow(clippy::cast_precision_loss)]
+    metrics::gauge!("topgun_ormap_tombstone_bytes").increment(n as f64);
 }
 
-/// Subtracts `n` bytes from the process-global OR-Map tombstone-bytes gauge.
+/// Subtracts `n` bytes from the process-global OR-Map tombstone-bytes gauge,
+/// and mirrors the same decrement onto the exported `topgun_ormap_tombstone_bytes`
+/// Prometheus gauge — the byte-for-byte counterpart of [`add_tombstone_bytes`]'s
+/// increment.
 ///
-/// This is the decrement path for the future OR-Map epoch-GC prune
-/// (TODO-566): once that prune wires in, it will call this function as it
-/// drops fully-superseded tombstone epochs. It is intentionally unused on
-/// today's additive-only write path (nothing yet prunes tombstones), so it is
-/// exercised solely by a unit test to keep it out of `-D warnings` dead-code
-/// territory until the prune lands.
+/// This is the decrement path for the OR-Map epoch-GC prune: it is called as
+/// the prune drops fully-superseded tombstone epochs, passing the same
+/// `tag.len() as u64` accounting [`add_tombstone_bytes`] used when the tag was
+/// first tombstoned, so the two calls are exact inverses over a tag's
+/// lifetime.
 ///
-/// **Prometheus divergence (forward-looking):** unlike [`add_tombstone_bytes`],
-/// this function does NOT emit to `topgun_ormap_tombstone_bytes_total` — that
-/// metric follows the `_total` *monotonic*-counter convention, so it cannot
-/// legally decrease. That is harmless today because usage is purely additive,
-/// but once TODO-566's prune starts calling this decrement path, the exported
-/// Prometheus series will diverge from (stay flat relative to) the
-/// authoritative in-process [`tombstone_bytes`] value. TODO-566 must reconcile
-/// the external surface at that point — e.g. switch the exported metric to a
-/// gauge, or have consumers (soak harness, dashboards) read the in-process
-/// accessor instead of scraping the counter.
+/// Unlike the `topgun_ormap_tombstone_bytes_total` counter (which follows the
+/// `_total` *monotonic* convention and therefore cannot legally decrease),
+/// `topgun_ormap_tombstone_bytes` has no such constraint: it is a plain
+/// Prometheus gauge, so this function's decrement is externally visible over
+/// `GET /metrics` without needing the in-process [`tombstone_bytes`] accessor
+/// — the surface an out-of-process soak monitor actually scrapes.
 ///
-/// Saturating-safe by construction: the future prune is only ever expected to
+/// Saturating-safe by construction: the prune is only ever expected to
 /// subtract bytes it previously observed being added, so it should never
 /// underflow in practice, but `fetch_sub` wraps on underflow rather than
 /// panicking — acceptable for a monitoring counter.
 pub fn sub_tombstone_bytes(n: u64) {
     OR_TOMBSTONE_BYTES.fetch_sub(n, Ordering::Relaxed);
+    // Precision loss only above 2^53 bytes of tombstone data on one process —
+    // not a real-world concern for this monitoring signal.
+    #[allow(clippy::cast_precision_loss)]
+    metrics::gauge!("topgun_ormap_tombstone_bytes").decrement(n as f64);
 }
 
 /// Reads the current value of the process-global OR-Map tombstone-bytes gauge.
@@ -115,27 +124,35 @@ pub fn tombstone_bytes() -> u64 {
 ///
 /// This is the **only** absolute-set path for the gauge. It exists exclusively
 /// for the one-time startup reconciliation that runs after WAL recovery
-/// completes (see `bin/topgun_server.rs`): both the process-local
-/// [`OR_TOMBSTONE_BYTES`] atomic and the exported Prometheus
-/// `topgun_ormap_tombstone_bytes_total` counter reset to zero on every process
-/// start and never re-count rehydrated (redb-persisted) tombstones, so without
-/// this boot seed the scraped series sawtooths back to 0 on every `kill -9`
-/// restart and the cross-restart leak becomes invisible. It MUST NEVER be called
-/// on the hot read/write path — only once, at boot, before the listener accepts
+/// completes (see `bin/topgun_server.rs`): the process-local
+/// [`OR_TOMBSTONE_BYTES`] atomic and both exported Prometheus series
+/// (`topgun_ormap_tombstone_bytes_total` and `topgun_ormap_tombstone_bytes`)
+/// reset to zero/absent on every process start and never re-count rehydrated
+/// (redb-persisted) tombstones, so without this boot seed the scraped series
+/// sawtooths back to 0 on every `kill -9` restart and the cross-restart leak
+/// becomes invisible. Seeding from the true reconciled corpus (rather than a
+/// literal `0`) means a genuine leak still shows as net upward drift from a
+/// real starting point, and a monitor that only trusts non-zero samples sees
+/// one from the first scrape after boot. It MUST NEVER be called on the hot
+/// read/write path — only once, at boot, before the listener accepts
 /// connections.
 ///
-/// It performs BOTH writes, in order, because the two are **separate sinks**:
+/// It performs THREE writes, in order, because they are **separate sinks**:
 ///  1. `OR_TOMBSTONE_BYTES.store(total)` re-baselines the in-process `AtomicU64`
 ///     — an absolute store, never `fetch_add`: a per-rehydration increment would
 ///     reintroduce the eviction double-count the gauge's cardinal rule forbids.
-///  2. `metrics::counter!(...).increment(total)` seeds the Prometheus counter,
-///     which is a *different* sink living in the process `PrometheusHandle`
-///     recorder. The soak harness scrapes THIS counter via `GET /metrics`, not
-///     the `AtomicU64`; on a fresh process the recorder's counter starts at
-///     0/absent, so a single `increment(total)` from zero lands the exported
-///     series at `total` while staying a legal monotonic-from-zero `_total`
-///     counter (a Prometheus counter has no `.set`/`.store`). A `.store()`-only
-///     path would never reach the sink the harness actually reads.
+///  2. `metrics::counter!(...).increment(total)` seeds the monotonic
+///     `_total` Prometheus counter, a *different* sink living in the process
+///     `PrometheusHandle` recorder; on a fresh process it starts at 0/absent,
+///     so a single `increment(total)` from zero lands the exported series at
+///     `total` while staying a legal monotonic-from-zero counter (a Prometheus
+///     counter has no `.set`/`.store`).
+///  3. `metrics::gauge!(...).set(total)` re-baselines the decrementable
+///     `topgun_ormap_tombstone_bytes` gauge — the series the soak monitor's
+///     plateau/slope fit actually scrapes over `GET /metrics`. Unlike the
+///     counter this is a plain absolute `.set`, so it carries no additive
+///     double-count risk and can be called safely even if this boot seed ever
+///     ran more than once.
 pub fn set_tombstone_bytes(total: u64) {
     OR_TOMBSTONE_BYTES.store(total, Ordering::Relaxed);
     // The Prometheus increment below is additive; correct only on a fresh-zero
@@ -160,6 +177,11 @@ pub fn set_tombstone_bytes(total: u64) {
          Prometheus counter would double-count"
     );
     metrics::counter!("topgun_ormap_tombstone_bytes_total").increment(total);
+    // Absolute re-baseline of the decrementable gauge — no additive-race
+    // hazard here since `.set` (unlike the counter's `.increment`) overwrites
+    // rather than accumulates.
+    #[allow(clippy::cast_precision_loss)]
+    metrics::gauge!("topgun_ormap_tombstone_bytes").set(total as f64);
 }
 
 /// The startup warning for a detected legacy [`RecordValue::OrTombstones`] corpus,
