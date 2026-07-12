@@ -73,7 +73,7 @@ use monitor::{
     sample_rss_mb, BootGap, DiskAssessment, DiskSample, MemSample, TombstoneAssessment,
     TombstoneSample, DEFAULT_DISK_CEILING_MB, DEFAULT_DISK_MIN_GROWTH_MB,
     DEFAULT_DISK_THRESHOLD_MB_PER_HOUR, DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
-    DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+    DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS, DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
 };
 use or_noloss::{missing_acked_adds, OrLedger};
 use process::{resolve_server_binary, ServerConfig, ServerSupervisor};
@@ -426,7 +426,8 @@ async fn run_soak(config: &Config) -> i32 {
                     // `monitor.rs` (unit-tested directly by the calibration
                     // target's synthetic boot-gap sequence, AC11) — this loop
                     // only calls it, so the filtering logic is never
-                    // duplicated or buried here.
+                    // duplicated or buried here, and the tested path is the
+                    // production path.
                     let gaps_snapshot = boot_gaps.lock().clone();
                     if !exclude_boot_gap_samples(std::slice::from_ref(&candidate), &gaps_snapshot)
                         .is_empty()
@@ -642,6 +643,7 @@ async fn run_soak(config: &Config) -> i32 {
         &tombstone_samples_snapshot,
         DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
         DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+        DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
     );
 
     // The tombstone-byte SLOPE clause is now a HARD GATE, not report-only: the

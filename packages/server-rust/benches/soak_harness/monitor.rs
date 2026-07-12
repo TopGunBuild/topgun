@@ -259,9 +259,35 @@ fn least_squares_slope_per_hour(points: &[(f64, f64)]) -> f64 {
 /// series even though a full-window fit would still be dragged upward by the
 /// earlier growth. `points.len() / 2` (floor) biases the split toward
 /// INCLUDING more of the recent half on an odd count.
-fn last_half_window_slope_per_hour(points: &[(f64, f64)]) -> f64 {
+///
+/// The slope statistic and the minimum-window-span guard in
+/// [`assess_tombstone_bytes`] MUST agree on which samples make up the "recent
+/// half" — otherwise the guard could clear a window the slope was actually fit
+/// over (or vice versa) — so both derive it from [`last_half_window`].
+fn last_half_window(points: &[(f64, f64)]) -> &[(f64, f64)] {
     let half = points.len() / 2;
-    least_squares_slope_per_hour(&points[half..])
+    &points[half..]
+}
+
+fn last_half_window_slope_per_hour(points: &[(f64, f64)]) -> f64 {
+    least_squares_slope_per_hour(last_half_window(points))
+}
+
+/// Wall-clock span (seconds) covered by the last-half window — `0.0` when that
+/// window has fewer than two points (no meaningful span to extrapolate over).
+///
+/// Gates the per-hour slope clause in [`assess_tombstone_bytes`]: the per-hour
+/// rate is an extrapolation (bytes/sec × 3600), so over a sub-minute window the
+/// `3600 / span` amplification turns a few KB of ordinary ramp-up into a
+/// six-figure B/h "leak". This span lets the gate suppress that clause until the
+/// fitted window covers enough real time for the per-hour number to mean
+/// anything.
+fn last_half_window_span_secs(points: &[(f64, f64)]) -> f64 {
+    let window = last_half_window(points);
+    match (window.first(), window.last()) {
+        (Some(first), Some(last)) if window.len() >= 2 => last.0 - first.0,
+        _ => 0.0,
+    }
 }
 
 /// Calibrated slope ceiling (bytes/hour) for the tombstone-byte gate.
@@ -288,6 +314,26 @@ pub const DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR: f64 = 512.0;
 /// so a one/two-sample run (degenerate least-squares fit) cannot trip the
 /// clause on rounding.
 pub const DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH: f64 = 1.0;
+
+/// Minimum wall-clock span (seconds) of the last-half fit window before the
+/// per-hour slope clause is allowed to hard-fail the run.
+///
+/// The slope is a per-hour EXTRAPOLATION (bytes/sec × 3600). Over a sub-minute
+/// window the `3600 / span_secs` amplification is enormous: a healthy short run
+/// that has simply not yet had time to plateau (e.g. the 25s blocking CI "Short
+/// no-crash soak", ~6 samples over ~25s with a few KB of ordinary ramp-up)
+/// extrapolates to a six-figure B/h rate and would false-RED. Below this floor
+/// the slope carries no plateau signal — a leak and a not-yet-plateaued healthy
+/// run are indistinguishable — so the clause is suppressed and the run passes on
+/// the blind-monitor + absolute-growth clauses alone.
+///
+/// 120s sits well above the smoke run's ~10-15s last-half span (suppressed) and
+/// well below a real bounded soak's window (a 10-60 min live run's last-half
+/// span is minutes, so a genuine leak still trips the clause; the 72h soak's
+/// span is orders of magnitude above it). The gauge is restart-survivable, so a
+/// crash-enabled long run keeps a continuous series whose window clears the
+/// floor.
+pub const DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS: f64 = 120.0;
 
 /// One tombstone-byte-gauge sample (`topgun_ormap_tombstone_bytes_total`,
 /// scraped over HTTP). `bytes` is `u64` — a counted byte total is a
@@ -317,11 +363,17 @@ pub struct TombstoneAssessment {
 /// * `min_growth_bytes` — absolute growth (peak − first) below which slope is
 ///   treated as noise. Kept minimal (see [`DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH`]
 ///   doc) rather than mirroring the RSS gate's large guard.
+/// * `min_window_secs` — minimum wall-clock span of the last-half fit window
+///   before the per-hour slope clause is allowed to fail the run (see
+///   [`DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS`]). Guards against a
+///   too-short-to-plateau run false-REDing on the per-hour extrapolation of a
+///   sub-minute window. Pass `0.0` to disable the guard.
 #[allow(clippy::cast_precision_loss)]
 pub fn assess_tombstone_bytes(
     samples: &[TombstoneSample],
     threshold_bytes_per_hour: f64,
     min_growth_bytes: f64,
+    min_window_secs: f64,
 ) -> TombstoneAssessment {
     if samples.is_empty() {
         // Same rationale as the RSS gate's empty-samples branch: zero samples
@@ -356,16 +408,31 @@ pub fn assess_tombstone_bytes(
     // correctly reports a genuine plateau even after an earlier ramp (see
     // `last_half_window_slope_per_hour` doc).
     let slope_bytes_per_hour = last_half_window_slope_per_hour(&points);
+    // Span of the window the slope was actually fit over — the per-hour rate is
+    // an extrapolation over exactly this span, so it is what the min-window
+    // guard must clear.
+    let last_half_span_secs = last_half_window_span_secs(&points);
 
     #[allow(clippy::cast_precision_loss)]
     let growth = peak_bytes.saturating_sub(first_bytes) as f64;
     let mut reasons = Vec::new();
 
-    if growth >= min_growth_bytes && slope_bytes_per_hour > threshold_bytes_per_hour {
+    // The per-hour slope clause only carries a plateau/leak signal once the fit
+    // window spans enough wall-clock time (min_window_secs). Below that, the
+    // per-hour extrapolation of a sub-minute window is dominated by the
+    // `3600 / span` amplification — a healthy run that simply has not plateaued
+    // yet is indistinguishable from a leak — so the clause is suppressed and the
+    // run passes on the blind-monitor + absolute-growth clauses alone. A real
+    // unbounded leak still trips it once the run is long enough (the 72h soak's
+    // window is orders of magnitude above the floor).
+    if last_half_span_secs >= min_window_secs
+        && growth >= min_growth_bytes
+        && slope_bytes_per_hour > threshold_bytes_per_hour
+    {
         reasons.push(format!(
             "tombstone-byte growth slope {slope_bytes_per_hour:.1} bytes/h exceeds \
              {threshold_bytes_per_hour:.1} bytes/h (total growth {growth:.0} bytes over {} \
-             samples)",
+             samples, last-half window {last_half_span_secs:.0}s)",
             samples.len()
         ));
     }
@@ -776,6 +843,7 @@ mod tests {
             &samples,
             DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
             DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
         );
         assert!(
             !a.passed,
@@ -795,6 +863,7 @@ mod tests {
             &samples,
             DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
             DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
         );
         assert!(
             a.passed,
@@ -812,6 +881,7 @@ mod tests {
             &[],
             DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
             DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
         );
         assert!(!a.passed, "zero samples must fail as a blind monitor");
     }
@@ -834,6 +904,7 @@ mod tests {
             &byte_samples,
             DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
             DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
         );
         assert!(
             !bytes_assessment.passed,
@@ -891,6 +962,7 @@ mod tests {
             &samples,
             DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
             DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
         );
         assert!(
             a.passed,
@@ -995,6 +1067,7 @@ mod tests {
             &filtered,
             DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
             DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
         );
         assert!(
             a.passed,
@@ -1009,11 +1082,63 @@ mod tests {
             &samples,
             DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
             DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
         );
         assert!(
             !unfiltered.passed,
             "sanity: the unfiltered series with the boot-gap dip must actually \
              trip the gate, or this test would not be proving anything"
+        );
+    }
+
+    /// Regression lock for the blocking CI "Short no-crash soak must be GREEN"
+    /// gate: a too-short-to-plateau run grows the tombstone gauge by a few KB
+    /// while the keyspace fills but has not had wall-clock time to plateau. Its
+    /// last-half fit window spans only seconds, so the per-hour extrapolation is
+    /// meaningless (a few KB over ~25s reads as a six-figure B/h "leak"). The
+    /// minimum-window-span guard MUST suppress the slope clause so the run
+    /// PASSES. Proven load-bearing: the SAME series with the guard disabled
+    /// (`min_window_secs = 0.0`) FAILS — this is exactly the reproduced smoke
+    /// regression the guard closes.
+    #[test]
+    fn calibration_short_run_below_min_window_passes() {
+        // 6 samples at 5s intervals = 25s total, linear 0 -> 6000 bytes — the
+        // exact shape reproduced FAILing the blocking CI smoke gate.
+        let samples: Vec<TombstoneSample> = (0..6u32)
+            .map(|i| TombstoneSample {
+                elapsed_secs: f64::from(i) * 5.0,
+                bytes: u64::from(i) * 1_200,
+            })
+            .collect();
+
+        // Guard disabled: the sub-minute per-hour slope is enormous and trips
+        // the gate — without this the test would prove nothing.
+        let no_guard = assess_tombstone_bytes(
+            &samples,
+            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+            0.0,
+        );
+        assert!(
+            !no_guard.passed,
+            "sanity: with the window guard disabled the sub-minute slope must \
+             trip the gate (slope={:.0} B/h) — otherwise this test is vacuous",
+            no_guard.slope_bytes_per_hour
+        );
+        assert!(no_guard.slope_bytes_per_hour > DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR);
+
+        // Real guard: the too-short window is suppressed and the run passes.
+        let guarded = assess_tombstone_bytes(
+            &samples,
+            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
+        );
+        assert!(
+            guarded.passed,
+            "a too-short-to-plateau run (last-half window well under the \
+             {:.0}s floor) must pass; slope={:.0} B/h reason={:?}",
+            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS, guarded.slope_bytes_per_hour, guarded.reason
         );
     }
 
