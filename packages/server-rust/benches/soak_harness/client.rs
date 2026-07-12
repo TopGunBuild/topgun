@@ -144,6 +144,26 @@ impl SoakClient {
         self.device_token.as_deref()
     }
 
+    /// The highest covering epoch this replica has ACKed. The driver reads it
+    /// before a reconnect and re-seeds it via [`Self::resume_from_cursor`] on the
+    /// fresh connection, so the first post-reconnect `ORMAP_SYNC_INIT` presents
+    /// the replica's TRUE last-applied cursor as `claimed_epoch` rather than a
+    /// spurious `None`. Presenting `None` after a reconnect would, under active
+    /// split-brain protection, fail-closed gate this replica's sync — pinning the
+    /// fleet-wide low-water-mark and starving the very prune this harness drives.
+    pub fn last_applied_cursor(&self) -> Option<u64> {
+        self.last_applied_cursor
+    }
+
+    /// Re-seed the last-applied cursor onto a freshly reconnected replica so its
+    /// next `confirm_apply` claims the epoch it had already reached, keeping the
+    /// server-side causal frontier monotonic across a reconnect.
+    pub fn resume_from_cursor(&mut self, cursor: Option<u64>) {
+        if cursor.is_some() {
+            self.last_applied_cursor = cursor;
+        }
+    }
+
     /// PUT `value` at `map`/`key` with `APPLIED` write concern and wait for the
     /// `OP_ACK`. The `(millis, counter)` pair must be monotonically increasing
     /// per key so Last-Write-Wins keeps the latest value; the caller owns that.

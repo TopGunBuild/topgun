@@ -248,6 +248,16 @@ struct SoakMetrics {
     /// a long soak: this staying at 0 for the whole run means the low-water-mark
     /// never advanced (expected under `--no-ack`; a bug otherwise).
     confirms: AtomicU64,
+    /// Highest epoch any tracked client has ACKed via `ClientApplyAck`. The
+    /// server's fleet-wide low-water-mark tracks the MIN across tracked clients,
+    /// so this is an upper bound on the LWM — a diagnostic that the confirm-apply
+    /// path is actually advancing the causal frontier the prune keys off.
+    last_confirmed_epoch: AtomicU64,
+    /// Count of `confirm_apply` rounds that errored (forcing a reconnect). A
+    /// non-`--no-ack` run with this climbing while `confirms` stays flat means a
+    /// harness plumbing failure (the tracked client can't ACK) — NOT a server
+    /// tombstone leak, even though both surface as an unbounded gauge slope.
+    confirm_errors: AtomicU64,
 }
 
 /// Context shared with every churn client task.
@@ -689,7 +699,7 @@ async fn run_soak(config: &Config) -> i32 {
         }
         println!(
             "[{:>6}s] {phase:<8} writes={} errs={} reconnects={} crashes={} steady={} recovery={} \
-             converged={} rss={:.0}MB(peak {:.0})",
+             converged={} confirms={} lastEpoch={} confirmErrs={} rss={:.0}MB(peak {:.0})",
             start.elapsed().as_secs(),
             metrics.total_writes.load(Ordering::Relaxed),
             metrics.write_errors.load(Ordering::Relaxed),
@@ -698,6 +708,9 @@ async fn run_soak(config: &Config) -> i32 {
             steady_checkpoints,
             recovery_checkpoints,
             last_convergence_ok,
+            metrics.confirms.load(Ordering::Relaxed),
+            metrics.last_confirmed_epoch.load(Ordering::Relaxed),
+            metrics.confirm_errors.load(Ordering::Relaxed),
             last,
             peak,
         );
@@ -888,7 +901,17 @@ async fn run_soak(config: &Config) -> i32 {
         timestamp: utc_timestamp_now(),
     };
 
-    print_summary(&report, &tombstones, &disk, redb_tombstone_scan);
+    print_summary(
+        &report,
+        &tombstones,
+        &disk,
+        redb_tombstone_scan,
+        &ConfirmDiagnostics {
+            confirms: metrics.confirms.load(Ordering::Relaxed),
+            last_confirmed_epoch: metrics.last_confirmed_epoch.load(Ordering::Relaxed),
+            confirm_errors: metrics.confirm_errors.load(Ordering::Relaxed),
+        },
+    );
     if let Some(path) = &config.json_output {
         write_report(path, &report);
         println!("wrote JSON report to {}", path.display());
@@ -903,11 +926,22 @@ async fn run_soak(config: &Config) -> i32 {
     i32::from(!passed)
 }
 
+/// Tracked-client confirm-apply diagnostics, surfaced in the summary without
+/// widening the persisted `SoakReport` (report.rs is outside this change's file
+/// budget). Purely a console signal for distinguishing a healthy LWM-advancing
+/// run from a stalled-confirm harness failure.
+struct ConfirmDiagnostics {
+    confirms: u64,
+    last_confirmed_epoch: u64,
+    confirm_errors: u64,
+}
+
 fn print_summary(
     r: &SoakReport,
     tombstones: &TombstoneAssessment,
     disk: &DiskAssessment,
     redb_tombstone_scan: Option<u64>,
+    confirm: &ConfirmDiagnostics,
 ) {
     println!("\n=== SOAK SUMMARY ===");
     println!(
@@ -920,6 +954,12 @@ fn print_summary(
     println!("write_errors:      {}", r.write_errors);
     println!("reconnects:        {}", r.reconnects);
     println!("resends:           {}", r.resends);
+    println!(
+        "confirm_apply:     confirms={} lastEpoch={} errors={} \
+         (tracked client advances the low-water-mark that licenses pruning; \
+         confirms=0 with a climbing gauge = LWM never advanced)",
+        confirm.confirms, confirm.last_confirmed_epoch, confirm.confirm_errors
+    );
     println!("steady_checkpts:   {}", r.steady_checkpoints);
     println!(
         "recovery_checkpts: {} (crashes {})",
@@ -1696,6 +1736,11 @@ struct TrackerConfig {
 /// 0 for the whole run: the negative control for the promoted hard gate.
 async fn run_tracked_confirm_client(cfg: TrackerConfig) {
     let mut device_token: Option<String> = None;
+    // Persisted across reconnects alongside `device_token`: the replica's
+    // last-ACKed covering epoch. Re-seeding it on the fresh connection keeps the
+    // first post-reconnect `claimed_epoch` truthful instead of a spurious `None`,
+    // which would fail-closed gate the replica under active split-brain protection.
+    let mut resume_cursor: Option<u64> = None;
 
     while !cfg.stop.load(Ordering::SeqCst) {
         while cfg.paused.load(Ordering::SeqCst) && !cfg.stop.load(Ordering::SeqCst) {
@@ -1716,6 +1761,7 @@ async fn run_tracked_confirm_client(cfg: TrackerConfig) {
             tokio::time::sleep(Duration::from_millis(200)).await;
             continue;
         };
+        client.resume_from_cursor(resume_cursor);
 
         let mut session_alive = true;
         while session_alive && !cfg.stop.load(Ordering::SeqCst) {
@@ -1731,13 +1777,23 @@ async fn run_tracked_confirm_client(cfg: TrackerConfig) {
 
             if !cfg.no_ack {
                 match client.confirm_apply(OR_MAP).await {
-                    Ok(Some(_)) => {
+                    Ok(Some(epoch)) => {
                         cfg.metrics.confirms.fetch_add(1, Ordering::Relaxed);
+                        cfg.metrics
+                            .last_confirmed_epoch
+                            .fetch_max(epoch, Ordering::Relaxed);
                     }
                     // `Ok(None)`: nothing to confirm yet (no tombstone stamped
                     // yet) — skip, not an error.
                     Ok(None) => {}
-                    Err(_) => {
+                    Err(e) => {
+                        // Surface the failure rather than reconnect-looping
+                        // silently: a swallowed confirm error looks identical to
+                        // a server tombstone leak (LWM never advances → gauge
+                        // climbs → hard gate REDs), so an invisible plumbing bug
+                        // would masquerade as the very defect this gate hunts.
+                        cfg.metrics.confirm_errors.fetch_add(1, Ordering::Relaxed);
+                        eprintln!("[tracker {}] confirm_apply error: {e:#}", cfg.idx);
                         session_alive = false;
                     }
                 }
@@ -1746,14 +1802,19 @@ async fn run_tracked_confirm_client(cfg: TrackerConfig) {
             tokio::time::sleep(cfg.confirm_interval).await;
         }
 
-        // Capture the device token BEFORE dropping so the next reconnect
-        // presents it and keeps the SAME (principal, deviceId) identity —
-        // otherwise every reconnect would mint a fresh, forgotten replica and
-        // the frontier's cursor for it would never accumulate.
+        // Capture the device token AND last-applied cursor BEFORE dropping so the
+        // next reconnect presents the SAME (principal, deviceId) identity and
+        // resumes its causal frontier — otherwise every reconnect would mint a
+        // fresh, forgotten replica whose cursor never accumulates, or reset the
+        // claimed epoch to None and risk a fail-closed gate under protection.
         let token = client.device_token().map(str::to_string);
+        let cursor = client.last_applied_cursor();
         drop(client);
         if token.is_some() {
             device_token = token;
+        }
+        if cursor.is_some() {
+            resume_cursor = cursor;
         }
         if cfg.stop.load(Ordering::SeqCst) {
             return;
