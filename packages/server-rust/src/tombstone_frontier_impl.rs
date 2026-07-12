@@ -59,7 +59,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
@@ -510,10 +510,12 @@ enum PersistMsg {
     /// worker's high-water for that client).
     Advance { client: ClientId, epoch: Epoch },
     /// Delete `client`'s durable cursor row. FIFO ordering guarantees this runs
-    /// after every prior `Advance` for the client; `done` signals completion.
+    /// after every prior `Advance` for the client; `done` reports the durable-delete
+    /// OUTCOME (`true` = row removed, `false` = the store delete failed) so the caller
+    /// can fall back to a direct retry when the worker's own delete did not land.
     Forget {
         client: ClientId,
-        done: oneshot::Sender<()>,
+        done: oneshot::Sender<bool>,
     },
     /// Drain barrier: signals `done` once every message enqueued before it has been
     /// processed. Lets a caller await outstanding persists without stopping the worker.
@@ -527,6 +529,21 @@ impl std::fmt::Debug for TombstoneFrontier {
             .field("tracked_clients", &tracked)
             .field("has_store", &self.store.is_some())
             .finish_non_exhaustive()
+    }
+}
+
+/// Recover a poisoned mutex guard instead of propagating the panic, logging the
+/// recovery so the underlying panic is not silent. Safe for every mutex this frontier
+/// holds: they guard best-effort state (a stale-but-consistent frontier snapshot, or an
+/// `Option` handle), and cursor-loss only degrades to a resync — but a poisoned lock
+/// still signals a prior panic worth surfacing.
+fn recover_poisoned<T>(guard: &'static str) -> impl FnOnce(std::sync::PoisonError<T>) -> T {
+    move |poison| {
+        warn!(
+            guard,
+            "recovered a poisoned tombstone-frontier mutex (a prior holder panicked)"
+        );
+        poison.into_inner()
     }
 }
 
@@ -573,7 +590,7 @@ impl TombstoneFrontier {
         let guard = self
             .persist_tx
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(recover_poisoned("persist_tx"));
         match guard.as_ref() {
             Some(tx) => tx.send(msg).is_ok(),
             None => false,
@@ -623,12 +640,12 @@ impl TombstoneFrontier {
         let _ = self
             .persist_tx
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(recover_poisoned("persist_tx"))
             .take();
         let handle = self
             .persist_worker
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(recover_poisoned("persist_worker"))
             .take();
         if let Some(handle) = handle {
             let _ = handle.await;
@@ -639,9 +656,7 @@ impl TombstoneFrontier {
         // A poisoned frontier mutex means a prior panic while holding it; recover the
         // guard rather than propagate the panic — the frontier is best-effort and a
         // stale-but-consistent snapshot is safe (cursor-loss degrades to resync).
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.state.lock().unwrap_or_else(recover_poisoned("state"))
     }
 
     /// Inject the server's current max stamped epoch (the global bound). Settable so
@@ -830,18 +845,20 @@ impl TombstoneFrontier {
                 None
             }
         };
-        // Whether the durable delete still needs a direct fallback. Two cases:
-        //   * `None`  — the delete was never enqueued (no store, or worker already
-        //     shut down).
-        //   * `Some(rx)` that resolves to `Err` — the delete WAS enqueued but the
-        //     worker died/was dropped before processing it (the oneshot sender was
-        //     dropped without sending), so it may never have run.
-        // Both fall through to the same direct `store.remove`. It is idempotent, so
-        // running it even when the worker did delete first is harmless. A forgotten
-        // client's row must never survive to be rehydrated at its stale cursor on
-        // restart.
+        // Whether the durable delete still needs a direct fallback. Three cases:
+        //   * `None`         — never enqueued (no store, or worker already shut down).
+        //   * `Some(Err(_))` — enqueued, but the worker died/was dropped before
+        //     processing it (the oneshot sender was dropped without sending), so the
+        //     delete may never have run.
+        //   * `Some(Ok(false))` — the worker RAN but its `store.remove` FAILED
+        //     (transient store error). Without this branch the failure would be
+        //     silently reported as success and the row would linger.
+        // Only `Some(Ok(true))` — a confirmed durable delete — skips the fallback.
+        // The fallback is the same direct `store.remove`; it is idempotent, so running
+        // it even when the worker did delete first is harmless. A forgotten client's
+        // row must never survive to be rehydrated at its stale cursor on restart.
         let needs_fallback = match rx {
-            Some(rx) => rx.await.is_err(),
+            Some(rx) => !rx.await.unwrap_or(false),
             None => true,
         };
         if needs_fallback {
@@ -1106,11 +1123,22 @@ async fn cursor_persist_worker(
             }
             PersistMsg::Forget { client, done } => {
                 let now = i64::try_from(now_millis()).unwrap_or(i64::MAX);
-                if let Err(e) = store.remove(CURSOR_MAP, &client, now).await {
-                    debug!(client = %client, "cursor forget delete failed: {e}");
-                }
+                // Report the DURABLE-DELETE OUTCOME, not merely "the worker saw the
+                // message". A swallowed store error here previously still signalled
+                // success, so `forget_client` skipped its idempotent fallback delete
+                // exactly when the delete had failed — leaving the forgotten row alive
+                // to be rehydrated at its stale cursor (the resurrection hazard the
+                // fallback exists to close). Report `false` on failure so the caller
+                // retries.
+                let removed = match store.remove(CURSOR_MAP, &client, now).await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        debug!(client = %client, "cursor forget delete failed: {e}");
+                        false
+                    }
+                };
                 high_water.remove(&client);
-                let _ = done.send(());
+                let _ = done.send(removed);
             }
             PersistMsg::Barrier { done } => {
                 let _ = done.send(());
@@ -1808,6 +1836,45 @@ mod persistence_tests {
         assert_eq!(f.cursor(&c), None, "no stale cursor resurrected");
     }
 
+    /// The worker is ALIVE and processes the forget, but its `store.remove` FAILS
+    /// (transient durable error). `forget_client` must still run its idempotent
+    /// fallback delete: the worker reports the delete OUTCOME through the oneshot, so a
+    /// failed durable delete is no longer silently signalled as success. Pre-fix the
+    /// worker sent `()` unconditionally, so the fallback was skipped and the forgotten
+    /// row could survive → stale-cursor resurrection on the next rehydrate.
+    #[tokio::test]
+    async fn forget_fallback_fires_when_worker_store_remove_fails() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (path, _dir) = temp_store();
+        let c: ClientId = "a5:alice|dev-1".into();
+        let inner: Arc<dyn MapDataStore> = Arc::new(RedbDataStore::new(&path).expect("open"));
+
+        let faulty = GatedAddStore::new_failing_remove(Arc::clone(&inner));
+        let remove_calls = faulty.remove_calls_handle();
+        let store: Arc<dyn MapDataStore> = Arc::new(faulty);
+        let f = TombstoneFrontier::new(Some(store));
+
+        // Establish + persist a cursor (the persist path uses `add`, never `remove`).
+        f.set_delivered(CONN_A, 100);
+        assert!(f.confirm_apply_ack(&c, 50, CONN_A).await);
+        f.quiesce_persists().await;
+
+        // Count only the removes issued by the forget path.
+        remove_calls.store(0, SeqCst);
+        f.forget_client(&c).await;
+
+        // The worker attempts the durable delete (fails), reports `false`, and
+        // `forget_client` retries via its idempotent fallback → at least TWO attempts.
+        // Pre-fix this was exactly ONE (worker signalled success → fallback skipped).
+        let attempts = remove_calls.load(SeqCst);
+        assert!(
+            attempts >= 2,
+            "worker delete + fallback delete must both be attempted when the worker's \
+             store.remove fails; got {attempts} attempt(s)"
+        );
+        f.shutdown().await;
+    }
+
     /// A freshly-minted identity has no persisted cursor: rehydrate is a no-op and it
     /// stays untracked (unknown → gated), pinning nothing.
     #[tokio::test]
@@ -2316,6 +2383,10 @@ mod persistence_tests {
         gate_add: std::sync::atomic::AtomicBool,
         gated_once: std::sync::atomic::AtomicBool,
         fail_load: std::sync::atomic::AtomicBool,
+        /// When set, every `remove` fails (models a transient durable-delete error).
+        fail_remove: std::sync::atomic::AtomicBool,
+        /// Counts `remove` attempts so a test can prove the forget fallback fired.
+        remove_calls: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl GatedAddStore {
@@ -2326,6 +2397,8 @@ mod persistence_tests {
                 gate_add: std::sync::atomic::AtomicBool::new(true),
                 gated_once: std::sync::atomic::AtomicBool::new(false),
                 fail_load: std::sync::atomic::AtomicBool::new(false),
+                fail_remove: std::sync::atomic::AtomicBool::new(false),
+                remove_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
         }
 
@@ -2338,7 +2411,30 @@ mod persistence_tests {
                 gate_add: std::sync::atomic::AtomicBool::new(false),
                 gated_once: std::sync::atomic::AtomicBool::new(false),
                 fail_load: std::sync::atomic::AtomicBool::new(true),
+                fail_remove: std::sync::atomic::AtomicBool::new(false),
+                remove_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
+        }
+
+        /// A wrapper whose `remove` always errors (no add-gate) — for exercising the
+        /// worker-alive-but-`store.remove`-fails forget path. The returned counter
+        /// counts every `remove` attempt.
+        fn new_failing_remove(inner: Arc<dyn MapDataStore>) -> Self {
+            Self {
+                inner,
+                gate: Arc::new(AddGate::new()),
+                gate_add: std::sync::atomic::AtomicBool::new(false),
+                gated_once: std::sync::atomic::AtomicBool::new(false),
+                fail_load: std::sync::atomic::AtomicBool::new(false),
+                fail_remove: std::sync::atomic::AtomicBool::new(true),
+                remove_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+
+        /// Shared handle to the `remove` attempt counter (clone before wrapping the
+        /// store in `Arc<dyn MapDataStore>`).
+        fn remove_calls_handle(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+            Arc::clone(&self.remove_calls)
         }
     }
 
@@ -2376,6 +2472,11 @@ mod persistence_tests {
                 .await
         }
         async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            self.remove_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail_remove.load(std::sync::atomic::Ordering::SeqCst) {
+                anyhow::bail!("GatedAddStore: simulated remove failure");
+            }
             self.inner.remove(map, key, now).await
         }
         async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
