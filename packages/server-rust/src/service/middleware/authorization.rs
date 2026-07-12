@@ -88,9 +88,12 @@ where
         // trusted origins never reach here (they early-return in `call`), so the
         // server's own internal writes to these maps stay exempt. Ops with an empty
         // `map_name` (bypass group, `SqlQuery`/`VectorSearch`/`QuerySyncInit`)
-        // cannot name a reserved map, so they fall through unaffected.
-        if is_reserved_map_name(&map_name) {
-            return Box::pin(async move { Err(OperationError::Forbidden { map_name }) });
+        // cannot name a reserved map, so they fall through unaffected. For an
+        // `OpBatch` EVERY op is inspected (not just the classified first one) —
+        // each op is applied by its own `map_name`, so a reserved map in a
+        // non-first position must still be rejected.
+        if let Some(reserved) = reserved_target_map_name(&op, &map_name) {
+            return Box::pin(async move { Err(OperationError::Forbidden { map_name: reserved }) });
         }
         let Some(action) = action else {
             return Box::pin(self.inner.call(op));
@@ -236,11 +239,34 @@ const RESERVED_MAP_PREFIXES: [&str; 2] = ["_topgun_", "__topgun_"];
 
 /// Whether `map_name` names a reserved internal map (see [`RESERVED_MAP_PREFIXES`]).
 /// Deliberately narrow: only the `_topgun_`/`__topgun_` families are reserved, so
-/// other leading-underscore names (`_internal`, `tags`, …) stay valid.
+/// other leading-underscore names (`_internal`, `tags`, …) stay valid. The prefix
+/// match is ASCII-case-insensitive so a `_TOPGUN_*` variant cannot slip past the
+/// guard if any downstream layer folds map-name case.
 fn is_reserved_map_name(map_name: &str) -> bool {
-    RESERVED_MAP_PREFIXES
-        .iter()
-        .any(|prefix| map_name.starts_with(prefix))
+    let bytes = map_name.as_bytes();
+    RESERVED_MAP_PREFIXES.iter().any(|prefix| {
+        let p = prefix.as_bytes();
+        bytes.len() >= p.len() && bytes[..p.len()].eq_ignore_ascii_case(p)
+    })
+}
+
+/// The reserved map name a client-origin op would target, if any.
+///
+/// `classify_operation` reports only `ops.first()`'s map for an `OpBatch`, but
+/// `handle_op_batch` applies EVERY op by its own `map_name` — so the guard must
+/// scan all of them, else a batch like `[{tags}, {_topgun_device_credentials}]`
+/// smuggles a reserved write past the single-map check. For every other op family
+/// the classified `map_name` is the one resource, so it is checked directly.
+fn reserved_target_map_name(op: &Operation, classified_map_name: &str) -> Option<String> {
+    if let Operation::OpBatch { payload, .. } = op {
+        return payload
+            .payload
+            .ops
+            .iter()
+            .find(|client_op| is_reserved_map_name(&client_op.map_name))
+            .map(|client_op| client_op.map_name.clone());
+    }
+    is_reserved_map_name(classified_map_name).then(|| classified_map_name.to_string())
 }
 
 /// Maps an `Operation` variant to a `PermissionAction` and a `map_name`.
@@ -1064,6 +1090,68 @@ mod tests {
         assert!(
             matches!(resp, Err(OperationError::Forbidden { .. })),
             "client-origin read of a reserved credential map must be Forbidden, got {resp:?}"
+        );
+    }
+
+    /// Helper: an Anonymous `OpBatch` whose ops target `maps` in order (multi-op).
+    fn anon_op_batch_multi(maps: &[&str]) -> Operation {
+        let mut ctx = OperationContext::new(33, service_names::CRDT, make_timestamp(), 5000);
+        ctx.caller_origin = CallerOrigin::Anonymous;
+        Operation::OpBatch {
+            ctx,
+            payload: topgun_core::messages::sync::OpBatchMessage {
+                payload: topgun_core::messages::sync::OpBatchPayload {
+                    ops: maps
+                        .iter()
+                        .map(|m| topgun_core::messages::base::ClientOp {
+                            map_name: (*m).to_string(),
+                            key: "k".to_string(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..Default::default()
+                },
+            },
+        }
+    }
+
+    /// AC7 (multi-op regression): `classify_operation` reports only `ops.first()`,
+    /// so a reserved map in a NON-FIRST batch position must still be rejected —
+    /// otherwise `[{tags}, {_topgun_…}]` smuggles the reserved write past the
+    /// single-map check (the device-hijack door R4 exists to close). Also asserts a
+    /// case-variant prefix cannot evade the guard, and an all-non-reserved batch
+    /// still passes. RED without the per-op scan in `reserved_target_map_name`.
+    #[tokio::test]
+    async fn reserved_namespace_rejected_when_not_first_op_in_batch() {
+        let store = Arc::new(InMemoryPolicyStore::new()); // empty → AllowAll (NO_AUTH)
+        let evaluator = Arc::new(PolicyEvaluator::new(store));
+        let layer = AuthorizationLayer::new(evaluator);
+        let mut svc = layer.layer(AlwaysOkService);
+
+        // Reserved map in a non-first position: the innocuous first op must not shield it.
+        for smuggle in [
+            anon_op_batch_multi(&["tags", "_topgun_device_credentials"]),
+            anon_op_batch_multi(&["tags", "_internal", "__topgun_policies"]),
+            // Case-variant prefix must not evade the ASCII-case-insensitive check.
+            anon_op_batch_multi(&["tags", "_TOPGUN_device_credentials"]),
+        ] {
+            let resp = ServiceExt::ready(&mut svc)
+                .await
+                .unwrap()
+                .call(smuggle)
+                .await;
+            assert!(
+                matches!(resp, Err(OperationError::Forbidden { .. })),
+                "reserved map in a non-first batch position must be Forbidden, got {resp:?}"
+            );
+        }
+
+        // An all-non-reserved multi-op batch still passes.
+        let clean = anon_op_batch_multi(&["tags", "_internal"]);
+        let resp = ServiceExt::ready(&mut svc).await.unwrap().call(clean).await;
+        assert!(
+            resp.is_ok(),
+            "all-non-reserved batch must pass, got {resp:?}"
         );
     }
 }
