@@ -1465,22 +1465,29 @@ impl MapDataStore for WriteBehindDataStore {
     }
 
     fn reset(&self) {
+        // Hold the pending-sequence lock across ALL watermark-state clears — the
+        // queues, staging, pending_count, the sequence counter, AND the pending set
+        // — so a `reset` presents a single consistent wipe. `assign_tracked_sequence`
+        // locks `pending_seqs` FIRST and only then touches `sequence`, so holding the
+        // lock here serializes reset against the counter/pending half of an assign;
+        // clearing queues/staging/pending_count inside the same critical section
+        // keeps them from drifting out of step with the counter (e.g. a stranded
+        // staging entry under a reset counter, which would freeze the watermark).
+        //
+        // Precondition: `reset` is a teardown / full-clear operation (test harnesses
+        // and quiesced admin clears) — it is NOT called concurrently with live
+        // tracked writers. An assign's second phase (its staging insert) runs OUTSIDE
+        // this lock, so the lock cannot make reset fully atomic against an in-flight
+        // writer; the invariant that no writer races reset is what guarantees
+        // consistency, and the lock is defense-in-depth that keeps the counter/pending
+        // pair coherent.
+        let mut pending = self.pending_seqs();
         self.queues.clear();
         self.staging.clear();
         self.pending_count.store(0, Ordering::Relaxed);
-        // Take the pending-sequence lock across BOTH the counter reset and the
-        // set clear. `assign_tracked_sequence` locks `pending_seqs` FIRST and only
-        // then touches `sequence`, so holding the lock here makes reset mutually
-        // exclusive with it. Doing the two as separate operations leaves a window
-        // where a concurrent assign runs between them — counter reset to 0, then
-        // assign takes seq 0 and inserts it, then our clear wipes it — stranding
-        // counter=1 with an empty pending set while seq 0 is still buffered, which
-        // would let the watermark jump past the un-flushed write.
-        {
-            let mut pending = self.pending_seqs();
-            self.sequence.store(0, Ordering::Relaxed);
-            pending.clear();
-        }
+        self.sequence.store(0, Ordering::Relaxed);
+        pending.clear();
+        drop(pending);
         self.inner.reset();
     }
 
