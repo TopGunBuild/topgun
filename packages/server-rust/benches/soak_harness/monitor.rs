@@ -64,15 +64,36 @@
 //!
 //! Note on gating responsibility: [`assess_tombstone_bytes`] *computes* the byte
 //! verdict (including its `passed` flag), but whether that verdict gates the run
-//! is decided in `main.rs`, not here. Today the byte **slope** is report-only —
-//! the process-local counter resets to 0 on every `kill -9`, so across a
-//! crash-enabled run its series is a per-life sawtooth whose OLS slope is
-//! untrustworthy, and the OR-Map tombstone leak it measures is deliberately
-//! unbounded until TODO-566. `main.rs` therefore routes a slope breach to its
-//! `pending_gates` channel (surfaced, does NOT fail the run) and hard-gates only
-//! on the blind-monitor (zero-sample) case. So do not read this module's
-//! `passed: bool` as load-bearing everywhere — see `main.rs`'s run-end
-//! verdict-assembly for the authoritative gating decision.
+//! is decided in `main.rs`, not here. The byte **slope** is surfaced
+//! REPORT-ONLY, NOT hard-gated. Although the gauge is restart-survivable
+//! (`reconcile_tombstone_bytes` in `bin/topgun_server.rs` re-seeds it via
+//! `set_tombstone_bytes` at boot), it is ADDITIVE-ONLY within a process life:
+//! every tombstone-add increments it and no prune-side decrement is wired yet
+//! (`sub_tombstone_bytes` has no live call site), and the OR-Map epoch prune is
+//! dark until a follow-up supplies the frontier's durable-epoch watermark. So
+//! under sustained OR churn the gauge climbs at the tombstone-*creation* rate
+//! and cannot plateau — hard-gating the slope would false-RED every healthy
+//! long run. `main.rs` therefore routes a slope breach to its `pending_gates`
+//! (honest, non-failing) channel, exactly like the disk gate; only the
+//! blind-monitor zero-sample case hard-gates. The RSS gate above remains a
+//! coarse, non-tombstone backstop. Re-promote the slope to a hard gate once the
+//! prune-activation follow-up makes the gauge track residency and a live
+//! bounded soak is observed to plateau. (This module's `passed: bool` on
+//! [`TombstoneAssessment`] still drives the report-only signal and the
+//! calibration tests below.)
+//!
+//! ## Boot-recompute-gap exclusion
+//!
+//! Between a process start and `reconcile_tombstone_bytes` completion there is
+//! a transient window during which the gauge is not yet trustworthy for the
+//! CURRENT life. [`exclude_boot_gap_samples`] is a pure, `retain`-style helper
+//! that drops every sample falling inside a recorded [`BootGap`] before the
+//! series reaches [`assess_tombstone_bytes`], so a spurious pre-reconcile read
+//! (or the very act of a `kill -9` and restart) can never manufacture a false
+//! leak/plateau signal. `main.rs` calls it once per scraped tombstone sample
+//! from the sampling loop; being pure and series-based, it is also driven
+//! directly by `tests::calibration_boot_gap_exclusion_does_not_trip_gate` with
+//! a fully synthetic sequence — no real process required.
 
 use std::path::Path;
 use std::process::Command;
@@ -228,6 +249,58 @@ fn least_squares_slope_per_hour(points: &[(f64, f64)]) -> f64 {
     }
 }
 
+/// Least-squares slope over just the LAST HALF of `points` (by time order),
+/// expressed as a per-hour rate.
+///
+/// This is the plateau/leak statistic for the tombstone-byte gate
+/// ([`assess_tombstone_bytes`]). A first-half/second-half growth RATIO is
+/// unstable as the denominator (first-half growth) approaches zero — exactly
+/// the shape a genuinely-bounded run produces once the M4 tombstone bound
+/// engages. A last-half-window OLS slope has no such singularity: it stays
+/// well-defined and near zero whether the window is perfectly flat or has
+/// tiny jitter, and it correctly reports near-zero on a "grow, then flatten"
+/// series even though a full-window fit would still be dragged upward by the
+/// earlier growth. `points.len() / 2` (floor) biases the split toward
+/// INCLUDING more of the recent half on an odd count.
+///
+/// The slope statistic and the minimum-window-span guard in
+/// [`assess_tombstone_bytes`] MUST agree on which samples make up the "recent
+/// half" — otherwise the guard could clear a window the slope was actually fit
+/// over (or vice versa) — so both derive it from [`last_half_window`].
+fn last_half_window(points: &[(f64, f64)]) -> &[(f64, f64)] {
+    let half = points.len() / 2;
+    &points[half..]
+}
+
+fn last_half_window_slope_per_hour(points: &[(f64, f64)]) -> f64 {
+    least_squares_slope_per_hour(last_half_window(points))
+}
+
+/// Wall-clock span (seconds) covered by the last-half window — `0.0` when that
+/// window has fewer than two points (no meaningful span to extrapolate over).
+///
+/// Gates the per-hour slope clause in [`assess_tombstone_bytes`]: the per-hour
+/// rate is an extrapolation (bytes/sec × 3600), so over a sub-minute window the
+/// `3600 / span` amplification turns a few KB of ordinary ramp-up into a
+/// six-figure B/h "leak". This span lets the gate suppress that clause until the
+/// fitted window covers enough real time for the per-hour number to mean
+/// anything.
+///
+/// A degenerate last-half window of ≤2 points therefore yields `0.0` and is
+/// intentionally suppressed: a run that produced only one or two samples (a very
+/// short soak) cannot trip even the report-only slope clause regardless of how
+/// linear its growth looks — there is no window to extrapolate over, and the
+/// 120s [`DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS`] floor would suppress it in any
+/// case. Real bounded/72h soaks accumulate hundreds of samples, so this bounds
+/// nothing they rely on.
+fn last_half_window_span_secs(points: &[(f64, f64)]) -> f64 {
+    let window = last_half_window(points);
+    match (window.first(), window.last()) {
+        (Some(first), Some(last)) if window.len() >= 2 => last.0 - first.0,
+        _ => 0.0,
+    }
+}
+
 /// Calibrated slope ceiling (bytes/hour) for the tombstone-byte gate.
 ///
 /// ~0.5 KB/h. Tight by design — see the module-level "no detection floor" doc:
@@ -237,7 +310,11 @@ fn least_squares_slope_per_hour(points: &[(f64, f64)]) -> f64 {
 /// Consumed by `main.rs` (the soak loop scrapes `GET /metrics` and calls
 /// [`assess_tombstone_bytes`] with this threshold alongside the RSS `assess`) and
 /// by the `soak_monitor_calibration` integration target's tests — the harness
-/// wiring has landed, so no `allow(dead_code)` is needed here.
+/// wiring has landed, so no `allow(dead_code)` is needed here. The slope this
+/// threshold measures is surfaced REPORT-ONLY by `main.rs` (the additive-only
+/// gauge cannot plateau under sustained churn until an OR-Map prune-activation
+/// follow-up wires residency tracking); the blind-monitor zero-sample clause is
+/// the only tombstone hard gate today. RSS above is the coarse backstop.
 pub const DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR: f64 = 512.0;
 
 /// Absolute-growth guard (bytes) for the tombstone-byte slope clause.
@@ -250,6 +327,29 @@ pub const DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR: f64 = 512.0;
 /// so a one/two-sample run (degenerate least-squares fit) cannot trip the
 /// clause on rounding.
 pub const DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH: f64 = 1.0;
+
+/// Minimum wall-clock span (seconds) of the last-half fit window before the
+/// per-hour slope clause is surfaced as a (report-only) breach.
+///
+/// The slope is a per-hour EXTRAPOLATION (bytes/sec × 3600). Over a sub-minute
+/// window the `3600 / span_secs` amplification is enormous: a healthy short run
+/// that has simply not yet had time to plateau (e.g. the 25s blocking CI "Short
+/// no-crash soak", ~6 samples over ~25s with a few KB of ordinary ramp-up)
+/// extrapolates to a six-figure B/h rate and would surface a spurious breach.
+/// Below this floor the slope carries no plateau signal — a leak and a
+/// not-yet-plateaued healthy run are indistinguishable — so the clause is
+/// suppressed (no breach is emitted for it) and the assessment passes on the
+/// blind-monitor + absolute-growth clauses alone. (The breach is report-only
+/// today regardless — see [`DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR`]; this
+/// floor keeps even the report-only signal from crying wolf on a short run.)
+///
+/// 120s sits well above the smoke run's ~10-15s last-half span (suppressed) and
+/// well below a real bounded soak's window (a 10-60 min live run's last-half
+/// span is minutes, so a genuine leak still trips the clause; the 72h soak's
+/// span is orders of magnitude above it). The gauge is restart-survivable, so a
+/// crash-enabled long run keeps a continuous series whose window clears the
+/// floor.
+pub const DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS: f64 = 120.0;
 
 /// One tombstone-byte-gauge sample (`topgun_ormap_tombstone_bytes_total`,
 /// scraped over HTTP). `bytes` is `u64` — a counted byte total is a
@@ -279,11 +379,17 @@ pub struct TombstoneAssessment {
 /// * `min_growth_bytes` — absolute growth (peak − first) below which slope is
 ///   treated as noise. Kept minimal (see [`DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH`]
 ///   doc) rather than mirroring the RSS gate's large guard.
+/// * `min_window_secs` — minimum wall-clock span of the last-half fit window
+///   before the per-hour slope clause is surfaced as a (report-only) breach
+///   (see [`DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS`]). Guards against a
+///   too-short-to-plateau run false-REDing on the per-hour extrapolation of a
+///   sub-minute window. Pass `0.0` to disable the guard.
 #[allow(clippy::cast_precision_loss)]
 pub fn assess_tombstone_bytes(
     samples: &[TombstoneSample],
     threshold_bytes_per_hour: f64,
     min_growth_bytes: f64,
+    min_window_secs: f64,
 ) -> TombstoneAssessment {
     if samples.is_empty() {
         // Same rationale as the RSS gate's empty-samples branch: zero samples
@@ -314,17 +420,35 @@ pub fn assess_tombstone_bytes(
         .iter()
         .map(|s| (s.elapsed_secs, s.bytes as f64))
         .collect();
-    let slope_bytes_per_hour = least_squares_slope_per_hour(&points);
+    // Last-half-window OLS, not the full-window fit: robust near zero and
+    // correctly reports a genuine plateau even after an earlier ramp (see
+    // `last_half_window_slope_per_hour` doc).
+    let slope_bytes_per_hour = last_half_window_slope_per_hour(&points);
+    // Span of the window the slope was actually fit over — the per-hour rate is
+    // an extrapolation over exactly this span, so it is what the min-window
+    // guard must clear.
+    let last_half_span_secs = last_half_window_span_secs(&points);
 
     #[allow(clippy::cast_precision_loss)]
     let growth = peak_bytes.saturating_sub(first_bytes) as f64;
     let mut reasons = Vec::new();
 
-    if growth >= min_growth_bytes && slope_bytes_per_hour > threshold_bytes_per_hour {
+    // The per-hour slope clause only carries a plateau/leak signal once the fit
+    // window spans enough wall-clock time (min_window_secs). Below that, the
+    // per-hour extrapolation of a sub-minute window is dominated by the
+    // `3600 / span` amplification — a healthy run that simply has not plateaued
+    // yet is indistinguishable from a leak — so the clause is suppressed and the
+    // run passes on the blind-monitor + absolute-growth clauses alone. A real
+    // unbounded leak still trips it once the run is long enough (the 72h soak's
+    // window is orders of magnitude above the floor).
+    if last_half_span_secs >= min_window_secs
+        && growth >= min_growth_bytes
+        && slope_bytes_per_hour > threshold_bytes_per_hour
+    {
         reasons.push(format!(
             "tombstone-byte growth slope {slope_bytes_per_hour:.1} bytes/h exceeds \
              {threshold_bytes_per_hour:.1} bytes/h (total growth {growth:.0} bytes over {} \
-             samples)",
+             samples, last-half window {last_half_span_secs:.0}s)",
             samples.len()
         ));
     }
@@ -343,6 +467,57 @@ pub fn assess_tombstone_bytes(
             Some(reasons.join("; "))
         },
     }
+}
+
+/// One boot-recompute-gap window: the span (on the `elapsed_secs` clock shared
+/// with [`TombstoneSample`]) between a `kill -9` and the restarted process's
+/// health-ready signal, during which the tombstone-bytes gauge for the new
+/// process life has not yet been re-seeded by `reconcile_tombstone_bytes` and
+/// a scrape could observe a spurious low/zero total.
+///
+/// Constructed by the soak orchestrator (`main.rs`) around each
+/// `ServerSupervisor::restart` call: `start_secs` is recorded immediately
+/// before the kill, `end_secs` immediately after the restart's health-ready
+/// signal fires. `end_secs` is left at `f64::INFINITY` while a restart is
+/// still in flight, so a real-time consumer (the sampling loop) treats the gap
+/// as still-open rather than briefly reappearing as closed.
+#[derive(Debug, Clone, Copy)]
+pub struct BootGap {
+    pub start_secs: f64,
+    pub end_secs: f64,
+}
+
+/// True if `elapsed_secs` falls inside any recorded [`BootGap`].
+///
+/// The window is half-open `[start_secs, end_secs)`, and `start_secs` is
+/// recorded just BEFORE the `kill -9`, so a sample from the still-alive
+/// pre-kill process can be excluded. That conservatism is intentional: dropping
+/// a couple of trustworthy pre-kill samples is strictly safer than ever
+/// admitting a post-kill, pre-reconcile spurious low/zero read into the slope
+/// fit — the gap is deliberately a touch wider than the strict kill→ready span.
+fn in_boot_gap(elapsed_secs: f64, boot_gaps: &[BootGap]) -> bool {
+    boot_gaps
+        .iter()
+        .any(|g| elapsed_secs >= g.start_secs && elapsed_secs < g.end_secs)
+}
+
+/// Drop every sample that falls inside a recorded boot-recompute gap.
+///
+/// PURE and `retain`-style: samples and gap windows in, a filtered `Vec` out —
+/// no process/HTTP/clock dependency. `main.rs`'s tombstone sampler calls this
+/// once per scraped sample (so a spurious pre-reconcile read never enters the
+/// series in the first place), and a calibration test drives it directly with
+/// a fully synthetic post-kill 0 -> reconciled-total sequence (AC11) without
+/// spawning any real process.
+pub fn exclude_boot_gap_samples(
+    samples: &[TombstoneSample],
+    boot_gaps: &[BootGap],
+) -> Vec<TombstoneSample> {
+    samples
+        .iter()
+        .copied()
+        .filter(|s| !in_boot_gap(s.elapsed_secs, boot_gaps))
+        .collect()
 }
 
 /// Calibrated slope ceiling (MB/hour) for the soak's on-disk data-dir growth
@@ -691,6 +866,7 @@ mod tests {
             &samples,
             DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
             DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
         );
         assert!(
             !a.passed,
@@ -710,6 +886,7 @@ mod tests {
             &samples,
             DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
             DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
         );
         assert!(
             a.passed,
@@ -727,8 +904,307 @@ mod tests {
             &[],
             DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
             DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
         );
         assert!(!a.passed, "zero samples must fail as a blind monitor");
+    }
+
+    /// AC10: the prune-disabled negative control, as a synthetic calibration
+    /// unit test (no live prune-disable toggle exists in the harness/server —
+    /// the live run is a documented manual step). A sustained byte-growth rate
+    /// realistic for a bounded 10-60 min run (single-digit KB total) MUST FAIL
+    /// — and specifically on the BYTE gate, not RSS: RSS's
+    /// `DEFAULT_MEM_MIN_GROWTH_MB` (80 MB) guard would false-GREEN this exact
+    /// magnitude of growth, so the byte gate is the only instrument that can
+    /// actually deliver the required FAIL.
+    #[test]
+    fn calibration_sustained_growth_fails_byte_gate_not_rss() {
+        // 4 hourly samples (enough points for a non-degenerate last-half OLS
+        // window) at 5000 bytes/h -> ~20 KB total growth over 4h, single-digit
+        // scale next to RSS's 80 MB guard.
+        let byte_samples = linear_bytes_series(1_000, 4, 5_000);
+        let bytes_assessment = assess_tombstone_bytes(
+            &byte_samples,
+            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
+        );
+        assert!(
+            !bytes_assessment.passed,
+            "sustained byte growth must fail the byte gate; slope={:.1} reason={:?}",
+            bytes_assessment.slope_bytes_per_hour, bytes_assessment.reason
+        );
+
+        // Same tiny (single-digit-KB-scale) magnitude of growth, expressed as
+        // an RSS series, must NOT fail the RSS gate — proving the byte gate,
+        // not RSS, is what makes the negative control fail.
+        let rss_samples = vec![
+            MemSample {
+                elapsed_secs: 0.0,
+                rss_mb: 220.0,
+            },
+            MemSample {
+                elapsed_secs: 4.0 * 3600.0,
+                rss_mb: 220.02,
+            },
+        ];
+        let rss_assessment = assess(
+            &rss_samples,
+            DEFAULT_MEM_THRESHOLD_MB_PER_HOUR,
+            DEFAULT_MEM_MIN_GROWTH_MB,
+            2048.0,
+        );
+        assert!(
+            rss_assessment.passed,
+            "a single-digit-KB-scale leak must NOT fail the RSS gate (its 80 MB \
+             min-growth guard structurally cannot see it); reason={:?}",
+            rss_assessment.reason
+        );
+    }
+
+    /// The grow-then-flatten shape a residency-tracking gauge WOULD produce once
+    /// the OR-Map bound engages: tombstone bytes grow while the churn stream
+    /// fills the keyspace, then flatten. Only the LAST-HALF window should drive
+    /// the fitted slope (R9(d)), so this PASSes even though the run grew earlier.
+    ///
+    /// NOTE — this validates the OLS/last-half-window MATH only; it is NOT a
+    /// reachable production PASS today. The `bytes` series here is hand-authored
+    /// to flatten, but the live gauge is additive-only and cannot flatten under
+    /// sustained churn (see `calibration_additive_only_gauge_never_plateaus`
+    /// below) — which is exactly why `main.rs` surfaces the slope report-only
+    /// rather than hard-gating it.
+    #[test]
+    fn calibration_delayed_plateau_grow_then_flatten_passes() {
+        let mut samples = Vec::new();
+        for h in 0..=11u32 {
+            samples.push(TombstoneSample {
+                elapsed_secs: f64::from(h) * 3600.0,
+                bytes: 1_000 + u64::from(h) * 1_000,
+            });
+        }
+        for h in 12..=23u32 {
+            samples.push(TombstoneSample {
+                elapsed_secs: f64::from(h) * 3600.0,
+                bytes: 12_000,
+            });
+        }
+        let a = assess_tombstone_bytes(
+            &samples,
+            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
+        );
+        assert!(
+            a.passed,
+            "delayed-plateau (grow-then-flatten) must pass on the last-half-window \
+             slope; slope={:.2} reason={:?}",
+            a.slope_bytes_per_hour, a.reason
+        );
+    }
+
+    /// Pins the REAL production shape and the reason the slope is report-only.
+    ///
+    /// The exported gauge (`add_tombstone_bytes`) is additive-only: it counts
+    /// every tombstone-add and is never decremented on prune, and the OR-Map
+    /// epoch prune is dark until a follow-up supplies the frontier watermark.
+    /// So under sustained OR churn the gauge climbs monotonically at the
+    /// tombstone-*creation* rate and never flattens within a process life — the
+    /// grow-then-flatten shape the plateau statistic looks for cannot occur.
+    /// This test feeds exactly that monotone shape (well past the min-window
+    /// floor) and asserts the assessment reports NOT-passed — which is why
+    /// `main.rs` routes this verdict to `pending_gates` (report-only) instead
+    /// of hard-gating the run. When a prune-activation follow-up makes the gauge
+    /// track residency, replace this with a genuine live-plateau PASS test and
+    /// re-promote the slope to a hard gate.
+    #[test]
+    fn calibration_additive_only_gauge_never_plateaus() {
+        // ~6h of steady creation at 5000 B/h — a multi-hour last-half window
+        // (well past the 120s min-window floor), monotone, no flatten. This is
+        // the shape a real sustained-churn soak actually produces today.
+        let samples = linear_bytes_series(1_000, 6, 5_000);
+        let a = assess_tombstone_bytes(
+            &samples,
+            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
+        );
+        assert!(
+            !a.passed,
+            "the additive-only gauge's monotone-growth shape must NOT be reported \
+             as a plateau — this is why the slope is surfaced report-only, not \
+             hard-gated; slope={:.1} reason={:?}",
+            a.slope_bytes_per_hour, a.reason
+        );
+    }
+
+    /// R9(d) proof: on the same grow-then-flatten shape, the FULL-window slope
+    /// is dragged well above the gate threshold by the earlier growth even
+    /// though the run has genuinely plateaued, while the LAST-HALF-window
+    /// slope correctly reports near-zero. This is why the plateau statistic
+    /// must be last-half-window, not full-window.
+    #[test]
+    fn last_half_window_slope_differs_from_full_window_on_delayed_plateau() {
+        let mut points = Vec::new();
+        for h in 0..=11u32 {
+            points.push((f64::from(h) * 3600.0, 1_000.0 + f64::from(h) * 5_000.0));
+        }
+        for h in 12..=23u32 {
+            points.push((f64::from(h) * 3600.0, 56_000.0));
+        }
+        let full = least_squares_slope_per_hour(&points);
+        let last_half = last_half_window_slope_per_hour(&points);
+        assert!(
+            full > DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+            "sanity: the full-window slope on this shape must itself be large \
+             enough to matter (full={full:.1} B/h)"
+        );
+        assert!(
+            last_half.abs() < DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+            "the last-half-window slope on a genuinely-flattened tail must be \
+             near zero even though the full-window slope is not \
+             (full={full:.1} B/h, last_half={last_half:.1} B/h)"
+        );
+    }
+
+    /// AC11: a synthetic post-kill sample sequence (a spurious near-zero read
+    /// during the boot-recompute gap, then the reconciled-total jump) must NOT
+    /// pollute the fitted slope. [`exclude_boot_gap_samples`] drops every
+    /// sample inside the recorded [`BootGap`] before the series reaches
+    /// [`assess_tombstone_bytes`], so the gate sees only reconciled, continuous
+    /// data.
+    #[test]
+    fn calibration_boot_gap_exclusion_does_not_trip_gate() {
+        // Life 0 plateaus at 50_000 bytes from t=0 to t=3600 (1h). At t=3605
+        // the process is killed; the restarted process's gauge is not yet
+        // reconciled until t=3610 (a 5s boot-recompute gap) — a scrape taken
+        // at t=3607 during that window reads a spurious near-zero total. From
+        // t=3610 onward, life 1 resumes at a slightly higher plateau (a small
+        // amount of legitimate growth, restart-survivable — not a reset to 0).
+        let samples = vec![
+            TombstoneSample {
+                elapsed_secs: 0.0,
+                bytes: 50_000,
+            },
+            TombstoneSample {
+                elapsed_secs: 1_800.0,
+                bytes: 50_000,
+            },
+            TombstoneSample {
+                elapsed_secs: 3_600.0,
+                bytes: 50_000,
+            },
+            // Spurious boot-gap read: the new process's counter has not yet
+            // been reconciled by `reconcile_tombstone_bytes`.
+            TombstoneSample {
+                elapsed_secs: 3_607.0,
+                bytes: 5,
+            },
+            TombstoneSample {
+                elapsed_secs: 3_610.0,
+                bytes: 50_010,
+            },
+            TombstoneSample {
+                elapsed_secs: 5_400.0,
+                bytes: 50_010,
+            },
+            TombstoneSample {
+                elapsed_secs: 7_200.0,
+                bytes: 50_010,
+            },
+        ];
+        let boot_gaps = vec![BootGap {
+            start_secs: 3_605.0,
+            end_secs: 3_610.0,
+        }];
+
+        let filtered = exclude_boot_gap_samples(&samples, &boot_gaps);
+        assert_eq!(
+            filtered.len(),
+            samples.len() - 1,
+            "exactly the one spurious in-gap sample must be dropped"
+        );
+        assert!(
+            !filtered.iter().any(|s| s.bytes == 5),
+            "the spurious near-zero in-gap sample must be excluded"
+        );
+
+        let a = assess_tombstone_bytes(
+            &filtered,
+            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
+        );
+        assert!(
+            a.passed,
+            "boot-gap-excluded plateau must pass; slope={:.2} reason={:?}",
+            a.slope_bytes_per_hour, a.reason
+        );
+
+        // Sanity: the unfiltered series (spurious dip included) is actually
+        // capable of tripping the gate, or this test would not be proving the
+        // exclusion is load-bearing.
+        let unfiltered = assess_tombstone_bytes(
+            &samples,
+            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
+        );
+        assert!(
+            !unfiltered.passed,
+            "sanity: the unfiltered series with the boot-gap dip must actually \
+             trip the gate, or this test would not be proving anything"
+        );
+    }
+
+    /// Regression lock for the blocking CI "Short no-crash soak must be GREEN"
+    /// gate: a too-short-to-plateau run grows the tombstone gauge by a few KB
+    /// while the keyspace fills but has not had wall-clock time to plateau. Its
+    /// last-half fit window spans only seconds, so the per-hour extrapolation is
+    /// meaningless (a few KB over ~25s reads as a six-figure B/h "leak"). The
+    /// minimum-window-span guard MUST suppress the slope clause so the run
+    /// PASSES. Proven load-bearing: the SAME series with the guard disabled
+    /// (`min_window_secs = 0.0`) FAILS — this is exactly the reproduced smoke
+    /// regression the guard closes.
+    #[test]
+    fn calibration_short_run_below_min_window_passes() {
+        // 6 samples at 5s intervals = 25s total, linear 0 -> 6000 bytes — the
+        // exact shape reproduced FAILing the blocking CI smoke gate.
+        let samples: Vec<TombstoneSample> = (0..6u32)
+            .map(|i| TombstoneSample {
+                elapsed_secs: f64::from(i) * 5.0,
+                bytes: u64::from(i) * 1_200,
+            })
+            .collect();
+
+        // Guard disabled: the sub-minute per-hour slope is enormous and trips
+        // the gate — without this the test would prove nothing.
+        let no_guard = assess_tombstone_bytes(
+            &samples,
+            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+            0.0,
+        );
+        assert!(
+            !no_guard.passed,
+            "sanity: with the window guard disabled the sub-minute slope must \
+             trip the gate (slope={:.0} B/h) — otherwise this test is vacuous",
+            no_guard.slope_bytes_per_hour
+        );
+        assert!(no_guard.slope_bytes_per_hour > DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR);
+
+        // Real guard: the too-short window is suppressed and the run passes.
+        let guarded = assess_tombstone_bytes(
+            &samples,
+            DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+            DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS,
+        );
+        assert!(
+            guarded.passed,
+            "a too-short-to-plateau run (last-half window well under the \
+             {:.0}s floor) must pass; slope={:.0} B/h reason={:?}",
+            DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS, guarded.slope_bytes_per_hour, guarded.reason
+        );
     }
 
     /// Build an hourly-sampled disk-usage series with a constant per-hour
