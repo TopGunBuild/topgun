@@ -457,17 +457,16 @@ impl CrdtService {
         Ok(snapshot)
     }
 
-    /// Defence-in-depth op-path gate (R4 — NON-load-bearing, DARK until SPEC-342j).
-    ///
-    /// Whether an OR-bearing op arriving on a direct client connection must be
-    /// dropped because the connection's server-authenticated `(principal, deviceId)`
-    /// identity is forgotten. This mirrors the sync-path push-diff gate purely as
-    /// belt-and-suspenders: the load-bearing re-admission surface is `ORMapPushDiff`,
-    /// and the `OR_ADD` apply path below REGENERATES the tag from the sanitized server
-    /// timestamp, so a same-tag op-path resurrection cannot even carry a client's
-    /// original tag through to the store (the test would be vacuous). Returns `false`
-    /// (never gates) for a non-client caller (no connection → HTTP/anonymous/system
-    /// trusted paths) and while the durability watermark is 0 (dark by construction).
+    /// This path deliberately carries no forgotten-client gate on OR-bearing ops
+    /// arriving over a direct client connection (see the inline comment above the
+    /// admission check inside this function's caller for the full reasoning):
+    /// client-originated tags are server-regenerated below, so a pruned
+    /// tombstone's tag can never be re-presented here, and gating on
+    /// unknown-connection == forgotten would silently drop first-sync writes from
+    /// any device that has not yet completed its first ACK round while still
+    /// returning `OP_ACK` — turning that ack into permanent client-side data loss.
+    /// The verbatim-tag `ORMapPushDiff` sync path keeps the load-bearing gate
+    /// instead.
     /// Applies a single `ClientOp` to the `RecordStore` and returns the `ServerEventPayload`
     /// to broadcast. Called by both `handle_client_op` and `handle_op_batch`.
     ///
@@ -673,10 +672,11 @@ impl CrdtService {
             // would self-deadlock on this key.
             drop(key_guard);
 
-            // Wholesale epoch-drop prune over the OR write path. DARK by construction:
-            // the frontier's `durable_epoch_watermark` is constant 0 in this child, so
-            // the call-site conjunction never licenses a prune for any stamped epoch —
-            // this drains nothing until SPEC-342j supplies the real watermark.
+            // Wholesale epoch-drop prune over the OR write path. Active whenever the
+            // low-water mark has advanced past a stamped epoch AND the durable epoch
+            // watermark has caught up to it — both conjuncts move forward as tracked
+            // clients confirm-apply and the durable backend flushes, so this drains
+            // real tombstones once those two conditions line up.
             if let Some(frontier) = self.frontier.as_ref() {
                 prune_epoch_tombstones(frontier, &self.record_store_factory, &self.key_writer)
                     .await;
@@ -1200,12 +1200,13 @@ fn read_or_map_state(value: Option<RecordValue>) -> (Vec<OrMapEntry>, Vec<String
 /// tag from its OR-Map record in storage (RAM + redb) under the per-key writer,
 /// so a concurrent OR write on the same key cannot flicker a pruned tag back in.
 ///
-/// DARK by construction in THIS child: the frontier's `durable_epoch_watermark`
-/// is constant 0, so the drained set is always empty in production — nothing is
-/// ever dropped. Tests inject a watermark (`set_durable_epoch_watermark`) to
-/// exercise this drop path. SPEC-342j supplies the real watermark that activates
-/// the prune. Shared by the OR write path (`crdt.rs`) and the SYNC leaf
-/// (`sync.rs`).
+/// The real gate is the conjunction of both call-site checks:
+/// `is_epoch_prune_eligible(E)` (derived from the low-water mark) AND
+/// `durable_epoch_watermark >= E`. Neither is a fixed constant — the low-water
+/// mark advances as tracked clients confirm-apply, and the durable watermark
+/// advances as the durable backend catches up, so the drained set grows over
+/// time in production rather than staying permanently empty. Shared by the OR
+/// write path (`crdt.rs`) and the SYNC leaf (`sync.rs`).
 ///
 /// A ref whose storage drop FAILS (read or write error) is handed back to the
 /// frontier via `restore_tombstone_ref` so a later sweep retries it — dropping
@@ -1234,7 +1235,7 @@ pub(crate) async fn prune_epoch_tombstones(
         let before = tombstones.len();
         tombstones.retain(|t| t != &r.tag);
         if tombstones.len() != before {
-            if let Err(e) = store
+            match store
                 .put(
                     &r.key,
                     RecordValue::OrMap {
@@ -1246,8 +1247,14 @@ pub(crate) async fn prune_epoch_tombstones(
                 )
                 .await
             {
-                tracing::warn!(map = %r.map, key = %r.key, epoch, "prune put failed, re-indexing tombstone for retry: {e}");
-                frontier.restore_tombstone_ref(epoch, r);
+                // The tag is durably gone from storage only once `put` succeeds —
+                // decrement here so the gauge tracks bytes actually resident, not
+                // bytes merely removed from an in-memory copy that never landed.
+                Ok(_) => crate::storage::record::sub_tombstone_bytes(r.tag.len() as u64),
+                Err(e) => {
+                    tracing::warn!(map = %r.map, key = %r.key, epoch, "prune put failed, re-indexing tombstone for retry: {e}");
+                    frontier.restore_tombstone_ref(epoch, r);
+                }
             }
         }
     }
