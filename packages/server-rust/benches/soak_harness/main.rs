@@ -18,12 +18,13 @@
 //!    halves are scoped to the capability each actually delivers.
 //! 3. **Bounded memory:** the OR-Map tombstone-bytes gauge
 //!    (`topgun_ormap_tombstone_bytes_total`, scraped from the server's own
-//!    `GET /metrics`) is sampled every interval and its slope is asserted
-//!    against a tight per-hour threshold — a direct, residency-independent
-//!    leak signal with no allocator/cache noise floor. Server RSS is sampled
-//!    in parallel and asserted against a looser slope as a secondary/backstop
-//!    gate; neither replaces the other (e.g. unbounded OR-Map tombstone
-//!    growth, TODO-479/480).
+//!    `GET /metrics`) is sampled every interval and its bounded-plateau slope
+//!    (last-half-window OLS, boot-recompute-gap samples excluded — see
+//!    `monitor.rs`) is asserted against a tight per-hour threshold — a direct,
+//!    residency-independent leak signal with no allocator/cache noise floor,
+//!    and a HARD gate now that the M4 tombstone bound is proven landed. Server
+//!    RSS is sampled in parallel and asserted against a looser slope as a
+//!    coarse, non-tombstone backstop gate; neither replaces the other.
 //! 4. **Zero panics:** any panic marker in server output, or any un-requested
 //!    exit, fails the run with the captured context.
 //!
@@ -68,10 +69,11 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use client::SoakClient;
 use model::{compare, next_stamp, Model};
 use monitor::{
-    assess, assess_disk, assess_tombstone_bytes, sample_disk_mb, sample_rss_mb, DiskAssessment,
-    DiskSample, MemSample, TombstoneAssessment, TombstoneSample, DEFAULT_DISK_CEILING_MB,
-    DEFAULT_DISK_MIN_GROWTH_MB, DEFAULT_DISK_THRESHOLD_MB_PER_HOUR,
-    DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH, DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
+    assess, assess_disk, assess_tombstone_bytes, exclude_boot_gap_samples, sample_disk_mb,
+    sample_rss_mb, BootGap, DiskAssessment, DiskSample, MemSample, TombstoneAssessment,
+    TombstoneSample, DEFAULT_DISK_CEILING_MB, DEFAULT_DISK_MIN_GROWTH_MB,
+    DEFAULT_DISK_THRESHOLD_MB_PER_HOUR, DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
+    DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR,
 };
 use or_noloss::{missing_acked_adds, OrLedger};
 use process::{resolve_server_binary, ServerConfig, ServerSupervisor};
@@ -164,6 +166,15 @@ impl Default for Config {
             mode_requested: false,
         }
     }
+}
+
+/// The sampler-start clock plus the mutable boot-recompute-gap window list,
+/// bundled so `recovery_checkpoint` (which records a gap around every
+/// `kill -9` + restart) takes one parameter instead of two — keeping the
+/// function under clippy's argument-count lint without an `#[allow]`.
+struct BootGapClock {
+    sampler_start: Instant,
+    boot_gaps: Arc<Mutex<Vec<BootGap>>>,
 }
 
 /// Shared atomic counters mutated by churn clients.
@@ -387,8 +398,15 @@ async fn run_soak(config: &Config) -> i32 {
     // non-200, or the metric line absent) is skipped rather than recorded as a
     // bogus point, mirroring `sample_rss_mb`'s `None`-on-gone-process contract.
     let tombstone_samples: Arc<Mutex<Vec<TombstoneSample>>> = Arc::new(Mutex::new(Vec::new()));
+    // Boot-recompute-gap windows recorded around each `kill -9` + restart
+    // cycle (`recovery_checkpoint` records both `start_secs` and, once the
+    // restarted process signals health-ready, `end_secs`). The tombstone
+    // sampler below excludes any sample landing inside one of these windows
+    // so a spurious pre-reconcile read never pollutes the OLS slope.
+    let boot_gaps: Arc<Mutex<Vec<BootGap>>> = Arc::new(Mutex::new(Vec::new()));
     {
         let samples = Arc::clone(&tombstone_samples);
+        let boot_gaps = Arc::clone(&boot_gaps);
         let stop = Arc::clone(&stop);
         let interval = config.mem_sample_interval;
         let start = sampler_start;
@@ -400,10 +418,21 @@ async fn run_soak(config: &Config) -> i32 {
                 }
                 if let Some(bytes) = scrape_tombstone_bytes(&http, port).await {
                     let elapsed = start.elapsed().as_secs_f64();
-                    samples.lock().push(TombstoneSample {
+                    let candidate = TombstoneSample {
                         elapsed_secs: elapsed,
                         bytes,
-                    });
+                    };
+                    // The exclusion predicate is a pure, retain-style helper in
+                    // `monitor.rs` (unit-tested directly by the calibration
+                    // target's synthetic boot-gap sequence, AC11) — this loop
+                    // only calls it, so the filtering logic is never
+                    // duplicated or buried here.
+                    let gaps_snapshot = boot_gaps.lock().clone();
+                    if !exclude_boot_gap_samples(std::slice::from_ref(&candidate), &gaps_snapshot)
+                        .is_empty()
+                    {
+                        samples.lock().push(candidate);
+                    }
                 }
                 tokio::time::sleep(interval).await;
             }
@@ -440,6 +469,11 @@ async fn run_soak(config: &Config) -> i32 {
             }
         });
     }
+
+    let boot_gap_clock = BootGapClock {
+        sampler_start,
+        boot_gaps: Arc::clone(&boot_gaps),
+    };
 
     // --- Orchestration loop ---
     let start = Instant::now();
@@ -488,6 +522,7 @@ async fn run_soak(config: &Config) -> i32 {
                 &jwt_secret,
                 config,
                 &paused,
+                &boot_gap_clock,
             )
             .await
             {
@@ -598,9 +633,10 @@ async fn run_soak(config: &Config) -> i32 {
     );
 
     // --- Assess tombstone-byte growth (direct residency-independent leak
-    // instrument). Coexists with the RSS gate above — neither replaces the other.
-    // The SLOPE clause is report-only today (see below); the blind-monitor clause
-    // (zero samples) hard-gates, mirroring the RSS empty-samples branch.
+    // instrument, the bounded-plateau GATE). Coexists with the RSS gate above
+    // as a coarse non-tombstone backstop — neither replaces the other. The
+    // sampling loop already excluded boot-recompute-gap samples (R9(c)), so
+    // this series is safe to fit directly.
     let tombstone_samples_snapshot = tombstone_samples.lock().clone();
     let tombstones = assess_tombstone_bytes(
         &tombstone_samples_snapshot,
@@ -608,19 +644,20 @@ async fn run_soak(config: &Config) -> i32 {
         DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH,
     );
 
-    // The tombstone-byte SLOPE clause is REPORT-ONLY today, not a hard gate: the
-    // OR-Map tombstone leak it measures is deliberately unbounded until TODO-566
-    // bounds it, so any or-churn soak REDding on slope is the EXPECTED honest
-    // signal (a real, known leak), not a regression. Hard-gating on it would make
-    // every or-churn soak permanently red — including the blocking no-crash CI
-    // smoke. It is surfaced as a pending (expected-fail) gate below and flips to a
-    // hard gate once TODO-566 bounds the leak (see TODO-563 Gap 4). A process-
-    // local gauge that also resets to 0 on `kill -9`/restart is a further reason
-    // it cannot gate — its slope over a cross-restart sawtooth is untrustworthy.
+    // The tombstone-byte SLOPE clause is now a HARD GATE, not report-only: the
+    // gauge is restart-survivable (`reconcile_tombstone_bytes` re-seeds it at
+    // boot, see monitor.rs), so its series is continuous across `kill -9`
+    // cycles and a trustworthy plateau/leak signal — not a per-life sawtooth.
+    // The M4 OR-Map tombstone bound is proven landed (342a-g), so a slope
+    // breach here is a genuine regression, not an expected/known leak. RSS
+    // above remains a coarse backstop: its large min-growth guard means it
+    // structurally cannot catch a single-digit-MB/KB tombstone leak on a
+    // bounded run, so it is not a substitute for this gate.
     //
-    // The blind-monitor guard, by contrast, DOES hard-gate: zero samples means
-    // the `/metrics` scrape was dead — a real harness defect independent of the
-    // leak magnitude, so a run that monitored nothing must not pass.
+    // The blind-monitor guard hard-gates independently of the slope clause:
+    // zero samples means the `/metrics` scrape was dead — a real harness
+    // defect independent of the leak magnitude, so a run that monitored
+    // nothing must not pass.
     let blind_monitor = tombstones.samples == 0;
 
     // --- Assess disk growth (durable-dir footprint; catches leaks RSS cannot
@@ -644,6 +681,7 @@ async fn run_soak(config: &Config) -> i32 {
         && recovery_failures.is_empty()
         && mem.passed
         && !blind_monitor
+        && tombstones.passed
         && !disk_blind_monitor
         && panic_report.is_none();
 
@@ -659,13 +697,13 @@ async fn run_soak(config: &Config) -> i32 {
             tombstones.reason.clone().unwrap_or_default()
         );
     } else if !tombstones.passed {
-        // Real, expected leak signal — record it as a pending gate (reported,
-        // did NOT fail the run) until TODO-566 makes bounded growth the norm.
-        pending_gates.push(format!(
-            "tombstone-byte slope {:.1} B/h exceeds {:.1} B/h — EXPECTED until \
-             TODO-566 bounds OR-Map tombstones (report-only, did NOT fail the run)",
-            tombstones.slope_bytes_per_hour, DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR
-        ));
+        // The bounded-plateau gate (R9(a)): a slope breach here is a genuine
+        // regression against the proven-landed M4 tombstone bound, so it hard
+        // gates the run via `passed` above rather than merely being reported.
+        finished_reason = format!(
+            "tombstone-byte growth assertion failed: {}",
+            tombstones.reason.clone().unwrap_or_default()
+        );
     }
     if disk_blind_monitor {
         finished_reason = format!(
@@ -761,10 +799,10 @@ fn print_summary(r: &SoakReport, tombstones: &TombstoneAssessment, disk: &DiskAs
         r.memory.slope_mb_per_hour,
         if r.memory.passed { "ok" } else { "FAIL" }
     );
-    // The byte SLOPE is report-only until TODO-566 bounds the (currently
-    // deliberate) OR-Map tombstone leak; only the blind-monitor (zero-sample)
-    // clause hard-gates today. See the run-end verdict rationale.
-    let tombstone_role = "slope report-only until TODO-566; blind-monitor hard-gates";
+    // The byte SLOPE is now a bounded-plateau HARD GATE (the M4 tombstone
+    // bound is proven landed) alongside the blind-monitor (zero-sample)
+    // clause. See the run-end verdict rationale.
+    let tombstone_role = "slope + blind-monitor both hard-gate";
     println!(
         "tombstone_bytes:   first={} peak={} last={} slope={:.1}B/h samples={} -> {} ({}){}",
         tombstones.first_bytes,
@@ -964,6 +1002,7 @@ async fn recovery_checkpoint(
     jwt: &str,
     config: &Config,
     paused: &Arc<AtomicBool>,
+    boot_gap_clock: &BootGapClock,
 ) -> Result<RecoveryOutcome> {
     paused.store(true, Ordering::SeqCst);
     // Pause new client writes, then choose the pre-kill behavior:
@@ -1022,12 +1061,31 @@ async fn recovery_checkpoint(
         ));
     }
 
-    // kill -9 + restart against the same redb + WAL.
+    // kill -9 + restart against the same redb + WAL. Record the boot-recompute
+    // gap around the restart: `end_secs` starts at `f64::INFINITY` (still
+    // open) so a real-time consumer (the tombstone sampling loop) treats any
+    // sample taken before the restart is confirmed ready as excluded, rather
+    // than briefly seeing no gap at all while the restart is in flight.
+    let gap_start_secs = boot_gap_clock.sampler_start.elapsed().as_secs_f64();
+    boot_gap_clock.boot_gaps.lock().push(BootGap {
+        start_secs: gap_start_secs,
+        end_secs: f64::INFINITY,
+    });
     if let Err(e) = supervisor.restart(config.ready_timeout).await {
         out.hard
             .push(format!("server failed to restart after kill -9: {e}"));
         paused.store(false, Ordering::SeqCst);
+        // Leave the just-pushed gap open (`end_secs = INFINITY`): the run is
+        // already failing via `out.hard`, and an open gap safely excludes
+        // every subsequent tombstone sample rather than risking a stale
+        // pre-reconcile read being treated as trustworthy.
         return Ok(out);
+    }
+    {
+        let gap_end_secs = boot_gap_clock.sampler_start.elapsed().as_secs_f64();
+        if let Some(last) = boot_gap_clock.boot_gaps.lock().last_mut() {
+            last.end_secs = gap_end_secs;
+        }
     }
 
     // Post-recovery snapshot — no writes happened in between. `post_query` reads
