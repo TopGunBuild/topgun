@@ -865,7 +865,10 @@ impl TombstoneFrontier {
             if let Some(store) = self.store.as_ref() {
                 let now = i64::try_from(now_millis()).unwrap_or(i64::MAX);
                 if let Err(e) = store.remove(CURSOR_MAP, client, now).await {
-                    debug!(client = %client, "cursor forget fallback delete failed: {e}");
+                    // Both the worker delete AND this fallback failed — a genuinely
+                    // stuck durable row. Surface at `warn!` (not `debug!`) so operators
+                    // can detect it; 342f's orphan TTL is the eventual backstop.
+                    warn!(client = %client, "cursor forget fallback delete failed: {e}");
                 }
             }
         }
@@ -1131,13 +1134,24 @@ async fn cursor_persist_worker(
                 // fallback exists to close). Report `false` on failure so the caller
                 // retries.
                 let removed = match store.remove(CURSOR_MAP, &client, now).await {
-                    Ok(()) => true,
+                    Ok(()) => {
+                        // Drop the in-memory high-water ONLY once the durable row is
+                        // actually gone. If the delete FAILED the stale row still lives
+                        // in the store, so retaining its high-water keeps a later
+                        // re-admission `Advance`'s seed consistent with the store:
+                        // otherwise the worker would re-seed from the store (or from 0
+                        // if the failed delete nonetheless removed the row) and a LOWER
+                        // re-admission cursor could clobber the higher value the client
+                        // previously reached — a durable monotonicity regression that
+                        // can drop the low-water-mark below an already-pruned watermark.
+                        high_water.remove(&client);
+                        true
+                    }
                     Err(e) => {
-                        debug!(client = %client, "cursor forget delete failed: {e}");
+                        warn!(client = %client, "cursor forget delete failed: {e}");
                         false
                     }
                 };
-                high_water.remove(&client);
                 let _ = done.send(removed);
             }
             PersistMsg::Barrier { done } => {
@@ -2228,6 +2242,59 @@ mod persistence_tests {
     }
 
     // -----------------------------------------------------------------------
+    // R3(a) — a forget whose durable delete FAILS must RETAIN the worker's
+    // high-water. Modelled with a "lost-ack" delete: the row IS removed durably
+    // but the store reports Err, so the worker observes a failed forget delete
+    // over an actually-emptied store. If the worker cleared its high-water on
+    // that failure, a later LOWER advance for the same client would re-seed from
+    // the now-empty store (seed 0) and persist the regressed cursor — dropping
+    // the durable cursor below the value the client previously reached (and below
+    // an already-pruned watermark). Clearing high-water only on a confirmed Ok
+    // delete prevents that. RED without the fix: the durable cursor comes back
+    // as Some(50).
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn forget_failed_ack_delete_retains_high_water_no_lower_reseed_regression() {
+        let (path, _dir) = temp_store();
+        let inner: Arc<dyn MapDataStore> = Arc::new(RedbDataStore::new(&path).expect("open"));
+        // `remove` durably deletes the row but reports Err (lost ack) → the worker sees
+        // a failed forget delete over an actually-emptied store.
+        let store: Arc<dyn MapDataStore> =
+            Arc::new(GatedAddStore::new_lossy_remove(Arc::clone(&inner)));
+        let c: ClientId = "a5:alice|dev-1".into();
+        let f = TombstoneFrontier::new(Some(store));
+
+        // Establish a high durable cursor (100).
+        f.enqueue_advance_for_test(&c, 100);
+        f.quiesce_persists().await;
+        assert_eq!(load_cursor(inner.as_ref(), &c).await.unwrap(), Some(100));
+
+        // Forget: the worker's delete lands durably (row gone) but reports Err, so the
+        // worker must RETAIN high-water[c]=100 rather than clearing it.
+        f.forget_client(&c).await;
+        f.quiesce_persists().await;
+        assert_eq!(
+            load_cursor(inner.as_ref(), &c).await.unwrap(),
+            None,
+            "the lost-ack delete still removed the durable row"
+        );
+
+        // A later LOWER advance (50) must NOT regress the durable cursor: the retained
+        // high-water (100) drops it. Without the fix the cleared high-water re-seeds
+        // from the emptied store (0) and persists 50.
+        f.enqueue_advance_for_test(&c, 50);
+        f.quiesce_persists().await;
+        assert_eq!(
+            load_cursor(inner.as_ref(), &c).await.unwrap(),
+            None,
+            "a failed-ack forget retains high-water so a lower re-advance cannot re-seed \
+             from the emptied store and persist a regressed cursor"
+        );
+        f.shutdown().await;
+    }
+
+    // -----------------------------------------------------------------------
     // R3(b) — the durable persist is OFFLOADED off the ACK read loop. The
     // in-memory LWM advances synchronously in `confirm_apply_ack` (returns true,
     // cursor == 50) while the durable write is still parked inside the store's
@@ -2385,6 +2452,12 @@ mod persistence_tests {
         fail_load: std::sync::atomic::AtomicBool,
         /// When set, every `remove` fails (models a transient durable-delete error).
         fail_remove: std::sync::atomic::AtomicBool,
+        /// When set, `remove` DELETES the row via the inner store but STILL reports
+        /// `Err` — models a delete that landed durably but whose ack was lost (a
+        /// transient error on the response path). Exercises the worker's
+        /// clear-high-water-only-on-`Ok` invariant: the row is gone yet the worker saw
+        /// a failure, so it must NOT re-seed a re-admission from the emptied store.
+        lossy_remove: std::sync::atomic::AtomicBool,
         /// Counts `remove` attempts so a test can prove the forget fallback fired.
         remove_calls: Arc<std::sync::atomic::AtomicUsize>,
     }
@@ -2398,6 +2471,7 @@ mod persistence_tests {
                 gated_once: std::sync::atomic::AtomicBool::new(false),
                 fail_load: std::sync::atomic::AtomicBool::new(false),
                 fail_remove: std::sync::atomic::AtomicBool::new(false),
+                lossy_remove: std::sync::atomic::AtomicBool::new(false),
                 remove_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
         }
@@ -2412,6 +2486,7 @@ mod persistence_tests {
                 gated_once: std::sync::atomic::AtomicBool::new(false),
                 fail_load: std::sync::atomic::AtomicBool::new(true),
                 fail_remove: std::sync::atomic::AtomicBool::new(false),
+                lossy_remove: std::sync::atomic::AtomicBool::new(false),
                 remove_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
         }
@@ -2427,6 +2502,24 @@ mod persistence_tests {
                 gated_once: std::sync::atomic::AtomicBool::new(false),
                 fail_load: std::sync::atomic::AtomicBool::new(false),
                 fail_remove: std::sync::atomic::AtomicBool::new(true),
+                lossy_remove: std::sync::atomic::AtomicBool::new(false),
+                remove_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+
+        /// A wrapper whose `remove` DELETES the row through the inner store but then
+        /// reports `Err` (delete landed, ack lost). Drives the worker's
+        /// clear-high-water-only-on-`Ok` invariant: the durable row is gone yet the
+        /// worker observed a failure.
+        fn new_lossy_remove(inner: Arc<dyn MapDataStore>) -> Self {
+            Self {
+                inner,
+                gate: Arc::new(AddGate::new()),
+                gate_add: std::sync::atomic::AtomicBool::new(false),
+                gated_once: std::sync::atomic::AtomicBool::new(false),
+                fail_load: std::sync::atomic::AtomicBool::new(false),
+                fail_remove: std::sync::atomic::AtomicBool::new(false),
+                lossy_remove: std::sync::atomic::AtomicBool::new(true),
                 remove_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
         }
@@ -2476,6 +2569,11 @@ mod persistence_tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.fail_remove.load(std::sync::atomic::Ordering::SeqCst) {
                 anyhow::bail!("GatedAddStore: simulated remove failure");
+            }
+            if self.lossy_remove.load(std::sync::atomic::Ordering::SeqCst) {
+                // The delete DOES land durably, but the ack is "lost": report Err.
+                self.inner.remove(map, key, now).await?;
+                anyhow::bail!("GatedAddStore: simulated lost-ack remove (row deleted)");
             }
             self.inner.remove(map, key, now).await
         }
