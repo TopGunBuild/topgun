@@ -26,8 +26,8 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use topgun_core::hlc::{LWWRecord, ORMapRecord, Timestamp};
 use topgun_core::messages::{
-    AuthMessage, ClientOp, MerkleReqBucketMessage, MerkleReqBucketPayload, Message,
-    ORMapMerkleReqBucket, ORMapMerkleReqBucketPayload, ORMapSyncInit, OpBatchMessage,
+    AuthMessage, ClientApplyAckMessage, ClientOp, MerkleReqBucketMessage, MerkleReqBucketPayload,
+    Message, ORMapMerkleReqBucket, ORMapMerkleReqBucketPayload, ORMapSyncInit, OpBatchMessage,
     OpBatchPayload, Query, QuerySubMessage, QuerySubPayload, QueryUnsubMessage, QueryUnsubPayload,
     SyncInitMessage, WriteConcern,
 };
@@ -53,30 +53,74 @@ pub struct SoakClient {
     ws: Ws,
     /// Stable subject id, reused for log correlation.
     user: String,
+    /// Server-issued device credential captured from `AUTH_ACK`, if any. A
+    /// tracked replica presents this on every reconnect so the server re-binds
+    /// the SAME `(principal, deviceId)` identity across a kill -9 cycle instead
+    /// of minting a fresh, forgotten one — the identity the server's per-device
+    /// causal frontier keys its low-water-mark on.
+    device_token: Option<String>,
+    /// Highest covering epoch this client has ACKed via `ClientApplyAck` on
+    /// this connection, reported back as `claimed_epoch` on the next OR-Map
+    /// sync-init so a regressed replica claim can be detected server-side.
+    last_applied_cursor: Option<u64>,
 }
 
 impl SoakClient {
     /// Open a connection to `addr` and complete the auth handshake as
-    /// `soak-user-{user_idx}`.
+    /// `soak-user-{user_idx}`. Not identity-tracked across reconnects — each
+    /// call presents no prior device token, so the server may mint a new
+    /// device identity. Use [`Self::connect_tracked`] for a replica that must
+    /// keep a stable identity across reconnects (soak's tombstone-prune LWM
+    /// driver).
     pub async fn connect(addr: SocketAddr, user_idx: usize, jwt_secret: &str) -> Result<Self> {
+        Self::connect_tracked(addr, user_idx, jwt_secret, None).await
+    }
+
+    /// Open a connection as a **tracked** replica: presents `device_token`
+    /// (captured from a prior `AUTH_ACK` on this same logical replica, if
+    /// any) so the server re-binds the same `(principal, deviceId)` identity
+    /// instead of minting a fresh one on every reconnect. This is what lets
+    /// the server's per-device confirmed-apply cursor accumulate across a
+    /// churn driver's repeated kill -9 / reconnect cycles, rather than
+    /// resetting to a fresh, forgotten replica every time.
+    ///
+    /// `AUTH_ACK.deviceToken` is populated ONLY on a fresh mint/rotation; a
+    /// plain re-bind of an already-valid presented token omits it (`None`).
+    /// The already-stored token is therefore never clobbered by an ack that
+    /// omits it — only overwritten when the server actually mints or rotates
+    /// one.
+    pub async fn connect_tracked(
+        addr: SocketAddr,
+        user_idx: usize,
+        jwt_secret: &str,
+        device_token: Option<String>,
+    ) -> Result<Self> {
         let url = format!("ws://{addr}/ws");
         let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
             .await
             .map_err(|e| anyhow!("user {user_idx}: ws connect failed: {e}"))?;
 
-        // AUTH_REQUIRED → AUTH(jwt) → AUTH_ACK
+        // AUTH_REQUIRED → AUTH(jwt, device_token) → AUTH_ACK
         let _auth_required = recv_decoded(&mut ws, "AUTH_REQUIRED").await?;
 
         let token = generate_jwt(user_idx, jwt_secret)?;
         let auth = Message::Auth(AuthMessage {
             token,
             protocol_version: None,
-            device_token: None,
+            device_token: device_token.clone(),
         });
         send_encoded(&mut ws, &auth).await?;
 
+        let mut resolved_token = device_token;
         match recv_decoded(&mut ws, "AUTH_ACK").await? {
-            Message::AuthAck(_) => {}
+            Message::AuthAck(ack) => {
+                // Persist-once: never overwrite an already-stored token with the
+                // `None` a plain re-bind sends — that would silently re-mint a
+                // fresh, forgotten replica identity and defeat cursor accumulation.
+                if let Some(tok) = ack.device_token {
+                    resolved_token = Some(tok);
+                }
+            }
             Message::AuthFail(fail) => {
                 let reason = fail.error.unwrap_or_else(|| "unknown".to_string());
                 bail!("user {user_idx}: auth failed: {reason}");
@@ -87,7 +131,17 @@ impl SoakClient {
         Ok(Self {
             ws,
             user: format!("soak-{user_idx}"),
+            device_token: resolved_token,
+            last_applied_cursor: None,
         })
+    }
+
+    /// The server-issued device credential captured from `AUTH_ACK`, if any.
+    /// The churn driver reads this before dropping a connection and passes it
+    /// to the next [`Self::connect_tracked`] call so the replica identity
+    /// survives a kill -9 / reconnect cycle.
+    pub fn device_token(&self) -> Option<&str> {
+        self.device_token.as_deref()
     }
 
     /// PUT `value` at `map`/`key` with `APPLIED` write concern and wait for the
@@ -389,6 +443,47 @@ impl SoakClient {
             Message::SyncRespRoot(r) => Ok(r.payload.root_hash),
             other => bail!("expected SYNC_RESP_ROOT, got {other:?}"),
         }
+    }
+
+    /// Run one confirm-apply round for `map`: an `ORMAP_SYNC_INIT` round trip
+    /// both (re-)establishes this connection's OR-Map sync session and
+    /// carries back the server's current `covering_epoch` (the "root"
+    /// response also serves as the resubscribe step after a reconnect — there
+    /// is no separate subscribe message). If the server has a covering epoch
+    /// to confirm, ACK it via `ClientApplyAck`; this is what advances the
+    /// server's per-device causal frontier and, fleet-wide, the low-water-mark
+    /// that licenses OR-Map tombstone pruning.
+    ///
+    /// `covering_epoch` is `None` when the server has stamped no tombstone yet
+    /// — there is nothing to confirm, so the ack is skipped entirely rather
+    /// than sending a placeholder `cursor: 0` (which would falsely claim epoch
+    /// 0 is durably applied). Returns the epoch that was ACKed, or `None` if
+    /// the round skipped the ack.
+    pub async fn confirm_apply(&mut self, map: &str) -> Result<Option<u64>> {
+        let init = Message::ORMapSyncInit(ORMapSyncInit {
+            map_name: map.to_string(),
+            root_hash: 0,
+            bucket_hashes: HashMap::new(),
+            last_sync_timestamp: None,
+            claimed_epoch: self.last_applied_cursor,
+        });
+        send_encoded(&mut self.ws, &init).await?;
+
+        let covering_epoch = match recv_decoded(&mut self.ws, "ORMAP_SYNC_RESP_ROOT").await? {
+            Message::ORMapSyncRespRoot(r) => r.payload.covering_epoch,
+            other => bail!("expected ORMAP_SYNC_RESP_ROOT, got {other:?}"),
+        };
+
+        let Some(epoch) = covering_epoch else {
+            return Ok(None);
+        };
+
+        // The server does not reply to `ClientApplyAck` — it is handled inline
+        // on the read loop with no ack-of-ack (see `handle_client_apply_ack`).
+        let ack = Message::ClientApplyAck(ClientApplyAckMessage { cursor: epoch });
+        send_encoded(&mut self.ws, &ack).await?;
+        self.last_applied_cursor = Some(epoch);
+        Ok(Some(epoch))
     }
 }
 
