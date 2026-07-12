@@ -76,6 +76,25 @@ where
     ) -> Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>> {
         let evaluator = Arc::clone(&self.evaluator);
         let (action, map_name) = classify_operation(&op);
+        // Reserved internal keyspace guard (resource-keyed, not op-family-keyed).
+        // No client-origin op — Client / HttpClient / Anonymous, all of which reach
+        // this method — may target the server's own control-plane maps
+        // (`_topgun_*` device credentials + tombstone cursors, `__topgun_*` RBAC
+        // policies). This sits at the classification point so it fires for EVERY
+        // client op family that names a map: writes (`OpBatch`/`ClientOp`/
+        // `ORMapPushDiff`) AND reads (a NO_AUTH client must not enumerate the
+        // credential-hash rows either). It runs BEFORE the `should_evaluate` gate
+        // below, so the NO_AUTH `GateDecision::AllowAll` passthrough cannot skip it;
+        // trusted origins never reach here (they early-return in `call`), so the
+        // server's own internal writes to these maps stay exempt. Ops with an empty
+        // `map_name` (bypass group, `SqlQuery`/`VectorSearch`/`QuerySyncInit`)
+        // cannot name a reserved map, so they fall through unaffected. For an
+        // `OpBatch` EVERY op is inspected (not just the classified first one) —
+        // each op is applied by its own `map_name`, so a reserved map in a
+        // non-first position must still be rejected.
+        if let Some(reserved) = reserved_target_map_name(&op, &map_name) {
+            return Box::pin(async move { Err(OperationError::Forbidden { map_name: reserved }) });
+        }
         let Some(action) = action else {
             return Box::pin(self.inner.call(op));
         };
@@ -209,6 +228,45 @@ where
         PolicyDecision::Allow => fut.await,
         PolicyDecision::Deny => Err(OperationError::Forbidden { map_name }),
     }
+}
+
+/// Reserved internal map-name prefixes. Maps under these belong to the server's
+/// own control plane — `_topgun_*` (device credentials, tombstone cursors) and
+/// `__topgun_*` (RBAC policies) — and must never be the target of a client-origin
+/// operation. A single `_topgun_` match does NOT cover `__topgun_` (the second
+/// character differs), so both are listed explicitly.
+const RESERVED_MAP_PREFIXES: [&str; 2] = ["_topgun_", "__topgun_"];
+
+/// Whether `map_name` names a reserved internal map (see [`RESERVED_MAP_PREFIXES`]).
+/// Deliberately narrow: only the `_topgun_`/`__topgun_` families are reserved, so
+/// other leading-underscore names (`_internal`, `tags`, …) stay valid. The prefix
+/// match is ASCII-case-insensitive so a `_TOPGUN_*` variant cannot slip past the
+/// guard if any downstream layer folds map-name case.
+fn is_reserved_map_name(map_name: &str) -> bool {
+    let bytes = map_name.as_bytes();
+    RESERVED_MAP_PREFIXES.iter().any(|prefix| {
+        let p = prefix.as_bytes();
+        bytes.len() >= p.len() && bytes[..p.len()].eq_ignore_ascii_case(p)
+    })
+}
+
+/// The reserved map name a client-origin op would target, if any.
+///
+/// `classify_operation` reports only `ops.first()`'s map for an `OpBatch`, but
+/// `handle_op_batch` applies EVERY op by its own `map_name` — so the guard must
+/// scan all of them, else a batch like `[{tags}, {_topgun_device_credentials}]`
+/// smuggles a reserved write past the single-map check. For every other op family
+/// the classified `map_name` is the one resource, so it is checked directly.
+fn reserved_target_map_name(op: &Operation, classified_map_name: &str) -> Option<String> {
+    if let Operation::OpBatch { payload, .. } = op {
+        return payload
+            .payload
+            .ops
+            .iter()
+            .find(|client_op| is_reserved_map_name(&client_op.map_name))
+            .map(|client_op| client_op.map_name.clone());
+    }
+    is_reserved_map_name(classified_map_name).then(|| classified_map_name.to_string())
 }
 
 /// Maps an `Operation` variant to a `PermissionAction` and a `map_name`.
@@ -895,6 +953,205 @@ mod tests {
         assert!(
             matches!(result, Err(OperationError::Forbidden { .. })),
             "tombstone write against owner condition should be denied, got {result:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // R4: reserved internal keyspace guard at the authz checkpoint.
+    // -----------------------------------------------------------------------
+
+    /// Helper: an Anonymous `OpBatch` (write) whose single op targets `map_name`.
+    fn anon_op_batch_op(map_name: &str) -> Operation {
+        let mut ctx = OperationContext::new(30, service_names::CRDT, make_timestamp(), 5000);
+        ctx.caller_origin = CallerOrigin::Anonymous;
+        Operation::OpBatch {
+            ctx,
+            payload: topgun_core::messages::sync::OpBatchMessage {
+                payload: topgun_core::messages::sync::OpBatchPayload {
+                    ops: vec![topgun_core::messages::base::ClientOp {
+                        map_name: map_name.to_string(),
+                        key: "k".to_string(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            },
+        }
+    }
+
+    /// Helper: an Anonymous `ORMapPushDiff` (write) targeting `map_name` — the
+    /// message-type-swap door that bypasses the `crdt.rs` data-plane arms.
+    fn anon_ormap_push_diff_op(map_name: &str) -> Operation {
+        let mut ctx = OperationContext::new(31, service_names::SYNC, make_timestamp(), 5000);
+        ctx.caller_origin = CallerOrigin::Anonymous;
+        Operation::ORMapPushDiff {
+            ctx,
+            payload: topgun_core::messages::sync::ORMapPushDiff {
+                payload: topgun_core::messages::sync::ORMapPushDiffPayload {
+                    map_name: map_name.to_string(),
+                    entries: Vec::new(),
+                },
+            },
+        }
+    }
+
+    /// Helper: a TRUSTED-origin (`Forwarded`) `ClientOp` write targeting `map_name`.
+    /// Trusted origins early-return before the guard, so an internal write to a
+    /// reserved map must still succeed.
+    fn trusted_write_op(map_name: &str) -> Operation {
+        let record = LWWRecord {
+            value: Some(rmpv::Value::Boolean(true)),
+            timestamp: make_timestamp(),
+            ttl_ms: None,
+        };
+        let mut ctx = OperationContext::new(32, service_names::CRDT, make_timestamp(), 5000);
+        ctx.caller_origin = CallerOrigin::Forwarded;
+        Operation::ClientOp {
+            ctx,
+            payload: topgun_core::messages::sync::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    map_name: map_name.to_string(),
+                    key: "k".to_string(),
+                    record: Some(Some(record)),
+                    ..Default::default()
+                },
+            },
+        }
+    }
+
+    /// AC7: at the authz checkpoint a CLIENT-origin op targeting a reserved
+    /// internal map is REJECTED across op families — `OpBatch`/`ClientOp` writes,
+    /// `ORMapPushDiff` (the Audit-v2 C2 message-swap door), AND a read — while a
+    /// non-reserved map passes and a TRUSTED-origin write to a reserved map still
+    /// succeeds. An EMPTY policy store makes `should_evaluate` return `AllowAll`
+    /// (the `TOPGUN_NO_AUTH` posture), so this proves the guard fires BEFORE that
+    /// permit — no policy store configured.
+    #[tokio::test]
+    async fn reserved_namespace_rejected_for_client_origin_under_no_auth() {
+        let store = Arc::new(InMemoryPolicyStore::new()); // empty → AllowAll (NO_AUTH)
+        let evaluator = Arc::new(PolicyEvaluator::new(store));
+        let layer = AuthorizationLayer::new(evaluator);
+        let mut svc = layer.layer(AlwaysOkService);
+
+        let reserved_ops = [
+            anon_op_batch_op("_topgun_device_credentials"), // OpBatch write
+            anon_write_op("_topgun_tombstone_cursors_v2"),  // ClientOp write
+            anon_ormap_push_diff_op("_topgun_device_credentials"), // ORMapPushDiff door
+            anon_query_op("__topgun_policies"),             // read + double-underscore prefix
+        ];
+        for op in reserved_ops {
+            let resp = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
+            assert!(
+                matches!(resp, Err(OperationError::Forbidden { .. })),
+                "client-origin op to a reserved map must be Forbidden, got {resp:?}"
+            );
+        }
+
+        // Non-reserved leading-underscore / plain maps are unaffected (guard narrow).
+        for accepted in [anon_write_op("_internal"), anon_write_op("tags")] {
+            let resp = ServiceExt::ready(&mut svc)
+                .await
+                .unwrap()
+                .call(accepted)
+                .await;
+            assert!(
+                resp.is_ok(),
+                "client op to a non-reserved map must pass, got {resp:?}"
+            );
+        }
+
+        // A trusted-origin write to a reserved map still succeeds — internal cursor
+        // persistence + device-auth are not broken.
+        let resp = ServiceExt::ready(&mut svc)
+            .await
+            .unwrap()
+            .call(trusted_write_op("_topgun_tombstone_cursors_v2"))
+            .await;
+        assert!(
+            resp.is_ok(),
+            "trusted-origin write to a reserved map must succeed, got {resp:?}"
+        );
+    }
+
+    /// AC7b: read-side closure — a client-origin READ of the credential map is
+    /// Forbidden, so a NO_AUTH client cannot enumerate the stored credential hashes.
+    #[tokio::test]
+    async fn reserved_namespace_read_rejected_for_client_origin() {
+        let store = Arc::new(InMemoryPolicyStore::new());
+        let evaluator = Arc::new(PolicyEvaluator::new(store));
+        let layer = AuthorizationLayer::new(evaluator);
+        let mut svc = layer.layer(AlwaysOkService);
+
+        let resp = ServiceExt::ready(&mut svc)
+            .await
+            .unwrap()
+            .call(anon_query_op("_topgun_device_credentials"))
+            .await;
+        assert!(
+            matches!(resp, Err(OperationError::Forbidden { .. })),
+            "client-origin read of a reserved credential map must be Forbidden, got {resp:?}"
+        );
+    }
+
+    /// Helper: an Anonymous `OpBatch` whose ops target `maps` in order (multi-op).
+    fn anon_op_batch_multi(maps: &[&str]) -> Operation {
+        let mut ctx = OperationContext::new(33, service_names::CRDT, make_timestamp(), 5000);
+        ctx.caller_origin = CallerOrigin::Anonymous;
+        Operation::OpBatch {
+            ctx,
+            payload: topgun_core::messages::sync::OpBatchMessage {
+                payload: topgun_core::messages::sync::OpBatchPayload {
+                    ops: maps
+                        .iter()
+                        .map(|m| topgun_core::messages::base::ClientOp {
+                            map_name: (*m).to_string(),
+                            key: "k".to_string(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..Default::default()
+                },
+            },
+        }
+    }
+
+    /// AC7 (multi-op regression): `classify_operation` reports only `ops.first()`,
+    /// so a reserved map in a NON-FIRST batch position must still be rejected —
+    /// otherwise `[{tags}, {_topgun_…}]` smuggles the reserved write past the
+    /// single-map check (the device-hijack door R4 exists to close). Also asserts a
+    /// case-variant prefix cannot evade the guard, and an all-non-reserved batch
+    /// still passes. RED without the per-op scan in `reserved_target_map_name`.
+    #[tokio::test]
+    async fn reserved_namespace_rejected_when_not_first_op_in_batch() {
+        let store = Arc::new(InMemoryPolicyStore::new()); // empty → AllowAll (NO_AUTH)
+        let evaluator = Arc::new(PolicyEvaluator::new(store));
+        let layer = AuthorizationLayer::new(evaluator);
+        let mut svc = layer.layer(AlwaysOkService);
+
+        // Reserved map in a non-first position: the innocuous first op must not shield it.
+        for smuggle in [
+            anon_op_batch_multi(&["tags", "_topgun_device_credentials"]),
+            anon_op_batch_multi(&["tags", "_internal", "__topgun_policies"]),
+            // Case-variant prefix must not evade the ASCII-case-insensitive check.
+            anon_op_batch_multi(&["tags", "_TOPGUN_device_credentials"]),
+        ] {
+            let resp = ServiceExt::ready(&mut svc)
+                .await
+                .unwrap()
+                .call(smuggle)
+                .await;
+            assert!(
+                matches!(resp, Err(OperationError::Forbidden { .. })),
+                "reserved map in a non-first batch position must be Forbidden, got {resp:?}"
+            );
+        }
+
+        // An all-non-reserved multi-op batch still passes.
+        let clean = anon_op_batch_multi(&["tags", "_internal"]);
+        let resp = ServiceExt::ready(&mut svc).await.unwrap().call(clean).await;
+        assert!(
+            resp.is_ok(),
+            "all-non-reserved batch must pass, got {resp:?}"
         );
     }
 }
