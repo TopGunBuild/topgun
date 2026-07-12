@@ -830,20 +830,25 @@ impl TombstoneFrontier {
                 None
             }
         };
-        match rx {
-            // A dropped sender (worker gone) resolves to Err — never hang.
-            Some(rx) => {
-                let _ = rx.await;
-            }
-            // No worker (no store, or already shut down): the delete was NOT enqueued,
-            // so fall back to a direct durable delete. A forgotten client's row must
-            // never survive to be rehydrated at its stale cursor on restart.
-            None => {
-                if let Some(store) = self.store.as_ref() {
-                    let now = i64::try_from(now_millis()).unwrap_or(i64::MAX);
-                    if let Err(e) = store.remove(CURSOR_MAP, client, now).await {
-                        debug!(client = %client, "cursor forget fallback delete failed: {e}");
-                    }
+        // Whether the durable delete still needs a direct fallback. Two cases:
+        //   * `None`  — the delete was never enqueued (no store, or worker already
+        //     shut down).
+        //   * `Some(rx)` that resolves to `Err` — the delete WAS enqueued but the
+        //     worker died/was dropped before processing it (the oneshot sender was
+        //     dropped without sending), so it may never have run.
+        // Both fall through to the same direct `store.remove`. It is idempotent, so
+        // running it even when the worker did delete first is harmless. A forgotten
+        // client's row must never survive to be rehydrated at its stale cursor on
+        // restart.
+        let needs_fallback = match rx {
+            Some(rx) => rx.await.is_err(),
+            None => true,
+        };
+        if needs_fallback {
+            if let Some(store) = self.store.as_ref() {
+                let now = i64::try_from(now_millis()).unwrap_or(i64::MAX);
+                if let Err(e) = store.remove(CURSOR_MAP, client, now).await {
+                    debug!(client = %client, "cursor forget fallback delete failed: {e}");
                 }
             }
         }
