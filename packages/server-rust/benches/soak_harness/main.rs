@@ -103,6 +103,8 @@ use report::{
     append_progress, utc_timestamp_now, write_report, MemoryReport, ProgressSnapshot, SoakReport,
 };
 use topgun_server::storage::record::RecordValue;
+use topgun_server::storage::wal::format::{self, FrameDecodeResult};
+use topgun_server::storage::wal::{WalOp, WalStorePayload};
 
 /// Subject index used by the orchestrator's verifier connections. Far above the
 /// churn-client range so it never owns keys or collides with churn auth.
@@ -176,6 +178,14 @@ struct Config {
     /// This is the assertion mode that proves acked == durable on `kill -9` under
     /// load: it does NOT depend on a pre-kill flush masking a durability gap.
     no_pre_kill_drain: bool,
+    /// Opt-in measurement mode: after the run, scan the retained WAL segment
+    /// files and emit a structured mechanism report (Q1-Q4) attributing the
+    /// OR-churn WAL+RSS growth. REPORT-ONLY — never affects `passed`, so it
+    /// cannot false-RED the CI smoke; it exists so a LIVE 60-min OR-churn run
+    /// produces the numbers that pin the fix mechanism. Also snapshots the WAL
+    /// dir's on-disk size immediately before stop and immediately after the
+    /// shutdown drain so the Q2 drain-window burst can be attributed.
+    mechanism_report: bool,
     /// True once any soak-controlling flag is parsed. A bare invocation (or one
     /// carrying only foreign libtest args, as `cargo test --all-targets` passes)
     /// leaves this false so the harness prints usage and exits 0 instead of
@@ -222,6 +232,7 @@ impl Default for Config {
             no_ack: false,
             inject_slow_leak: false,
             no_pre_kill_drain: false,
+            mechanism_report: false,
             mode_requested: false,
         }
     }
@@ -731,12 +742,29 @@ async fn run_soak(config: &Config) -> i32 {
     }
 
     // --- Tear down ---
+    // Q2: bracket the shutdown-drain window by measuring the WAL dir on disk just
+    // before we stop and again after the drain completes, so the report can
+    // attribute the end-of-run WAL burst (Run B saw 84 -> 222 MB in the final
+    // ~60s). Gated on the opt-in measurement mode so a normal run pays nothing.
+    let wal_dir = data_dir.join("wal");
+    let wal_mb_before_drain = if config.mechanism_report {
+        sample_disk_mb(&wal_dir)
+    } else {
+        None
+    };
+
     stop.store(true, Ordering::SeqCst);
     paused.store(false, Ordering::SeqCst);
     for h in churn_handles {
         let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
     }
     supervisor.shutdown().await;
+
+    let wal_mb_after_drain = if config.mechanism_report {
+        sample_disk_mb(&wal_dir)
+    } else {
+        None
+    };
 
     // Positive-control independent corpus assertion (R5): the server process
     // has just been reaped, so its redb handle is released and this scan can
@@ -915,6 +943,51 @@ async fn run_soak(config: &Config) -> i32 {
     if let Some(path) = &config.json_output {
         write_report(path, &report);
         println!("wrote JSON report to {}", path.display());
+    }
+
+    // --- Mechanism report (R1: Q1-Q4, report-only) ---
+    // Built from the retained WAL frame scan plus the RSS/disk slopes and the
+    // independent tombstone corpus scan already computed above. REPORT-ONLY:
+    // it is printed (and serialized next to the JSON report when set) but never
+    // asserted into `passed`, so it cannot false-RED the bounded CI smoke.
+    if config.mechanism_report {
+        if let Some(wal) = scan_wal_frame_sizes(&wal_dir) {
+            let mechanism = build_mechanism_report(&MechanismInputs {
+                wal: &wal,
+                rss_samples: &mem_samples,
+                disk_samples: &disk_samples_snapshot,
+                rss_slope_mb_per_hour: mem.slope_mb_per_hour,
+                disk_slope_mb_per_hour: disk.slope_mb_per_hour,
+                tombstone_corpus_bytes: redb_tombstone_scan,
+                tombstone_gauge_bytes: tombstones.last_bytes,
+                wal_mb_before_drain,
+                wal_mb_after_drain,
+            });
+            print_mechanism_report(&mechanism);
+            if let Some(path) = &config.json_output {
+                let mech_path = path.with_extension("mechanism.json");
+                match std::fs::File::create(&mech_path) {
+                    Ok(f) => {
+                        if let Err(e) = serde_json::to_writer_pretty(f, &mechanism) {
+                            eprintln!("mechanism report write failed: {e}");
+                        } else {
+                            println!("wrote mechanism report to {}", mech_path.display());
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "mechanism report create failed for {}: {e}",
+                            mech_path.display()
+                        );
+                    }
+                }
+            }
+        } else {
+            eprintln!(
+                "mechanism report requested but WAL dir {} could not be scanned",
+                wal_dir.display()
+            );
+        }
     }
     // NOTE: neither the tombstone-byte nor the disk verdict is a field on
     // `SoakReport` (report.rs) — both are asserted into `passed`/`finished_reason`
@@ -1186,6 +1259,430 @@ fn scan_redb_tombstone_corpus(data_dir: &Path, map: &str) -> Option<u64> {
         }
     }
     Some(total_bytes)
+}
+
+// ---------------------------------------------------------------------------
+// Mechanism report (R1: Q1-Q4 attribution of OR-churn WAL + RSS growth)
+// ---------------------------------------------------------------------------
+
+/// Per-op-kind WAL frame-size aggregates from a post-run scan of the retained
+/// segment files. The retained WAL is the acked-beyond-applied tail (GC has
+/// reclaimed everything at/below the applied watermark), so its highest
+/// sequences are the most-recently-appended frames — which lets a single
+/// end-of-run scan answer Q1 (does an OR op's frame size RISE over the run?) by
+/// bucketing OR frames by sequence into an early and a late half.
+struct WalFrameStats {
+    segment_files: usize,
+    or_frames: usize,
+    or_bytes_total: u64,
+    or_bytes_max: u64,
+    lww_frames: usize,
+    lww_bytes_total: u64,
+    lww_bytes_max: u64,
+    remove_frames: usize,
+    /// Mean OR frame bytes in the earliest / latest sequence half of the retained
+    /// corpus. `late > early` is the O(N)-per-op growth signature.
+    or_bytes_mean_early: f64,
+    or_bytes_mean_late: f64,
+    or_bytes_max_early: u64,
+    or_bytes_max_late: u64,
+    /// Frames whose sequence is in the top decile of the retained corpus (the
+    /// drain-window proxy) plus the largest OR frame among them: many small
+    /// frames points at a rotation/flush storm, a few large OR frames at a final
+    /// full-slot re-write.
+    top_decile_frames: usize,
+    top_decile_or_bytes_max: u64,
+}
+
+fn classify_frame(op: &WalOp) -> Option<bool> {
+    // Returns Some(true) for an OR frame, Some(false) for an LWW frame, None for
+    // a Remove/tombstone frame (counted separately). OR_ADD/OR_REMOVE both persist
+    // the full RecordValue::OrMap slot today; the legacy OrTombstones blob is also
+    // an OR-side snapshot. Legacy bare-Value frames replay as LWW.
+    match op {
+        WalOp::Remove => None,
+        WalOp::Store { value, .. } => match value {
+            WalStorePayload::Record(
+                RecordValue::OrMap { .. } | RecordValue::OrTombstones { .. },
+            ) => Some(true),
+            WalStorePayload::Record(RecordValue::Lww { .. }) | WalStorePayload::Legacy(_) => {
+                Some(false)
+            }
+        },
+    }
+}
+
+/// Scan every `*.log` WAL segment under `wal_dir`, decode intact frames, and
+/// aggregate per-op-kind frame sizes. Read-only and best-effort: a torn active
+/// tail decodes as its intact prefix (`TruncatedTail`), a corrupt/foreign file
+/// is skipped, and an exact on-disk frame size is recovered by re-encoding each
+/// decoded entry through the deterministic codec (the same trick WAL recovery
+/// uses to measure a segment's intact-prefix length). Returns `None` only if the
+/// directory cannot be read at all.
+fn scan_wal_frame_sizes(wal_dir: &Path) -> Option<WalFrameStats> {
+    let read_dir = std::fs::read_dir(wal_dir).ok()?;
+    // (sequence, frame_bytes) for every OR frame, and running LWW/Remove tallies.
+    let mut or_frames: Vec<(u64, u64)> = Vec::new();
+    let mut lww_bytes_total: u64 = 0;
+    let mut lww_bytes_max: u64 = 0;
+    let mut lww_frames: usize = 0;
+    let mut remove_frames: usize = 0;
+    let mut segment_files: usize = 0;
+    let mut max_seq: u64 = 0;
+
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("log") {
+            continue;
+        }
+        let Ok(data) = std::fs::read(&path) else {
+            continue;
+        };
+        segment_files += 1;
+        // A corrupt/foreign/empty file contributes no frames — skip it rather than
+        // abort the whole scan (this is a report-only instrument).
+        let (FrameDecodeResult::Complete(entries)
+        | FrameDecodeResult::TruncatedTail { complete: entries }) = format::decode_all(&data)
+        else {
+            continue;
+        };
+        for wal_entry in &entries {
+            let Ok(frame) = format::encode(wal_entry) else {
+                continue;
+            };
+            let bytes = frame.len() as u64;
+            max_seq = max_seq.max(wal_entry.sequence);
+            match classify_frame(&wal_entry.op) {
+                Some(true) => or_frames.push((wal_entry.sequence, bytes)),
+                Some(false) => {
+                    lww_frames += 1;
+                    lww_bytes_total += bytes;
+                    lww_bytes_max = lww_bytes_max.max(bytes);
+                }
+                None => remove_frames += 1,
+            }
+        }
+    }
+
+    or_frames.sort_by_key(|(seq, _)| *seq);
+    let or_count = or_frames.len();
+    let or_bytes_total: u64 = or_frames.iter().map(|(_, b)| *b).sum();
+    let or_bytes_max = or_frames.iter().map(|(_, b)| *b).max().unwrap_or(0);
+
+    let half = or_count / 2;
+    let (early, late) = or_frames.split_at(half);
+    let mean = |s: &[(u64, u64)]| -> f64 {
+        if s.is_empty() {
+            0.0
+        } else {
+            s.iter().map(|(_, b)| *b as f64).sum::<f64>() / s.len() as f64
+        }
+    };
+    let max_of = |s: &[(u64, u64)]| -> u64 { s.iter().map(|(_, b)| *b).max().unwrap_or(0) };
+
+    // Top-decile-by-sequence frames across BOTH kinds: the drain-window proxy.
+    let decile_floor = max_seq.saturating_sub(max_seq / 10);
+    let top_decile_frames = or_frames.iter().filter(|(s, _)| *s >= decile_floor).count();
+    let top_decile_or_bytes_max = or_frames
+        .iter()
+        .filter(|(s, _)| *s >= decile_floor)
+        .map(|(_, b)| *b)
+        .max()
+        .unwrap_or(0);
+
+    Some(WalFrameStats {
+        segment_files,
+        or_frames: or_count,
+        or_bytes_total,
+        or_bytes_max,
+        lww_frames,
+        lww_bytes_total,
+        lww_bytes_max,
+        remove_frames,
+        or_bytes_mean_early: mean(early),
+        or_bytes_mean_late: mean(late),
+        or_bytes_max_early: max_of(early),
+        or_bytes_max_late: max_of(late),
+        top_decile_frames,
+        top_decile_or_bytes_max,
+    })
+}
+
+/// Pearson correlation between the RSS and disk time series, matching each disk
+/// sample to the RSS sample nearest in elapsed time (both share `sampler_start`,
+/// but a skipped scrape can drop a point on either side). `None` if either
+/// series has fewer than two matched points or is degenerate (zero variance).
+fn rss_disk_correlation(rss: &[MemSample], disk: &[DiskSample]) -> Option<f64> {
+    if rss.len() < 2 || disk.len() < 2 {
+        return None;
+    }
+    let mut xs: Vec<f64> = Vec::new();
+    let mut ys: Vec<f64> = Vec::new();
+    for d in disk {
+        let nearest = rss.iter().min_by(|a, b| {
+            (a.elapsed_secs - d.elapsed_secs)
+                .abs()
+                .partial_cmp(&(b.elapsed_secs - d.elapsed_secs).abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+        xs.push(nearest.rss_mb);
+        ys.push(d.disk_mb);
+    }
+    let n = xs.len() as f64;
+    if n < 2.0 {
+        return None;
+    }
+    let mean_x = xs.iter().sum::<f64>() / n;
+    let mean_y = ys.iter().sum::<f64>() / n;
+    let mut cov = 0.0;
+    let mut var_x = 0.0;
+    let mut var_y = 0.0;
+    for (x, y) in xs.iter().zip(&ys) {
+        cov += (x - mean_x) * (y - mean_y);
+        var_x += (x - mean_x).powi(2);
+        var_y += (y - mean_y).powi(2);
+    }
+    if var_x <= f64::EPSILON || var_y <= f64::EPSILON {
+        return None;
+    }
+    Some(cov / (var_x.sqrt() * var_y.sqrt()))
+}
+
+/// Structured mechanism report answering Q1-Q4. REPORT-ONLY: serialized to the
+/// JSON output (when set) and printed to the console; never asserted into
+/// `passed`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MechanismReport {
+    // Q1 — bytes per frame, OR vs LWW, and growth over the run.
+    q1_or_frame_bytes_mean_early: f64,
+    q1_or_frame_bytes_mean_late: f64,
+    q1_or_frame_bytes_max_early: u64,
+    q1_or_frame_bytes_max_late: u64,
+    q1_or_frame_bytes_max: u64,
+    q1_lww_frame_bytes_mean: f64,
+    q1_lww_frame_bytes_max: u64,
+    q1_or_frame_size_rises: bool,
+    q1_or_vs_lww_mean_ratio: f64,
+    // Q2 — the shutdown drain-window WAL burst.
+    q2_wal_mb_before_drain: Option<f64>,
+    q2_wal_mb_after_drain: Option<f64>,
+    q2_drain_delta_mb: Option<f64>,
+    q2_top_decile_frames: usize,
+    q2_top_decile_or_bytes_max: u64,
+    q2_attribution: String,
+    // Q3 — what holds RSS.
+    q3_rss_slope_mb_per_hour: f64,
+    q3_disk_slope_mb_per_hour: f64,
+    q3_rss_disk_correlation: Option<f64>,
+    q3_attribution: String,
+    // Q4 — NOT the tombstone index.
+    q4_tombstone_corpus_bytes: Option<u64>,
+    q4_tombstone_gauge_bytes: u64,
+    q4_or_wal_bytes_total: u64,
+    q4_growth_is_or_snapshot_not_tombstone: bool,
+    // Scan meta + verdict.
+    wal_segment_files: usize,
+    or_frames: usize,
+    lww_frames: usize,
+    remove_frames: usize,
+    conclusion: String,
+    sequencing_note: String,
+}
+
+/// Inputs the mechanism report is built from, bundled so the builder stays under
+/// the argument-count lint without an `#[allow]`.
+struct MechanismInputs<'a> {
+    wal: &'a WalFrameStats,
+    rss_samples: &'a [MemSample],
+    disk_samples: &'a [DiskSample],
+    rss_slope_mb_per_hour: f64,
+    disk_slope_mb_per_hour: f64,
+    tombstone_corpus_bytes: Option<u64>,
+    tombstone_gauge_bytes: u64,
+    wal_mb_before_drain: Option<f64>,
+    wal_mb_after_drain: Option<f64>,
+}
+
+fn build_mechanism_report(inp: &MechanismInputs) -> MechanismReport {
+    let wal = inp.wal;
+    let lww_mean = if wal.lww_frames == 0 {
+        0.0
+    } else {
+        wal.lww_bytes_total as f64 / wal.lww_frames as f64
+    };
+    // A 10% late-vs-early mean growth (with a non-trivial OR frame count) is the
+    // threshold for calling the O(N)-per-op frame growth confirmed.
+    let rises = wal.or_frames >= 20 && wal.or_bytes_mean_late > wal.or_bytes_mean_early * 1.10;
+    let or_vs_lww = if lww_mean <= f64::EPSILON {
+        0.0
+    } else {
+        (wal.or_bytes_mean_late.max(wal.or_bytes_mean_early)) / lww_mean
+    };
+
+    let drain_delta = match (inp.wal_mb_before_drain, inp.wal_mb_after_drain) {
+        (Some(before), Some(after)) => Some(after - before),
+        _ => None,
+    };
+    // Attribute the drain burst: a large delta carried by a few large OR frames in
+    // the top sequence decile points at a final full-slot re-write on drain; a
+    // large delta spread across many frames points at a rotation/flush storm.
+    let q2_attribution = match drain_delta {
+        Some(d) if d > 5.0 => {
+            if wal.top_decile_or_bytes_max > 4096 && wal.top_decile_frames < 512 {
+                format!(
+                    "drain grew WAL by {d:.1}MB carried by a few large OR frames \
+                     (top-decile max OR frame {}B across {} frames) — consistent with a \
+                     final full-slot re-write on drain, which delta-framing removes",
+                    wal.top_decile_or_bytes_max, wal.top_decile_frames
+                )
+            } else {
+                format!(
+                    "drain grew WAL by {d:.1}MB spread across {} top-decile frames — \
+                     consistent with a rotation/flush storm on shutdown drain",
+                    wal.top_decile_frames
+                )
+            }
+        }
+        Some(d) => format!("no significant drain burst (WAL delta {d:.1}MB)"),
+        None => {
+            "drain-window WAL size not captured (need --data-dir + --mechanism-report)".to_string()
+        }
+    };
+
+    let corr = rss_disk_correlation(inp.rss_samples, inp.disk_samples);
+    // Q3 branch (spec R2 rec 6): if RSS tracks disk in lockstep AND OR frames grow,
+    // the growing OR blobs sit in the write-behind queue / record cache and
+    // delta-framing shrinks BOTH. If RSS climbs while disk is flat, RSS is
+    // record-cache-driven and delta-framing would NOT reduce it — the fix would
+    // instead be compacting the resident representation.
+    let q3_attribution = match corr {
+        Some(c) if c > 0.8 && inp.disk_slope_mb_per_hour > 1.0 => format!(
+            "RSS tracks disk in lockstep (r={c:.2}); the growing OR blobs sit in the \
+             write-behind queue / record cache — delta-framing should reduce RSS too"
+        ),
+        Some(c) if inp.rss_slope_mb_per_hour > 1.0 && inp.disk_slope_mb_per_hour <= 1.0 => format!(
+            "RSS grows ({:.1}MB/h) while disk is ~flat (r={c:.2}); RSS is record-cache-driven \
+             — delta-framing alone would NOT bound RSS, compact the resident slot instead",
+            inp.rss_slope_mb_per_hour
+        ),
+        Some(c) => format!(
+            "RSS slope {:.1}MB/h, disk slope {:.1}MB/h, r={c:.2}",
+            inp.rss_slope_mb_per_hour, inp.disk_slope_mb_per_hour
+        ),
+        None => format!(
+            "RSS slope {:.1}MB/h, disk slope {:.1}MB/h (correlation unavailable)",
+            inp.rss_slope_mb_per_hour, inp.disk_slope_mb_per_hour
+        ),
+    };
+
+    // Q4: the growth is the OR snapshot path iff the retained OR WAL bytes dwarf
+    // the bounded (SPEC-345, ~11KB pruned) tombstone corpus.
+    let corpus = inp.tombstone_corpus_bytes.unwrap_or(0);
+    let q4_is_or_not_tombstone = wal.or_bytes_total > corpus.saturating_mul(10).max(1_000_000);
+
+    let conclusion = if rises && q4_is_or_not_tombstone {
+        "CONFIRMED: the OR write path appends the full per-key OR-Map snapshot per op, \
+         so an OR frame grows O(N) over the run while LWW frames stay flat, and the growth \
+         is the OR record/snapshot serialization path — NOT the bounded tombstone corpus. \
+         Fix surface: delta-frame the OR write path (append the mutation, fold on recovery)."
+            .to_string()
+    } else if !rises {
+        "REFUTED / INCONCLUSIVE: OR frame size did NOT rise late-vs-early over the retained \
+         corpus — the O(N)-per-op-frame hypothesis is not confirmed by this run. Inspect the \
+         acked-beyond-applied tail bound and write-behind retention before choosing the fix."
+            .to_string()
+    } else {
+        "PARTIAL: OR frames grow, but the retained OR WAL bytes do not clearly dwarf the \
+         tombstone corpus — re-check Q4 against the redb corpus scan before pinning the fix."
+            .to_string()
+    };
+
+    MechanismReport {
+        q1_or_frame_bytes_mean_early: wal.or_bytes_mean_early,
+        q1_or_frame_bytes_mean_late: wal.or_bytes_mean_late,
+        q1_or_frame_bytes_max_early: wal.or_bytes_max_early,
+        q1_or_frame_bytes_max_late: wal.or_bytes_max_late,
+        q1_or_frame_bytes_max: wal.or_bytes_max,
+        q1_lww_frame_bytes_mean: lww_mean,
+        q1_lww_frame_bytes_max: wal.lww_bytes_max,
+        q1_or_frame_size_rises: rises,
+        q1_or_vs_lww_mean_ratio: or_vs_lww,
+        q2_wal_mb_before_drain: inp.wal_mb_before_drain,
+        q2_wal_mb_after_drain: inp.wal_mb_after_drain,
+        q2_drain_delta_mb: drain_delta,
+        q2_top_decile_frames: wal.top_decile_frames,
+        q2_top_decile_or_bytes_max: wal.top_decile_or_bytes_max,
+        q2_attribution,
+        q3_rss_slope_mb_per_hour: inp.rss_slope_mb_per_hour,
+        q3_disk_slope_mb_per_hour: inp.disk_slope_mb_per_hour,
+        q3_rss_disk_correlation: corr,
+        q3_attribution,
+        q4_tombstone_corpus_bytes: inp.tombstone_corpus_bytes,
+        q4_tombstone_gauge_bytes: inp.tombstone_gauge_bytes,
+        q4_or_wal_bytes_total: wal.or_bytes_total,
+        q4_growth_is_or_snapshot_not_tombstone: q4_is_or_not_tombstone,
+        wal_segment_files: wal.segment_files,
+        or_frames: wal.or_frames,
+        lww_frames: wal.lww_frames,
+        remove_frames: wal.remove_frames,
+        conclusion,
+        sequencing_note: "Sequencing option for the R1 /xask gate: tail-bounding the \
+             acked-beyond-applied WAL is the lowest-risk FIRST containment (OOM/disk-full \
+             -> backpressure, zero recovery-path risk); delta-framing is the eventual \
+             O(1)-frame fix. If Q2 shows the drain burst is buffered O(N) frames, \
+             tail-bounding addresses it directly."
+            .to_string(),
+    }
+}
+
+fn print_mechanism_report(r: &MechanismReport) {
+    println!("\n=== OR-CHURN MECHANISM REPORT (report-only, Q1-Q4) ===");
+    println!(
+        "Q1 bytes/frame:    OR early(mean={:.0}B max={}B) late(mean={:.0}B max={}B) max={}B | \
+         LWW mean={:.0}B max={}B | OR/LWW={:.1}x | rises={}",
+        r.q1_or_frame_bytes_mean_early,
+        r.q1_or_frame_bytes_max_early,
+        r.q1_or_frame_bytes_mean_late,
+        r.q1_or_frame_bytes_max_late,
+        r.q1_or_frame_bytes_max,
+        r.q1_lww_frame_bytes_mean,
+        r.q1_lww_frame_bytes_max,
+        r.q1_or_vs_lww_mean_ratio,
+        r.q1_or_frame_size_rises,
+    );
+    println!(
+        "Q2 drain window:   before={} after={} delta={} | {}",
+        r.q2_wal_mb_before_drain
+            .map_or_else(|| "n/a".to_string(), |v| format!("{v:.1}MB")),
+        r.q2_wal_mb_after_drain
+            .map_or_else(|| "n/a".to_string(), |v| format!("{v:.1}MB")),
+        r.q2_drain_delta_mb
+            .map_or_else(|| "n/a".to_string(), |v| format!("{v:.1}MB")),
+        r.q2_attribution,
+    );
+    println!(
+        "Q3 RSS holder:     rss_slope={:.1}MB/h disk_slope={:.1}MB/h corr={} | {}",
+        r.q3_rss_slope_mb_per_hour,
+        r.q3_disk_slope_mb_per_hour,
+        r.q3_rss_disk_correlation
+            .map_or_else(|| "n/a".to_string(), |v| format!("{v:.2}")),
+        r.q3_attribution,
+    );
+    println!(
+        "Q4 not tombstone:  or_wal_bytes={} tombstone_corpus={} gauge={} | growth_is_or={}",
+        r.q4_or_wal_bytes_total,
+        r.q4_tombstone_corpus_bytes
+            .map_or_else(|| "n/a".to_string(), |v| v.to_string()),
+        r.q4_tombstone_gauge_bytes,
+        r.q4_growth_is_or_snapshot_not_tombstone,
+    );
+    println!(
+        "scan:              segments={} or_frames={} lww_frames={} remove_frames={}",
+        r.wal_segment_files, r.or_frames, r.lww_frames, r.remove_frames
+    );
+    println!("conclusion:        {}", r.conclusion);
+    println!("sequencing:        {}", r.sequencing_note);
 }
 
 // ---------------------------------------------------------------------------
@@ -2012,6 +2509,7 @@ const KNOWN_FLAGS: &[&str] = &[
     "--no-ack",
     "--inject-slow-leak",
     "--no-pre-kill-drain",
+    "--mechanism-report",
     "--smoke",
 ];
 
@@ -2031,7 +2529,10 @@ fn print_usage() {
          \x20 soak_harness --inject-divergence\n\
          \x20 soak_harness --inject-panic\n\
          \x20 soak_harness --no-ack --duration 3600  # tombstone hard-gate must FAIL\n\
-         \x20 soak_harness --inject-slow-leak --duration 3600  # slope detection-floor calibration\n\n\
+         \x20 soak_harness --inject-slow-leak --duration 3600  # slope detection-floor calibration\n\
+         \x20 # OR-churn WAL/RSS growth mechanism report (Q1-Q4), report-only\n\
+         \x20 soak_harness --mechanism-report --or-churn true --or-keyspace 48 \\\n\
+         \x20              --crash-interval 0 --duration 3600 --data-dir ./soak-data\n\n\
          See packages/server-rust/benches/soak_harness/README.md for the full flag list\n\
          and the Hetzner 72h runner."
     );
@@ -2175,6 +2676,10 @@ fn parse_args() -> Config {
             }
             "--no-pre-kill-drain" => {
                 c.no_pre_kill_drain = true;
+                i += 1;
+            }
+            "--mechanism-report" => {
+                c.mechanism_report = true;
                 i += 1;
             }
             "--smoke" => {
