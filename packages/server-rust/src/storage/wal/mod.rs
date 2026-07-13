@@ -23,7 +23,7 @@ use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
 
 use crate::storage::map_data_store::MapDataStore;
-use crate::storage::record::RecordValue;
+use crate::storage::record::{OrMapEntry, RecordValue};
 
 // ---------------------------------------------------------------------------
 // WalFsyncPolicy
@@ -149,6 +149,167 @@ pub enum WalStorePayload {
     Record(RecordValue),
     /// Bare value written by older servers; replayed as an LWW record.
     Legacy(Value),
+}
+
+// ---------------------------------------------------------------------------
+// OrDelta — per-op OR-Map mutation seam (interface only; not yet wired)
+// ---------------------------------------------------------------------------
+
+/// The minimal per-op OR-Map mutation an OR write would append **instead of** a
+/// full [`RecordValue::OrMap`] snapshot.
+///
+/// Today every OR_ADD / OR_REMOVE persists the *entire* per-key OR-Map slot
+/// (`records: Vec<OrMapEntry>` + `tombstones: Vec<String>`) on every op, so the
+/// Nth op on a key appends an O(N) frame and the retained WAL grows without
+/// bound under sustained churn. Appending only the mutation makes the durable
+/// append O(1) per op; recovery folds the deltas back onto the resident slot
+/// (see [`OrDeltaFold`]).
+///
+/// This models the spec's candidate shape
+/// `{ added: Option<OrMapEntry>, removed_tag: Option<String>, pruned_tags: Vec<String> }`
+/// as an **enum discriminant** rather than a bag of `Option`s: a single OR op is
+/// exactly one of add / remove, and an epoch-GC sweep is a prune — an enum makes
+/// the illegal "both added and removed set" state unrepresentable and satisfies
+/// the op-kind-discriminant type-mapping rule (serde owns the tag; there is no
+/// `r#type` field). The set-algebra a fold must apply matches the resident CRDT
+/// exactly: add-wins (retain concurrent survivors, an already-tombstoned tag is
+/// never resurrected), remove-wins (drop the matched tag from records, record its
+/// tombstone), prune (drop the given tombstone tags once the low-water-mark has
+/// passed their epoch).
+///
+/// ## Codec-safety envelope (design contract for the G2 wiring)
+///
+/// An `OrDelta` is carried inside a [`WalEntry`] and encoded through the SAME
+/// [`format::encode`] path as every other frame, so it inherits the frame codec
+/// invariants unchanged and MUST NOT weaken them:
+///
+/// - **CRC32C**: the frame stays length-prefixed and Castagnoli-checksummed; a
+///   bit-flip in a delta frame is caught exactly as it is for a Store frame.
+/// - **Length bound**: a delta payload is far smaller than a full snapshot, so it
+///   is trivially within [`format::MAX_FRAME_PAYLOAD_LEN`]; the bound still
+///   applies and rejects a corrupt/bloated declared length before allocating.
+/// - **Exhaustive decode**: recovery MUST continue to pattern-match every
+///   [`format::FrameDecodeResult`] variant and NEVER panic on malformed input —
+///   folding a decoded delta happens only on the `Complete` / tolerated
+///   `TruncatedTail` arms, exactly like the current Store replay.
+/// - **Version discipline**: introducing an `OrDelta`-carrying `WalOp` variant is
+///   an additive MsgPack-named change. A legacy binary reading a new delta frame
+///   fails `WalEntry` deserialization, which `decode_all` already classifies as
+///   `Corruption` (a *refusal to start*, never a silent mis-read) — so mixed
+///   old/new recovery fails closed. Whether G2 also bumps
+///   [`format::FRAME_VERSION`] for an explicit signal (rather than relying on the
+///   deserialize-refusal) is the version-discipline decision to settle when the
+///   delta frame lands; the safety floor (fail-closed, no silent corruption) holds
+///   either way.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OrDelta {
+    /// OR_ADD: a tagged entry was added. Fold: remove any existing entry with the
+    /// same tag (idempotent re-add), then append this one — UNLESS the tag is
+    /// already tombstoned, in which case the add is suppressed (remove-wins).
+    Add {
+        /// The added entry (value + unique tag + HLC timestamp).
+        entry: OrMapEntry,
+    },
+    /// OR_REMOVE: a tag was observed-removed. Fold: drop the matched tag from
+    /// `records` (preserving every concurrent survivor) and append it to
+    /// `tombstones` if genuinely new.
+    Remove {
+        /// The observed-removed tag.
+        tag: String,
+    },
+    /// Epoch-GC prune: the given tombstone tags are dropped once the fleet-wide
+    /// low-water-mark has passed their epoch. Fold: remove these tags from
+    /// `tombstones`.
+    Prune {
+        /// Tombstone tags being reclaimed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<String>,
+    },
+}
+
+/// Checkpoint policy that bounds delta-fold depth (the PRIMARY delta design:
+/// checkpoint + bounded-deltas, not an unbounded fold chain).
+///
+/// A pure "fold every delta since key creation" chain is unbounded → slow
+/// recovery and fragile (one lost/corrupt delta breaks all subsequent state).
+/// Instead, a full-snapshot frame (the existing `WalOp::Store` of the whole
+/// `RecordValue::OrMap`) is emitted every `snapshot_every_ops` (K) ops **or**
+/// `snapshot_every_bytes` (B) accumulated delta bytes per key, whichever trips
+/// first; recovery folds only the deltas since that key's last checkpoint. This
+/// bounds recovery cost, localizes corruption blast-radius to one checkpoint
+/// window, still yields the ~100× WAL reduction, and degrades naturally to a
+/// **K=1 full-snapshot-only fallback** (see [`Self::full_snapshot_only`]) the
+/// recovery path can drop to on ANY fold anomaly.
+///
+/// The concrete K / B values are a deliberately-unset design parameter: they are
+/// resolved at the R1 `/xask` design gate with the live measurement in hand, not
+/// guessed here without data. Counts are integers (ops, bytes) — never `f64`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrDeltaCheckpointPolicy {
+    /// K: emit a full-snapshot frame after this many deltas on a key. `1` means
+    /// "snapshot every op" — the full-snapshot-only fallback.
+    pub snapshot_every_ops: u32,
+    /// B: emit a full-snapshot frame once accumulated delta bytes on a key reach
+    /// this threshold, independent of op count.
+    pub snapshot_every_bytes: u64,
+}
+
+impl OrDeltaCheckpointPolicy {
+    /// The K=1 fallback: every OR op emits a full snapshot, so recovery never
+    /// folds a delta. This is the behaviourally-identical-to-today mode the
+    /// recovery path drops to whenever a fold anomaly is detected, and the
+    /// baseline the differential recovery test exercises.
+    #[must_use]
+    pub const fn full_snapshot_only() -> Self {
+        Self {
+            snapshot_every_ops: 1,
+            snapshot_every_bytes: 0,
+        }
+    }
+
+    /// Whether an op that is the `ops_since_checkpoint`-th delta carrying
+    /// `bytes_since_checkpoint` accumulated bytes must be materialized as a full
+    /// snapshot instead of a delta under this policy.
+    #[must_use]
+    pub const fn should_checkpoint(
+        &self,
+        ops_since_checkpoint: u32,
+        bytes_since_checkpoint: u64,
+    ) -> bool {
+        ops_since_checkpoint >= self.snapshot_every_ops
+            || (self.snapshot_every_bytes > 0
+                && bytes_since_checkpoint >= self.snapshot_every_bytes)
+    }
+}
+
+/// Recovery-fold interface: replays a bounded run of [`OrDelta`]s onto a resident
+/// OR-Map slot to reconstruct the value the full-snapshot path would have
+/// produced.
+///
+/// **Interface only — the production recovery path is NOT wired to this in Wave
+/// 1.** `base` is the resident slot as of the key's last full-snapshot checkpoint
+/// (`None` for a key whose first frame in the replay window is itself a
+/// checkpoint, i.e. an empty starting slot); `deltas` are the checkpoint-window
+/// deltas in WAL sequence order. The returned value is a `RecordValue::OrMap`.
+///
+/// ## Recovery-equivalence invariant (SEMANTIC-SET, not byte-for-byte)
+///
+/// The reconstructed slot is required to be **semantic-set equivalent** to the
+/// full-snapshot path's slot — the same live `(tag, value)` set, the same
+/// tombstone set, and the same pruned-tag set — NOT byte-for-byte identical. The
+/// resident `RecordValue::OrMap` stores `records`/`tombstones` in
+/// **operation-insertion order** (the CRDT write path does `retain(tag != ...)`
+/// then `push(...)`; it never canonically sorts), and cross-node OR-Map
+/// convergence is set-based, so no canonical byte ordering exists to make
+/// bit-equality a robust invariant. The G2 differential recovery test asserts
+/// this semantic-set equivalence (via the equivalence oracle defined alongside
+/// the OR write path), including the K=1 full-snapshot-only fallback.
+pub trait OrDeltaFold {
+    /// Fold `deltas` (checkpoint-window, in sequence order) onto `base`,
+    /// returning the reconstructed `RecordValue::OrMap`. Must apply the exact
+    /// add-wins / remove-wins / prune algebra the resident CRDT slot uses.
+    fn fold(&self, base: Option<RecordValue>, deltas: &[OrDelta]) -> RecordValue;
 }
 
 // ---------------------------------------------------------------------------
