@@ -177,7 +177,7 @@ pub enum WalStorePayload {
 /// tombstone), prune (drop the given tombstone tags once the low-water-mark has
 /// passed their epoch).
 ///
-/// ## Codec-safety envelope (design contract for the G2 wiring)
+/// ## Codec-safety envelope (design contract for the write-path wiring)
 ///
 /// An `OrDelta` is carried inside a [`WalEntry`] and encoded through the SAME
 /// [`format::encode`] path as every other frame, so it inherits the frame codec
@@ -196,7 +196,7 @@ pub enum WalStorePayload {
 ///   an additive MsgPack-named change. A legacy binary reading a new delta frame
 ///   fails `WalEntry` deserialization, which `decode_all` already classifies as
 ///   `Corruption` (a *refusal to start*, never a silent mis-read) — so mixed
-///   old/new recovery fails closed. Whether G2 also bumps
+///   old/new recovery fails closed. Whether the wiring step also bumps
 ///   [`format::FRAME_VERSION`] for an explicit signal (rather than relying on the
 ///   deserialize-refusal) is the version-discipline decision to settle when the
 ///   delta frame lands; the safety floor (fail-closed, no silent corruption) holds
@@ -302,7 +302,7 @@ impl OrDeltaCheckpointPolicy {
 /// **operation-insertion order** (the CRDT write path does `retain(tag != ...)`
 /// then `push(...)`; it never canonically sorts), and cross-node OR-Map
 /// convergence is set-based, so no canonical byte ordering exists to make
-/// bit-equality a robust invariant. The G2 differential recovery test asserts
+/// bit-equality a robust invariant. The differential recovery test asserts
 /// this semantic-set equivalence (via the equivalence oracle defined alongside
 /// the OR write path), including the K=1 full-snapshot-only fallback.
 pub trait OrDeltaFold {

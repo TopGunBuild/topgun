@@ -1577,7 +1577,7 @@ fn build_mechanism_report(inp: &MechanismInputs) -> MechanismReport {
     };
 
     // Q4: the growth is the OR snapshot path iff the retained OR WAL bytes dwarf
-    // the bounded (SPEC-345, ~11KB pruned) tombstone corpus.
+    // the bounded (~11KB, pruned) tombstone corpus.
     let corpus = inp.tombstone_corpus_bytes.unwrap_or(0);
     let q4_is_or_not_tombstone = wal.or_bytes_total > corpus.saturating_mul(10).max(1_000_000);
 

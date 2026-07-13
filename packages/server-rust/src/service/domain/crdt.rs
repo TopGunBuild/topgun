@@ -1197,7 +1197,7 @@ fn read_or_map_state(value: Option<RecordValue>) -> (Vec<OrMapEntry>, Vec<String
 /// hold the same CRDT state but in a different `Vec` order compare equal.
 ///
 /// This is the equivalence oracle for the planned delta-fold recovery path (see
-/// [`crate::storage::wal::OrDeltaFold`]): the G2 differential recovery test folds
+/// [`crate::storage::wal::OrDeltaFold`]): the differential recovery test folds
 /// a random OR op sequence through BOTH the delta path and the full-snapshot path
 /// and asserts their views are equal under this type.
 // `Value` is only `PartialEq` (it can hold a float), so the view is `PartialEq`
@@ -1206,8 +1206,8 @@ fn read_or_map_state(value: Option<RecordValue>) -> (Vec<OrMapEntry>, Vec<String
 #[derive(Debug, Clone, PartialEq)]
 #[allow(
     dead_code,
-    reason = "recovery-equivalence oracle for the delta-fold seam; the G2 differential \
-              recovery test is the first consumer — defined here in Wave 1 as the \
+    reason = "recovery-equivalence oracle for the delta-fold seam; the differential \
+              recovery test is the first consumer — defined here as the \
               interface, not yet wired to a recovery path"
 )]
 pub(crate) struct OrMapSemanticView {
@@ -1242,15 +1242,15 @@ pub(crate) struct OrMapSemanticView {
 /// A delta-fold could therefore reconstruct a semantically-identical slot whose
 /// `Vec` order differs from the full-snapshot slot, so **byte-for-byte equality
 /// would be a false-positive "data loss" signal** and is rejected as the
-/// invariant. The testable invariant the G2 differential test asserts is
+/// invariant. The testable invariant the differential test asserts is
 /// semantic-set equivalence: same live `(tag, value)` set, same tombstone set
 /// (and, for a prune, the same pruned-tag set — observable as the removed
 /// tombstones). Byte-for-byte would only be defensible if a canonical ordering
 /// were imposed on the resident representation, which today it is not.
 #[allow(
     dead_code,
-    reason = "equivalence oracle for the delta-fold seam; first consumed by the G2 \
-              differential recovery test — Wave 1 defines the interface only"
+    reason = "equivalence oracle for the delta-fold seam; first consumed by the \
+              differential recovery test — the interface is defined here only"
 )]
 pub(crate) fn or_map_semantic_view(value: Option<RecordValue>) -> OrMapSemanticView {
     let (records, mut tombstones) = read_or_map_state(value);
