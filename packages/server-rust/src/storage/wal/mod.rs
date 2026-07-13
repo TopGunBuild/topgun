@@ -158,7 +158,7 @@ pub enum WalStorePayload {
 /// The minimal per-op OR-Map mutation an OR write would append **instead of** a
 /// full [`RecordValue::OrMap`] snapshot.
 ///
-/// Today every OR_ADD / OR_REMOVE persists the *entire* per-key OR-Map slot
+/// Today every `OR_ADD` / `OR_REMOVE` persists the *entire* per-key OR-Map slot
 /// (`records: Vec<OrMapEntry>` + `tombstones: Vec<String>`) on every op, so the
 /// Nth op on a key appends an O(N) frame and the retained WAL grows without
 /// bound under sustained churn. Appending only the mutation makes the durable
@@ -204,14 +204,14 @@ pub enum WalStorePayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum OrDelta {
-    /// OR_ADD: a tagged entry was added. Fold: remove any existing entry with the
+    /// `OR_ADD`: a tagged entry was added. Fold: remove any existing entry with the
     /// same tag (idempotent re-add), then append this one — UNLESS the tag is
     /// already tombstoned, in which case the add is suppressed (remove-wins).
     Add {
         /// The added entry (value + unique tag + HLC timestamp).
         entry: OrMapEntry,
     },
-    /// OR_REMOVE: a tag was observed-removed. Fold: drop the matched tag from
+    /// `OR_REMOVE`: a tag was observed-removed. Fold: drop the matched tag from
     /// `records` (preserving every concurrent survivor) and append it to
     /// `tombstones` if genuinely new.
     Remove {

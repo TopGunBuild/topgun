@@ -1228,10 +1228,10 @@ pub(crate) struct OrMapSemanticView {
 /// The resident `RecordValue::OrMap` is NOT canonically ordered. Evidence from
 /// the OR write path in this file:
 ///
-/// - OR_ADD builds `records` with `records.retain(|e| e.tag != new_entry.tag)`
+/// - `OR_ADD` builds `records` with `records.retain(|e| e.tag != new_entry.tag)`
 ///   then `records.push(new_entry)` — the vector is in **operation-insertion
 ///   order**, never sorted.
-/// - OR_REMOVE appends with `tombstones.push(tag.clone())` — also insertion order.
+/// - `OR_REMOVE` appends with `tombstones.push(tag.clone())` — also insertion order.
 /// - The prune path (`prune_epoch_tombstones`) `retain`s in place, preserving
 ///   whatever order was there.
 /// - `storage/record.rs` declares `records: Vec<OrMapEntry>` / `tombstones:
@@ -1254,8 +1254,7 @@ pub(crate) struct OrMapSemanticView {
 )]
 pub(crate) fn or_map_semantic_view(value: Option<RecordValue>) -> OrMapSemanticView {
     let (records, mut tombstones) = read_or_map_state(value);
-    let mut live: Vec<(String, Value)> =
-        records.into_iter().map(|e| (e.tag, e.value)).collect();
+    let mut live: Vec<(String, Value)> = records.into_iter().map(|e| (e.tag, e.value)).collect();
     live.sort_by(|a, b| {
         a.0.cmp(&b.0)
             .then_with(|| format!("{:?}", a.1).cmp(&format!("{:?}", b.1)))
