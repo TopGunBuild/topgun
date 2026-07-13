@@ -463,15 +463,15 @@ mod tombstone_bytes_gauge_tests {
     use super::*;
     use std::sync::Mutex;
 
-    // `OR_TOMBSTONE_BYTES` is a single process-global static. No production
-    // call site exists yet (added by later task groups), so the only writers
-    // today are these three tests themselves — but the Rust test harness runs
-    // them concurrently on separate threads, and a delta-based assertion in
-    // one test can still observe an in-flight mutation from another. A
-    // test-local mutex serializes just this module's tests against each
-    // other, which is sufficient today; asserting deltas (rather than
-    // absolute values) additionally keeps these tests robust once real call
-    // sites (G2/G3) start mutating the gauge from other test modules too.
+    // `OR_TOMBSTONE_BYTES` is a single process-global static. The production
+    // writers are the OR_REMOVE add path and the epoch-prune drop path (which
+    // decrements on a successful tombstone drop), so these tests are not the
+    // only mutators — and the Rust test harness runs tests concurrently on
+    // separate threads, where a delta-based assertion in one test can still
+    // observe an in-flight mutation from another. A test-local mutex serializes
+    // just this module's tests against each other; asserting deltas (rather
+    // than absolute values) additionally keeps these tests robust against
+    // concurrent mutation from other test modules.
     static TEST_SERIALIZE: Mutex<()> = Mutex::new(());
 
     #[test]

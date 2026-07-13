@@ -342,7 +342,7 @@ pub const DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR: f64 = 512.0;
 pub const DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH: f64 = 1.0;
 
 /// Minimum wall-clock span (seconds) of the last-half fit window before the
-/// per-hour slope clause is surfaced as a (report-only) breach.
+/// per-hour slope clause is allowed to hard-gate the run.
 ///
 /// The slope is a per-hour EXTRAPOLATION (bytes/sec × 3600). Over a sub-minute
 /// window the `3600 / span_secs` amplification is enormous: a healthy short run
@@ -352,9 +352,9 @@ pub const DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH: f64 = 1.0;
 /// Below this floor the slope carries no plateau signal — a leak and a
 /// not-yet-plateaued healthy run are indistinguishable — so the clause is
 /// suppressed (no breach is emitted for it) and the assessment passes on the
-/// blind-monitor + absolute-growth clauses alone. (The breach is report-only
-/// today regardless — see [`DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR`]; this
-/// floor keeps even the report-only signal from crying wolf on a short run.)
+/// blind-monitor + absolute-growth clauses alone. (The slope is now a HARD gate
+/// once the window clears this floor — see [`DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR`];
+/// this floor is what keeps that hard gate from crying wolf on a short run.)
 ///
 /// 120s sits well above the smoke run's ~10-15s last-half span (suppressed) and
 /// well below a real bounded soak's window (a 10-60 min live run's last-half
@@ -364,9 +364,10 @@ pub const DEFAULT_TOMBSTONE_BYTES_MIN_GROWTH: f64 = 1.0;
 /// floor.
 pub const DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS: f64 = 120.0;
 
-/// One tombstone-byte-gauge sample (`topgun_ormap_tombstone_bytes_total`,
-/// scraped over HTTP). `bytes` is `u64` — a counted byte total is a
-/// non-negative integer, never a float.
+/// One tombstone-byte-gauge sample (`topgun_ormap_tombstone_bytes`, the
+/// decrementable gauge scraped over HTTP — not the monotonic `_total` counter).
+/// `bytes` is `u64` — a counted byte total is a non-negative integer, never a
+/// float.
 #[derive(Debug, Clone, Copy)]
 pub struct TombstoneSample {
     pub elapsed_secs: f64,
