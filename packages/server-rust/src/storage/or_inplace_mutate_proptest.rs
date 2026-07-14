@@ -127,6 +127,9 @@ mod tests {
     struct RetainingCountingStore {
         data: AsyncMutex<HashMap<(String, String), RecordValue>>,
         adds: AtomicUsize,
+        // Number of upcoming add() calls to fail with an error, for the
+        // write-failure + retry gauge test. Zero (the default) never fails.
+        fail_adds: AtomicUsize,
     }
 
     #[async_trait]
@@ -139,6 +142,10 @@ mod tests {
             _exp: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
+            if self.fail_adds.load(Ordering::Relaxed) > 0 {
+                self.fail_adds.fetch_sub(1, Ordering::Relaxed);
+                return Err(anyhow::anyhow!("injected write-through failure"));
+            }
             self.adds.fetch_add(1, Ordering::Relaxed);
             self.data
                 .lock()
@@ -299,6 +306,18 @@ mod tests {
         }
     }
 
+    /// Mirror of the private `normalize_to_or_map` in `crdt.rs`: upgrade a legacy
+    /// non-`OrMap` slot to the unified `OrMap` shape in place before an in-place merge.
+    fn normalize(value: &mut RecordValue) {
+        if !matches!(value, RecordValue::OrMap { .. }) {
+            let (records, tombstones) = read_state(Some(std::mem::replace(value, empty_ormap())));
+            *value = RecordValue::OrMap {
+                records,
+                tombstones,
+            };
+        }
+    }
+
     struct Harness {
         store: DefaultRecordStore,
         observer: Arc<CountingObserver>,
@@ -338,6 +357,7 @@ mod tests {
                 };
                 let mut entry_opt = Some(entry);
                 let mut merge = move |value: &mut RecordValue| {
+                    normalize(value);
                     if let RecordValue::OrMap {
                         records,
                         tombstones,
@@ -363,38 +383,41 @@ mod tests {
                     .unwrap();
             }
             OrOp::Remove { tag } => {
-                let mut is_new = false;
-                {
-                    let mut apply = |value: &mut RecordValue| {
-                        if let RecordValue::OrMap {
-                            records,
-                            tombstones,
-                        } = value
-                        {
-                            records.retain(|e| e.tag != *tag);
-                            if !tombstones.contains(tag) {
-                                tombstones.push(tag.clone());
-                                is_new = true;
-                            }
+                let mut apply = |value: &mut RecordValue| {
+                    normalize(value);
+                    if let RecordValue::OrMap {
+                        records,
+                        tombstones,
+                    } = value
+                    {
+                        records.retain(|e| e.tag != *tag);
+                        if !tombstones.contains(tag) {
+                            tombstones.push(tag.clone());
+                            // Mirror production: count atomically with the resident
+                            // push (inside the closure), so a failed write + retry
+                            // counts the tag exactly once.
+                            add_tombstone_bytes(tag.len() as u64);
                         }
-                        true
-                    };
-                    store
-                        .update_in_place(
-                            KEY,
-                            Some(empty_ormap()),
-                            ExpiryPolicy::NONE,
-                            CallerProvenance::CrdtMerge,
-                            &mut apply,
-                        )
-                        .await
-                        .unwrap();
-                }
-                if is_new {
-                    add_tombstone_bytes(tag.len() as u64);
-                }
+                    }
+                    true
+                };
+                store
+                    .update_in_place(
+                        KEY,
+                        Some(empty_ormap()),
+                        ExpiryPolicy::NONE,
+                        CallerProvenance::CrdtMerge,
+                        &mut apply,
+                    )
+                    .await
+                    .unwrap();
             }
             OrOp::Prune { tag } => {
+                // Mirror production: hydrate first so an evicted key's durable
+                // tombstone is reclaimed too (init=None only mutates a resident slot).
+                if store.get(KEY, false).await.unwrap().is_none() {
+                    return;
+                }
                 let mut dropped = false;
                 {
                     let mut drop_tag = |value: &mut RecordValue| {
@@ -689,5 +712,215 @@ mod tests {
                 .map(|i| format!("{}:{}:node-1", 1_600_000_000_000_u64 + i as u64, i))
                 .collect(),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // HIGH-1 regression: a legacy OrTombstones resident slot (persisted by an
+    // older server; never emitted by the current write path) is UPGRADED to
+    // OrMap by the in-place path, not silently dropped — matching the old
+    // get -> read_or_map_state -> put path. Without normalization the in-place
+    // OrMap pattern match fails and the add/remove is lost on the upgrade path.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn legacy_ortombstones_upgrade_matches_get_build_put() {
+        let _serialize = GAUGE_LOCK.lock().unwrap();
+        block_on_async(async {
+            let inplace = make_harness();
+            let legacy = make_harness();
+
+            for h in [&inplace, &legacy] {
+                h.store
+                    .put(
+                        KEY,
+                        RecordValue::OrTombstones {
+                            tags: vec!["t0".into(), "t1".into()],
+                        },
+                        ExpiryPolicy::NONE,
+                        CallerProvenance::CrdtMerge,
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            let ops = vec![
+                OrOp::Add {
+                    tag: "t2".into(),
+                    val: 7,
+                }, // fresh add survives
+                OrOp::Add {
+                    tag: "t0".into(),
+                    val: 9,
+                }, // remove-wins: suppressed by the legacy tombstone
+                OrOp::Remove { tag: "t3".into() }, // new tombstone appended
+                OrOp::Add {
+                    tag: "t4".into(),
+                    val: 11,
+                },
+            ];
+            for op in &ops {
+                apply_inplace(&inplace.store, op).await;
+                apply_legacy(&legacy.store, op).await;
+            }
+
+            let a = inplace
+                .store
+                .get(KEY, false)
+                .await
+                .unwrap()
+                .map(|r| r.value);
+            let b = legacy.store.get(KEY, false).await.unwrap().map(|r| r.value);
+            assert_eq!(
+                a, b,
+                "in-place must upgrade the legacy OrTombstones blob exactly like get->build->put"
+            );
+            assert!(
+                matches!(a, Some(RecordValue::OrMap { .. })),
+                "legacy blob must be upgraded to OrMap, not left as OrTombstones with adds dropped"
+            );
+            assert_eq!(
+                or_map_semantic_view(a),
+                or_map_semantic_view(b),
+                "semantic view must match after the legacy upgrade"
+            );
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // MED-2 regression: prune reclaims an EVICTED key's durable tombstone by
+    // hydrating first — init=None alone only mutates a resident slot, so a
+    // non-resident key's durable tombstone would leak and its frontier ref be
+    // consumed without retry. Mirrors prune_epoch_tombstones (hydrate-then-drop).
+    // -----------------------------------------------------------------------
+
+    fn store_sharing(datastore: &Arc<RetainingCountingStore>) -> DefaultRecordStore {
+        let observer = Arc::new(CountingObserver::default());
+        let composite = Arc::new(CompositeMutationObserver::new(vec![
+            Arc::clone(&observer) as Arc<dyn MutationObserver>
+        ]));
+        DefaultRecordStore::new(
+            MAP.to_string(),
+            0,
+            Box::new(HashMapStorage::new()),
+            Arc::clone(datastore) as Arc<dyn MapDataStore>,
+            composite,
+            StorageConfig::default(),
+        )
+    }
+
+    #[test]
+    fn prune_reclaims_evicted_key_durable_tombstone() {
+        let _serialize = GAUGE_LOCK.lock().unwrap();
+        block_on_async(async {
+            let datastore = Arc::new(RetainingCountingStore::default());
+
+            // store1 creates a durable tombstone for t0.
+            let store1 = store_sharing(&datastore);
+            apply_inplace(
+                &store1,
+                &OrOp::Add {
+                    tag: "t0".into(),
+                    val: 1,
+                },
+            )
+            .await;
+            apply_inplace(&store1, &OrOp::Remove { tag: "t0".into() }).await;
+            let durable = datastore
+                .data
+                .lock()
+                .await
+                .get(&(MAP.to_string(), KEY.to_string()))
+                .cloned();
+            assert!(
+                matches!(&durable, Some(RecordValue::OrMap { tombstones, .. }) if tombstones.contains(&"t0".to_string())),
+                "precondition: t0 tombstone must be durable, got {durable:?}"
+            );
+
+            // store2 shares the datastore but has an empty engine — the key is
+            // NON-RESIDENT there (models eviction). Prune must still reclaim it.
+            let store2 = store_sharing(&datastore);
+            apply_inplace(&store2, &OrOp::Prune { tag: "t0".into() }).await;
+
+            let durable_after = datastore
+                .data
+                .lock()
+                .await
+                .get(&(MAP.to_string(), KEY.to_string()))
+                .cloned();
+            assert!(
+                matches!(&durable_after, Some(RecordValue::OrMap { tombstones, .. }) if !tombstones.contains(&"t0".to_string())),
+                "prune must reclaim the evicted key's durable tombstone (hydrate-then-drop), got {durable_after:?}"
+            );
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // MED-1 regression: a new tombstone is counted in the gauge EXACTLY ONCE
+    // even when the durable write fails and the client retries. The increment is
+    // atomic with the resident push, so the retry (which finds it already
+    // resident) does not double-count, and the failed first attempt does not skip
+    // it — a post-write increment would skip it on retry and later underflow the
+    // non-saturating gauge on prune.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn new_tombstone_counted_once_across_write_failure_and_retry() {
+        let _serialize = GAUGE_LOCK.lock().unwrap();
+        block_on_async(async {
+            let datastore = Arc::new(RetainingCountingStore::default());
+            // Fail exactly the first write-through.
+            datastore.fail_adds.store(1, Ordering::Relaxed);
+            let store = store_sharing(&datastore);
+
+            let tag = "tX";
+            let mut remove_once = |value: &mut RecordValue| {
+                normalize(value);
+                if let RecordValue::OrMap {
+                    records,
+                    tombstones,
+                } = value
+                {
+                    records.retain(|e| e.tag != tag);
+                    if !tombstones.iter().any(|t| t == tag) {
+                        tombstones.push(tag.to_string());
+                        add_tombstone_bytes(tag.len() as u64);
+                    }
+                }
+                true
+            };
+
+            let baseline = tombstone_bytes();
+            // First attempt: resident mutated + gauge incremented in-closure, then
+            // the durable write fails.
+            let r1 = store
+                .update_in_place(
+                    KEY,
+                    Some(empty_ormap()),
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::CrdtMerge,
+                    &mut remove_once,
+                )
+                .await;
+            assert!(r1.is_err(), "first write-through must fail (injected)");
+            // Retry: the tag is already resident, so it is not re-counted; the
+            // durable write now succeeds.
+            let r2 = store
+                .update_in_place(
+                    KEY,
+                    Some(empty_ormap()),
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::CrdtMerge,
+                    &mut remove_once,
+                )
+                .await;
+            assert!(r2.is_ok(), "retry write-through must succeed");
+
+            let delta = tombstone_bytes().saturating_sub(baseline);
+            assert_eq!(
+                delta,
+                tag.len() as u64,
+                "a new tombstone must be counted exactly once across write-failure + retry"
+            );
+        });
     }
 }

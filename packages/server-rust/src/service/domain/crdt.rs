@@ -560,6 +560,11 @@ impl CrdtService {
             // closure runs exactly once (per key, under the writer lock above).
             let mut new_entry_opt = Some(new_entry);
             let mut merge_add = move |value: &mut RecordValue| {
+                // Upgrade a legacy non-OrMap resident slot (an OrTombstones blob
+                // from an older server) to the unified OrMap shape first, matching
+                // the prior get -> read_or_map_state -> put path — otherwise the add
+                // is dropped and the legacy blob re-persisted unchanged.
+                normalize_to_or_map(value);
                 if let RecordValue::OrMap {
                     records,
                     tombstones,
@@ -631,6 +636,9 @@ impl CrdtService {
             let mut stamped_new_tombstone = false;
             {
                 let mut apply_remove = |value: &mut RecordValue| {
+                    // Upgrade a legacy OrTombstones blob to OrMap first (see OR_ADD);
+                    // otherwise the tombstone append is dropped on the upgrade path.
+                    normalize_to_or_map(value);
                     if let RecordValue::OrMap {
                         records,
                         tombstones,
@@ -641,6 +649,14 @@ impl CrdtService {
                         // Only a genuinely-new tag is counted and epoch-stamped.
                         if !tombstones.contains(tag) {
                             tombstones.push(tag.clone());
+                            // Feeds the residency-independent soak leak gauge. Counted
+                            // here, atomically with the resident push (under the engine's
+                            // per-key lock) rather than after the durable write, so a
+                            // failed write + client retry counts the tag exactly once
+                            // (the retry sees it already resident): a post-write
+                            // increment would miss it on retry and later underflow the
+                            // gauge on prune. Eviction/rehydration never move this number.
+                            crate::storage::record::add_tombstone_bytes(tag.len() as u64);
                             stamped_new_tombstone = true;
                         }
                     }
@@ -661,13 +677,6 @@ impl CrdtService {
                     )
                     .await
                     .map_err(OperationError::Internal)?;
-            }
-
-            if stamped_new_tombstone {
-                // Feeds the residency-independent soak leak gauge: counted here on
-                // the write path (once per genuinely-new tag) so eviction and
-                // rehydration of the record never move this number.
-                crate::storage::record::add_tombstone_bytes(tag.len() as u64);
             }
 
             // Stamp the genuinely-new tombstone with the current server epoch —
@@ -1205,6 +1214,29 @@ fn read_or_map_state(value: Option<RecordValue>) -> (Vec<OrMapEntry>, Vec<String
     }
 }
 
+/// Normalize a resident slot to the unified `OrMap` shape in place before an
+/// in-place OR merge. A legacy `OrTombstones` blob persisted by an older server
+/// is converted to `OrMap { records: [], tombstones: tags }`, exactly as the
+/// prior get -> `read_or_map_state` -> put path did; a slot that is already
+/// `OrMap` is left untouched. Without this the in-place merge closure would fail
+/// its `OrMap` pattern match, silently drop the mutation, and re-persist the
+/// legacy blob unchanged — losing an acked write on the upgrade path.
+fn normalize_to_or_map(value: &mut RecordValue) {
+    if !matches!(value, RecordValue::OrMap { .. }) {
+        let (records, tombstones) = read_or_map_state(Some(std::mem::replace(
+            value,
+            RecordValue::OrMap {
+                records: Vec::new(),
+                tombstones: Vec::new(),
+            },
+        )));
+        *value = RecordValue::OrMap {
+            records,
+            tombstones,
+        };
+    }
+}
+
 /// Order-independent semantic view of an OR-Map slot: the live `(tag, value)`
 /// set and the tombstone set, each canonicalized by sorting, so two slots that
 /// hold the same CRDT state but in a different `Vec` order compare equal.
@@ -1315,9 +1347,24 @@ pub(crate) async fn prune_epoch_tombstones(
         let store = factory.get_or_create(&r.map, hash_to_partition(&r.key));
         // Serialize the drop against concurrent OR writes on this key.
         let _guard = key_writer.acquire(&r.map, &r.key).await;
-        // Drop the tag from the resident tombstone set IN PLACE (init=None →
-        // mutate only if the record is present, never create one), owing a durable
-        // write only when a tombstone was actually removed.
+        // Ensure the key is resident before the in-place drop: init=None only mutates
+        // an already-resident slot, so an evicted key's durable tombstone would
+        // otherwise never be reclaimed and its frontier ref would be consumed without
+        // retry. Hydrating first (as the prior get -> put path did) also reclaims
+        // evicted keys and surfaces a backend read error so the ref can be re-indexed.
+        match store.get(&r.key, false).await {
+            Ok(Some(_)) => {}
+            // Truly gone (no resident and no durable record): nothing to reclaim.
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!(map = %r.map, key = %r.key, epoch, "prune read failed, re-indexing tombstone for retry: {e}");
+                frontier.restore_tombstone_ref(epoch, r);
+                continue;
+            }
+        }
+        // Drop the tag from the now-resident tombstone set IN PLACE (init=None →
+        // mutate only the present record, never create one), owing a durable write
+        // only when a tombstone was actually removed.
         let mut dropped = false;
         let result = {
             let mut drop_tag = |value: &mut RecordValue| {
