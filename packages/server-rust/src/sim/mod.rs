@@ -46,4 +46,10 @@ pub use madsim::rand;
 
 pub mod cluster;
 pub mod network;
+
+/// OR-Map churn convergence under a network-partition fault, exercising the
+/// in-place mutate write path.
+#[cfg(test)]
+mod or_churn_inplace;
+
 pub mod tombstone_gc_proof;
