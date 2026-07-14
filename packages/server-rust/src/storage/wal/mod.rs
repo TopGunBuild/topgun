@@ -222,7 +222,9 @@ pub enum OrDelta {
     /// low-water-mark has passed their epoch. Fold: remove these tags from
     /// `tombstones`.
     Prune {
-        /// Tombstone tags being reclaimed.
+        /// Tombstone tags being reclaimed. An empty `tags` is a representable
+        /// no-op (a fold over it changes nothing); the write path MUST NOT emit
+        /// one — an empty-prune delta only inflates the WAL without effect.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tags: Vec<String>,
     },
@@ -268,18 +270,20 @@ impl OrDeltaCheckpointPolicy {
         }
     }
 
-    /// Whether an op that is the `ops_since_checkpoint`-th delta carrying
-    /// `bytes_since_checkpoint` accumulated bytes must be materialized as a full
-    /// snapshot instead of a delta under this policy.
+    /// Whether the current op must be materialized as a full snapshot instead of a
+    /// delta under this policy.
+    ///
+    /// `delta_index` is **1-indexed**: the first delta after a checkpoint is
+    /// `delta_index = 1` (NOT `0` — passing the pre-op count is an off-by-one that
+    /// would make `full_snapshot_only()` fold the first op of every window instead
+    /// of snapshotting it). `window_bytes` is the delta bytes accumulated in the
+    /// current checkpoint window including this op. With `snapshot_every_ops = K`,
+    /// the op snapshots when `delta_index >= K`, so the K=1 `full_snapshot_only()`
+    /// policy snapshots on `delta_index = 1` — every op — and never folds a delta.
     #[must_use]
-    pub const fn should_checkpoint(
-        &self,
-        ops_since_checkpoint: u32,
-        bytes_since_checkpoint: u64,
-    ) -> bool {
-        ops_since_checkpoint >= self.snapshot_every_ops
-            || (self.snapshot_every_bytes > 0
-                && bytes_since_checkpoint >= self.snapshot_every_bytes)
+    pub const fn should_checkpoint(&self, delta_index: u32, window_bytes: u64) -> bool {
+        delta_index >= self.snapshot_every_ops
+            || (self.snapshot_every_bytes > 0 && window_bytes >= self.snapshot_every_bytes)
     }
 }
 
@@ -1215,6 +1219,43 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use topgun_core::types::Value as TgValue;
+
+    // -----------------------------------------------------------------------
+    // OrDeltaCheckpointPolicy — the delta-fold depth bound (types-only seam)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn full_snapshot_only_snapshots_every_op() {
+        // The K=1 fallback must snapshot on the FIRST delta of every window
+        // (delta_index is 1-indexed), so recovery never folds a delta. A 0-indexed
+        // read of should_checkpoint would silently fold the first op instead.
+        let p = OrDeltaCheckpointPolicy::full_snapshot_only();
+        assert!(p.should_checkpoint(1, 0));
+        assert!(p.should_checkpoint(1, u64::MAX));
+    }
+
+    #[test]
+    fn should_checkpoint_honors_k_and_b_independently() {
+        let p = OrDeltaCheckpointPolicy {
+            snapshot_every_ops: 4,
+            snapshot_every_bytes: 1000,
+        };
+        // Below both thresholds → fold as a delta.
+        assert!(!p.should_checkpoint(1, 0));
+        assert!(!p.should_checkpoint(3, 999));
+        // K trips at the K-th delta.
+        assert!(p.should_checkpoint(4, 0));
+        // B trips independently of op count.
+        assert!(p.should_checkpoint(1, 1000));
+
+        // snapshot_every_bytes == 0 disables the byte trigger entirely.
+        let no_b = OrDeltaCheckpointPolicy {
+            snapshot_every_ops: 4,
+            snapshot_every_bytes: 0,
+        };
+        assert!(!no_b.should_checkpoint(1, u64::MAX));
+        assert!(no_b.should_checkpoint(4, 0));
+    }
 
     // -----------------------------------------------------------------------
     // Helper types for behavioral tests

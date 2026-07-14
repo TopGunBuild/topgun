@@ -1200,10 +1200,18 @@ fn read_or_map_state(value: Option<RecordValue>) -> (Vec<OrMapEntry>, Vec<String
 /// [`crate::storage::wal::OrDeltaFold`]): the differential recovery test folds
 /// a random OR op sequence through BOTH the delta path and the full-snapshot path
 /// and asserts their views are equal under this type.
-// `Value` is only `PartialEq` (it can hold a float), so the view is `PartialEq`
-// too; the equivalence test compares views with `assert_eq!`, which needs only
-// `PartialEq`.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Values are canonicalized to their `{:?}` debug string rather than kept as
+/// `Value`, so equality on the view is a **total, reflexive** relation. A raw
+/// `Value` is only `PartialEq`, and a float `NaN` is not equal to itself — a view
+/// holding a `NaN`-valued entry would then compare unequal to its own recovery,
+/// producing a false-positive "data loss" signal in the differential test.
+/// Debug-string canonicalization removes that hole (`NaN` maps to the same
+/// string as itself). This relies on `Value::Debug` being injective across live
+/// variants (distinct values → distinct strings), which holds for the current
+/// `Value` enum; if a future variant summarizes or truncates in `Debug`, the
+/// oracle must switch to a dedicated canonical key on `Value` instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(
     dead_code,
     reason = "recovery-equivalence oracle for the delta-fold seam; the differential \
@@ -1211,11 +1219,13 @@ fn read_or_map_state(value: Option<RecordValue>) -> (Vec<OrMapEntry>, Vec<String
               interface, not yet wired to a recovery path"
 )]
 pub(crate) struct OrMapSemanticView {
-    /// Live entries as `(tag, value)` pairs, sorted by tag then value-debug for a
-    /// canonical, order-independent comparison. The HLC timestamp is excluded: a
-    /// tag is unique per add, so `(tag, value)` already identifies a survivor, and
-    /// the fold must reproduce the same survivors regardless of insertion order.
-    pub live: Vec<(String, Value)>,
+    /// Live entries as `(tag, canonical-value-string)` pairs, sorted, for a
+    /// canonical, order-independent comparison. The value is its `{:?}` string so
+    /// the relation stays reflexive under float `NaN` (see the type doc). The HLC
+    /// timestamp is excluded: a tag is unique per add, so `(tag, value)` already
+    /// identifies a survivor, and the fold must reproduce the same survivors
+    /// regardless of insertion order.
+    pub live: Vec<(String, String)>,
     /// Observed-remove tombstone tags, sorted.
     pub tombstones: Vec<String>,
 }
@@ -1254,11 +1264,11 @@ pub(crate) struct OrMapSemanticView {
 )]
 pub(crate) fn or_map_semantic_view(value: Option<RecordValue>) -> OrMapSemanticView {
     let (records, mut tombstones) = read_or_map_state(value);
-    let mut live: Vec<(String, Value)> = records.into_iter().map(|e| (e.tag, e.value)).collect();
-    live.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| format!("{:?}", a.1).cmp(&format!("{:?}", b.1)))
-    });
+    let mut live: Vec<(String, String)> = records
+        .into_iter()
+        .map(|e| (e.tag, format!("{:?}", e.value)))
+        .collect();
+    live.sort();
     tombstones.sort();
     OrMapSemanticView { live, tombstones }
 }
@@ -1416,6 +1426,67 @@ mod tests {
             counter: 1,
             node_id: "test-node".to_string(),
         }
+    }
+
+    #[test]
+    fn or_map_semantic_view_order_independent_and_reflexive_under_nan() {
+        let ts = make_timestamp();
+        let entry = |tag: &str, v: Value| OrMapEntry {
+            value: v,
+            tag: tag.to_string(),
+            timestamp: ts.clone(),
+        };
+
+        // Same live set + tombstone set, opposite Vec order → equal views. This is
+        // the order-independence the delta-fold path relies on (the resident slot
+        // is in operation-insertion order, never canonically sorted).
+        let a = RecordValue::OrMap {
+            records: vec![
+                entry("t1", Value::Int(1)),
+                entry("t2", Value::String("x".into())),
+            ],
+            tombstones: vec!["z".to_string(), "a".to_string()],
+        };
+        let b = RecordValue::OrMap {
+            records: vec![
+                entry("t2", Value::String("x".into())),
+                entry("t1", Value::Int(1)),
+            ],
+            tombstones: vec!["a".to_string(), "z".to_string()],
+        };
+        assert_eq!(
+            or_map_semantic_view(Some(a)),
+            or_map_semantic_view(Some(b)),
+            "order-differing but set-equal OR-Map slots must compare equal"
+        );
+
+        // A NaN-valued slot must equal ITSELF: a derived PartialEq that delegated
+        // to Value would break reflexivity (NaN != NaN) and report a slot as
+        // unequal to its own recovery. Debug-string canonicalization fixes it.
+        let nan = RecordValue::OrMap {
+            records: vec![entry("t1", Value::Float(f64::NAN))],
+            tombstones: vec![],
+        };
+        assert_eq!(
+            or_map_semantic_view(Some(nan.clone())),
+            or_map_semantic_view(Some(nan)),
+            "the equivalence oracle must be reflexive even for NaN float values"
+        );
+
+        // A genuine live-value difference must still be detected (non-vacuous).
+        let c = RecordValue::OrMap {
+            records: vec![entry("t1", Value::Int(1))],
+            tombstones: vec![],
+        };
+        let d = RecordValue::OrMap {
+            records: vec![entry("t1", Value::Int(2))],
+            tombstones: vec![],
+        };
+        assert_ne!(
+            or_map_semantic_view(Some(c)),
+            or_map_semantic_view(Some(d)),
+            "distinct survivor values must produce distinct views"
+        );
     }
 
     fn make_ctx() -> OperationContext {
