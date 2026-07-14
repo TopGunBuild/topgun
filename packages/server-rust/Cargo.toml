@@ -15,9 +15,14 @@ redb = ["dep:redb"]
 simulation = ["dep:madsim"]
 datafusion = ["dep:datafusion", "dep:arrow"]
 swagger = ["dep:utoipa-swagger-ui"]
+# Heap-profiling instrument (off by default): installs a dhat global allocator and
+# writes a heap profile on clean exit. Used to attribute in-process memory holders
+# during soak investigation; never enabled in production builds.
+dhat-heap = ["dep:dhat"]
 
 [dependencies]
 topgun-core = { path = "../core-rust", features = ["arrow"] }
+dhat = { version = "0.3", optional = true }
 async-trait = "0.1"
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }

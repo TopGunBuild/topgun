@@ -289,8 +289,44 @@ impl ServerSupervisor {
     }
 
     /// Final teardown: SIGKILL without restart.
+    ///
+    /// When `TOPGUN_SOAK_GRACEFUL_SHUTDOWN=1`, send SIGTERM instead and give the
+    /// child up to 90s to exit cleanly (SIGKILL fallback). Graceful teardown lets
+    /// the server's `main` return normally so an end-of-run heap profiler (dhat)
+    /// can flush; the default SIGKILL path is unaffected for crash-recovery runs.
     pub async fn shutdown(&self) {
-        self.kill9().await;
+        if std::env::var("TOPGUN_SOAK_GRACEFUL_SHUTDOWN").as_deref() == Ok("1") {
+            self.graceful_shutdown().await;
+        } else {
+            self.kill9().await;
+        }
+    }
+
+    /// SIGTERM the child and wait (bounded) for a clean exit, falling back to
+    /// SIGKILL if it overruns. Marks the kill intentional so the exit watcher
+    /// stays quiet, mirroring `kill9`.
+    async fn graceful_shutdown(&self) {
+        self.intentional_kill.store(true, Ordering::SeqCst);
+        let pid = self.current_pid();
+        let child = self.child.lock().take();
+        if let Some(mut child) = child {
+            if let Some(pid) = pid {
+                // tokio's Child only exposes SIGKILL via start_kill; shell out to
+                // deliver the catchable SIGTERM the server drains on.
+                let _ = Command::new("kill")
+                    .arg("-TERM")
+                    .arg(pid.to_string())
+                    .status()
+                    .await;
+            }
+            match tokio::time::timeout(Duration::from_secs(90), child.wait()).await {
+                Ok(_) => {}
+                Err(_) => {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                }
+            }
+        }
     }
 
     /// Spawn a task that reaps the current child and, if it died without an

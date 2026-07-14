@@ -448,9 +448,26 @@ impl ClusterService for ClusterStateAdapter {
 // Entry point
 // ---------------------------------------------------------------------------
 
+// Heap-profiling allocator, compiled in only under the `dhat-heap` feature. The
+// profile is written when the `Profiler` guard in `main` is dropped, which only
+// happens on a clean return — so a profiled run must be stopped with SIGTERM
+// (graceful shutdown), never SIGKILL.
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
+    // Hold the dhat heap profiler for the whole process lifetime; dropping it on
+    // a clean `main` return flushes the profile to `DHAT_OUT` (default
+    // `dhat-heap.json`). No-op unless built with `--features dhat-heap`.
+    #[cfg(feature = "dhat-heap")]
+    let _dhat_profiler = {
+        let out = std::env::var("DHAT_OUT").unwrap_or_else(|_| "dhat-heap.json".to_string());
+        dhat::Profiler::builder().file_name(out).build()
+    };
+
     // Initialize tracing AND install the global Prometheus recorder in one call.
     // Without this the `/metrics` endpoint renders an empty body (no recorder is
     // installed), so counters like `topgun_ormap_tombstone_bytes_total` are
