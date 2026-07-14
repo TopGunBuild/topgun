@@ -233,6 +233,77 @@ impl RecordStore for DefaultRecordStore {
         Ok(old_record.map(|r| r.value))
     }
 
+    async fn update_in_place(
+        &self,
+        key: &str,
+        init: Option<RecordValue>,
+        expiry: ExpiryPolicy,
+        provenance: CallerProvenance,
+        mutate: &mut (dyn for<'a> FnMut(&'a mut RecordValue) -> bool + Send),
+    ) -> anyhow::Result<bool> {
+        use crate::storage::engine::UpdateInPlaceOutcome;
+
+        let now = now_millis();
+        // Cost estimate mirrors put(): value bytes + the key string's heap
+        // contribution. For the OrMap arm this is now a cheap structural
+        // estimate (no per-op full serialize).
+        let cost_of =
+            |value: &RecordValue| crate::storage::record::estimated_cost(value) + key.len() as u64;
+
+        // Re-borrow the `&mut (dyn FnMut + Send)` as the plain `&mut dyn FnMut`
+        // the engine seam expects. The wrapper is only ever called synchronously
+        // inside update_in_place (before any await), so it needs no Send bound.
+        let mut engine_mutate = |value: &mut RecordValue| mutate(value);
+        let outcome =
+            self.engine
+                .update_in_place(key, now, init, &mut engine_mutate, &cost_of);
+
+        let (record, inserted) = match outcome {
+            UpdateInPlaceOutcome::Absent | UpdateInPlaceOutcome::Unchanged => return Ok(false),
+            UpdateInPlaceOutcome::Written { record, inserted } => (record, inserted),
+        };
+
+        // Capture the token off the record just written, before any concurrent
+        // writer can replace the slot — the exact-identity key for mark_stored.
+        let write_token = record.metadata.write_token;
+
+        // Fire observer notifications matching put(): on_put for a fresh insert,
+        // on_update for an existing record. The OR observers never read the
+        // pre-image (the index observer skips OrMap; search/embedding handle only
+        // Lww; merkle/query use the new value), so the new value is passed as the
+        // old value rather than re-cloning the resident slot this seam exists to
+        // stop churning.
+        if inserted {
+            self.observer.on_put(key, &record, None, false);
+        } else {
+            self.observer
+                .on_update(key, &record, &record.value, &record.value, false);
+        }
+
+        // Write-through for Client or CrdtMerge provenance — byte-identical to
+        // put()'s full-snapshot durable write, so crash recovery is unchanged.
+        if matches!(
+            provenance,
+            CallerProvenance::Client | CallerProvenance::CrdtMerge
+        ) {
+            let expiration_time = self.compute_expiration_time(&expiry, now);
+            self.data_store
+                .add(&self.name, key, &record.value, expiration_time, now)
+                .await?;
+
+            // Mark clean in place under the engine's per-key lock only when the
+            // resident record is still the exact write we persisted (token match).
+            if !self.data_store.is_null() && !self.engine.mark_stored(key, now, write_token) {
+                tracing::trace!(
+                    key,
+                    "mark_stored found no eligible record after in-place persist (evicted or superseded)"
+                );
+            }
+        }
+
+        Ok(true)
+    }
+
     async fn remove(
         &self,
         key: &str,
