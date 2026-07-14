@@ -4,7 +4,7 @@
 //! Hazelcast's `Storage<K,R>`). Implementations provide in-memory key-value
 //! storage with cursor-based iteration support.
 
-use super::record::Record;
+use super::record::{Record, RecordValue};
 
 /// Opaque cursor for resumable iteration over storage entries.
 ///
@@ -38,6 +38,36 @@ pub struct FetchResult<T> {
     pub items: Vec<T>,
     /// Updated cursor for the next fetch call.
     pub next_cursor: IterationCursor,
+}
+
+/// Outcome of an in-place record mutation via [`StorageEngine::update_in_place`].
+///
+/// Distinguishes the three terminal states so the caller (a
+/// [`RecordStore`](super::RecordStore)) can fire the correct observer
+/// notification and decide whether a durable write-through is owed, WITHOUT a
+/// full get→clone→put round trip.
+pub enum UpdateInPlaceOutcome {
+    /// The key was absent and no `init` value was supplied, so nothing was
+    /// mutated. No observer notification and no write-through are owed.
+    Absent,
+    /// The mutation closure ran but reported no durable change was needed
+    /// (returned `false`), so the resident metadata was left untouched. No
+    /// observer notification and no write-through are owed. Used by the prune
+    /// sweep when the target tag was already gone from the tombstone set.
+    Unchanged,
+    /// The record was created or updated in place. `record` is a clone of the
+    /// mutated resident record (for the caller's post-lock observer fan-out and
+    /// async write-through); `inserted` is `true` when the key was absent and a
+    /// fresh record was created (fire `on_put`), `false` when an existing
+    /// resident record was mutated (fire `on_update`).
+    Written {
+        /// Clone of the mutated resident record — the single owned copy the
+        /// caller hands to the async write-through and observer fan-out.
+        record: Record,
+        /// `true` if a fresh record was inserted (key was absent), `false` if
+        /// an existing resident record was mutated in place.
+        inserted: bool,
+    },
 }
 
 /// Low-level typed key-value storage with cursor-based iteration.
@@ -79,6 +109,34 @@ pub trait StorageEngine: Send + Sync + 'static {
     /// the key is absent or the resident record is a different write (token
     /// mismatch — a newer write owns the slot).
     fn mark_stored(&self, key: &str, now: i64, token: u64) -> bool;
+
+    /// Mutate a resident record's value in place under the engine's per-key
+    /// write lock, avoiding the full get→clone→put round trip.
+    ///
+    /// `mutate` runs synchronously while the shard write lock is held, receiving
+    /// `&mut RecordValue` for the resident slot, and returns `true` if it made a
+    /// change that must be persisted (a durable write is owed) or `false` if the
+    /// call is a no-op. The closure MUST return `true` whenever it altered the
+    /// value — returning `false` after a change would leave a resident mutation
+    /// that never reaches the durable backend (data loss on eviction).
+    ///
+    /// On a `true` return the engine stamps `on_update(now)` (bumping version and
+    /// minting a fresh per-write token) and recomputes `metadata.cost` via
+    /// `cost_of` over the mutated value, all under the same lock, then returns a
+    /// clone of the mutated record in [`UpdateInPlaceOutcome::Written`].
+    ///
+    /// If the key is absent: when `init` is `Some`, the value is created from it,
+    /// `mutate` is applied, and (on a `true` return) the fresh record is inserted
+    /// with metadata minted via `RecordMetadata::new`; when `init` is `None`, the
+    /// call is a no-op returning [`UpdateInPlaceOutcome::Absent`].
+    fn update_in_place(
+        &self,
+        key: &str,
+        now: i64,
+        init: Option<RecordValue>,
+        mutate: &mut dyn FnMut(&mut RecordValue) -> bool,
+        cost_of: &dyn Fn(&RecordValue) -> u64,
+    ) -> UpdateInPlaceOutcome;
 
     /// Remove a record by key, returning the removed record.
     fn remove(&self, key: &str) -> Option<Record>;

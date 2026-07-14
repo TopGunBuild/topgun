@@ -4,11 +4,12 @@
 //! Suitable for development, testing, and production workloads where
 //! all data fits in memory.
 
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use rand::Rng;
 
-use crate::storage::engine::{FetchResult, IterationCursor, StorageEngine};
-use crate::storage::record::Record;
+use crate::storage::engine::{FetchResult, IterationCursor, StorageEngine, UpdateInPlaceOutcome};
+use crate::storage::record::{Record, RecordMetadata, RecordValue};
 
 /// In-memory storage backed by [`DashMap`] for concurrent read access.
 ///
@@ -77,6 +78,56 @@ impl StorageEngine for HashMapStorage {
             }
         }
         false
+    }
+
+    fn update_in_place(
+        &self,
+        key: &str,
+        now: i64,
+        init: Option<RecordValue>,
+        mutate: &mut dyn FnMut(&mut RecordValue) -> bool,
+        cost_of: &dyn Fn(&RecordValue) -> u64,
+    ) -> UpdateInPlaceOutcome {
+        // `entry` holds the shard write lock across the match, so the
+        // check-mutate-or-insert is atomic against any other engine op on this
+        // key — there is no get()+put() window a concurrent writer could tear.
+        // The one owned-key allocation on the occupied path (bytes) is trivial
+        // next to the per-op resident-snapshot churn this seam exists to remove.
+        match self.entries.entry(key.to_string()) {
+            Entry::Occupied(mut occ) => {
+                let record = occ.get_mut();
+                if !mutate(&mut record.value) {
+                    return UpdateInPlaceOutcome::Unchanged;
+                }
+                // Mint a fresh write token and bump version/last_update in place,
+                // then re-cost from the mutated value — no full-snapshot rebuild.
+                record.metadata.on_update(now);
+                record.metadata.cost = cost_of(&record.value);
+                UpdateInPlaceOutcome::Written {
+                    record: record.clone(),
+                    inserted: false,
+                }
+            }
+            Entry::Vacant(vac) => {
+                let Some(mut value) = init else {
+                    return UpdateInPlaceOutcome::Absent;
+                };
+                if !mutate(&mut value) {
+                    return UpdateInPlaceOutcome::Absent;
+                }
+                let cost = cost_of(&value);
+                let record = Record {
+                    value,
+                    metadata: RecordMetadata::new(now, cost),
+                };
+                let clone = record.clone();
+                vac.insert(record);
+                UpdateInPlaceOutcome::Written {
+                    record: clone,
+                    inserted: true,
+                }
+            }
+        }
     }
 
     fn remove(&self, key: &str) -> Option<Record> {
