@@ -42,6 +42,18 @@ pub const FRAME_MAGIC: u32 = 0x54_47_57_4C;
 /// Bumped whenever the frame layout changes in a backward-incompatible way so
 /// recovery can refuse to read frames written by a newer binary rather than
 /// silently mis-interpreting them as corruption.
+///
+/// Version-discipline note for the planned OR-delta frame (see
+/// [`crate::storage::wal::OrDelta`]): appending a per-op OR mutation instead of a
+/// full snapshot is carried as a new `WalOp` payload inside the same frame
+/// envelope, which is an additive MsgPack-named change — it does NOT alter the
+/// header layout. A legacy binary that meets a delta frame fails `WalEntry`
+/// deserialization, which `decode_all` reports as `Corruption` (a fail-closed
+/// refusal to start, never a silent mis-read), so mixed old/new recovery is
+/// already safe WITHOUT a version bump. Bumping this byte when the delta frame
+/// lands is therefore an explicit-signal choice rather than a safety requirement;
+/// either way the CRC32C + length-bound + exhaustive-`FrameDecodeResult` envelope
+/// below is preserved.
 pub const FRAME_VERSION: u8 = 1;
 
 /// Total header bytes: 4 (magic) + 1 (version) + 4 (length) + 4 (crc32c).

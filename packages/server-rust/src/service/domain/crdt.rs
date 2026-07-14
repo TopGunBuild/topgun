@@ -1192,6 +1192,87 @@ fn read_or_map_state(value: Option<RecordValue>) -> (Vec<OrMapEntry>, Vec<String
     }
 }
 
+/// Order-independent semantic view of an OR-Map slot: the live `(tag, value)`
+/// set and the tombstone set, each canonicalized by sorting, so two slots that
+/// hold the same CRDT state but in a different `Vec` order compare equal.
+///
+/// This is the equivalence oracle for the planned delta-fold recovery path (see
+/// [`crate::storage::wal::OrDeltaFold`]): the differential recovery test folds
+/// a random OR op sequence through BOTH the delta path and the full-snapshot path
+/// and asserts their views are equal under this type.
+///
+/// Values are canonicalized to their `{:?}` debug string rather than kept as
+/// `Value`, so equality on the view is a **total, reflexive** relation. A raw
+/// `Value` is only `PartialEq`, and a float `NaN` is not equal to itself — a view
+/// holding a `NaN`-valued entry would then compare unequal to its own recovery,
+/// producing a false-positive "data loss" signal in the differential test.
+/// Debug-string canonicalization removes that hole (`NaN` maps to the same
+/// string as itself). This relies on `Value::Debug` being injective across live
+/// variants (distinct values → distinct strings), which holds for the current
+/// `Value` enum; if a future variant summarizes or truncates in `Debug`, the
+/// oracle must switch to a dedicated canonical key on `Value` instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "recovery-equivalence oracle for the delta-fold seam; the differential \
+              recovery test is the first consumer — defined here as the \
+              interface, not yet wired to a recovery path"
+)]
+pub(crate) struct OrMapSemanticView {
+    /// Live entries as `(tag, canonical-value-string)` pairs, sorted, for a
+    /// canonical, order-independent comparison. The value is its `{:?}` string so
+    /// the relation stays reflexive under float `NaN` (see the type doc). The HLC
+    /// timestamp is excluded: a tag is unique per add, so `(tag, value)` already
+    /// identifies a survivor, and the fold must reproduce the same survivors
+    /// regardless of insertion order.
+    pub live: Vec<(String, String)>,
+    /// Observed-remove tombstone tags, sorted.
+    pub tombstones: Vec<String>,
+}
+
+/// Extract the [`OrMapSemanticView`] equivalence key from any OR-carrying
+/// `RecordValue`.
+///
+/// ## Recovery-equivalence invariant decision: SEMANTIC-SET (not byte-for-byte)
+///
+/// The resident `RecordValue::OrMap` is NOT canonically ordered. Evidence from
+/// the OR write path in this file:
+///
+/// - `OR_ADD` builds `records` with `records.retain(|e| e.tag != new_entry.tag)`
+///   then `records.push(new_entry)` — the vector is in **operation-insertion
+///   order**, never sorted.
+/// - `OR_REMOVE` appends with `tombstones.push(tag.clone())` — also insertion order.
+/// - The prune path (`prune_epoch_tombstones`) `retain`s in place, preserving
+///   whatever order was there.
+/// - `storage/record.rs` declares `records: Vec<OrMapEntry>` / `tombstones:
+///   Vec<String>` with no ordering invariant, and OR-Map cross-node convergence
+///   is set-based (add-wins / remove-wins), so no canonical byte ordering is
+///   required or guaranteed anywhere.
+///
+/// A delta-fold could therefore reconstruct a semantically-identical slot whose
+/// `Vec` order differs from the full-snapshot slot, so **byte-for-byte equality
+/// would be a false-positive "data loss" signal** and is rejected as the
+/// invariant. The testable invariant the differential test asserts is
+/// semantic-set equivalence: same live `(tag, value)` set, same tombstone set
+/// (and, for a prune, the same pruned-tag set — observable as the removed
+/// tombstones). Byte-for-byte would only be defensible if a canonical ordering
+/// were imposed on the resident representation, which today it is not.
+#[allow(
+    dead_code,
+    reason = "equivalence oracle for the delta-fold seam; first consumed by the \
+              differential recovery test — the interface is defined here only"
+)]
+pub(crate) fn or_map_semantic_view(value: Option<RecordValue>) -> OrMapSemanticView {
+    let (records, mut tombstones) = read_or_map_state(value);
+    let mut live: Vec<(String, String)> = records
+        .into_iter()
+        .map(|e| (e.tag, format!("{:?}", e.value)))
+        .collect();
+    live.sort();
+    tombstones.sort();
+    OrMapSemanticView { live, tombstones }
+}
+
 /// Run the wholesale epoch-drop prune over the storage backing `factory`.
 ///
 /// Drains every currently prune-eligible epoch's tombstone refs out of the
@@ -1345,6 +1426,67 @@ mod tests {
             counter: 1,
             node_id: "test-node".to_string(),
         }
+    }
+
+    #[test]
+    fn or_map_semantic_view_order_independent_and_reflexive_under_nan() {
+        let ts = make_timestamp();
+        let entry = |tag: &str, v: Value| OrMapEntry {
+            value: v,
+            tag: tag.to_string(),
+            timestamp: ts.clone(),
+        };
+
+        // Same live set + tombstone set, opposite Vec order → equal views. This is
+        // the order-independence the delta-fold path relies on (the resident slot
+        // is in operation-insertion order, never canonically sorted).
+        let a = RecordValue::OrMap {
+            records: vec![
+                entry("t1", Value::Int(1)),
+                entry("t2", Value::String("x".into())),
+            ],
+            tombstones: vec!["z".to_string(), "a".to_string()],
+        };
+        let b = RecordValue::OrMap {
+            records: vec![
+                entry("t2", Value::String("x".into())),
+                entry("t1", Value::Int(1)),
+            ],
+            tombstones: vec!["a".to_string(), "z".to_string()],
+        };
+        assert_eq!(
+            or_map_semantic_view(Some(a)),
+            or_map_semantic_view(Some(b)),
+            "order-differing but set-equal OR-Map slots must compare equal"
+        );
+
+        // A NaN-valued slot must equal ITSELF: a derived PartialEq that delegated
+        // to Value would break reflexivity (NaN != NaN) and report a slot as
+        // unequal to its own recovery. Debug-string canonicalization fixes it.
+        let nan = RecordValue::OrMap {
+            records: vec![entry("t1", Value::Float(f64::NAN))],
+            tombstones: vec![],
+        };
+        assert_eq!(
+            or_map_semantic_view(Some(nan.clone())),
+            or_map_semantic_view(Some(nan)),
+            "the equivalence oracle must be reflexive even for NaN float values"
+        );
+
+        // A genuine live-value difference must still be detected (non-vacuous).
+        let c = RecordValue::OrMap {
+            records: vec![entry("t1", Value::Int(1))],
+            tombstones: vec![],
+        };
+        let d = RecordValue::OrMap {
+            records: vec![entry("t1", Value::Int(2))],
+            tombstones: vec![],
+        };
+        assert_ne!(
+            or_map_semantic_view(Some(c)),
+            or_map_semantic_view(Some(d)),
+            "distinct survivor values must produce distinct views"
+        );
     }
 
     fn make_ctx() -> OperationContext {
