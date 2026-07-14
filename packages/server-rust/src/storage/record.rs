@@ -349,7 +349,7 @@ pub const COST_ESTIMATE_FALLBACK: u64 = 4096;
 
 /// Per-`OrMapEntry` structural framing constant (bytes).
 ///
-/// Approximates the fixed MsgPack overhead of one `OrMapEntry` map — the map
+/// Approximates the fixed `MsgPack` overhead of one `OrMapEntry` map — the map
 /// header plus the `value`/`tag`/`timestamp` field-name strings and the nested
 /// `Timestamp` map's `millis`/`counter`/`nodeId` keys, headers, and fixed-width
 /// numeric fields — everything except the variable `value`, `tag`, and
@@ -358,11 +358,11 @@ pub const COST_ESTIMATE_FALLBACK: u64 = 4096;
 /// `rmp_serde::to_vec_named` size for representative OR entries.
 const OR_ENTRY_FRAMING_BYTES: u64 = 61;
 
-/// Fixed MsgPack framing (bytes) for the outer `OrMap` map itself (the map
+/// Fixed `MsgPack` framing (bytes) for the outer `OrMap` map itself (the map
 /// header + `records`/`tombstones` field names + array headers).
 const OR_MAP_FRAMING_BYTES: u64 = 12;
 
-/// Structural byte-size estimate of a [`Value`], approximating its MsgPack
+/// Structural byte-size estimate of a [`Value`], approximating its `MsgPack`
 /// encoding without serializing.
 ///
 /// `Value` is an externally-tagged enum, so each variant carries a small

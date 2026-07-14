@@ -241,7 +241,13 @@ mod tests {
             Ok(())
         }
 
-        async fn flush_key(&self, _: &str, _: &str, _: &RecordValue, _: bool) -> anyhow::Result<()> {
+        async fn flush_key(
+            &self,
+            _: &str,
+            _: &str,
+            _: &RecordValue,
+            _: bool,
+        ) -> anyhow::Result<()> {
             Ok(())
         }
 
@@ -495,7 +501,7 @@ mod tests {
 
     /// Sum of every resident tombstone tag's UTF-8 byte length — the same
     /// `tag.len()` accounting `reconcile_tombstone_bytes` recomputes at boot.
-    fn resident_tombstone_bytes(value: &Option<RecordValue>) -> u64 {
+    fn resident_tombstone_bytes(value: Option<&RecordValue>) -> u64 {
         match value {
             Some(RecordValue::OrMap { tombstones, .. }) => {
                 tombstones.iter().map(|t| t.len() as u64).sum()
@@ -617,8 +623,8 @@ mod tests {
                     tag: "t0".into(),
                     val: 3,
                 }, // remove-wins: suppressed, tombstone stays
-                OrOp::Prune { tag: "t2".into() }, // drop one tombstone
-                OrOp::Prune { tag: "t9".into() }, // no-op prune (absent tag)
+                OrOp::Prune { tag: "t2".into() },  // drop one tombstone
+                OrOp::Prune { tag: "t9".into() },  // no-op prune (absent tag)
             ];
 
             let baseline = tombstone_bytes();
@@ -628,7 +634,7 @@ mod tests {
             let net_delta = tombstone_bytes().saturating_sub(baseline);
 
             let resident = h.store.get(KEY, false).await.unwrap().map(|r| r.value);
-            let recomputed = resident_tombstone_bytes(&resident);
+            let recomputed = resident_tombstone_bytes(resident.as_ref());
 
             assert_eq!(
                 net_delta, recomputed,
@@ -642,11 +648,12 @@ mod tests {
     // AC6 (Rec 3): cheap OrMap estimated_cost stays close to the true size
     // -----------------------------------------------------------------------
 
-    /// The structural OrMap-arm cost estimate feeds the `TOPGUN_MAX_RAM_MB`
+    /// The structural `OrMap`-arm cost estimate feeds the `TOPGUN_MAX_RAM_MB`
     /// eviction water-mark, so it must not materially diverge from the true
     /// `rmp_serde` serialized size. Assert it stays within 1.5× in both
-    /// directions for representative OrMap slots.
+    /// directions for representative `OrMap` slots.
     #[test]
+    #[allow(clippy::cast_precision_loss)]
     fn estimated_cost_ormap_fidelity_within_1_5x() {
         let slots = [
             build_slot(1, 0),
@@ -668,6 +675,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::cast_possible_wrap)]
     fn build_slot(records: usize, tombstones: usize) -> RecordValue {
         RecordValue::OrMap {
             records: (0..records)

@@ -319,12 +319,12 @@ impl ServerSupervisor {
                     .status()
                     .await;
             }
-            match tokio::time::timeout(Duration::from_secs(90), child.wait()).await {
-                Ok(_) => {}
-                Err(_) => {
-                    let _ = child.start_kill();
-                    let _ = child.wait().await;
-                }
+            if tokio::time::timeout(Duration::from_secs(90), child.wait())
+                .await
+                .is_err()
+            {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
             }
         }
     }

@@ -18,9 +18,7 @@ mod tests {
     /// Live entry tags in an OR-Map value.
     fn live_tags(value: &RecordValue) -> Vec<String> {
         match value {
-            RecordValue::OrMap { records, .. } => {
-                records.iter().map(|e| e.tag.clone()).collect()
-            }
+            RecordValue::OrMap { records, .. } => records.iter().map(|e| e.tag.clone()).collect(),
             _ => Vec::new(),
         }
     }
@@ -30,7 +28,7 @@ mod tests {
         match value {
             RecordValue::OrMap { tombstones, .. } => tombstones.clone(),
             RecordValue::OrTombstones { tags } => tags.clone(),
-            _ => Vec::new(),
+            RecordValue::Lww { .. } => Vec::new(),
         }
     }
 
