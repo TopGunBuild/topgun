@@ -120,6 +120,11 @@ pub trait StorageEngine: Send + Sync + 'static {
     /// value — returning `false` after a change would leave a resident mutation
     /// that never reaches the durable backend (data loss on eviction).
     ///
+    /// Implementations MUST invoke `mutate` **at most once** per call. Callers may
+    /// rely on single invocation (e.g. the `OR_ADD` merge closure moves its entry in
+    /// via `Option::take` and would panic on a second call); an engine that retries
+    /// the closure would break that contract.
+    ///
     /// On a `true` return the engine stamps `on_update(now)` (bumping version and
     /// minting a fresh per-write token) and recomputes `metadata.cost` via
     /// `cost_of` over the mutated value, all under the same lock, then returns a

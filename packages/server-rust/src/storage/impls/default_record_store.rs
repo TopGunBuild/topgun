@@ -273,6 +273,12 @@ impl RecordStore for DefaultRecordStore {
         // Lww; merkle/query use the new value), so the new value is passed as the
         // old value rather than re-cloning the resident slot this seam exists to
         // stop churning.
+        //
+        // CONTRACT: any observer added later that reads `old_value` for an OrMap
+        // record would receive the post-image here, not the true pre-image. That
+        // is only safe because this seam is OrMap-only; if a future observer needs
+        // the OrMap pre-image, capture a pre-mutation clone in the engine's
+        // Occupied arm and thread it through instead of reusing the new value.
         if inserted {
             self.observer.on_put(key, &record, None, false);
         } else {

@@ -118,7 +118,8 @@ pub trait RecordStore: Send + Sync {
     /// `mutate` runs synchronously under the engine's per-key write lock and
     /// returns `true` if it made a change that must be persisted, or `false`
     /// for a no-op (e.g. a prune whose target tag was already gone). It MUST
-    /// return `true` whenever it altered the value.
+    /// return `true` whenever it altered the value, and is invoked **at most
+    /// once** per call — callers may rely on single invocation.
     ///
     /// If the key is absent: when `init` is `Some`, a fresh record is created
     /// from it, `mutate` is applied, and (on a `true` return) `on_put` fires;
