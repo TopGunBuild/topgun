@@ -254,9 +254,9 @@ impl RecordStore for DefaultRecordStore {
         // the engine seam expects. The wrapper is only ever called synchronously
         // inside update_in_place (before any await), so it needs no Send bound.
         let mut engine_mutate = |value: &mut RecordValue| mutate(value);
-        let outcome =
-            self.engine
-                .update_in_place(key, now, init, &mut engine_mutate, &cost_of);
+        let outcome = self
+            .engine
+            .update_in_place(key, now, init, &mut engine_mutate, &cost_of);
 
         let (record, inserted) = match outcome {
             UpdateInPlaceOutcome::Absent | UpdateInPlaceOutcome::Unchanged => return Ok(false),
