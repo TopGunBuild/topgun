@@ -347,21 +347,84 @@ impl RecordMetadata {
 /// is the `tracing::warn!` emitted alongside it.
 pub const COST_ESTIMATE_FALLBACK: u64 = 4096;
 
+/// Per-`OrMapEntry` structural framing constant (bytes).
+///
+/// Approximates the fixed `MsgPack` overhead of one `OrMapEntry` map — the map
+/// header plus the `value`/`tag`/`timestamp` field-name strings and the nested
+/// `Timestamp` map's `millis`/`counter`/`nodeId` keys, headers, and fixed-width
+/// numeric fields — everything except the variable `value`, `tag`, and
+/// `node_id` byte lengths, which are added separately. Chosen so the cheap
+/// structural estimate lands close to (within ~1.5× of) the true
+/// `rmp_serde::to_vec_named` size for representative OR entries.
+const OR_ENTRY_FRAMING_BYTES: u64 = 61;
+
+/// Fixed `MsgPack` framing (bytes) for the outer `OrMap` map itself (the map
+/// header + `records`/`tombstones` field names + array headers).
+const OR_MAP_FRAMING_BYTES: u64 = 12;
+
+/// Structural byte-size estimate of a [`Value`], approximating its `MsgPack`
+/// encoding without serializing.
+///
+/// `Value` is an externally-tagged enum, so each variant carries a small
+/// map/variant-name framing overhead in addition to its payload bytes; the
+/// per-variant constants below fold that in. This is a monitoring/eviction size
+/// signal, not an exact wire measurement.
+fn value_byte_estimate(value: &Value) -> u64 {
+    match value {
+        Value::Null => 5,
+        Value::Bool(_) => 7,
+        Value::Int(_) => 14,
+        Value::Float(_) => 16,
+        Value::String(s) => 10 + s.len() as u64,
+        Value::Bytes(b) => 9 + b.len() as u64,
+        Value::Array(items) => 8 + items.iter().map(value_byte_estimate).sum::<u64>(),
+        Value::Map(entries) => {
+            6 + entries
+                .iter()
+                .map(|(k, v)| k.len() as u64 + 3 + value_byte_estimate(v))
+                .sum::<u64>()
+        }
+    }
+}
+
+/// Cheap structural byte-size estimate of an `OrMap` slot — the sum of each
+/// record's value/tag/timestamp byte lengths plus fixed framing, and each
+/// tombstone tag's UTF-8 byte length — WITHOUT serializing the whole snapshot.
+///
+/// This reuses the same `tag.len()` accounting the SPEC-345 tombstone gauge
+/// uses. It replaces the former per-put `rmp_serde::to_vec_named` of the entire
+/// (often ~130 KB) OR snapshot, which was a dominant source of per-op allocator
+/// churn on the OR write path.
+fn or_map_estimated_cost(records: &[OrMapEntry], tombstones: &[String]) -> u64 {
+    let records_bytes: u64 = records
+        .iter()
+        .map(|e| {
+            OR_ENTRY_FRAMING_BYTES
+                + value_byte_estimate(&e.value)
+                + e.tag.len() as u64
+                + e.timestamp.node_id.len() as u64
+        })
+        .sum();
+    let tombstones_bytes: u64 = tombstones.iter().map(|t| t.len() as u64 + 2).sum();
+    OR_MAP_FRAMING_BYTES + records_bytes + tombstones_bytes
+}
+
 /// Returns the estimated heap cost of a [`RecordValue`] in bytes.
 ///
-/// Serializes the value via `rmp_serde::to_vec_named` (the same encoding used
-/// by the persistence layer) and returns the byte length, floored to `≥ 1`.
-/// The floor prevents empty/`Null` values from contributing zero cost, which
-/// would leave the eviction orchestrator blind to maps of empty values.
+/// For the [`RecordValue::OrMap`] arm this is a cheap structural size estimate
+/// (see [`or_map_estimated_cost`]) — the sum of the records' value/tag/timestamp
+/// byte lengths plus the tombstone tag byte lengths — so the write path never
+/// serializes the whole (often ~130 KB) OR snapshot just to size it. Every
+/// other arm serializes via `rmp_serde::to_vec_named` (the same encoding used by
+/// the persistence layer) and returns the byte length. The result is floored to
+/// `≥ 1` so empty/`Null` values still contribute non-zero cost, keeping the
+/// eviction orchestrator from going blind to maps of empty values.
 ///
-/// This is a deliberate *second* serialization of the value — the persistence
-/// path (`MapDataStore::add`) encodes it again to write it. Reusing the
+/// The non-OrMap serialize is a deliberate *second* encode — the persistence
+/// path (`MapDataStore::add`) encodes the value again to write it. Reusing the
 /// persisted bytes would require threading the encoded length back out through
 /// the datastore trait (every backend impl), so the estimate stays
-/// self-contained here. The extra encode is bounded by the value size already
-/// paid for the durable write and runs only on the write path (not per eviction
-/// tick), so the cost is acceptable; folding the two encodes into one is a
-/// tracked follow-up optimization.
+/// self-contained here. It runs only on the write path (not per eviction tick).
 ///
 /// On serialization failure the fallback is [`COST_ESTIMATE_FALLBACK`] plus a
 /// `tracing::warn!` — never a silent `1`, which would blind the orchestrator to
@@ -372,6 +435,14 @@ pub const COST_ESTIMATE_FALLBACK: u64 = 4096;
 /// callers retain the key in scope without the helper needing to take ownership.
 #[must_use]
 pub fn estimated_cost(value: &RecordValue) -> u64 {
+    if let RecordValue::OrMap {
+        records,
+        tombstones,
+    } = value
+    {
+        return or_map_estimated_cost(records, tombstones).max(1);
+    }
+
     match rmp_serde::to_vec_named(value) {
         Ok(bytes) => (bytes.len() as u64).max(1),
         Err(e) => {

@@ -111,6 +111,51 @@ pub trait RecordStore: Send + Sync {
         provenance: CallerProvenance,
     ) -> anyhow::Result<Option<RecordValue>>;
 
+    /// Mutate a resident record's value in place, firing the same observer
+    /// notifications and durable write-through as [`put`](RecordStore::put)
+    /// WITHOUT a full get→build→put round trip.
+    ///
+    /// `mutate` runs synchronously under the engine's per-key write lock and
+    /// returns `true` if it made a change that must be persisted, or `false`
+    /// for a no-op (e.g. a prune whose target tag was already gone). It MUST
+    /// return `true` whenever it altered the value, and is invoked **at most
+    /// once** per call — callers may rely on single invocation.
+    ///
+    /// If the key is absent: when `init` is `Some`, a fresh record is created
+    /// from it, `mutate` is applied, and (on a `true` return) `on_put` fires;
+    /// when `init` is `None`, the call is a no-op. Returns `true` when a record
+    /// was created or updated (a write-through was owed), `false` otherwise.
+    ///
+    /// This exists for the OR-Map write path, whose per-op read-modify-write
+    /// otherwise cloned the whole ~130 KB resident snapshot on every op. The OR
+    /// observers ignore the pre-image, so no old value is materialized.
+    ///
+    /// The default implementation falls back to a get→mutate→put round trip so
+    /// non-optimized stores remain correct; [`DefaultRecordStore`] overrides it
+    /// with the true in-place seam.
+    async fn update_in_place(
+        &self,
+        key: &str,
+        init: Option<RecordValue>,
+        expiry: ExpiryPolicy,
+        provenance: CallerProvenance,
+        mutate: &mut (dyn for<'a> FnMut(&'a mut RecordValue) -> bool + Send),
+    ) -> anyhow::Result<bool> {
+        let existing = self.get(key, false).await?;
+        let mut value = match existing {
+            Some(record) => record.value,
+            None => match init {
+                Some(v) => v,
+                None => return Ok(false),
+            },
+        };
+        if !mutate(&mut value) {
+            return Ok(false);
+        }
+        self.put(key, value, expiry, provenance).await?;
+        Ok(true)
+    }
+
     /// Remove a record, returning the old value.
     async fn remove(
         &self,

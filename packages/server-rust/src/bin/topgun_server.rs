@@ -448,9 +448,66 @@ impl ClusterService for ClusterStateAdapter {
 // Entry point
 // ---------------------------------------------------------------------------
 
+// Heap-profiling allocator, compiled in only under the `dhat-heap` feature. The
+// profile is written when the `Profiler` guard in `main` is dropped, which only
+// happens on a clean return — so a profiled run must be stopped with SIGTERM
+// (graceful shutdown), never SIGKILL. Mutually exclusive with `count-alloc`.
+#[cfg(all(feature = "dhat-heap", not(feature = "count-alloc")))]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
+// Live-bytes counting allocator, compiled in only under the `count-alloc` feature.
+// `stats_alloc` wraps the System allocator (preserving libmalloc/glibc behavior —
+// so the current allocator regime is measured, not changed) and tracks cumulative
+// bytes allocated/deallocated with near-zero overhead, so it does NOT throttle
+// throughput the way a full heap profiler does. Paired with the RSS sampler it
+// distinguishes allocator page-retention/fragmentation (live bytes FLAT while RSS
+// climbs) from a real reference leak (live bytes climbing WITH RSS). Off by default;
+// the workspace forbids hand-written unsafe, so the wrapper lives in the crate.
+#[cfg(feature = "count-alloc")]
+#[global_allocator]
+static ALLOC: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
+
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
+    // Hold the dhat heap profiler for the whole process lifetime; dropping it on
+    // a clean `main` return flushes the profile to `DHAT_OUT` (default
+    // `dhat-heap.json`). No-op unless built with `--features dhat-heap`.
+    #[cfg(feature = "dhat-heap")]
+    let _dhat_profiler = {
+        let out = std::env::var("DHAT_OUT").unwrap_or_else(|_| "dhat-heap.json".to_string());
+        dhat::Profiler::builder().file_name(out).build()
+    };
+
+    // Sample the live-bytes counter alongside the harness's per-30s RSS sampler so
+    // the two series can be correlated post-run. Emitted on stderr (mirrored by the
+    // soak harness under SOAK_SERVER_LOG_PASSTHROUGH). No-op unless built with
+    // `--features count-alloc`.
+    #[cfg(feature = "count-alloc")]
+    tokio::spawn(async move {
+        let start = std::time::Instant::now();
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            tick.tick().await;
+            let s = ALLOC.stats();
+            // Net live bytes = cumulative allocated − cumulative deallocated.
+            let allocated = i64::try_from(s.bytes_allocated).unwrap_or(i64::MAX);
+            let deallocated = i64::try_from(s.bytes_deallocated).unwrap_or(i64::MAX);
+            let live = allocated - deallocated;
+            #[allow(clippy::cast_precision_loss)]
+            let live_mb = live as f64 / 1_048_576.0;
+            eprintln!(
+                "alloc_probe elapsed_s={} live_bytes={} live_mb={:.1} allocs={} deallocs={}",
+                start.elapsed().as_secs(),
+                live,
+                live_mb,
+                s.allocations,
+                s.deallocations
+            );
+        }
+    });
+
     // Initialize tracing AND install the global Prometheus recorder in one call.
     // Without this the `/metrics` endpoint renders an empty body (no recorder is
     // installed), so counters like `topgun_ormap_tombstone_bytes_total` are

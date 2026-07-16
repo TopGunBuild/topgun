@@ -19,6 +19,11 @@ mod crash_safety_proptest;
 #[cfg(test)]
 mod eviction_cost_test;
 
+/// Differential resident-state equivalence proof for the OR-Map in-place mutate
+/// write path vs the historical get→build→put path.
+#[cfg(test)]
+mod or_inplace_mutate_proptest;
+
 pub mod datastores;
 pub mod durable_merkle;
 pub mod engine;

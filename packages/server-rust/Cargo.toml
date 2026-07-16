@@ -15,9 +15,22 @@ redb = ["dep:redb"]
 simulation = ["dep:madsim"]
 datafusion = ["dep:datafusion", "dep:arrow"]
 swagger = ["dep:utoipa-swagger-ui"]
+# Heap-profiling instrument (off by default): installs a dhat global allocator and
+# writes a heap profile on clean exit. Used to attribute in-process memory holders
+# during soak investigation; never enabled in production builds.
+dhat-heap = ["dep:dhat"]
+# Live-bytes counting allocator (off by default): wraps the System allocator via
+# stats_alloc (near-zero overhead, preserves libmalloc behavior) and tracks bytes
+# allocated-minus-freed, sampled with RSS to distinguish allocator retention (flat
+# live bytes, climbing RSS) from a real leak (climbing live bytes). Keeps the
+# high-throughput regime a full heap profiler would throttle. Mutually exclusive
+# with dhat-heap; never enabled in production builds.
+count-alloc = ["dep:stats_alloc"]
 
 [dependencies]
 topgun-core = { path = "../core-rust", features = ["arrow"] }
+dhat = { version = "0.3", optional = true }
+stats_alloc = { version = "0.1", optional = true }
 async-trait = "0.1"
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
