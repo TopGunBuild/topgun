@@ -64,7 +64,41 @@ pub struct WriteBehindConfig {
     /// delta-sync. Set `TOPGUN_WAL_FSYNC_POLICY=per_op` to make every acked write
     /// fsynced-before-ack (acked == durable) at a large per-write latency cost.
     pub wal_fsync_policy: WalFsyncPolicy,
+    /// How long a partition's smallest un-resolved WAL sequence may stay put,
+    /// under ongoing writes, before the stalled-watermark alarm fires.
+    ///
+    /// It must sit an order of magnitude above the longest LEGITIMATE
+    /// non-advance, or the alarm fires on correct behaviour. The default is
+    /// derived from the OTHER defaults in this struct (write delay + flush
+    /// interval + the full retry ladder, and clear of the shutdown timeout), so
+    /// raising `flush_interval_ms` or `shutdown_timeout_ms` requires raising
+    /// this alongside them.
+    pub wal_watermark_stall_bound_ms: u64,
 }
+
+/// Absolute lower clamp on [`WriteBehindConfig::reconfirm_delay_ms`].
+///
+/// The re-confirmation delay exists to outlast the classifier's own
+/// drain-between-probes window, which is bounded by a task schedule. A `0` delay
+/// would take both samples back-to-back and collapse the two-sample rule into
+/// the single sample it replaced, so the floor makes non-zero a property of the
+/// type rather than of operator discipline.
+const RECONFIRM_FLOOR_MS: u64 = 100;
+
+/// Absolute lower clamp on [`WriteBehindConfig::watchdog_tick_ms`].
+///
+/// Same reasoning as [`RECONFIRM_FLOOR_MS`]: a tick derived by division must
+/// never reach zero, or the watchdog task spins.
+const WATCHDOG_TICK_FLOOR_MS: u64 = 100;
+
+/// The smallest stall bound an operator may set.
+///
+/// Chosen so the two guards MEET rather than overlap ambiguously: at exactly
+/// this bound, `6_000 / 60 == 100 == RECONFIRM_FLOOR_MS`. Below it the derived
+/// re-confirmation delay would be governed by the floor alone while the boot
+/// line still echoes the operator's value, which is why a lower value is fatal
+/// rather than clamped.
+const MIN_WAL_WATERMARK_STALL_BOUND_MS: u64 = 6_000;
 
 impl Default for WriteBehindConfig {
     fn default() -> Self {
@@ -79,6 +113,7 @@ impl Default for WriteBehindConfig {
             shutdown_timeout_ms: 30_000,
             wal_dir: PathBuf::from("./topgun-wal"),
             wal_fsync_policy: WalFsyncPolicy::Batched,
+            wal_watermark_stall_bound_ms: 60_000,
         }
     }
 }
@@ -86,9 +121,10 @@ impl Default for WriteBehindConfig {
 impl WriteBehindConfig {
     /// Construct [`WriteBehindConfig`] from environment variables.
     ///
-    /// Reads env vars; any missing or unparseable var falls back to the
-    /// corresponding [`Self::default`] field and emits a `tracing::warn!`. The
-    /// server never panics due to a misconfigured write-behind env var.
+    /// Reads env vars; most missing or unparseable vars fall back to the
+    /// corresponding [`Self::default`] field and emit a `tracing::warn!`. Two
+    /// misconfigurations are fatal instead — see [`Self::from_source`]'s
+    /// `# Panics` section for both and for why each is not silently downgraded.
     ///
     /// | Env var | Field | Default |
     /// |---|---|---|
@@ -98,6 +134,7 @@ impl WriteBehindConfig {
     /// | `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS` | `shutdown_timeout_ms` | 30 000 ms |
     /// | `TOPGUN_WAL_DIR` | `wal_dir` | `./topgun-wal` |
     /// | `TOPGUN_WAL_FSYNC_POLICY` | `wal_fsync_policy` | `batched` |
+    /// | `TOPGUN_WAL_WATERMARK_STALL_BOUND_MS` | `wal_watermark_stall_bound_ms` | 60 000 ms — raise it alongside `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` / `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS`, whose defaults this default is derived from |
     ///
     /// Fields not covered by env vars (`write_delay_ms`, `max_retries`,
     /// `backoff_base_ms`, `backoff_cap_ms`) retain their [`Self::default`] values.
@@ -121,6 +158,15 @@ impl WriteBehindConfig {
     /// unknown durability policy to the weaker default is what masked a durability
     /// regression through a full RED soak, so the misconfiguration is made fatal at
     /// startup rather than surfacing as data loss on the next unclean shutdown.
+    ///
+    /// Panics (refuses to start) if `TOPGUN_WAL_WATERMARK_STALL_BOUND_MS` PARSES
+    /// but is below [`MIN_WAL_WATERMARK_STALL_BOUND_MS`]. This is a different case
+    /// from an unparseable value, which warns and falls back: an unparseable value
+    /// leaves the operator's intent unknown and costs nothing to default, whereas
+    /// an out-of-range value is honoured, echoed into the boot line as the
+    /// effective bound, and silently disarms the two-sample confirmation that is
+    /// the fatal stalled-watermark alarm's only false-positive guard. That is a
+    /// fatal-path guard being disabled, not an alarm threshold being mis-set.
     #[must_use]
     pub fn from_source<F: Fn(&str) -> Option<String>>(get: F) -> Self {
         let defaults = Self::default();
@@ -236,7 +282,75 @@ impl WriteBehindConfig {
             }
         }
 
+        // Parse TOPGUN_WAL_WATERMARK_STALL_BOUND_MS → wal_watermark_stall_bound_ms
+        //
+        // Unparseable warns and falls back: this is an alarm threshold, not a
+        // durability policy, so a bad value cannot lose data and refusing to boot
+        // over one would trade a durability guard for an availability outage.
+        //
+        // A value that PARSES but is below the minimum is FATAL, for the same
+        // reason the fsync policy above is: it is honoured, echoed into the boot
+        // line as the effective bound, and disarms the two-sample confirmation
+        // that keeps the fatal alarm from firing on correct code.
+        if let Some(raw) = get("TOPGUN_WAL_WATERMARK_STALL_BOUND_MS") {
+            match raw.trim().parse::<u64>() {
+                Ok(ms) if ms < MIN_WAL_WATERMARK_STALL_BOUND_MS => {
+                    panic!(
+                        "TOPGUN_WAL_WATERMARK_STALL_BOUND_MS={ms} is below the minimum of \
+                         {MIN_WAL_WATERMARK_STALL_BOUND_MS} ms. Refusing to start: a shorter bound \
+                         shrinks the derived re-confirmation delay below the window it exists to \
+                         absorb, which disarms the stalled-watermark alarm's only false-positive \
+                         guard while the boot line still reports the value as effective."
+                    );
+                }
+                Ok(ms) => {
+                    cfg.wal_watermark_stall_bound_ms = ms;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "topgun_server::storage::write_behind",
+                        var = "TOPGUN_WAL_WATERMARK_STALL_BOUND_MS",
+                        value = %raw,
+                        error = %err,
+                        default = defaults.wal_watermark_stall_bound_ms,
+                        "Failed to parse env var; using default"
+                    );
+                    cfg.wal_watermark_stall_bound_ms = defaults.wal_watermark_stall_bound_ms;
+                }
+            }
+        }
+
         cfg
+    }
+
+    /// How long the stalled-watermark classifier waits between the two samples a
+    /// `TrackerLeak` verdict requires.
+    ///
+    /// Derived rather than independently settable: the quantity has no standalone
+    /// operational meaning — it is "long enough to outlast the benign
+    /// drain-between-probes window, short enough to be noise against the stall
+    /// bound" — and both halves are expressed relative to the bound. A separate
+    /// knob would let an operator raise one while the other went stale, with the
+    /// stale one sitting on the fatal path.
+    ///
+    /// The floor is what makes the lower half hold at every admissible bound; the
+    /// divisor is a literal, so the division cannot trap and no subtraction on
+    /// this path can underflow toward a zero delay.
+    #[must_use]
+    pub fn reconfirm_delay_ms(&self) -> u64 {
+        (self.wal_watermark_stall_bound_ms / 60).max(RECONFIRM_FLOOR_MS)
+    }
+
+    /// How often the stalled-watermark watchdog task takes a classifier sample.
+    ///
+    /// The bound is how long a stall must persist before it is reportable, so the
+    /// probe must be frequent enough to detect one within a small fraction of it
+    /// and infrequent enough that the per-tick queue scan stays off every hot
+    /// path — it is paid once per tick, never per write. Floored for the same
+    /// reason as [`Self::reconfirm_delay_ms`]: a zero tick would spin.
+    #[must_use]
+    pub fn watchdog_tick_ms(&self) -> u64 {
+        (self.wal_watermark_stall_bound_ms / 10).max(WATCHDOG_TICK_FLOOR_MS)
     }
 }
 
