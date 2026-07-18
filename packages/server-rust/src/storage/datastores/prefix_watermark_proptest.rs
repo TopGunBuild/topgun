@@ -27,6 +27,7 @@ use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
 
 use super::*;
+use crate::service::middleware::init_observability;
 use crate::storage::wal::{
     wal_fail_stop, WalFailStopTier, WalRecovery, WalWriter, FAIL_STOP_TEST_LOCK,
 };
@@ -124,6 +125,17 @@ struct FaultStore {
     /// (map, key) -> value, or `None` for a tombstone.
     data: AsyncMutex<HashMap<(String, String), Option<RecordValue>>>,
     reject: std::sync::Mutex<HashSet<String>>,
+    /// Keys whose `add` parks instead of returning.
+    ///
+    /// A hang is categorically different from a rejection: it returns neither
+    /// `Ok` nor `Err`, so no terminal runs and no retry ladder starts. That is
+    /// the state the classifier must read as an environment problem rather than
+    /// as a lost sequence.
+    hang: std::sync::Mutex<HashSet<String>>,
+    /// Set once the test releases every parked call, so the hang cannot outlive
+    /// the test and wedge the runtime's worker threads.
+    released: std::sync::atomic::AtomicBool,
+    wake: tokio::sync::Notify,
 }
 
 impl FaultStore {
@@ -143,6 +155,36 @@ impl FaultStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
+    }
+
+    /// Parks every subsequent `add` of `key` until [`release`](Self::release).
+    fn hang_key(&self, key: &str) {
+        self.hang
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.to_string());
+    }
+
+    fn release(&self) {
+        self.released
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.wake.notify_waiters();
+    }
+
+    fn hangs(&self, key: &str) -> bool {
+        self.hang
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(key)
+    }
+
+    /// Parks until released. A flag plus a notify rather than a bare `Notify`:
+    /// a release that lands before the park would otherwise be missed and the
+    /// call would hang for real.
+    async fn park(&self) {
+        while !self.released.load(std::sync::atomic::Ordering::Relaxed) {
+            self.wake.notified().await;
+        }
     }
 
     fn rejects(&self, key: &str) -> bool {
@@ -186,6 +228,10 @@ impl MapDataStore for FaultStore {
         if self.rejects(key) {
             anyhow::bail!("injected inner-store rejection for key={key}");
         }
+        if self.hangs(key) {
+            self.park().await;
+            anyhow::bail!("injected inner-store hang released for key={key}");
+        }
         self.data
             .lock()
             .await
@@ -207,6 +253,10 @@ impl MapDataStore for FaultStore {
     async fn remove(&self, map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
         if self.rejects(key) {
             anyhow::bail!("injected inner-store rejection for key={key}");
+        }
+        if self.hangs(key) {
+            self.park().await;
+            anyhow::bail!("injected inner-store hang released for key={key}");
         }
         self.data
             .lock()
@@ -328,6 +378,14 @@ struct FaultWal {
     inner: Arc<WalWriter>,
     appends: FaultAtomicU64,
     fail_on_nth: std::sync::Mutex<Option<(u64, FaultClass)>>,
+    /// Parks every append instead of returning, modelling a hung or full disk.
+    ///
+    /// Distinct from every failure class above: the caller is parked INSIDE the
+    /// append, so the rollback that a returned `Err` triggers never runs and the
+    /// sequence stays mid-append with no entry and no frame.
+    hang: std::sync::atomic::AtomicBool,
+    released: std::sync::atomic::AtomicBool,
+    wake: tokio::sync::Notify,
 }
 
 impl FaultWal {
@@ -336,7 +394,21 @@ impl FaultWal {
             inner,
             appends: FaultAtomicU64::new(0),
             fail_on_nth: std::sync::Mutex::new(None),
+            hang: std::sync::atomic::AtomicBool::new(false),
+            released: std::sync::atomic::AtomicBool::new(false),
+            wake: tokio::sync::Notify::new(),
         })
+    }
+
+    /// Parks every subsequent append until [`release`](Self::release).
+    fn hang_appends(&self) {
+        self.hang.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn release(&self) {
+        self.released
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.wake.notify_waiters();
     }
 
     /// Fails the `nth` append this WAL sees (1-based) in `class`.
@@ -358,6 +430,12 @@ impl FaultWal {
 #[async_trait]
 impl Wal for FaultWal {
     async fn append(&self, partition: u32, entry: &WalEntry) -> anyhow::Result<()> {
+        if self.hang.load(std::sync::atomic::Ordering::Relaxed) {
+            while !self.released.load(std::sync::atomic::Ordering::Relaxed) {
+                self.wake.notified().await;
+            }
+            anyhow::bail!("injected WAL append hang released");
+        }
         let nth = self.appends.fetch_add(1, Ordering::Relaxed) + 1;
         match self.planned(nth) {
             Some(FaultClass::PreFrame) => {
@@ -1247,4 +1325,439 @@ async fn a_partition_without_a_live_write_never_marks_anything_applied() {
         "and never has anything marked applied, so its frames stay retained"
     );
     assert!(!wal.unapplied(partition).await.unwrap().is_empty());
+}
+
+// ===========================================================================
+// AC3(a) — the classifier matrix: six scenarios, one per row
+// ===========================================================================
+
+/// A config whose flush loop actually drains, for the scenarios that need an
+/// entry to reach the inner store.
+fn draining_config() -> WriteBehindConfig {
+    WriteBehindConfig {
+        write_delay_ms: 0,
+        flush_interval_ms: 5,
+        shutdown_timeout_ms: 200,
+        max_retries: 1,
+        backoff_base_ms: 1,
+        backoff_cap_ms: 2,
+        ..WriteBehindConfig::default()
+    }
+}
+
+fn build_store_with(
+    inner: &Arc<FaultStore>,
+    wal: Arc<dyn Wal>,
+    sequence_start: u64,
+    config: WriteBehindConfig,
+) -> Arc<WriteBehindDataStore> {
+    WriteBehindDataStore::new_with_wal(
+        Arc::clone(inner) as Arc<dyn MapDataStore>,
+        config,
+        Some(WalBootstrap {
+            wal,
+            sequence_start,
+        }),
+    )
+}
+
+/// A real `WalWriter` in a fresh directory, kept alive by the returned guard.
+fn real_wal() -> (tempfile::TempDir, Arc<WalWriter>) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp).expect("wal");
+    (dir, wal)
+}
+
+/// Waits for a condition instead of sleeping a guessed duration: the scenarios
+/// depend on a background task having reached a specific state, and a fixed
+/// sleep would make that a race rather than a proof.
+async fn wait_until(label: &str, mut cond: impl FnMut() -> bool) {
+    for _ in 0..2_000 {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    panic!("timed out waiting for {label}");
+}
+
+/// The `topgun_wal_applied_watermark_lag` sample for `partition`, read off the
+/// exact text `GET /metrics` serves.
+fn scraped_lag(rendered: &str, partition: u32) -> Option<f64> {
+    let needle = format!("partition=\"{partition}\"");
+    rendered
+        .lines()
+        .find(|line| line.starts_with(WAL_WATERMARK_LAG_GAUGE) && line.contains(&needle))
+        .and_then(|line| line.rsplit(' ').next())
+        .and_then(|v| v.parse::<f64>().ok())
+}
+
+/// Asserts the partition's stall is visible to an operator scraping `/metrics`,
+/// not merely to an internal read.
+///
+/// The partition label is per-test-unique by construction (each scenario owns
+/// its own partition), so a hit here can never be another test's emission.
+fn assert_lag_visible(partition: u32, at_least: f64) {
+    let rendered = init_observability().render_metrics();
+    assert!(
+        rendered.contains(&format!("# HELP {WAL_WATERMARK_LAG_GAUGE}")),
+        "the lag gauge must be DESCRIBED on the scrape"
+    );
+    let lag = scraped_lag(&rendered, partition);
+    assert!(
+        lag.is_some_and(|v| v >= at_least),
+        "partition {partition} must report a lag of at least {at_least} on the \
+         scrape; got {lag:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_hung_inner_store_is_an_abandoned_write_not_a_leak() {
+    // Install the recorder BEFORE the first emission: a metric emitted against
+    // the no-op recorder is invisible to every later scrape.
+    init_observability();
+    let partition = 250;
+    let key = keys_in_partition(partition, 1).remove(0);
+    let (_dir, wal) = real_wal();
+    let inner = FaultStore::new();
+    let store = build_store_with(
+        &inner,
+        Arc::clone(&wal) as Arc<dyn Wal>,
+        1,
+        draining_config(),
+    );
+
+    inner.hang_key(&key);
+    store.add(TEST_MAP, &key, &lww(1), 0, 0).await.unwrap();
+
+    // The flush worker has taken the entry out of the queue and registered it,
+    // and its `inner.add` will never return: in-flight, no `Err`, no terminal.
+    wait_until("the hung entry to be registered in flight", || {
+        !store.test_in_flight_wal_sequences(partition).is_empty()
+    })
+    .await;
+
+    let alarm = store.test_run_classifier_sample(partition);
+    assert_eq!(
+        alarm,
+        Some(WalWatermarkAlarm::AbandonedWrite {
+            origin: PendingOrigin::Live
+        }),
+        "a hung STORE sends the operator to the backend"
+    );
+    // Explicitly NOT the other class, and explicitly not the other origin: under
+    // a rule that keys on "absent from queue and registry" this reads as a code
+    // bug, and under a collapsed tag it reads as a hung disk.
+    assert_ne!(alarm, Some(WalWatermarkAlarm::TrackerLeak));
+    assert_ne!(
+        alarm,
+        Some(WalWatermarkAlarm::AbandonedWrite {
+            origin: PendingOrigin::Appending
+        })
+    );
+    assert_lag_visible(partition, 1.0);
+
+    inner.release();
+}
+
+#[tokio::test]
+async fn a_boot_unreplayed_sequence_is_an_abandoned_write_not_a_leak() {
+    // Install the recorder BEFORE the first emission: a metric emitted against
+    // the no-op recorder is invisible to every later scrape.
+    init_observability();
+    let partition = 251;
+    let key = keys_in_partition(partition, 1).remove(0);
+    let (_dir, wal) = real_wal();
+
+    // A prior incarnation acked a write whose frame never reached the store.
+    {
+        let inner = FaultStore::new();
+        let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
+        store.add(TEST_MAP, &key, &lww(1), 0, 0).await.unwrap();
+        drop(store);
+    }
+
+    // A fresh incarnation: no queue, no registry, no entry — by construction.
+    let inner = FaultStore::new();
+    let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 2);
+    store.ensure_wal_seeded(partition).await;
+    assert_eq!(
+        store.test_pending_wal_sequences(partition),
+        vec![(1, PendingOrigin::BootUnreplayed)],
+    );
+
+    let alarm = store.test_run_classifier_sample(partition);
+    assert_eq!(
+        alarm,
+        Some(WalWatermarkAlarm::AbandonedWrite {
+            origin: PendingOrigin::BootUnreplayed
+        }),
+        "a prior incarnation's un-replayed frame is a stall to surface, not a bug \
+         to fix"
+    );
+    assert_ne!(alarm, Some(WalWatermarkAlarm::TrackerLeak));
+    // Zero, not one: `max_assigned` seeds at 0 and this incarnation has assigned
+    // nothing, so the LAG is genuinely zero while the stall is real. What the
+    // scrape must show here is that the partition is reported at all.
+    assert_lag_visible(partition, 0.0);
+}
+
+#[tokio::test]
+async fn a_queued_then_dequeued_sequence_missing_from_the_registry_is_a_leak() {
+    // Install the recorder BEFORE the first emission: a metric emitted against
+    // the no-op recorder is invisible to every later scrape.
+    init_observability();
+    let partition = 252;
+    let key = keys_in_partition(partition, 1).remove(0);
+    let (_dir, wal) = real_wal();
+    let inner = FaultStore::new();
+    let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
+
+    store.add(TEST_MAP, &key, &lww(1), 0, 0).await.unwrap();
+    assert_eq!(
+        store.test_pending_wal_sequences(partition),
+        vec![(1, PendingOrigin::Live)],
+        "a successful add promotes to Live at the queue insert — an un-promoted \
+         sequence would report a healthy queued write as a hung disk"
+    );
+
+    // Dequeue WITHOUT registering: the missed disposition this class exists to
+    // name. `Live` is entered only at the queue insert, so this state cannot
+    // arise from any correct path.
+    let drained = store
+        .queues
+        .get_mut(&partition)
+        .unwrap()
+        .drain_ready(i64::MAX);
+    assert_eq!(drained.len(), 1);
+    drop(drained);
+    assert!(store.test_in_flight_wal_sequences(partition).is_empty());
+
+    assert_eq!(
+        store.test_run_classifier_sample(partition),
+        None,
+        "one ownerless read is a CANDIDATE: a sequence drained between the \
+         registry probe and the queue scan reads identically"
+    );
+    let alarm = store.test_run_classifier_sample(partition);
+    assert_eq!(
+        alarm,
+        Some(WalWatermarkAlarm::TrackerLeak),
+        "a genuine leak is permanent, so it survives re-confirmation"
+    );
+    assert_ne!(
+        alarm,
+        Some(WalWatermarkAlarm::AbandonedWrite {
+            origin: PendingOrigin::Live
+        })
+    );
+    assert_lag_visible(partition, 1.0);
+}
+
+#[tokio::test]
+async fn a_max_retries_discard_is_an_abandoned_write_not_a_leak() {
+    // Install the recorder BEFORE the first emission: a metric emitted against
+    // the no-op recorder is invisible to every later scrape.
+    init_observability();
+    let partition = 253;
+    let key = keys_in_partition(partition, 1).remove(0);
+    let (_dir, wal) = real_wal();
+    let inner = FaultStore::new();
+    let store = build_store_with(
+        &inner,
+        Arc::clone(&wal) as Arc<dyn Wal>,
+        1,
+        draining_config(),
+    );
+
+    inner.reject_key(&key);
+    store.add(TEST_MAP, &key, &lww(1), 0, 0).await.unwrap();
+
+    wait_until("the entry to exhaust its retries", || {
+        store.test_pending_wal_sequences(partition) == vec![(1, PendingOrigin::Abandoned)]
+    })
+    .await;
+    assert!(
+        store.test_in_flight_wal_sequences(partition).is_empty(),
+        "the discard deregisters, so the tag is the ONLY thing carrying the class"
+    );
+
+    let alarm = store.test_run_classifier_sample(partition);
+    assert_eq!(
+        alarm,
+        Some(WalWatermarkAlarm::AbandonedWrite {
+            origin: PendingOrigin::Abandoned
+        }),
+    );
+    assert_ne!(alarm, Some(WalWatermarkAlarm::TrackerLeak));
+    assert_lag_visible(partition, 1.0);
+}
+
+#[tokio::test]
+async fn a_sequence_queued_behind_a_blocked_worker_is_an_abandoned_write_not_a_leak() {
+    // Install the recorder BEFORE the first emission: a metric emitted against
+    // the no-op recorder is invisible to every later scrape.
+    init_observability();
+    let blocked_partition = 254;
+    let queued_partition = 255;
+    let blocked_key = keys_in_partition(blocked_partition, 1).remove(0);
+    let queued_key = keys_in_partition(queued_partition, 1).remove(0);
+    let (_dir, wal) = real_wal();
+    let inner = FaultStore::new();
+    let store = build_store_with(
+        &inner,
+        Arc::clone(&wal) as Arc<dyn Wal>,
+        1,
+        draining_config(),
+    );
+
+    // The flush loop is sequential across partitions, so one hung `inner` call
+    // holds up every entry drained after it.
+    inner.hang_key(&blocked_key);
+    store
+        .add(TEST_MAP, &blocked_key, &lww(1), 0, 0)
+        .await
+        .unwrap();
+    wait_until("the worker to block on the hung entry", || {
+        !store
+            .test_in_flight_wal_sequences(blocked_partition)
+            .is_empty()
+    })
+    .await;
+
+    store
+        .add(TEST_MAP, &queued_key, &lww(2), 0, 0)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .test_in_flight_wal_sequences(queued_partition)
+            .is_empty(),
+        "the second write is still QUEUED — the worker never got to it"
+    );
+
+    let alarm = store.test_run_classifier_sample(queued_partition);
+    assert_eq!(
+        alarm,
+        Some(WalWatermarkAlarm::AbandonedWrite {
+            origin: PendingOrigin::Live
+        }),
+        "a queued sequence has an owner, so it is a stall, not a leak"
+    );
+    assert_ne!(alarm, Some(WalWatermarkAlarm::TrackerLeak));
+    assert_lag_visible(queued_partition, 1.0);
+
+    inner.release();
+}
+
+#[tokio::test]
+async fn a_hung_wal_append_is_an_appending_abandoned_write_not_a_leak() {
+    // Install the recorder BEFORE the first emission: a metric emitted against
+    // the no-op recorder is invisible to every later scrape.
+    init_observability();
+    let partition = 256;
+    let key = keys_in_partition(partition, 1).remove(0);
+    let (_dir, inner_wal) = real_wal();
+    let wal = FaultWal::new(inner_wal);
+    let inner = FaultStore::new();
+    let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
+
+    wal.hang_appends();
+    // `add` never returns, so the write must run on its own task — this is the
+    // state a per-op device-barrier fsync parks a caller in.
+    let writer = {
+        let store = Arc::clone(&store);
+        let key = key.clone();
+        tokio::spawn(async move { store.add(TEST_MAP, &key, &lww(1), 0, 0).await })
+    };
+
+    wait_until("the sequence to be assigned mid-append", || {
+        store.test_pending_wal_sequences(partition) == vec![(1, PendingOrigin::Appending)]
+    })
+    .await;
+    assert!(
+        store.test_in_flight_wal_sequences(partition).is_empty(),
+        "absent from the queue AND the registry is this state's NORMAL"
+    );
+
+    let alarm = store.test_run_classifier_sample(partition);
+    assert_eq!(
+        alarm,
+        Some(WalWatermarkAlarm::AbandonedWrite {
+            origin: PendingOrigin::Appending
+        }),
+        "a hung APPEND sends the operator to the disk, not to the backend"
+    );
+    // Without the fourth state this sequence is `Live` and absent from both,
+    // which classifies as a code bug against a perfectly healthy write path.
+    assert_ne!(alarm, Some(WalWatermarkAlarm::TrackerLeak));
+    assert_ne!(
+        alarm,
+        Some(WalWatermarkAlarm::AbandonedWrite {
+            origin: PendingOrigin::Live
+        })
+    );
+    assert_lag_visible(partition, 1.0);
+
+    wal.release();
+    let _ = writer.await;
+}
+
+#[tokio::test]
+async fn a_transient_ownerless_window_never_fires_an_alarm() {
+    let partition = 257;
+    let key = keys_in_partition(partition, 1).remove(0);
+    let (_dir, wal) = real_wal();
+    let inner = FaultStore::new();
+    let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
+
+    store.add(TEST_MAP, &key, &lww(1), 0, 0).await.unwrap();
+
+    // Drain INSIDE the classifier's own sample, between the registry probe and
+    // the queue scan: the first sample then reads absent-from-both on a write
+    // that is doing exactly the right thing. Deterministic by construction —
+    // the alternative is the sleep-based race this must not be.
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let store_hook = Arc::clone(&store);
+        let fired = Arc::clone(&fired);
+        store.test_set_classifier_hook(Arc::new(move |p: u32| {
+            if fired.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            let drained = store_hook.queues.get_mut(&p).unwrap().drain_ready(i64::MAX);
+            for entry in &drained {
+                store_hook.register_in_flight(p, &entry.wal_sequences);
+            }
+        }));
+    }
+
+    assert_eq!(
+        store.test_run_classifier_sample(partition),
+        None,
+        "the transient window must NOT be a verdict"
+    );
+
+    // The write then completes normally, before the confirming sample.
+    store
+        .resolve_and_advance(partition, &BTreeSet::from([1]))
+        .await;
+
+    assert_eq!(
+        store.test_run_classifier_sample(partition),
+        None,
+        "and no alarm of ANY class may fire for a sequence that resolved"
+    );
+    assert_eq!(
+        store.test_classifier_sample_count(partition),
+        2,
+        "the assertion above must not be satisfiable by a classifier that simply \
+         never fired"
+    );
+    assert!(store.test_pending_wal_sequences(partition).is_empty());
+    assert_eq!(
+        store.test_wal_watermark(partition),
+        Some(Ok(1)),
+        "the watermark advances normally past a sequence that was never leaked"
+    );
 }
