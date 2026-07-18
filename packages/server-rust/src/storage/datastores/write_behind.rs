@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use tokio::sync::{watch, Notify};
 use topgun_core::{fnv1a_hash, PARTITION_COUNT};
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::storage::map_data_store::{
     merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
@@ -267,7 +267,6 @@ pub(crate) enum DelayedOp {
 /// sequence absent from both the partition queue and the in-flight registry is
 /// NORMAL for three of these four tags, so a bare "absent from both means leak"
 /// rule would fire on healthy writes.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PendingOrigin {
     /// Seeded at boot from a frame a PRIOR incarnation left un-applied. No live
@@ -558,6 +557,31 @@ pub(crate) struct PartitionTracking {
     /// not yet terminal. Without it a hung inner store reads as a code bug: the
     /// entry exists only as a local binding for the whole of the inner call.
     in_flight: BTreeSet<u64>,
+    /// Whether this partition's pending map has been seeded from the on-disk WAL.
+    ///
+    /// Recovery replays frames DIRECTLY into the inner store, bypassing
+    /// write-behind, so a fresh map knows nothing about the frames a prior
+    /// incarnation left un-applied. Until the seed lands, "nothing pending" would
+    /// mean "nothing this process assigned", not "every frame applied" — and
+    /// answering the watermark from it would mark a prior incarnation's
+    /// un-replayed frames applied.
+    seeded: bool,
+}
+
+/// Why a partition's applied watermark could not be computed.
+///
+/// Typed rather than a silent fallback: the one state in which the watermark is
+/// unknowable — an empty pending map that has not been seeded from the WAL — is
+/// exactly the state in which a guessed answer marks a prior incarnation's
+/// frames applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum WalWatermarkError {
+    /// The pending map is empty only because boot seeding has not run yet, so
+    /// emptiness carries no information about what a prior incarnation left
+    /// behind. Reachable only with a WAL present: with no WAL there is no
+    /// tracker, no frames, and nothing to seed.
+    #[error("WAL watermark queried before boot seeding completed")]
+    Unseeded,
 }
 
 /// The WAL handle bundled with all of its `wal_seq` tracking state.
@@ -991,12 +1015,137 @@ impl WriteBehindDataStore {
     /// which returns the OLD value, so its loaded value is the NEXT sequence to
     /// assign — using it would pre-mark the next write's frame applied before that
     /// frame is even written.
-    fn prefix_complete_watermark(state: &PartitionTracking) -> u64 {
-        state
-            .pending
-            .keys()
-            .next()
-            .map_or(state.max_assigned, |min| min.saturating_sub(1))
+    ///
+    /// An empty map is only informative once the partition has been seeded from
+    /// the on-disk WAL: before that, emptiness says nothing about the frames a
+    /// prior incarnation left un-applied, so it is a typed error rather than an
+    /// advance.
+    fn prefix_complete_watermark(state: &PartitionTracking) -> Result<u64, WalWatermarkError> {
+        match state.pending.keys().next() {
+            Some(min) => Ok(min.saturating_sub(1)),
+            None if state.seeded => Ok(state.max_assigned),
+            None => Err(WalWatermarkError::Unseeded),
+        }
+    }
+
+    /// Seeds `partition`'s pending map from the frames the on-disk WAL still
+    /// reports as un-applied, so this incarnation's watermark respects what the
+    /// previous one left behind.
+    ///
+    /// Recovery replays directly into the inner store and never touches
+    /// write-behind, so without this a restarted process boots with an empty
+    /// pending map and the first flush marks every un-replayed frame applied —
+    /// filtering them out of the next replay and making their segments
+    /// collectable. The seeded sequences never resolve in this incarnation: they
+    /// resolve by replaying on a future restart, and the stall they cause is the
+    /// intended surfacing of a write the store rejected.
+    ///
+    /// `unapplied` is a full read-and-decode of every retained segment for the
+    /// partition, so it runs once per partition, off the steady-state path, and
+    /// outside the tracking lock.
+    ///
+    /// The install is double-checked, and that is load-bearing rather than
+    /// defensive. Only the FIRST installer's scan provably predates any live
+    /// append for the partition — a losing racer's scan may have observed a
+    /// winner's freshly-appended live frame, so its install must not reach the
+    /// map. Sequences are inserted without displacing existing entries for the
+    /// same reason: a seed must never overwrite what a live write recorded.
+    async fn ensure_wal_seeded(&self, partition: u32) {
+        let Some(tracking) = &self.wal else {
+            return;
+        };
+        if tracking.with_partition(partition, |state| state.seeded) {
+            return;
+        }
+
+        let frames = match tracking.wal.unapplied(partition).await {
+            Ok(frames) => frames,
+            Err(err) => {
+                // Leaving the partition unseeded holds its watermark at the typed
+                // error, which under-advances rather than over-advances: GC is
+                // delayed, no frame is marked applied.
+                error!(
+                    partition,
+                    error = %err,
+                    "Failed to read un-applied WAL frames; partition watermark stays unseeded"
+                );
+                return;
+            }
+        };
+
+        tracking.with_partition(partition, |state| {
+            if state.seeded {
+                return;
+            }
+            for frame in &frames {
+                state
+                    .pending
+                    .entry(frame.sequence)
+                    .or_insert(PendingOrigin::BootUnreplayed);
+            }
+            state.seeded = true;
+        });
+    }
+
+    /// Records that a flush worker now owns `seqs`, having taken their entry out
+    /// of the partition queue.
+    ///
+    /// Between the queue removal and the terminal the entry exists only as a
+    /// local binding, so without this a sequence is absent from both the queue
+    /// and the registry — which is the signature of a leaked sequence. A hung
+    /// inner store would then be reported as a code bug rather than as a disk to
+    /// go and look at.
+    fn register_in_flight(&self, partition: u32, seqs: &BTreeSet<u64>) {
+        let Some(tracking) = &self.wal else {
+            return;
+        };
+        tracking.with_partition(partition, |state| {
+            state.in_flight.extend(seqs.iter().copied());
+        });
+    }
+
+    /// Releases a flush worker's ownership of `seqs` without resolving them.
+    ///
+    /// Used where the entry leaves in-flight but has NOT reached a terminal — a
+    /// retry puts it back on the queue. Skipping it would leave the sequence
+    /// both queued and in-flight, and would leak one registry entry per retry.
+    fn deregister_in_flight(&self, partition: u32, seqs: &BTreeSet<u64>) {
+        let Some(tracking) = &self.wal else {
+            return;
+        };
+        tracking.with_partition(partition, |state| {
+            for seq in seqs {
+                state.in_flight.remove(seq);
+            }
+        });
+    }
+
+    /// Marks `seqs` abandoned: their entry reached a terminal that did NOT make
+    /// the write durable in the inner store.
+    ///
+    /// Deliberately does not resolve. Resolving would let the watermark advance
+    /// past an acked write that is in neither the inner store nor — once GC runs
+    /// behind the advanced watermark — the WAL, which is permanent silent loss.
+    /// Leaving the sequence pending keeps the frame replayable, stalls the
+    /// watermark, and raises the abandoned-write alarm; a transient store failure
+    /// then self-heals on the next restart's replay.
+    ///
+    /// The re-tag is conditional. A sequence may already have been resolved by a
+    /// racing durable terminal for the same entry, and a blind insert would
+    /// re-introduce a sequence that is already applied, pinning the watermark
+    /// forever.
+    fn abandon_wal_sequences(&self, partition: u32, seqs: &BTreeSet<u64>) {
+        let Some(tracking) = &self.wal else {
+            return;
+        };
+        tracking.with_partition(partition, |state| {
+            for seq in seqs {
+                state.in_flight.remove(seq);
+                if let Some(origin) = state.pending.get_mut(seq) {
+                    *origin = PendingOrigin::Abandoned;
+                }
+            }
+        });
     }
 
     /// Resolves `seqs` as durably applied and advances the partition's WAL
@@ -1026,10 +1175,25 @@ impl WriteBehindDataStore {
             if scalar_max {
                 // Reproduces the pre-fix scalar advance so the differential test
                 // keeps a live negative control rather than a one-off revert.
-                return seqs.iter().copied().max().unwrap_or(0);
+                return Ok(seqs.iter().copied().max().unwrap_or(0));
             }
             Self::prefix_complete_watermark(state)
         });
+
+        let watermark = match watermark {
+            Ok(watermark) => watermark,
+            Err(err) => {
+                // Nothing is marked applied. The frames stay replayable and the
+                // WAL grows, which is the safe direction: the alternative is
+                // guessing a watermark for frames this process never saw.
+                error!(
+                    partition,
+                    error = %err,
+                    "Refusing to advance the WAL watermark for an unseeded partition"
+                );
+                return;
+            }
+        };
 
         if let Err(err) = tracking.wal.mark_applied(partition, watermark).await {
             warn!(
@@ -1084,11 +1248,27 @@ impl WriteBehindDataStore {
     }
 
     /// The prefix-complete watermark `partition` would advance to right now.
+    ///
+    /// `None` means no WAL exists, so the watermark has no subject at all; an
+    /// inner `Err` means the partition has not been boot-seeded yet. The two are
+    /// kept distinct because collapsing them is exactly the conflation the
+    /// typed error exists to prevent.
     #[cfg(test)]
-    pub(crate) fn test_wal_watermark(&self, partition: u32) -> Option<u64> {
+    pub(crate) fn test_wal_watermark(
+        &self,
+        partition: u32,
+    ) -> Option<Result<u64, WalWatermarkError>> {
         self.wal.as_ref().map(|tracking| {
             tracking.with_partition(partition, |state| Self::prefix_complete_watermark(state))
         })
+    }
+
+    /// Whether `partition`'s pending map has been seeded from the on-disk WAL.
+    #[cfg(test)]
+    pub(crate) fn test_wal_partition_seeded(&self, partition: u32) -> bool {
+        self.wal
+            .as_ref()
+            .is_some_and(|tracking| tracking.with_partition(partition, |state| state.seeded))
     }
 }
 
@@ -1135,6 +1315,14 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
 
         if ready_entries.is_empty() {
             continue;
+        }
+
+        // The drained entries now exist only as local bindings, so record this
+        // worker's ownership of their WAL sequences before the first inner-store
+        // call. Done after every partition-queue guard has dropped, so the
+        // tracking lock is never nested under one.
+        for entry in &ready_entries {
+            store.register_in_flight(partition_for(&entry.map, &entry.key), &entry.wal_sequences);
         }
 
         // Sort by store_time then sequence for fairness
@@ -1201,6 +1389,13 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                             let mut retry_entry = entry.clone();
                             retry_entry.retry_count = new_retry;
 
+                            // Back on the queue, so this worker no longer owns the
+                            // sequences — but they are NOT terminal and stay
+                            // pending. Skipping this would leave them both queued
+                            // and in-flight, and would leak a registry entry per
+                            // retry.
+                            store.deregister_in_flight(partition_id_for_wal, &entry.wal_sequences);
+
                             let partition_id = partition_for(&entry.map, &entry.key);
                             let mut queue = store.queues.entry(partition_id).or_default();
                             queue.reinsert_front(vec![retry_entry]);
@@ -1230,6 +1425,13 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                             // in the WAL until GC (R12(b)), so this does not lose
                             // durability — a discarded write is a re-sync event.
                             store.resolve_pending(entry.sequence);
+                            // The WAL sequences take the OPPOSITE disposition: this
+                            // write is in neither the inner store nor, once the WAL
+                            // watermark passes it, the WAL. Resolving would license
+                            // the watermark past an acked, non-durable write.
+                            // Abandoning keeps the frame replayable so the next
+                            // restart re-applies it.
+                            store.abandon_wal_sequences(partition_id_for_wal, &entry.wal_sequences);
                         }
                     }
                 }
@@ -1277,6 +1479,10 @@ impl MapDataStore for WriteBehindDataStore {
         }
 
         let partition_id = partition_for(map, key);
+        // Seed before the first sequence of this partition is handed out, so the
+        // watermark this write eventually advances already accounts for whatever
+        // a prior incarnation left un-applied.
+        self.ensure_wal_seeded(partition_id).await;
         let wal_seq = self.assign_wal_sequence(partition_id);
 
         // Append to WAL and satisfy the fsync policy before touching in-memory
@@ -1403,6 +1609,10 @@ impl MapDataStore for WriteBehindDataStore {
         }
 
         let partition_id = partition_for(map, key);
+        // Seed before the first sequence of this partition is handed out, so the
+        // watermark this write eventually advances already accounts for whatever
+        // a prior incarnation left un-applied.
+        self.ensure_wal_seeded(partition_id).await;
         let wal_seq = self.assign_wal_sequence(partition_id);
 
         // Append to WAL before updating in-memory state so crash recovery can
@@ -1535,6 +1745,10 @@ impl MapDataStore for WriteBehindDataStore {
             }
 
             let partition_id = partition_for(map, key);
+            // Seed before the first sequence of this partition is handed out, so
+            // the watermark this write eventually advances already accounts for
+            // whatever a prior incarnation left un-applied.
+            self.ensure_wal_seeded(partition_id).await;
             let wal_seq = self.assign_wal_sequence(partition_id);
 
             // Append each tombstone to the WAL before queuing so crash recovery
@@ -1795,6 +2009,16 @@ impl MapDataStore for WriteBehindDataStore {
                 return Ok(());
             }
 
+            // Same window as the flush loop's drain: from here the entries exist
+            // only as local bindings, so record ownership before the first
+            // inner-store call and after every queue guard has dropped.
+            for entry in &all_entries {
+                self.register_in_flight(
+                    partition_for(&entry.map, &entry.key),
+                    &entry.wal_sequences,
+                );
+            }
+
             // Persist each entry, wrapping each inner-store call with the
             // remaining deadline budget. This ensures that even a single slow
             // inner-store write cannot hold up the process past the configured
@@ -1864,9 +2088,24 @@ impl MapDataStore for WriteBehindDataStore {
 
             if !timed_out_entries.is_empty() {
                 // Also sweep any entries reinserted by concurrent retry paths.
+                // These are drained and abandoned in one go — deliberately never
+                // registered, since they never enter a flush and an ownership
+                // that is taken and released with no call in between is a state
+                // no observer can see.
                 for mut queue_ref in self.queues.iter_mut() {
                     let drained = queue_ref.value_mut().drain_ready(i64::MAX);
                     timed_out_entries.extend(drained);
+                }
+
+                // The process is exiting with these writes in neither the inner
+                // store nor applied in the WAL. Abandoning rather than resolving
+                // holds the watermark below their frames, so recovery replays
+                // them on the next boot.
+                for entry in &timed_out_entries {
+                    self.abandon_wal_sequences(
+                        partition_for(&entry.map, &entry.key),
+                        &entry.wal_sequences,
+                    );
                 }
 
                 // Log every op that could not be persisted within the timeout.
@@ -1906,6 +2145,13 @@ impl MapDataStore for WriteBehindDataStore {
             None
         };
 
+        // This caller — not the flush loop — now owns the superseded entry's WAL
+        // sequences: a third in-flight producer, and the easiest of the three to
+        // miss. Recorded after the partition-queue guard has dropped.
+        if let Some(removed) = &removed {
+            self.register_in_flight(partition_id, &removed.wal_sequences);
+        }
+
         // Remove from staging
         self.staging.remove(&(map.to_string(), key.to_string()));
 
@@ -1929,6 +2175,22 @@ impl MapDataStore for WriteBehindDataStore {
         // watermark forever and freeze the tombstone durability fence.
         if let Some(removed) = &removed {
             self.resolve_pending(removed.sequence);
+        }
+
+        // The WAL sequences split by outcome, unlike the entry sequence above.
+        // On success the value is durable in the inner store, so they resolve and
+        // the partition watermark advances — this site writes no WAL frame of its
+        // own, but skipping the advance would leave a flush_key-only partition
+        // moving its pending set while the sidecar never moves, growing the WAL
+        // where neither alarm can see it. On failure the write is durable
+        // nowhere, so they are abandoned and their frames stay replayable.
+        if let Some(removed) = &removed {
+            if result.is_ok() {
+                self.resolve_and_advance(partition_id, &removed.wal_sequences)
+                    .await;
+            } else {
+                self.abandon_wal_sequences(partition_id, &removed.wal_sequences);
+            }
         }
 
         result
@@ -3870,7 +4132,7 @@ mod tests {
         assert!(store.test_in_flight_wal_sequences(partition).is_empty());
         assert_eq!(
             store.test_wal_watermark(partition),
-            Some(0),
+            Some(Ok(0)),
             "the lowest pending sequence is itself UNRESOLVED, so the inclusive \
              watermark stops one below it — marking it would filter a buffered \
              frame out of replay"
@@ -3882,7 +4144,7 @@ mod tests {
 
         assert_eq!(
             store.test_wal_watermark(partition),
-            Some(1),
+            Some(Ok(1)),
             "nothing pending ⇒ every assigned sequence resolved ⇒ the highest \
              ASSIGNED, never the counter's next value"
         );
@@ -3987,6 +4249,66 @@ mod tests {
         assert!(
             store.test_pending_wal_sequences(partition).is_empty(),
             "the sequences are inert identifiers; nothing tracks them"
+        );
+    }
+
+    #[tokio::test]
+    async fn boot_seeding_holds_the_watermark_below_a_prior_incarnation_frame() {
+        let wal = InMemoryTestWal::new();
+        let partition = partition_for("m", "k1");
+        // A previous process appended this frame and died before it was applied.
+        // Recovery replays such frames straight into the inner store, so nothing
+        // else would ever tell this store the frame exists.
+        wal.appended.lock().await.push((
+            partition,
+            WalEntry {
+                map: "m".to_string(),
+                key: "stranded".to_string(),
+                op: WalOp::Remove,
+                timestamp: None,
+                sequence: 7,
+            },
+        ));
+
+        let inner: Arc<dyn MapDataStore> = Arc::new(SpyDataStore::new());
+        let store = WriteBehindDataStore::new_with_wal(
+            inner,
+            WriteBehindConfig {
+                write_delay_ms: 60_000,
+                flush_interval_ms: 60_000,
+                ..WriteBehindConfig::default()
+            },
+            Some(WalBootstrap {
+                wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                sequence_start: 100,
+            }),
+        );
+
+        assert!(!store.test_wal_partition_seeded(partition));
+        assert_eq!(
+            store.test_wal_watermark(partition),
+            Some(Err(WalWatermarkError::Unseeded)),
+            "an empty map that has not been seeded says nothing about what a \
+             prior incarnation left behind, so it must not answer the watermark"
+        );
+
+        store.add("m", "k1", &dummy_value(), 0, 1000).await.unwrap();
+
+        assert!(store.test_wal_partition_seeded(partition));
+        assert_eq!(
+            store.test_pending_wal_sequences(partition),
+            vec![
+                (7, PendingOrigin::BootUnreplayed),
+                (100, PendingOrigin::Live)
+            ],
+            "the stranded frame is pending in this incarnation even though no \
+             entry owns it; it resolves only by replaying on a future restart"
+        );
+        assert_eq!(
+            store.test_wal_watermark(partition),
+            Some(Ok(6)),
+            "the watermark stops below the stranded frame — advancing past it \
+             would filter it out of the next replay and free its segment"
         );
     }
 
