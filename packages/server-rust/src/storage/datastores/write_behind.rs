@@ -924,6 +924,14 @@ pub struct WriteBehindDataStore {
     /// Test-only instrumentation of the stalled-pending classifier.
     #[cfg(test)]
     classifier_seam: ClassifierSeam,
+    /// Forces every coalesce survivor to answer "does not subsume".
+    ///
+    /// No production framing answers `false` yet, so without this the
+    /// carry-forward route — and the abandoned-survivor stall that keeps a
+    /// retired frame replayable — would ship unexercised until the first
+    /// partial-state framing lands.
+    #[cfg(test)]
+    force_non_subsuming_survivor: AtomicBool,
 }
 
 /// WAL plus the live sequence counter's starting value, threaded into
@@ -994,6 +1002,8 @@ impl WriteBehindDataStore {
             watermark_mode: Mutex::new(WatermarkMode::default()),
             #[cfg(test)]
             classifier_seam: ClassifierSeam::default(),
+            #[cfg(test)]
+            force_non_subsuming_survivor: AtomicBool::new(false),
         });
 
         // Spawn background flush loop with a clone of the Arc
@@ -1438,6 +1448,29 @@ impl WriteBehindDataStore {
             state.max_assigned = state.max_assigned.max(seq);
             seq
         })
+    }
+
+    /// Whether the SURVIVOR of a coalesce makes its predecessor's frame
+    /// redundant.
+    ///
+    /// Read off the survivor's own framing, never the retired entry's: a
+    /// survivor carrying complete state subsumes any predecessor, while one
+    /// carrying only its own delta subsumes nothing regardless of what it
+    /// displaces.
+    fn survivor_subsumes(&self, op: &WalOp) -> bool {
+        #[cfg(test)]
+        if self.force_non_subsuming_survivor.load(Ordering::Relaxed) {
+            return false;
+        }
+        op.subsumes_on_coalesce()
+    }
+
+    /// Makes every subsequent coalesce route as if the survivor's framing
+    /// carried only partial state.
+    #[cfg(test)]
+    pub(crate) fn test_force_non_subsuming_survivor(&self, force: bool) {
+        self.force_non_subsuming_survivor
+            .store(force, Ordering::Relaxed);
     }
 
     /// Promotes `seq` from `Appending` to `Live` once its frame is on disk and its
@@ -2091,7 +2124,7 @@ impl MapDataStore for WriteBehindDataStore {
         // survivor carrying complete state subsumes any predecessor, while a
         // survivor carrying only its own delta subsumes nothing regardless of what
         // it displaces.
-        let survivor_subsumes = wal_entry.op.subsumes_on_coalesce();
+        let survivor_subsumes = self.survivor_subsumes(&wal_entry.op);
         // A failed append leaves a tracked sequence that no frame bears and that
         // nothing can ever flush to resolve, so drop it before propagating.
         if let Err(err) = self.wal_append(partition_id, &wal_entry).await {
@@ -2217,7 +2250,7 @@ impl MapDataStore for WriteBehindDataStore {
             sequence: wal_seq,
         };
         // Evaluated on the SURVIVOR — this write — never on what it displaces.
-        let survivor_subsumes = wal_entry.op.subsumes_on_coalesce();
+        let survivor_subsumes = self.survivor_subsumes(&wal_entry.op);
         // A failed append leaves a tracked sequence no frame bears — drop it.
         if let Err(err) = self.wal_append(partition_id, &wal_entry).await {
             self.rollback_wal_sequence(partition_id, wal_seq);
@@ -2367,7 +2400,7 @@ impl MapDataStore for WriteBehindDataStore {
             };
             // Evaluated on the SURVIVOR — this key's write — never on what it
             // displaces in the queue.
-            let survivor_subsumes = wal_entry.op.subsumes_on_coalesce();
+            let survivor_subsumes = self.survivor_subsumes(&wal_entry.op);
             // Roll back ONLY the key whose own append failed. The earlier keys'
             // sequences are frame-backed and must stay pending — rolling those
             // back would let the watermark advance past frames never applied.
@@ -4248,6 +4281,55 @@ mod tests {
         let _ = WriteBehindConfig::from_source(config_source(&[(
             "TOPGUN_WAL_FSYNC_POLICY",
             "invalid_policy",
+        )]));
+    }
+
+    #[test]
+    fn from_source_parses_the_wal_watermark_stall_bound() {
+        // Unset ⇒ the recorded default. Asserting the server's OWN parse rather
+        // than re-deriving the value from the environment is the point: the
+        // defect class this guards is a parse that silently disagrees with what
+        // the operator-facing boot line reports.
+        let cfg = WriteBehindConfig::from_source(config_source(&[]));
+        assert_eq!(cfg.wal_watermark_stall_bound_ms, 60_000);
+
+        let cfg = WriteBehindConfig::from_source(config_source(&[(
+            "TOPGUN_WAL_WATERMARK_STALL_BOUND_MS",
+            "90000",
+        )]));
+        assert_eq!(cfg.wal_watermark_stall_bound_ms, 90_000);
+
+        // Unparseable warns and falls back — deliberately NOT symmetric with the
+        // out-of-range case below: a typo must not take the process down, while
+        // a value that parses and disarms the alarm's false-positive guard must.
+        let cfg = WriteBehindConfig::from_source(config_source(&[(
+            "TOPGUN_WAL_WATERMARK_STALL_BOUND_MS",
+            "not-a-number",
+        )]));
+        assert_eq!(cfg.wal_watermark_stall_bound_ms, 60_000);
+
+        // The ACCEPTED boundary, with the derived values read off the config's own
+        // arithmetic so a regression to a bare division cannot pass: at the floor
+        // both derivations are pinned by their floors, not by the quotient.
+        let cfg = WriteBehindConfig::from_source(config_source(&[(
+            "TOPGUN_WAL_WATERMARK_STALL_BOUND_MS",
+            "6000",
+        )]));
+        assert_eq!(cfg.wal_watermark_stall_bound_ms, 6_000);
+        assert_eq!(cfg.reconfirm_delay_ms(), 100);
+        assert_eq!(cfg.watchdog_tick_ms(), 600);
+    }
+
+    #[test]
+    #[should_panic(expected = "is below the minimum of")]
+    fn from_source_stall_bound_below_the_minimum_is_fatal() {
+        // One millisecond under the floor: the check must be a boundary, not a
+        // rough band, or the alarm's re-confirmation window shrinks below the
+        // race it exists to absorb while the boot line still reports it as
+        // effective.
+        let _ = WriteBehindConfig::from_source(config_source(&[(
+            "TOPGUN_WAL_WATERMARK_STALL_BOUND_MS",
+            "5999",
         )]));
     }
 

@@ -379,6 +379,38 @@ fn admin_bind_posture(no_auth: bool, bind_addr: &str, allow_public_override: boo
     }
 }
 
+/// Emits the single operator-facing boot summary.
+///
+/// Reads against this line are how an operator confirms the effective memory
+/// ceiling, whether write-behind is wrapping the durable backend, the active WAL
+/// configuration, and the effective stalled-watermark bound. Extracted from
+/// `main` so the EMISSION itself — not a getter that happens to agree with it —
+/// can be asserted: a field that never reaches this line is invisible to the
+/// operator regardless of how correctly it parsed.
+fn log_boot_summary(
+    eviction_config: &EvictionConfig,
+    write_behind_config: &WriteBehindConfig,
+    durable_backend: bool,
+    policies_loaded: usize,
+    rbac_configured: bool,
+) {
+    tracing::info!(
+        max_ram_mb = eviction_config.max_ram_bytes / (1024 * 1024),
+        high_water_pct = eviction_config.high_water_pct,
+        low_water_pct = eviction_config.low_water_pct,
+        interval_ms = eviction_config.interval_ms,
+        write_behind_enabled = durable_backend,
+        write_behind_shutdown_timeout_ms = write_behind_config.shutdown_timeout_ms,
+        wal_enabled = durable_backend,
+        wal_dir = %write_behind_config.wal_dir.display(),
+        wal_fsync_policy = ?write_behind_config.wal_fsync_policy,
+        wal_watermark_stall_bound_ms = write_behind_config.wal_watermark_stall_bound_ms,
+        policies_loaded,
+        rbac_configured,
+        "eviction + write-behind + WAL initialized"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // ClusterStateAdapter — bridges ClusterState to the ClusterService trait
 // ---------------------------------------------------------------------------
@@ -1044,22 +1076,12 @@ async fn main() -> anyhow::Result<()> {
     );
     tokio::spawn(orchestrator.run());
 
-    // Single operator-facing summary line. Reads against this line are how an
-    // operator confirms the effective ceiling, whether write-behind is wrapping
-    // the durable backend, and the active WAL configuration.
-    tracing::info!(
-        max_ram_mb = eviction_config.max_ram_bytes / (1024 * 1024),
-        high_water_pct = eviction_config.high_water_pct,
-        low_water_pct = eviction_config.low_water_pct,
-        interval_ms = eviction_config.interval_ms,
-        write_behind_enabled = !matches!(backend, StorageBackend::Null),
-        write_behind_shutdown_timeout_ms = write_behind_config.shutdown_timeout_ms,
-        wal_enabled = !matches!(backend, StorageBackend::Null),
-        wal_dir = %write_behind_config.wal_dir.display(),
-        wal_fsync_policy = ?write_behind_config.wal_fsync_policy,
+    log_boot_summary(
+        &eviction_config,
+        &write_behind_config,
+        !matches!(backend, StorageBackend::Null),
         policies_loaded,
         rbac_configured,
-        "eviction + write-behind + WAL initialized"
     );
 
     // Make each policy's crash-durability caveat impossible to miss at boot on a
@@ -2156,7 +2178,73 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::{admin_bind_posture, BindPosture};
+    use super::{admin_bind_posture, log_boot_summary, BindPosture};
+    use super::{EvictionConfig, WriteBehindConfig};
+    use std::io;
+    use std::sync::{Arc, Mutex};
+
+    /// A `tracing` writer that keeps the captured bytes in the test's own buffer.
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_boot_summary_carries_the_effective_stall_bound() {
+        let captured = CapturedLog::default();
+        let writer = captured.clone();
+
+        let mut write_behind_config = WriteBehindConfig::default();
+        // A value no default and no other field could coincidentally produce, so
+        // a substring hit cannot be someone else's number.
+        write_behind_config.wal_watermark_stall_bound_ms = 42_123;
+
+        // Scoped, never a global install: this test binary is shared and runs in
+        // parallel, and a global subscriber would leak into every other test.
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            log_boot_summary(
+                &EvictionConfig::default(),
+                &write_behind_config,
+                true,
+                0,
+                false,
+            );
+        });
+
+        let rendered = String::from_utf8(
+            captured
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
+        .expect("captured log is utf-8");
+
+        // VALUE substring only — never full-line equality, never the message
+        // text, never field order: this pins exactly the field name and its
+        // effective value, and nothing a later field addition would rot.
+        assert!(
+            rendered.contains("wal_watermark_stall_bound_ms=42123"),
+            "the operator-facing boot line must carry the EFFECTIVE stall bound; \
+             captured: {rendered}"
+        );
+    }
 
     #[test]
     fn auth_enforced_is_always_allowed() {
