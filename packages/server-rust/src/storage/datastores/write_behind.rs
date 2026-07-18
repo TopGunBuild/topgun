@@ -5145,3 +5145,14 @@ mod durability_tests {
         }
     }
 }
+
+/// Proofs for the per-partition prefix-complete WAL watermark.
+///
+/// A CHILD module, not a sibling: `datastores/mod.rs` declares `mod write_behind`
+/// privately, so nothing outside `datastores` can name this store's `pub(crate)`
+/// internals. A child reaches the pending map, `max_assigned`, the in-flight
+/// registry and the watermark-mode seam directly, with no production visibility
+/// widened for a test.
+#[cfg(test)]
+#[path = "prefix_watermark_proptest.rs"]
+mod prefix_watermark_proptest;
