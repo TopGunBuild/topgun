@@ -2206,10 +2206,12 @@ mod tests {
         let captured = CapturedLog::default();
         let writer = captured.clone();
 
-        let mut write_behind_config = WriteBehindConfig::default();
         // A value no default and no other field could coincidentally produce, so
         // a substring hit cannot be someone else's number.
-        write_behind_config.wal_watermark_stall_bound_ms = 42_123;
+        let write_behind_config = WriteBehindConfig {
+            wal_watermark_stall_bound_ms: 42_123,
+            ..WriteBehindConfig::default()
+        };
 
         // Scoped, never a global install: this test binary is shared and runs in
         // parallel, and a global subscriber would leak into every other test.

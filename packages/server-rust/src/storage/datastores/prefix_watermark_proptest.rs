@@ -1761,3 +1761,354 @@ async fn a_transient_ownerless_window_never_fires_an_alarm() {
         "the watermark advances normally past a sequence that was never leaked"
     );
 }
+
+// ===========================================================================
+// AC4 — the widened `[W, max]` re-replay window is idempotent
+// ===========================================================================
+
+/// A real `RedbDataStore`, so the merge that makes re-replay a no-op is the
+/// production one. A hand-rolled double could be made to "merge" by fiat and the
+/// assertion would prove nothing about the store the server actually runs.
+fn redb_store(path: &std::path::Path) -> Arc<crate::storage::datastores::RedbDataStore> {
+    Arc::new(crate::storage::datastores::RedbDataStore::new(path).expect("redb store"))
+}
+
+async fn stored_millis(
+    store: &Arc<crate::storage::datastores::RedbDataStore>,
+    key: &str,
+) -> Option<u64> {
+    match store.load(TEST_MAP, key).await.expect("load") {
+        Some(RecordValue::Lww { timestamp, .. }) => Some(timestamp.millis),
+        _ => None,
+    }
+}
+
+/// The durable tombstone-byte ground truth, computed the way the boot-time
+/// reconciliation computes it.
+///
+/// The production `reconcile_tombstone_bytes` lives in the server BINARY and
+/// cannot be called from the lib test binary, so this asserts the quantity it
+/// derives — the durable sum — rather than the function call.
+async fn durable_tombstone_bytes(store: &Arc<crate::storage::datastores::RedbDataStore>) -> usize {
+    let mut total = 0usize;
+    let batch = store.scan_values(TEST_MAP, false, 0).await.expect("scan");
+    for (_key, value) in &batch.records {
+        if let RecordValue::OrMap { tombstones, .. } = value {
+            total += tombstones.iter().map(String::len).sum::<usize>();
+        }
+    }
+    total
+}
+
+#[tokio::test]
+async fn a_re_replayed_window_lands_on_the_newest_frame_and_moves_no_tombstone_bytes() {
+    let partition = 258;
+    let key = keys_in_partition(partition, 1).remove(0);
+    let (_wal_dir, wal) = real_wal();
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    // ONE durable handle for the whole test: the background flush task holds an
+    // `Arc` of the write-behind store, so a reopen here would race redb's file
+    // lock. Re-opening is AC9's subject, not this one's.
+    let redb = redb_store(&store_dir.path().join("redb"));
+    {
+        let store = WriteBehindDataStore::new_with_wal(
+            Arc::clone(&redb) as Arc<dyn MapDataStore>,
+            never_flush_config(),
+            Some(WalBootstrap {
+                wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                sequence_start: 1,
+            }),
+        );
+        // Two framed writes for one key, both inside the widened window.
+        store.add(TEST_MAP, &key, &lww(10), 0, 0).await.unwrap();
+        store.add(TEST_MAP, &key, &lww(20), 0, 0).await.unwrap();
+        drop(store);
+    }
+
+    let before = durable_tombstone_bytes(&redb).await;
+
+    // Replay the window twice. Re-replay is what widening `[W, max]` makes
+    // routine, so landing on the newest frame must be a property of the window,
+    // not of running it exactly once.
+    for _ in 0..2 {
+        WalRecovery::new(Arc::clone(&wal), Vec::new())
+            .run(Arc::clone(&redb) as Arc<dyn MapDataStore>)
+            .await
+            .expect("re-replay of an intact window must succeed");
+        assert_eq!(
+            stored_millis(&redb, &key).await,
+            Some(20),
+            "the window replays in sequence order, so it always settles on the \
+             newest frame — an older frame in the same window must not be the \
+             last word"
+        );
+    }
+
+    // The gauge assertion kept in its only non-vacuous form: replay bypasses the
+    // gauge helpers entirely, so "gauge unchanged" proves nothing — the durable
+    // ground truth a boot reconciliation would recompute is what must hold.
+    assert_eq!(
+        durable_tombstone_bytes(&redb).await,
+        before,
+        "re-replaying the widened window must not move the durable tombstone \
+         ground truth"
+    );
+}
+
+// ===========================================================================
+// AC5 — recovery stops at the contiguous-success frontier, and legacy boots
+// ===========================================================================
+
+#[tokio::test]
+async fn recovery_stops_at_the_contiguous_success_frontier() {
+    let partition = 259;
+    let keys = keys_in_partition(partition, 3);
+    let (_wal_dir, wal) = real_wal();
+
+    {
+        let inner = FaultStore::new();
+        let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
+        for (i, key) in keys.iter().enumerate() {
+            store
+                .add(TEST_MAP, key, &lww(i as u64 + 1), 0, 0)
+                .await
+                .unwrap();
+        }
+        drop(store);
+    }
+
+    // [1 Ok, 2 Err, 3 Ok]: the frontier is 1, NOT 3 — marking 3 applied would
+    // license GC of the frame that failed to replay.
+    let recovered = FaultStore::new();
+    recovered.reject_key(&keys[1]);
+    let outcome = WalRecovery::new(Arc::clone(&wal), Vec::new())
+        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+        .await;
+    assert!(outcome.is_ok(), "a failed replay must not refuse the boot");
+
+    assert_eq!(
+        wal.test_read_applied_sequence(partition),
+        1,
+        "the sidecar stops at the last CONTIGUOUS success"
+    );
+    let unapplied: Vec<u64> = wal
+        .unapplied(partition)
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| e.sequence)
+        .collect();
+    assert_eq!(
+        unapplied,
+        vec![2, 3],
+        "both the failed frame and everything after it stay replayable"
+    );
+
+    // The stall self-heals on the next boot once the store accepts the write.
+    recovered.accept_all();
+    WalRecovery::new(Arc::clone(&wal), Vec::new())
+        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+        .await
+        .expect("second recovery");
+    assert_eq!(wal.test_read_applied_sequence(partition), 3);
+    assert!(wal.unapplied(partition).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_legacy_shaped_wal_still_boots_and_replays() {
+    let partition = 260;
+    let key = keys_in_partition(partition, 1).remove(0);
+    let (_wal_dir, wal) = real_wal();
+
+    // The bare-`Value` framing an older server wrote. Refusing to start on it
+    // would strand every existing deployment's WAL.
+    wal.append(
+        partition,
+        &WalEntry {
+            map: TEST_MAP.to_string(),
+            key: key.clone(),
+            op: WalOp::Store {
+                value: WalStorePayload::Legacy(Value::Int(7)),
+                expiration_time: None,
+            },
+            timestamp: None,
+            sequence: 1,
+        },
+    )
+    .await
+    .unwrap();
+
+    let recovered = FaultStore::new();
+    WalRecovery::new(Arc::clone(&wal), Vec::new())
+        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+        .await
+        .expect("a legacy WAL must boot, not refuse to start");
+    assert!(recovered.contains(&key).await, "and its frame must replay");
+}
+
+// ===========================================================================
+// AC9 — the durable-store assumption everything else rests on
+// ===========================================================================
+
+#[tokio::test]
+async fn a_committed_redb_write_survives_a_drop_and_reopen() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("redb");
+
+    // No write-behind and no WAL: this asserts the STORE's own durability
+    // contract. Under a downgraded commit durability an un-checkpointed commit
+    // does not survive the reopen — which is what makes this discriminate, and
+    // which is why every resolve-on-flush-success in this spec depends on it.
+    {
+        let store = redb_store(&path);
+        store.add(TEST_MAP, "durable", &lww(1), 0, 0).await.unwrap();
+    }
+
+    let reopened = redb_store(&path);
+    assert_eq!(
+        stored_millis(&reopened, "durable").await,
+        Some(1),
+        "a committed write must survive a drop and reopen, or advancing the \
+         watermark on flush success advances past a non-durable write"
+    );
+}
+
+// ===========================================================================
+// AC10 — a coalesce never shifts a key's due time
+// ===========================================================================
+
+#[tokio::test]
+async fn a_coalesce_leaves_the_keys_due_time_stable() {
+    let partition = 261;
+    let key = keys_in_partition(partition, 1).remove(0);
+    let (_wal_dir, wal) = real_wal();
+    let inner = FaultStore::new();
+    let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
+
+    store.add(TEST_MAP, &key, &lww(1), 0, 1_000).await.unwrap();
+    store.add(TEST_MAP, &key, &lww(2), 0, 9_000).await.unwrap();
+
+    let drained = store
+        .queues
+        .get_mut(&partition)
+        .unwrap()
+        .drain_ready(i64::MAX);
+    assert_eq!(
+        drained.len(),
+        1,
+        "the second write coalesced onto the first"
+    );
+    assert_eq!(
+        drained[0].store_time, 1_000,
+        "a coalesce carries the survivor's VALUE but never shifts WHEN the key \
+         flushes: a later store_time would let a hot key defer its own flush \
+         indefinitely"
+    );
+}
+
+// ===========================================================================
+// AC11 — the coalesce-retire routes, both directions
+// ===========================================================================
+
+#[tokio::test]
+async fn a_subsuming_survivor_early_resolves_the_retired_sequence() {
+    let partition = 262;
+    let keys = keys_in_partition(partition, 2);
+    let (_wal_dir, wal) = real_wal();
+    let inner = FaultStore::new();
+    let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
+
+    // Store-onto-Store: a full snapshot subsumes its predecessor.
+    store.add(TEST_MAP, &keys[0], &lww(1), 0, 0).await.unwrap();
+    store.add(TEST_MAP, &keys[0], &lww(2), 0, 0).await.unwrap();
+    let pending: Vec<u64> = store
+        .test_pending_wal_sequences(partition)
+        .iter()
+        .map(|(s, _)| *s)
+        .collect();
+    assert_eq!(
+        pending,
+        vec![2],
+        "the retired sequence resolves at the coalesce; leaving it pending pins \
+         the partition's watermark on a repeatedly coalesced key"
+    );
+
+    // Remove-onto-Remove: the unit variant carries no payload, so the predicate
+    // must live on `WalOp` itself for this row to be answerable at all.
+    store.remove(TEST_MAP, &keys[1], 0).await.unwrap();
+    store.remove(TEST_MAP, &keys[1], 0).await.unwrap();
+    let pending: Vec<u64> = store
+        .test_pending_wal_sequences(partition)
+        .iter()
+        .map(|(s, _)| *s)
+        .collect();
+    assert_eq!(pending, vec![2, 4]);
+}
+
+#[tokio::test]
+async fn a_non_subsuming_survivor_carries_the_retired_sequence_forward() {
+    let partition = 263;
+    let key = keys_in_partition(partition, 1).remove(0);
+    let (_wal_dir, wal) = real_wal();
+
+    {
+        let inner = FaultStore::new();
+        let store = build_store_with(
+            &inner,
+            Arc::clone(&wal) as Arc<dyn Wal>,
+            1,
+            draining_config(),
+        );
+        // The survivor's framing carries only partial state, so the retired
+        // frame's effect is NOT re-carried and must stay replayable.
+        store.test_force_non_subsuming_survivor(true);
+        inner.reject_key(&key);
+
+        store.add(TEST_MAP, &key, &lww(1), 0, 0).await.unwrap();
+        store.add(TEST_MAP, &key, &lww(2), 0, 0).await.unwrap();
+
+        assert_eq!(
+            store
+                .test_pending_wal_sequences(partition)
+                .iter()
+                .map(|(s, _)| *s)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "the survivor OWNS the retired sequence: it does not early-resolve"
+        );
+
+        // The survivor then hits an abandoned terminal, so neither sequence may
+        // resolve and the watermark must stay below BOTH.
+        wait_until("the survivor to exhaust its retries", || {
+            store
+                .test_pending_wal_sequences(partition)
+                .iter()
+                .all(|(_, origin)| *origin == PendingOrigin::Abandoned)
+        })
+        .await;
+        assert_eq!(
+            store.test_wal_watermark(partition),
+            Some(Ok(0)),
+            "the watermark stalls at the OLDEST carried sequence, not at the \
+             survivor's own"
+        );
+        drop(store);
+    }
+
+    assert_eq!(
+        wal.test_read_applied_sequence(partition),
+        0,
+        "nothing was marked applied, so the retired frame stays GC-ineligible"
+    );
+    let recovered = FaultStore::new();
+    WalRecovery::new(Arc::clone(&wal), Vec::new())
+        .run(Arc::clone(&recovered) as Arc<dyn MapDataStore>)
+        .await
+        .expect("recovery");
+    assert!(
+        recovered.contains(&key).await,
+        "the retired frame IS replayed when the survivor is abandoned — which is \
+         exactly what early-resolving it would have made impossible"
+    );
+}

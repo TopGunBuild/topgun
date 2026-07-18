@@ -2846,11 +2846,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_skipped_gc_is_visible_on_the_metrics_scrape() {
-        let observability = crate::service::middleware::observability::init_observability();
-        let dir = tempfile::tempdir().unwrap();
-        let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap();
-
-        fn skipped_total(rendered: &str) -> u64 {
+        fn skipped_total(rendered: &str) -> f64 {
             rendered
                 .lines()
                 .find(|line| {
@@ -2859,8 +2855,12 @@ mod tests {
                 })
                 .and_then(|line| line.rsplit(' ').next())
                 .and_then(|v| v.parse::<f64>().ok())
-                .map_or(0, |v| v as u64)
+                .unwrap_or(0.0)
         }
+
+        let observability = crate::service::middleware::observability::init_observability();
+        let dir = tempfile::tempdir().unwrap();
+        let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap();
 
         let before = skipped_total(&observability.render_metrics());
 

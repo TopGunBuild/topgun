@@ -1457,6 +1457,7 @@ impl WriteBehindDataStore {
     /// survivor carrying complete state subsumes any predecessor, while one
     /// carrying only its own delta subsumes nothing regardless of what it
     /// displaces.
+    #[cfg_attr(not(test), allow(clippy::unused_self))]
     fn survivor_subsumes(&self, op: &WalOp) -> bool {
         #[cfg(test)]
         if self.force_non_subsuming_survivor.load(Ordering::Relaxed) {
