@@ -1319,6 +1319,37 @@ impl WriteBehindDataStore {
         }
     }
 
+    /// Disposes of a coalesce-retired entry's WAL sequences against the survivor.
+    ///
+    /// Returns the sequences the caller must EARLY-RESOLVE (once the partition
+    /// queue guard has dropped) when the survivor's frame subsumes the retired
+    /// one, and `None` when it does not — in which case they are carried forward
+    /// onto the survivor, which then resolves them together with its own at its
+    /// terminal outcome.
+    ///
+    /// Carry-forward is not the unconditional choice even though it is
+    /// framing-agnostic: it pays unbounded set growth on a hot, repeatedly
+    /// coalesced key, and an abandoned survivor stalls the watermark at the
+    /// OLDEST carried sequence rather than at its own. Early-resolve is sound
+    /// exactly when the survivor's frame re-carries the retired frame's effect,
+    /// which is what the predicate decides.
+    ///
+    /// Dropping the retired sequences instead — carrying neither disposition —
+    /// leaves them pending with no owner, so a repeatedly coalesced key pins its
+    /// partition's watermark forever.
+    fn coalesce_wal_sequences(
+        survivor_subsumes: bool,
+        survivor: &mut DelayedEntry,
+        retired: BTreeSet<u64>,
+    ) -> Option<BTreeSet<u64>> {
+        if survivor_subsumes {
+            Some(retired)
+        } else {
+            survivor.wal_sequences.extend(retired);
+            None
+        }
+    }
+
     /// Appends an entry to the WAL and satisfies the fsync policy before
     /// returning. Returns `Ok(())` immediately when no WAL is configured.
     ///
@@ -1534,17 +1565,26 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                             // entry's terminal discard.
                             store.clear_staging_if_current(&entry.map, &entry.key, entry.sequence);
                             store.pending_count.fetch_sub(1, Ordering::Relaxed);
-                            // Terminal discard: the sequence will never flush, so
-                            // resolve it to unstall the watermark. Its bytes remain
-                            // in the WAL until GC (R12(b)), so this does not lose
-                            // durability — a discarded write is a re-sync event.
+                            // Terminal discard in ENTRY space: the sequence will
+                            // never flush, so resolve it or the prefix-complete
+                            // flushed watermark — and with it the tombstone
+                            // durability fence — stalls behind a write that can
+                            // never arrive.
+                            //
+                            // This resolve does NOT keep the frame available: it
+                            // never gates WAL GC. What actually makes this write's
+                            // bytes collectable is a LATER entry in the same
+                            // partition advancing the WAL watermark past its
+                            // sequence, which is exactly why the wal_seq
+                            // disposition below is the opposite one.
                             store.resolve_pending(entry.sequence);
                             // The WAL sequences take the OPPOSITE disposition: this
                             // write is in neither the inner store nor, once the WAL
                             // watermark passes it, the WAL. Resolving would license
                             // the watermark past an acked, non-durable write.
-                            // Abandoning keeps the frame replayable so the next
-                            // restart re-applies it.
+                            // Abandoning holds the watermark below the frame, keeps
+                            // it replayable on the next restart, and raises the
+                            // abandoned-write alarm so the stall is never silent.
                             store.abandon_wal_sequences(partition_id_for_wal, &entry.wal_sequences);
                         }
                     }
@@ -1626,6 +1666,12 @@ impl MapDataStore for WriteBehindDataStore {
             timestamp: wal_timestamp,
             sequence: wal_seq,
         };
+        // Whether THIS write, as the survivor of a coalesce, makes a predecessor's
+        // frame redundant. Read off the SURVIVOR, never the retired entry: a
+        // survivor carrying complete state subsumes any predecessor, while a
+        // survivor carrying only its own delta subsumes nothing regardless of what
+        // it displaces.
+        let survivor_subsumes = wal_entry.op.subsumes_on_coalesce();
         // A failed append leaves a tracked sequence that no frame bears and that
         // nothing can ever flush to resolve, so drop it before propagating.
         if let Err(err) = self.wal_append(partition_id, &wal_entry).await {
@@ -1651,21 +1697,26 @@ impl MapDataStore for WriteBehindDataStore {
 
         // Insert into partition queue, preserving original store_time on coalesce
         let staging_key = (map.to_string(), key.to_string());
-        let retired_seq = {
+        let (retired_seq, subsumed_wal_seqs) = {
             let mut queue = self.queues.entry(partition_id).or_default();
             // If coalescing, preserve the original store_time
             if let Some(existing) = queue.value_mut().remove(map, key) {
                 let retired = existing.sequence;
                 let mut coalesced = entry;
                 coalesced.store_time = existing.store_time;
+                let subsumed = Self::coalesce_wal_sequences(
+                    survivor_subsumes,
+                    &mut coalesced,
+                    existing.wal_sequences,
+                );
                 let _ = queue.value_mut().insert(coalesced);
                 // No pending_count change on coalesce
-                Some(retired)
+                (Some(retired), subsumed)
             } else {
                 let _ = queue.value_mut().insert(entry);
                 // New key -- increment pending count
                 self.pending_count.fetch_add(1, Ordering::Relaxed);
-                None
+                (None, None)
             }
         };
 
@@ -1679,6 +1730,13 @@ impl MapDataStore for WriteBehindDataStore {
         // pending-set lock is never nested under it.
         if let Some(retired) = retired_seq {
             self.resolve_pending(retired);
+        }
+
+        // The retired frame is subsumed by the survivor's, so nothing is lost by
+        // letting the watermark past it. Sited after the queue guard drops, like
+        // every other tracking call.
+        if let Some(subsumed) = subsumed_wal_seqs {
+            self.resolve_and_advance(partition_id, &subsumed).await;
         }
 
         // Update staging area for read-your-writes
@@ -1738,6 +1796,8 @@ impl MapDataStore for WriteBehindDataStore {
             timestamp: None,
             sequence: wal_seq,
         };
+        // Evaluated on the SURVIVOR — this write — never on what it displaces.
+        let survivor_subsumes = wal_entry.op.subsumes_on_coalesce();
         // A failed append leaves a tracked sequence no frame bears — drop it.
         if let Err(err) = self.wal_append(partition_id, &wal_entry).await {
             self.rollback_wal_sequence(partition_id, wal_seq);
@@ -1757,19 +1817,24 @@ impl MapDataStore for WriteBehindDataStore {
         };
 
         let staging_key = (map.to_string(), key.to_string());
-        let retired_seq = {
+        let (retired_seq, subsumed_wal_seqs) = {
             let mut queue = self.queues.entry(partition_id).or_default();
             if let Some(existing) = queue.value_mut().remove(map, key) {
                 let retired = existing.sequence;
                 let mut coalesced = entry;
                 coalesced.store_time = existing.store_time;
+                let subsumed = Self::coalesce_wal_sequences(
+                    survivor_subsumes,
+                    &mut coalesced,
+                    existing.wal_sequences,
+                );
                 let _ = queue.value_mut().insert(coalesced);
                 // No pending_count change on coalesce
-                Some(retired)
+                (Some(retired), subsumed)
             } else {
                 let _ = queue.value_mut().insert(entry);
                 self.pending_count.fetch_add(1, Ordering::Relaxed);
-                None
+                (None, None)
             }
         };
 
@@ -1778,6 +1843,12 @@ impl MapDataStore for WriteBehindDataStore {
 
         if let Some(retired) = retired_seq {
             self.resolve_pending(retired);
+        }
+
+        // The survivor's frame subsumes the retired one, so its sequences resolve
+        // now rather than being dropped and stranding the watermark.
+        if let Some(subsumed) = subsumed_wal_seqs {
+            self.resolve_and_advance(partition_id, &subsumed).await;
         }
 
         // Pending delete marker in staging
@@ -1874,6 +1945,9 @@ impl MapDataStore for WriteBehindDataStore {
                 timestamp: None,
                 sequence: wal_seq,
             };
+            // Evaluated on the SURVIVOR — this key's write — never on what it
+            // displaces in the queue.
+            let survivor_subsumes = wal_entry.op.subsumes_on_coalesce();
             // Roll back ONLY the key whose own append failed. The earlier keys'
             // sequences are frame-backed and must stay pending — rolling those
             // back would let the watermark advance past frames never applied.
@@ -1895,18 +1969,23 @@ impl MapDataStore for WriteBehindDataStore {
             };
 
             let staging_key = (map.to_string(), key.clone());
-            let retired_seq = {
+            let (retired_seq, subsumed_wal_seqs) = {
                 let mut queue = self.queues.entry(partition_id).or_default();
                 if let Some(existing) = queue.value_mut().remove(map, key) {
                     let retired = existing.sequence;
                     let mut coalesced = entry;
                     coalesced.store_time = existing.store_time;
+                    let subsumed = Self::coalesce_wal_sequences(
+                        survivor_subsumes,
+                        &mut coalesced,
+                        existing.wal_sequences,
+                    );
                     let _ = queue.value_mut().insert(coalesced);
-                    Some(retired)
+                    (Some(retired), subsumed)
                 } else {
                     let _ = queue.value_mut().insert(entry);
                     self.pending_count.fetch_add(1, Ordering::Relaxed);
-                    None
+                    (None, None)
                 }
             };
 
@@ -1919,6 +1998,12 @@ impl MapDataStore for WriteBehindDataStore {
             // released so the pending-set lock is never nested under it.
             if let Some(retired) = retired_seq {
                 self.resolve_pending(retired);
+            }
+
+            // The survivor's frame subsumes the retired one, so its sequences
+            // resolve now rather than being dropped and stranding the watermark.
+            if let Some(subsumed) = subsumed_wal_seqs {
+                self.resolve_and_advance(partition_id, &subsumed).await;
             }
 
             let (smap, skey) = staging_key;
