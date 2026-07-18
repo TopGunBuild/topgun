@@ -953,6 +953,19 @@ pub(crate) enum WalFailStopTier {
 static FAIL_STOP_OBSERVATIONS: std::sync::Mutex<Vec<WalFailStopTier>> =
     std::sync::Mutex::new(Vec::new());
 
+/// Serialises every test that asserts on a recorded fail-stop tier.
+///
+/// The observation log is append-only and process-global, so two fail-stop tests
+/// running in parallel interleave their entries and make an index-based read
+/// return the other test's tier. Holding this across the act keeps each scenario
+/// reading only its own entry — which is what keeps tier P distinguishable from
+/// tier B rather than merely "something stopped".
+///
+/// Async-aware because the scenarios it guards await on real WAL and store I/O
+/// between snapshotting the log length and reading their own entry.
+#[cfg(test)]
+pub(crate) static FAIL_STOP_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Terminates the process on an unrecoverable WAL condition. Never returns.
 ///
 /// `abort()` — not `panic!` — is the mechanism, because the workspace builds with
@@ -2697,6 +2710,11 @@ mod tests {
 
     #[tokio::test]
     async fn append_to_sealed_active_fail_stops_at_tier_p() {
+        // Serialised against every other fail-stop assertion: the observation log
+        // is process-global, so a concurrent tier would make the index read below
+        // return someone else's entry.
+        let _guard = FAIL_STOP_TEST_LOCK.lock().await;
+
         let dir = tempfile::tempdir().unwrap();
         let wal = Arc::new(WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap());
 
@@ -2722,6 +2740,12 @@ mod tests {
             observed.get(before),
             Some(&WalFailStopTier::P),
             "A sealed append target is a rotation-bookkeeping bug: tier P, not tier B"
+        );
+        assert_eq!(
+            observed.len(),
+            before + 1,
+            "The pre-check stops BEFORE the write path, so the sequence never \
+             reaches the residual (B) disposition — a second record would mean it did"
         );
     }
 
