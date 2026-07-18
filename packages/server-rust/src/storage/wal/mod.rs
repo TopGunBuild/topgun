@@ -127,6 +127,17 @@ pub enum WalOp {
     },
     /// Tombstone: remove the record from the store.
     Remove,
+    /// A framing that carries only part of a key's state, so a successor CANNOT
+    /// re-derive it. Exists to keep the coalesce predicate's `false` branch —
+    /// and the carry-forward route it selects — under test before any real
+    /// delta framing lands.
+    ///
+    /// Sited on this externally-tagged enum rather than on the `untagged`
+    /// [`WalStorePayload`], where an extra arm would shift untagged decode
+    /// ordering between test and production builds and corrupt the WAL
+    /// round-trip proofs that run under `cfg(test)`.
+    #[cfg(test)]
+    TestNonSubsuming,
 }
 
 impl WalOp {
@@ -149,6 +160,11 @@ impl WalOp {
                 // Full CRDT snapshot; a bare legacy value is also a complete state.
                 WalStorePayload::Record(_) | WalStorePayload::Legacy(_) => true,
             },
+            // Partial state: dropping the predecessor would lose information the
+            // survivor does not carry, so the retired sequences must ride along
+            // instead of resolving early.
+            #[cfg(test)]
+            Self::TestNonSubsuming => false,
         }
     }
 }
@@ -528,18 +544,23 @@ pub const WAL_GC_SKIPPED_COUNTER: &str = "topgun_wal_gc_skipped_total";
 /// initialisation point: the recorder is process-global and shared by every
 /// producer, so a describe tied to a single construction site would leave the
 /// metrics undescribed for whichever producer ran first.
+///
+/// Deliberately NOT `Once`-guarded. A one-shot describe is only registered
+/// against whichever recorder happens to be installed at the first emission —
+/// an emission preceding `init_observability` would burn the guard on the no-op
+/// recorder and leave the metrics permanently HELP-less on `/metrics`. The
+/// `describe_*` macros are idempotent metadata registrations and the emission
+/// paths here are a per-tick watchdog sample and a rare retained-segment GC
+/// skip, never a per-write hot path.
 pub fn describe_wal_watermark_metrics() {
-    static DESCRIBED: std::sync::Once = std::sync::Once::new();
-    DESCRIBED.call_once(|| {
-        metrics::describe_gauge!(
-            WAL_WATERMARK_LAG_GAUGE,
-            "WAL sequences assigned for a partition but not yet covered by its applied watermark"
-        );
-        metrics::describe_counter!(
-            WAL_GC_SKIPPED_COUNTER,
-            "Sealed WAL segments retained instead of reclaimed, labeled by the reason they were kept"
-        );
-    });
+    metrics::describe_gauge!(
+        WAL_WATERMARK_LAG_GAUGE,
+        "WAL sequences assigned for a partition but not yet covered by its applied watermark"
+    );
+    metrics::describe_counter!(
+        WAL_GC_SKIPPED_COUNTER,
+        "Sealed WAL segments retained instead of reclaimed, labeled by the reason they were kept"
+    );
 }
 
 /// fsyncs a directory so a just-created (or just-renamed/unlinked) entry within it
@@ -1473,6 +1494,18 @@ impl WalRecovery {
                     .await
             }
             WalOp::Remove => inner_store.remove(&entry.map, &entry.key, now).await,
+            // An explicit arm rather than a `_` catch-all: the exhaustiveness is
+            // what forces a future framing to declare its replay semantics here
+            // instead of inheriting someone else's. This variant is never
+            // appended by production code, so reaching replay means a test built
+            // a frame it has no way to apply.
+            #[cfg(test)]
+            WalOp::TestNonSubsuming => Err(anyhow::anyhow!(
+                "partial-state WAL framing has no replay semantics: map={}, key={}, sequence={}",
+                entry.map,
+                entry.key,
+                entry.sequence
+            )),
         }
     }
 
@@ -2706,6 +2739,151 @@ mod tests {
             expiration_time: None,
         }
         .subsumes_on_coalesce());
+    }
+
+    #[tokio::test]
+    async fn a_partial_state_framing_neither_subsumes_nor_replays() {
+        // The `false` answer is what routes a coalesce-retire to carry-forward
+        // instead of early-resolve; a `_ =>` catch-all in either match would
+        // silently re-bless `true` here and lose the retired frame's effect.
+        assert!(
+            !WalOp::TestNonSubsuming.subsumes_on_coalesce(),
+            "a partial-state survivor cannot make its predecessor redundant"
+        );
+
+        // The MIXED case, evaluated on the SURVIVOR only: a retired frame that
+        // WOULD subsume must not decide the route. Reading the retired op here
+        // returns `true` and early-resolves the very frame carry-forward exists
+        // to keep replayable.
+        let retired = WalOp::Store {
+            value: WalStorePayload::Record(RecordValue::Lww {
+                value: TgValue::String("v".to_string()),
+                timestamp: Timestamp {
+                    millis: 1,
+                    counter: 0,
+                    node_id: "n1".to_string(),
+                },
+            }),
+            expiration_time: None,
+        };
+        assert!(
+            retired.subsumes_on_coalesce() && !WalOp::TestNonSubsuming.subsumes_on_coalesce(),
+            "the two ops must answer differently, or the mixed case proves nothing"
+        );
+
+        let store: Arc<dyn MapDataStore> = Arc::new(ReplayStore::default());
+        let mut entry = make_wal_entry(1);
+        entry.op = WalOp::TestNonSubsuming;
+        assert!(
+            WalRecovery::replay_entry(&store, &entry, 0).await.is_err(),
+            "a framing with no replay semantics must surface an error, never be \
+             silently absorbed by a catch-all arm"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_flush_key_only_terminal_advances_the_durable_sidecar() {
+        use crate::storage::datastores::{WalBootstrap, WriteBehindConfig, WriteBehindDataStore};
+
+        // `partition_for` is private to the write-behind module, so the partition
+        // is located by the sidecar that MOVED rather than by recomputing the
+        // hash — which also makes the assertion independent of the hash function.
+        fn advanced_partitions(wal: &WalWriter) -> Vec<u32> {
+            (0..topgun_core::PARTITION_COUNT)
+                .filter(|p| wal.test_read_applied_sequence(*p) >= 1)
+                .collect()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+        let inner: Arc<dyn MapDataStore> = Arc::new(ReplayStore::default());
+
+        // Nothing may drain on its own: `flush_key` must be the ONLY possible
+        // source of the advance, or the flush loop could satisfy the assertion.
+        let config = WriteBehindConfig {
+            write_delay_ms: 600_000,
+            flush_interval_ms: 600_000,
+            shutdown_timeout_ms: 1_000,
+            ..WriteBehindConfig::default()
+        };
+        let store = WriteBehindDataStore::new_with_wal(
+            inner,
+            config,
+            Some(WalBootstrap {
+                wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                // Production seeds `max_observed + 1`, so the counter never hands
+                // out sequence 0 — the reserved sentinel.
+                sequence_start: 1,
+            }),
+        );
+
+        let value = RecordValue::Lww {
+            value: TgValue::String("v".to_string()),
+            timestamp: Timestamp {
+                millis: 1,
+                counter: 0,
+                node_id: "n1".to_string(),
+            },
+        };
+        store.add("m", "k", &value, 0, 0).await.unwrap();
+
+        assert!(
+            advanced_partitions(&wal).is_empty(),
+            "a buffered write must not have advanced anything yet"
+        );
+
+        store.flush_key("m", "k", &value, false).await.unwrap();
+
+        // Read off the `.applied` FILE: an implementation that resolves the
+        // carried sequences but never calls `mark_applied` moves the pending set
+        // correctly and grows the WAL forever, and only the durable read sees it.
+        assert_eq!(
+            advanced_partitions(&wal).len(),
+            1,
+            "a flush_key Ok terminal must resolve AND advance the durable sidecar"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_skipped_gc_is_visible_on_the_metrics_scrape() {
+        let observability = crate::service::middleware::observability::init_observability();
+        let dir = tempfile::tempdir().unwrap();
+        let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap();
+
+        fn skipped_total(rendered: &str) -> u64 {
+            rendered
+                .lines()
+                .find(|line| {
+                    line.starts_with(WAL_GC_SKIPPED_COUNTER)
+                        && line.contains("watermark_below_segment")
+                })
+                .and_then(|line| line.rsplit(' ').next())
+                .and_then(|v| v.parse::<f64>().ok())
+                .map_or(0, |v| v as u64)
+        }
+
+        let before = skipped_total(&observability.render_metrics());
+
+        for seq in 1..=3u64 {
+            wal.append(0, &make_wal_entry(seq)).await.unwrap();
+        }
+        wal.test_force_gc_revalidation_watermark(Some(0));
+        wal.mark_applied(0, 3).await.unwrap();
+        wal.test_force_gc_revalidation_watermark(None);
+
+        let rendered = observability.render_metrics();
+        assert!(
+            rendered.contains(&format!("# HELP {WAL_GC_SKIPPED_COUNTER}")),
+            "the counter must be DESCRIBED on the scrape, or an operator sees a \
+             bare number with no meaning"
+        );
+        // A strict increase, not equality: the recorder is process-global and a
+        // parallel test may add its own skip. Nothing can decrement it.
+        assert!(
+            skipped_total(&rendered) > before,
+            "a retained segment must be visible to an operator scraping /metrics, \
+             not only to an internal read"
+        );
     }
 
     #[tokio::test]
