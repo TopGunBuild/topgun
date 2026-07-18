@@ -461,6 +461,85 @@ pub struct WalWriter {
     /// Batched-commit group-commit timer: shared notifier woken every ~10 ms.
     /// When `policy == Batched`, the writer also fsyncs after every 100 ops.
     batch_flush_tx: tokio::sync::watch::Sender<()>,
+    /// Forces the pre-unlink watermark re-read to return this value instead of
+    /// the sidecar's.
+    ///
+    /// The re-validation it drives cannot fire in production — the sidecar is
+    /// monotonic, so a re-read can only return a value at or above the local
+    /// watermark — so this seam is the only way to exercise that path at all.
+    /// Per-writer rather than process-global so concurrent tests cannot perturb
+    /// each other.
+    #[cfg(test)]
+    gc_revalidation_override: std::sync::Mutex<Option<u64>>,
+}
+
+/// A sealed segment was retained instead of reclaimed.
+///
+/// Typed rather than an `assert!` because a failed re-validation must surface as
+/// a value the caller can count and log: aborting the process would turn a
+/// conservative retention — which loses nothing — into an outage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WalGcError {
+    /// The watermark re-read immediately before the unlink does not cover the
+    /// segment that the locally computed watermark had licensed for reclamation.
+    WatermarkBelowSegment {
+        partition: u32,
+        segment_max_seq: u64,
+        revalidated: u64,
+    },
+}
+
+impl std::fmt::Display for WalGcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WatermarkBelowSegment {
+                partition,
+                segment_max_seq,
+                revalidated,
+            } => write!(
+                f,
+                "refusing to unlink sealed WAL segment of partition {partition}: its highest \
+                 sequence {segment_max_seq} is above the re-read applied watermark {revalidated}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for WalGcError {}
+
+/// Why a sealed segment was kept, as the `reason` label on the skipped-GC counter.
+const GC_SKIP_REASON_WATERMARK: &str = "watermark_below_segment";
+
+/// Per-partition lag between the highest assigned WAL sequence and the applied
+/// watermark — the continuous early warning under the fatal alarm.
+///
+/// Sited here rather than beside its only producer because the skipped-GC
+/// counter below MUST be shared by two producers in different modules, and
+/// splitting the pair would leave one of them describing a metric it does not
+/// emit.
+pub const WAL_WATERMARK_LAG_GAUGE: &str = "topgun_wal_applied_watermark_lag";
+
+/// Sealed WAL segments retained rather than reclaimed, by reason.
+pub const WAL_GC_SKIPPED_COUNTER: &str = "topgun_wal_gc_skipped_total";
+
+/// Registers HELP/TYPE metadata for the two WAL-watermark metrics.
+///
+/// Idempotent, and called from every emission path rather than from one
+/// initialisation point: the recorder is process-global and shared by every
+/// producer, so a describe tied to a single construction site would leave the
+/// metrics undescribed for whichever producer ran first.
+pub fn describe_wal_watermark_metrics() {
+    static DESCRIBED: std::sync::Once = std::sync::Once::new();
+    DESCRIBED.call_once(|| {
+        metrics::describe_gauge!(
+            WAL_WATERMARK_LAG_GAUGE,
+            "WAL sequences assigned for a partition but not yet covered by its applied watermark"
+        );
+        metrics::describe_counter!(
+            WAL_GC_SKIPPED_COUNTER,
+            "Sealed WAL segments retained instead of reclaimed, labeled by the reason they were kept"
+        );
+    });
 }
 
 /// fsyncs a directory so a just-created (or just-renamed/unlinked) entry within it
@@ -502,6 +581,8 @@ impl WalWriter {
             policy,
             partitions: AsyncMutex::new(HashMap::new()),
             batch_flush_tx,
+            #[cfg(test)]
+            gc_revalidation_override: std::sync::Mutex::new(None),
         });
 
         // For the Batched policy, spawn a background task that fsyncs every open
@@ -567,6 +648,43 @@ impl WalWriter {
 
     /// Reads the highest applied sequence number for a partition from the
     /// sidecar file, or 0 if the file does not exist.
+    /// Re-reads the partition's applied watermark for the pre-unlink check.
+    ///
+    /// The `.applied` sidecar is this module's only watermark source: write-behind
+    /// holds the WAL, never the reverse, so its in-memory tracker is not reachable
+    /// from here and reading it would invert the dependency.
+    fn revalidated_watermark(&self, partition: u32) -> u64 {
+        #[cfg(test)]
+        if let Some(forced) = *self
+            .gc_revalidation_override
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            return forced;
+        }
+        Self::read_applied_sequence(&self.applied_path(partition))
+    }
+
+    /// Confirms a re-read watermark still covers a segment about to be unlinked.
+    ///
+    /// A typed `Err` rather than an `assert!`: retaining a segment costs disk and
+    /// nothing else, so the conservative outcome must stay reachable instead of
+    /// taking the process down.
+    fn revalidate_before_unlink(
+        partition: u32,
+        segment_max_seq: u64,
+        revalidated: u64,
+    ) -> Result<(), WalGcError> {
+        if segment_max_seq > revalidated {
+            return Err(WalGcError::WatermarkBelowSegment {
+                partition,
+                segment_max_seq,
+                revalidated,
+            });
+        }
+        Ok(())
+    }
+
     fn read_applied_sequence(path: &Path) -> u64 {
         match std::fs::read(path) {
             Ok(bytes) if bytes.len() == 8 => u64::from_be_bytes(bytes.try_into().unwrap_or([0; 8])),
@@ -953,6 +1071,43 @@ impl Wal for WalWriter {
         Ok(())
     }
 
+    /// Advances the partition's applied watermark and reclaims what it covers.
+    ///
+    /// # Control flow — three independent steps, each with its OWN precondition
+    ///
+    /// The local watermark is `max(sequence, current)`, so an under-advancing
+    /// `sequence` collapses it to the value already on disk. That is what makes
+    /// an under-advance harmless — NOT the `if watermark > current` guard, which
+    /// governs only the first step:
+    ///
+    /// 1. **Sidecar write + its fsync** — gated by `if watermark > current`. A
+    ///    watermark that does not move writes nothing and syncs nothing.
+    /// 2. **Seal + rotate** — NOT gated by that guard. Its own precondition is
+    ///    `active.has_frames()`: an empty active segment means no seal, no
+    ///    rotate, and ZERO fsyncs; a non-empty one costs an `sync_data` plus a
+    ///    parent-dir fsync.
+    /// 3. **Segment GC** — NOT gated by that guard either. It reclaims sealed
+    ///    segments whose highest sequence is at or below the local `watermark`,
+    ///    so under an under-advance it unlinks only what the persisted sidecar
+    ///    already licenses. Its parent-dir fsync has its own precondition,
+    ///    `!reclaimed.is_empty()`, so a reclaiming GC adds a THIRD fsync.
+    ///
+    /// Reading the guard as gating steps 2 and 3 is wrong in both directions: it
+    /// overstates the guard and understates the fsync cost.
+    ///
+    /// # Durability rule
+    ///
+    /// `sequence` must be prefix-complete — see the trait's contract. GC unlinks
+    /// frames on the strength of this watermark, so a watermark that runs ahead
+    /// of what the inner store has durably applied discards the only copy of
+    /// those writes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the sidecar cannot be written, a segment cannot be
+    /// opened, sealed, or unlinked, or a directory fsync fails. A segment that
+    /// fails the pre-unlink re-validation is NOT an error: it is retained,
+    /// counted, and logged.
     async fn mark_applied(&self, partition: u32, sequence: u64) -> anyhow::Result<()> {
         let applied_path = self.applied_path(partition);
         // Advance the watermark monotonically; never regress it.
@@ -1026,14 +1181,41 @@ impl Wal for WalWriter {
         // --- GC sealed segments fully covered by the watermark ---
         // Takes ONLY the sealed-set lock; never the active-append lock. Appends in
         // flight to the active segment are not blocked by this deletion.
+        //
+        // Every candidate is re-validated against a FRESH read of the `.applied`
+        // sidecar immediately before its unlink. That re-read cannot fall below
+        // the local `watermark` while the sidecar stays monotonic, so this is
+        // defense-in-depth, not a live hole: it converts any future watermark
+        // regression from a silent unlink into a counted, logged retention.
         let reclaimed: Vec<PathBuf> = {
+            let revalidated = self.revalidated_watermark(partition);
             let mut sealed = handle.sealed.lock().await;
             // Reclaimable sealed segments are a prefix of the ascending-ordered set
             // (oldest first), valid because sequences are monotonic and gap-free.
-            let reclaim = sealed
-                .iter()
-                .take_while(|s| s.max_seq() <= watermark)
-                .count();
+            // The prefix stops at the FIRST segment the re-read does not cover:
+            // beyond it every segment is higher still, so nothing reclaimable is
+            // lost by stopping, and GC resumes on the next call.
+            let mut reclaim = 0usize;
+            for segment in sealed.iter().take_while(|s| s.max_seq() <= watermark) {
+                if let Err(err) =
+                    Self::revalidate_before_unlink(partition, segment.max_seq(), revalidated)
+                {
+                    describe_wal_watermark_metrics();
+                    metrics::counter!(
+                        WAL_GC_SKIPPED_COUNTER,
+                        "reason" => GC_SKIP_REASON_WATERMARK
+                    )
+                    .increment(1);
+                    tracing::error!(
+                        target: "topgun_server::storage::wal_watermark",
+                        partition,
+                        segment = %segment.path().display(),
+                        "{err}"
+                    );
+                    break;
+                }
+                reclaim += 1;
+            }
             sealed
                 .drain(..reclaim)
                 .map(|s| s.path().to_path_buf())
@@ -1069,10 +1251,15 @@ impl Wal for WalWriter {
             let data = match tokio::fs::read(&path).await {
                 Ok(data) => data,
                 // A concurrent GC can unlink a sealed segment between the directory
-                // scan above and this read. A GC'd segment is `<= watermark` by
-                // construction, so its frames are already applied and the later
-                // `retain(|e| e.sequence > applied_seq)` would drop them anyway —
-                // skipping the vanished file is correct, not a lost frame.
+                // scan above and this read. Skipping the vanished file is correct,
+                // not a lost frame — but the reason is the WATERMARK's rule, not
+                // the segment's: GC reclaims only segments covered by a
+                // prefix-complete, inclusive, cross-incarnation watermark, i.e. one
+                // that stops below the first frame any incarnation left un-applied.
+                // So an unlinked segment's frames are durable in the inner store,
+                // and the `retain(|e| e.sequence > applied_seq)` below would drop
+                // them regardless. Were the watermark merely the highest sequence
+                // that happened to be applied, this skip WOULD lose frames.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => {
                     return Err(anyhow::anyhow!(
@@ -1227,6 +1414,55 @@ impl WalRecovery {
         Ok(ids)
     }
 
+    /// Replays ONE entry through the inner store.
+    ///
+    /// Goes straight to the store rather than through the CRDT service layer, so
+    /// idempotency comes from the store's own merge: a replay whose timestamp is
+    /// older than the stored value loses the merge and changes nothing. That is
+    /// what makes re-replaying an already-applied frame safe.
+    async fn replay_entry(
+        inner_store: &Arc<dyn MapDataStore>,
+        entry: &WalEntry,
+        now: i64,
+    ) -> anyhow::Result<()> {
+        match &entry.op {
+            WalOp::Store {
+                value,
+                expiration_time,
+            } => {
+                // Reconstruct the exact RecordValue. Current frames carry the full
+                // value (LWW or OR), so OR-Map adds/tombstones replay losslessly.
+                // Legacy frames carried a bare Value and are replayed as LWW; an
+                // absent WAL timestamp (legacy/malformed) becomes a zero-epoch
+                // timestamp so the inner store treats the replay as always-merge.
+                let record_value = match value {
+                    WalStorePayload::Record(rv) => rv.clone(),
+                    WalStorePayload::Legacy(v) => {
+                        let ts = entry.timestamp.clone().unwrap_or_else(|| Timestamp {
+                            millis: 0,
+                            counter: 0,
+                            node_id: String::new(),
+                        });
+                        RecordValue::Lww {
+                            value: v.clone(),
+                            timestamp: ts,
+                        }
+                    }
+                };
+                inner_store
+                    .add(
+                        &entry.map,
+                        &entry.key,
+                        &record_value,
+                        expiration_time.unwrap_or(0),
+                        now,
+                    )
+                    .await
+            }
+            WalOp::Remove => inner_store.remove(&entry.map, &entry.key, now).await,
+        }
+    }
+
     /// Replays all un-applied entries for every partition through `inner_store`.
     ///
     /// Returns an error (and the caller should exit non-zero) if mid-file
@@ -1296,47 +1532,7 @@ impl WalRecovery {
             let now = current_millis();
 
             for entry in &entries {
-                // Replay through the inner store so the store's own LWW merge
-                // provides idempotency: a stale replay loses the merge.
-                let result = match &entry.op {
-                    WalOp::Store {
-                        value,
-                        expiration_time,
-                    } => {
-                        // Reconstruct the exact RecordValue. Current frames carry
-                        // the full value (LWW or OR), so OR-Map adds/tombstones
-                        // replay losslessly. Legacy frames carried a bare Value and
-                        // are replayed as LWW; an absent WAL timestamp (legacy/
-                        // malformed) becomes a zero-epoch timestamp so the inner
-                        // store treats the replay as always-merge.
-                        let record_value = match value {
-                            WalStorePayload::Record(rv) => rv.clone(),
-                            WalStorePayload::Legacy(v) => {
-                                let ts = entry.timestamp.clone().unwrap_or_else(|| Timestamp {
-                                    millis: 0,
-                                    counter: 0,
-                                    node_id: String::new(),
-                                });
-                                RecordValue::Lww {
-                                    value: v.clone(),
-                                    timestamp: ts,
-                                }
-                            }
-                        };
-                        inner_store
-                            .add(
-                                &entry.map,
-                                &entry.key,
-                                &record_value,
-                                expiration_time.unwrap_or(0),
-                                now,
-                            )
-                            .await
-                    }
-                    WalOp::Remove => inner_store.remove(&entry.map, &entry.key, now).await,
-                };
-
-                match result {
+                match Self::replay_entry(&inner_store, entry, now).await {
                     Ok(()) => {
                         // Only a success that is still contiguous with the prefix
                         // may advance the frontier. Once an entry has failed, later
@@ -1458,6 +1654,30 @@ impl WalWriter {
     /// in-memory mirror that would let a test pass on state a restart would lose.
     pub(crate) fn test_read_applied_sequence(&self, partition: u32) -> u64 {
         Self::read_applied_sequence(&self.applied_path(partition))
+    }
+
+    /// Forces the pre-unlink watermark re-read to return `value`, or restores the
+    /// real sidecar read with `None`.
+    ///
+    /// The re-validation this drives is unreachable in production — the sidecar
+    /// clamps monotonically, so a re-read can only return a value at or above the
+    /// watermark GC already computed — so the path exists to be forced, not to be
+    /// provoked by contriving a regression that cannot happen.
+    pub(crate) fn test_force_gc_revalidation_watermark(&self, value: Option<u64>) {
+        *self
+            .gc_revalidation_override
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = value;
+    }
+
+    /// Runs the pre-unlink re-validation directly, so its typed `Err` can be
+    /// asserted without driving a whole GC pass.
+    pub(crate) fn test_revalidate_before_unlink(
+        partition: u32,
+        segment_max_seq: u64,
+        revalidated: u64,
+    ) -> Result<(), WalGcError> {
+        Self::revalidate_before_unlink(partition, segment_max_seq, revalidated)
     }
 
     /// Fail-stop tiers recorded in this process, oldest first.
@@ -2052,6 +2272,54 @@ mod tests {
     // may be absent). Fails without Fix 1 (seal hits mid-file corruption → Err);
     // passes with it.
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn pre_unlink_revalidation_is_a_typed_error_not_a_panic() {
+        assert_eq!(
+            WalWriter::test_revalidate_before_unlink(7, 100, 100),
+            Ok(()),
+            "a watermark that exactly covers the segment must license the unlink"
+        );
+        assert_eq!(
+            WalWriter::test_revalidate_before_unlink(7, 101, 100),
+            Err(WalGcError::WatermarkBelowSegment {
+                partition: 7,
+                segment_max_seq: 101,
+                revalidated: 100,
+            }),
+            "a segment above the re-read watermark must surface as a typed error"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn forced_watermark_regression_retains_the_sealed_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap();
+
+        for seq in 1..=3u64 {
+            wal.append(0, &make_wal_entry(seq)).await.unwrap();
+        }
+        // Seals frames 1..=3 into one sealed segment and licenses its reclamation.
+        // The forced re-read lands below the segment's highest sequence, which the
+        // monotonic sidecar can never do on its own.
+        let sealed_path = dir.path().join(segment::format_segment_filename(0, 0));
+        wal.test_force_gc_revalidation_watermark(Some(0));
+        wal.mark_applied(0, 3).await.unwrap();
+
+        assert!(
+            sealed_path.exists(),
+            "a segment the re-read watermark does not cover must be retained, not unlinked"
+        );
+
+        // Restoring the real read lets the next pass reclaim it: the retention is a
+        // deferral, never a permanent leak.
+        wal.test_force_gc_revalidation_watermark(None);
+        wal.mark_applied(0, 3).await.unwrap();
+        assert!(
+            !sealed_path.exists(),
+            "GC must resume once the re-read watermark covers the segment again"
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn torn_active_tail_truncated_on_reopen_survives_seal() {

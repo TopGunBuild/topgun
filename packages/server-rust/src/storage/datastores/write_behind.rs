@@ -19,7 +19,10 @@ use crate::storage::map_data_store::{
     merkle_leaf_hash, LeafSink, MapDataStore, MerkleLeaf, ScanBatch, ScanCursor,
 };
 use crate::storage::record::RecordValue;
-use crate::storage::wal::{Wal, WalEntry, WalFsyncPolicy, WalOp, WalStorePayload};
+use crate::storage::wal::{
+    describe_wal_watermark_metrics, Wal, WalEntry, WalFsyncPolicy, WalOp, WalStorePayload,
+    WAL_WATERMARK_LAG_GAUGE,
+};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -477,33 +480,6 @@ impl WalWatermarkAlarm {
             }
         }
     }
-}
-
-/// Per-partition lag between the highest assigned WAL sequence and the applied
-/// watermark — the continuous early warning under the fatal alarm.
-pub(crate) const WAL_WATERMARK_LAG_GAUGE: &str = "topgun_wal_applied_watermark_lag";
-
-/// Sealed WAL segments retained rather than reclaimed, by reason.
-pub(crate) const WAL_GC_SKIPPED_COUNTER: &str = "topgun_wal_gc_skipped_total";
-
-/// Registers HELP/TYPE metadata for the two WAL-watermark metrics.
-///
-/// Idempotent, and called from every emission path rather than from one
-/// initialisation point: the recorder is process-global and shared by every
-/// producer, so a describe tied to a single construction site would leave the
-/// metrics undescribed for whichever producer ran first.
-pub(crate) fn describe_wal_watermark_metrics() {
-    static DESCRIBED: std::sync::Once = std::sync::Once::new();
-    DESCRIBED.call_once(|| {
-        metrics::describe_gauge!(
-            WAL_WATERMARK_LAG_GAUGE,
-            "WAL sequences assigned for a partition but not yet covered by its applied watermark"
-        );
-        metrics::describe_counter!(
-            WAL_GC_SKIPPED_COUNTER,
-            "Sealed WAL segments retained instead of reclaimed, labeled by the reason they were kept"
-        );
-    });
 }
 
 /// Outcome of ONE stalled-watermark classifier sample.
