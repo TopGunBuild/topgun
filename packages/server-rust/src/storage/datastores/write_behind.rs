@@ -411,9 +411,19 @@ pub(crate) struct DelayedEntry {
     pub sequence: u64,
     /// Number of failed flush attempts so far.
     pub retry_count: u32,
-    /// WAL sequence number for this entry; used to mark it applied after flush.
-    /// Zero means no WAL entry was written (e.g., when WAL is disabled).
-    pub wal_sequence: u64,
+    /// WAL sequences whose frames this entry carries; resolved together at the
+    /// entry's terminal outcome.
+    ///
+    /// A sequence is assigned unconditionally — including when no WAL is
+    /// configured — and identifies this entry's frame. With no WAL no frame is
+    /// written and nothing tracks the sequence, so it is an inert identifier
+    /// rather than a sentinel: there is no "zero means no WAL entry" state,
+    /// because the counter starts at 1 and always hands out a real number.
+    ///
+    /// It is a SET, not a scalar, because a coalesce survivor whose frame does
+    /// not subsume its predecessor's must carry that predecessor's sequence
+    /// forward and resolve both together.
+    pub wal_sequences: BTreeSet<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -527,6 +537,75 @@ struct StagingSlot {
     value: Option<RecordValue>,
 }
 
+/// Per-partition `wal_seq` state: which sequences are still unresolved, why,
+/// and which are currently owned by a flush worker.
+///
+/// The in-flight registry shares ONE mutex with the pending map deliberately: a
+/// single lock cannot invert against itself, so the mandated
+/// registry-before-tracker acquisition order becomes impossible to violate
+/// rather than a rule every call site has to remember.
+#[derive(Debug, Default)]
+pub(crate) struct PartitionTracking {
+    /// Assigned-but-unresolved `wal_seq`s, mapped to why each is unresolved.
+    /// A map rather than a set because the stalled-watermark classifier must be
+    /// able to tell a boot-seeded sequence from a leaked one.
+    pending: BTreeMap<u64, PendingOrigin>,
+    /// Highest `wal_seq` ever assigned to this partition. Monotonic: a rolled-back
+    /// sequence is NOT restored, which is safe because a rolled-back sequence
+    /// names no frame, so a later watermark at that value asserts nothing about it.
+    max_assigned: u64,
+    /// `wal_seq`s currently owned by a flush worker — removed from the queue and
+    /// not yet terminal. Without it a hung inner store reads as a code bug: the
+    /// entry exists only as a local binding for the whole of the inner call.
+    in_flight: BTreeSet<u64>,
+}
+
+/// The WAL handle bundled with all of its `wal_seq` tracking state.
+///
+/// Bundling is what makes a tracker without a WAL UNREPRESENTABLE. With no WAL
+/// no frame is ever written, so the applied-watermark invariant has no subject —
+/// nothing to filter on replay, nothing to GC, and no watermark to compute. Held
+/// as two separate fields, that would be a branch every call site had to
+/// remember; held as one struct, it falls out of the type.
+pub(crate) struct WalTracking {
+    /// The WAL every write is appended to before ack.
+    wal: Arc<dyn Wal>,
+    /// Per-partition tracking state, lazily created on a partition's first assign.
+    partitions: DashMap<u32, Arc<Mutex<PartitionTracking>>>,
+}
+
+impl WalTracking {
+    fn new(wal: Arc<dyn Wal>) -> Self {
+        Self {
+            wal,
+            partitions: DashMap::new(),
+        }
+    }
+
+    /// The tracking cell for `partition`, cloned out so the `DashMap` shard guard
+    /// is released before the per-partition mutex is taken.
+    fn cell(&self, partition: u32) -> Arc<Mutex<PartitionTracking>> {
+        if let Some(existing) = self.partitions.get(&partition) {
+            return Arc::clone(existing.value());
+        }
+        Arc::clone(self.partitions.entry(partition).or_default().value())
+    }
+
+    /// Runs `f` under `partition`'s tracking lock.
+    ///
+    /// The guard cannot escape the closure and the closure is synchronous, so the
+    /// lock is structurally incapable of being held across an `.await` — which is
+    /// the one discipline the compiler does not otherwise enforce here, since
+    /// nesting this mutex under a `DashMap` guard compiles cleanly.
+    fn with_partition<R>(&self, partition: u32, f: impl FnOnce(&mut PartitionTracking) -> R) -> R {
+        let cell = self.cell(partition);
+        let mut guard = cell
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f(&mut guard)
+    }
+}
+
 /// Write-behind buffering layer that wraps any [`MapDataStore`].
 ///
 /// Buffers `add`/`remove` calls in per-partition coalesced queues and flushes
@@ -558,10 +637,12 @@ pub struct WriteBehindDataStore {
     /// Set to true once graceful drain begins so any straggler writes are
     /// rejected loudly rather than silently lost.
     is_shutdown: AtomicBool,
-    /// Optional WAL for append-before-ack durability. When `Some`, every write
-    /// is persisted to the WAL per the configured fsync policy before the
-    /// store method returns, closing the unclean-crash loss window.
-    wal: Option<Arc<dyn Wal>>,
+    /// Optional WAL for append-before-ack durability, bundled with its
+    /// per-partition sequence tracking. When `Some`, every write is persisted to
+    /// the WAL per the configured fsync policy before the store method returns,
+    /// closing the unclean-crash loss window. When `None` no frame is ever
+    /// written, so there is no tracking to do and none exists.
+    wal: Option<WalTracking>,
     /// WAL sequence counter, monotonically increasing per-entry for ordering.
     wal_sequence: AtomicU64,
     /// Entry sequences ASSIGNED but not yet RESOLVED — a write is resolved when
@@ -626,7 +707,9 @@ impl WriteBehindDataStore {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let flush_notify = Arc::new(Notify::new());
 
-        let wal = bootstrap.as_ref().map(|b| b.wal.clone());
+        let wal = bootstrap
+            .as_ref()
+            .map(|b| WalTracking::new(Arc::clone(&b.wal)));
         // Seed the live counter from the WAL watermark so post-restart writes
         // never reuse a sequence at or below a persisted watermark (which the
         // recovery filter `e.sequence > applied_seq` would silently drop). A
@@ -821,6 +904,143 @@ impl WriteBehindDataStore {
         self.wal_sequence.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Assigns the next WAL sequence for `partition` and, when a WAL exists,
+    /// records it pending in the SAME critical section the watermark reads.
+    ///
+    /// Folding the counter bump and the pending insert under one lock is what
+    /// keeps the watermark honest under concurrency: a separate bump-then-track
+    /// leaves a window where the counter has moved but the pending map is still
+    /// empty, during which the empty-map rule returns a value ABOVE the
+    /// just-assigned, still-buffered sequence — a mid-range hole that marks an
+    /// un-flushed frame applied.
+    ///
+    /// The tag is `Appending`, never `Live`: `Live` asserts that an entry owns the
+    /// sequence, and at the assign the frame is not even appended yet. Tagging
+    /// `Live` here is what routes a hung append to "this is a code bug" instead of
+    /// to the disk.
+    ///
+    /// With no WAL the counter still bumps and nothing tracks the sequence. That
+    /// is correct: no frame will ever bear it, so it is an inert identifier. The
+    /// counter is global and its monotonicity is load-bearing across restarts, so
+    /// the bump must not become conditional.
+    fn assign_wal_sequence(&self, partition: u32) -> u64 {
+        let Some(tracking) = &self.wal else {
+            return self.next_wal_sequence();
+        };
+        tracking.with_partition(partition, |state| {
+            let seq = self.next_wal_sequence();
+            state.pending.insert(seq, PendingOrigin::Appending);
+            state.max_assigned = state.max_assigned.max(seq);
+            seq
+        })
+    }
+
+    /// Promotes `seq` from `Appending` to `Live` once its frame is on disk and its
+    /// entry is in the partition queue.
+    ///
+    /// CONDITIONAL on the sequence still being present: the flush loop is a
+    /// separately spawned task and a coalesced entry inherits its predecessor's
+    /// store time, so it is immediately drain-eligible — the whole
+    /// drain/flush/resolve sequence can complete between the queue insert and this
+    /// call. A blind insert here would re-insert a sequence that already reached a
+    /// durable terminal, pinning the partition's watermark forever and reporting a
+    /// leak against code that did exactly the right thing.
+    fn promote_wal_sequence(&self, partition: u32, seq: u64) {
+        let Some(tracking) = &self.wal else {
+            return;
+        };
+        tracking.with_partition(partition, |state| {
+            if let Some(origin) = state.pending.get_mut(&seq) {
+                *origin = PendingOrigin::Live;
+            }
+        });
+    }
+
+    /// Drops `seq` from tracking after its WAL append failed before any byte of
+    /// the frame could reach the segment.
+    ///
+    /// Scoped to the FAILED sequence only. In a multi-key loop the earlier keys'
+    /// sequences are frame-backed and MUST stay pending — rolling those back would
+    /// let the watermark advance past frames that were never applied, which is the
+    /// exact loss this tracker exists to prevent.
+    ///
+    /// Every error that reaches this point is pre-frame by construction: a failure
+    /// at or after the frame write fail-stops the process inside the WAL rather
+    /// than returning, so a returned error can only come from upstream of the
+    /// write path.
+    fn rollback_wal_sequence(&self, partition: u32, seq: u64) {
+        let Some(tracking) = &self.wal else {
+            return;
+        };
+        tracking.with_partition(partition, |state| {
+            state.pending.remove(&seq);
+        });
+    }
+
+    /// The applied watermark for a partition, in the INCLUSIVE space
+    /// `mark_applied` speaks: the largest sequence such that every frame at or
+    /// below it is resolved.
+    ///
+    /// The smallest pending sequence is itself UNRESOLVED, so the watermark stops
+    /// one below it — marking it would filter its frame out of replay and make its
+    /// segment collectable while the write is still buffered.
+    ///
+    /// With nothing pending, every sequence ever assigned to the partition is
+    /// resolved, so the watermark is the highest one assigned. It is NEVER the
+    /// counter's current value: the counter hands out sequences with `fetch_add`,
+    /// which returns the OLD value, so its loaded value is the NEXT sequence to
+    /// assign — using it would pre-mark the next write's frame applied before that
+    /// frame is even written.
+    fn prefix_complete_watermark(state: &PartitionTracking) -> u64 {
+        state
+            .pending
+            .keys()
+            .next()
+            .map_or(state.max_assigned, |min| min.saturating_sub(1))
+    }
+
+    /// Resolves `seqs` as durably applied and advances the partition's WAL
+    /// watermark to the prefix-complete frontier.
+    ///
+    /// Resolve and advance are ONE unit: a durable terminal that resolves without
+    /// advancing leaves the sidecar frozen and the WAL growing, and neither alarm
+    /// tier can see it because both key on the pending set, which advanced.
+    ///
+    /// The tracking lock is dropped before `mark_applied`, which does disk I/O.
+    /// A racing computation can therefore hand it a stale-but-lower watermark;
+    /// that is harmless because `mark_applied` clamps monotonically, and lower is
+    /// the safe direction.
+    async fn resolve_and_advance(&self, partition: u32, seqs: &BTreeSet<u64>) {
+        let Some(tracking) = &self.wal else {
+            return;
+        };
+        #[cfg(test)]
+        let scalar_max = self.watermark_mode() == WatermarkMode::ScalarMax;
+
+        let watermark = tracking.with_partition(partition, |state| {
+            for seq in seqs {
+                state.in_flight.remove(seq);
+                state.pending.remove(seq);
+            }
+            #[cfg(test)]
+            if scalar_max {
+                // Reproduces the pre-fix scalar advance so the differential test
+                // keeps a live negative control rather than a one-off revert.
+                return seqs.iter().copied().max().unwrap_or(0);
+            }
+            Self::prefix_complete_watermark(state)
+        });
+
+        if let Err(err) = tracking.wal.mark_applied(partition, watermark).await {
+            warn!(
+                partition,
+                watermark,
+                error = %err,
+                "Failed to mark WAL watermark applied; next restart will re-replay (safe but redundant)"
+            );
+        }
+    }
+
     /// Appends an entry to the WAL and satisfies the fsync policy before
     /// returning. Returns `Ok(())` immediately when no WAL is configured.
     ///
@@ -828,10 +1048,47 @@ impl WriteBehindDataStore {
     /// that a crash after ack but before the background flush still allows
     /// recovery to replay the acked write.
     async fn wal_append(&self, partition: u32, entry: &WalEntry) -> anyhow::Result<()> {
-        if let Some(wal) = &self.wal {
-            wal.append(partition, entry).await?;
+        if let Some(tracking) = &self.wal {
+            tracking.wal.append(partition, entry).await?;
         }
         Ok(())
+    }
+
+    /// The pending `wal_seq`s of `partition` with their origin tags.
+    ///
+    /// Reachable from sibling test modules, which Rust privacy otherwise keeps out
+    /// of this store's internals entirely.
+    #[cfg(test)]
+    pub(crate) fn test_pending_wal_sequences(&self, partition: u32) -> Vec<(u64, PendingOrigin)> {
+        self.wal.as_ref().map_or_else(Vec::new, |tracking| {
+            tracking.with_partition(partition, |state| {
+                state.pending.iter().map(|(s, o)| (*s, *o)).collect()
+            })
+        })
+    }
+
+    /// The highest `wal_seq` ever assigned to `partition`.
+    #[cfg(test)]
+    pub(crate) fn test_max_assigned_wal_sequence(&self, partition: u32) -> u64 {
+        self.wal.as_ref().map_or(0, |tracking| {
+            tracking.with_partition(partition, |state| state.max_assigned)
+        })
+    }
+
+    /// The `wal_seq`s currently owned by a flush worker in `partition`.
+    #[cfg(test)]
+    pub(crate) fn test_in_flight_wal_sequences(&self, partition: u32) -> Vec<u64> {
+        self.wal.as_ref().map_or_else(Vec::new, |tracking| {
+            tracking.with_partition(partition, |state| state.in_flight.iter().copied().collect())
+        })
+    }
+
+    /// The prefix-complete watermark `partition` would advance to right now.
+    #[cfg(test)]
+    pub(crate) fn test_wal_watermark(&self, partition: u32) -> Option<u64> {
+        self.wal.as_ref().map(|tracking| {
+            tracking.with_partition(partition, |state| Self::prefix_complete_watermark(state))
+        })
     }
 }
 
@@ -928,22 +1185,14 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
                         // advance past it. This is the ONLY signal that advances
                         // the tombstone durability fence.
                         store.resolve_pending(entry.sequence);
-                        // Mark the WAL entry applied so a clean restart does not
-                        // re-replay writes that are already durable in the inner store.
-                        if let Some(wal) = &store.wal {
-                            if let Err(err) = wal
-                                .mark_applied(partition_id_for_wal, entry.wal_sequence)
-                                .await
-                            {
-                                warn!(
-                                    map = %entry.map,
-                                    key = %entry.key,
-                                    wal_seq = entry.wal_sequence,
-                                    error = %err,
-                                    "Failed to mark WAL entry applied; next restart will re-replay (safe but redundant)"
-                                );
-                            }
-                        }
+                        // Resolve this entry's WAL sequences and advance the
+                        // partition watermark to the prefix-complete frontier, so a
+                        // clean restart does not re-replay writes that are already
+                        // durable in the inner store — and so no lower, still
+                        // un-flushed frame in the same partition is marked applied.
+                        store
+                            .resolve_and_advance(partition_id_for_wal, &entry.wal_sequences)
+                            .await;
                     }
                     Err(err) => {
                         let new_retry = entry.retry_count + 1;
@@ -1028,7 +1277,7 @@ impl MapDataStore for WriteBehindDataStore {
         }
 
         let partition_id = partition_for(map, key);
-        let wal_seq = self.next_wal_sequence();
+        let wal_seq = self.assign_wal_sequence(partition_id);
 
         // Append to WAL and satisfy the fsync policy before touching in-memory
         // state. This must happen before returning Ok(()) so a crash after ack
@@ -1057,7 +1306,12 @@ impl MapDataStore for WriteBehindDataStore {
             timestamp: wal_timestamp,
             sequence: wal_seq,
         };
-        self.wal_append(partition_id, &wal_entry).await?;
+        // A failed append leaves a tracked sequence that no frame bears and that
+        // nothing can ever flush to resolve, so drop it before propagating.
+        if let Err(err) = self.wal_append(partition_id, &wal_entry).await {
+            self.rollback_wal_sequence(partition_id, wal_seq);
+            return Err(err);
+        }
 
         // Assign and track the durability sequence atomically (see
         // `assign_tracked_sequence`) BEFORE the entry enters the queue.
@@ -1072,7 +1326,7 @@ impl MapDataStore for WriteBehindDataStore {
             store_time: now,
             sequence: entry_seq,
             retry_count: 0,
-            wal_sequence: wal_seq,
+            wal_sequences: BTreeSet::from([wal_seq]),
         };
 
         // Insert into partition queue, preserving original store_time on coalesce
@@ -1094,6 +1348,11 @@ impl MapDataStore for WriteBehindDataStore {
                 None
             }
         };
+
+        // The frame is on disk and the entry is queued, so an entry now owns this
+        // WAL sequence. Done after releasing the partition-queue lock so neither
+        // tracking lock is ever nested under it.
+        self.promote_wal_sequence(partition_id, wal_seq);
 
         // Retire the coalesced-away predecessor (its data is carried forward by
         // this write). Done after releasing the partition-queue lock so the
@@ -1144,7 +1403,7 @@ impl MapDataStore for WriteBehindDataStore {
         }
 
         let partition_id = partition_for(map, key);
-        let wal_seq = self.next_wal_sequence();
+        let wal_seq = self.assign_wal_sequence(partition_id);
 
         // Append to WAL before updating in-memory state so crash recovery can
         // replay the tombstone if the process dies after ack but before flush.
@@ -1155,7 +1414,11 @@ impl MapDataStore for WriteBehindDataStore {
             timestamp: None,
             sequence: wal_seq,
         };
-        self.wal_append(partition_id, &wal_entry).await?;
+        // A failed append leaves a tracked sequence no frame bears — drop it.
+        if let Err(err) = self.wal_append(partition_id, &wal_entry).await {
+            self.rollback_wal_sequence(partition_id, wal_seq);
+            return Err(err);
+        }
 
         // Assign and track the durability sequence atomically before queuing.
         let entry_seq = self.assign_tracked_sequence();
@@ -1166,7 +1429,7 @@ impl MapDataStore for WriteBehindDataStore {
             store_time: now,
             sequence: entry_seq,
             retry_count: 0,
-            wal_sequence: wal_seq,
+            wal_sequences: BTreeSet::from([wal_seq]),
         };
 
         let staging_key = (map.to_string(), key.to_string());
@@ -1185,6 +1448,9 @@ impl MapDataStore for WriteBehindDataStore {
                 None
             }
         };
+
+        // An entry now owns this WAL sequence; sited after the queue guard drops.
+        self.promote_wal_sequence(partition_id, wal_seq);
 
         if let Some(retired) = retired_seq {
             self.resolve_pending(retired);
@@ -1269,7 +1535,7 @@ impl MapDataStore for WriteBehindDataStore {
             }
 
             let partition_id = partition_for(map, key);
-            let wal_seq = self.next_wal_sequence();
+            let wal_seq = self.assign_wal_sequence(partition_id);
 
             // Append each tombstone to the WAL before queuing so crash recovery
             // can replay every individual key deletion, not just the batch call.
@@ -1280,7 +1546,13 @@ impl MapDataStore for WriteBehindDataStore {
                 timestamp: None,
                 sequence: wal_seq,
             };
-            self.wal_append(partition_id, &wal_entry).await?;
+            // Roll back ONLY the key whose own append failed. The earlier keys'
+            // sequences are frame-backed and must stay pending — rolling those
+            // back would let the watermark advance past frames never applied.
+            if let Err(err) = self.wal_append(partition_id, &wal_entry).await {
+                self.rollback_wal_sequence(partition_id, wal_seq);
+                return Err(err);
+            }
 
             // Assign and track the durability sequence atomically before queuing.
             let entry_seq = self.assign_tracked_sequence();
@@ -1291,7 +1563,7 @@ impl MapDataStore for WriteBehindDataStore {
                 store_time: now,
                 sequence: entry_seq,
                 retry_count: 0,
-                wal_sequence: wal_seq,
+                wal_sequences: BTreeSet::from([wal_seq]),
             };
 
             let staging_key = (map.to_string(), key.clone());
@@ -1309,6 +1581,9 @@ impl MapDataStore for WriteBehindDataStore {
                     None
                 }
             };
+
+            // An entry now owns this WAL sequence; sited after the queue guard drops.
+            self.promote_wal_sequence(partition_id, wal_seq);
 
             // Retire the coalesced-away predecessor so its durability sequence does
             // not stall the flushed watermark forever (a leaked pending sequence
@@ -1564,22 +1839,10 @@ impl MapDataStore for WriteBehindDataStore {
                         self.staging.remove(&(entry.map.clone(), entry.key.clone()));
                         self.pending_count.fetch_sub(1, Ordering::Relaxed);
                         self.resolve_pending(entry.sequence);
-                        // Mark WAL applied so a restart after clean shutdown is
+                        // Resolve and advance so a restart after clean shutdown is
                         // a no-op rather than re-replaying already-durable writes.
-                        if let Some(wal) = &self.wal {
-                            if let Err(err) = wal
-                                .mark_applied(partition_id_for_wal, entry.wal_sequence)
-                                .await
-                            {
-                                warn!(
-                                    map = %entry.map,
-                                    key = %entry.key,
-                                    wal_seq = entry.wal_sequence,
-                                    error = %err,
-                                    "Failed to mark WAL entry applied during shutdown drain"
-                                );
-                            }
-                        }
+                        self.resolve_and_advance(partition_id_for_wal, &entry.wal_sequences)
+                            .await;
                     }
                     Ok(Err(err)) => {
                         // Inner store returned an error; log and treat as timed-out
@@ -3565,6 +3828,165 @@ mod tests {
             store.test_classifier_sample_count(partition + 1),
             0,
             "samples are counted per partition"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-partition WAL-sequence tracker
+    // -----------------------------------------------------------------------
+
+    fn wal_seam_store(wal: &Arc<InMemoryTestWal>) -> Arc<WriteBehindDataStore> {
+        let inner: Arc<dyn MapDataStore> = Arc::new(SpyDataStore::new());
+        let config = WriteBehindConfig {
+            // Long delays so nothing drains behind the assertions.
+            write_delay_ms: 60_000,
+            flush_interval_ms: 60_000,
+            ..WriteBehindConfig::default()
+        };
+        WriteBehindDataStore::new_with_wal(
+            inner,
+            config,
+            Some(WalBootstrap {
+                wal: Arc::clone(wal) as Arc<dyn Wal>,
+                sequence_start: 1,
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn watermark_stops_one_below_the_lowest_unresolved_sequence() {
+        let wal = InMemoryTestWal::new();
+        let store = wal_seam_store(&wal);
+        let partition = partition_for("m", "k1");
+
+        store.add("m", "k1", &dummy_value(), 0, 1000).await.unwrap();
+
+        assert_eq!(
+            store.test_pending_wal_sequences(partition),
+            vec![(1, PendingOrigin::Live)],
+            "the append returned Ok and the entry is queued, so an entry owns the sequence"
+        );
+        assert_eq!(store.test_max_assigned_wal_sequence(partition), 1);
+        assert!(store.test_in_flight_wal_sequences(partition).is_empty());
+        assert_eq!(
+            store.test_wal_watermark(partition),
+            Some(0),
+            "the lowest pending sequence is itself UNRESOLVED, so the inclusive \
+             watermark stops one below it — marking it would filter a buffered \
+             frame out of replay"
+        );
+
+        store
+            .resolve_and_advance(partition, &BTreeSet::from([1]))
+            .await;
+
+        assert_eq!(
+            store.test_wal_watermark(partition),
+            Some(1),
+            "nothing pending ⇒ every assigned sequence resolved ⇒ the highest \
+             ASSIGNED, never the counter's next value"
+        );
+        assert_eq!(
+            store.wal_sequence.load(Ordering::Relaxed),
+            2,
+            "fetch_add returns the OLD value, so the counter's load is the NEXT \
+             sequence to assign; using it would pre-mark an unwritten frame applied"
+        );
+    }
+
+    #[tokio::test]
+    async fn scalar_max_mode_advances_past_an_unresolved_lower_sequence() {
+        let wal = InMemoryTestWal::new();
+        let applied = Arc::clone(&wal.applied);
+        let store = wal_seam_store(&wal);
+        let partition = 11_u32;
+
+        let low = store.assign_wal_sequence(partition);
+        let high = store.assign_wal_sequence(partition);
+        store.promote_wal_sequence(partition, low);
+        store.promote_wal_sequence(partition, high);
+
+        store.test_set_watermark_mode(WatermarkMode::ScalarMax);
+        store
+            .resolve_and_advance(partition, &BTreeSet::from([high]))
+            .await;
+        assert_eq!(
+            *applied.lock().await,
+            vec![(partition, high)],
+            "the negative control must actually discriminate: scalar-max marks the \
+             still-buffered lower frame applied"
+        );
+
+        store.test_set_watermark_mode(WatermarkMode::PrefixComplete);
+        store.resolve_and_advance(partition, &BTreeSet::new()).await;
+        assert_eq!(
+            applied.lock().await.last().copied(),
+            Some((partition, low - 1)),
+            "prefix-complete holds below the unresolved sequence"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_drops_only_the_failed_sequence() {
+        let wal = InMemoryTestWal::new();
+        let store = wal_seam_store(&wal);
+        let partition = 5_u32;
+
+        let framed = store.assign_wal_sequence(partition);
+        let failed = store.assign_wal_sequence(partition);
+        store.promote_wal_sequence(partition, framed);
+
+        store.rollback_wal_sequence(partition, failed);
+
+        assert_eq!(
+            store.test_pending_wal_sequences(partition),
+            vec![(framed, PendingOrigin::Live)],
+            "a frame-backed sequence must survive a later key's append failure — \
+             rolling it back would let the watermark pass a frame never applied"
+        );
+        assert_eq!(
+            store.test_max_assigned_wal_sequence(partition),
+            failed,
+            "max_assigned stays monotonic across a rollback: a rolled-back \
+             sequence names no frame, so a watermark at that value asserts nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn promotion_is_a_no_op_once_the_sequence_reached_a_terminal() {
+        let wal = InMemoryTestWal::new();
+        let store = wal_seam_store(&wal);
+        let partition = 9_u32;
+
+        let seq = store.assign_wal_sequence(partition);
+        // The flush task is separate and a coalesced entry is immediately
+        // drain-eligible, so a terminal can land inside the assign→promote window.
+        store
+            .resolve_and_advance(partition, &BTreeSet::from([seq]))
+            .await;
+        store.promote_wal_sequence(partition, seq);
+
+        assert!(
+            store.test_pending_wal_sequences(partition).is_empty(),
+            "re-inserting a sequence that already reached a durable terminal would \
+             pin the watermark forever and report a leak against correct code"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_wal_means_no_tracker_but_the_counter_still_advances() {
+        let store = seam_store();
+        let partition = 4_u32;
+
+        assert!(
+            store.test_wal_watermark(partition).is_none(),
+            "with no WAL no frame is ever written, so the watermark has no subject"
+        );
+        assert_eq!(store.assign_wal_sequence(partition), 1);
+        assert_eq!(store.assign_wal_sequence(partition), 2);
+        assert!(
+            store.test_pending_wal_sequences(partition).is_empty(),
+            "the sequences are inert identifiers; nothing tracks them"
         );
     }
 
