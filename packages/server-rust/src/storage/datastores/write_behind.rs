@@ -1531,15 +1531,21 @@ impl WriteBehindDataStore {
     /// assign — using it would pre-mark the next write's frame applied before that
     /// frame is even written.
     ///
-    /// An empty map is only informative once the partition has been seeded from
-    /// the on-disk WAL: before that, emptiness says nothing about the frames a
-    /// prior incarnation left un-applied, so it is a typed error rather than an
-    /// advance.
+    /// NOTHING is knowable before the partition is seeded from the on-disk WAL,
+    /// and that holds whether or not this incarnation has pending sequences of
+    /// its own. A prior incarnation's un-applied frames sit BELOW every sequence
+    /// this incarnation hands out (the live counter starts above the highest
+    /// observed), so `min(pending) - 1` computed on an unseeded partition sits
+    /// ABOVE them — it would mark frames applied that were never replayed and
+    /// hand their segments to GC. The seeding failure that makes this reachable
+    /// is rare, but its cost is permanent loss, so the guard covers both arms.
     fn prefix_complete_watermark(state: &PartitionTracking) -> Result<u64, WalWatermarkError> {
+        if !state.seeded {
+            return Err(WalWatermarkError::Unseeded);
+        }
         match state.pending.keys().next() {
             Some(min) => Ok(min.saturating_sub(1)),
-            None if state.seeded => Ok(state.max_assigned),
-            None => Err(WalWatermarkError::Unseeded),
+            None => Ok(state.max_assigned),
         }
     }
 
@@ -1699,6 +1705,12 @@ impl WriteBehindDataStore {
         let Some(tracking) = &self.wal else {
             return;
         };
+        // Seeded by construction at every advance, not only at the mutating
+        // entry points: `flush_key` can be the ONLY terminal a partition ever
+        // sees, and an unseeded partition has no knowable watermark, so without
+        // this its sidecar would never move and its WAL would grow forever.
+        // Cheap after the first call — a bool read under the partition lock.
+        self.ensure_wal_seeded(partition).await;
         #[cfg(test)]
         let scalar_max = self.watermark_mode() == WatermarkMode::ScalarMax;
 

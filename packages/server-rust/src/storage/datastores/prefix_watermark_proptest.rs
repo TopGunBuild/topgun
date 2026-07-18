@@ -2112,3 +2112,75 @@ async fn a_non_subsuming_survivor_carries_the_retired_sequence_forward() {
          exactly what early-resolving it would have made impossible"
     );
 }
+
+/// A WAL whose `unapplied` fails, so boot seeding cannot complete.
+struct UnseedableWal(Arc<WalWriter>);
+
+#[async_trait]
+impl Wal for UnseedableWal {
+    async fn append(&self, partition: u32, entry: &WalEntry) -> anyhow::Result<()> {
+        self.0.append(partition, entry).await
+    }
+
+    async fn mark_applied(&self, partition: u32, sequence: u64) -> anyhow::Result<()> {
+        self.0.mark_applied(partition, sequence).await
+    }
+
+    async fn unapplied(&self, _partition: u32) -> anyhow::Result<Vec<WalEntry>> {
+        anyhow::bail!("injected failure reading un-applied frames")
+    }
+}
+
+#[tokio::test]
+async fn an_unseeded_partition_never_advances_even_with_pending_sequences() {
+    let partition = 264;
+    let keys = keys_in_partition(partition, 2);
+    let (_wal_dir, wal) = real_wal();
+
+    // A prior incarnation left frames 1 and 2 un-replayed.
+    {
+        let inner = FaultStore::new();
+        let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
+        for key in &keys {
+            store.add(TEST_MAP, key, &lww(1), 0, 0).await.unwrap();
+        }
+        drop(store);
+    }
+
+    // The new incarnation cannot seed: the WAL read fails. Its own sequences
+    // start ABOVE the prior incarnation's, so a watermark computed from them
+    // alone would sit above frames that were never replayed.
+    let inner = FaultStore::new();
+    let store = build_store(
+        &inner,
+        Arc::new(UnseedableWal(Arc::clone(&wal))) as Arc<dyn Wal>,
+        3,
+    );
+    for key in &keys {
+        store.add(TEST_MAP, key, &lww(2), 0, 0).await.unwrap();
+    }
+    assert!(!store.test_wal_partition_seeded(partition));
+
+    // Resolve only the FIRST of the two, so the pending map is non-empty at the
+    // advance — the case a seeded-only-on-empty guard lets straight through.
+    store
+        .resolve_and_advance(partition, &BTreeSet::from([3]))
+        .await;
+
+    assert_eq!(
+        store.test_wal_watermark(partition),
+        Some(Err(WalWatermarkError::Unseeded)),
+        "an unseeded partition has no knowable watermark, pending or not"
+    );
+    assert_eq!(
+        wal.test_read_applied_sequence(partition),
+        0,
+        "and nothing may be marked applied: frames 1 and 2 were never replayed, \
+         so advancing to 2 would hand their segments to GC"
+    );
+    assert_eq!(
+        wal.unapplied(partition).await.unwrap().len(),
+        4,
+        "every frame stays replayable — under-advancing is the safe direction"
+    );
+}
