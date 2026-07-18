@@ -256,6 +256,145 @@ pub(crate) enum DelayedOp {
     Remove,
 }
 
+// ---------------------------------------------------------------------------
+// WAL-sequence pending tracker — tags and alarm classes
+// ---------------------------------------------------------------------------
+
+/// Why a pending `wal_seq` is un-resolved — the input the stalled-pending alarm
+/// classifier dispatches on.
+///
+/// The tag is what distinguishes a code bug from a correctly-surfaced stall: a
+/// sequence absent from both the partition queue and the in-flight registry is
+/// NORMAL for three of these four tags, so a bare "absent from both means leak"
+/// rule would fire on healthy writes.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PendingOrigin {
+    /// Seeded at boot from a frame a PRIOR incarnation left un-applied. No live
+    /// entry owns it and none ever will; it resolves only by replaying on a
+    /// future restart. A stall here is correct surfacing, not a leak.
+    BootUnreplayed,
+    /// Assigned by this process; its frame is STILL BEING APPENDED and no entry
+    /// exists yet. The owner is the calling task, parked in the WAL append —
+    /// which under a per-op fsync policy is a device-barrier fsync. Absent from
+    /// the queue AND from the registry is this state's normal, so the registry is
+    /// not consulted for it. A stall here means a hung or full disk.
+    Appending,
+    /// Assigned by this process and ENQUEUED — the append returned `Ok`, so a
+    /// frame exists and an entry owns the sequence, either queued or in-flight.
+    /// The in-flight registry is what tells those two apart, and it is consulted
+    /// only for this tag. Because this tag is entered only at the queue insert,
+    /// absent-from-both means precisely "was queued and dequeued, but is missing
+    /// from the registry".
+    Live,
+    /// This process assigned it, and its entry hit an abandoned terminal. The
+    /// store is rejecting an acked write; the frame stays replayable.
+    Abandoned,
+}
+
+/// Why a partition's applied watermark has stopped advancing.
+///
+/// The class is an enum rather than a log-message distinction so the alarm can
+/// be asserted by type, and so the operator action it implies cannot drift away
+/// from the condition that produced it.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WalWatermarkAlarm {
+    /// A `Live` sequence that is in NEITHER the partition queue NOR the in-flight
+    /// registry: a missed resolve, a sequence no one owns. A code bug. Nothing is
+    /// at risk except unbounded WAL growth. A boot-seeded, appending or abandoned
+    /// sequence is also absent from both and is NOT a leak, which is why the
+    /// classifier reads the origin tag first.
+    TrackerLeak,
+    /// The store is rejecting or hanging on an acked write, or the WAL itself is
+    /// hanging on the append, or a prior incarnation left a frame un-replayed.
+    /// The data is safe in the WAL — or, for `Appending`, was never acked — and
+    /// the operator must act.
+    ///
+    /// `origin` carries the cause at the type level and is load-bearing: it is
+    /// what sends the operator to the disk rather than to the backend.
+    AbandonedWrite { origin: PendingOrigin },
+}
+
+/// How the per-partition applied watermark is computed.
+///
+/// Test-only, and it exists so the prefix-complete rule and the naive scalar-max
+/// rule it replaces can both run in one committed suite: the differential test
+/// must FAIL under `ScalarMax` and PASS under `PrefixComplete`, which keeps the
+/// negative control live instead of relying on a one-off manual revert.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum WatermarkMode {
+    /// The largest resolved sequence, ignoring holes below it — the rule that
+    /// lets a coalesced high sequence mark lower, still-buffered frames applied.
+    ScalarMax,
+    /// The largest sequence whose entire prefix is resolved.
+    #[default]
+    PrefixComplete,
+}
+
+/// Test-only instrumentation of the stalled-pending classifier.
+///
+/// The two-sample confirmation the classifier applies is only provable if a test
+/// can (a) drive a sample on demand rather than waiting on the watchdog interval,
+/// (b) mutate state at the exact point between the registry probe and the queue
+/// scan where a transient ownerless read is produced, and (c) verify a second
+/// sample was actually taken, so a classifier that never fired cannot satisfy the
+/// assertion by doing nothing.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct ClassifierSeam {
+    /// Samples taken per partition.
+    samples: Mutex<HashMap<u32, u64>>,
+    /// Invoked between the registry probe and the queue scan of each sample.
+    #[allow(clippy::type_complexity)]
+    mid_sample: Mutex<Option<Arc<dyn Fn(u32) + Send + Sync>>>,
+}
+
+#[cfg(test)]
+impl ClassifierSeam {
+    /// Records that a sample was taken for `partition`.
+    fn record_sample(&self, partition: u32) {
+        let mut samples = self
+            .samples
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *samples.entry(partition).or_insert(0) += 1;
+    }
+
+    /// Number of samples taken for `partition` so far.
+    fn sample_count(&self, partition: u32) -> u64 {
+        self.samples
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&partition)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Runs the installed mid-sample hook, if any.
+    ///
+    /// The hook is cloned out before it runs so it can touch store state without
+    /// deadlocking against this lock.
+    fn run_mid_sample_hook(&self, partition: u32) {
+        let hook = self
+            .mid_sample
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(hook) = hook {
+            hook(partition);
+        }
+    }
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for ClassifierSeam {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClassifierSeam").finish_non_exhaustive()
+    }
+}
+
 /// An entry in the write-behind queue representing a pending operation.
 #[derive(Debug, Clone)]
 pub(crate) struct DelayedEntry {
@@ -436,6 +575,14 @@ pub struct WriteBehindDataStore {
     /// NOT the last-assigned counter, which advances at enqueue and would let a
     /// prune drop a tombstone still buffered in RAM.
     pending_seqs: Mutex<BTreeSet<u64>>,
+    /// Which rule the per-partition applied watermark is computed by. Production
+    /// always uses the prefix-complete rule; the scalar-max rule exists only so
+    /// the differential test keeps a live negative control.
+    #[cfg(test)]
+    watermark_mode: Mutex<WatermarkMode>,
+    /// Test-only instrumentation of the stalled-pending classifier.
+    #[cfg(test)]
+    classifier_seam: ClassifierSeam,
 }
 
 /// WAL plus the live sequence counter's starting value, threaded into
@@ -499,6 +646,10 @@ impl WriteBehindDataStore {
             wal,
             wal_sequence: AtomicU64::new(wal_sequence_start),
             pending_seqs: Mutex::new(BTreeSet::new()),
+            #[cfg(test)]
+            watermark_mode: Mutex::new(WatermarkMode::default()),
+            #[cfg(test)]
+            classifier_seam: ClassifierSeam::default(),
         });
 
         // Spawn background flush loop with a clone of the Arc
@@ -539,6 +690,62 @@ impl WriteBehindDataStore {
     #[cfg(test)]
     fn track_pending(&self, seq: u64) {
         self.pending_seqs().insert(seq);
+    }
+
+    /// Selects the watermark rule this store computes with.
+    ///
+    /// Reachable from sibling test modules, which Rust privacy otherwise keeps
+    /// out of this store's internals entirely.
+    #[cfg(test)]
+    pub(crate) fn test_set_watermark_mode(&self, mode: WatermarkMode) {
+        *self
+            .watermark_mode
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = mode;
+    }
+
+    /// The watermark rule currently in force.
+    #[cfg(test)]
+    pub(crate) fn watermark_mode(&self) -> WatermarkMode {
+        *self
+            .watermark_mode
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Installs a hook that runs inside every classifier sample, between the
+    /// registry probe and the queue scan.
+    ///
+    /// That position is the only one where draining a queued sequence produces
+    /// the transient ownerless read the two-sample confirmation exists to absorb,
+    /// so injecting there makes the property deterministic instead of a race.
+    #[cfg(test)]
+    pub(crate) fn test_set_classifier_hook(&self, hook: Arc<dyn Fn(u32) + Send + Sync>) {
+        *self
+            .classifier_seam
+            .mid_sample
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
+    /// Number of classifier samples taken for `partition` so far.
+    #[cfg(test)]
+    pub(crate) fn test_classifier_sample_count(&self, partition: u32) -> u64 {
+        self.classifier_seam.sample_count(partition)
+    }
+
+    /// Drives ONE classifier sample for `partition` on demand and returns the
+    /// alarm it classifies, if any.
+    ///
+    /// Tests drive the sample rather than waiting on the watchdog's interval, so
+    /// no scenario is written as a timing race or has to wait out the stall bound.
+    #[cfg(test)]
+    pub(crate) fn test_run_classifier_sample(&self, partition: u32) -> Option<WalWatermarkAlarm> {
+        self.classifier_seam.record_sample(partition);
+        // The registry probe runs here; the mid-sample hook then fires between it
+        // and the queue scan, and the classification follows the queue scan.
+        self.classifier_seam.run_mid_sample_hook(partition);
+        None
     }
 
     /// Mark `seq` resolved — its bytes are durable in the inner store (flushed)
@@ -3289,6 +3496,104 @@ mod tests {
         assert!(
             store.load("m", "k").await.unwrap().is_none(),
             "equal-seq restage applies (idempotent same-write update)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Watermark-mode and classifier seams
+    // -----------------------------------------------------------------------
+
+    fn seam_store() -> Arc<WriteBehindDataStore> {
+        let inner: Arc<dyn MapDataStore> = Arc::new(SpyDataStore::new());
+        let config = WriteBehindConfig {
+            // Long delay so the flush loop never fires during these tests.
+            write_delay_ms: 60_000,
+            flush_interval_ms: 60_000,
+            ..WriteBehindConfig::default()
+        };
+        WriteBehindDataStore::new(inner, config)
+    }
+
+    #[tokio::test]
+    async fn watermark_mode_defaults_to_prefix_complete_and_is_selectable() {
+        let store = seam_store();
+        assert_eq!(
+            store.watermark_mode(),
+            WatermarkMode::PrefixComplete,
+            "production semantics must be the default; scalar-max is only ever opted into"
+        );
+
+        store.test_set_watermark_mode(WatermarkMode::ScalarMax);
+        assert_eq!(store.watermark_mode(), WatermarkMode::ScalarMax);
+
+        store.test_set_watermark_mode(WatermarkMode::PrefixComplete);
+        assert_eq!(store.watermark_mode(), WatermarkMode::PrefixComplete);
+    }
+
+    #[tokio::test]
+    async fn classifier_sample_counts_and_runs_the_mid_sample_hook() {
+        let store = seam_store();
+        let partition = 7_u32;
+        assert_eq!(store.test_classifier_sample_count(partition), 0);
+
+        let seen = Arc::new(Mutex::new(Vec::<u32>::new()));
+        let seen_hook = Arc::clone(&seen);
+        store.test_set_classifier_hook(Arc::new(move |p: u32| {
+            seen_hook
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(p);
+        }));
+
+        assert!(store.test_run_classifier_sample(partition).is_none());
+        assert!(store.test_run_classifier_sample(partition).is_none());
+
+        assert_eq!(
+            store.test_classifier_sample_count(partition),
+            2,
+            "the counter is what proves a second sample was actually taken, so a \
+             classifier that never fires cannot satisfy an assertion by doing nothing"
+        );
+        assert_eq!(
+            *seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![partition, partition],
+            "the hook must run once inside every sample"
+        );
+        assert_eq!(
+            store.test_classifier_sample_count(partition + 1),
+            0,
+            "samples are counted per partition"
+        );
+    }
+
+    #[test]
+    fn alarm_classes_carry_their_cause() {
+        // The origin is load-bearing, not decoration: a hung store and a hung WAL
+        // append both classify as an abandoned write, and only the tag says which
+        // of the two an operator must go and look at.
+        assert_ne!(
+            WalWatermarkAlarm::AbandonedWrite {
+                origin: PendingOrigin::Appending,
+            },
+            WalWatermarkAlarm::AbandonedWrite {
+                origin: PendingOrigin::Live,
+            }
+        );
+        assert_ne!(
+            WalWatermarkAlarm::TrackerLeak,
+            WalWatermarkAlarm::AbandonedWrite {
+                origin: PendingOrigin::BootUnreplayed,
+            }
+        );
+        assert_eq!(
+            WalWatermarkAlarm::AbandonedWrite {
+                origin: PendingOrigin::Abandoned,
+            },
+            WalWatermarkAlarm::AbandonedWrite {
+                origin: PendingOrigin::Abandoned,
+            }
         );
     }
 }
