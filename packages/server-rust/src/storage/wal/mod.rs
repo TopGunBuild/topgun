@@ -377,9 +377,9 @@ pub struct WalEntry {
 
 /// Object-safe WAL interface.
 ///
-/// Both the production file-backed `WalWriter` (307c) and the in-memory
-/// simulation double (307d) implement this trait so callers can depend on
-/// `Arc<dyn Wal>` without coupling to a specific implementation.
+/// A file-backed production implementation (`WalWriter`) and an in-memory
+/// simulation double share this trait so callers can depend on `Arc<dyn Wal>`
+/// without coupling to a specific implementation.
 ///
 /// All methods are async because the production implementation performs I/O.
 /// The fsync behaviour is governed by the `WalFsyncPolicy` that each
@@ -394,19 +394,26 @@ pub trait Wal: Send + Sync {
     /// fails; the caller should NOT ack the client until this returns `Ok`.
     async fn append(&self, partition: u32, entry: &WalEntry) -> anyhow::Result<()>;
 
-    /// Marks a WAL entry as applied and removes it from the set of entries
-    /// that `unapplied` would return.
+    /// Advances the partition's applied watermark to `sequence`, removing every
+    /// entry at or below it from what `unapplied` returns.
     ///
-    /// Called after the entry has been successfully flushed to the durable
-    /// inner store. The implementation may truncate or checkpoint the log
-    /// when all entries up to a sequence number have been marked applied.
+    /// `sequence` MUST be **prefix-complete**: every frame at or below it has
+    /// been durably applied to the inner store. It is not a high-water mark of
+    /// whatever happened to succeed — a single un-applied frame holds the
+    /// watermark below itself, because the watermark is what licenses the log to
+    /// discard the frames it covers. Implementations clamp monotonically, so a
+    /// caller that under-advances is safe; a caller that over-advances loses
+    /// data.
     async fn mark_applied(&self, partition: u32, sequence: u64) -> anyhow::Result<()>;
 
-    /// Returns all un-applied entries for a partition, in sequence order.
+    /// Returns all un-applied entries for a partition, in ascending sequence
+    /// order.
     ///
-    /// Called at startup (307c recovery loop) to replay any entries that were
-    /// appended before the last crash but not yet acknowledged as applied.
-    /// An empty vec means the partition is clean.
+    /// Startup replays these: they are the frames appended before the last crash
+    /// that the watermark does not yet cover, so their effects may be missing
+    /// from the inner store. Because the watermark is prefix-complete, this is a
+    /// contiguous suffix of the log rather than an arbitrary subset. An empty vec
+    /// means the partition is clean.
     async fn unapplied(&self, partition: u32) -> anyhow::Result<Vec<WalEntry>>;
 }
 
@@ -1226,13 +1233,39 @@ impl WalRecovery {
     /// corruption is detected — see `WalWriter::unapplied`. A truncated tail
     /// is tolerated with a WARN log.
     ///
-    /// After successful replay the WAL entries are marked applied so a subsequent
-    /// clean restart is a no-op.
+    /// A partition is marked applied only up to its **contiguous-success
+    /// frontier**: the highest sequence such that every un-applied entry at or
+    /// below it replayed successfully. The frontier — never the highest sequence
+    /// that happened to succeed — is what makes the persisted watermark
+    /// prefix-complete, so a single failed replay can no longer license GC of its
+    /// own frame. Frames above the frontier stay in the replay window and are
+    /// re-applied on a later boot; that re-application is safe because the inner
+    /// store merges by timestamp, so replaying an already-applied entry loses the
+    /// merge and changes nothing.
+    ///
+    /// A partition whose frontier stops below its highest enumerated frame raises
+    /// the abandoned-write alarm here, at boot. Write-behind's watchdog cannot
+    /// cover this: a partition that never receives a live write is never seeded
+    /// and never sampled, so without the boot alarm its retained frames would be
+    /// safe but invisible.
+    ///
+    /// # Violation posture
+    ///
+    /// Recovery never refuses to boot on the state it observes. Every input here
+    /// — segment bytes, frame contents, the store's replay verdict — is
+    /// environmental or adversarial, so it is handled as a value, never as a
+    /// panic: a hard stop would brick an already-deployed server on upgrade over
+    /// a pre-existing on-disk WAL, converting a durability fix into an outage. A
+    /// panic is reserved for an inconsistency reachable ONLY through this
+    /// process's own in-memory ordering, and recovery observes none. Legacy WAL
+    /// states — including `WalStorePayload::Legacy` frames and a sidecar written
+    /// before the frontier rule existed — boot and replay unchanged.
     ///
     /// # Errors
     ///
     /// Returns an error if a WAL file contains mid-file CRC corruption, an
-    /// unrecognised magic, or an unknown format version.
+    /// unrecognised magic, or an unknown format version. A failed replay of an
+    /// individual entry is NOT an error: it blocks the frontier and is logged.
     pub async fn run(&self, inner_store: Arc<dyn MapDataStore>) -> anyhow::Result<()> {
         let partitions = if self.partitions.is_empty() {
             Self::discover_partitions(&self.wal.wal_dir)?
@@ -1253,7 +1286,13 @@ impl WalRecovery {
                 "WAL recovery: replaying unapplied entries"
             );
 
-            let mut max_seq = 0u64;
+            // The watermark stops at the last CONTIGUOUSLY replayed entry, not at
+            // the highest one that happened to succeed: a failed entry blocks the
+            // prefix exactly as it does on the live path. For [100 Ok, 101 Err,
+            // 102 Ok] the frontier is 100, so 101 AND 102 stay replayable.
+            let mut frontier = 0u64;
+            let mut first_failed: Option<u64> = None;
+            let highest_enumerated = entries.iter().map(|e| e.sequence).max().unwrap_or(0);
             let now = current_millis();
 
             for entry in &entries {
@@ -1297,27 +1336,69 @@ impl WalRecovery {
                     WalOp::Remove => inner_store.remove(&entry.map, &entry.key, now).await,
                 };
 
-                if let Err(err) = result {
-                    tracing::warn!(
-                        partition = partition_id,
-                        map = %entry.map,
-                        key = %entry.key,
-                        seq = entry.sequence,
-                        error = %err,
-                        "WAL recovery: replay failed for entry; skipping"
-                    );
-                }
-
-                if entry.sequence > max_seq {
-                    max_seq = entry.sequence;
+                match result {
+                    Ok(()) => {
+                        // Only a success that is still contiguous with the prefix
+                        // may advance the frontier. Once an entry has failed, later
+                        // successes are kept (replay is idempotent, so re-running
+                        // them next boot is free) but they must NOT license GC of
+                        // the frame that failed.
+                        if first_failed.is_none() {
+                            frontier = entry.sequence;
+                        }
+                    }
+                    Err(err) => {
+                        // A store error here is environmental, so it is logged and
+                        // the boot continues; refusing to boot would convert a
+                        // transient backend failure into an availability outage.
+                        tracing::warn!(
+                            partition = partition_id,
+                            map = %entry.map,
+                            key = %entry.key,
+                            seq = entry.sequence,
+                            error = %err,
+                            "WAL recovery: replay failed for entry; \
+                             watermark stops below it and it stays replayable"
+                        );
+                        first_failed.get_or_insert(entry.sequence);
+                    }
                 }
             }
 
-            // Mark all replayed entries as applied so a clean restart is a no-op.
-            if let Err(err) = self.wal.mark_applied(partition_id, max_seq).await {
+            if frontier < highest_enumerated {
+                // An idle partition never receives a live write, so write-behind
+                // never seeds it and its watchdog never samples it. Without this
+                // boot alarm the retained frames would be safe but SILENT, and
+                // silence is the failure class the alarm exists to remove.
+                // Emitted on write-behind's watchdog target, with the same class
+                // label, so an operator has ONE place to watch for a stalled
+                // watermark regardless of which side observed it.
+                tracing::error!(
+                    target: "topgun_server::storage::wal_watermark",
+                    partition = partition_id,
+                    sequence = first_failed.unwrap_or(frontier.saturating_add(1)),
+                    frontier,
+                    highest_enumerated,
+                    class = "AbandonedWrite/BootUnreplayed",
+                    "WAL recovery could not replay every frame for this partition: the applied \
+                     watermark stops at the contiguous-success frontier and the frames above it \
+                     stay replayable. They resolve by replaying on a future restart once the store \
+                     accepts them; WAL GC stays held back until they do."
+                );
+            }
+
+            // Marking `0` would be a no-op on the sidecar but would still run
+            // seal/rotate and GC for their own side effects; nothing was replayed,
+            // so skip the call and its I/O entirely.
+            if frontier == 0 {
+                continue;
+            }
+
+            // Mark the contiguous prefix applied so a clean restart is a no-op.
+            if let Err(err) = self.wal.mark_applied(partition_id, frontier).await {
                 tracing::warn!(
                     partition = partition_id,
-                    max_seq = max_seq,
+                    frontier,
                     error = %err,
                     "WAL recovery: failed to mark entries applied; \
                      next restart will re-replay (safe but redundant)"
