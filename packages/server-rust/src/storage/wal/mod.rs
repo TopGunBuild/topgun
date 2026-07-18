@@ -129,6 +129,30 @@ pub enum WalOp {
     Remove,
 }
 
+impl WalOp {
+    /// Whether THIS op, as the SURVIVOR of a coalesce, makes an earlier frame for
+    /// the same key redundant: the survivor carries the key's COMPLETE state, so
+    /// dropping any predecessor loses nothing. Full snapshots and whole-key
+    /// tombstones subsume; per-op deltas do not, because each delta carries
+    /// independent information a successor cannot re-derive.
+    ///
+    /// The match is exhaustive with NO catch-all at any level, and that is the
+    /// point: a future delta-framing variant cannot be added without deciding its
+    /// answer here, so the coalesce branch cannot silently keep early-resolving
+    /// frames that are no longer redundant.
+    #[must_use]
+    pub fn subsumes_on_coalesce(&self) -> bool {
+        match self {
+            // A whole-key tombstone IS complete state: it fully determines the key.
+            Self::Remove => true,
+            Self::Store { value, .. } => match value {
+                // Full CRDT snapshot; a bare legacy value is also a complete state.
+                WalStorePayload::Record(_) | WalStorePayload::Legacy(_) => true,
+            },
+        }
+    }
+}
+
 /// Payload of a [`WalOp::Store`] frame.
 ///
 /// Current servers write `Record(RecordValue)`, preserving the exact CRDT shape
@@ -780,6 +804,64 @@ impl WalWriter {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Fail-stop
+// ---------------------------------------------------------------------------
+
+/// Which unrecoverable WAL condition triggered a fail-stop.
+///
+/// The tier is what an operator — and recovery — reads differently; the
+/// mechanism is identical for both, so the tier lives in the log and in the
+/// classification only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WalFailStopTier {
+    /// The WAL's own rotation bookkeeping is inconsistent: an append targeted a
+    /// sealed segment. No frame of the entry reached the segment.
+    P,
+    /// A write, flush or fsync failed after the entry may already have been
+    /// framed into the segment, so the frame's durability is unknown.
+    B,
+}
+
+/// Tiers observed by [`wal_fail_stop`] under test builds, oldest first.
+#[cfg(test)]
+static FAIL_STOP_OBSERVATIONS: std::sync::Mutex<Vec<WalFailStopTier>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Terminates the process on an unrecoverable WAL condition. Never returns.
+///
+/// `abort()` — not `panic!` — is the mechanism, because the workspace builds with
+/// the unwind panic strategy (switching it is a protected performance decision).
+/// An unwinding panic here would be contained by the calling tokio task and the
+/// process would survive on a WAL already known to be broken, panicking again on
+/// every later append to the same partition. `abort()` is independent of the
+/// panic strategy; `std::process::exit` is rejected because it runs destructors
+/// that can block on the very WAL that is failing, and returning an error is
+/// exactly what this disposition exists to forbid.
+///
+/// Under `cfg(test)` it records the tier and panics instead, so a test can
+/// observe which tier fired without the harness process being killed.
+pub(crate) fn wal_fail_stop(tier: WalFailStopTier, ctx: &str) -> ! {
+    tracing::error!(
+        target: "topgun::wal",
+        tier = ?tier,
+        ctx,
+        "WAL fail-stop: unrecoverable condition, terminating process"
+    );
+
+    #[cfg(test)]
+    {
+        FAIL_STOP_OBSERVATIONS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(tier);
+        panic!("WAL fail-stop at tier {tier:?}: {ctx}");
+    }
+
+    #[cfg(not(test))]
+    std::process::abort();
+}
+
 #[async_trait]
 impl Wal for WalWriter {
     async fn append(&self, partition: u32, entry: &WalEntry) -> anyhow::Result<()> {
@@ -792,17 +874,65 @@ impl Wal for WalWriter {
         // partition must serialize so a seal never freezes a half-written frame.
         let mut active = handle.active.lock().await;
 
-        let count = active.append_frame(&frame, entry.sequence).await?;
+        // A sealed append target means the WAL's own rotation bookkeeping is
+        // inconsistent — a programming bug that no runtime disposition can repair
+        // and that a rollback would only paper over, leaving the process running
+        // on a broken WAL. Checked structurally, under the guard the append
+        // already holds, so no byte of this entry can have been framed yet.
+        if active.is_sealed() {
+            wal_fail_stop(
+                WalFailStopTier::P,
+                &format!(
+                    "append targeted a sealed segment: partition={partition}, sequence={}, path={}",
+                    entry.sequence,
+                    active.path().display()
+                ),
+            );
+        }
+
+        // Every residual failure below is tier (B) BY CONSTRUCTION: the pre-check
+        // has already excluded (P), so no error content needs inspecting. A frame
+        // may already be in the segment and its durability is unknown, so the
+        // process stops and recovery re-derives state from durable frames — a
+        // retried fsync can report success for bytes the OS has already dropped.
+        let count = active
+            .append_frame(&frame, entry.sequence)
+            .await
+            .unwrap_or_else(|e| {
+                wal_fail_stop(
+                    WalFailStopTier::B,
+                    &format!(
+                        "WAL frame append failed: partition={partition}, sequence={}: {e}",
+                        entry.sequence
+                    ),
+                )
+            });
 
         match self.policy {
             WalFsyncPolicy::PerOp => {
-                active.sync_data().await?;
+                active.sync_data().await.unwrap_or_else(|e| {
+                    wal_fail_stop(
+                        WalFailStopTier::B,
+                        &format!(
+                            "WAL fsync failed: partition={partition}, sequence={}: {e}",
+                            entry.sequence
+                        ),
+                    )
+                });
             }
             WalFsyncPolicy::Batched => {
                 // Flush immediately when the batch threshold is reached so
                 // high-throughput bursts don't wait for the timer task.
                 if count >= 100 {
-                    active.sync_data().await?;
+                    active.sync_data().await.unwrap_or_else(|e| {
+                        wal_fail_stop(
+                            WalFailStopTier::B,
+                            &format!(
+                                "WAL batched fsync failed: partition={partition}, sequence={}: {e}",
+                                entry.sequence
+                            ),
+                        )
+                    });
                     // Notify the background timer that we just fsynced so it
                     // resets its internal cooldown.
                     let _ = self.batch_flush_tx.send(());
@@ -1208,6 +1338,54 @@ fn current_millis() -> i64 {
             .as_millis(),
     )
     .unwrap_or(i64::MAX)
+}
+
+// ===========================================================================
+// Test seams
+// ===========================================================================
+
+/// Accessors that open private WAL state to tests.
+///
+/// They exist because the state below is otherwise unreachable — `PartitionHandle`
+/// and the `.applied` sidecar helpers are private, and sibling test modules
+/// cannot see them at all.
+#[cfg(test)]
+impl WalWriter {
+    /// Seals the partition's active segment in place.
+    ///
+    /// Seal/rotate always installs a FRESH active segment under the same lock, so
+    /// a sealed active segment is not reachable through any production path. This
+    /// is the only way to construct the state the append pre-check guards.
+    pub(crate) async fn test_seal_active_segment(&self, partition: u32) -> anyhow::Result<()> {
+        let handle = self.handle(partition).await?;
+        let mut active = handle.active.lock().await;
+        // `into_sealed` consumes the segment, so swap a placeholder in to take
+        // ownership without ever leaving the guard holding an invalid value.
+        let placeholder = Segment::sealed_existing(
+            active.path().to_path_buf(),
+            active.first_seq(),
+            active.max_seq(),
+        );
+        let current = std::mem::replace(&mut *active, placeholder);
+        *active = current.into_sealed();
+        Ok(())
+    }
+
+    /// Reads the partition's applied watermark from the `.applied` sidecar FILE.
+    ///
+    /// The value is durable by construction — it comes off disk, not from an
+    /// in-memory mirror that would let a test pass on state a restart would lose.
+    pub(crate) fn test_read_applied_sequence(&self, partition: u32) -> u64 {
+        Self::read_applied_sequence(&self.applied_path(partition))
+    }
+
+    /// Fail-stop tiers recorded in this process, oldest first.
+    pub(crate) fn test_fail_stop_observations() -> Vec<WalFailStopTier> {
+        FAIL_STOP_OBSERVATIONS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 
 // ===========================================================================
@@ -2140,6 +2318,78 @@ mod tests {
         assert!(
             unapplied_after.is_empty(),
             "No entries should remain after mark_applied"
+        );
+    }
+
+    #[test]
+    fn snapshot_ops_subsume_on_coalesce() {
+        // Both of today's framings carry the key's COMPLETE state, so a survivor
+        // makes its predecessor redundant. A future delta framing must answer
+        // `false` here, and the exhaustive match is what forces the decision.
+        assert!(WalOp::Remove.subsumes_on_coalesce());
+        assert!(WalOp::Store {
+            value: WalStorePayload::Record(RecordValue::Lww {
+                value: TgValue::String("v".to_string()),
+                timestamp: Timestamp {
+                    millis: 1,
+                    counter: 0,
+                    node_id: "n1".to_string(),
+                },
+            }),
+            expiration_time: None,
+        }
+        .subsumes_on_coalesce());
+        assert!(WalOp::Store {
+            value: WalStorePayload::Legacy(TgValue::Int(1)),
+            expiration_time: None,
+        }
+        .subsumes_on_coalesce());
+    }
+
+    #[tokio::test]
+    async fn append_to_sealed_active_fail_stops_at_tier_p() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = Arc::new(WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap());
+
+        wal.append(0, &make_wal_entry(1)).await.unwrap();
+        wal.test_seal_active_segment(0).await.unwrap();
+
+        let before = WalWriter::test_fail_stop_observations().len();
+
+        // Run the append on its own task so the fail-stop's test-mode panic is
+        // caught by the JoinHandle instead of unwinding the test itself — the
+        // tier record has to stay readable afterwards.
+        let wal_clone = Arc::clone(&wal);
+        let outcome = tokio::spawn(async move { wal_clone.append(0, &make_wal_entry(2)).await })
+            .await
+            .err();
+        assert!(
+            outcome.is_some_and(|e| e.is_panic()),
+            "An append to a sealed active segment must fail-stop, not return"
+        );
+
+        let observed = WalWriter::test_fail_stop_observations();
+        assert_eq!(
+            observed.get(before),
+            Some(&WalFailStopTier::P),
+            "A sealed append target is a rotation-bookkeeping bug: tier P, not tier B"
+        );
+    }
+
+    #[tokio::test]
+    async fn applied_sidecar_is_readable_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap();
+
+        assert_eq!(wal.test_read_applied_sequence(0), 0);
+
+        wal.append(0, &make_wal_entry(1)).await.unwrap();
+        wal.mark_applied(0, 1).await.unwrap();
+
+        assert_eq!(
+            wal.test_read_applied_sequence(0),
+            1,
+            "The accessor must observe the durable sidecar value, not an in-memory mirror"
         );
     }
 }
