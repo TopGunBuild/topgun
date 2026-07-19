@@ -953,6 +953,18 @@ pub struct WriteBehindDataStore {
     /// takes the `Seeded` path.
     #[cfg(test)]
     boot_seed_mode: Mutex<BootSeedMode>,
+    /// Reports the WAL sequence a mutation was just assigned, at append time only.
+    ///
+    /// This transfers an IDENTIFIER (the sequence number the implementation
+    /// assigned), never a lifecycle: the crash/recovery harness's reference model
+    /// learns what a write is *called* so it can name it in its own event log,
+    /// while every `Appended -> Acked -> DurablyApplied` transition is decided by
+    /// the model alone. Fired synchronously inside `assign_wal_sequence`, the one
+    /// chokepoint every mutating path funnels a sequence assignment through, so a
+    /// single observation covers `add`, `remove`, and each key of `remove_all`.
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    append_observer: Mutex<Option<Arc<dyn Fn(u32, u64) + Send + Sync>>>,
 }
 
 /// WAL plus the live sequence counter's starting value, threaded into
@@ -1027,6 +1039,8 @@ impl WriteBehindDataStore {
             force_non_subsuming_survivor: AtomicBool::new(false),
             #[cfg(test)]
             boot_seed_mode: Mutex::new(BootSeedMode::default()),
+            #[cfg(test)]
+            append_observer: Mutex::new(None),
         });
 
         // Spawn background flush loop with a clone of the Arc
@@ -1483,15 +1497,49 @@ impl WriteBehindDataStore {
     /// counter is global and its monotonicity is load-bearing across restarts, so
     /// the bump must not become conditional.
     fn assign_wal_sequence(&self, partition: u32) -> u64 {
-        let Some(tracking) = &self.wal else {
-            return self.next_wal_sequence();
+        let seq = match &self.wal {
+            None => self.next_wal_sequence(),
+            Some(tracking) => tracking.with_partition(partition, |state| {
+                let seq = self.next_wal_sequence();
+                state.pending.insert(seq, PendingOrigin::Appending);
+                state.max_assigned = state.max_assigned.max(seq);
+                seq
+            }),
         };
-        tracking.with_partition(partition, |state| {
-            let seq = self.next_wal_sequence();
-            state.pending.insert(seq, PendingOrigin::Appending);
-            state.max_assigned = state.max_assigned.max(seq);
-            seq
-        })
+        // Report the assigned sequence as a NAME to any installed harness observer.
+        // This is the ONLY point a sequence is minted for a mutation, so it covers
+        // every mutating path exactly once; it hands out an identifier, not a
+        // durability verdict.
+        #[cfg(test)]
+        self.notify_append_observer(partition, seq);
+        seq
+    }
+
+    /// Installs the harness's append observer (see [`Self::append_observer`]).
+    ///
+    /// Reachable from sibling test modules the same way the other `test_set_*`
+    /// seams are; a `None` observer (the default) makes this a no-op branch.
+    #[cfg(test)]
+    pub(crate) fn test_set_append_observer(&self, observer: Arc<dyn Fn(u32, u64) + Send + Sync>) {
+        *self
+            .append_observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observer);
+    }
+
+    /// Fires the installed append observer, if any, with the partition and the
+    /// sequence just assigned. Cloned out before invoking so the observer cannot
+    /// deadlock against this lock.
+    #[cfg(test)]
+    fn notify_append_observer(&self, partition: u32, seq: u64) {
+        let observer = self
+            .append_observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(observer) = observer {
+            observer(partition, seq);
+        }
     }
 
     /// Whether the SURVIVOR of a coalesce makes its predecessor's frame
