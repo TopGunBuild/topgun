@@ -373,7 +373,8 @@ mod tests {
         with_gauge_sink, with_isolated_gauge, with_sink, IsolatedGauge, ProcessGauge,
         TombstoneGaugeSink,
     };
-    use crate::storage::record::{add_tombstone_bytes, tombstone_bytes};
+    use crate::storage::record::add_tombstone_bytes;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
     #[tokio::test]
@@ -452,12 +453,27 @@ mod tests {
     /// *inside* the scope so they are guaranteed to have landed before it
     /// closes; an un-joined spawn would let the test pass while proving nothing.
     ///
-    /// The process-gauge readings are taken **outside** the scope on purpose:
-    /// inside it, `tombstone_bytes()` resolves to the isolated sink, so a
-    /// reading there would measure the wrong sink and collapse (b) into a
-    /// restatement of (a). And (b) is a lower bound, never an equality — the
-    /// process gauge is shared with the whole crate, so pinning it exactly would
-    /// re-create the order-dependence this seam exists to remove.
+    /// The two assertions divide the claim:
+    ///
+    ///  - (a) `delta == OWN` is the isolation claim itself, and it alone
+    ///    discriminates the spawn-propagation property: were the task-local to
+    ///    cross `tokio::spawn`, the foreign adds would land on the isolated sink
+    ///    and this would read `OWN + FOREIGN_TOTAL`.
+    ///  - (b) is the negative control that keeps (a) from passing vacuously —
+    ///    it proves each spawned task really executed its add rather than being
+    ///    skipped or optimised into a no-op.
+    ///
+    /// (b) accounts the foreign work on a **counter private to this test**
+    /// rather than diffing the shared process gauge. A before/after diff of that
+    /// gauge is not deterministic: the whole crate writes to it, and correctly
+    /// unscoped subtractions elsewhere in the suite can land inside the live
+    /// window and outpace the foreign additions, reddening the assertion on
+    /// perfectly correct behaviour. That is the very order-dependent
+    /// shared-counter flake this seam exists to remove, so the control must not
+    /// reintroduce it. Proving the adds landed *specifically* on the process
+    /// gauge is not part of the isolation claim — (a) already establishes they
+    /// did not land on the scope — and asserting it was the sole source of the
+    /// race.
     #[tokio::test]
     async fn a_scope_ignores_concurrent_foreign_traffic_on_the_process_gauge() {
         const FOREIGN_TASKS: u64 = 4;
@@ -465,11 +481,19 @@ mod tests {
         const FOREIGN_TOTAL: u64 = FOREIGN_TASKS * FOREIGN_PER_TASK;
         const OWN: u64 = 11;
 
-        let before = tombstone_bytes();
+        // Private to this test: nothing else in the crate can write to it, so
+        // its final value is exact by construction.
+        let accounted = Arc::new(AtomicU64::new(0));
 
         let ((), delta) = with_isolated_gauge(async {
             let foreign: Vec<_> = (0..FOREIGN_TASKS)
-                .map(|_| tokio::spawn(async { add_tombstone_bytes(FOREIGN_PER_TASK) }))
+                .map(|_| {
+                    let accounted = Arc::clone(&accounted);
+                    tokio::spawn(async move {
+                        add_tombstone_bytes(FOREIGN_PER_TASK);
+                        accounted.fetch_add(FOREIGN_PER_TASK, Ordering::Relaxed);
+                    })
+                })
                 .collect();
 
             add_tombstone_bytes(OWN);
@@ -480,19 +504,15 @@ mod tests {
         })
         .await;
 
-        let after = tombstone_bytes();
-
         assert_eq!(
             delta, OWN,
             "the scoped delta must count only the scope's own writes"
         );
-        // Phrased as an addition rather than `after - before` so a concurrent
-        // prune elsewhere in the suite cannot underflow the subtraction into a
-        // panic before the assertion gets to report anything.
-        assert!(
-            after >= before.saturating_add(FOREIGN_TOTAL),
-            "the foreign traffic must have landed on the process gauge \
-             (before {before}, after {after}, expected a rise of at least {FOREIGN_TOTAL})"
+        assert_eq!(
+            accounted.load(Ordering::Relaxed),
+            FOREIGN_TOTAL,
+            "every foreign task must have executed its add, so the isolation \
+             claim above is asserted against real concurrent traffic"
         );
     }
 
