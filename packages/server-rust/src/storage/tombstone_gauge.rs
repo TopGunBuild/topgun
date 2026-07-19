@@ -389,6 +389,40 @@ mod tests {
         assert_eq!(delta, 5, "the scope's final value is its net delta");
     }
 
+    /// Enforces the pure-delegation invariant the trait impl documents, rather
+    /// than leaving it to a comment nobody re-checks.
+    ///
+    /// Release resolves `s.add(n)` to the inherent method and test builds
+    /// resolve it to the trait method, so the two builds agree only while the
+    /// trait impl delegates verbatim. Tests exercise the trait arm exclusively,
+    /// which means a divergence introduced here would be invisible to every
+    /// other test in the crate — including the ones this module exists to make
+    /// trustworthy. Driving both arms over identical instances and comparing
+    /// the observable state turns that silent divergence into a red test.
+    #[test]
+    fn the_trait_impl_delegates_verbatim_to_the_inherent_methods() {
+        let inherent = ProcessGauge::new();
+        let via_trait = ProcessGauge::new();
+        let dynamic: &dyn TombstoneGaugeSink = &via_trait;
+
+        // Same op sequence, one arm per dispatch form.
+        inherent.add(9);
+        dynamic.add(9);
+        ProcessGauge::sub(&inherent, 4);
+        dynamic.sub(4);
+
+        assert_eq!(
+            ProcessGauge::read(&inherent),
+            dynamic.read(),
+            "inherent and trait dispatch must leave identical byte counts"
+        );
+        assert_eq!(
+            inherent.armed(),
+            via_trait.armed(),
+            "inherent and trait dispatch must arm the tripwire identically"
+        );
+    }
+
     /// Pins the binding helper itself: a caller-supplied sink receives the
     /// scope's writes, and its tripwire is observable on that instance alone —
     /// never through a process-global read that every unmarked OR-remove in the
