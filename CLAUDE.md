@@ -143,13 +143,28 @@ Examples:
 
 ## Code Comments Convention
 
-- **Do NOT** add phase/spec/bug references in code comments (e.g., `// Phase 8.02`, `// BUG-06`, `// SPEC-011`)
+- **Do NOT** add **provenance** references in code comments — markers whose only job is to answer
+  "where did this come from" (e.g., `// Phase 8.02`, `// BUG-06`, `// SPEC-011`)
 - Such references belong in **commit messages**, not in code
 - Instead, write WHY-comments explaining the reason for the code:
   ```typescript
   // BAD: // Merge defaults (Phase 3 BUG-06)
   // GOOD: // Merge defaults to prevent race condition when topics subscribe before connection
   ```
+- **Allowed exceptions** (these are not provenance — they are load-bearing, machine-checkable
+  citations that a reader needs at the code):
+  - `TG-<DOMAIN>-<NNN>` **invariant IDs** from `INVARIANTS.md`. They are stable identifiers under
+    a CI-gated catalog (`scripts/check-invariants.sh`), so citing one in a doc-comment or a
+    violation variant tells the reader *which contract this code upholds*, not which ticket
+    produced it.
+  - A **tracker pointer inside a doc-contract for an invariant that is explicitly known-false or
+    deferred** — because a doc-contract asserting a property the code does not have is a
+    false-invariant hazard, and naming the tracker is what makes the gap honest rather than
+    silent.
+- **Spec identifiers (`SPEC-NNN`) have no exception.** They are provenance by definition and are
+  forbidden in code comments without qualification. When code needs to point at a spec, cite the
+  `TG-<DOMAIN>-<NNN>` invariant instead and let the `INVARIANTS.md` row carry the spec reference —
+  the catalog is the sanctioned home for spec routing.
 
 ## Pre-Existing Errors Are Owned, Not Deferred
 
