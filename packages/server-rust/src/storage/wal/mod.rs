@@ -1224,6 +1224,29 @@ impl Wal for WalWriter {
                 .select_reclaimable(partition, &handle, watermark, watermark)
                 .await;
             self.unlink_reclaimed(&reclaimed).await?;
+
+            // Same `gc_crash_point` knob as the production path (R7), but its
+            // landing spot mirrors the inverted step order: here it fires
+            // AFTER the wrongly-early unlink and BEFORE the (deferred)
+            // sidecar write, instead of before the unlink. That is the exact
+            // TG-WAL-003 loss window — segments are already gone from disk
+            // while the sidecar is still at its OLD value, which under-seeds
+            // max_observed_sequence on restart and drops/reuses a sequence
+            // (see the comment on the production write below). Ending the
+            // incarnation here, rather than after a fully-completed call, is
+            // what makes AC7(b) reachable: a crash the harness fires only
+            // between ops would otherwise never observe an inconsistent
+            // on-disk state, since a completed call leaves both steps
+            // durable regardless of the order they ran in.
+            if *self
+                .gc_crash_point
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                == GcCrashPoint::PreUnlink
+            {
+                return Ok(());
+            }
+
             if watermark > current {
                 Self::write_applied_sequence(&applied_path, watermark).map_err(|e| {
                     anyhow::anyhow!(
@@ -2616,6 +2639,57 @@ mod tests {
 
         wal.test_force_gc_revalidation_watermark(None);
         wal.test_set_gc_order_mode(GcOrderMode::FsyncThenUnlink);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gc_order_mode_unlink_then_fsync_plus_crash_point_leaves_stale_sidecar() {
+        // AC7(b): the genuine TG-WAL-003 loss window only exists BETWEEN the
+        // wrongly-early unlink and the deferred sidecar write. A crash the
+        // harness fires only between whole `mark_applied` calls would never
+        // observe it, because a *completed* inverted-order call still leaves
+        // both steps durable by the time it returns (proven by the sibling
+        // test above: segment gone AND sidecar at 3). This test proves the
+        // combination of `UnlinkThenFsync` + `GcCrashPoint::PreUnlink` lands
+        // the crash inside that window instead: segment gone, sidecar STILL
+        // at its old value.
+        let dir = tempfile::tempdir().unwrap();
+        let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap();
+
+        for seq in 1..=3u64 {
+            wal.append(0, &make_wal_entry(seq)).await.unwrap();
+        }
+        let sealed_path = dir.path().join(segment::format_segment_filename(0, 0));
+        assert_eq!(
+            wal.test_read_applied_sequence(0),
+            0,
+            "no watermark has been recorded yet"
+        );
+
+        wal.test_set_gc_order_mode(GcOrderMode::UnlinkThenFsync);
+        wal.test_set_gc_crash_point(GcCrashPoint::PreUnlink);
+        wal.mark_applied(0, 3).await.unwrap();
+
+        assert!(
+            !sealed_path.exists(),
+            "the inverted order unlinks BEFORE the deferred sidecar write, so the \
+             segment must already be gone at the (post-unlink) crash point"
+        );
+        assert_eq!(
+            wal.test_read_applied_sequence(0),
+            0,
+            "the crash point fires before the deferred sidecar write, so the \
+             sidecar must still be at its OLD value — the exact TG-WAL-003 \
+             hazard: a restart seeded from this stale watermark under-seeds \
+             max_observed_sequence for the now-vanished segment's frames"
+        );
+
+        // Contrast: the production order under the SAME crash point leaves
+        // the sidecar durable and the segment retained (proven by
+        // `gc_crash_point_pre_unlink_ends_the_call_before_reclaiming` above)
+        // — the inversion, not the crash point alone, is what produces the
+        // inconsistent on-disk state.
+        wal.test_set_gc_order_mode(GcOrderMode::FsyncThenUnlink);
+        wal.test_set_gc_crash_point(GcCrashPoint::None);
     }
 
     #[tokio::test(flavor = "multi_thread")]
