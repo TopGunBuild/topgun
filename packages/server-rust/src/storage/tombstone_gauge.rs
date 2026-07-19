@@ -373,6 +373,7 @@ mod tests {
         with_gauge_sink, with_isolated_gauge, with_sink, IsolatedGauge, ProcessGauge,
         TombstoneGaugeSink,
     };
+    use crate::storage::record::{add_tombstone_bytes, tombstone_bytes};
     use std::sync::Arc;
 
     #[tokio::test]
@@ -405,6 +406,90 @@ mod tests {
 
         assert_eq!(observer.read(), 3);
         assert!(observer.armed(), "an add arms the receiving instance");
+    }
+
+    /// Adversarial proof that a scoped assertion is immune to concurrent
+    /// foreign traffic, with an in-band negative control proving the foreign
+    /// traffic was real.
+    ///
+    /// The foreign writes go through `tokio::spawn`, which the task-local
+    /// override deliberately does not cross, so they land on the process gauge —
+    /// exactly the contention a gauge assertion has to survive. They are joined
+    /// *inside* the scope so they are guaranteed to have landed before it
+    /// closes; an un-joined spawn would let the test pass while proving nothing.
+    ///
+    /// The process-gauge readings are taken **outside** the scope on purpose:
+    /// inside it, `tombstone_bytes()` resolves to the isolated sink, so a
+    /// reading there would measure the wrong sink and collapse (b) into a
+    /// restatement of (a). And (b) is a lower bound, never an equality — the
+    /// process gauge is shared with the whole crate, so pinning it exactly would
+    /// re-create the order-dependence this seam exists to remove.
+    #[tokio::test]
+    async fn a_scope_ignores_concurrent_foreign_traffic_on_the_process_gauge() {
+        const FOREIGN_TASKS: u64 = 4;
+        const FOREIGN_PER_TASK: u64 = 25;
+        const FOREIGN_TOTAL: u64 = FOREIGN_TASKS * FOREIGN_PER_TASK;
+        const OWN: u64 = 11;
+
+        let before = tombstone_bytes();
+
+        let ((), delta) = with_isolated_gauge(async {
+            let foreign: Vec<_> = (0..FOREIGN_TASKS)
+                .map(|_| tokio::spawn(async { add_tombstone_bytes(FOREIGN_PER_TASK) }))
+                .collect();
+
+            add_tombstone_bytes(OWN);
+
+            for task in foreign {
+                task.await.expect("foreign gauge task must not panic");
+            }
+        })
+        .await;
+
+        let after = tombstone_bytes();
+
+        assert_eq!(
+            delta, OWN,
+            "the scoped delta must count only the scope's own writes"
+        );
+        // Phrased as an addition rather than `after - before` so a concurrent
+        // prune elsewhere in the suite cannot underflow the subtraction into a
+        // panic before the assertion gets to report anything.
+        assert!(
+            after >= before.saturating_add(FOREIGN_TOTAL),
+            "the foreign traffic must have landed on the process gauge \
+             (before {before}, after {after}, expected a rise of at least {FOREIGN_TOTAL})"
+        );
+    }
+
+    /// The boot-seed tripwire still arms when an add reaches the gauge through
+    /// `record.rs`'s public API.
+    ///
+    /// Both reads are taken on a private `ProcessGauge` bound for this scope
+    /// alone, never on the process singleton: every unmarked OR-remove in the
+    /// crate arms that one, so a global read would be order-dependent by
+    /// construction. `set()` is never called here — on an armed instance it
+    /// trips the boot-seed `debug_assert!`.
+    #[tokio::test]
+    async fn an_add_through_the_public_api_arms_its_own_gauge_s_tripwire() {
+        let sink = Arc::new(ProcessGauge::new());
+        let observer = Arc::clone(&sink);
+
+        assert!(
+            !observer.armed(),
+            "a freshly-constructed gauge must start un-armed"
+        );
+
+        with_gauge_sink(sink, async {
+            add_tombstone_bytes(6);
+        })
+        .await;
+
+        assert_eq!(observer.read(), 6, "the bound instance received the add");
+        assert!(
+            observer.armed(),
+            "an add routed through the public API must arm the receiving instance"
+        );
     }
 
     #[test]
