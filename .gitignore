@@ -78,6 +78,13 @@ isolate-*.log
 # *.crt
 # *.key
 
+# Google service account keys — never in this repo, it is public. The real key
+# lives at ~/.config/gsc/service-account.json, outside every git working tree
+# (see apps/docs-astro/scripts/gsc.sh). This is only a backstop for the day
+# someone copies one in "just to make it work".
+*service-account*.json
+gsc-*.json
+
 # Custom k6 binary (platform-specific, rebuild with: pnpm test:k6:build)
 bin/k6
 
