@@ -1451,9 +1451,16 @@ impl WalRecovery {
     /// Replays ONE entry through the inner store.
     ///
     /// Goes straight to the store rather than through the CRDT service layer, so
-    /// idempotency comes from the store's own merge: a replay whose timestamp is
-    /// older than the stored value loses the merge and changes nothing. That is
-    /// what makes re-replaying an already-applied frame safe.
+    /// there is NO merge here.
+    ///
+    /// Re-replay safety today rests ONLY on in-sequence-order replay plus
+    /// last-frame-wins WITHIN the replayed window: the window's frames are applied
+    /// in ascending sequence order, so the newest frame in the window is the one
+    /// that survives. The store's `write_one` is a blind insert with NO
+    /// read-compare merge, so a stale replayed frame CAN clobber a newer durable
+    /// value written outside the window (reproduced; tracked as TODO-598).
+    ///
+    /// Do NOT rely on re-replay idempotency until TODO-598 closes.
     async fn replay_entry(
         inner_store: &Arc<dyn MapDataStore>,
         entry: &WalEntry,
@@ -1521,9 +1528,14 @@ impl WalRecovery {
     /// that happened to succeed — is what makes the persisted watermark
     /// prefix-complete, so a single failed replay can no longer license GC of its
     /// own frame. Frames above the frontier stay in the replay window and are
-    /// re-applied on a later boot; that re-application is safe because the inner
-    /// store merges by timestamp, so replaying an already-applied entry loses the
-    /// merge and changes nothing.
+    /// re-applied on a later boot.
+    ///
+    /// That re-application is bounded, NOT idempotent. Its safety rests ONLY on
+    /// in-sequence-order replay plus last-frame-wins WITHIN the replayed window —
+    /// the inner store does NOT merge by timestamp: `write_one` is a blind insert
+    /// with no read-compare, so a stale replayed frame CAN clobber a newer durable
+    /// value written outside the window (reproduced; tracked as TODO-598). Do NOT
+    /// rely on re-replay idempotency until TODO-598 closes.
     ///
     /// A partition whose frontier stops below its highest enumerated frame raises
     /// the abandoned-write alarm here, at boot. Write-behind's watchdog cannot
