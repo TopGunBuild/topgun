@@ -79,12 +79,18 @@ for id in $ids; do
 done
 
 echo "invariants: $entries entries, $naked NAKED (baseline $NAKED_BASELINE)"
-if [ "$naked" -gt "$NAKED_BASELINE" ]; then
-  echo "FAIL: NAKED count grew ($naked > $NAKED_BASELINE). Either add an enforcing test or"
-  echo "      consciously raise NAKED_BASELINE in scripts/check-invariants.sh in this PR."
+# The baseline is an exact-match ratchet, BOTH directions. Growth is the obvious failure;
+# an un-lowered baseline after a NAKED closure is the subtle one — it leaves silent headroom
+# a later PR could spend on a new naked entry without tripping the gate.
+if [ "$naked" -ne "$NAKED_BASELINE" ]; then
+  if [ "$naked" -gt "$NAKED_BASELINE" ]; then
+    echo "FAIL: NAKED count grew ($naked > $NAKED_BASELINE). Add an enforcing test or"
+    echo "      consciously raise NAKED_BASELINE in scripts/check-invariants.sh in this PR."
+  else
+    echo "FAIL: NAKED count dropped to $naked but NAKED_BASELINE still says $NAKED_BASELINE."
+    echo "      Lower NAKED_BASELINE in this PR to lock in the progress (ratchet, not a cap)."
+  fi
   fail=1
-elif [ "$naked" -lt "$NAKED_BASELINE" ]; then
-  echo "NOTE: NAKED count dropped to $naked — lower NAKED_BASELINE to lock in the progress."
 fi
 
 exit $fail
