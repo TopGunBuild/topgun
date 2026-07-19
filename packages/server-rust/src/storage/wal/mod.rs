@@ -533,10 +533,10 @@ const GC_SKIP_REASON_WATERMARK: &str = "watermark_below_segment";
 /// counter below MUST be shared by two producers in different modules, and
 /// splitting the pair would leave one of them describing a metric it does not
 /// emit.
-pub const WAL_WATERMARK_LAG_GAUGE: &str = "topgun_wal_applied_watermark_lag";
+pub(crate) const WAL_WATERMARK_LAG_GAUGE: &str = "topgun_wal_applied_watermark_lag";
 
 /// Sealed WAL segments retained rather than reclaimed, by reason.
-pub const WAL_GC_SKIPPED_COUNTER: &str = "topgun_wal_gc_skipped_total";
+pub(crate) const WAL_GC_SKIPPED_COUNTER: &str = "topgun_wal_gc_skipped_total";
 
 /// Registers HELP/TYPE metadata for the two WAL-watermark metrics.
 ///
@@ -552,7 +552,7 @@ pub const WAL_GC_SKIPPED_COUNTER: &str = "topgun_wal_gc_skipped_total";
 /// `describe_*` macros are idempotent metadata registrations and the emission
 /// paths here are a per-tick watchdog sample and a rare retained-segment GC
 /// skip, never a per-write hot path.
-pub fn describe_wal_watermark_metrics() {
+pub(crate) fn describe_wal_watermark_metrics() {
     metrics::describe_gauge!(
         WAL_WATERMARK_LAG_GAUGE,
         "WAL sequences assigned for a partition but not yet covered by its applied watermark"
