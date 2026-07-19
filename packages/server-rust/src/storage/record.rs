@@ -465,85 +465,90 @@ pub struct Record {
 #[cfg(test)]
 mod tombstone_bytes_gauge_tests {
     use super::*;
-    use std::sync::Mutex;
+    use crate::storage::tombstone_gauge::with_isolated_gauge;
 
-    // Unscoped gauge calls resolve to a single process-global sink shared with
-    // every OR_REMOVE add and epoch-prune drop in the crate, and the Rust test
-    // harness runs tests concurrently on separate threads. A test-local mutex
-    // serializes only this module's tests against each other. Asserting a delta
-    // off a baseline confers NO isolation: a concurrent mutation from any other
-    // test module lands between the baseline read and the assertion and is
-    // indistinguishable from this test's own write. The only thing that makes a
-    // gauge assertion immune to that traffic is binding a private sink for the
-    // duration of the assertion.
-    static TEST_SERIALIZE: Mutex<()> = Mutex::new(());
+    // Every test here binds a private sink for the duration of its own future,
+    // so it observes only the writes it makes itself. `#[tokio::test]` is
+    // load-bearing rather than cosmetic: the override lives in a task-local, so
+    // a plain `#[test]` has no runtime to resolve it from, the resolver falls
+    // back to the process-global gauge, and the body would silently run on the
+    // shared counter every other OR-remove in the crate is also writing to —
+    // with nothing failing to compile to say so.
 
-    #[test]
-    fn add_tombstone_bytes_is_monotonic_and_visible_via_accessor() {
-        let _guard = TEST_SERIALIZE.lock().unwrap();
-        let baseline = tombstone_bytes();
+    #[tokio::test]
+    async fn add_tombstone_bytes_is_monotonic_and_visible_via_accessor() {
+        let ((), delta) = with_isolated_gauge(async {
+            add_tombstone_bytes(5);
+            assert_eq!(
+                tombstone_bytes(),
+                5,
+                "add_tombstone_bytes must increase the gauge by exactly n"
+            );
 
-        add_tombstone_bytes(5);
-        assert_eq!(
-            tombstone_bytes(),
-            baseline + 5,
-            "add_tombstone_bytes must increase the gauge by exactly n"
-        );
+            add_tombstone_bytes(3);
+            assert_eq!(
+                tombstone_bytes(),
+                8,
+                "successive adds must accumulate monotonically"
+            );
+        })
+        .await;
 
-        add_tombstone_bytes(3);
-        assert_eq!(
-            tombstone_bytes(),
-            baseline + 8,
-            "successive adds must accumulate monotonically"
-        );
+        assert_eq!(delta, 8, "the scope's net delta is the sum of its adds");
     }
 
-    #[test]
-    fn sub_tombstone_bytes_decrements_the_gauge() {
-        let _guard = TEST_SERIALIZE.lock().unwrap();
-        // Add first so the subtraction has headroom and cannot underflow
-        // relative to this test's own contribution, independent of whatever
-        // baseline other parallel tests have left in the global counter.
-        add_tombstone_bytes(10);
-        let after_add = tombstone_bytes();
+    #[tokio::test]
+    async fn sub_tombstone_bytes_decrements_the_gauge() {
+        // Add before subtracting so this exercises the add→sub pairing rather
+        // than an underflow off an empty sink.
+        let ((), delta) = with_isolated_gauge(async {
+            add_tombstone_bytes(10);
+            sub_tombstone_bytes(4);
+            assert_eq!(
+                tombstone_bytes(),
+                6,
+                "sub_tombstone_bytes must decrease the gauge by exactly n"
+            );
+        })
+        .await;
 
-        sub_tombstone_bytes(4);
-        assert_eq!(
-            tombstone_bytes(),
-            after_add - 4,
-            "sub_tombstone_bytes must decrease the gauge by exactly n"
-        );
+        assert_eq!(delta, 6, "add(10) then sub(4) nets to 6");
     }
 
     /// Serializing/deserializing an `OrMap` `RecordValue` must not touch the
     /// gauge — the gauge is updated only by explicit call sites at the
     /// `OR_REMOVE` tombstone-push / inbound-sync-union points (later task
     /// groups), never as a side effect of encoding.
-    #[test]
-    fn ormap_serde_round_trip_does_not_touch_gauge() {
-        let _guard = TEST_SERIALIZE.lock().unwrap();
-        let baseline = tombstone_bytes();
+    #[tokio::test]
+    async fn ormap_serde_round_trip_does_not_touch_gauge() {
+        let ((), delta) = with_isolated_gauge(async {
+            let value = RecordValue::OrMap {
+                records: vec![OrMapEntry {
+                    value: Value::String("hello".to_string()),
+                    tag: "tag-1".to_string(),
+                    timestamp: Timestamp {
+                        millis: 100,
+                        counter: 0,
+                        node_id: "node-a".to_string(),
+                    },
+                }],
+                tombstones: vec!["tag-removed".to_string()],
+            };
 
-        let value = RecordValue::OrMap {
-            records: vec![OrMapEntry {
-                value: Value::String("hello".to_string()),
-                tag: "tag-1".to_string(),
-                timestamp: Timestamp {
-                    millis: 100,
-                    counter: 0,
-                    node_id: "node-a".to_string(),
-                },
-            }],
-            tombstones: vec!["tag-removed".to_string()],
-        };
+            let bytes = rmp_serde::to_vec_named(&value).expect("serialize OrMap");
+            let _decoded: RecordValue = rmp_serde::from_slice(&bytes).expect("deserialize OrMap");
 
-        let bytes = rmp_serde::to_vec_named(&value).expect("serialize OrMap");
-        let _decoded: RecordValue = rmp_serde::from_slice(&bytes).expect("deserialize OrMap");
+            assert_eq!(
+                tombstone_bytes(),
+                0,
+                "serde round-trip must not mutate the tombstone-bytes gauge"
+            );
+        })
+        .await;
 
         assert_eq!(
-            tombstone_bytes(),
-            baseline,
-            "serde round-trip must not mutate the tombstone-bytes gauge"
+            delta, 0,
+            "a serde round-trip contributes nothing to the scope"
         );
     }
 }
