@@ -250,7 +250,7 @@ impl TombstoneGaugeSink for ProcessGauge {
 }
 
 /// The one gauge production ever writes to.
-pub static PROCESS_GAUGE: ProcessGauge = ProcessGauge::new();
+pub(crate) static PROCESS_GAUGE: ProcessGauge = ProcessGauge::new();
 
 /// A private, test-only sink: a bare counter with no Prometheus emission.
 ///
@@ -312,7 +312,7 @@ tokio::task_local! {
 /// monomorphises and inlines down to the same atomic operation it has always
 /// performed — no branch, no vtable.
 #[cfg(not(test))]
-pub fn with_sink<R>(f: impl FnOnce(&ProcessGauge) -> R) -> R {
+pub(crate) fn with_sink<R>(f: impl FnOnce(&ProcessGauge) -> R) -> R {
     f(&PROCESS_GAUGE)
 }
 
@@ -327,7 +327,7 @@ pub fn with_sink<R>(f: impl FnOnce(&ProcessGauge) -> R) -> R {
 /// the process gauge is the designed behaviour — it is exactly what makes a
 /// scoped assertion immune to it.
 #[cfg(test)]
-pub fn with_sink<R>(f: impl FnOnce(&dyn TombstoneGaugeSink) -> R) -> R {
+pub(crate) fn with_sink<R>(f: impl FnOnce(&dyn TombstoneGaugeSink) -> R) -> R {
     match GAUGE_SINK.try_with(Arc::clone) {
         Ok(sink) => f(&*sink),
         Err(_) => f(&PROCESS_GAUGE),
