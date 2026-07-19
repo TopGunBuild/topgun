@@ -3312,7 +3312,6 @@ mod tests {
     // practical here — this exercises the actual eviction blind-spot the gauge
     // exists to defend against, not a stand-in for it.
     #[tokio::test]
-    #[serial_test::serial(tombstone_gauge)]
     async fn or_remove_tombstone_gauge_survives_real_eviction_and_rehydration() {
         let dir = tempfile::tempdir().expect("tempdir");
         let redb_path = dir.path().join("gauge_residency.redb");
@@ -3334,21 +3333,15 @@ mod tests {
             Arc::new(SchemaService::new()),
         ));
 
-        // The gauge is a process-global static: the serial(tombstone_gauge) group
-        // serializes the gauge-asserting tests against each other, but UNMARKED
-        // parallel tests still mutate it via ordinary OR_REMOVE applies and prune
-        // drains. Exact-equality snapshots are therefore retried on a fresh map:
-        // ambient noise shifts between attempts, while a genuine double-count /
-        // dropped-gauge regression is deterministic and fails every attempt.
-        let mut attempt = 0usize;
-        'attempt: loop {
-            attempt += 1;
-            let map_name = &format!("gauge_residency_map_{attempt}");
-            let key = "item-1";
-            let tag = "tag-gauge-residency";
+        // The whole body runs against a private, zero-based gauge sink, so every
+        // snapshot below is this test's own contribution and nothing else's. No
+        // ambient OR_REMOVE traffic from parallel tests can reach it, which is
+        // what lets the three measurement points be exact equalities.
+        let map_name = "gauge_residency_map";
+        let key = "item-1";
+        let tag = "tag-gauge-residency";
 
-            let before_write = crate::storage::record::tombstone_bytes();
-
+        let ((), net_delta) = crate::storage::tombstone_gauge::with_isolated_gauge(async {
             svc.clone()
                 .oneshot(or_add_op(map_name, key, "payload", tag))
                 .await
@@ -3359,13 +3352,11 @@ mod tests {
                 .expect("or_remove must succeed");
 
             let after_write = crate::storage::record::tombstone_bytes();
-            if after_write - before_write != tag.len() as u64 {
-                assert!(
-                    attempt < 5,
-                    "gauge delta never settled to exactly the tag length across 5 quiet-window attempts                      (deterministic gauge regression, not parallel-test noise)"
-                );
-                continue 'attempt;
-            }
+            assert_eq!(
+                after_write,
+                tag.len() as u64,
+                "OR_REMOVE must charge the gauge exactly the tag's byte length"
+            );
 
             // Force the record non-resident via the real eviction primitive. The
             // OR_REMOVE above wrote through with `CallerProvenance::CrdtMerge` over a
@@ -3380,13 +3371,11 @@ mod tests {
             );
 
             let after_eviction = crate::storage::record::tombstone_bytes();
-            if after_eviction != after_write {
-                assert!(
-                    attempt < 5,
-                    "eviction kept moving the gauge across 5 attempts — a deterministic                      evict-drops-gauge regression, not parallel-test noise"
-                );
-                continue 'attempt;
-            }
+            assert_eq!(
+                after_eviction, after_write,
+                "evicting the record must not move the gauge — the accounting is \
+                 residency-independent"
+            );
 
             // Rehydrate: `get()` transparently reloads the non-resident record from
             // the datastore. Confirm the tombstone survived the round trip and the
@@ -3399,15 +3388,19 @@ mod tests {
             );
 
             let after_rehydration = crate::storage::record::tombstone_bytes();
-            if after_rehydration != after_write {
-                assert!(
-                    attempt < 5,
-                    "rehydration kept moving the gauge across 5 attempts — a deterministic                      double-count regression, not parallel-test noise"
-                );
-                continue 'attempt;
-            }
-            break 'attempt;
-        }
+            assert_eq!(
+                after_rehydration, after_write,
+                "rehydrating the record must not re-charge the gauge — a second \
+                 charge here is the double-count regression this test pins"
+            );
+        })
+        .await;
+
+        assert_eq!(
+            net_delta,
+            tag.len() as u64,
+            "net scoped delta across the write/evict/rehydrate cycle is one tag"
+        );
     }
 
     // AC1: add-wins — OR_REMOVE of one tag preserves concurrent survivors.
