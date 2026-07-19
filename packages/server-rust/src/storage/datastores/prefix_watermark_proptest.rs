@@ -2184,3 +2184,134 @@ async fn an_unseeded_partition_never_advances_even_with_pending_sequences() {
         "every frame stays replayable — under-advancing is the safe direction"
     );
 }
+
+/// A WAL whose `unapplied` fails only while the flag is set, modelling a
+/// transient read failure that later clears.
+struct FlakyUnseedableWal {
+    inner: Arc<WalWriter>,
+    failing: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl Wal for FlakyUnseedableWal {
+    async fn append(&self, partition: u32, entry: &WalEntry) -> anyhow::Result<()> {
+        self.inner.append(partition, entry).await
+    }
+
+    async fn mark_applied(&self, partition: u32, sequence: u64) -> anyhow::Result<()> {
+        self.inner.mark_applied(partition, sequence).await
+    }
+
+    async fn unapplied(&self, partition: u32) -> anyhow::Result<Vec<WalEntry>> {
+        if self.failing.load(Ordering::Relaxed) {
+            anyhow::bail!("injected transient failure reading un-applied frames");
+        }
+        self.inner.unapplied(partition).await
+    }
+}
+
+/// The two guards compose: while a partition is unseeded the advance is REFUSED
+/// however many sequences are pending, and the advance site is where seeding is
+/// retried once the WAL read recovers.
+///
+/// Both halves are load-bearing and this asserts each against its own failure
+/// mode. Removing the refuse-guard turns phase A into an over-advance above
+/// never-replayed frames; removing the seed retry from `resolve_and_advance`
+/// leaves phase B unseeded forever, so the sidecar never moves and the WAL grows
+/// where neither alarm can see it.
+#[tokio::test]
+async fn an_advance_refuses_while_unseeded_and_retries_the_seed_once_the_wal_read_recovers() {
+    let partition = 264;
+    let keys = keys_in_partition(partition, 2);
+    let (_wal_dir, wal) = real_wal();
+
+    // A prior incarnation left frames 1 and 2 un-replayed.
+    {
+        let inner = FaultStore::new();
+        let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
+        for key in &keys {
+            store.add(TEST_MAP, key, &lww(1), 0, 0).await.unwrap();
+        }
+        drop(store);
+    }
+
+    let failing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let inner = FaultStore::new();
+    let store = build_store(
+        &inner,
+        Arc::new(FlakyUnseedableWal {
+            inner: Arc::clone(&wal),
+            failing: Arc::clone(&failing),
+        }) as Arc<dyn Wal>,
+        3,
+    );
+
+    // ---- Phase A: seeding fails at the entry point, so the advance is refused.
+    // Two writes, so the pending map is NON-EMPTY at the advance — the case a
+    // seeded-only-on-empty guard lets straight through.
+    for key in &keys {
+        store.add(TEST_MAP, key, &lww(2), 0, 0).await.unwrap();
+    }
+    assert!(
+        !store.test_wal_partition_seeded(partition),
+        "the injected read failure must leave the partition unseeded"
+    );
+    assert_eq!(
+        store.test_wal_watermark(partition),
+        Some(Err(WalWatermarkError::Unseeded)),
+        "an unseeded partition has no knowable watermark, pending or not"
+    );
+    assert_eq!(
+        wal.test_read_applied_sequence(partition),
+        0,
+        "nothing may be marked applied while unseeded: min(pending) - 1 would be 2, \
+         which sits ABOVE frames 1 and 2 that were never replayed"
+    );
+
+    // ---- Phase B: the WAL read recovers. No further add/remove arrives for this
+    // partition, so `resolve_and_advance` — reached through `flush_key` — is the
+    // ONLY remaining site that can retry the seed.
+    failing.store(false, Ordering::Relaxed);
+    store
+        .flush_key(TEST_MAP, &keys[0], &lww(2), false)
+        .await
+        .unwrap();
+
+    assert!(
+        store.test_wal_partition_seeded(partition),
+        "the advance site must retry the seed once the WAL read recovers — \
+         otherwise this partition stays unseeded forever"
+    );
+    assert_eq!(
+        store.test_wal_watermark(partition),
+        Some(Ok(0)),
+        "seeding replaces the typed error with a KNOWABLE watermark that accounts \
+         for the prior incarnation's un-applied frames 1 and 2"
+    );
+    assert_eq!(
+        wal.test_read_applied_sequence(partition),
+        0,
+        "still 0 — frames 1 and 2 remain un-replayed, so the prefix stops below them"
+    );
+
+    // ---- Phase C: once the prior incarnation's frames resolve too, the sidecar
+    // actually moves. This is what the seed bought: without it the watermark
+    // would still be Err(Unseeded) here and the WAL would grow forever.
+    //
+    // It moves to 3, not 4: `keys[1]`'s sequence 4 was never flushed and is still
+    // pending, so the prefix stops immediately below it. Advancing to 4 here
+    // would be the over-advance this whole invariant exists to forbid.
+    store
+        .resolve_and_advance(partition, &BTreeSet::from([1, 2]))
+        .await;
+    assert_eq!(
+        store.test_wal_watermark(partition),
+        Some(Ok(3)),
+        "the prefix stops below the still-pending sequence 4"
+    );
+    assert_eq!(
+        wal.test_read_applied_sequence(partition),
+        3,
+        "the sidecar moves 0 -> 3 — a seeded partition can reclaim its segments"
+    );
+}

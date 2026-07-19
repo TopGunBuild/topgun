@@ -1706,10 +1706,19 @@ impl WriteBehindDataStore {
             return;
         };
         // Seeded by construction at every advance, not only at the mutating
-        // entry points: `flush_key` can be the ONLY terminal a partition ever
-        // sees, and an unseeded partition has no knowable watermark, so without
-        // this its sidecar would never move and its WAL would grow forever.
-        // Cheap after the first call — a bool read under the partition lock.
+        // entry points — this is the seed RETRY site.
+        //
+        // `ensure_wal_seeded` swallows a WAL-read error and leaves the partition
+        // unseeded (under-advancing is the safe direction), so a transient read
+        // failure at the entry point leaves a partition with no knowable
+        // watermark. The mutating entry points retry only when another write for
+        // the same partition arrives; a partition that goes quiet after that
+        // failure would otherwise reach its terminals via `flush_key` and the
+        // flush loop alone, stay unseeded forever, and grow its WAL where neither
+        // alarm can see it. Retrying here makes every advance site seeded by
+        // construction.
+        //
+        // Cheap after the first success — a bool read under the partition lock.
         self.ensure_wal_seeded(partition).await;
         #[cfg(test)]
         let scalar_max = self.watermark_mode() == WatermarkMode::ScalarMax;
