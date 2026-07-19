@@ -33,6 +33,11 @@
 //!   `TG-OR-003`; the spec that lands it is found by following that ID into `INVARIANTS.md`, not by
 //!   a reference here.
 
+/// The executor: applies a generated [`Case`] to a real `WriteBehindDataStore`
+/// + `WalWriter`, crosses incarnations with real crashes/recoveries, and
+/// evaluates both oracles. Layered on the vocabulary this module declares.
+pub(crate) mod driver;
+
 /// Index into the small per-case key space (`0..=K`, `K` ≈ 4).
 ///
 /// Keys drawn from this space are forced into a single partition (the existing
