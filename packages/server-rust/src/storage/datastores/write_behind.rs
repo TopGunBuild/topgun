@@ -24,6 +24,13 @@ use crate::storage::wal::{
     WAL_WATERMARK_LAG_GAUGE,
 };
 
+/// Boot pending-map seeding seam (C12 re-introduction). Reused from the
+/// crash/recovery harness's vocabulary rather than duplicated here — see
+/// `wal_harness::BootSeedMode`'s doc-comment for the production/defect
+/// semantics of each variant.
+#[cfg(test)]
+use self::wal_harness::BootSeedMode;
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -551,6 +558,13 @@ pub(crate) enum WatermarkMode {
     /// The largest sequence whose entire prefix is resolved.
     #[default]
     PrefixComplete,
+    /// C13 re-introduction: returns `min(pending)` instead of `min(pending) - 1`
+    /// — the inclusive off-by-one that marks the smallest still-unresolved
+    /// sequence applied instead of stopping one below it. Carries its own
+    /// `#[cfg(test)]` (on top of the enum-level one) so neither the variant nor
+    /// any branch handling it can reach a release build.
+    #[cfg(test)]
+    InclusiveOffByOne,
 }
 
 /// Test-only instrumentation of the stalled-pending classifier.
@@ -932,6 +946,13 @@ pub struct WriteBehindDataStore {
     /// partial-state framing lands.
     #[cfg(test)]
     force_non_subsuming_survivor: AtomicBool,
+    /// Selects whether boot seeding populates a partition's pending map from
+    /// `wal.unapplied(p)` (`Seeded`, production) or skips it (`Empty`, the C12
+    /// re-introduction the crash/recovery harness drives). Production has no
+    /// field and no branch for this: with no seam to read, boot seeding always
+    /// takes the `Seeded` path.
+    #[cfg(test)]
+    boot_seed_mode: Mutex<BootSeedMode>,
 }
 
 /// WAL plus the live sequence counter's starting value, threaded into
@@ -1004,6 +1025,8 @@ impl WriteBehindDataStore {
             classifier_seam: ClassifierSeam::default(),
             #[cfg(test)]
             force_non_subsuming_survivor: AtomicBool::new(false),
+            #[cfg(test)]
+            boot_seed_mode: Mutex::new(BootSeedMode::default()),
         });
 
         // Spawn background flush loop with a clone of the Arc
@@ -1071,6 +1094,27 @@ impl WriteBehindDataStore {
     pub(crate) fn watermark_mode(&self) -> WatermarkMode {
         *self
             .watermark_mode
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Selects whether the NEXT unseeded partition's boot seeding populates its
+    /// pending map from `wal.unapplied(p)` (`Seeded`) or skips it (`Empty`, the
+    /// C12 re-introduction). Reachable from sibling test modules the same way
+    /// [`Self::test_set_watermark_mode`] is.
+    #[cfg(test)]
+    pub(crate) fn test_set_boot_seed_mode(&self, mode: BootSeedMode) {
+        *self
+            .boot_seed_mode
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = mode;
+    }
+
+    /// The boot-seed mode currently in force.
+    #[cfg(test)]
+    fn boot_seed_mode(&self) -> BootSeedMode {
+        *self
+            .boot_seed_mode
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -1549,6 +1593,22 @@ impl WriteBehindDataStore {
         }
     }
 
+    /// C13 re-introduction (`WatermarkMode::InclusiveOffByOne`): identical to
+    /// [`Self::prefix_complete_watermark`] except it returns `min(pending)`
+    /// rather than `min(pending) - 1`, marking the smallest still-unresolved
+    /// sequence applied instead of stopping one below it. Test-only: production
+    /// always uses the prefix-complete rule.
+    #[cfg(test)]
+    fn inclusive_off_by_one_watermark(state: &PartitionTracking) -> Result<u64, WalWatermarkError> {
+        if !state.seeded {
+            return Err(WalWatermarkError::Unseeded);
+        }
+        match state.pending.keys().next() {
+            Some(min) => Ok(*min),
+            None => Ok(state.max_assigned),
+        }
+    }
+
     /// Seeds `partition`'s pending map from the frames the on-disk WAL still
     /// reports as un-applied, so this incarnation's watermark respects what the
     /// previous one left behind.
@@ -1576,6 +1636,18 @@ impl WriteBehindDataStore {
             return;
         };
         if tracking.with_partition(partition, |state| state.seeded) {
+            return;
+        }
+
+        #[cfg(test)]
+        if self.boot_seed_mode() == BootSeedMode::Empty {
+            // C12 re-introduction: mark the partition seeded WITHOUT populating
+            // its pending map from `wal.unapplied(p)` — the pending map boots
+            // empty/blind, exactly as if every frame a prior incarnation left
+            // un-applied had already been applied.
+            tracking.with_partition(partition, |state| {
+                state.seeded = true;
+            });
             return;
         }
 
@@ -1721,7 +1793,7 @@ impl WriteBehindDataStore {
         // Cheap after the first success — a bool read under the partition lock.
         self.ensure_wal_seeded(partition).await;
         #[cfg(test)]
-        let scalar_max = self.watermark_mode() == WatermarkMode::ScalarMax;
+        let watermark_mode = self.watermark_mode();
 
         let watermark = tracking.with_partition(partition, |state| {
             for seq in seqs {
@@ -1729,10 +1801,18 @@ impl WriteBehindDataStore {
                 state.pending.remove(seq);
             }
             #[cfg(test)]
-            if scalar_max {
-                // Reproduces the pre-fix scalar advance so the differential test
-                // keeps a live negative control rather than a one-off revert.
-                return Ok(seqs.iter().copied().max().unwrap_or(0));
+            match watermark_mode {
+                WatermarkMode::ScalarMax => {
+                    // Reproduces the pre-fix scalar advance so the differential
+                    // test keeps a live negative control rather than a one-off
+                    // revert.
+                    return Ok(seqs.iter().copied().max().unwrap_or(0));
+                }
+                #[cfg(test)]
+                WatermarkMode::InclusiveOffByOne => {
+                    return Self::inclusive_off_by_one_watermark(state);
+                }
+                WatermarkMode::PrefixComplete => {}
             }
             Self::prefix_complete_watermark(state)
         });
@@ -5260,3 +5340,18 @@ mod durability_tests {
 #[cfg(test)]
 #[path = "prefix_watermark_proptest.rs"]
 mod prefix_watermark_proptest;
+
+/// The deterministic write-behind + WAL crash/recovery harness's vocabulary
+/// (op alphabet, incarnation shape, defect modes, reference-model trait,
+/// typed violations).
+///
+/// A CHILD module, not a sibling, for the same reason
+/// `prefix_watermark_proptest` is one: `datastores/mod.rs` declares `mod
+/// write_behind` privately, so nothing outside `datastores` can name this
+/// store's `pub(crate)` internals. A child reaches the pending map,
+/// `max_assigned`, the in-flight registry, the `BootSeedMode` seam and the
+/// `WatermarkMode` seam directly, with no production visibility widened for a
+/// test.
+#[cfg(test)]
+#[path = "wal_harness/mod.rs"]
+mod wal_harness;
