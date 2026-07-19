@@ -16,17 +16,31 @@
 //! (the full-snapshot WAL write-through is unchanged, so crash recovery is
 //! byte-identical to before and is covered by the crash-safety proptests).
 //!
-//! It also proves the SPEC-345 tombstone-bytes gauge stays consistent under the
-//! in-place path (the gauge deltas route through `add_tombstone_bytes` /
+//! It also proves the tombstone-bytes gauge stays consistent under the in-place
+//! path (the gauge deltas route through `add_tombstone_bytes` /
 //! `sub_tombstone_bytes`, never bypassed), and that the cheap OrMap-arm
 //! `estimated_cost` estimate stays close to the true serialized size so the
 //! eviction water-mark is not skewed.
+//!
+//! # Scope of the gauge evidence in this file
+//!
+//! The gauge assertions here drive a **test-local `apply_inplace` mirror** that
+//! calls `add_tombstone_bytes` / `sub_tombstone_bytes` itself. They do NOT drive
+//! the production epoch-prune call site in the CRDT service. Deleting that
+//! production call would leave every test in this module green.
+//!
+//! These tests are therefore evidence for the **in-place mutation contract
+//! only**: that a mutation routed through `update_in_place` moves the gauge
+//! exactly once across a write-failure/retry, and that the net delta reconciles
+//! with the tombstones left resident. They must NOT be cited as evidence that
+//! any production call site is correctly wired — coverage of the production
+//! prune path lives with that path's own test.
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use async_trait::async_trait;
     use proptest::prelude::*;
@@ -42,10 +56,10 @@ mod tests {
     use crate::storage::map_data_store::{LeafSink, MapDataStore, ScanBatch, ScanCursor};
     use crate::storage::mutation_observer::{CompositeMutationObserver, MutationObserver};
     use crate::storage::record::{
-        add_tombstone_bytes, estimated_cost, sub_tombstone_bytes, tombstone_bytes, OrMapEntry,
-        Record, RecordValue,
+        add_tombstone_bytes, estimated_cost, sub_tombstone_bytes, OrMapEntry, Record, RecordValue,
     };
     use crate::storage::record_store::{CallerProvenance, ExpiryPolicy, RecordStore};
+    use crate::storage::tombstone_gauge::with_isolated_gauge;
 
     const MAP: &str = "omap";
     const KEY: &str = "k1";
@@ -67,12 +81,6 @@ mod tests {
         let _guard = handle.enter();
         block_in_place(|| Handle::current().block_on(fut))
     }
-
-    // The tombstone-bytes gauge is a single process-global static shared with
-    // every other test that touches OR removes/prunes. Serialize this module's
-    // gauge-measuring region so its own passes do not interleave; delta-based
-    // assertions keep it robust against unrelated modules' mutations.
-    static GAUGE_LOCK: Mutex<()> = Mutex::new(());
 
     // -----------------------------------------------------------------------
     // Counting mutation observer — proves the two paths fire identical fan-out
@@ -626,7 +634,6 @@ mod tests {
     /// bypassing them, so a boot `reconcile_tombstone_bytes` would agree.
     #[test]
     fn gauge_reconciles_with_resident_tombstones_under_inplace() {
-        let _serialize = GAUGE_LOCK.lock().unwrap();
         block_on_async(async {
             let h = make_harness();
 
@@ -650,11 +657,15 @@ mod tests {
                 OrOp::Prune { tag: "t9".into() },  // no-op prune (absent tag)
             ];
 
-            let baseline = tombstone_bytes();
-            for op in &ops {
-                apply_inplace(&h.store, op).await;
-            }
-            let net_delta = tombstone_bytes().saturating_sub(baseline);
+            // Exact equality, not a saturating delta: saturation would mask a
+            // negative net change, which is the underflow regression this test
+            // exists to catch.
+            let ((), net_delta) = with_isolated_gauge(async {
+                for op in &ops {
+                    apply_inplace(&h.store, op).await;
+                }
+            })
+            .await;
 
             let resident = h.store.get(KEY, false).await.unwrap().map(|r| r.value);
             let recomputed = resident_tombstone_bytes(resident.as_ref());
@@ -724,7 +735,6 @@ mod tests {
 
     #[test]
     fn legacy_ortombstones_upgrade_matches_get_build_put() {
-        let _serialize = GAUGE_LOCK.lock().unwrap();
         block_on_async(async {
             let inplace = make_harness();
             let legacy = make_harness();
@@ -810,7 +820,6 @@ mod tests {
 
     #[test]
     fn prune_reclaims_evicted_key_durable_tombstone() {
-        let _serialize = GAUGE_LOCK.lock().unwrap();
         block_on_async(async {
             let datastore = Arc::new(RetainingCountingStore::default());
 
@@ -865,7 +874,6 @@ mod tests {
 
     #[test]
     fn new_tombstone_counted_once_across_write_failure_and_retry() {
-        let _serialize = GAUGE_LOCK.lock().unwrap();
         block_on_async(async {
             let datastore = Arc::new(RetainingCountingStore::default());
             // Fail exactly the first write-through.
@@ -889,33 +897,37 @@ mod tests {
                 true
             };
 
-            let baseline = tombstone_bytes();
-            // First attempt: resident mutated + gauge incremented in-closure, then
-            // the durable write fails.
-            let r1 = store
-                .update_in_place(
-                    KEY,
-                    Some(empty_ormap()),
-                    ExpiryPolicy::NONE,
-                    CallerProvenance::CrdtMerge,
-                    &mut remove_once,
-                )
-                .await;
-            assert!(r1.is_err(), "first write-through must fail (injected)");
-            // Retry: the tag is already resident, so it is not re-counted; the
-            // durable write now succeeds.
-            let r2 = store
-                .update_in_place(
-                    KEY,
-                    Some(empty_ormap()),
-                    ExpiryPolicy::NONE,
-                    CallerProvenance::CrdtMerge,
-                    &mut remove_once,
-                )
-                .await;
-            assert!(r2.is_ok(), "retry write-through must succeed");
+            // Exact equality, not a saturating delta: saturation would mask a
+            // negative net change, which is the underflow regression this test
+            // exists to catch.
+            let ((), delta) = with_isolated_gauge(async {
+                // First attempt: resident mutated + gauge incremented
+                // in-closure, then the durable write fails.
+                let r1 = store
+                    .update_in_place(
+                        KEY,
+                        Some(empty_ormap()),
+                        ExpiryPolicy::NONE,
+                        CallerProvenance::CrdtMerge,
+                        &mut remove_once,
+                    )
+                    .await;
+                assert!(r1.is_err(), "first write-through must fail (injected)");
+                // Retry: the tag is already resident, so it is not re-counted;
+                // the durable write now succeeds.
+                let r2 = store
+                    .update_in_place(
+                        KEY,
+                        Some(empty_ormap()),
+                        ExpiryPolicy::NONE,
+                        CallerProvenance::CrdtMerge,
+                        &mut remove_once,
+                    )
+                    .await;
+                assert!(r2.is_ok(), "retry write-through must succeed");
+            })
+            .await;
 
-            let delta = tombstone_bytes().saturating_sub(baseline);
             assert_eq!(
                 delta,
                 tag.len() as u64,

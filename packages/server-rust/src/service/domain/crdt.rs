@@ -3093,6 +3093,80 @@ mod tests {
         );
     }
 
+    /// The tombstone-bytes gauge is decremented by the REAL epoch-prune path.
+    ///
+    /// Reuses `ac4_prune_wired_into_or_write_path`'s eligibility recipe, but
+    /// asserts on the gauge rather than on stored contents: the production
+    /// `sub_tombstone_bytes` in the prune drain is otherwise reachable only
+    /// through a test-local mirror, which cannot detect its removal. Running
+    /// inside a private sink makes the net delta exact — three OR_REMOVE adds
+    /// minus the one tag the sweep drops — so a missing decrement cannot be
+    /// absorbed by ambient traffic.
+    #[tokio::test]
+    async fn or_prune_decrements_gauge_on_real_prune_path() {
+        let (svc, factory, frontier) = make_service_with_frontier();
+        let (t1, t2, t3) = ("T1", "T2", "T3");
+
+        let ((), net_delta) = crate::storage::tombstone_gauge::with_isolated_gauge(async {
+            // Add + remove T1 on k1 -> epoch 1; T2 on k2 -> epoch 2. Both stored.
+            for (key, val, tag) in [("k1", "v1", t1), ("k2", "v2", t2)] {
+                Arc::clone(&svc)
+                    .oneshot(or_add_op("m", key, val, tag))
+                    .await
+                    .unwrap();
+                Arc::clone(&svc)
+                    .oneshot(or_remove_op("m", key, tag))
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(frontier.current_epoch(), 2, "epochs 1..=2 stamped");
+
+            // Raise the LWM strictly past epoch 1 (cursor 2 > 1) and open the
+            // durability watermark. Both are injected, so exactly which epoch is
+            // eligible is deterministic — no wall clock, no background sweeper.
+            let c: String = "a5:alice|dev-1".into();
+            frontier.set_delivered(ConnectionId(1), 100);
+            assert!(frontier.confirm_apply_ack(&c, 2, ConnectionId(1)).await);
+            assert_eq!(frontier.low_water_mark(), 2);
+            frontier.set_durable_epoch_watermark(1000);
+
+            // Fire the sweep via an OR_REMOVE on a THIRD key: epoch 3 (its own)
+            // and epoch 2 stay pinned, epoch 1's T1 is dropped and its bytes are
+            // returned to the gauge.
+            Arc::clone(&svc)
+                .oneshot(or_add_op("m", "k3", "v3", t3))
+                .await
+                .unwrap();
+            Arc::clone(&svc)
+                .oneshot(or_remove_op("m", "k3", t3))
+                .await
+                .unwrap();
+
+            // Pin the drop the decrement accounts for. Without this, a gauge
+            // delta alone could also be produced by a prune that never ran plus
+            // miscounted adds; pairing the two makes a failure attributable.
+            let (_, tombs_k1) = read_or_map(&factory, "m", "k1").await;
+            assert!(
+                !tombs_k1.contains(&t1.to_string()),
+                "epoch-1 tombstone pruned from storage via the OR write path"
+            );
+            let (_, tombs_k2) = read_or_map(&factory, "m", "k2").await;
+            assert!(
+                tombs_k2.contains(&t2.to_string()),
+                "epoch-2 tombstone still pinned (LWM 2 not strictly past epoch 2)"
+            );
+        })
+        .await;
+
+        // Derived from the tag lengths rather than hard-coded, so renaming a tag
+        // cannot silently invalidate the expectation.
+        let expected = (t1.len() + t2.len() + t3.len() - t1.len()) as u64;
+        assert_eq!(
+            net_delta, expected,
+            "three OR_REMOVE charges minus the single epoch-1 tag the prune drops"
+        );
+    }
+
     /// Op-path data-loss guard: the OR write path has NO forgotten-client gate,
     /// so a NOT-yet-ACKed (untracked) device's `CLIENT_OP` / `OP_BATCH` OR writes
     /// are APPLIED and acked even with tombstone protection active — never
@@ -3312,7 +3386,6 @@ mod tests {
     // practical here — this exercises the actual eviction blind-spot the gauge
     // exists to defend against, not a stand-in for it.
     #[tokio::test]
-    #[serial_test::serial(tombstone_gauge)]
     async fn or_remove_tombstone_gauge_survives_real_eviction_and_rehydration() {
         let dir = tempfile::tempdir().expect("tempdir");
         let redb_path = dir.path().join("gauge_residency.redb");
@@ -3334,21 +3407,15 @@ mod tests {
             Arc::new(SchemaService::new()),
         ));
 
-        // The gauge is a process-global static: the serial(tombstone_gauge) group
-        // serializes the gauge-asserting tests against each other, but UNMARKED
-        // parallel tests still mutate it via ordinary OR_REMOVE applies and prune
-        // drains. Exact-equality snapshots are therefore retried on a fresh map:
-        // ambient noise shifts between attempts, while a genuine double-count /
-        // dropped-gauge regression is deterministic and fails every attempt.
-        let mut attempt = 0usize;
-        'attempt: loop {
-            attempt += 1;
-            let map_name = &format!("gauge_residency_map_{attempt}");
-            let key = "item-1";
-            let tag = "tag-gauge-residency";
+        // The whole body runs against a private, zero-based gauge sink, so every
+        // snapshot below is this test's own contribution and nothing else's. No
+        // ambient OR_REMOVE traffic from parallel tests can reach it, which is
+        // what lets the three measurement points be exact equalities.
+        let map_name = "gauge_residency_map";
+        let key = "item-1";
+        let tag = "tag-gauge-residency";
 
-            let before_write = crate::storage::record::tombstone_bytes();
-
+        let ((), net_delta) = crate::storage::tombstone_gauge::with_isolated_gauge(async {
             svc.clone()
                 .oneshot(or_add_op(map_name, key, "payload", tag))
                 .await
@@ -3359,13 +3426,11 @@ mod tests {
                 .expect("or_remove must succeed");
 
             let after_write = crate::storage::record::tombstone_bytes();
-            if after_write - before_write != tag.len() as u64 {
-                assert!(
-                    attempt < 5,
-                    "gauge delta never settled to exactly the tag length across 5 quiet-window attempts                      (deterministic gauge regression, not parallel-test noise)"
-                );
-                continue 'attempt;
-            }
+            assert_eq!(
+                after_write,
+                tag.len() as u64,
+                "OR_REMOVE must charge the gauge exactly the tag's byte length"
+            );
 
             // Force the record non-resident via the real eviction primitive. The
             // OR_REMOVE above wrote through with `CallerProvenance::CrdtMerge` over a
@@ -3380,13 +3445,11 @@ mod tests {
             );
 
             let after_eviction = crate::storage::record::tombstone_bytes();
-            if after_eviction != after_write {
-                assert!(
-                    attempt < 5,
-                    "eviction kept moving the gauge across 5 attempts — a deterministic                      evict-drops-gauge regression, not parallel-test noise"
-                );
-                continue 'attempt;
-            }
+            assert_eq!(
+                after_eviction, after_write,
+                "evicting the record must not move the gauge — the accounting is \
+                 residency-independent"
+            );
 
             // Rehydrate: `get()` transparently reloads the non-resident record from
             // the datastore. Confirm the tombstone survived the round trip and the
@@ -3399,15 +3462,19 @@ mod tests {
             );
 
             let after_rehydration = crate::storage::record::tombstone_bytes();
-            if after_rehydration != after_write {
-                assert!(
-                    attempt < 5,
-                    "rehydration kept moving the gauge across 5 attempts — a deterministic                      double-count regression, not parallel-test noise"
-                );
-                continue 'attempt;
-            }
-            break 'attempt;
-        }
+            assert_eq!(
+                after_rehydration, after_write,
+                "rehydrating the record must not re-charge the gauge — a second \
+                 charge here is the double-count regression this test pins"
+            );
+        })
+        .await;
+
+        assert_eq!(
+            net_delta,
+            tag.len() as u64,
+            "net scoped delta across the write/evict/rehydrate cycle is one tag"
+        );
     }
 
     // AC1: add-wins — OR_REMOVE of one tag preserves concurrent survivors.

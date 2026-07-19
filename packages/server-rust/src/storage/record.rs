@@ -3,11 +3,13 @@
 //! Defines the core data structures stored in [`StorageEngine`](super::StorageEngine):
 //! [`Record`], [`RecordMetadata`], [`RecordValue`], and [`OrMapEntry`].
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
+
+use super::tombstone_gauge::with_sink;
 
 /// Process-monotonic counter for minting per-write identity tokens.
 ///
@@ -18,39 +20,6 @@ use topgun_core::types::Value;
 /// `Relaxed` ordering is sufficient because token publication is already
 /// synchronized by the `DashMap` shard lock at `get_mut`/put.
 static WRITE_TOKEN: AtomicU64 = AtomicU64::new(1);
-
-/// Process-global running total of OR-Map tombstone bytes (sum of removed
-/// tags' UTF-8 byte lengths currently tracked across all `OrMap.tombstones`
-/// sets).
-///
-/// This is the in-process source of truth behind [`add_tombstone_bytes`],
-/// [`sub_tombstone_bytes`], and [`tombstone_bytes`]. It exists to give the
-/// unbounded-tombstone-growth soak monitor (and the `/metrics` Prometheus
-/// surface) a cheap, lock-free signal of how much tombstone data has
-/// accumulated, without walking every resident `OrMap` record on each check.
-/// `Relaxed` ordering is sufficient: this is a monitoring counter, not a
-/// correctness-critical value guarding any invariant, so no other memory
-/// operation needs to be ordered against it.
-static OR_TOMBSTONE_BYTES: AtomicU64 = AtomicU64::new(0);
-
-/// Fail-loud tripwire recording whether [`add_tombstone_bytes`] has fired in
-/// this process.
-///
-/// [`set_tombstone_bytes`] pairs an **absolute** `AtomicU64` store with an
-/// **additive** Prometheus `increment`. The one-time boot seed is only correct
-/// on a fresh recorder: if any `add_tombstone_bytes` landed between recorder
-/// install and the boot seed, the `AtomicU64` would still self-correct (it is a
-/// store), but the Prometheus counter — the sink the soak harness scrapes —
-/// would silently double-count (it is additive). No `add_tombstone_bytes` call
-/// site is reachable before `set_ready()` today, so the boot seed is the sole
-/// gauge mutator in the recovery→ready window; this flag turns a future refactor
-/// that violates that ordering into a loud failure — a `tracing::error!` in every
-/// build (the soak harness and production run release, where `debug_assert!` is a
-/// no-op) plus a hard `debug_assert!` in debug/test — rather than a silent
-/// double-count of the Prometheus counter the harness scrapes. Written with
-/// `Release` / read with `Acquire` so the boot seed reliably observes a prior arm
-/// even if the two ever run on different threads.
-static TOMBSTONE_ADD_FIRED: AtomicBool = AtomicBool::new(false);
 
 /// Adds `n` bytes to the process-global OR-Map tombstone-bytes gauge and
 /// emits the same delta to both exported Prometheus series: the
@@ -67,17 +36,7 @@ static TOMBSTONE_ADD_FIRED: AtomicBool = AtomicBool::new(false);
 /// this gauge exists to expose, and a constant per-entry factor only scales
 /// it without changing what it reveals.
 pub fn add_tombstone_bytes(n: u64) {
-    // Arm the tripwire that makes the boot-seed dual-write asymmetry fail loud
-    // (see TOMBSTONE_ADD_FIRED). A single store on the write path is negligible
-    // next to the map mutation that precedes it; `Release` pairs with the boot
-    // seed's `Acquire` load so the seed reliably observes this arm cross-thread.
-    TOMBSTONE_ADD_FIRED.store(true, Ordering::Release);
-    OR_TOMBSTONE_BYTES.fetch_add(n, Ordering::Relaxed);
-    metrics::counter!("topgun_ormap_tombstone_bytes_total").increment(n);
-    // Precision loss only above 2^53 bytes of tombstone data on one process —
-    // not a real-world concern for this monitoring signal.
-    #[allow(clippy::cast_precision_loss)]
-    metrics::gauge!("topgun_ormap_tombstone_bytes").increment(n as f64);
+    with_sink(|s| s.add(n));
 }
 
 /// Subtracts `n` bytes from the process-global OR-Map tombstone-bytes gauge,
@@ -103,11 +62,7 @@ pub fn add_tombstone_bytes(n: u64) {
 /// underflow in practice, but `fetch_sub` wraps on underflow rather than
 /// panicking — acceptable for a monitoring counter.
 pub fn sub_tombstone_bytes(n: u64) {
-    OR_TOMBSTONE_BYTES.fetch_sub(n, Ordering::Relaxed);
-    // Precision loss only above 2^53 bytes of tombstone data on one process —
-    // not a real-world concern for this monitoring signal.
-    #[allow(clippy::cast_precision_loss)]
-    metrics::gauge!("topgun_ormap_tombstone_bytes").decrement(n as f64);
+    with_sink(|s| s.sub(n));
 }
 
 /// Reads the current value of the process-global OR-Map tombstone-bytes gauge.
@@ -116,8 +71,13 @@ pub fn sub_tombstone_bytes(n: u64) {
 /// [`sub_tombstone_bytes`] Prometheus-divergence note above, and by the
 /// soak-test monitor that watches for unbounded tombstone growth.
 #[must_use]
+// The closure is redundant only in the release arm, where the resolver hands
+// over a concrete `&ProcessGauge`. Test builds receive a `&dyn
+// TombstoneGaugeSink`, and a bare method path cannot satisfy that
+// higher-ranked bound. The closure is the one form that compiles in both.
+#[allow(clippy::redundant_closure_for_method_calls)]
 pub fn tombstone_bytes() -> u64 {
-    OR_TOMBSTONE_BYTES.load(Ordering::Relaxed)
+    with_sink(|s| s.read())
 }
 
 /// Re-baselines the OR-Map tombstone-bytes gauge to an absolute `total`.
@@ -125,7 +85,7 @@ pub fn tombstone_bytes() -> u64 {
 /// This is the **only** absolute-set path for the gauge. It exists exclusively
 /// for the one-time startup reconciliation that runs after WAL recovery
 /// completes (see `bin/topgun_server.rs`): the process-local
-/// [`OR_TOMBSTONE_BYTES`] atomic and both exported Prometheus series
+/// [`ProcessGauge`](super::tombstone_gauge::ProcessGauge) atomic and both exported Prometheus series
 /// (`topgun_ormap_tombstone_bytes_total` and `topgun_ormap_tombstone_bytes`)
 /// reset to zero/absent on every process start and never re-count rehydrated
 /// (redb-persisted) tombstones, so without this boot seed the scraped series
@@ -138,7 +98,7 @@ pub fn tombstone_bytes() -> u64 {
 /// connections.
 ///
 /// It performs THREE writes, in order, because they are **separate sinks**:
-///  1. `OR_TOMBSTONE_BYTES.store(total)` re-baselines the in-process `AtomicU64`
+///  1. `bytes.store(total)` re-baselines the in-process `AtomicU64`
 ///     — an absolute store, never `fetch_add`: a per-rehydration increment would
 ///     reintroduce the eviction double-count the gauge's cardinal rule forbids.
 ///  2. `metrics::counter!(...).increment(total)` seeds the monotonic
@@ -154,34 +114,7 @@ pub fn tombstone_bytes() -> u64 {
 ///     double-count risk and can be called safely even if this boot seed ever
 ///     ran more than once.
 pub fn set_tombstone_bytes(total: u64) {
-    OR_TOMBSTONE_BYTES.store(total, Ordering::Relaxed);
-    // The Prometheus increment below is additive; correct only on a fresh-zero
-    // recorder. No add_tombstone_bytes site is reachable before this boot seed,
-    // so the tripwire must still be un-armed here — otherwise the counter the
-    // harness scrapes would silently double-count. Fail loud in EVERY build: the
-    // soak harness and production run release, where `debug_assert!` alone is a
-    // no-op, so an error log carries the signal there while the debug_assert hard
-    // -fails tests.
-    let armed = TOMBSTONE_ADD_FIRED.load(Ordering::Acquire);
-    if armed {
-        tracing::error!(
-            target: "topgun_server::bootstrap",
-            "set_tombstone_bytes boot seed ran after add_tombstone_bytes — the additive \
-             Prometheus counter will double-count; the recovery→ready gauge-window invariant \
-             was violated by a reachable pre-set_ready write path"
-        );
-    }
-    debug_assert!(
-        !armed,
-        "set_tombstone_bytes boot seed ran after add_tombstone_bytes — the additive \
-         Prometheus counter would double-count"
-    );
-    metrics::counter!("topgun_ormap_tombstone_bytes_total").increment(total);
-    // Absolute re-baseline of the decrementable gauge — no additive-race
-    // hazard here since `.set` (unlike the counter's `.increment`) overwrites
-    // rather than accumulates.
-    #[allow(clippy::cast_precision_loss)]
-    metrics::gauge!("topgun_ormap_tombstone_bytes").set(total as f64);
+    with_sink(|s| s.set(total));
 }
 
 /// The startup warning for a detected legacy [`RecordValue::OrTombstones`] corpus,
@@ -532,85 +465,90 @@ pub struct Record {
 #[cfg(test)]
 mod tombstone_bytes_gauge_tests {
     use super::*;
-    use std::sync::Mutex;
+    use crate::storage::tombstone_gauge::with_isolated_gauge;
 
-    // `OR_TOMBSTONE_BYTES` is a single process-global static. The production
-    // writers are the OR_REMOVE add path and the epoch-prune drop path (which
-    // decrements on a successful tombstone drop), so these tests are not the
-    // only mutators — and the Rust test harness runs tests concurrently on
-    // separate threads, where a delta-based assertion in one test can still
-    // observe an in-flight mutation from another. A test-local mutex serializes
-    // just this module's tests against each other; asserting deltas (rather
-    // than absolute values) additionally keeps these tests robust against
-    // concurrent mutation from other test modules.
-    static TEST_SERIALIZE: Mutex<()> = Mutex::new(());
+    // Every test here binds a private sink for the duration of its own future,
+    // so it observes only the writes it makes itself. `#[tokio::test]` is
+    // load-bearing rather than cosmetic: the override lives in a task-local, so
+    // a plain `#[test]` has no runtime to resolve it from, the resolver falls
+    // back to the process-global gauge, and the body would silently run on the
+    // shared counter every other OR-remove in the crate is also writing to —
+    // with nothing failing to compile to say so.
 
-    #[test]
-    fn add_tombstone_bytes_is_monotonic_and_visible_via_accessor() {
-        let _guard = TEST_SERIALIZE.lock().unwrap();
-        let baseline = tombstone_bytes();
+    #[tokio::test]
+    async fn add_tombstone_bytes_is_monotonic_and_visible_via_accessor() {
+        let ((), delta) = with_isolated_gauge(async {
+            add_tombstone_bytes(5);
+            assert_eq!(
+                tombstone_bytes(),
+                5,
+                "add_tombstone_bytes must increase the gauge by exactly n"
+            );
 
-        add_tombstone_bytes(5);
-        assert_eq!(
-            tombstone_bytes(),
-            baseline + 5,
-            "add_tombstone_bytes must increase the gauge by exactly n"
-        );
+            add_tombstone_bytes(3);
+            assert_eq!(
+                tombstone_bytes(),
+                8,
+                "successive adds must accumulate monotonically"
+            );
+        })
+        .await;
 
-        add_tombstone_bytes(3);
-        assert_eq!(
-            tombstone_bytes(),
-            baseline + 8,
-            "successive adds must accumulate monotonically"
-        );
+        assert_eq!(delta, 8, "the scope's net delta is the sum of its adds");
     }
 
-    #[test]
-    fn sub_tombstone_bytes_decrements_the_gauge() {
-        let _guard = TEST_SERIALIZE.lock().unwrap();
-        // Add first so the subtraction has headroom and cannot underflow
-        // relative to this test's own contribution, independent of whatever
-        // baseline other parallel tests have left in the global counter.
-        add_tombstone_bytes(10);
-        let after_add = tombstone_bytes();
+    #[tokio::test]
+    async fn sub_tombstone_bytes_decrements_the_gauge() {
+        // Add before subtracting so this exercises the add→sub pairing rather
+        // than an underflow off an empty sink.
+        let ((), delta) = with_isolated_gauge(async {
+            add_tombstone_bytes(10);
+            sub_tombstone_bytes(4);
+            assert_eq!(
+                tombstone_bytes(),
+                6,
+                "sub_tombstone_bytes must decrease the gauge by exactly n"
+            );
+        })
+        .await;
 
-        sub_tombstone_bytes(4);
-        assert_eq!(
-            tombstone_bytes(),
-            after_add - 4,
-            "sub_tombstone_bytes must decrease the gauge by exactly n"
-        );
+        assert_eq!(delta, 6, "add(10) then sub(4) nets to 6");
     }
 
     /// Serializing/deserializing an `OrMap` `RecordValue` must not touch the
     /// gauge — the gauge is updated only by explicit call sites at the
     /// `OR_REMOVE` tombstone-push / inbound-sync-union points (later task
     /// groups), never as a side effect of encoding.
-    #[test]
-    fn ormap_serde_round_trip_does_not_touch_gauge() {
-        let _guard = TEST_SERIALIZE.lock().unwrap();
-        let baseline = tombstone_bytes();
+    #[tokio::test]
+    async fn ormap_serde_round_trip_does_not_touch_gauge() {
+        let ((), delta) = with_isolated_gauge(async {
+            let value = RecordValue::OrMap {
+                records: vec![OrMapEntry {
+                    value: Value::String("hello".to_string()),
+                    tag: "tag-1".to_string(),
+                    timestamp: Timestamp {
+                        millis: 100,
+                        counter: 0,
+                        node_id: "node-a".to_string(),
+                    },
+                }],
+                tombstones: vec!["tag-removed".to_string()],
+            };
 
-        let value = RecordValue::OrMap {
-            records: vec![OrMapEntry {
-                value: Value::String("hello".to_string()),
-                tag: "tag-1".to_string(),
-                timestamp: Timestamp {
-                    millis: 100,
-                    counter: 0,
-                    node_id: "node-a".to_string(),
-                },
-            }],
-            tombstones: vec!["tag-removed".to_string()],
-        };
+            let bytes = rmp_serde::to_vec_named(&value).expect("serialize OrMap");
+            let _decoded: RecordValue = rmp_serde::from_slice(&bytes).expect("deserialize OrMap");
 
-        let bytes = rmp_serde::to_vec_named(&value).expect("serialize OrMap");
-        let _decoded: RecordValue = rmp_serde::from_slice(&bytes).expect("deserialize OrMap");
+            assert_eq!(
+                tombstone_bytes(),
+                0,
+                "serde round-trip must not mutate the tombstone-bytes gauge"
+            );
+        })
+        .await;
 
         assert_eq!(
-            tombstone_bytes(),
-            baseline,
-            "serde round-trip must not mutate the tombstone-bytes gauge"
+            delta, 0,
+            "a serde round-trip contributes nothing to the scope"
         );
     }
 }
