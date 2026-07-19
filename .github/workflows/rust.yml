@@ -41,6 +41,18 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  invariants:
+    name: Invariants catalog gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      # INVARIANTS.md discipline: every entry either cites a test that still exists
+      # or carries an honest NAKED marker with a tracking TODO; the NAKED count may
+      # never grow silently. Pure bash — no toolchain needed.
+      - name: Check invariant-test mapping
+        run: ./scripts/check-invariants.sh
+
   check:
     name: Check & Lint
     runs-on: ubuntu-latest
