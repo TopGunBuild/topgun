@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc baf8de895b84866aacf8bf37cb701c834975ee82bbc2303b337d8fb8461a507d # shrinks to case = [Incarnation { ops: [RemoveAll { keys: [0] }, FlushTick { advance_ms: 0 }], end: Crash }]

@@ -38,6 +38,13 @@
 /// evaluates both oracles. Layered on the vocabulary this module declares.
 pub(crate) mod driver;
 
+/// Proptest strategies, incarnation-preserving shrinking, the property tests
+/// (AC1/AC2/AC3), the four regression meta-tests (AC4–AC7), and the oracle-
+/// coverage guard (AC14). Layered on the driver and the vocabulary this module
+/// declares.
+#[cfg(test)]
+mod cases;
+
 /// Index into the small per-case key space (`0..=K`, `K` ≈ 4).
 ///
 /// Keys drawn from this space are forced into a single partition (the existing
