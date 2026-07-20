@@ -739,6 +739,18 @@ impl WalWriter {
         Self::read_applied_sequence(&self.applied_path(partition))
     }
 
+    /// The partition's crash-durable applied watermark as recorded in the
+    /// `.applied` sidecar — the value that actually determines which frames
+    /// [`Wal::unapplied`] still returns. Distinct from write-behind's recomputed
+    /// prefix-complete watermark: this is the PERSISTED value a defective advance
+    /// writes (the C13 inclusive-off-by-one over-advances it), so a test oracle
+    /// can tell an over-advanced watermark that FILTERED a frame from a segment
+    /// unlinked before its sidecar was durable.
+    #[cfg(test)]
+    pub(crate) fn test_applied_watermark(&self, partition: u32) -> u64 {
+        Self::read_applied_sequence(&self.applied_path(partition))
+    }
+
     /// Confirms a re-read watermark still covers a segment about to be unlinked.
     ///
     /// A typed `Err` rather than an `assert!`: retaining a segment costs disk and

@@ -310,8 +310,8 @@ impl RunOutcome {
         let o2_floor_met = cov.o2_evaluations >= 1;
         // Skipping is honest but bounded: indeterminate skips must not dominate,
         // or O2 would be "passing" by evaluating nothing.
-        let indeterminate_ratio_floor_met =
-            cov.o2_evaluations == 0 || cov.o2_indeterminate_skips.saturating_mul(2) <= cov.o2_evaluations;
+        let indeterminate_ratio_floor_met = cov.o2_evaluations == 0
+            || cov.o2_indeterminate_skips.saturating_mul(2) <= cov.o2_evaluations;
         OracleCoverage {
             floors: OracleCoverageFloors {
                 o1_floor_met,
@@ -476,7 +476,8 @@ impl ReferenceModel for LogModel {
         step: usize,
         sequence: Sequence,
     ) {
-        self.bindings.insert((incarnation, step), (partition, sequence));
+        self.bindings
+            .insert((incarnation, step), (partition, sequence));
     }
 
     fn record_ack(&mut self, incarnation: usize, step: usize, key: Key, value: ModelValue) {
@@ -544,7 +545,10 @@ fn keys_in_partition(partition: u32, count: usize) -> Vec<String> {
             out.push(key);
         }
         i += 1;
-        assert!(i < 1_000_000, "no key space found for partition {partition}");
+        assert!(
+            i < 1_000_000,
+            "no key space found for partition {partition}"
+        );
     }
     out
 }
@@ -592,7 +596,8 @@ pub(crate) async fn run_case(case: &Case, config: &RunConfig) -> RunOutcome {
     // No fsync: the in-process crash model preserves un-fsynced bytes (the OS
     // page cache holds them across a drop-and-reopen), so PerOp would only slow
     // the run without changing what a crash can lose here.
-    let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::None).expect("wal writer");
+    let wal =
+        WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::None).expect("wal writer");
     let inner = HarnessInnerStore::new();
 
     let partition = harness_partition();
@@ -686,7 +691,11 @@ impl Driver {
     /// Builds a fresh `WriteBehindDataStore` for one incarnation on real boot-
     /// seeding, applies the run's defect seams, installs the append observer, and
     /// (for a non-first incarnation) asserts the crash-vacuity guard (AC2).
-    async fn boot_store(&mut self, is_first: bool, incarnation: usize) -> Arc<WriteBehindDataStore> {
+    async fn boot_store(
+        &mut self,
+        is_first: bool,
+        incarnation: usize,
+    ) -> Arc<WriteBehindDataStore> {
         let sequence_start = if is_first {
             1
         } else {
@@ -725,7 +734,9 @@ impl Driver {
         // Apply the run's defect seams (R6).
         match self.config.defect {
             DefectMode::None | DefectMode::UnlinkThenFsync => {}
-            DefectMode::ScalarMaxWatermark => store.test_set_watermark_mode(WatermarkMode::ScalarMax),
+            DefectMode::ScalarMaxWatermark => {
+                store.test_set_watermark_mode(WatermarkMode::ScalarMax)
+            }
             DefectMode::EmptyBootSeed => store.test_set_boot_seed_mode(BootSeedMode::Empty),
             DefectMode::InclusiveOffByOne => {
                 store.test_set_watermark_mode(WatermarkMode::InclusiveOffByOne);
@@ -780,7 +791,9 @@ impl Driver {
             WorkOp::Append { key, millis } => {
                 let value = lww(*millis);
                 let now = self.clock;
-                let res = store.add(TEST_MAP, self.key_str(*key), &value, 0, now).await;
+                let res = store
+                    .add(TEST_MAP, self.key_str(*key), &value, 0, now)
+                    .await;
                 let observed = self.drain_observed();
                 if res.is_ok() {
                     // Bind the sequence NAME, then let the MODEL decide the ack
@@ -812,7 +825,17 @@ impl Driver {
                 }
             }
             WorkOp::RemoveAll { keys } => {
-                let now = self.clock;
+                // Unlike `add`/`remove`, the store's `remove_all` takes no injected
+                // clock and stamps each buffered entry's `store_time` with the real
+                // `now_millis()` wall clock — a value that always sits FAR BELOW the
+                // driver's virtual clock (`CLOCK_BASE`), so a store-side remove_all
+                // entry is due against every virtual flush deadline. The model must
+                // stamp the same wall-clock semantics, or it would believe the entry
+                // is not-yet-due while the store has already drained it — a false O2
+                // RED. `0` is below every virtual deadline, so it reproduces the
+                // store's always-due behaviour; coalescing then preserves the
+                // survivor's `store_time` on both sides exactly as `DelayedEntry` does.
+                let store_time = 0;
                 let key_strs: Vec<String> =
                     keys.iter().map(|k| self.key_str(*k).to_string()).collect();
                 let res = store.remove_all(TEST_MAP, &key_strs).await;
@@ -821,7 +844,8 @@ impl Driver {
                     // The store appends per key in order, so the Nth observed
                     // sequence belongs to the Nth key.
                     for ((p, s), key) in observed.iter().zip(keys.iter()) {
-                        self.model.ack(*p, *s, *key, ModelValue::Tombstone, now);
+                        self.model
+                            .ack(*p, *s, *key, ModelValue::Tombstone, store_time);
                     }
                 } else {
                     // Partial failure: attribution is ambiguous — mark every
@@ -880,10 +904,21 @@ impl Driver {
                 } => {
                     store
                         .inner
-                        .add(&entry.map, &entry.key, value, *expiration_time, entry.store_time)
+                        .add(
+                            &entry.map,
+                            &entry.key,
+                            value,
+                            *expiration_time,
+                            entry.store_time,
+                        )
                         .await
                 }
-                DelayedOp::Remove => store.inner.remove(&entry.map, &entry.key, entry.store_time).await,
+                DelayedOp::Remove => {
+                    store
+                        .inner
+                        .remove(&entry.map, &entry.key, entry.store_time)
+                        .await
+                }
             };
             store.resolve_pending(entry.sequence);
             if result.is_ok() {
@@ -969,11 +1004,16 @@ impl Driver {
 
         // Clause 3 (+ clause 2): wal.unapplied(p) must still contain every
         // model-unresolved sequence — a frame that should replay must not have
-        // been filtered out. When a frame IS missing, the impl-observed watermark
-        // discriminates the cause: a watermark that advanced past it filtered it
-        // (the C13 off-by-one shape); a frame gone while the watermark stayed
-        // below it means its sealed segment was unlinked before the sidecar was
-        // durable (the TG-WAL-003 hazard).
+        // been filtered out. When a frame IS missing, the PERSISTED applied
+        // watermark (the `.applied` sidecar, the value that actually governs what
+        // `unapplied` returns) discriminates the cause: a persisted watermark that
+        // advanced to or past it FILTERED it (the C13 inclusive-off-by-one shape);
+        // a frame gone while the persisted watermark stayed below it means its
+        // sealed segment was unlinked before the sidecar was durable (the
+        // TG-WAL-003 hazard). The recomputed prefix-complete `test_wal_watermark`
+        // used by clause 1 always sits one below the smallest unresolved sequence,
+        // so it cannot make this distinction — only the persisted sidecar can.
+        let persisted_watermark = self.wal.test_applied_watermark(p);
         let unapplied: HashSet<Sequence> = match self.wal.unapplied(p).await {
             Ok(frames) => frames.into_iter().map(|f| f.sequence).collect(),
             Err(_) => HashSet::new(),
@@ -982,7 +1022,7 @@ impl Driver {
             if unapplied.contains(s) {
                 continue;
             }
-            let violation = if watermark.is_some_and(|w| w >= *s) {
+            let violation = if persisted_watermark >= *s {
                 InvariantViolation::UnappliedFrameFiltered {
                     partition: p,
                     sequence: *s,
@@ -1026,10 +1066,7 @@ impl Driver {
             if violated {
                 self.outcome
                     .violations
-                    .push(InvariantViolation::AckedWriteLost {
-                        key,
-                        incarnation,
-                    });
+                    .push(InvariantViolation::AckedWriteLost { key, incarnation });
             }
         }
     }
