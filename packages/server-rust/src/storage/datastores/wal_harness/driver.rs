@@ -47,7 +47,7 @@
 //! as a documented limitation here rather than driven — the retaining in-memory
 //! double exercises the identical drop/preserve/reopen control flow.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -407,7 +407,7 @@ impl LogModel {
         );
     }
 
-    /// The keys whose buffered entry is due at `deadline` (store_time ≤ deadline),
+    /// The keys whose buffered entry is due at `deadline` (`store_time` ≤ deadline),
     /// matching `PartitionQueue::drain_ready`'s eligibility test.
     fn due_keys(&self, deadline: i64) -> Vec<Key> {
         let mut keys: Vec<Key> = self
@@ -738,7 +738,7 @@ impl Driver {
         match self.config.defect {
             DefectMode::None | DefectMode::UnlinkThenFsync => {}
             DefectMode::ScalarMaxWatermark => {
-                store.test_set_watermark_mode(WatermarkMode::ScalarMax)
+                store.test_set_watermark_mode(WatermarkMode::ScalarMax);
             }
             DefectMode::EmptyBootSeed => store.test_set_boot_seed_mode(BootSeedMode::Empty),
             DefectMode::InclusiveOffByOne => {
@@ -771,8 +771,8 @@ impl Driver {
     }
 
     /// Drains and binds the sequences the store assigned during the just-completed
-    /// mutating call.
-    fn drain_observed(&self) -> Vec<(PartitionId, Sequence)> {
+    /// mutating call. Reads the process-wide append sink, so it takes no `self`.
+    fn drain_observed() -> Vec<(PartitionId, Sequence)> {
         let sink = APPEND_SINK.with(Arc::clone);
         let mut guard = sink
             .lock()
@@ -780,8 +780,8 @@ impl Driver {
         std::mem::take(&mut *guard)
     }
 
-    /// Applies one op. Returns `true` if the op ended the incarnation (a GcTick
-    /// under an active PreUnlink crash point).
+    /// Applies one op. Returns `true` if the op ended the incarnation (a `GcTick`
+    /// under an active `PreUnlink` crash point).
     async fn apply_op(
         &mut self,
         store: &Arc<WriteBehindDataStore>,
@@ -797,7 +797,7 @@ impl Driver {
                 let res = store
                     .add(TEST_MAP, self.key_str(*key), &value, 0, now)
                     .await;
-                let observed = self.drain_observed();
+                let observed = Self::drain_observed();
                 if res.is_ok() {
                     // A successful `add` mints exactly one WAL frame, so exactly one
                     // sequence must have been observed. A mismatch means the append
@@ -827,7 +827,7 @@ impl Driver {
             WorkOp::Remove { key } => {
                 let now = self.clock;
                 let res = store.remove(TEST_MAP, self.key_str(*key), now).await;
-                let observed = self.drain_observed();
+                let observed = Self::drain_observed();
                 if res.is_ok() {
                     assert_eq!(
                         observed.len(),
@@ -857,7 +857,7 @@ impl Driver {
                 let key_strs: Vec<String> =
                     keys.iter().map(|k| self.key_str(*k).to_string()).collect();
                 let res = store.remove_all(TEST_MAP, &key_strs).await;
-                let observed = self.drain_observed();
+                let observed = Self::drain_observed();
                 if res.is_ok() {
                     // `remove_all` appends exactly one frame per input key, in order
                     // and WITHOUT deduplicating (verified in write_behind.rs), so the
@@ -976,7 +976,7 @@ impl Driver {
     }
 
     /// Real `mark_applied` at the current prefix-complete watermark, honouring the
-    /// installed GC order and crash point (R7). Returns `true` when a PreUnlink
+    /// installed GC order and crash point (R7). Returns `true` when a `PreUnlink`
     /// crash point is active, ending the incarnation at the seam (sidecar durable
     /// under the production order; segments already unlinked under the inverted
     /// one).
@@ -992,9 +992,8 @@ impl Driver {
 
         // Read the watermark to DRIVE the implementation's own GC (not a model
         // input). Unseeded / no-WAL → nothing to collect.
-        let watermark = match store.test_wal_watermark(self.partition) {
-            Some(Ok(w)) => w,
-            _ => return false,
+        let Some(Ok(watermark)) = store.test_wal_watermark(self.partition) else {
+            return false;
         };
         let _ = self.wal.mark_applied(self.partition, watermark).await;
 
@@ -1250,8 +1249,10 @@ mod smoke {
             vec![WorkOp::Append { key: 0, millis: 1 }],
             IncarnationEnd::CleanShutdown,
         )];
-        let mut shape = CaseShape::default();
-        shape.force_single_incarnation = true;
+        let shape = CaseShape {
+            force_single_incarnation: true,
+            ..CaseShape::default()
+        };
         let cfg = RunConfig {
             shape: shape.clone(),
             ..RunConfig::baseline()

@@ -168,18 +168,6 @@ pub(crate) enum DefectMode {
     UnlinkThenFsync,
 }
 
-/// GC segment-unlink ordering seam (R6, R7). The production order is the default; the inverted
-/// order is the `TG-WAL-003` negative control.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum GcOrderMode {
-    /// Production order: the watermark sidecar's write+fsync completes before any sealed segment
-    /// it licenses is unlinked.
-    #[default]
-    FsyncThenUnlink,
-    /// `TG-WAL-003` negative control: unlink before the sidecar fsync completes.
-    UnlinkThenFsync,
-}
-
 /// `wal/mod.rs::mark_applied` crash-injection point (R7), fired between the sidecar write+fsync
 /// and the unlink loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -209,17 +197,9 @@ pub(crate) enum BootSeedMode {
 /// read-compare merge — WAL re-replay is NOT merge-idempotent today. Turning this on before
 /// `TODO-598` lands would fire REDs on known, tracked behaviour rather than new defects; flipping it
 /// to `true` (with the suite still green) IS `TODO-598`'s closing evidence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct OracleConfig {
     pub value_equality: bool,
-}
-
-impl Default for OracleConfig {
-    fn default() -> Self {
-        Self {
-            value_equality: false,
-        }
-    }
 }
 
 /// Per-floor pass/fail evaluation of an [`OracleCoverage`] sample against AC14's floors.
@@ -263,25 +243,6 @@ pub(crate) enum ModelValue {
     Live { millis: i64 },
     /// An acked tombstone (the key was removed after being live).
     Tombstone,
-}
-
-/// Sequence lifecycle states the model tracks per R5.0's binding rule.
-///
-/// The model learns WAL sequence numbers only as *names* (via [`ReferenceModel::bind_sequence`]);
-/// every subsequent transition is decided by the model alone from the driver's own event log —
-/// never by reading the implementation's pending/in-flight/seeded/staging state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SequenceState {
-    /// The op that produced this sequence was appended to the WAL but its store call has not yet
-    /// returned.
-    Appended,
-    /// The store call that produced this sequence returned `Ok(())`.
-    Acked,
-    /// A healthy `FlushTick` drained this sequence under the replicated flush policy.
-    DurablyApplied,
-    /// Attribution is genuinely ambiguous (a mid-loop `RemoveAll` partial failure, or the op was
-    /// issued while the store was unhealthy) — the model skips rather than guesses (R5.0.3).
-    Indeterminate,
 }
 
 /// The model side of every oracle comparison (R5.0): a record of what the driver did and observed,
