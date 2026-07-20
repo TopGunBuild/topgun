@@ -309,9 +309,12 @@ impl RunOutcome {
             shape.force_single_incarnation || cov.o1_healthy_recovery_evaluations >= 1;
         let o2_floor_met = cov.o2_evaluations >= 1;
         // Skipping is honest but bounded: indeterminate skips must not dominate,
-        // or O2 would be "passing" by evaluating nothing.
+        // or O2 would be "passing" by evaluating nothing. The structural floor is
+        // held at the SAME 25% bound the strategy layer's tight AC14(c) check
+        // asserts, so the reusable guard can never report pass on a skip ratio the
+        // AC-level assertion would reject (a 26-49% run must fail BOTH, not just one).
         let indeterminate_ratio_floor_met = cov.o2_evaluations == 0
-            || cov.o2_indeterminate_skips.saturating_mul(2) <= cov.o2_evaluations;
+            || cov.o2_indeterminate_skips.saturating_mul(4) <= cov.o2_evaluations;
         OracleCoverage {
             floors: OracleCoverageFloors {
                 o1_floor_met,
@@ -796,6 +799,16 @@ impl Driver {
                     .await;
                 let observed = self.drain_observed();
                 if res.is_ok() {
+                    // A successful `add` mints exactly one WAL frame, so exactly one
+                    // sequence must have been observed. A mismatch means the append
+                    // path started coalescing/deduplicating before assigning a
+                    // sequence, which would silently misalign the model↔sequence
+                    // binding and blind the oracle — fail loud rather than drift.
+                    assert_eq!(
+                        observed.len(),
+                        1,
+                        "add must append exactly one WAL frame per call"
+                    );
                     // Bind the sequence NAME, then let the MODEL decide the ack
                     // transition (R5.0): identifier from the impl, lifecycle from
                     // the model's own log.
@@ -816,6 +829,11 @@ impl Driver {
                 let res = store.remove(TEST_MAP, self.key_str(*key), now).await;
                 let observed = self.drain_observed();
                 if res.is_ok() {
+                    assert_eq!(
+                        observed.len(),
+                        1,
+                        "remove must append exactly one WAL frame per call"
+                    );
                     self.model.cur_store_time = now;
                     for (p, s) in observed {
                         self.model.bind_sequence(p, incarnation, step, s);
@@ -841,15 +859,32 @@ impl Driver {
                 let res = store.remove_all(TEST_MAP, &key_strs).await;
                 let observed = self.drain_observed();
                 if res.is_ok() {
-                    // The store appends per key in order, so the Nth observed
-                    // sequence belongs to the Nth key.
+                    // `remove_all` appends exactly one frame per input key, in order
+                    // and WITHOUT deduplicating (verified in write_behind.rs), so the
+                    // Nth observed sequence belongs to the Nth key and the zip is
+                    // fully aligned. Assert the 1:1 length so a future append-path
+                    // change that dedups/skips keys cannot silently misattribute a
+                    // sequence and blind the oracle — the zip would otherwise stop at
+                    // the shorter iterator with no error.
+                    assert_eq!(
+                        observed.len(),
+                        keys.len(),
+                        "remove_all must append exactly one WAL frame per input key"
+                    );
                     for ((p, s), key) in observed.iter().zip(keys.iter()) {
                         self.model
                             .ack(*p, *s, *key, ModelValue::Tombstone, store_time);
                     }
                 } else {
                     // Partial failure: attribution is ambiguous — mark every
-                    // observed sequence Indeterminate rather than guess.
+                    // observed sequence Indeterminate rather than guess. This is
+                    // deliberately conservative: keys appended BEFORE the failing one
+                    // are frame-backed and stay pending in the impl, so marking them
+                    // Indeterminate over-skips them in O2 (a narrowed coverage gap,
+                    // never a false GREEN). Not exercised by the current generator —
+                    // `remove_all` fails only on capacity pressure (unbounded here) or
+                    // a WAL-append error (WAL is a TempDir here). Precise per-key
+                    // attribution when the path becomes reachable is TODO-606.
                     for (p, s) in observed {
                         self.model.record_indeterminate(p, s);
                     }
