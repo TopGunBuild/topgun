@@ -487,6 +487,55 @@ pub struct WalWriter {
     /// each other.
     #[cfg(test)]
     gc_revalidation_override: std::sync::Mutex<Option<u64>>,
+    /// TG-WAL-003 crash-point knob (R7): when `PreUnlink`, `mark_applied`
+    /// returns right after the sidecar watermark is durable but before any
+    /// sealed segment is unlinked, so a harness case can end the incarnation
+    /// exactly there.
+    #[cfg(test)]
+    gc_crash_point: std::sync::Mutex<GcCrashPoint>,
+    /// TG-WAL-003 negative-control knob (R6): when `UnlinkThenFsync`,
+    /// `mark_applied` unlinks sealed segments BEFORE the sidecar watermark is
+    /// durable — the inverted, pre-fix order this module's comments exist to
+    /// prevent — so the harness can prove its oracle actually detects the
+    /// hazard rather than passing vacuously.
+    #[cfg(test)]
+    gc_order_mode: std::sync::Mutex<GcOrderMode>,
+}
+
+/// TG-WAL-003 crash-point seam (R7): where `mark_applied` may end an
+/// incarnation while re-introducing the GC crash point.
+///
+/// `#[cfg(test)]`-only by construction — this type does not exist in a
+/// release build, so it cannot add a runtime branch there.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum GcCrashPoint {
+    /// Normal behaviour: `mark_applied` runs to completion.
+    #[default]
+    None,
+    /// Return immediately after the sidecar watermark write+fsync, before the
+    /// unlink loop runs: the sidecar is durable, the sealed segments it
+    /// covers are still on disk.
+    PreUnlink,
+}
+
+/// TG-WAL-003 negative-control seam (R6): the order `mark_applied` performs
+/// the sidecar durability step and the sealed-segment unlink step in.
+///
+/// `#[cfg(test)]`-only by construction — this type does not exist in a
+/// release build, so it cannot add a runtime branch there.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum GcOrderMode {
+    /// Production order: the sidecar watermark is durable (written + fsynced)
+    /// BEFORE any sealed segment is unlinked.
+    #[default]
+    FsyncThenUnlink,
+    /// Inverted, pre-fix order re-introduced as a negative control: sealed
+    /// segments are unlinked BEFORE the sidecar watermark is made durable.
+    /// A crash between the two steps loses the only record that those
+    /// segments' frames were already applied.
+    UnlinkThenFsync,
 }
 
 /// A sealed segment was retained instead of reclaimed.
@@ -604,6 +653,10 @@ impl WalWriter {
             batch_flush_tx,
             #[cfg(test)]
             gc_revalidation_override: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            gc_crash_point: std::sync::Mutex::new(GcCrashPoint::None),
+            #[cfg(test)]
+            gc_order_mode: std::sync::Mutex::new(GcOrderMode::FsyncThenUnlink),
         });
 
         // For the Batched policy, spawn a background task that fsyncs every open
@@ -683,6 +736,18 @@ impl WalWriter {
         {
             return forced;
         }
+        Self::read_applied_sequence(&self.applied_path(partition))
+    }
+
+    /// The partition's crash-durable applied watermark as recorded in the
+    /// `.applied` sidecar — the value that actually determines which frames
+    /// [`Wal::unapplied`] still returns. Distinct from write-behind's recomputed
+    /// prefix-complete watermark: this is the PERSISTED value a defective advance
+    /// writes (the C13 inclusive-off-by-one over-advances it), so a test oracle
+    /// can tell an over-advanced watermark that FILTERED a frame from a segment
+    /// unlinked before its sidecar was durable.
+    #[cfg(test)]
+    pub(crate) fn test_applied_watermark(&self, partition: u32) -> u64 {
         Self::read_applied_sequence(&self.applied_path(partition))
     }
 
@@ -1147,6 +1212,64 @@ impl Wal for WalWriter {
         // Advance the watermark monotonically; never regress it.
         let current = Self::read_applied_sequence(&applied_path);
         let watermark = sequence.max(current);
+
+        // TG-WAL-003 negative control (R6): when forced, run the inverted,
+        // pre-fix order — unlink sealed segments BEFORE the sidecar watermark
+        // is durable — so the harness can prove its oracle actually detects
+        // the hazard the production order below exists to prevent.
+        // `#[cfg(test)]`-only: this whole block does not exist in a release
+        // build, so the production path is unconditional there.
+        #[cfg(test)]
+        if *self
+            .gc_order_mode
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            == GcOrderMode::UnlinkThenFsync
+        {
+            let handle = self.handle(partition).await?;
+            self.seal_and_rotate_if_needed(partition, &handle).await?;
+            // No durable sidecar exists yet in this mode, so there is nothing
+            // to re-read: reclaim against the in-memory `watermark` directly,
+            // mirroring the pre-fix code that had no durable value to
+            // re-validate against.
+            let reclaimed = self
+                .select_reclaimable(partition, &handle, watermark, watermark)
+                .await;
+            self.unlink_reclaimed(&reclaimed).await?;
+
+            // Same `gc_crash_point` knob as the production path (R7), but its
+            // landing spot mirrors the inverted step order: here it fires
+            // AFTER the wrongly-early unlink and BEFORE the (deferred)
+            // sidecar write, instead of before the unlink. That is the exact
+            // TG-WAL-003 loss window — segments are already gone from disk
+            // while the sidecar is still at its OLD value, which under-seeds
+            // max_observed_sequence on restart and drops/reuses a sequence
+            // (see the comment on the production write below). Ending the
+            // incarnation here, rather than after a fully-completed call, is
+            // what makes AC7(b) reachable: a crash the harness fires only
+            // between ops would otherwise never observe an inconsistent
+            // on-disk state, since a completed call leaves both steps
+            // durable regardless of the order they ran in.
+            if *self
+                .gc_crash_point
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                == GcCrashPoint::PreUnlink
+            {
+                return Ok(());
+            }
+
+            if watermark > current {
+                Self::write_applied_sequence(&applied_path, watermark).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Cannot write applied sidecar {}: {e}",
+                        applied_path.display()
+                    )
+                })?;
+            }
+            return Ok(());
+        }
+
         if watermark > current {
             // Durably advance the watermark BEFORE any sealed segment is unlinked:
             // a crash after an unlink but before the watermark fsync would
@@ -1163,111 +1286,34 @@ impl Wal for WalWriter {
 
         let handle = self.handle(partition).await?;
 
-        // --- Seal + rotate (RULE-ordered, under the active-append lock) ---
-        // Only rotate when the active segment actually holds frames. Sealing an
-        // empty active segment would leave a zero-length sealed file the next
-        // append could never reach and GC would have to special-case.
+        self.seal_and_rotate_if_needed(partition, &handle).await?;
+
+        // TG-WAL-003 crash-point seam (R7): fires exactly between the durable
+        // sidecar advance above and the unlink loop below. A harness case
+        // configured with `GcCrashPoint::PreUnlink` ends the incarnation
+        // here — the watermark is durable, no sealed segment has been
+        // unlinked yet. `#[cfg(test)]`-only: no branch in a release build.
+        #[cfg(test)]
+        if *self
+            .gc_crash_point
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            == GcCrashPoint::PreUnlink
         {
-            let mut active = handle.active.lock().await;
-            if active.has_frames() {
-                // Durably fsync the current active's data FIRST, before any swap or
-                // new-file creation. A sealed segment is non-last in the live
-                // ordering, and a torn tail on a non-last segment is fatal during
-                // recovery — so its data must be synced before it is frozen. Doing
-                // the only fallible fsync here (while the old active is still
-                // installed and no new file exists yet) means a failure leaves no
-                // orphan: returning early keeps the old active in place with no
-                // dangling new segment.
-                active.sync_data().await?;
-
-                let next_first_seq = active.max_seq().saturating_add(1);
-                let new_path = self
-                    .wal_dir
-                    .join(segment::format_segment_filename(partition, next_first_seq));
-                let new_file = tokio::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&new_path)
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!("Cannot open WAL segment {}: {e}", new_path.display())
-                    })?;
-                // (c) fsync the parent dir so the new active file's dir entry is
-                // durable BEFORE any append is acked to it (before this lock is
-                // released).
-                fsync_dir(&self.wal_dir)?;
-
-                // Swap in the fresh active, take the old one out to freeze it. The
-                // old segment's data was already fsynced above, so the freeze is
-                // the infallible `into_sealed` — no fallible fsync runs AFTER the
-                // swap, which guarantees the old active can never be dropped
-                // (orphaned) by a failing fsync after it has been replaced.
-                let new_active = Segment::new_active(new_path, next_first_seq, new_file);
-                let old_active = std::mem::replace(&mut *active, new_active);
-                let frozen = old_active.into_sealed();
-                // The sealed-set lock is taken only for the push, never held across
-                // the append-lock release, so appenders are not serialized by GC.
-                handle.sealed.lock().await.push(frozen);
-                // Active-append lock released here.
-            }
+            return Ok(());
         }
 
         // --- GC sealed segments fully covered by the watermark ---
-        // Takes ONLY the sealed-set lock; never the active-append lock. Appends in
-        // flight to the active segment are not blocked by this deletion.
-        //
         // Every candidate is re-validated against a FRESH read of the `.applied`
         // sidecar immediately before its unlink. That re-read cannot fall below
         // the local `watermark` while the sidecar stays monotonic, so this is
         // defense-in-depth, not a live hole: it converts any future watermark
         // regression from a silent unlink into a counted, logged retention.
-        let reclaimed: Vec<PathBuf> = {
-            let revalidated = self.revalidated_watermark(partition);
-            let mut sealed = handle.sealed.lock().await;
-            // Reclaimable sealed segments are a prefix of the ascending-ordered set
-            // (oldest first), valid because sequences are monotonic and gap-free.
-            // The prefix stops at the FIRST segment the re-read does not cover:
-            // beyond it every segment is higher still, so nothing reclaimable is
-            // lost by stopping, and GC resumes on the next call.
-            let mut reclaim = 0usize;
-            for segment in sealed.iter().take_while(|s| s.max_seq() <= watermark) {
-                if let Err(err) =
-                    Self::revalidate_before_unlink(partition, segment.max_seq(), revalidated)
-                {
-                    describe_wal_watermark_metrics();
-                    metrics::counter!(
-                        WAL_GC_SKIPPED_COUNTER,
-                        "reason" => GC_SKIP_REASON_WATERMARK
-                    )
-                    .increment(1);
-                    tracing::error!(
-                        target: "topgun_server::storage::wal_watermark",
-                        partition,
-                        segment = %segment.path().display(),
-                        "{err}"
-                    );
-                    break;
-                }
-                reclaim += 1;
-            }
-            sealed
-                .drain(..reclaim)
-                .map(|s| s.path().to_path_buf())
-                .collect()
-        };
-
-        for path in &reclaimed {
-            tokio::fs::remove_file(path).await.map_err(|e| {
-                anyhow::anyhow!("Cannot unlink sealed WAL segment {}: {e}", path.display())
-            })?;
-        }
-        // A single parent-dir fsync after the unlink batch makes the reclamation
-        // durable. Per-unlink dir fsync is unnecessary: GC is resumable and replay
-        // is idempotent under the watermark filter, so a crash between unlinks is
-        // safe.
-        if !reclaimed.is_empty() {
-            fsync_dir(&self.wal_dir)?;
-        }
+        let revalidated = self.revalidated_watermark(partition);
+        let reclaimed = self
+            .select_reclaimable(partition, &handle, watermark, revalidated)
+            .await;
+        self.unlink_reclaimed(&reclaimed).await?;
 
         Ok(())
     }
@@ -1319,6 +1365,137 @@ impl Wal for WalWriter {
 }
 
 impl WalWriter {
+    /// Seals the active segment and rotates a fresh one in, if the active
+    /// segment actually holds frames.
+    ///
+    /// Sealing an empty active segment would leave a zero-length sealed file
+    /// the next append could never reach and GC would have to special-case,
+    /// so this is a no-op when the active segment is empty. Shared by both
+    /// the production `mark_applied` order and the `#[cfg(test)]`
+    /// order-inversion seam, so both exercise identical seal/rotate
+    /// behaviour and only the watermark-vs-unlink ordering differs.
+    async fn seal_and_rotate_if_needed(
+        &self,
+        partition: u32,
+        handle: &Arc<PartitionHandle>,
+    ) -> anyhow::Result<()> {
+        let mut active = handle.active.lock().await;
+        if active.has_frames() {
+            // Durably fsync the current active's data FIRST, before any swap or
+            // new-file creation. A sealed segment is non-last in the live
+            // ordering, and a torn tail on a non-last segment is fatal during
+            // recovery — so its data must be synced before it is frozen. Doing
+            // the only fallible fsync here (while the old active is still
+            // installed and no new file exists yet) means a failure leaves no
+            // orphan: returning early keeps the old active in place with no
+            // dangling new segment.
+            active.sync_data().await?;
+
+            let next_first_seq = active.max_seq().saturating_add(1);
+            let new_path = self
+                .wal_dir
+                .join(segment::format_segment_filename(partition, next_first_seq));
+            let new_file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&new_path)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("Cannot open WAL segment {}: {e}", new_path.display())
+                })?;
+            // (c) fsync the parent dir so the new active file's dir entry is
+            // durable BEFORE any append is acked to it (before this lock is
+            // released).
+            fsync_dir(&self.wal_dir)?;
+
+            // Swap in the fresh active, take the old one out to freeze it. The
+            // old segment's data was already fsynced above, so the freeze is
+            // the infallible `into_sealed` — no fallible fsync runs AFTER the
+            // swap, which guarantees the old active can never be dropped
+            // (orphaned) by a failing fsync after it has been replaced.
+            let new_active = Segment::new_active(new_path, next_first_seq, new_file);
+            let old_active = std::mem::replace(&mut *active, new_active);
+            let frozen = old_active.into_sealed();
+            // The sealed-set lock is taken only for the push, never held across
+            // the append-lock release, so appenders are not serialized by GC.
+            handle.sealed.lock().await.push(frozen);
+            // Active-append lock released here.
+        }
+        Ok(())
+    }
+
+    /// Selects the prefix of sealed segments safe to reclaim given the
+    /// locally computed `watermark` and a `revalidated` value to gate the
+    /// unlink against.
+    ///
+    /// On the production path `revalidated` is a fresh disk re-read of the
+    /// `.applied` sidecar (defense-in-depth: it cannot fall below `watermark`
+    /// once the sidecar write above has completed). The `#[cfg(test)]`
+    /// order-inversion seam instead passes the in-memory `watermark` itself,
+    /// since no durable sidecar exists yet at that point in the inverted
+    /// order — mirroring the pre-fix code that had no durable value to
+    /// re-validate against.
+    ///
+    /// Takes ONLY the sealed-set lock; never the active-append lock. Appends
+    /// in flight to the active segment are not blocked by this deletion.
+    async fn select_reclaimable(
+        &self,
+        partition: u32,
+        handle: &Arc<PartitionHandle>,
+        watermark: u64,
+        revalidated: u64,
+    ) -> Vec<PathBuf> {
+        let mut sealed = handle.sealed.lock().await;
+        // Reclaimable sealed segments are a prefix of the ascending-ordered set
+        // (oldest first), valid because sequences are monotonic and gap-free.
+        // The prefix stops at the FIRST segment the re-read does not cover:
+        // beyond it every segment is higher still, so nothing reclaimable is
+        // lost by stopping, and GC resumes on the next call.
+        let mut reclaim = 0usize;
+        for segment in sealed.iter().take_while(|s| s.max_seq() <= watermark) {
+            if let Err(err) =
+                Self::revalidate_before_unlink(partition, segment.max_seq(), revalidated)
+            {
+                describe_wal_watermark_metrics();
+                metrics::counter!(
+                    WAL_GC_SKIPPED_COUNTER,
+                    "reason" => GC_SKIP_REASON_WATERMARK
+                )
+                .increment(1);
+                tracing::error!(
+                    target: "topgun_server::storage::wal_watermark",
+                    partition,
+                    segment = %segment.path().display(),
+                    "{err}"
+                );
+                break;
+            }
+            reclaim += 1;
+        }
+        sealed
+            .drain(..reclaim)
+            .map(|s| s.path().to_path_buf())
+            .collect()
+    }
+
+    /// Unlinks the segments `select_reclaimable` selected, then fsyncs the
+    /// WAL directory once so the reclamation itself is durable.
+    ///
+    /// Per-unlink dir fsync is unnecessary: GC is resumable and replay is
+    /// idempotent under the watermark filter, so a crash between unlinks is
+    /// safe.
+    async fn unlink_reclaimed(&self, reclaimed: &[PathBuf]) -> anyhow::Result<()> {
+        for path in reclaimed {
+            tokio::fs::remove_file(path).await.map_err(|e| {
+                anyhow::anyhow!("Cannot unlink sealed WAL segment {}: {e}", path.display())
+            })?;
+        }
+        if !reclaimed.is_empty() {
+            fsync_dir(&self.wal_dir)?;
+        }
+        Ok(())
+    }
+
     /// Highest sequence this WAL has ever durably observed across **all**
     /// partitions: the max over every `.applied` sidecar watermark AND every
     /// log's max sequence.
@@ -1744,6 +1921,25 @@ impl WalWriter {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Sets the TG-WAL-003 crash-point knob (R7) `mark_applied` reads on its
+    /// next call. `GcCrashPoint::None` restores normal behaviour.
+    pub(crate) fn test_set_gc_crash_point(&self, point: GcCrashPoint) {
+        *self
+            .gc_crash_point
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = point;
+    }
+
+    /// Sets the TG-WAL-003 order-inversion knob (R6) `mark_applied` reads on
+    /// its next call. `GcOrderMode::FsyncThenUnlink` restores the production
+    /// order.
+    pub(crate) fn test_set_gc_order_mode(&self, mode: GcOrderMode) {
+        *self
+            .gc_order_mode
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = mode;
     }
 }
 
@@ -2377,6 +2573,135 @@ mod tests {
             !sealed_path.exists(),
             "GC must resume once the re-read watermark covers the segment again"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // TG-WAL-003 seams (R6/R7): GcCrashPoint and GcOrderMode wiring
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gc_crash_point_pre_unlink_ends_the_call_before_reclaiming() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap();
+
+        for seq in 1..=3u64 {
+            wal.append(0, &make_wal_entry(seq)).await.unwrap();
+        }
+        let sealed_path = dir.path().join(segment::format_segment_filename(0, 0));
+
+        wal.test_set_gc_crash_point(GcCrashPoint::PreUnlink);
+        wal.mark_applied(0, 3).await.unwrap();
+
+        // The sidecar advance happens before the injected crash point, so it
+        // must be durable even though the call returned early.
+        assert_eq!(
+            wal.test_read_applied_sequence(0),
+            3,
+            "the watermark write+fsync precedes the crash point and must be durable"
+        );
+        // The unlink loop is after the injected crash point, so the sealed
+        // segment must still be on disk.
+        assert!(
+            sealed_path.exists(),
+            "PreUnlink must end the call before the sealed segment is unlinked"
+        );
+
+        // Restoring normal behaviour lets GC resume and finish the deferred
+        // reclamation on the next call — nothing was permanently lost.
+        wal.test_set_gc_crash_point(GcCrashPoint::None);
+        wal.mark_applied(0, 3).await.unwrap();
+        assert!(
+            !sealed_path.exists(),
+            "GC must complete the deferred reclamation once the crash point is cleared"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gc_order_mode_unlink_then_fsync_bypasses_the_durable_revalidation() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap();
+
+        for seq in 1..=3u64 {
+            wal.append(0, &make_wal_entry(seq)).await.unwrap();
+        }
+        let sealed_path = dir.path().join(segment::format_segment_filename(0, 0));
+
+        // Force a stale re-read that would RETAIN the segment under the
+        // production (FsyncThenUnlink) order — proven above by
+        // `forced_watermark_regression_retains_the_sealed_segment`. The
+        // order-inversion seam has no durable sidecar to re-read at its point
+        // in the (inverted) sequence, so it must reclaim against the
+        // in-memory watermark and ignore this override entirely — that
+        // divergence is exactly the TG-WAL-003 hazard being reintroduced.
+        wal.test_force_gc_revalidation_watermark(Some(0));
+        wal.test_set_gc_order_mode(GcOrderMode::UnlinkThenFsync);
+        wal.mark_applied(0, 3).await.unwrap();
+
+        assert!(
+            !sealed_path.exists(),
+            "UnlinkThenFsync must reclaim against the in-memory watermark, \
+             not the (irrelevant, not-yet-durable) forced re-read"
+        );
+        assert_eq!(
+            wal.test_read_applied_sequence(0),
+            3,
+            "the sidecar is still made durable by the end of the call, just \
+             after the unlink instead of before it"
+        );
+
+        wal.test_force_gc_revalidation_watermark(None);
+        wal.test_set_gc_order_mode(GcOrderMode::FsyncThenUnlink);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gc_order_mode_unlink_then_fsync_plus_crash_point_leaves_stale_sidecar() {
+        // AC7(b): the genuine TG-WAL-003 loss window only exists BETWEEN the
+        // wrongly-early unlink and the deferred sidecar write. A crash the
+        // harness fires only between whole `mark_applied` calls would never
+        // observe it, because a *completed* inverted-order call still leaves
+        // both steps durable by the time it returns (proven by the sibling
+        // test above: segment gone AND sidecar at 3). This test proves the
+        // combination of `UnlinkThenFsync` + `GcCrashPoint::PreUnlink` lands
+        // the crash inside that window instead: segment gone, sidecar STILL
+        // at its old value.
+        let dir = tempfile::tempdir().unwrap();
+        let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap();
+
+        for seq in 1..=3u64 {
+            wal.append(0, &make_wal_entry(seq)).await.unwrap();
+        }
+        let sealed_path = dir.path().join(segment::format_segment_filename(0, 0));
+        assert_eq!(
+            wal.test_read_applied_sequence(0),
+            0,
+            "no watermark has been recorded yet"
+        );
+
+        wal.test_set_gc_order_mode(GcOrderMode::UnlinkThenFsync);
+        wal.test_set_gc_crash_point(GcCrashPoint::PreUnlink);
+        wal.mark_applied(0, 3).await.unwrap();
+
+        assert!(
+            !sealed_path.exists(),
+            "the inverted order unlinks BEFORE the deferred sidecar write, so the \
+             segment must already be gone at the (post-unlink) crash point"
+        );
+        assert_eq!(
+            wal.test_read_applied_sequence(0),
+            0,
+            "the crash point fires before the deferred sidecar write, so the \
+             sidecar must still be at its OLD value — the exact TG-WAL-003 \
+             hazard: a restart seeded from this stale watermark under-seeds \
+             max_observed_sequence for the now-vanished segment's frames"
+        );
+
+        // Contrast: the production order under the SAME crash point leaves
+        // the sidecar durable and the segment retained (proven by
+        // `gc_crash_point_pre_unlink_ends_the_call_before_reclaiming` above)
+        // — the inversion, not the crash point alone, is what produces the
+        // inconsistent on-disk state.
+        wal.test_set_gc_order_mode(GcOrderMode::FsyncThenUnlink);
+        wal.test_set_gc_crash_point(GcCrashPoint::None);
     }
 
     #[tokio::test(flavor = "multi_thread")]

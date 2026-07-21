@@ -42,8 +42,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Violation consequence:** an unbounded loss window under the default policy — the documented
   trade-off silently becomes a lie.
 - **Discovered by:** extraction pilot audit 2026-07-16; fsync-tier asymmetry noted vs TiKV.
-- **Status:** decided (gap intentional), **enforcement NAKED (TODO-602; harness TODO-597 is the
-  natural vehicle — a Batched-policy fault schedule)**.
+- **Status:** decided (gap intentional), **enforcement NAKED (TODO-602; the natural vehicle is
+  SPEC-352b / TODO-603 — a Batched-policy truncate-to-durable-frontier fault schedule, which the
+  in-process crash harness deliberately does not model)**.
 
 ### TG-WAL-003: The applied watermark is durably fsynced before any sealed segment is unlinked
 
@@ -53,14 +54,16 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   idempotent under the watermark filter).
 - **Maintaining code:** `wal/mod.rs` `mark_applied` (fsync-before-unlink block + apply-time
   re-validation before physical delete, SPEC-350).
-- **Enforcing test:** partially enforced —
-  `packages/server-rust/src/storage/datastores/prefix_watermark_proptest.rs` (SPEC-350) drives
-  GC gating + boot seeding across incarnations; the precise crash injection BETWEEN the sidecar
-  fsync and the unlink loop remains `NAKED (TODO-597 harness target)`.
+- **Enforcing test:** `wal_harness/cases.rs::ac7_tg_wal_003_gc_crash_point_both_directions` —
+  drives the real `mark_applied` with a crash injected BETWEEN the sidecar fsync and the unlink
+  loop: the production `FsyncThenUnlink` order loses nothing and recovery replays every
+  acked-but-unapplied frame, while the inverted `UnlinkThenFsync` order (post-unlink/pre-fsync
+  crash) loses data — the both-directions proof. `prefix_watermark_proptest.rs` (SPEC-350) also
+  drives GC gating + boot seeding across incarnations.
 - **Violation consequence:** under-seeded `max_observed_sequence` on restart → sequence reuse →
   recovery filter silently drops frames.
-- **Discovered by:** SPEC-330 era; hardened by SPEC-350.
-- **Status:** decided; enforcement partial (crash-point injection open).
+- **Discovered by:** SPEC-330 era; hardened by SPEC-350; crash-point injection proved by SPEC-352.
+- **Status:** decided, **enforced** (crash-point injection closed by the harness).
 
 ### TG-WAL-005: The per-partition applied watermark is prefix-complete across incarnations
 
@@ -73,6 +76,8 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   boot seeding; unseeded-refuse guard.
 - **Enforcing test:** `prefix_watermark_proptest.rs` — restart-crossing proptest; both loss-guards
   (unseeded-refuse, seed-retry) verified by revert during review (fail on pre-fix code).
+  Generatively re-enforced by `wal_harness/cases.rs::ac4_c3_scalar_max_watermark_regression`
+  (the C3 scalar-max over-advance, found from generated crash/recover sequences).
 - **Violation consequence:** the SPEC-350 headline defect — acked writes of one key silently
   dropped from replay because another key's flush advanced a scalar watermark past them.
 - **Discovered by:** SPEC-349 Audit v2 (three independent derivations).
@@ -137,10 +142,28 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   assign+track is atomic under one lock (the mid-range-hole guard).
 - **Maintaining code:** `write_behind.rs` `assign_tracked_sequence` + `resolve_pending`.
 - **Enforcing test:** `write_behind.rs::ac3c_flushed_watermark_prefix_complete_never_exposes_hole`
-  + surrounding block (coalesce-resolves-a-hole, prune-frontier-stall regression).
+  + surrounding block (coalesce-resolves-a-hole, prune-frontier-stall regression). Additionally
+  exercised by the `wal_harness` frame oracle (O2) via `ac3_ac14_baseline_coverage_and_timing`.
 - **Violation consequence:** a tombstone pruned while its bytes are still RAM-only → resurrection
   after crash.
 - **Discovered by:** SPEC-330.
+- **Status:** decided, **enforced**.
+
+### TG-WB-002: A crash rebuilds write-behind pending state solely from the durable WAL
+
+- **Scope:** `WriteBehindDataStore` boot / `ensure_wal_seeded` across an incarnation boundary.
+- **Statement:** an unclean crash discards ALL in-memory write-behind state (staging buffer,
+  pending tracker, in-flight registry, seeded-partition set); the next incarnation reconstructs its
+  pending/seeded state EXCLUSIVELY from `wal.unapplied(p)`, so no acked write depends on any
+  in-memory structure surviving the crash. A partition boots empty and seeds lazily on first access.
+- **Maintaining code:** `write_behind.rs` boot seeding (`ensure_wal_seeded` from `wal.unapplied`).
+- **Enforcing test:** `wal_harness/cases.rs::ac2_crash_destroys_in_memory_state` asserts every
+  non-first incarnation boots with an empty pending tracker before any op runs;
+  `ac5_c12_empty_boot_seed_regression` proves the harness detects the blind-boot violation from
+  generated cross-incarnation sequences, with a single-incarnation negative control.
+- **Violation consequence:** a restart that trusts stale/absent in-memory state → the pending
+  tracker boots blind, the watermark advances past un-applied frames, acked writes are lost (C12).
+- **Discovered by:** SPEC-352 harness (built alongside the TG-WAL-003 crash-injection work).
 - **Status:** decided, **enforced**.
 
 ### TG-EVI-001: Never-evict-dirty — an unflushed write is never evicted from the resident cache
@@ -189,8 +212,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   base and snapshot frames as in-order absolute-set inputs.
 - **Maintaining code:** types + oracle landed (SPEC-346); fold delegates to the live apply path
   (single-algebra rule, SPEC-349 R-mandate).
-- **Enforcing test:** `NAKED by the code's own admission — the doc names a differential recovery
-  test that does not exist yet (SPEC-349b + TODO-597 harness)`.
+- **Enforcing test:** `NAKED — the OR delta-fold differential recovery proof does not exist yet.
+  It lands as a case on the cross-incarnation harness
+  (packages/server-rust/src/storage/datastores/wal_harness/), driven by SPEC-349b — not a fork`.
 - **Violation consequence:** silent post-crash divergence of OR state — the class the oracle was
   built to kill.
 - **Discovered by:** SPEC-346 design.
