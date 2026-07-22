@@ -1112,14 +1112,21 @@ impl Driver {
             // writes for a key. Off by default; enabled explicitly for the
             // closing-evidence and regression runs.
             //
-            // Soundness coupling (do not break in `lww()`): comparing millis alone is
-            // sound ONLY because `lww(millis)` makes value a pure function of millis
-            // and fixes `counter:0`/`node_id:""`, so full-`Timestamp` order collapses
-            // to millis order and equal millis implies an identical value. A future
-            // generator that emits distinct values at equal millis, or varies
-            // counter/node_id, would let an equal-millis different-value clobber slip
-            // this strictly-older check — the oracle would then need the same
-            // full-`Timestamp` compare the gate uses.
+            // Soundness domain (two constraints, both currently satisfied):
+            //  1. Value coupling (do not break in `lww()`): comparing millis alone is
+            //     sound only because `lww(millis)` makes value a pure function of millis
+            //     and fixes `counter:0`/`node_id:""`, so full-`Timestamp` order collapses
+            //     to millis order and equal millis implies an identical value. A generator
+            //     that emitted distinct values at equal millis, or varied counter/node_id,
+            //     would let an equal-millis different-value clobber slip this check.
+            //  2. Reference point: `expected` is the model's LATEST-ARRIVAL millis, which
+            //     equals the true LWW winner (max timestamp) only when a key's writes are
+            //     MONOTONE in arrival order — as production HLC always is, and as the sole
+            //     `value_equality: true` case (`ac4_5_...`) is by construction. If a defect
+            //     run ever used a non-monotone key (arrival 20, 30, 10) a clobber landing in
+            //     `[latest_arrival, max_acked)` (e.g. recovered 20 vs latest-arrival 10)
+            //     would slip the strictly-older check. Making the oracle sound for
+            //     non-monotone defect runs needs a per-key max-live-millis reference.
             if self.config.oracle.value_equality {
                 if let (
                     ModelValue::Live { millis: expected },
