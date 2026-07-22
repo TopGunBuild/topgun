@@ -736,7 +736,11 @@ impl Driver {
 
         // Apply the run's defect seams (R6).
         match self.config.defect {
-            DefectMode::None | DefectMode::UnlinkThenFsync => {}
+            // `ReplayClobberOlderFrame` is a recovery-side seam (see `recover`),
+            // so it installs nothing on the store.
+            DefectMode::None
+            | DefectMode::UnlinkThenFsync
+            | DefectMode::ReplayClobberOlderFrame => {}
             DefectMode::ScalarMaxWatermark => {
                 store.test_set_watermark_mode(WatermarkMode::ScalarMax);
             }
@@ -1086,13 +1090,8 @@ impl Driver {
                 continue;
             };
             let key_str = self.key_strings[usize::from(key) % self.key_strings.len()].clone();
-            let present = self
-                .inner
-                .load(TEST_MAP, &key_str)
-                .await
-                .ok()
-                .flatten()
-                .is_some();
+            let loaded = self.inner.load(TEST_MAP, &key_str).await.ok().flatten();
+            let present = loaded.is_some();
             let violated = match value {
                 ModelValue::Live { .. } => !present,
                 ModelValue::Tombstone => present,
@@ -1101,6 +1100,51 @@ impl Driver {
                 self.outcome
                     .violations
                     .push(InvariantViolation::AckedWriteLost { key, incarnation });
+            }
+
+            // value_equality oracle (opt-in, R5): a present acked-live value must
+            // NOT carry a timestamp OLDER than the model's latest acked HLC millis.
+            // A stale re-replay clobber resurrects an older durable value — the exact
+            // regression TG-WAL-006's fix prevents. Only a strictly-older recovered
+            // timestamp is flagged: a recovered value NEWER than the model's
+            // last-arrival is the LWW-by-timestamp winner (never data loss), so it
+            // must not false-positive when the generator emits out-of-timestamp-order
+            // writes for a key. Off by default; enabled explicitly for the
+            // closing-evidence and regression runs.
+            //
+            // Soundness domain (two constraints, both currently satisfied):
+            //  1. Value coupling (do not break in `lww()`): comparing millis alone is
+            //     sound only because `lww(millis)` makes value a pure function of millis
+            //     and fixes `counter:0`/`node_id:""`, so full-`Timestamp` order collapses
+            //     to millis order and equal millis implies an identical value. A generator
+            //     that emitted distinct values at equal millis, or varied counter/node_id,
+            //     would let an equal-millis different-value clobber slip this check.
+            //  2. Reference point: `expected` is the model's LATEST-ARRIVAL millis, which
+            //     equals the true LWW winner (max timestamp) only when a key's writes are
+            //     MONOTONE in arrival order — as production HLC always is, and as the sole
+            //     `value_equality: true` case (`ac4_5_...`) is by construction. If a defect
+            //     run ever used a non-monotone key (arrival 20, 30, 10) a clobber landing in
+            //     `[latest_arrival, max_acked)` (e.g. recovered 20 vs latest-arrival 10)
+            //     would slip the strictly-older check. Making the oracle sound for
+            //     non-monotone defect runs needs a per-key max-live-millis reference.
+            if self.config.oracle.value_equality {
+                if let (
+                    ModelValue::Live { millis: expected },
+                    Some(RecordValue::Lww { timestamp, .. }),
+                ) = (&value, &loaded)
+                {
+                    let recovered = i64::try_from(timestamp.millis).unwrap_or(i64::MAX);
+                    if recovered < *expected {
+                        self.outcome
+                            .violations
+                            .push(InvariantViolation::AckedValueMismatch {
+                                key,
+                                incarnation,
+                                expected_millis: *expected,
+                                recovered_millis: recovered,
+                            });
+                    }
+                }
             }
         }
     }
@@ -1140,7 +1184,15 @@ impl Driver {
     /// partition unresolved view to match the empty post-recovery pending map.
     /// `next_incarnation` is the index the loss surfaces at (for the O1 record).
     async fn recover(&mut self, next_incarnation: usize) {
-        let _ = WalRecovery::new(Arc::clone(&self.wal), vec![self.partition])
+        let mut recovery = WalRecovery::new(Arc::clone(&self.wal), vec![self.partition]);
+        // `ReplayClobberOlderFrame` reproduces the pre-`TG-WAL-006` blind clobber:
+        // disable the merge gate AND re-replay each partition's oldest un-applied
+        // frame over the newer durable value the in-order pass left behind.
+        if self.config.defect == DefectMode::ReplayClobberOlderFrame {
+            recovery.test_set_replay_merge_gate(false);
+            recovery.test_set_re_replay_oldest_frame(true);
+        }
+        let _ = recovery
             .run(Arc::clone(&self.inner) as Arc<dyn MapDataStore>)
             .await;
 
@@ -1165,6 +1217,12 @@ thread_local! {
 }
 
 /// Builds an LWW record carrying `millis` as both the value and the timestamp.
+///
+/// Load-bearing for the `value_equality` oracle's soundness: value MUST stay a pure
+/// function of `millis`, and `counter`/`node_id` MUST stay constant. The oracle
+/// compares `millis` alone; if value stopped tracking `millis`, or `counter`/`node_id`
+/// varied, an equal-millis different-value clobber would slip its strictly-older
+/// check (see the soundness-coupling note at the oracle in `evaluate_o1`).
 fn lww(millis: i64) -> RecordValue {
     RecordValue::Lww {
         value: Value::Int(millis),

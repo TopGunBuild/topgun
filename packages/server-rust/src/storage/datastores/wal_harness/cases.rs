@@ -548,9 +548,9 @@ fn ac14e_coverage_guard_discriminates_below_floor() {
 // AC11 — value-equality oracle stays off by default
 // ---------------------------------------------------------------------------
 
-/// The default oracle config keeps value equality OFF, so it cannot be silently
-/// flipped on and start firing REDs on the known-not-merge-idempotent replay
-/// behaviour (`TG-WAL-006` / `TODO-598`).
+/// The value-equality oracle stays OFF by default (opt-in per run): `TG-WAL-006`
+/// is enforced LWW-scoped, but the oracle is enabled explicitly only for the
+/// closing-evidence and regression runs, never silently for every case.
 #[test]
 fn ac11_value_equality_defaults_off() {
     assert!(!OracleConfig::default().value_equality);
@@ -636,6 +636,91 @@ fn ac4_c3_scalar_max_watermark_regression() {
     assert!(
         none.is_none(),
         "AC4(d): discriminator — DefectMode::None must yield zero AckedWriteLost, got {none:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AC4 / AC5 — TG-WAL-006 replay-clobber proof via the value_equality oracle
+// ---------------------------------------------------------------------------
+
+/// `DefectMode::ReplayClobberOlderFrame` (the pre-`TG-WAL-006` blind clobber) must
+/// be CAUGHT by the `value_equality` oracle as an `AckedValueMismatch` naming the
+/// key and the (expected, recovered) millis (AC4); and the identical case on the
+/// fixed path (`DefectMode::None`, gate on, no re-replay) must be GREEN under the
+/// same opt-in oracle (AC5 — the closing evidence SPEC-352's `OracleConfig`
+/// doc-comment names).
+///
+/// The case writes key 0 twice, timestamp-monotonic (ts=10 then ts=20). The FIRST
+/// write's flush is rejected (store unhealthy) so its sequence strands un-applied
+/// and holds the partition watermark back; the SECOND write flushes durably (ts=20)
+/// but its frame therefore ALSO stays un-applied. At recovery both frames replay
+/// in order (leaving ts=20 durable), then the seam re-replays the oldest (ts=10)
+/// frame over it — the older-frame-in-window condition the live `flush_key` path
+/// can produce but generated ops cannot manufacture (flush persists the watermark).
+/// Monotonic timestamps keep the last-arrival model and the LWW gate in agreement,
+/// so the oracle is sound.
+#[test]
+fn ac4_5_replay_clobber_caught_by_value_equality_oracle() {
+    let case: Case = vec![
+        Incarnation {
+            ops: vec![
+                WorkOp::Append { key: 0, millis: 10 },
+                WorkOp::SetStoreHealth { healthy: false },
+                WorkOp::FlushTick { advance_ms: 5_000 },
+                WorkOp::SetStoreHealth { healthy: true },
+                WorkOp::Append { key: 0, millis: 20 },
+                WorkOp::FlushTick { advance_ms: 5_000 },
+            ],
+            end: IncarnationEnd::Crash,
+        },
+        Incarnation {
+            ops: vec![WorkOp::Read { key: 0 }],
+            end: IncarnationEnd::CleanShutdown,
+        },
+    ];
+
+    let value_eq = OracleConfig {
+        value_equality: true,
+    };
+
+    // (a) defect present: the oracle catches the clobber, naming key/expected/recovered.
+    let defect_cfg = RunConfig {
+        defect: DefectMode::ReplayClobberOlderFrame,
+        oracle: value_eq,
+        ..RunConfig::baseline()
+    };
+    let defect_outcome = block_on_async(run_case(&case, &defect_cfg));
+    let mismatch = defect_outcome.violations.iter().find_map(|v| match v {
+        InvariantViolation::AckedValueMismatch {
+            key,
+            expected_millis,
+            recovered_millis,
+            ..
+        } => Some((*key, *expected_millis, *recovered_millis)),
+        _ => None,
+    });
+    assert_eq!(
+        mismatch,
+        Some((0, 20, 10)),
+        "AC4: value_equality must catch the replay clobber (key 0, expected 20, recovered 10); \
+         got violations {:?}",
+        defect_outcome.violations
+    );
+
+    // (b) discriminator: the fixed path is GREEN of any value mismatch (AC5).
+    let fixed_cfg = RunConfig {
+        defect: DefectMode::None,
+        oracle: value_eq,
+        ..RunConfig::baseline()
+    };
+    let fixed_outcome = block_on_async(run_case(&case, &fixed_cfg));
+    assert!(
+        !fixed_outcome
+            .violations
+            .iter()
+            .any(|v| matches!(v, InvariantViolation::AckedValueMismatch { .. })),
+        "AC5: the fixed path must report no AckedValueMismatch under value_equality; got {:?}",
+        fixed_outcome.violations
     );
 }
 
