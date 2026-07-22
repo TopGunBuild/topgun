@@ -166,6 +166,13 @@ pub(crate) enum DefectMode {
     /// Re-introduces the `TG-WAL-003` hazard via `wal/mod.rs`'s new
     /// `GcOrderMode::UnlinkThenFsync` seam.
     UnlinkThenFsync,
+    /// Re-introduces the pre-`TG-WAL-006` recovery clobber via `wal/mod.rs`'s
+    /// `WalRecovery` test seams: the `RecordValue::Lww` merge gate is disabled
+    /// (blind replay) AND each partition's oldest un-applied frame is re-replayed
+    /// once more after the in-order pass — reproducing "an older frame is
+    /// re-applied over a newer durable value". Caught by the `value_equality`
+    /// oracle as an `AckedValueMismatch`.
+    ReplayClobberOlderFrame,
 }
 
 /// `wal/mod.rs::mark_applied` crash-injection point (R7), fired between the sidecar write+fsync
@@ -191,12 +198,17 @@ pub(crate) enum BootSeedMode {
 
 /// Which oracles are active for a run (R5).
 ///
-/// `value_equality` gates a byte-for-byte equality check between the model's acked value and the
-/// recovered value, layered on top of O1/O2. It defaults to `false` because `TG-WAL-006` (open,
-/// tracked as `TODO-598`) records that `RedbDataStore::write_one` is a blind insert with no
-/// read-compare merge — WAL re-replay is NOT merge-idempotent today. Turning this on before
-/// `TODO-598` lands would fire REDs on known, tracked behaviour rather than new defects; flipping it
-/// to `true` (with the suite still green) IS `TODO-598`'s closing evidence.
+/// `value_equality` gates an equality check between the model's latest acked value (its HLC
+/// millis) and the recovered value's `RecordValue::Lww` timestamp, layered on top of O1/O2. When on,
+/// a recovered value whose timestamp does not match the model's latest acked write is reported as an
+/// `AckedValueMismatch` — the shape a stale re-replay clobber produces.
+///
+/// It defaults to `false` deliberately: the equality oracle is opt-in per run, and
+/// `ac11_value_equality_defaults_off` guards that `OracleConfig::default()` never silently enables
+/// it. `TG-WAL-006` is now enforced (LWW-scoped): `WalRecovery::replay_entry` discards a modern Lww
+/// frame older than the current durable value, so the baseline suite is GREEN with this flag turned
+/// on — that green run is the closing evidence the invariant refers to. `DefectMode::ReplayClobberOlderFrame`
+/// re-introduces the pre-fix blind clobber and IS caught by this oracle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct OracleConfig {
     pub value_equality: bool,
@@ -333,5 +345,17 @@ pub(crate) enum InvariantViolation {
     SegmentUnlinkedBeforeWatermarkFsync {
         partition: PartitionId,
         sequence: Sequence,
+    },
+
+    /// `TG-WAL-006`: the recovered `RecordValue::Lww` value for `key` carries a timestamp STRICTLY
+    /// OLDER than the model's latest acked HLC millis — a stale re-replayed frame clobbered a newer
+    /// durable value. Only reported when the `value_equality` oracle is enabled. A recovered value
+    /// newer than the model's last-arrival is the LWW winner and is NOT flagged. Carries the
+    /// incarnation the mismatch surfaced at, the model's expected millis, and the recovered millis.
+    AckedValueMismatch {
+        key: Key,
+        incarnation: usize,
+        expected_millis: i64,
+        recovered_millis: i64,
     },
 }

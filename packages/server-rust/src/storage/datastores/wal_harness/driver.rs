@@ -736,7 +736,11 @@ impl Driver {
 
         // Apply the run's defect seams (R6).
         match self.config.defect {
-            DefectMode::None | DefectMode::UnlinkThenFsync => {}
+            // `ReplayClobberOlderFrame` is a recovery-side seam (see `recover`),
+            // so it installs nothing on the store.
+            DefectMode::None
+            | DefectMode::UnlinkThenFsync
+            | DefectMode::ReplayClobberOlderFrame => {}
             DefectMode::ScalarMaxWatermark => {
                 store.test_set_watermark_mode(WatermarkMode::ScalarMax);
             }
@@ -1086,13 +1090,8 @@ impl Driver {
                 continue;
             };
             let key_str = self.key_strings[usize::from(key) % self.key_strings.len()].clone();
-            let present = self
-                .inner
-                .load(TEST_MAP, &key_str)
-                .await
-                .ok()
-                .flatten()
-                .is_some();
+            let loaded = self.inner.load(TEST_MAP, &key_str).await.ok().flatten();
+            let present = loaded.is_some();
             let violated = match value {
                 ModelValue::Live { .. } => !present,
                 ModelValue::Tombstone => present,
@@ -1101,6 +1100,35 @@ impl Driver {
                 self.outcome
                     .violations
                     .push(InvariantViolation::AckedWriteLost { key, incarnation });
+            }
+
+            // value_equality oracle (opt-in, R5): a present acked-live value must
+            // NOT carry a timestamp OLDER than the model's latest acked HLC millis.
+            // A stale re-replay clobber resurrects an older durable value — the exact
+            // regression TG-WAL-006's fix prevents. Only a strictly-older recovered
+            // timestamp is flagged: a recovered value NEWER than the model's
+            // last-arrival is the LWW-by-timestamp winner (never data loss), so it
+            // must not false-positive when the generator emits out-of-timestamp-order
+            // writes for a key. Off by default; enabled explicitly for the
+            // closing-evidence and regression runs.
+            if self.config.oracle.value_equality {
+                if let (
+                    ModelValue::Live { millis: expected },
+                    Some(RecordValue::Lww { timestamp, .. }),
+                ) = (&value, &loaded)
+                {
+                    let recovered = i64::try_from(timestamp.millis).unwrap_or(i64::MAX);
+                    if recovered < *expected {
+                        self.outcome
+                            .violations
+                            .push(InvariantViolation::AckedValueMismatch {
+                                key,
+                                incarnation,
+                                expected_millis: *expected,
+                                recovered_millis: recovered,
+                            });
+                    }
+                }
             }
         }
     }
@@ -1140,7 +1168,15 @@ impl Driver {
     /// partition unresolved view to match the empty post-recovery pending map.
     /// `next_incarnation` is the index the loss surfaces at (for the O1 record).
     async fn recover(&mut self, next_incarnation: usize) {
-        let _ = WalRecovery::new(Arc::clone(&self.wal), vec![self.partition])
+        let mut recovery = WalRecovery::new(Arc::clone(&self.wal), vec![self.partition]);
+        // `ReplayClobberOlderFrame` reproduces the pre-`TG-WAL-006` blind clobber:
+        // disable the merge gate AND re-replay each partition's oldest un-applied
+        // frame over the newer durable value the in-order pass left behind.
+        if self.config.defect == DefectMode::ReplayClobberOlderFrame {
+            recovery.test_set_replay_merge_gate(false);
+            recovery.test_set_re_replay_oldest_frame(true);
+        }
+        let _ = recovery
             .run(Arc::clone(&self.inner) as Arc<dyn MapDataStore>)
             .await;
 

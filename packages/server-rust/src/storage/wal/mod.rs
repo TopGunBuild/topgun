@@ -1597,6 +1597,17 @@ pub struct WalRecovery {
     wal: Arc<WalWriter>,
     /// Partition IDs to recover. If empty, all log files in `wal_dir` are used.
     partitions: Vec<u32>,
+    /// Whether the `RecordValue::Lww` merge-idempotency gate in `replay_entry` is
+    /// active. Always `true` in production; the harness flips it off to reproduce
+    /// the pre-`TG-WAL-006` blind clobber.
+    replay_merge_gate: bool,
+    /// Whether `run` re-replays each partition's oldest un-applied frame once more
+    /// after the in-order pass — a harness seam that manufactures the "older frame
+    /// re-applied over a newer durable value" condition the live `flush_key` path
+    /// produces but generated ops cannot. `#[cfg(test)]`-only: it does not exist in
+    /// a production build.
+    #[cfg(test)]
+    re_replay_oldest_frame: bool,
 }
 
 impl WalRecovery {
@@ -1604,7 +1615,28 @@ impl WalRecovery {
     /// partition IDs. Pass an empty slice to auto-discover partitions from the
     /// log files in `wal_dir`.
     pub fn new(wal: Arc<WalWriter>, partitions: Vec<u32>) -> Self {
-        Self { wal, partitions }
+        Self {
+            wal,
+            partitions,
+            replay_merge_gate: true,
+            #[cfg(test)]
+            re_replay_oldest_frame: false,
+        }
+    }
+
+    /// Test-only: disable (or re-enable) the `RecordValue::Lww` merge gate in
+    /// `replay_entry`. Disabling it reproduces the pre-`TG-WAL-006` blind replay.
+    #[cfg(test)]
+    pub(crate) fn test_set_replay_merge_gate(&mut self, enabled: bool) {
+        self.replay_merge_gate = enabled;
+    }
+
+    /// Test-only: after the in-order replay pass, re-replay each partition's oldest
+    /// un-applied frame once more — the harness seam that reproduces a stale
+    /// re-replay over a newer durable value.
+    #[cfg(test)]
+    pub(crate) fn test_set_re_replay_oldest_frame(&mut self, enabled: bool) {
+        self.re_replay_oldest_frame = enabled;
     }
 
     /// Discovers partition IDs by scanning `wal_dir` for segment files
@@ -1659,6 +1691,7 @@ impl WalRecovery {
         inner_store: &Arc<dyn MapDataStore>,
         entry: &WalEntry,
         now: i64,
+        merge_gate: bool,
     ) -> anyhow::Result<()> {
         match &entry.op {
             WalOp::Store {
@@ -1692,18 +1725,22 @@ impl WalRecovery {
                 // the replay window) and must be discarded rather than clobber it.
                 // Legacy frames, OR frames, and a non-Lww stored value all fall
                 // through to the blind replay unchanged (see the doc-contract above).
-                if let WalStorePayload::Record(RecordValue::Lww {
-                    timestamp: incoming_ts,
-                    ..
-                }) = value
-                {
-                    if let Some(RecordValue::Lww {
-                        timestamp: stored_ts,
+                // `merge_gate` is always `true` in production; the harness flips it
+                // off to reproduce the pre-fix blind clobber.
+                if merge_gate {
+                    if let WalStorePayload::Record(RecordValue::Lww {
+                        timestamp: incoming_ts,
                         ..
-                    }) = inner_store.load(&entry.map, &entry.key).await?
+                    }) = value
                     {
-                        if *incoming_ts < stored_ts {
-                            return Ok(());
+                        if let Some(RecordValue::Lww {
+                            timestamp: stored_ts,
+                            ..
+                        }) = inner_store.load(&entry.map, &entry.key).await?
+                        {
+                            if *incoming_ts < stored_ts {
+                                return Ok(());
+                            }
                         }
                     }
                 }
@@ -1810,7 +1847,7 @@ impl WalRecovery {
             let now = current_millis();
 
             for entry in &entries {
-                match Self::replay_entry(&inner_store, entry, now).await {
+                match Self::replay_entry(&inner_store, entry, now, self.replay_merge_gate).await {
                     Ok(()) => {
                         // Only a success that is still contiguous with the prefix
                         // may advance the frontier. Once an entry has failed, later
@@ -1837,6 +1874,22 @@ impl WalRecovery {
                         );
                         first_failed.get_or_insert(entry.sequence);
                     }
+                }
+            }
+
+            // Harness-only seam: re-replay the oldest un-applied frame once more,
+            // AFTER the in-order pass has left the newest value durable. This
+            // reproduces the stale re-replay the live `flush_key` path can cause
+            // (an older frame lingering in the replay window over a frameless newer
+            // durable write) — a condition generated ops cannot manufacture because
+            // in-order replay always ends on the newest frame. With the merge gate
+            // on (production) the re-replayed older frame is discarded; with it off
+            // it clobbers, which the `value_equality` oracle catches.
+            #[cfg(test)]
+            if self.re_replay_oldest_frame {
+                if let Some(oldest) = entries.first() {
+                    let _ =
+                        Self::replay_entry(&inner_store, oldest, now, self.replay_merge_gate).await;
                 }
             }
 
@@ -2186,6 +2239,311 @@ mod tests {
             timestamp: Some(timestamp),
             sequence: seq,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // TG-WAL-006 — replay merge-idempotency (LWW-scoped) direct unit tests
+    // -----------------------------------------------------------------------
+
+    /// A load-serving in-memory `MapDataStore`: unlike `ReplayStore` (records-only,
+    /// `load` returns `None`), this serves back what was last written so the
+    /// `replay_entry` merge gate can read the current durable value.
+    #[derive(Default)]
+    struct MergeProbeStore {
+        data: tokio::sync::Mutex<
+            std::collections::HashMap<(String, String), crate::storage::record::RecordValue>,
+        >,
+    }
+
+    #[async_trait]
+    impl MapDataStore for MergeProbeStore {
+        async fn add(
+            &self,
+            map: &str,
+            key: &str,
+            value: &crate::storage::record::RecordValue,
+            _exp: i64,
+            _now: i64,
+        ) -> anyhow::Result<()> {
+            self.data
+                .lock()
+                .await
+                .insert((map.to_string(), key.to_string()), value.clone());
+            Ok(())
+        }
+        async fn add_backup(
+            &self,
+            _map: &str,
+            _key: &str,
+            _value: &crate::storage::record::RecordValue,
+            _exp: i64,
+            _now: i64,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn remove(&self, map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
+            self.data
+                .lock()
+                .await
+                .remove(&(map.to_string(), key.to_string()));
+            Ok(())
+        }
+        async fn remove_backup(&self, _map: &str, _key: &str, _now: i64) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn load(
+            &self,
+            map: &str,
+            key: &str,
+        ) -> anyhow::Result<Option<crate::storage::record::RecordValue>> {
+            Ok(self
+                .data
+                .lock()
+                .await
+                .get(&(map.to_string(), key.to_string()))
+                .cloned())
+        }
+        async fn load_all(
+            &self,
+            _map: &str,
+            _keys: &[String],
+        ) -> anyhow::Result<Vec<(String, crate::storage::record::RecordValue)>> {
+            Ok(Vec::new())
+        }
+        async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+            for k in keys {
+                self.remove(map, k, 0).await?;
+            }
+            Ok(())
+        }
+        async fn enumerate_leaves(
+            &self,
+            _map: &str,
+            _is_backup: bool,
+            _sink: &mut dyn crate::storage::map_data_store::LeafSink,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn scan_values(
+            &self,
+            _map: &str,
+            _is_backup: bool,
+            _max_batch_cost: u64,
+        ) -> anyhow::Result<crate::storage::map_data_store::ScanBatch> {
+            Ok(crate::storage::map_data_store::ScanBatch::default())
+        }
+        async fn scan_values_batched(
+            &self,
+            _map: &str,
+            _is_backup: bool,
+            _cursor: crate::storage::map_data_store::ScanCursor,
+            _max_batch_cost: u64,
+        ) -> anyhow::Result<crate::storage::map_data_store::ScanBatch> {
+            Ok(crate::storage::map_data_store::ScanBatch::default())
+        }
+        fn is_loadable(&self, _key: &str) -> bool {
+            true
+        }
+        fn pending_operation_count(&self) -> u64 {
+            0
+        }
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            Ok(0)
+        }
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn flush_key(
+            &self,
+            _map: &str,
+            _key: &str,
+            _value: &crate::storage::record::RecordValue,
+            _backup: bool,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn reset(&self) {}
+        fn is_null(&self) -> bool {
+            false
+        }
+    }
+
+    fn ts(millis: u64) -> Timestamp {
+        Timestamp {
+            millis,
+            counter: 0,
+            node_id: "n".to_string(),
+        }
+    }
+
+    fn lww_frame(key: &str, millis: u64) -> WalEntry {
+        WalEntry {
+            map: "m".to_string(),
+            key: key.to_string(),
+            op: WalOp::Store {
+                value: WalStorePayload::Record(RecordValue::Lww {
+                    value: TgValue::Int(i64::try_from(millis).unwrap()),
+                    timestamp: ts(millis),
+                }),
+                expiration_time: None,
+            },
+            timestamp: None,
+            sequence: 1,
+        }
+    }
+
+    fn record_frame(key: &str, value: RecordValue) -> WalEntry {
+        WalEntry {
+            map: "m".to_string(),
+            key: key.to_string(),
+            op: WalOp::Store {
+                value: WalStorePayload::Record(value),
+                expiration_time: None,
+            },
+            timestamp: None,
+            sequence: 1,
+        }
+    }
+
+    async fn load_millis(store: &Arc<dyn MapDataStore>, key: &str) -> Option<u64> {
+        match store.load("m", key).await.unwrap() {
+            Some(RecordValue::Lww { timestamp, .. }) => Some(timestamp.millis),
+            _ => None,
+        }
+    }
+
+    /// TG-WAL-006: the `RecordValue::Lww` gate in `replay_entry` discards a frame
+    /// OLDER than the current durable value, writes through ties/newer, and — with
+    /// the gate off — reproduces the pre-fix blind clobber. This isolates the GATE
+    /// as the fix (independent of the harness's re-replay seam).
+    #[tokio::test]
+    async fn replay_lww_gate_discards_older_frame_isolated() {
+        let store: Arc<dyn MapDataStore> = Arc::new(MergeProbeStore::default());
+        let newer = RecordValue::Lww {
+            value: TgValue::Int(20),
+            timestamp: ts(20),
+        };
+
+        // Gate ON: an older (ts=10) frame over a newer (ts=20) durable value is discarded.
+        store.add("m", "k", &newer, 0, 0).await.unwrap();
+        WalRecovery::replay_entry(&store, &lww_frame("k", 10), 0, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            load_millis(&store, "k").await,
+            Some(20),
+            "gate ON must discard the older frame (no clobber)"
+        );
+
+        // Gate ON: a newer (ts=30) frame writes through.
+        WalRecovery::replay_entry(&store, &lww_frame("k", 30), 0, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            load_millis(&store, "k").await,
+            Some(30),
+            "gate ON must let a newer frame write through"
+        );
+
+        // Gate ON: an equal-timestamp frame writes through (ties, not strictly older).
+        WalRecovery::replay_entry(&store, &lww_frame("k", 30), 0, true)
+            .await
+            .unwrap();
+        assert_eq!(load_millis(&store, "k").await, Some(30), "ties write through");
+
+        // Gate OFF: the same older frame clobbers — the pre-fix blind replay.
+        WalRecovery::replay_entry(&store, &lww_frame("k", 10), 0, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            load_millis(&store, "k").await,
+            Some(10),
+            "gate OFF reproduces the blind clobber (the defect the fix closes)"
+        );
+    }
+
+    /// TG-WAL-006 scope: `OrMap`/`OrTombstones` frames and cross-kind (non-Lww
+    /// stored) frames BYPASS the Lww read-compare — proven directly, since the
+    /// harness `ModelValue` is LWW-only and cannot drive OR frames. Also proves a
+    /// `Legacy` frame keeps always-merge replay.
+    #[tokio::test]
+    async fn replay_or_crosskind_and_legacy_bypass_lww_gate() {
+        let store: Arc<dyn MapDataStore> = Arc::new(MergeProbeStore::default());
+
+        // (a) OR-over-OR: with the gate ON, an OR frame blind-overwrites the durable
+        // OR value — the Lww read-compare never intercepts an OR-valued frame.
+        let durable_or = RecordValue::OrMap {
+            records: vec![],
+            tombstones: vec!["B".to_string()],
+        };
+        store.add("m", "o", &durable_or, 0, 0).await.unwrap();
+        let or_frame = RecordValue::OrMap {
+            records: vec![],
+            tombstones: vec!["A".to_string()],
+        };
+        WalRecovery::replay_entry(&store, &record_frame("o", or_frame.clone()), 0, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load("m", "o").await.unwrap(),
+            Some(or_frame),
+            "an OR frame must bypass the Lww gate and blind-overwrite (no timestamp compare)"
+        );
+
+        // (b) cross-kind: an OLDER Lww frame over a non-Lww (OR) stored value must
+        // write through — the gate's inner `Some(Lww)` match fails on an OR value.
+        WalRecovery::replay_entry(&store, &lww_frame("o", 1), 0, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            load_millis(&store, "o").await,
+            Some(1),
+            "a Lww frame over a non-Lww stored value writes through (cross-kind bypass)"
+        );
+
+        // (c) legacy: a `Legacy` payload has no real timestamp (synthesized
+        // zero-epoch) and must always-merge — bypass the gate even over a newer value.
+        let store2: Arc<dyn MapDataStore> = Arc::new(MergeProbeStore::default());
+        store2
+            .add(
+                "m",
+                "k",
+                &RecordValue::Lww {
+                    value: TgValue::Int(50),
+                    timestamp: ts(50),
+                },
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        let legacy = WalEntry {
+            map: "m".to_string(),
+            key: "k".to_string(),
+            op: WalOp::Store {
+                value: WalStorePayload::Legacy(TgValue::Int(1)),
+                expiration_time: None,
+            },
+            timestamp: None,
+            sequence: 1,
+        };
+        WalRecovery::replay_entry(&store2, &legacy, 0, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            store2.load("m", "k").await.unwrap(),
+            Some(RecordValue::Lww {
+                value: TgValue::Int(1),
+                // Legacy frames with no WAL timestamp reconstruct a zero-epoch HLC
+                // with an EMPTY node id (see `replay_entry`).
+                timestamp: Timestamp {
+                    millis: 0,
+                    counter: 0,
+                    node_id: String::new(),
+                },
+            }),
+            "a legacy frame must always-merge (bypass the gate) even over a newer value"
+        );
     }
 
     /// Manual measurement of the per-append fsync tax of each `WalFsyncPolicy`.
@@ -3156,7 +3514,9 @@ mod tests {
         let mut entry = make_wal_entry(1);
         entry.op = WalOp::TestNonSubsuming;
         assert!(
-            WalRecovery::replay_entry(&store, &entry, 0).await.is_err(),
+            WalRecovery::replay_entry(&store, &entry, 0, true)
+                .await
+                .is_err(),
             "a framing with no replay semantics must surface an error, never be \
              silently absorbed by a catch-all arm"
         );
