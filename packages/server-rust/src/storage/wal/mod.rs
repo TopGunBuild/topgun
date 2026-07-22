@@ -1683,7 +1683,7 @@ impl WalRecovery {
     ///   and each per-key OR frame is a post-RMW full snapshot that is monotone in
     ///   `wal_seq` order, so in-sequence replay converges to the newest snapshot
     ///   regardless of re-replay. OR merge-idempotency as its own property is owned
-    ///   by `TG-OR-003` (SPEC-349b), not this path.
+    ///   by `TG-OR-003`, not this path.
     /// - A cross-kind case (stored value is not `Lww` while the incoming frame is)
     ///   cannot be compared by timestamp, so it also BYPASSES the gate and writes
     ///   through.
@@ -1791,8 +1791,8 @@ impl WalRecovery {
     /// newer durable value written outside the window (e.g. a frameless write-behind
     /// flush). `OrMap`/`OrTombstones` frames are idempotent by pre-existing
     /// monotonicity (post-RMW full snapshots, monotone in `wal_seq` order), not by
-    /// this merge; their own merge-idempotency property is owned by `TG-OR-003`
-    /// (SPEC-349b). Legacy frames keep always-merge replay.
+    /// this merge; their own merge-idempotency property is owned by `TG-OR-003`.
+    /// Legacy frames keep always-merge replay.
     ///
     /// A partition whose frontier stops below its highest enumerated frame raises
     /// the abandoned-write alarm here, at boot. Write-behind's watchdog cannot

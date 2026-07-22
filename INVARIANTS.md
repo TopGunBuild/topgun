@@ -83,22 +83,34 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Discovered by:** SPEC-349 Audit v2 (three independent derivations).
 - **Status:** decided, **enforced**.
 
-### TG-WAL-006: WAL re-replay is NOT merge-idempotent today (known-false, tracked)
+### TG-WAL-006: WAL re-replay is merge-idempotent for `RecordValue::Lww` (enforced, LWW-scoped)
 
-- **Scope:** `WalRecovery::run` replay into `RedbDataStore`.
-- **Statement (negative):** `write_one` is a blind `table.insert` with no read-compare merge — a
-  replayed older frame CAN clobber a newer durable value written outside the replay window
-  (reproduced). Recovery safety currently rests ONLY on in-sequence-order replay +
-  last-frame-wins within the window.
-- **Maintaining code:** the truth is stated in the doc-contracts at `wal/mod.rs` (`replay_entry`,
-  `recover`) pointing at the tracker; `datastores/redb.rs:309` (`write_one`).
-- **Enforcing test:** the weaker (true) in-window property only, BY DESIGN ("don't ship the
-  loss as a test"): `prefix_watermark_proptest.rs::a_frame_written_after_the_partition_drains_is_still_replayed`
-  and `::a_mid_loop_remove_all_failure_still_replays_the_earlier_tombstones`.
-- **Violation consequence:** citing this branch for re-replay idempotency re-plants a false
-  invariant; timestamp regression on crash-recovery under out-of-order arrivals.
-- **Discovered by:** SPEC-350 execution (AC4(b) honest-unmet escalation).
-- **Status:** **open (TODO-598)** — flips to a positive merge-idempotency invariant when closed.
+- **Scope:** `WalRecovery::run` replay through `replay_entry`, for `RecordValue::Lww` values.
+- **Statement (positive):** re-replaying a WAL frame whose value is OLDER than the current durable
+  value MUST NOT change the durable value, for `RecordValue::Lww`: `replay_entry` reads the current
+  value and discards a modern Lww frame whose HLC timestamp is strictly lower (last-write-wins by
+  timestamp); ties and newer timestamps write through. `WalStorePayload::Legacy` frames (synthesized
+  always-merge timestamp), `RecordValue::OrMap`/`OrTombstones` frames, and a cross-kind (non-Lww
+  stored) value BYPASS the gate and keep the pre-existing blind replay. `write_one` stays a
+  CRDT-agnostic blind insert; the merge lives at the recovery boundary.
+- **Maintaining code:** `wal/mod.rs::replay_entry` (the `RecordValue::Lww` read-compare gate) +
+  `run` / call-site doc-contracts; `datastores/redb.rs` (`write_one` doc-comment records the
+  guarantee lives upstream).
+- **Enforcing test:** `wal/mod.rs::tests::replay_lww_gate_discards_older_frame_isolated` (older
+  discarded, ties/newer through, gate-off clobbers) and `::replay_or_crosskind_and_legacy_bypass_lww_gate`
+  (the bypass proof, since the harness model is LWW-only); the harness value-equality case
+  `wal_harness::cases::ac4_5_replay_clobber_caught_by_value_equality_oracle`.
+- **Superseded (still true, kept):** the weaker in-window proptests
+  `prefix_watermark_proptest.rs::a_frame_written_after_the_partition_drains_is_still_replayed`
+  and `::a_mid_loop_remove_all_failure_still_replays_the_earlier_tombstones` remain valid and are
+  subsumed by the stronger property above.
+- **OR residue (routed, NOT closed here):** OR-Map merge-idempotency as an independent property is
+  owned by `TG-OR-003` / SPEC-349b (tracked by TODO-608), where delta-fold-delegates-to-live-apply
+  answers it by construction; this invariant covers only the `RecordValue::Lww` case.
+- **Violation consequence:** timestamp regression on crash-recovery — a stale re-replayed frame
+  resurrects an older durable value.
+- **Discovered by:** SPEC-350 execution (AC4(b) honest-unmet escalation); closed by SPEC-353.
+- **Status:** decided, **enforced (LWW-scoped)**.
 
 ### TG-WAL-007: WAL write-path failures fail-stop through one abort-based mechanism
 

@@ -548,9 +548,9 @@ fn ac14e_coverage_guard_discriminates_below_floor() {
 // AC11 — value-equality oracle stays off by default
 // ---------------------------------------------------------------------------
 
-/// The default oracle config keeps value equality OFF, so it cannot be silently
-/// flipped on and start firing REDs on the known-not-merge-idempotent replay
-/// behaviour (`TG-WAL-006` / `TODO-598`).
+/// The value-equality oracle stays OFF by default (opt-in per run): `TG-WAL-006`
+/// is enforced LWW-scoped, but the oracle is enabled explicitly only for the
+/// closing-evidence and regression runs, never silently for every case.
 #[test]
 fn ac11_value_equality_defaults_off() {
     assert!(!OracleConfig::default().value_equality);

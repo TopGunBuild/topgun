@@ -21,10 +21,9 @@
 //!
 //! The design admits both of the following as **cases on this harness**, not forks:
 //!
-//! - **Value-equality oracle.** `OracleConfig::value_equality` defaults to `false` because the
-//!   catalog records WAL re-replay as known-not-merge-idempotent today (`TODO-598`). Flipping the
-//!   flag to `true` — with the suite still green — is `TODO-598`'s own closing evidence; no driver
-//!   change is needed to exercise it.
+//! - **Value-equality oracle.** `OracleConfig::value_equality` defaults to `false` (opt-in per run);
+//!   `TG-WAL-006` is enforced (LWW-scoped), so a run with the flag on is green on the fixed path and
+//!   `DefectMode::ReplayClobberOlderFrame` is caught by it. No driver change is needed to exercise it.
 //! - **OR-Map delta-fold recovery across a restart.** This lands as an `OrDelta`-shaped variant
 //!   added to [`WorkOp`] plus an OR-shaped variant added to [`ModelValue`] — the OR-Map delta-fold
 //!   recovery proof lands as a case on this harness, rather than a fork of it. The driver's
