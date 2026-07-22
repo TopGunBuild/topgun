@@ -1111,6 +1111,15 @@ impl Driver {
             // must not false-positive when the generator emits out-of-timestamp-order
             // writes for a key. Off by default; enabled explicitly for the
             // closing-evidence and regression runs.
+            //
+            // Soundness coupling (do not break in `lww()`): comparing millis alone is
+            // sound ONLY because `lww(millis)` makes value a pure function of millis
+            // and fixes `counter:0`/`node_id:""`, so full-`Timestamp` order collapses
+            // to millis order and equal millis implies an identical value. A future
+            // generator that emits distinct values at equal millis, or varies
+            // counter/node_id, would let an equal-millis different-value clobber slip
+            // this strictly-older check — the oracle would then need the same
+            // full-`Timestamp` compare the gate uses.
             if self.config.oracle.value_equality {
                 if let (
                     ModelValue::Live { millis: expected },
@@ -1201,6 +1210,12 @@ thread_local! {
 }
 
 /// Builds an LWW record carrying `millis` as both the value and the timestamp.
+///
+/// Load-bearing for the `value_equality` oracle's soundness: value MUST stay a pure
+/// function of `millis`, and `counter`/`node_id` MUST stay constant. The oracle
+/// compares millis alone; if value stopped tracking millis, or counter/node_id
+/// varied, an equal-millis different-value clobber would slip its strictly-older
+/// check (see the soundness-coupling note at the oracle in `evaluate_o1`).
 fn lww(millis: i64) -> RecordValue {
     RecordValue::Lww {
         value: Value::Int(millis),
