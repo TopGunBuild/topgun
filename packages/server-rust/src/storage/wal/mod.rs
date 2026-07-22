@@ -2449,7 +2449,11 @@ mod tests {
         WalRecovery::replay_entry(&store, &lww_frame("k", 30), 0, true)
             .await
             .unwrap();
-        assert_eq!(load_millis(&store, "k").await, Some(30), "ties write through");
+        assert_eq!(
+            load_millis(&store, "k").await,
+            Some(30),
+            "ties write through"
+        );
 
         // Gate OFF: the same older frame clobbers — the pre-fix blind replay.
         WalRecovery::replay_entry(&store, &lww_frame("k", 10), 0, false)
