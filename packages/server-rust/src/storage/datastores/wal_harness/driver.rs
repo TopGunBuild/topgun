@@ -1220,7 +1220,7 @@ thread_local! {
 ///
 /// Load-bearing for the `value_equality` oracle's soundness: value MUST stay a pure
 /// function of `millis`, and `counter`/`node_id` MUST stay constant. The oracle
-/// compares millis alone; if value stopped tracking millis, or counter/node_id
+/// compares `millis` alone; if value stopped tracking `millis`, or `counter`/`node_id`
 /// varied, an equal-millis different-value clobber would slip its strictly-older
 /// check (see the soundness-coupling note at the oracle in `evaluate_o1`).
 fn lww(millis: i64) -> RecordValue {
