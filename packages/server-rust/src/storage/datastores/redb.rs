@@ -306,6 +306,14 @@ impl RedbDataStore {
 /// tuple. Validates the map name, opens (or creates) the per-(map, `is_backup`)
 /// table inside one `WriteTransaction`, serializes the value via msgpack, and
 /// commits.
+///
+/// This is a deliberately CRDT-agnostic blind insert: it does NOT merge by
+/// timestamp. Last-write-wins ordering is upheld before the store is ever
+/// reached — by the CRDT service layer on the live path, and by the
+/// `RecordValue::Lww` read-compare gate in `WalRecovery::replay_entry` on the
+/// recovery path (TG-WAL-006). Keeping merge semantics out of the storage
+/// primitive avoids a layering inversion and a per-write read on the flush hot
+/// path.
 fn write_one(
     db: &redb::Database,
     map: &str,

@@ -1628,16 +1628,33 @@ impl WalRecovery {
     /// Replays ONE entry through the inner store.
     ///
     /// Goes straight to the store rather than through the CRDT service layer, so
-    /// there is NO merge here.
+    /// the merge that upholds re-replay idempotency lives HERE, at the recovery
+    /// boundary, not in the store (`write_one` stays a CRDT-agnostic blind insert).
     ///
-    /// Re-replay safety today rests ONLY on in-sequence-order replay plus
-    /// last-frame-wins WITHIN the replayed window: the window's frames are applied
-    /// in ascending sequence order, so the newest frame in the window is the one
-    /// that survives. The store's `write_one` is a blind insert with NO
-    /// read-compare merge, so a stale replayed frame CAN clobber a newer durable
-    /// value written outside the window (reproduced; tracked as TODO-598).
+    /// Re-replay of a `RecordValue::Lww` frame is idempotent (TG-WAL-006): before
+    /// applying a modern Lww frame this reads the current durable value and, if the
+    /// incoming frame's HLC timestamp is strictly OLDER than the stored value's,
+    /// discards it (last-write-wins by timestamp). A stale replayed frame therefore
+    /// can no longer clobber a newer durable value written outside the replay window
+    /// (e.g. a frameless write-behind flush). Ties and newer timestamps write
+    /// through unchanged. The read-then-write is not atomic, which is safe because
+    /// recovery runs before the listener accepts connections — there are no
+    /// concurrent writers at boot.
     ///
-    /// Do NOT rely on re-replay idempotency until TODO-598 closes.
+    /// The gate is scoped to modern `WalStorePayload::Record(RecordValue::Lww)`
+    /// frames only:
+    /// - `WalStorePayload::Legacy` frames carry a SYNTHESIZED timestamp (zero-epoch
+    ///   when the WAL recorded none) whose intent is always-merge, so they BYPASS
+    ///   the gate and keep the pre-existing blind replay.
+    /// - `RecordValue::OrMap`/`OrTombstones` frames BYPASS the gate: their
+    ///   convergence is set-union of tags+tombstones, not a scalar timestamp max,
+    ///   and each per-key OR frame is a post-RMW full snapshot that is monotone in
+    ///   `wal_seq` order, so in-sequence replay converges to the newest snapshot
+    ///   regardless of re-replay. OR merge-idempotency as its own property is owned
+    ///   by `TG-OR-003` (SPEC-349b), not this path.
+    /// - A cross-kind case (stored value is not `Lww` while the incoming frame is)
+    ///   cannot be compared by timestamp, so it also BYPASSES the gate and writes
+    ///   through.
     async fn replay_entry(
         inner_store: &Arc<dyn MapDataStore>,
         entry: &WalEntry,
@@ -1667,6 +1684,30 @@ impl WalRecovery {
                         }
                     }
                 };
+
+                // Merge-idempotency gate (TG-WAL-006), scoped to modern Lww frames.
+                // Only a `Record`-payload `Lww` frame carries a real value timestamp
+                // to compare; if the current durable value is a strictly-newer Lww
+                // value, this frame is stale (it was superseded by a write outside
+                // the replay window) and must be discarded rather than clobber it.
+                // Legacy frames, OR frames, and a non-Lww stored value all fall
+                // through to the blind replay unchanged (see the doc-contract above).
+                if let WalStorePayload::Record(RecordValue::Lww {
+                    timestamp: incoming_ts,
+                    ..
+                }) = value
+                {
+                    if let Some(RecordValue::Lww {
+                        timestamp: stored_ts,
+                        ..
+                    }) = inner_store.load(&entry.map, &entry.key).await?
+                    {
+                        if *incoming_ts < stored_ts {
+                            return Ok(());
+                        }
+                    }
+                }
+
                 inner_store
                     .add(
                         &entry.map,
@@ -1707,12 +1748,14 @@ impl WalRecovery {
     /// own frame. Frames above the frontier stay in the replay window and are
     /// re-applied on a later boot.
     ///
-    /// That re-application is bounded, NOT idempotent. Its safety rests ONLY on
-    /// in-sequence-order replay plus last-frame-wins WITHIN the replayed window —
-    /// the inner store does NOT merge by timestamp: `write_one` is a blind insert
-    /// with no read-compare, so a stale replayed frame CAN clobber a newer durable
-    /// value written outside the window (reproduced; tracked as TODO-598). Do NOT
-    /// rely on re-replay idempotency until TODO-598 closes.
+    /// That re-application is idempotent for `RecordValue::Lww` (TG-WAL-006):
+    /// `replay_entry` reads the current durable value and discards a frame whose HLC
+    /// timestamp is strictly older, so a stale replayed frame can no longer clobber a
+    /// newer durable value written outside the window (e.g. a frameless write-behind
+    /// flush). `OrMap`/`OrTombstones` frames are idempotent by pre-existing
+    /// monotonicity (post-RMW full snapshots, monotone in `wal_seq` order), not by
+    /// this merge; their own merge-idempotency property is owned by `TG-OR-003`
+    /// (SPEC-349b). Legacy frames keep always-merge replay.
     ///
     /// A partition whose frontier stops below its highest enumerated frame raises
     /// the abandoned-write alarm here, at boot. Write-behind's watchdog cannot
@@ -1771,9 +1814,10 @@ impl WalRecovery {
                     Ok(()) => {
                         // Only a success that is still contiguous with the prefix
                         // may advance the frontier. Once an entry has failed, later
-                        // successes are kept (replay is idempotent, so re-running
-                        // them next boot is free) but they must NOT license GC of
-                        // the frame that failed.
+                        // successes are kept (replay is idempotent for Lww via the
+                        // read-compare in `replay_entry`, and for OR via snapshot
+                        // monotonicity, so re-running them next boot is free) but
+                        // they must NOT license GC of the frame that failed.
                         if first_failed.is_none() {
                             frontier = entry.sequence;
                         }
