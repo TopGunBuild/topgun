@@ -1686,13 +1686,15 @@ impl WriteBehindDataStore {
     /// The frame carries the HLC of the value being removed (read through the
     /// staging→inner overlay). At `replay_entry` recovery compares it to the
     /// currently-stored value's HLC under LWW's total order: a stale re-replayed
-    /// Remove whose HLC is strictly older than the stored value is discarded, so a
-    /// value re-created after this Remove survives. When the key has no `Lww` value
-    /// to source an HLC from — absent, a pending-delete, or a non-`Lww` value — the
-    /// **zero-epoch sentinel** `{0,0,""}` is stamped: any real re-creation has an
-    /// HLC `> 0`, so the same guard protects it, while an absent-key Remove that
-    /// meets an older-or-tie value still deletes. This is distinct from a legacy
-    /// `None` frame (older servers), which bypasses the guard and always deletes.
+    /// Remove whose REAL HLC is strictly older than the stored value is discarded,
+    /// so a value re-created after this Remove survives. When the key has no `Lww`
+    /// value to source an HLC from — absent, a pending-delete, or a non-`Lww`
+    /// value — the **zero-epoch sentinel** `{0,0,""}` is stamped (distinct on the
+    /// wire from a legacy `None` frame). The sentinel is a synthetic bottom, not a
+    /// causal position, so recovery does NOT gate on it — a sentinel Remove deletes.
+    /// An absent-at-remove-time key needs no gate protection: any re-creation is a
+    /// fresh write carrying its own later WAL frame, which in-order replay applies
+    /// after this Remove.
     async fn remove_frame_timestamp(&self, map: &str, key: &str) -> anyhow::Result<Timestamp> {
         match self.load(map, key).await? {
             Some(RecordValue::Lww { timestamp, .. }) => Ok(timestamp),
