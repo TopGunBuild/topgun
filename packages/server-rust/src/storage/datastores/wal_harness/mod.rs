@@ -172,6 +172,14 @@ pub(crate) enum DefectMode {
     /// re-applied over a newer durable value". Caught by the `value_equality`
     /// oracle as an `AckedValueMismatch`.
     ReplayClobberOlderFrame,
+    /// Re-introduces the pre-`TG-WAL-009` Remove clobber via the SAME `WalRecovery`
+    /// test seams: the replay gate is disabled AND each partition's oldest
+    /// un-applied frame is re-replayed once more. When a case arranges that oldest
+    /// frame to be a stale `WalOp::Remove` sitting in the replay window over a
+    /// key re-created with a newer durable value, the blind re-replay deletes the
+    /// re-creation. Caught by the O1 `AckedWriteLost` oracle (expected Live, got
+    /// absent) — NO new oracle needed.
+    ReplayStaleRemoveOverNewerValue,
 }
 
 /// `wal/mod.rs::mark_applied` crash-injection point (R7), fired between the sidecar write+fsync

@@ -725,6 +725,84 @@ fn ac4_5_replay_clobber_caught_by_value_equality_oracle() {
 }
 
 // ---------------------------------------------------------------------------
+// AC1 / AC5 / AC6 — TG-WAL-009 stale-Remove-clobber proof via the O1 oracle
+// ---------------------------------------------------------------------------
+
+/// `DefectMode::ReplayStaleRemoveOverNewerValue` (the pre-`TG-WAL-009` blind Remove
+/// clobber) must be CAUGHT by the O1 `AckedWriteLost` oracle naming the deleted key
+/// (AC5 — defect-present detection, NO model/oracle fork); and the identical case on
+/// the fixed path (`DefectMode::None`, gate on, no re-replay) must be GREEN (AC1/AC6
+/// — the fix holds).
+///
+/// The case makes the stale Remove the OLDEST un-applied frame over a newer durable
+/// re-creation — the condition the live `flush_key` path can produce but generated
+/// ops cannot manufacture:
+///  1. Append key 0 (ts=5) and flush it durably — its frame is applied, advancing
+///     the watermark past it, so it drops OUT of the replay window.
+///  2. Remove key 0 — write-behind sources the removed value's HLC (ts=5) onto the
+///     frame; its flush is REJECTED (store unhealthy), so the Remove frame strands
+///     un-applied and holds the watermark back. It is now the oldest un-applied frame.
+///  3. Re-create key 0 (ts=20) and flush it durably — its frame stays un-applied
+///     because the stranded Remove blocks the contiguous frontier.
+///
+/// At recovery the in-order pass leaves ts=20 durable (the gate skips the stale
+/// Remove), then the seam re-replays the oldest frame — the Remove. With the gate
+/// off (defect) it blind-deletes the re-creation; the model's acked value for key 0
+/// is `Live{20}`, so O1 reports `AckedWriteLost`. With the gate on (`None`) the
+/// re-replayed Remove is discarded and the run is GREEN.
+#[test]
+fn ac1_ac6_stale_remove_clobber_caught_by_o1_oracle() {
+    let case: Case = vec![
+        Incarnation {
+            ops: vec![
+                WorkOp::Append { key: 0, millis: 5 },
+                WorkOp::FlushTick { advance_ms: 5_000 },
+                WorkOp::Remove { key: 0 },
+                WorkOp::SetStoreHealth { healthy: false },
+                WorkOp::FlushTick { advance_ms: 5_000 },
+                WorkOp::SetStoreHealth { healthy: true },
+                WorkOp::Append { key: 0, millis: 20 },
+                WorkOp::FlushTick { advance_ms: 5_000 },
+            ],
+            end: IncarnationEnd::Crash,
+        },
+        Incarnation {
+            ops: vec![WorkOp::Read { key: 0 }],
+            end: IncarnationEnd::CleanShutdown,
+        },
+    ];
+
+    // (a) defect present: the O1 oracle catches the stale-Remove clobber of key 0.
+    let defect_cfg = RunConfig {
+        defect: DefectMode::ReplayStaleRemoveOverNewerValue,
+        ..RunConfig::baseline()
+    };
+    let defect_outcome = block_on_async(run_case(&case, &defect_cfg));
+    let lost = defect_outcome
+        .violations
+        .iter()
+        .any(|v| matches!(v, InvariantViolation::AckedWriteLost { key: 0, .. }));
+    assert!(
+        lost,
+        "AC5: the stale-Remove clobber must surface as AckedWriteLost naming key 0; \
+         got violations {:?}",
+        defect_outcome.violations
+    );
+
+    // (b) discriminator: the fixed path clobbers nothing (AC1/AC6).
+    let fixed_cfg = RunConfig {
+        defect: DefectMode::None,
+        ..RunConfig::baseline()
+    };
+    let fixed_outcome = block_on_async(run_case(&case, &fixed_cfg));
+    assert!(
+        fixed_outcome.violations.is_empty(),
+        "AC6: the fixed path must report zero violations for the identical run; got {:?}",
+        fixed_outcome.violations
+    );
+}
+
+// ---------------------------------------------------------------------------
 // AC5 — C12 regression proof, with the cross-incarnation negative control
 // ---------------------------------------------------------------------------
 

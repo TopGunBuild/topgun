@@ -736,11 +736,12 @@ impl Driver {
 
         // Apply the run's defect seams (R6).
         match self.config.defect {
-            // `ReplayClobberOlderFrame` is a recovery-side seam (see `recover`),
-            // so it installs nothing on the store.
+            // Both replay-clobber defects are recovery-side seams (see `recover`),
+            // so they install nothing on the store.
             DefectMode::None
             | DefectMode::UnlinkThenFsync
-            | DefectMode::ReplayClobberOlderFrame => {}
+            | DefectMode::ReplayClobberOlderFrame
+            | DefectMode::ReplayStaleRemoveOverNewerValue => {}
             DefectMode::ScalarMaxWatermark => {
                 store.test_set_watermark_mode(WatermarkMode::ScalarMax);
             }
@@ -1185,10 +1186,17 @@ impl Driver {
     /// `next_incarnation` is the index the loss surfaces at (for the O1 record).
     async fn recover(&mut self, next_incarnation: usize) {
         let mut recovery = WalRecovery::new(Arc::clone(&self.wal), vec![self.partition]);
-        // `ReplayClobberOlderFrame` reproduces the pre-`TG-WAL-006` blind clobber:
-        // disable the merge gate AND re-replay each partition's oldest un-applied
-        // frame over the newer durable value the in-order pass left behind.
-        if self.config.defect == DefectMode::ReplayClobberOlderFrame {
+        // Both replay-clobber defects reproduce the pre-fix blind re-replay with the
+        // SAME two seams: disable the merge gate AND re-replay each partition's
+        // oldest un-applied frame over the newer durable value the in-order pass
+        // left behind. `ReplayClobberOlderFrame` (TG-WAL-006) arranges that oldest
+        // frame to be a stale Lww Store; `ReplayStaleRemoveOverNewerValue`
+        // (TG-WAL-009) arranges it to be a stale `WalOp::Remove` — the guard and the
+        // clobber differ, the seam does not.
+        if matches!(
+            self.config.defect,
+            DefectMode::ReplayClobberOlderFrame | DefectMode::ReplayStaleRemoveOverNewerValue
+        ) {
             recovery.test_set_replay_merge_gate(false);
             recovery.test_set_re_replay_oldest_frame(true);
         }
