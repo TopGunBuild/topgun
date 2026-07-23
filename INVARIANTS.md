@@ -146,6 +146,40 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Discovered by:** SPEC-350 Audit v7 (two-class split), v10–v12 (races).
 - **Status:** decided, **enforced**.
 
+### TG-WAL-009: WAL re-replay is idempotent for `WalOp::Remove` (enforced, Remove-scoped)
+
+- **Scope:** `WalRecovery::replay_entry` `WalOp::Remove` arm, for a frame carrying the removed
+  value's HLC in `entry.timestamp`.
+- **Statement (positive):** re-replaying a stale `WalOp::Remove` MUST NOT delete a durable value
+  re-created after it: `replay_entry` reads the current durable value and, when the frame carries a
+  REAL sourced HLC and the stored value is a `RecordValue::Lww` whose HLC is STRICTLY NEWER, discards
+  the Remove (last-write-wins by timestamp — the value was re-created after the Remove). Ties, an
+  older/absent target, and a non-`Lww` stored value all delete as before, so a legitimate deletion
+  is never suppressed. The zero-epoch sentinel `{0,0,""}` (stamped for an absent-key Remove, distinct
+  on the wire from legacy `None`) is a synthetic bottom, NOT a sound causal position, so the gate
+  does NOT skip on it — a sentinel Remove DELETES. This is required for soundness: an older un-durable
+  `Store` frame can replay just before a Remove in the same in-order pass, and skipping on a synthetic
+  bottom would resurrect a value the Remove is the last writer of. An absent-at-remove-time key needs
+  no sentinel protection because any re-creation is a fresh write carrying its own later WAL frame,
+  applied after the Remove. A legacy `None`-timestamp Remove (older server) likewise BYPASSES the
+  guard and always deletes, keeping the upgrade path over a pre-existing on-disk WAL intact.
+- **Maintaining code:** `wal/mod.rs::replay_entry` (the `WalOp::Remove` read-compare guard) + `run` /
+  `WalEntry` doc-contracts; `datastores/write_behind.rs::remove_frame_timestamp` populates the frame
+  HLC from the removed value at both `remove`/`remove_all` append sites.
+- **Enforcing test:** `wal/mod.rs::tests::replay_remove_gate_discards_stale_remove_isolated`
+  (strictly-older discarded, sentinel protects, tie/newer delete, gate-off clobbers) and
+  `::replay_legacy_remove_bypasses_gate` (the legacy-bypass proof); the harness case
+  `wal_harness::cases::ac1_ac6_stale_remove_clobber_caught_by_o1_oracle` (O1 `AckedWriteLost` catches
+  the clobber under the defect seam; the `DefectMode::None` run is green).
+- **Sibling invariant (DISTINCT):** `TG-WAL-006` owns the same re-replay-idempotency loss-class for
+  `RecordValue::Lww` VALUES; this invariant is the `WalOp::Remove` counterpart and is scoped strictly
+  to the Remove OP — the two share the recovery-boundary layering but not a comparison basis.
+- **Violation consequence:** acked-write loss on crash-recovery — a stale re-replayed Remove deletes
+  a value re-created after it (the durable re-creation vanishes).
+- **Discovered by:** SPEC-353 `/xask` (Review v1 flagged the Remove-clobber as the same loss-class,
+  routed to TODO-609); closed by SPEC-354.
+- **Status:** decided, **enforced (Remove-scoped)**.
+
 ### TG-WB-001: The flushed watermark is prefix-complete — no mid-range hole
 
 - **Scope:** entry-ordering-space `pending_seqs` / `flushed_watermark()` (tombstone fence
