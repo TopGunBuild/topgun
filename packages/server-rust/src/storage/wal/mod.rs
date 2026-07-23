@@ -379,7 +379,12 @@ pub struct WalEntry {
     pub op: WalOp,
     /// HLC timestamp from the originating write. Used as the idempotency key:
     /// during recovery, a replayed entry whose timestamp is older than the
-    /// current in-memory value is a no-op.
+    /// current in-memory value is a no-op. For a `WalOp::Store` `Lww` frame this
+    /// is the value's own HLC; for a modern `WalOp::Remove` frame it is the HLC of
+    /// the value being removed (the zero-epoch sentinel `{0,0,""}` when the key had
+    /// no `Lww` value to source one) — the idempotency key that lets recovery guard
+    /// a stale Remove against a newer re-creation. `None` is reserved for legacy
+    /// frames written by older servers, which bypass the replay gate.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub timestamp: Option<Timestamp>,
     /// Monotonically increasing counter assigned at append time. Establishes
@@ -1687,6 +1692,18 @@ impl WalRecovery {
     /// - A cross-kind case (stored value is not `Lww` while the incoming frame is)
     ///   cannot be compared by timestamp, so it also BYPASSES the gate and writes
     ///   through.
+    ///
+    /// Re-replay of a `WalOp::Remove` frame is ALSO idempotent, under a DISTINCT
+    /// invariant (`TG-WAL-009`, Remove-scoped — not the `TG-WAL-006` value claim
+    /// above). A modern Remove frame carries the removed value's HLC in
+    /// `entry.timestamp`; before deleting, this reads the current durable value and,
+    /// if it is a `RecordValue::Lww` whose HLC is STRICTLY NEWER than the Remove's,
+    /// discards the Remove (the value was re-created after it). Ties, an
+    /// older/absent target, and a non-`Lww` stored value all delete as before, so a
+    /// legitimate deletion is never suppressed. The zero-epoch sentinel `{0,0,""}`
+    /// (stamped for an absent-key Remove) flows through the same compare and skips
+    /// any real (`> 0`) value. A legacy `None`-timestamp Remove (older server)
+    /// BYPASSES the guard and always deletes, keeping the upgrade path intact.
     async fn replay_entry(
         inner_store: &Arc<dyn MapDataStore>,
         entry: &WalEntry,
@@ -1755,7 +1772,37 @@ impl WalRecovery {
                     )
                     .await
             }
-            WalOp::Remove => inner_store.remove(&entry.map, &entry.key, now).await,
+            WalOp::Remove => {
+                // Remove-idempotency gate (TG-WAL-009), DISTINCT from the LWW-value
+                // gate above (TG-WAL-006). A modern Remove frame carries the removed
+                // value's HLC in `entry.timestamp`; recovery must not let a STALE
+                // re-replayed Remove delete a value re-created after it (a frameless
+                // durable write outside the replay window). When the frame carries a
+                // real HLC and the current durable value is a strictly-NEWER `Lww`,
+                // the value was re-created after this Remove, so the Remove is stale
+                // and is skipped. Ties, older/absent targets, and a non-`Lww` stored
+                // value all delete as before. The zero-epoch sentinel `{0,0,""}`
+                // (absent-key remove) flows through this same `Some(hlc)` path and
+                // correctly skips any real (`> 0`) stored value — no special-casing.
+                // A legacy `None`-timestamp frame BYPASSES the guard and always
+                // deletes, preserving the upgrade path over a pre-existing on-disk
+                // WAL. `merge_gate` is always `true` in production; the harness flips
+                // it off to reproduce the pre-fix blind clobber.
+                if merge_gate {
+                    if let Some(remove_hlc) = &entry.timestamp {
+                        if let Some(RecordValue::Lww {
+                            timestamp: stored_ts,
+                            ..
+                        }) = inner_store.load(&entry.map, &entry.key).await?
+                        {
+                            if stored_ts > *remove_hlc {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                inner_store.remove(&entry.map, &entry.key, now).await
+            }
             // An explicit arm rather than a `_` catch-all: the exhaustiveness is
             // what forces a future framing to declare its replay semantics here
             // instead of inheriting someone else's. This variant is never
@@ -1793,6 +1840,12 @@ impl WalRecovery {
     /// monotonicity (post-RMW full snapshots, monotone in `wal_seq` order), not by
     /// this merge; their own merge-idempotency property is owned by `TG-OR-003`.
     /// Legacy frames keep always-merge replay.
+    ///
+    /// `WalOp::Remove` re-replay is idempotent under a DISTINCT invariant
+    /// (`TG-WAL-009`): a modern Remove frame carries the removed value's HLC, and
+    /// `replay_entry` discards a strictly-older Remove over a re-created newer
+    /// durable value; ties/newer/absent/non-`Lww`-stored targets delete, and a
+    /// legacy `None`-timestamp Remove bypasses the guard and always deletes.
     ///
     /// A partition whose frontier stops below its highest enumerated frame raises
     /// the abandoned-write alarm here, at boot. Write-behind's watchdog cannot
