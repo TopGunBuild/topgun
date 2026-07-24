@@ -168,9 +168,20 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   Remove, re-creating the value) or the Remove is the newest op for the key (deleting is
   live-correct). The stale-Remove-over-newer-frameless-value juxtaposition is reachable ONLY by
   re-applying an already-applied older frame after the in-order pass — the harness
-  `re_replay_oldest_frame` seam, never a production path. Both premises are themselves enforced here:
-  prefix-complete watermark (`TG-WB-001` / `TG-WAL-003`) and single-partition-per-key (`partition_for`
-  is deterministic).
+  `re_replay_oldest_frame` seam, never a production path. The chain rests on FOUR premises, EACH an
+  enforced invariant (not asserted prose):
+  - **(a) prefix-complete watermark** — `W = min(unresolved) - 1`, never at/above an unresolved
+    sequence, so `N > W` bounds the replay window: `TG-WAL-005` / `TG-WB-001` / `TG-WAL-003`.
+  - **(b) one sequence space per key** — `partition_for(map, key)` is deterministic, so a key's ops
+    are all sequenced in a single per-partition space (this is a SINGLE-SPACE claim, NOT itself an
+    ordering claim; the ordering is (c)/(d)): `partition_for` is a pure function.
+  - **(c) strictly-monotone per-partition sequence assignment** — a later arrival gets a strictly
+    HIGHER sequence, which is what makes the re-creation `M > N`: `TG-WAL-010`.
+  - **(d) strictly-ascending replay of the unapplied window** — a frame at `M > N` is replayed AFTER
+    the Remove at `N`, so the re-creation survives: `TG-WAL-011`.
+  Premises (c) and (d) carry the load-bearing `M > N` and replayed-after steps; (a) and (b) bound the
+  window and the sequence space. (b) alone is necessary-but-insufficient for the ordering — it is
+  (c)+(d) that order the space.
 - **Windowing residual (tracked, NOT closed by a gate):** the only genuine out-of-order hazard — a
   frameless `flush_key` durable write racing an un-resolved older Remove — is a WATERMARK/FRAMING
   concern, not a Remove-idempotency one, so it is routed to TODO-612 (SPEC-349/windowing), not
@@ -194,6 +205,41 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   TODO-609); SPEC-354 Review v1 caught the unsound gate (an `AckedWriteLost` regression); closed by
   SPEC-354 via a pre-fix `/xask` + a structural non-reachability spike.
 - **Status:** decided, **enforced (Remove-scoped)**.
+
+### TG-WAL-010: Per-partition WAL sequence assignment is strictly monotone
+
+- **Scope:** `WriteBehindDataStore::assign_wal_sequence` — the single mint point for a mutation's WAL
+  sequence — per partition.
+- **Statement:** every assigned WAL sequence is drawn from one process-global atomic counter
+  (`next_wal_sequence`, a `fetch_add`), so a partition's assigned sequences are a strictly-increasing
+  subsequence: no sequence is ever reused, and a later arrival gets a strictly HIGHER sequence than
+  an earlier op on the same partition. This is what makes a re-created value carry `M > N` relative to
+  an older op on the same key — premise (c) of `TG-WAL-009`.
+- **Maintaining code:** `write_behind.rs` `next_wal_sequence` (atomic `fetch_add`) + `assign_wal_sequence`.
+- **Enforcing test:** `write_behind.rs::tests::wal_sequence_assignment_is_strictly_monotone_per_partition`
+  — 2000 concurrent assigns on ONE partition are all distinct and strictly increasing when sorted.
+- **Violation consequence:** sequence reuse or non-monotone assignment breaks both the prefix-complete
+  watermark and `TG-WAL-009`'s `M > N` step, admitting a stale-Remove clobber.
+- **Discovered by:** SPEC-354 Review v2 (cataloguing the gate-free warrant's premises).
+- **Status:** decided, **enforced**.
+
+### TG-WAL-011: WAL recovery replays the unapplied window in strictly ascending sequence order
+
+- **Scope:** `Wal::unapplied` ordering contract + `WalRecovery::run` replay loop.
+- **Statement:** `Wal::unapplied` returns the unapplied window sorted strictly ascending by WAL
+  sequence — a defensive `sort_by_key(|e| e.sequence)` that holds REGARDLESS of the order frames were
+  appended or enumerated across segments — and `run` replays that Vec in order. A frame at sequence
+  `M > N` is therefore always replayed AFTER the frame at `N` (premise (d) of `TG-WAL-009`), and the
+  contiguous-success frontier the applied watermark advances to is well-defined by sequence.
+- **Maintaining code:** `wal/mod.rs::WalWriter::unapplied` (the `all.sort_by_key(|e| e.sequence)`
+  before the `applied_seq` filter) + `WalRecovery::run`'s in-order replay loop.
+- **Enforcing test:** `wal/mod.rs::tests::wal_recovery_replays_in_strictly_ascending_sequence_order`
+  — frames appended out of order (seq 3, 1, 2) are returned by `unapplied` and replayed 1, 2, 3;
+  removing the `sort_by_key` makes both assertions FAIL.
+- **Violation consequence:** out-of-order replay would let a stale Remove delete a strictly-newer
+  re-creation replayed before it, or miscompute the contiguous frontier — an acked-write loss.
+- **Discovered by:** SPEC-354 Review v2 (cataloguing the gate-free warrant's premises).
+- **Status:** decided, **enforced**.
 
 ### TG-WB-001: The flushed watermark is prefix-complete — no mid-range hole
 
