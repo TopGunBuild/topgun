@@ -197,16 +197,46 @@ fn incarnation_strategy(shape: &CaseShape) -> BoxedStrategy<Incarnation> {
         .boxed()
 }
 
+/// Rewrites every `Append`'s `millis` to a strictly-increasing, arrival-ordered
+/// value across the whole case, so each key's HLCs are MONOTONE in arrival order.
+///
+/// This is the O1/O2 LWW reference model's SOUND DOMAIN, and it matches production:
+/// a single node's HLC never goes backwards, so a key's WAL frames arrive in
+/// non-decreasing timestamp order. Under a NON-monotone arrival (a later frame with
+/// a lower HLC) the model's latest-arrival value diverges from the impl's max-HLC
+/// LWW winner: the impl's recovery discards the stale lower-HLC frame (advancing the
+/// watermark store-health-INDEPENDENTLY), while the health-gated reference model
+/// keeps it unresolved — producing false `WatermarkAboveUnresolved` / `AckedWriteLost`
+/// reports that are oracle artefacts, not real losses. Generating only monotone
+/// arrivals keeps the oracle inside its proven-sound domain; the non-monotone-arrival
+/// extension (a per-key max-live-millis reference) is owned by TODO-610, not this
+/// harness.
+fn make_hlc_monotone(mut case: Case) -> Case {
+    let mut next: i64 = 1;
+    for incarnation in &mut case {
+        for op in &mut incarnation.ops {
+            if let WorkOp::Append { millis, .. } = op {
+                *millis = next;
+                next += 1;
+            }
+        }
+    }
+    case
+}
+
 /// A whole case: `1..=max_incarnations` incarnations (R1). `force_single_incarnation`
 /// pins it to exactly one incarnation — AC5(c)'s negative control — so no crash and
-/// therefore no recovery can occur.
+/// therefore no recovery can occur. Generated HLCs are made monotone in arrival order
+/// (see `make_hlc_monotone`) so the run stays in the oracle's sound domain.
 fn case_strategy(shape: &CaseShape) -> BoxedStrategy<Case> {
     let max_inc = if shape.force_single_incarnation {
         1
     } else {
         shape.max_incarnations
     };
-    proptest::collection::vec(incarnation_strategy(shape), 1..=max_inc).boxed()
+    proptest::collection::vec(incarnation_strategy(shape), 1..=max_inc)
+        .prop_map(make_hlc_monotone)
+        .boxed()
 }
 
 // ---------------------------------------------------------------------------
@@ -734,22 +764,26 @@ fn ac4_5_replay_clobber_caught_by_value_equality_oracle() {
 /// the fixed path (`DefectMode::None`, gate on, no re-replay) must be GREEN (AC1/AC6
 /// — the fix holds).
 ///
-/// The case makes the stale Remove the OLDEST un-applied frame over a newer durable
-/// re-creation — the condition the live `flush_key` path can produce but generated
-/// ops cannot manufacture:
+/// The case arranges a stale Remove as the OLDEST un-applied frame over a newer
+/// durable re-creation, then relies on the harness `re_replay_oldest_frame` seam to
+/// re-apply that Remove OUT OF ORDER — the only way to fabricate the clobber, since
+/// in-order replay always ends on the newest frame (production can never manufacture
+/// it — see TG-WAL-009's non-reachability argument):
 ///  1. Append key 0 (ts=5) and flush it durably — its frame is applied, advancing
 ///     the watermark past it, so it drops OUT of the replay window.
-///  2. Remove key 0 — write-behind sources the removed value's HLC (ts=5) onto the
-///     frame; its flush is REJECTED (store unhealthy), so the Remove frame strands
-///     un-applied and holds the watermark back. It is now the oldest un-applied frame.
+///  2. Remove key 0 (frame carries no timestamp); its flush is REJECTED (store
+///     unhealthy), so the Remove frame strands un-applied and holds the watermark
+///     back. It is now the oldest un-applied frame.
 ///  3. Re-create key 0 (ts=20) and flush it durably — its frame stays un-applied
 ///     because the stranded Remove blocks the contiguous frontier.
 ///
-/// At recovery the in-order pass leaves ts=20 durable (the gate skips the stale
-/// Remove), then the seam re-replays the oldest frame — the Remove. With the gate
-/// off (defect) it blind-deletes the re-creation; the model's acked value for key 0
-/// is `Live{20}`, so O1 reports `AckedWriteLost`. With the gate on (`None`) the
-/// re-replayed Remove is discarded and the run is GREEN.
+/// At recovery the in-order pass replays the Remove THEN the ts=20 re-creation, so
+/// key 0 ends `Live{20}` — matching the model. Under `DefectMode::None` there is no
+/// re-replay, so the run is GREEN (AC1/AC6 — replay is correct without a gate). The
+/// defect then re-replays the OLDEST frame (the Remove) after the in-order pass;
+/// replay-remove is unconditional (identical to live), so it blind-deletes the
+/// re-creation, and O1 reports `AckedWriteLost` for key 0 (AC5 — the seam-injected
+/// out-of-order clobber is detected).
 #[test]
 fn ac1_ac6_stale_remove_clobber_caught_by_o1_oracle() {
     let case: Case = vec![
