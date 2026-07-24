@@ -4294,6 +4294,63 @@ mod tests {
         assert_eq!(appended[0].1.key, "k1");
     }
 
+    /// TG-WAL-010: per-partition WAL-sequence assignment is strictly monotone —
+    /// concurrent `assign_wal_sequence` calls on ONE partition never hand out the
+    /// same sequence twice. This is premise (c) of the TG-WAL-009 gate-free
+    /// warrant (a strictly-newer re-creation of a key gets a strictly HIGHER WAL
+    /// sequence than an older op on the same key, so `M > N` holds).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn wal_sequence_assignment_is_strictly_monotone_per_partition() {
+        const PARTITION: u32 = 7;
+        const TASKS: usize = 8;
+        const PER_TASK: usize = 250;
+
+        let wal = InMemoryTestWal::new();
+        let wal_arc: Arc<dyn Wal> = Arc::clone(&wal) as Arc<dyn Wal>;
+        let inner: Arc<dyn MapDataStore> = Arc::new(SpyDataStore::new());
+        let store = WriteBehindDataStore::new_with_wal(
+            inner,
+            WriteBehindConfig::default(),
+            Some(WalBootstrap {
+                wal: wal_arc,
+                sequence_start: 1,
+            }),
+        );
+
+        let mut handles = Vec::new();
+        for _ in 0..TASKS {
+            let store = Arc::clone(&store);
+            handles.push(tokio::spawn(async move {
+                (0..PER_TASK)
+                    .map(|_| store.assign_wal_sequence(PARTITION))
+                    .collect::<Vec<u64>>()
+            }));
+        }
+
+        let mut all = Vec::new();
+        for h in handles {
+            all.extend(h.await.unwrap());
+        }
+
+        let total = TASKS * PER_TASK;
+        let unique: std::collections::HashSet<u64> = all.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            total,
+            "a strictly-monotone counter never reuses a sequence under concurrency \
+             ({total} concurrent assigns produced {} distinct values)",
+            unique.len()
+        );
+
+        // Distinct integers are strictly increasing once sorted — the observable
+        // monotonicity of the assignment.
+        all.sort_unstable();
+        assert!(
+            all.windows(2).all(|w| w[0] < w[1]),
+            "sorted per-partition assignments must be strictly increasing"
+        );
+    }
+
     // AC1: WAL entry is appended before remove() returns Ok(())
     #[tokio::test]
     async fn wal_append_happens_before_remove_returns() {

@@ -1882,6 +1882,13 @@ impl WalRecovery {
                 continue;
             }
 
+            // `entries` is strictly ascending by WAL sequence: `Wal::unapplied`
+            // sorts defensively (see its impl), and the loop below replays in that
+            // order. Both the contiguous-frontier watermark logic AND the gate-free
+            // Remove-idempotency non-reachability argument (TG-WAL-009's premise
+            // that a stale Remove is replayed only when every strictly-newer frame
+            // for the key is replayed AFTER it) rely on this ascending order
+            // (TG-WAL-011).
             tracing::info!(
                 partition = partition_id,
                 count = entries.len(),
@@ -2304,6 +2311,9 @@ mod tests {
         data: tokio::sync::Mutex<
             std::collections::HashMap<(String, String), crate::storage::record::RecordValue>,
         >,
+        /// The key of every `add`/`remove` in call order, so a recovery test can
+        /// assert the REPLAY ORDER (TG-WAL-011), not just the final state.
+        replay_order: tokio::sync::Mutex<Vec<String>>,
     }
 
     #[async_trait]
@@ -2316,6 +2326,7 @@ mod tests {
             _exp: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
+            self.replay_order.lock().await.push(key.to_string());
             self.data
                 .lock()
                 .await
@@ -2333,6 +2344,7 @@ mod tests {
             Ok(())
         }
         async fn remove(&self, map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
+            self.replay_order.lock().await.push(key.to_string());
             self.data
                 .lock()
                 .await
@@ -2681,6 +2693,61 @@ mod tests {
                 "every Remove deletes unconditionally regardless of its timestamp: {frame:?}"
             );
         }
+    }
+
+    /// TG-WAL-011: recovery replays the unapplied window in strictly ASCENDING
+    /// WAL-sequence order — `Wal::unapplied` sorts frames by sequence regardless of
+    /// the order they were appended (its defensive `sort_by_key`), and `run`
+    /// replays them in that order. This is premise (d) of the TG-WAL-009 gate-free
+    /// warrant — the "a strictly-newer re-creation is replayed AFTER the stale
+    /// Remove" step. Frames appended OUT OF ORDER (seq 3, 1, 2) come back — and
+    /// replay — 1, 2, 3. Removing the `sort_by_key` in `unapplied` makes both
+    /// assertions FAIL — the discriminator for the ordering contract.
+    #[tokio::test]
+    async fn wal_recovery_replays_in_strictly_ascending_sequence_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap();
+
+        // Append out of sequence order (all > 0; seq 0 is the reserved sentinel
+        // `unapplied` filters). Each key carries its sequence so the probe records
+        // the replay order back.
+        for seq in [3u64, 1, 2] {
+            let entry = WalEntry {
+                map: "m".to_string(),
+                key: seq.to_string(),
+                op: WalOp::Remove,
+                timestamp: None,
+                sequence: seq,
+            };
+            wal.append(0, &entry).await.unwrap();
+        }
+        // `unapplied` sorts the shuffled appends into strictly ascending sequence
+        // order — the contract `run`'s in-order replay (and TG-WAL-009) depends on.
+        let enumerated: Vec<u64> = wal
+            .unapplied(0)
+            .await
+            .unwrap()
+            .iter()
+            .map(|e| e.sequence)
+            .collect();
+        assert_eq!(
+            enumerated,
+            vec![1, 2, 3],
+            "unapplied must return strictly ascending sequence order regardless of append order"
+        );
+
+        let store = Arc::new(MergeProbeStore::default());
+        WalRecovery::new(Arc::clone(&wal), vec![0])
+            .run(Arc::clone(&store) as Arc<dyn MapDataStore>)
+            .await
+            .unwrap();
+
+        let order = store.replay_order.lock().await.clone();
+        assert_eq!(
+            order,
+            vec!["1".to_string(), "2".to_string(), "3".to_string()],
+            "recovery must replay in ascending sequence order (got {order:?})"
+        );
     }
 
     /// Manual measurement of the per-append fsync tax of each `WalFsyncPolicy`.
