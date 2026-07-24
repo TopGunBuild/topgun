@@ -12,7 +12,6 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use tokio::sync::{watch, Notify};
-use topgun_core::hlc::Timestamp;
 use topgun_core::{fnv1a_hash, PARTITION_COUNT};
 use tracing::{error, warn};
 
@@ -1680,32 +1679,6 @@ impl WriteBehindDataStore {
     /// winner's freshly-appended live frame, so its install must not reach the
     /// map. Sequences are inserted without displacing existing entries for the
     /// same reason: a seed must never overwrite what a live write recorded.
-    /// HLC to stamp on a `WalOp::Remove` frame so crash recovery can guard the
-    /// replay against deleting a NEWER re-creation of the same key.
-    ///
-    /// The frame carries the HLC of the value being removed (read through the
-    /// staging→inner overlay). At `replay_entry` recovery compares it to the
-    /// currently-stored value's HLC under LWW's total order: a stale re-replayed
-    /// Remove whose REAL HLC is strictly older than the stored value is discarded,
-    /// so a value re-created after this Remove survives. When the key has no `Lww`
-    /// value to source an HLC from — absent, a pending-delete, or a non-`Lww`
-    /// value — the **zero-epoch sentinel** `{0,0,""}` is stamped (distinct on the
-    /// wire from a legacy `None` frame). The sentinel is a synthetic bottom, not a
-    /// causal position, so recovery does NOT gate on it — a sentinel Remove deletes.
-    /// An absent-at-remove-time key needs no gate protection: any re-creation is a
-    /// fresh write carrying its own later WAL frame, which in-order replay applies
-    /// after this Remove.
-    async fn remove_frame_timestamp(&self, map: &str, key: &str) -> anyhow::Result<Timestamp> {
-        match self.load(map, key).await? {
-            Some(RecordValue::Lww { timestamp, .. }) => Ok(timestamp),
-            _ => Ok(Timestamp {
-                millis: 0,
-                counter: 0,
-                node_id: String::new(),
-            }),
-        }
-    }
-
     async fn ensure_wal_seeded(&self, partition: u32) {
         let Some(tracking) = &self.wal else {
             return;
@@ -2416,19 +2389,17 @@ impl MapDataStore for WriteBehindDataStore {
         // a prior incarnation left un-applied.
         self.ensure_wal_seeded(partition_id).await;
 
-        // Source the removed value's HLC BEFORE assigning a sequence so the frame
-        // carries the idempotency key recovery needs (see `remove_frame_timestamp`).
-        let remove_hlc = self.remove_frame_timestamp(map, key).await?;
-
         let wal_seq = self.assign_wal_sequence(partition_id);
 
         // Append to WAL before updating in-memory state so crash recovery can
-        // replay the tombstone if the process dies after ack but before flush.
+        // replay the tombstone if the process dies after ack but before flush. A
+        // Remove frame carries no timestamp: replay deletes unconditionally, exactly
+        // as this live path does (see `WalRecovery::replay_entry`, TG-WAL-009).
         let wal_entry = WalEntry {
             map: map.to_string(),
             key: key.to_string(),
             op: WalOp::Remove,
-            timestamp: Some(remove_hlc),
+            timestamp: None,
             sequence: wal_seq,
         };
         // Evaluated on the SURVIVOR — this write — never on what it displaces.
@@ -2570,19 +2541,17 @@ impl MapDataStore for WriteBehindDataStore {
             // whatever a prior incarnation left un-applied.
             self.ensure_wal_seeded(partition_id).await;
 
-            // One HLC source per key — the frame carries the removed value's HLC so
-            // recovery guards each key's Remove replay (see `remove_frame_timestamp`).
-            let remove_hlc = self.remove_frame_timestamp(map, key).await?;
-
             let wal_seq = self.assign_wal_sequence(partition_id);
 
             // Append each tombstone to the WAL before queuing so crash recovery
-            // can replay every individual key deletion, not just the batch call.
+            // can replay every individual key deletion, not just the batch call. A
+            // Remove frame carries no timestamp: replay deletes unconditionally, as
+            // this live path does (see `WalRecovery::replay_entry`, TG-WAL-009).
             let wal_entry = WalEntry {
                 map: map.to_string(),
                 key: key.clone(),
                 op: WalOp::Remove,
-                timestamp: Some(remove_hlc),
+                timestamp: None,
                 sequence: wal_seq,
             };
             // Evaluated on the SURVIVOR — this key's write — never on what it

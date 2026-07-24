@@ -1186,13 +1186,15 @@ impl Driver {
     /// `next_incarnation` is the index the loss surfaces at (for the O1 record).
     async fn recover(&mut self, next_incarnation: usize) {
         let mut recovery = WalRecovery::new(Arc::clone(&self.wal), vec![self.partition]);
-        // Both replay-clobber defects reproduce the pre-fix blind re-replay with the
-        // SAME two seams: disable the merge gate AND re-replay each partition's
-        // oldest un-applied frame over the newer durable value the in-order pass
-        // left behind. `ReplayClobberOlderFrame` (TG-WAL-006) arranges that oldest
-        // frame to be a stale Lww Store; `ReplayStaleRemoveOverNewerValue`
-        // (TG-WAL-009) arranges it to be a stale `WalOp::Remove` — the guard and the
-        // clobber differ, the seam does not.
+        // Both replay-clobber defects re-replay each partition's oldest un-applied
+        // frame over the newer durable value the in-order pass left behind.
+        // `ReplayClobberOlderFrame` (TG-WAL-006) arranges that oldest frame to be a
+        // stale Lww Store and ALSO disables the Lww merge gate (which live-Store's
+        // LWW semantics require replay to mirror); `ReplayStaleRemoveOverNewerValue`
+        // (TG-WAL-009) arranges it to be a stale `WalOp::Remove`, whose replay is
+        // unconditional (no gate to disable — the `merge_gate=false` below is a
+        // vestigial no-op for the Remove arm). The out-of-order re-replay seam is
+        // what produces the clobber; in-order replay never does.
         if matches!(
             self.config.defect,
             DefectMode::ReplayClobberOlderFrame | DefectMode::ReplayStaleRemoveOverNewerValue
