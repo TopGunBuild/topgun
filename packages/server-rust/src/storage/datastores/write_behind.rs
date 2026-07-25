@@ -2627,13 +2627,13 @@ impl MapDataStore for WriteBehindDataStore {
         // discovered even when not resident.
         let mut names = self.inner.list_maps().await?;
 
-        // Union in maps whose only write is still buffered in staging. Before
-        // SPEC-323 clean-marking, a buffered record was necessarily also
-        // resident, so the durable catalog covered it. R6 makes a buffered
-        // record evictable, so a map whose sole write is buffered-and-evicted is
-        // now reachable only via staging — it must be surfaced here or the
-        // residency-independent seed would miss it. A map present in staging
-        // only via pending deletes (None) contributes nothing.
+        // Union in maps whose only write is still buffered in staging. A buffered
+        // record used to be necessarily resident too, so the durable catalog
+        // covered it; clean-marking made a buffered record evictable, so a map
+        // whose sole write is buffered-and-evicted is now reachable only via
+        // staging — it must be surfaced here or the residency-independent seed
+        // would miss it. A map present in staging only via pending deletes
+        // (None) contributes nothing.
         let mut staging_only: Vec<String> = self
             .staging
             .iter()
@@ -4294,15 +4294,25 @@ mod tests {
         assert_eq!(appended[0].1.key, "k1");
     }
 
-    /// TG-WAL-010: per-partition WAL-sequence assignment is strictly monotone —
-    /// concurrent `assign_wal_sequence` calls on ONE partition never hand out the
-    /// same sequence twice. This is premise (c) of the TG-WAL-009 gate-free
-    /// warrant (a strictly-newer re-creation of a key gets a strictly HIGHER WAL
-    /// sequence than an older op on the same key, so `M > N` holds).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    /// TG-WAL-010: WAL-sequence assignment is strictly monotone per partition and
+    /// never reuses a sequence globally. This is premise (c) of the TG-WAL-009
+    /// gate-free warrant (a strictly-newer re-creation of a key gets a strictly
+    /// HIGHER WAL sequence than an older op on the same key, so `M > N` holds).
+    ///
+    /// The assigns MUST be spread across distinct partitions. `assign_wal_sequence`
+    /// mints inside `with_partition`, i.e. under that partition's OWN mutex, so
+    /// pinning every task to one partition lets the lock serialize the counter bump
+    /// and hides whether the counter itself is atomic: with all tasks on a single
+    /// partition, replacing the `fetch_add` with a racy load/store keeps this test
+    /// (and the whole suite) green. Spread over 8 partitions the mutexes no longer
+    /// overlap and the same mutation goes RED on the arrival-order assertion (the
+    /// counter is observed moving backwards within one partition). One task per
+    /// partition is what makes that arrival order observable at all.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn wal_sequence_assignment_is_strictly_monotone_per_partition() {
-        const PARTITION: u32 = 7;
-        const TASKS: usize = 8;
+        // Eight DISTINCT partitions, named explicitly so the test needs no
+        // usize/u32 casts.
+        const PARTITIONS: [u32; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
         const PER_TASK: usize = 250;
 
         let wal = InMemoryTestWal::new();
@@ -4317,22 +4327,39 @@ mod tests {
             }),
         );
 
+        // One task per partition: distinct partitions => distinct tracking mutexes,
+        // so the only thing ordering these assigns is the counter itself.
         let mut handles = Vec::new();
-        for _ in 0..TASKS {
+        for partition in PARTITIONS {
             let store = Arc::clone(&store);
             handles.push(tokio::spawn(async move {
-                (0..PER_TASK)
-                    .map(|_| store.assign_wal_sequence(PARTITION))
-                    .collect::<Vec<u64>>()
+                (
+                    partition,
+                    (0..PER_TASK)
+                        .map(|_| store.assign_wal_sequence(partition))
+                        .collect::<Vec<u64>>(),
+                )
             }));
         }
 
         let mut all = Vec::new();
         for h in handles {
-            all.extend(h.await.unwrap());
+            let (partition, assigned) = h.await.unwrap();
+
+            // Per-partition monotonicity, in ARRIVAL order (not sorted): a later
+            // arrival on a partition gets a strictly higher sequence. This is the
+            // `M > N` step of the TG-WAL-009 warrant.
+            assert!(
+                assigned.windows(2).all(|w| w[0] < w[1]),
+                "partition {partition} assignments must be strictly increasing in \
+                 arrival order, got {assigned:?}"
+            );
+            all.extend(assigned);
         }
 
-        let total = TASKS * PER_TASK;
+        // Global no-reuse: one process-global counter feeds every partition, so no
+        // sequence may be handed out twice across partitions either.
+        let total = PARTITIONS.len() * PER_TASK;
         let unique: std::collections::HashSet<u64> = all.iter().copied().collect();
         assert_eq!(
             unique.len(),
@@ -4340,14 +4367,6 @@ mod tests {
             "a strictly-monotone counter never reuses a sequence under concurrency \
              ({total} concurrent assigns produced {} distinct values)",
             unique.len()
-        );
-
-        // Distinct integers are strictly increasing once sorted — the observable
-        // monotonicity of the assignment.
-        all.sort_unstable();
-        assert!(
-            all.windows(2).all(|w| w[0] < w[1]),
-            "sorted per-partition assignments must be strictly increasing"
         );
     }
 

@@ -194,6 +194,12 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   both `merge_gate` values — the discriminator vs the reverted gate) and the harness case
   `wal_harness::cases::ac1_ac6_stale_remove_clobber_caught_by_o1_oracle` (O1 `AckedWriteLost` catches
   the seam-injected out-of-order clobber; the `DefectMode::None` in-order run is green).
+  **Coverage note (deliberate narrowing):** the GENERATIVE baseline is not a second guard for the
+  gate-free property. `wal_harness`'s generator constrains arrival to a monotone-HLC domain (the O1
+  oracle's sound domain, `make_hlc_monotone`), which narrows it out of the range where a reintroduced
+  Remove gate would surface as `AckedWriteLost`. The isolated unit test above is therefore the SOLE
+  enforcing guard against gate reintroduction; oracle genericity over the non-monotone domain is owned
+  by TODO-610.
 - **Sibling invariant (DISTINCT):** `TG-WAL-006` owns the same re-replay-idempotency loss-class for
   `RecordValue::Lww` VALUES — there a gate IS correct because live-Store is HLC-conditional (LWW), so
   replay must mirror that compare. Remove is the counterpart whose live semantics are UNCONDITIONAL,
@@ -217,7 +223,17 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   an older op on the same key — premise (c) of `TG-WAL-009`.
 - **Maintaining code:** `write_behind.rs` `next_wal_sequence` (atomic `fetch_add`) + `assign_wal_sequence`.
 - **Enforcing test:** `write_behind.rs::tests::wal_sequence_assignment_is_strictly_monotone_per_partition`
-  — 2000 concurrent assigns on ONE partition are all distinct and strictly increasing when sorted.
+  — 8 tasks on 8 DISTINCT partitions × 250 assigns each, asserting BOTH clauses: each partition's own
+  returns are strictly increasing in ARRIVAL order (per-partition monotonicity, the `M > N` step), and
+  all 2000 values are globally distinct (no reuse). Spreading across partitions is load-bearing for
+  discrimination, not incidental: `assign_wal_sequence` mints inside `with_partition`, i.e. under that
+  partition's OWN mutex, so a single-partition variant stays GREEN — and the whole lib suite with it —
+  when the `fetch_add` is replaced by a racy load/yield/store, because the lock serializes the bump and
+  hides whether the counter is atomic at all. Across 8 partitions the mutexes no longer overlap and the
+  same mutation goes RED on the ARRIVAL-ORDER assertion (observed: partition 0 returned `… 83, 75 …`,
+  i.e. the counter moved backwards), which aborts the test before the distinctness assertion is reached;
+  a distinctness-only variant of this test reports the same break as ~705 distinct values out of 2000.
+  Mutation-verified in both directions (green with `fetch_add`, red without).
 - **Violation consequence:** sequence reuse or non-monotone assignment breaks both the prefix-complete
   watermark and `TG-WAL-009`'s `M > N` step, admitting a stale-Remove clobber.
 - **Discovered by:** SPEC-354 Review v2 (cataloguing the gate-free warrant's premises).
@@ -234,8 +250,10 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Maintaining code:** `wal/mod.rs::WalWriter::unapplied` (the `all.sort_by_key(|e| e.sequence)`
   before the `applied_seq` filter) + `WalRecovery::run`'s in-order replay loop.
 - **Enforcing test:** `wal/mod.rs::tests::wal_recovery_replays_in_strictly_ascending_sequence_order`
-  — frames appended out of order (seq 3, 1, 2) are returned by `unapplied` and replayed 1, 2, 3;
-  removing the `sort_by_key` makes both assertions FAIL.
+  — frames appended out of order (seq 3, 1, 2) are returned by `unapplied` and replayed 1, 2, 3.
+  Mutation-verified: removing the `sort_by_key` fails the FIRST assertion (`unapplied`'s returned order,
+  `left: [3, 1, 2]` vs `right: [1, 2, 3]`), which aborts the test before the replay-order assertion is
+  reached — so the enforcement is real, but it is the enumeration-order assertion that discriminates.
 - **Violation consequence:** out-of-order replay would let a stale Remove delete a strictly-newer
   re-creation replayed before it, or miscompute the contiguous frontier — an acked-write loss.
 - **Discovered by:** SPEC-354 Review v2 (cataloguing the gate-free warrant's premises).
