@@ -677,8 +677,8 @@ fn ac4_c3_scalar_max_watermark_regression() {
 /// be CAUGHT by the `value_equality` oracle as an `AckedValueMismatch` naming the
 /// key and the (expected, recovered) millis (AC4); and the identical case on the
 /// fixed path (`DefectMode::None`, gate on, no re-replay) must be GREEN under the
-/// same opt-in oracle (AC5 — the closing evidence SPEC-352's `OracleConfig`
-/// doc-comment names).
+/// same opt-in oracle (AC5 — the closing evidence the `OracleConfig` doc-comment
+/// names).
 ///
 /// The case writes key 0 twice, timestamp-monotonic (ts=10 then ts=20). The FIRST
 /// write's flush is rejected (store unhealthy) so its sequence strands un-applied
