@@ -168,8 +168,10 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   Remove, re-creating the value) or the Remove is the newest op for the key (deleting is
   live-correct). The stale-Remove-over-newer-frameless-value juxtaposition is reachable ONLY by
   re-applying an already-applied older frame after the in-order pass — the harness
-  `re_replay_oldest_frame` seam, never a production path. The chain rests on FOUR premises, EACH an
-  enforced invariant (not asserted prose):
+  `re_replay_oldest_frame` seam, never a production path. The chain rests on FOUR premises, none of
+  them asserted prose — three are TEST-backed (each a catalogued enforced invariant with a real test:
+  (a), (c), (d)) and one is COMPILER/TYPE-backed ((b): a pure free function, which is why it cites no
+  invariant ID and needs no enforcing test):
   - **(a) prefix-complete watermark** — `W = min(unresolved) - 1`, never at/above an unresolved
     sequence, so `N > W` bounds the replay window: `TG-WAL-005` / `TG-WB-001` / `TG-WAL-003`.
   - **(b) one sequence space per key** — `partition_for(map, key)` is deterministic, so a key's ops
