@@ -146,6 +146,121 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Discovered by:** SPEC-350 Audit v7 (two-class split), v10–v12 (races).
 - **Status:** decided, **enforced**.
 
+### TG-WAL-009: WAL re-replay is idempotent for `WalOp::Remove` (enforced, Remove-scoped)
+
+- **Scope:** `WalRecovery::replay_entry` `WalOp::Remove` arm. Modern Remove frames carry
+  `timestamp: None`; replay does not consult it.
+- **Statement (positive):** a `WalOp::Remove` replays UNCONDITIONALLY — a blind delete, identical to
+  the live remove path (`WriteBehindDataStore::remove`, which stages a pending-delete with no
+  timestamp compare). There is deliberately NO replay gate: the live path has no such condition, so a
+  gate would make `replay(Remove) != live(Remove)` and is itself unsound — an HLC-sourced gate
+  wrongly skipped a Remove whose sourced value-HLC was strictly older than the LWW survivor, losing
+  the acked delete (surfaced as `AckedWriteLost`). Idempotency is a property of the replay ORDER, not
+  a per-frame timestamp compare.
+- **Warrant (why no gate is NEEDED — structural non-reachability):** under prefix-complete, strictly
+  in-order replay of the unapplied window, a stale Remove can never delete a strictly-newer
+  re-creation. Let the Remove be at WAL sequence N and W the prefix-complete applied watermark
+  (`min(pending) - 1`, never at/above an unresolved sequence). For the Remove to be replayed, N > W.
+  A re-creation strictly newer than it has, by per-partition monotonic sequencing (= arrival order),
+  sequence M > N; for that re-creation to be durable-but-unframed (not re-enumerated after the
+  Remove) it must sit below the watermark, M <= W. Together: `M <= W < N < M` — a contradiction. So
+  either every strictly-newer re-creation's frame is also above W (enumerated and replayed AFTER the
+  Remove, re-creating the value) or the Remove is the newest op for the key (deleting is
+  live-correct). The stale-Remove-over-newer-frameless-value juxtaposition is reachable ONLY by
+  re-applying an already-applied older frame after the in-order pass — the harness
+  `re_replay_oldest_frame` seam, never a production path. The chain rests on FOUR premises, none of
+  them asserted prose — three are TEST-backed (each a catalogued enforced invariant with a real test:
+  (a), (c), (d)) and one is COMPILER/TYPE-backed ((b): a pure free function, which is why it cites no
+  invariant ID and needs no enforcing test):
+  - **(a) prefix-complete watermark** — `W = min(unresolved) - 1`, never at/above an unresolved
+    sequence, so `N > W` bounds the replay window: `TG-WAL-005` / `TG-WB-001` / `TG-WAL-003`.
+  - **(b) one sequence space per key** — `partition_for(map, key)` is deterministic, so a key's ops
+    are all sequenced in a single per-partition space (this is a SINGLE-SPACE claim, NOT itself an
+    ordering claim; the ordering is (c)/(d)): `partition_for` is a pure function.
+  - **(c) strictly-monotone per-partition sequence assignment** — a later arrival gets a strictly
+    HIGHER sequence, which is what makes the re-creation `M > N`: `TG-WAL-010`.
+  - **(d) strictly-ascending replay of the unapplied window** — a frame at `M > N` is replayed AFTER
+    the Remove at `N`, so the re-creation survives: `TG-WAL-011`.
+  Premises (c) and (d) carry the load-bearing `M > N` and replayed-after steps; (a) and (b) bound the
+  window and the sequence space. (b) alone is necessary-but-insufficient for the ordering — it is
+  (c)+(d) that order the space.
+- **Windowing residual (tracked, NOT closed by a gate):** the only genuine out-of-order hazard — a
+  frameless `flush_key` durable write racing an un-resolved older Remove — is a WATERMARK/FRAMING
+  concern, not a Remove-idempotency one, so it is routed to TODO-612 (SPEC-349/windowing), not
+  papered over with an unsound Remove-replay timestamp gate.
+- **Maintaining code:** `wal/mod.rs::replay_entry` (`WalOp::Remove` arm, unconditional) + `run` /
+  `WalEntry` doc-contracts; `datastores/write_behind.rs` `remove`/`remove_all` append Remove frames
+  with `timestamp: None`.
+- **Enforcing test:** `wal/mod.rs::tests::replay_remove_replays_unconditionally_isolated`
+  (strictly-older / tie / newer / sentinel / legacy-`None` Remove all delete unconditionally, under
+  both `merge_gate` values — the discriminator vs the reverted gate) and the harness case
+  `wal_harness::cases::ac1_ac6_stale_remove_clobber_caught_by_o1_oracle` (O1 `AckedWriteLost` catches
+  the seam-injected out-of-order clobber; the `DefectMode::None` in-order run is green).
+  **Coverage note (deliberate narrowing):** the GENERATIVE baseline is not a second guard for the
+  gate-free property. `wal_harness`'s generator constrains arrival to a monotone-HLC domain (the O1
+  oracle's sound domain, `make_hlc_monotone`), which narrows it out of the range where a reintroduced
+  Remove gate would surface as `AckedWriteLost`. The isolated unit test above is therefore the SOLE
+  enforcing guard against gate reintroduction; oracle genericity over the non-monotone domain is owned
+  by TODO-610.
+- **Sibling invariant (DISTINCT):** `TG-WAL-006` owns the same re-replay-idempotency loss-class for
+  `RecordValue::Lww` VALUES — there a gate IS correct because live-Store is HLC-conditional (LWW), so
+  replay must mirror that compare. Remove is the counterpart whose live semantics are UNCONDITIONAL,
+  so it needs no gate; the two share the recovery-boundary layering but not a comparison basis.
+- **Violation consequence:** acked-write loss on crash-recovery — either an unsound gate wrongly
+  skips a legitimate delete, or (if the windowing residual were left unhandled) a stale-Remove
+  clobbers a re-creation. Both surface as `AckedWriteLost`.
+- **Discovered by:** SPEC-353 `/xask` (Review v1 flagged the Remove-clobber loss-class, routed to
+  TODO-609); SPEC-354 Review v1 caught the unsound gate (an `AckedWriteLost` regression); closed by
+  SPEC-354 via a pre-fix `/xask` + a structural non-reachability spike.
+- **Status:** decided, **enforced (Remove-scoped)**.
+
+### TG-WAL-010: Per-partition WAL sequence assignment is strictly monotone
+
+- **Scope:** `WriteBehindDataStore::assign_wal_sequence` — the single mint point for a mutation's WAL
+  sequence — per partition.
+- **Statement:** every assigned WAL sequence is drawn from one process-global atomic counter
+  (`next_wal_sequence`, a `fetch_add`), so a partition's assigned sequences are a strictly-increasing
+  subsequence: no sequence is ever reused, and a later arrival gets a strictly HIGHER sequence than
+  an earlier op on the same partition. This is what makes a re-created value carry `M > N` relative to
+  an older op on the same key — premise (c) of `TG-WAL-009`.
+- **Maintaining code:** `write_behind.rs` `next_wal_sequence` (atomic `fetch_add`) + `assign_wal_sequence`.
+- **Enforcing test:** `write_behind.rs::tests::wal_sequence_assignment_is_strictly_monotone_per_partition`
+  — 8 tasks on 8 DISTINCT partitions × 250 assigns each, asserting BOTH clauses: each partition's own
+  returns are strictly increasing in ARRIVAL order (per-partition monotonicity, the `M > N` step), and
+  all 2000 values are globally distinct (no reuse). Spreading across partitions is load-bearing for
+  discrimination, not incidental: `assign_wal_sequence` mints inside `with_partition`, i.e. under that
+  partition's OWN mutex, so a single-partition variant stays GREEN — and the whole lib suite with it —
+  when the `fetch_add` is replaced by a racy load/yield/store, because the lock serializes the bump and
+  hides whether the counter is atomic at all. Across 8 partitions the mutexes no longer overlap and the
+  same mutation goes RED on the ARRIVAL-ORDER assertion (observed: partition 0 returned `… 83, 75 …`,
+  i.e. the counter moved backwards), which aborts the test before the distinctness assertion is reached;
+  a distinctness-only variant of this test reports the same break as ~705 distinct values out of 2000.
+  Mutation-verified in both directions (green with `fetch_add`, red without).
+- **Violation consequence:** sequence reuse or non-monotone assignment breaks both the prefix-complete
+  watermark and `TG-WAL-009`'s `M > N` step, admitting a stale-Remove clobber.
+- **Discovered by:** SPEC-354 Review v2 (cataloguing the gate-free warrant's premises).
+- **Status:** decided, **enforced**.
+
+### TG-WAL-011: WAL recovery replays the unapplied window in strictly ascending sequence order
+
+- **Scope:** `Wal::unapplied` ordering contract + `WalRecovery::run` replay loop.
+- **Statement:** `Wal::unapplied` returns the unapplied window sorted strictly ascending by WAL
+  sequence — a defensive `sort_by_key(|e| e.sequence)` that holds REGARDLESS of the order frames were
+  appended or enumerated across segments — and `run` replays that Vec in order. A frame at sequence
+  `M > N` is therefore always replayed AFTER the frame at `N` (premise (d) of `TG-WAL-009`), and the
+  contiguous-success frontier the applied watermark advances to is well-defined by sequence.
+- **Maintaining code:** `wal/mod.rs::WalWriter::unapplied` (the `all.sort_by_key(|e| e.sequence)`
+  before the `applied_seq` filter) + `WalRecovery::run`'s in-order replay loop.
+- **Enforcing test:** `wal/mod.rs::tests::wal_recovery_replays_in_strictly_ascending_sequence_order`
+  — frames appended out of order (seq 3, 1, 2) are returned by `unapplied` and replayed 1, 2, 3.
+  Mutation-verified: removing the `sort_by_key` fails the FIRST assertion (`unapplied`'s returned order,
+  `left: [3, 1, 2]` vs `right: [1, 2, 3]`), which aborts the test before the replay-order assertion is
+  reached — so the enforcement is real, but it is the enumeration-order assertion that discriminates.
+- **Violation consequence:** out-of-order replay would let a stale Remove delete a strictly-newer
+  re-creation replayed before it, or miscompute the contiguous frontier — an acked-write loss.
+- **Discovered by:** SPEC-354 Review v2 (cataloguing the gate-free warrant's premises).
+- **Status:** decided, **enforced**.
+
 ### TG-WB-001: The flushed watermark is prefix-complete — no mid-range hole
 
 - **Scope:** entry-ordering-space `pending_seqs` / `flushed_watermark()` (tombstone fence

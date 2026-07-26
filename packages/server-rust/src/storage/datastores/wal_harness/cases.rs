@@ -197,16 +197,46 @@ fn incarnation_strategy(shape: &CaseShape) -> BoxedStrategy<Incarnation> {
         .boxed()
 }
 
+/// Rewrites every `Append`'s `millis` to a strictly-increasing, arrival-ordered
+/// value across the whole case, so each key's HLCs are MONOTONE in arrival order.
+///
+/// This is the O1/O2 LWW reference model's SOUND DOMAIN, and it matches production:
+/// a single node's HLC never goes backwards, so a key's WAL frames arrive in
+/// non-decreasing timestamp order. Under a NON-monotone arrival (a later frame with
+/// a lower HLC) the model's latest-arrival value diverges from the impl's max-HLC
+/// LWW winner: the impl's recovery discards the stale lower-HLC frame (advancing the
+/// watermark store-health-INDEPENDENTLY), while the health-gated reference model
+/// keeps it unresolved — producing false `WatermarkAboveUnresolved` / `AckedWriteLost`
+/// reports that are oracle artefacts, not real losses. Generating only monotone
+/// arrivals keeps the oracle inside its proven-sound domain; the non-monotone-arrival
+/// extension (a per-key max-live-millis reference) is owned by TODO-610, not this
+/// harness.
+fn make_hlc_monotone(mut case: Case) -> Case {
+    let mut next: i64 = 1;
+    for incarnation in &mut case {
+        for op in &mut incarnation.ops {
+            if let WorkOp::Append { millis, .. } = op {
+                *millis = next;
+                next += 1;
+            }
+        }
+    }
+    case
+}
+
 /// A whole case: `1..=max_incarnations` incarnations (R1). `force_single_incarnation`
 /// pins it to exactly one incarnation — AC5(c)'s negative control — so no crash and
-/// therefore no recovery can occur.
+/// therefore no recovery can occur. Generated HLCs are made monotone in arrival order
+/// (see `make_hlc_monotone`) so the run stays in the oracle's sound domain.
 fn case_strategy(shape: &CaseShape) -> BoxedStrategy<Case> {
     let max_inc = if shape.force_single_incarnation {
         1
     } else {
         shape.max_incarnations
     };
-    proptest::collection::vec(incarnation_strategy(shape), 1..=max_inc).boxed()
+    proptest::collection::vec(incarnation_strategy(shape), 1..=max_inc)
+        .prop_map(make_hlc_monotone)
+        .boxed()
 }
 
 // ---------------------------------------------------------------------------
@@ -647,8 +677,8 @@ fn ac4_c3_scalar_max_watermark_regression() {
 /// be CAUGHT by the `value_equality` oracle as an `AckedValueMismatch` naming the
 /// key and the (expected, recovered) millis (AC4); and the identical case on the
 /// fixed path (`DefectMode::None`, gate on, no re-replay) must be GREEN under the
-/// same opt-in oracle (AC5 — the closing evidence SPEC-352's `OracleConfig`
-/// doc-comment names).
+/// same opt-in oracle (AC5 — the closing evidence the `OracleConfig` doc-comment
+/// names).
 ///
 /// The case writes key 0 twice, timestamp-monotonic (ts=10 then ts=20). The FIRST
 /// write's flush is rejected (store unhealthy) so its sequence strands un-applied
@@ -720,6 +750,88 @@ fn ac4_5_replay_clobber_caught_by_value_equality_oracle() {
             .iter()
             .any(|v| matches!(v, InvariantViolation::AckedValueMismatch { .. })),
         "AC5: the fixed path must report no AckedValueMismatch under value_equality; got {:?}",
+        fixed_outcome.violations
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AC1 / AC5 / AC6 — TG-WAL-009 stale-Remove-clobber proof via the O1 oracle
+// ---------------------------------------------------------------------------
+
+/// `DefectMode::ReplayStaleRemoveOverNewerValue` (the pre-`TG-WAL-009` blind Remove
+/// clobber) must be CAUGHT by the O1 `AckedWriteLost` oracle naming the deleted key
+/// (AC5 — defect-present detection, NO model/oracle fork); and the identical case on
+/// the fixed path (`DefectMode::None`, gate on, no re-replay) must be GREEN (AC1/AC6
+/// — the fix holds).
+///
+/// The case arranges a stale Remove as the OLDEST un-applied frame over a newer
+/// durable re-creation, then relies on the harness `re_replay_oldest_frame` seam to
+/// re-apply that Remove OUT OF ORDER — the only way to fabricate the clobber, since
+/// in-order replay always ends on the newest frame (production can never manufacture
+/// it — see TG-WAL-009's non-reachability argument):
+///  1. Append key 0 (ts=5) and flush it durably — its frame is applied, advancing
+///     the watermark past it, so it drops OUT of the replay window.
+///  2. Remove key 0 (frame carries no timestamp); its flush is REJECTED (store
+///     unhealthy), so the Remove frame strands un-applied and holds the watermark
+///     back. It is now the oldest un-applied frame.
+///  3. Re-create key 0 (ts=20) and flush it durably — its frame stays un-applied
+///     because the stranded Remove blocks the contiguous frontier.
+///
+/// At recovery the in-order pass replays the Remove THEN the ts=20 re-creation, so
+/// key 0 ends `Live{20}` — matching the model. Under `DefectMode::None` there is no
+/// re-replay, so the run is GREEN (AC1/AC6 — replay is correct without a gate). The
+/// defect then re-replays the OLDEST frame (the Remove) after the in-order pass;
+/// replay-remove is unconditional (identical to live), so it blind-deletes the
+/// re-creation, and O1 reports `AckedWriteLost` for key 0 (AC5 — the seam-injected
+/// out-of-order clobber is detected).
+#[test]
+fn ac1_ac6_stale_remove_clobber_caught_by_o1_oracle() {
+    let case: Case = vec![
+        Incarnation {
+            ops: vec![
+                WorkOp::Append { key: 0, millis: 5 },
+                WorkOp::FlushTick { advance_ms: 5_000 },
+                WorkOp::Remove { key: 0 },
+                WorkOp::SetStoreHealth { healthy: false },
+                WorkOp::FlushTick { advance_ms: 5_000 },
+                WorkOp::SetStoreHealth { healthy: true },
+                WorkOp::Append { key: 0, millis: 20 },
+                WorkOp::FlushTick { advance_ms: 5_000 },
+            ],
+            end: IncarnationEnd::Crash,
+        },
+        Incarnation {
+            ops: vec![WorkOp::Read { key: 0 }],
+            end: IncarnationEnd::CleanShutdown,
+        },
+    ];
+
+    // (a) defect present: the O1 oracle catches the stale-Remove clobber of key 0.
+    let defect_cfg = RunConfig {
+        defect: DefectMode::ReplayStaleRemoveOverNewerValue,
+        ..RunConfig::baseline()
+    };
+    let defect_outcome = block_on_async(run_case(&case, &defect_cfg));
+    let lost = defect_outcome
+        .violations
+        .iter()
+        .any(|v| matches!(v, InvariantViolation::AckedWriteLost { key: 0, .. }));
+    assert!(
+        lost,
+        "AC5: the stale-Remove clobber must surface as AckedWriteLost naming key 0; \
+         got violations {:?}",
+        defect_outcome.violations
+    );
+
+    // (b) discriminator: the fixed path clobbers nothing (AC1/AC6).
+    let fixed_cfg = RunConfig {
+        defect: DefectMode::None,
+        ..RunConfig::baseline()
+    };
+    let fixed_outcome = block_on_async(run_case(&case, &fixed_cfg));
+    assert!(
+        fixed_outcome.violations.is_empty(),
+        "AC6: the fixed path must report zero violations for the identical run; got {:?}",
         fixed_outcome.violations
     );
 }

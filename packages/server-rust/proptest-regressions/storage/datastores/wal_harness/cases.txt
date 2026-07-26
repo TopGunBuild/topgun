@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc baf8de895b84866aacf8bf37cb701c834975ee82bbc2303b337d8fb8461a507d # shrinks to case = [Incarnation { ops: [RemoveAll { keys: [0] }, FlushTick { advance_ms: 0 }], end: Crash }]
+cc 340d7e254c74a17b5cfff223dd1b798306c2789f23618cc6b09588d756f6e663 # shrinks to case = [Incarnation { ops: [Append { key: 3, millis: 657772 }], end: Crash }, Incarnation { ops: [SetStoreHealth { healthy: false }, Append { key: 3, millis: 1 }], end: Crash }, Incarnation { ops: [Append { key: 0, millis: 1 }], end: Crash }]

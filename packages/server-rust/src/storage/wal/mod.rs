@@ -377,9 +377,15 @@ pub struct WalEntry {
     pub key: String,
     /// The operation to replay on recovery.
     pub op: WalOp,
-    /// HLC timestamp from the originating write. Used as the idempotency key:
-    /// during recovery, a replayed entry whose timestamp is older than the
-    /// current in-memory value is a no-op.
+    /// HLC timestamp from the originating write. It is the idempotency key for
+    /// `WalOp::Store` `Lww` frames ONLY: during recovery a replayed Store whose
+    /// timestamp is older than the current durable value is a no-op (TG-WAL-006).
+    /// `WalOp::Remove` frames carry `None` — a Remove replays UNCONDITIONALLY,
+    /// exactly as the live remove path deletes unconditionally (no timestamp
+    /// compare), so recovery never consults a Remove's timestamp (TG-WAL-009). A
+    /// Remove gate would be unsound: live-remove has no such condition, and under
+    /// prefix-complete in-order replay a stale Remove can never be juxtaposed over
+    /// a strictly-newer re-creation (proof recorded in INVARIANTS.md TG-WAL-009).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub timestamp: Option<Timestamp>,
     /// Monotonically increasing counter assigned at append time. Establishes
@@ -1687,6 +1693,25 @@ impl WalRecovery {
     /// - A cross-kind case (stored value is not `Lww` while the incoming frame is)
     ///   cannot be compared by timestamp, so it also BYPASSES the gate and writes
     ///   through.
+    ///
+    /// Re-replay of a `WalOp::Remove` frame is idempotent WITHOUT a gate, under a
+    /// DISTINCT invariant (`TG-WAL-009`, Remove-scoped — not the `TG-WAL-006` value
+    /// claim above). A Remove replays UNCONDITIONALLY, identical to the live remove
+    /// path (a blind delete with no timestamp compare): `entry.timestamp` is not
+    /// consulted. This is single-algebra-correct — a gate the live path does not
+    /// have would make `replay(Remove) != live(Remove)` and would itself lose acked
+    /// deletes (a Remove whose sourced value-HLC is strictly older than the LWW
+    /// survivor would be wrongly skipped). No gate is NEEDED either: under
+    /// prefix-complete, in-order replay of the unapplied window, a stale Remove at
+    /// sequence N is replayed only when N is above the watermark, in which case
+    /// every higher-sequence frame — including any strictly-newer re-creation — is
+    /// also above the watermark and replayed AFTER it, so the re-creation survives;
+    /// and the only way a re-creation is durable-but-unframed is that its sequence
+    /// is below the watermark, i.e. OLDER than the replayed Remove, so deleting it
+    /// is live-correct. The `stale-Remove-over-newer-frameless-value` juxtaposition
+    /// is unreachable except by re-applying an already-applied older frame — the
+    /// harness `re_replay_oldest_frame` seam, never a production path (see
+    /// INVARIANTS.md TG-WAL-009 for the full state-machine argument).
     async fn replay_entry(
         inner_store: &Arc<dyn MapDataStore>,
         entry: &WalEntry,
@@ -1755,7 +1780,21 @@ impl WalRecovery {
                     )
                     .await
             }
-            WalOp::Remove => inner_store.remove(&entry.map, &entry.key, now).await,
+            WalOp::Remove => {
+                // Replay a Remove UNCONDITIONALLY (TG-WAL-009) — identical to the
+                // live remove path, which is a blind delete with no timestamp
+                // compare. `entry.timestamp` is deliberately NOT consulted and
+                // `merge_gate` is ignored for this arm: a gate the live path does not
+                // have would make `replay(Remove) != live(Remove)` and would itself
+                // lose acked deletes (the exact regression an HLC-sourced gate
+                // produced). No gate is needed — under prefix-complete in-order
+                // replay a stale Remove can never be juxtaposed over a strictly-newer
+                // re-creation (see `run`'s doc-contract and INVARIANTS.md TG-WAL-009
+                // for the state-machine argument). The harness reproduces the
+                // synthetic out-of-order clobber via its `re_replay_oldest_frame`
+                // seam, not through this arm.
+                inner_store.remove(&entry.map, &entry.key, now).await
+            }
             // An explicit arm rather than a `_` catch-all: the exhaustiveness is
             // what forces a future framing to declare its replay semantics here
             // instead of inheriting someone else's. This variant is never
@@ -1794,6 +1833,18 @@ impl WalRecovery {
     /// this merge; their own merge-idempotency property is owned by `TG-OR-003`.
     /// Legacy frames keep always-merge replay.
     ///
+    /// `WalOp::Remove` re-replay is idempotent under a DISTINCT invariant
+    /// (`TG-WAL-009`) WITHOUT a gate: a Remove replays UNCONDITIONALLY, identical to
+    /// the live remove path (blind delete). Because this pass is prefix-complete and
+    /// strictly in-order, a stale Remove at sequence N is replayed only when N sits
+    /// above the applied watermark, which forces every higher-sequence frame —
+    /// including any strictly-newer re-creation — above the watermark too, so the
+    /// re-creation replays AFTER the Remove and survives; and a re-creation that is
+    /// durable-but-unframed necessarily sits below the watermark (older than the
+    /// replayed Remove), so deleting it is live-correct. The out-of-order
+    /// stale-Remove-over-newer-value state is unreachable here and is fabricated
+    /// only by the harness `re_replay_oldest_frame` seam.
+    ///
     /// A partition whose frontier stops below its highest enumerated frame raises
     /// the abandoned-write alarm here, at boot. Write-behind's watchdog cannot
     /// cover this: a partition that never receives a live write is never seeded
@@ -1831,6 +1882,13 @@ impl WalRecovery {
                 continue;
             }
 
+            // `entries` is strictly ascending by WAL sequence: `Wal::unapplied`
+            // sorts defensively (see its impl), and the loop below replays in that
+            // order. Both the contiguous-frontier watermark logic AND the gate-free
+            // Remove-idempotency non-reachability argument (TG-WAL-009's premise
+            // that a stale Remove is replayed only when every strictly-newer frame
+            // for the key is replayed AFTER it) rely on this ascending order
+            // (TG-WAL-011).
             tracing::info!(
                 partition = partition_id,
                 count = entries.len(),
@@ -2253,6 +2311,9 @@ mod tests {
         data: tokio::sync::Mutex<
             std::collections::HashMap<(String, String), crate::storage::record::RecordValue>,
         >,
+        /// The key of every `add`/`remove` in call order, so a recovery test can
+        /// assert the REPLAY ORDER (TG-WAL-011), not just the final state.
+        replay_order: tokio::sync::Mutex<Vec<String>>,
     }
 
     #[async_trait]
@@ -2265,6 +2326,7 @@ mod tests {
             _exp: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
+            self.replay_order.lock().await.push(key.to_string());
             self.data
                 .lock()
                 .await
@@ -2282,6 +2344,7 @@ mod tests {
             Ok(())
         }
         async fn remove(&self, map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
+            self.replay_order.lock().await.push(key.to_string());
             self.data
                 .lock()
                 .await
@@ -2547,6 +2610,143 @@ mod tests {
                 },
             }),
             "a legacy frame must always-merge (bypass the gate) even over a newer value"
+        );
+    }
+
+    fn remove_frame(key: &str, millis: u64) -> WalEntry {
+        WalEntry {
+            map: "m".to_string(),
+            key: key.to_string(),
+            op: WalOp::Remove,
+            timestamp: Some(ts(millis)),
+            sequence: 1,
+        }
+    }
+
+    /// TG-WAL-009: `replay_entry` replays a `WalOp::Remove` UNCONDITIONALLY —
+    /// identical to the live remove path (a blind delete). It NEVER consults the
+    /// frame's timestamp and NEVER resurrects a value via a gate. The strictly-older
+    /// case is the discriminator: an HLC-sourced gate (the reverted regression)
+    /// would have SKIPPED a Remove whose sourced HLC is older than the durable
+    /// value, losing the acked delete; unconditional replay deletes it, matching
+    /// live. This isolates the SEMANTICS (independent of the harness re-replay seam),
+    /// and `merge_gate` is proven irrelevant to the Remove arm.
+    #[tokio::test]
+    async fn replay_remove_replays_unconditionally_isolated() {
+        let newer = RecordValue::Lww {
+            value: TgValue::Int(20),
+            timestamp: ts(20),
+        };
+        let sentinel_remove = WalEntry {
+            map: "m".to_string(),
+            key: "k".to_string(),
+            op: WalOp::Remove,
+            timestamp: Some(Timestamp {
+                millis: 0,
+                counter: 0,
+                node_id: String::new(),
+            }),
+            sequence: 1,
+        };
+
+        // The discriminator: a Remove whose sourced HLC (10) is STRICTLY OLDER than
+        // a newer durable value (20) STILL deletes. The reverted gate would have
+        // skipped this (resurrecting the value and losing the acked delete); live
+        // remove deletes unconditionally, so replay must too. Proven under BOTH
+        // `merge_gate` values — the Remove arm ignores the flag entirely.
+        for merge_gate in [true, false] {
+            let store: Arc<dyn MapDataStore> = Arc::new(MergeProbeStore::default());
+            store.add("m", "k", &newer, 0, 0).await.unwrap();
+            WalRecovery::replay_entry(&store, &remove_frame("k", 10), 0, merge_gate)
+                .await
+                .unwrap();
+            assert_eq!(
+                store.load("m", "k").await.unwrap(),
+                None,
+                "a strictly-older Remove still deletes (unconditional replay = live), \
+                 merge_gate={merge_gate}"
+            );
+        }
+
+        // A tie, a newer, a sentinel, and a legacy `None` Remove all delete too —
+        // there is no timestamp condition on the Remove arm at all.
+        for frame in [
+            remove_frame("k", 20),
+            remove_frame("k", 30),
+            sentinel_remove,
+            WalEntry {
+                map: "m".to_string(),
+                key: "k".to_string(),
+                op: WalOp::Remove,
+                timestamp: None,
+                sequence: 1,
+            },
+        ] {
+            let store: Arc<dyn MapDataStore> = Arc::new(MergeProbeStore::default());
+            store.add("m", "k", &newer, 0, 0).await.unwrap();
+            WalRecovery::replay_entry(&store, &frame, 0, true)
+                .await
+                .unwrap();
+            assert_eq!(
+                store.load("m", "k").await.unwrap(),
+                None,
+                "every Remove deletes unconditionally regardless of its timestamp: {frame:?}"
+            );
+        }
+    }
+
+    /// TG-WAL-011: recovery replays the unapplied window in strictly ASCENDING
+    /// WAL-sequence order — `Wal::unapplied` sorts frames by sequence regardless of
+    /// the order they were appended (its defensive `sort_by_key`), and `run`
+    /// replays them in that order. This is premise (d) of the TG-WAL-009 gate-free
+    /// warrant — the "a strictly-newer re-creation is replayed AFTER the stale
+    /// Remove" step. Frames appended OUT OF ORDER (seq 3, 1, 2) come back — and
+    /// replay — 1, 2, 3. Removing the `sort_by_key` in `unapplied` makes both
+    /// assertions FAIL — the discriminator for the ordering contract.
+    #[tokio::test]
+    async fn wal_recovery_replays_in_strictly_ascending_sequence_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap();
+
+        // Append out of sequence order (all > 0; seq 0 is the reserved sentinel
+        // `unapplied` filters). Each key carries its sequence so the probe records
+        // the replay order back.
+        for seq in [3u64, 1, 2] {
+            let entry = WalEntry {
+                map: "m".to_string(),
+                key: seq.to_string(),
+                op: WalOp::Remove,
+                timestamp: None,
+                sequence: seq,
+            };
+            wal.append(0, &entry).await.unwrap();
+        }
+        // `unapplied` sorts the shuffled appends into strictly ascending sequence
+        // order — the contract `run`'s in-order replay (and TG-WAL-009) depends on.
+        let enumerated: Vec<u64> = wal
+            .unapplied(0)
+            .await
+            .unwrap()
+            .iter()
+            .map(|e| e.sequence)
+            .collect();
+        assert_eq!(
+            enumerated,
+            vec![1, 2, 3],
+            "unapplied must return strictly ascending sequence order regardless of append order"
+        );
+
+        let store = Arc::new(MergeProbeStore::default());
+        WalRecovery::new(Arc::clone(&wal), vec![0])
+            .run(Arc::clone(&store) as Arc<dyn MapDataStore>)
+            .await
+            .unwrap();
+
+        let order = store.replay_order.lock().await.clone();
+        assert_eq!(
+            order,
+            vec!["1".to_string(), "2".to_string(), "3".to_string()],
+            "recovery must replay in ascending sequence order (got {order:?})"
         );
     }
 
