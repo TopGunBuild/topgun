@@ -752,6 +752,24 @@ fn ac4_5_replay_clobber_caught_by_value_equality_oracle() {
         "AC5: the fixed path must report no AckedValueMismatch under value_equality; got {:?}",
         fixed_outcome.violations
     );
+
+    // (c) the DISCRIMINATING discriminator: arm (b) sets neither seam, so it only
+    // proves "no re-replay happened → no clobber". This arm fires the SAME stale
+    // re-replay the defect arm uses but leaves the `RecordValue::Lww` merge gate in
+    // its production state, so a GREEN result is the gate DEFEATING an out-of-order
+    // stale frame (TG-WAL-006) rather than the absence of one.
+    let gate_on_cfg = RunConfig {
+        defect: DefectMode::ReReplayOldestFrameGateOn,
+        oracle: value_eq,
+        ..RunConfig::baseline()
+    };
+    let gate_on_outcome = block_on_async(run_case(&case, &gate_on_cfg));
+    assert!(
+        gate_on_outcome.violations.is_empty(),
+        "AC5: a stale re-replay with the merge gate still ON must be GREEN — the gate \
+         must discard the older frame; got {:?}",
+        gate_on_outcome.violations
+    );
 }
 
 // ---------------------------------------------------------------------------

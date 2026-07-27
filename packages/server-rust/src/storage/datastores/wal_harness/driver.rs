@@ -761,12 +761,13 @@ impl Driver {
 
         // Apply the run's defect seams (R6).
         match self.config.defect {
-            // Both replay-clobber defects are recovery-side seams (see `recover`),
-            // so they install nothing on the store.
+            // The replay-side modes are recovery-side seams (see `recover`), so they
+            // install nothing on the store.
             DefectMode::None
             | DefectMode::UnlinkThenFsync
             | DefectMode::ReplayClobberOlderFrame
-            | DefectMode::ReplayStaleRemoveOverNewerValue => {}
+            | DefectMode::ReplayStaleRemoveOverNewerValue
+            | DefectMode::ReReplayOldestFrameGateOn => {}
             DefectMode::ScalarMaxWatermark => {
                 store.test_set_watermark_mode(WatermarkMode::ScalarMax);
             }
@@ -1213,12 +1214,24 @@ impl Driver {
         // unconditional (no gate to disable — the `merge_gate=false` below is a
         // vestigial no-op for the Remove arm). The out-of-order re-replay seam is
         // what produces the clobber; in-order replay never does.
-        if matches!(
-            self.config.defect,
-            DefectMode::ReplayClobberOlderFrame | DefectMode::ReplayStaleRemoveOverNewerValue
-        ) {
-            recovery.test_set_replay_merge_gate(false);
-            recovery.test_set_re_replay_oldest_frame(true);
+        //
+        // The two seams are SELECTED INDEPENDENTLY: `ReReplayOldestFrameGateOn`
+        // takes the re-replay seam alone, leaving the gate in its production state,
+        // so a run can discriminate "the gate defeats the stale re-replay" from the
+        // trivial "no re-replay happened".
+        match self.config.defect {
+            DefectMode::ReplayClobberOlderFrame | DefectMode::ReplayStaleRemoveOverNewerValue => {
+                recovery.test_set_replay_merge_gate(false);
+                recovery.test_set_re_replay_oldest_frame(true);
+            }
+            DefectMode::ReReplayOldestFrameGateOn => {
+                recovery.test_set_re_replay_oldest_frame(true);
+            }
+            DefectMode::None
+            | DefectMode::ScalarMaxWatermark
+            | DefectMode::EmptyBootSeed
+            | DefectMode::InclusiveOffByOne
+            | DefectMode::UnlinkThenFsync => {}
         }
         let _ = recovery
             .run(Arc::clone(&self.inner) as Arc<dyn MapDataStore>)

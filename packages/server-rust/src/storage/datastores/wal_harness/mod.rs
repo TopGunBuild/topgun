@@ -182,6 +182,13 @@ pub(crate) enum DefectMode {
     /// manufactures it. Caught by the O1 `AckedWriteLost` oracle (expected Live, got
     /// absent) — NO new oracle needed.
     ReplayStaleRemoveOverNewerValue,
+    /// NOT a defect: the stale re-replay seam (`re_replay_oldest_frame`) with the
+    /// `RecordValue::Lww` merge gate left ON — the production gate configuration under
+    /// an out-of-order replay. It exists so a run can DISCRIMINATE "the gate defeats a
+    /// stale re-replay" (`TG-WAL-006`) from the trivial "no re-replay happened at all"
+    /// that [`DefectMode::None`] proves. A run under this mode is expected GREEN; a
+    /// violation here means the gate stopped holding.
+    ReReplayOldestFrameGateOn,
 }
 
 /// `wal/mod.rs::mark_applied` crash-injection point (R7), fired between the sidecar write+fsync
