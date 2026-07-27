@@ -368,7 +368,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   counter call sites in `crdt.rs`: `add_tombstone_bytes` inside the OR_REMOVE mutate closure's
   new-tombstone guard, and `sub_tombstone_bytes` in `crdt.rs::prune_epoch_tombstones`'s post-write
   `Ok(_)` arm behind `dropped`. Both deliberately sit OUTSIDE the extracted pure apply
-  (`crdt.rs::apply_or_delta`, which is counter-free by contract — TG-OR-003). That purity rule is NOT
+  (`crdt.rs::apply_or_delta`, whose counter-freeness is itself asserted, behaviourally by
+  `crdt.rs::or_apply_moves_no_tombstone_bytes_on_any_arm` and structurally by
+  `::or_apply_body_names_no_tombstone_byte_counter`). That purity rule is NOT
   permission to move them into it: the decrement in particular must fire only after the durable write
   succeeds, because the gauge tracks bytes actually resident, not bytes removed from an in-memory copy.
   Citations are kept line-number-free on purpose — the SPEC-349 extraction relocated the surrounding
