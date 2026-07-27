@@ -311,13 +311,20 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Statement:** one call invokes `mutate` at most once (doc-contract, SPEC-347); gauge side
   effects inside the closure must not double-count.
 - **Maintaining code:** doc-contract + DashMap shard-lock path.
-- **Enforcing test:** partial —
-  `or_inplace_mutate_proptest.rs::new_tombstone_counted_once_across_write_failure_and_retry`
-  proves no double-count across fail+retry; the literal call-counter assertion (`AtomicUsize
-  == 1` per call) is `NAKED (TODO-602)`.
+- **Enforcing test:** the literal call-counter assertion now exists —
+  `or_inplace_mutate_proptest.rs::update_in_place_invokes_the_mutate_closure_exactly_once_per_call`
+  counts invocations per call (`AtomicUsize`) on the insert, occupied and failed-write-through
+  paths, and `::update_in_place_admits_the_take_once_shape_the_or_add_path_uses` pins the OR_ADD
+  `Option::take` shape; both are mutation-proven RED against a second `mutate` call in either
+  `engines/hashmap.rs` arm.
+  `::new_tombstone_counted_once_across_write_failure_and_retry` covers the gauge half (no
+  double-count across fail+retry).
+  Scope of that evidence, stated honestly: it counts the production pair the record-store factory
+  builds (`DefaultRecordStore` + `HashMapStorage`). Other `RecordStore` impls, including the trait's
+  own default fallback, are not counted.
 - **Violation consequence:** hidden internal retry double-applies CRDT mutations/gauge deltas.
 - **Discovered by:** SPEC-347 review minors.
-- **Status:** decided; enforcement partial.
+- **Status:** decided, **enforced** for the production store/engine pair.
 
 ### TG-OR-002: OR observers receive the documented `old_value` contract (post-image)
 
