@@ -2236,6 +2236,146 @@ mod tests {
     use topgun_core::types::Value as TgValue;
 
     // -----------------------------------------------------------------------
+    // Doc-contract assertions
+    //
+    // The OR contracts in this file are load-bearing rather than decorative:
+    // `WalRecovery::run`'s idempotency paragraph is the text the
+    // contiguous-success frontier cites to justify keeping post-failure
+    // successes and re-replaying the window on the next boot. A contract that
+    // under-describes a frame kind is therefore a false invariant in code, not
+    // stale prose, so these assertions read this file's own source and fail the
+    // build when a required clause goes missing or a withdrawn one returns.
+    //
+    // Every assertion runs on a WHITESPACE-NORMALIZED view. A single-line
+    // search is NOT equivalent: several of the phrases below are line-wrapped
+    // inside comments, so an un-normalized absence check would pass without
+    // anyone having touched the contract it claims to police.
+    // -----------------------------------------------------------------------
+
+    /// This file's own source, truncated at the inline test module.
+    ///
+    /// Truncating is what keeps the assertions non-vacuous: the phrases they
+    /// search for are spelled out as literals in the tests themselves, so a
+    /// whole-file view would match a test's own argument instead of the
+    /// production contract it is meant to check.
+    fn production_source() -> &'static str {
+        const SOURCE: &str = include_str!("mod.rs");
+        // The escaped newline in this literal is not a newline in this file, so
+        // the search cannot land on this line instead of the real marker.
+        let marker = "#[cfg(test)]\nmod tests {";
+        let end = SOURCE
+            .find(marker)
+            .expect("this file carries its tests in an inline `mod tests`");
+        &SOURCE[..end]
+    }
+
+    /// Strips comment markers and indentation and collapses every run of
+    /// whitespace to one space, so a phrase assertion can be neither satisfied
+    /// nor defeated by where a line happens to wrap.
+    fn normalized(src: &str) -> String {
+        src.lines()
+            .map(str::trim_start)
+            .map(|l| {
+                l.trim_start_matches("//!")
+                    .trim_start_matches("///")
+                    .trim_start_matches("//")
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The source from `start` up to the next `end`, so a phrase can be
+    /// required of ONE contract rather than of the file as a whole.
+    fn slice_between<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let from = src
+            .find(start)
+            .unwrap_or_else(|| panic!("region anchor not found: {start:?}"));
+        let rest = &src[from..];
+        let to = rest
+            .find(end)
+            .unwrap_or_else(|| panic!("region end anchor not found after {start:?}: {end:?}"));
+        &rest[..to]
+    }
+
+    #[test]
+    fn or_doc_contracts_carry_no_withdrawn_or_provenance_clause() {
+        let src = normalized(production_source());
+
+        for phrase in [
+            // The WAL-window-only fold base. A snapshot frame read as the
+            // checkpoint the fold starts FROM silently loses every add it
+            // carries whenever the coalesced store write had not yet landed.
+            "the resident slot as of the key's last full-snapshot checkpoint",
+            // The window-fold shape the single-delta signature replaced.
+            "checkpoint-window deltas in WAL sequence order",
+            // The frontier's sole OR justification from before there were two
+            // OR frame kinds. Monotonicity does not cover a delta frame.
+            "for OR via snapshot monotonicity",
+            // Prose provenance: which wave, gate or spec produced the code
+            // belongs in the commit message, never in the contract.
+            "before any real delta framing lands",
+            "NOT wired to this in Wave 1",
+            "resolved at the R1 `/xask` design gate",
+            "This models the spec's candidate shape",
+        ] {
+            assert!(
+                !src.contains(phrase),
+                "a withdrawn or provenance clause is still in a doc-contract: {phrase:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_non_subsuming_doc_states_the_role_no_other_variant_fills() {
+        let src = normalized(production_source());
+        assert!(
+            src.contains("the only `WalOp` with no replay semantics"),
+            "the `TestNonSubsuming` doc must state the coverage no other variant \
+             can supply, so the reason the variant survives stays checkable \
+             rather than assumed by whoever next reads the enum"
+        );
+    }
+
+    #[test]
+    fn frontier_idempotency_contract_splits_the_two_or_frame_kinds() {
+        let src = production_source();
+
+        let regions = [
+            (
+                "`run`'s doc-contract",
+                slice_between(
+                    src,
+                    "/// Replays all un-applied entries for every partition",
+                    "pub async fn run(",
+                ),
+            ),
+            (
+                "the frontier loop's inline comment",
+                slice_between(
+                    src,
+                    "// Only a success that is still contiguous with the prefix",
+                    "if first_failed.is_none()",
+                ),
+            ),
+        ];
+
+        for (what, region) in regions {
+            let region = normalized(region);
+            for needle in ["WalOp::OrDelta", "apply_or_delta"] {
+                assert!(
+                    region.contains(needle),
+                    "{what} must name `{needle}`: a delta frame is idempotent by \
+                     set-algebra fold idempotency through the live apply, NOT by \
+                     the snapshot monotonicity that covers `WalOp::Store` OR frames"
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // OrDeltaCheckpointPolicy — the delta-fold depth bound (types-only seam)
     // -----------------------------------------------------------------------
 
