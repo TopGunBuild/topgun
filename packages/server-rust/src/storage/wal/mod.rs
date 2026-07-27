@@ -281,63 +281,6 @@ pub enum OrDelta {
     },
 }
 
-/// Checkpoint policy that bounds delta-fold depth (the PRIMARY delta design:
-/// checkpoint + bounded-deltas, not an unbounded fold chain).
-///
-/// A pure "fold every delta since key creation" chain is unbounded → slow
-/// recovery and fragile (one lost/corrupt delta breaks all subsequent state).
-/// Instead, a full-snapshot frame (the existing `WalOp::Store` of the whole
-/// `RecordValue::OrMap`) is emitted every `snapshot_every_ops` (K) ops **or**
-/// `snapshot_every_bytes` (B) accumulated delta bytes per key, whichever trips
-/// first; recovery folds only the deltas since that key's last checkpoint. This
-/// bounds recovery cost, localizes corruption blast-radius to one checkpoint
-/// window, still yields the ~100× WAL reduction, and degrades naturally to a
-/// **K=1 full-snapshot-only fallback** (see [`Self::full_snapshot_only`]) the
-/// recovery path can drop to on ANY fold anomaly.
-///
-/// The concrete K / B values are a deliberately-unset design parameter: they are
-/// resolved at the R1 `/xask` design gate with the live measurement in hand, not
-/// guessed here without data. Counts are integers (ops, bytes) — never `f64`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OrDeltaCheckpointPolicy {
-    /// K: emit a full-snapshot frame after this many deltas on a key. `1` means
-    /// "snapshot every op" — the full-snapshot-only fallback.
-    pub snapshot_every_ops: u32,
-    /// B: emit a full-snapshot frame once accumulated delta bytes on a key reach
-    /// this threshold, independent of op count.
-    pub snapshot_every_bytes: u64,
-}
-
-impl OrDeltaCheckpointPolicy {
-    /// The K=1 fallback: every OR op emits a full snapshot, so recovery never
-    /// folds a delta. This is the behaviourally-identical-to-today mode the
-    /// recovery path drops to whenever a fold anomaly is detected, and the
-    /// baseline the differential recovery test exercises.
-    #[must_use]
-    pub const fn full_snapshot_only() -> Self {
-        Self {
-            snapshot_every_ops: 1,
-            snapshot_every_bytes: 0,
-        }
-    }
-
-    /// Whether the current op must be materialized as a full snapshot instead of a
-    /// delta under this policy.
-    ///
-    /// `delta_index` is **1-indexed**: the first delta after a checkpoint is
-    /// `delta_index = 1` (NOT `0` — passing the pre-op count is an off-by-one that
-    /// would make `full_snapshot_only()` fold the first op of every window instead
-    /// of snapshotting it). `window_bytes` is the delta bytes accumulated in the
-    /// current checkpoint window including this op. With `snapshot_every_ops = K`,
-    /// the op snapshots when `delta_index >= K`, so the K=1 `full_snapshot_only()`
-    /// policy snapshots on `delta_index = 1` — every op — and never folds a delta.
-    #[must_use]
-    pub const fn should_checkpoint(&self, delta_index: u32, window_bytes: u64) -> bool {
-        delta_index >= self.snapshot_every_ops
-            || (self.snapshot_every_bytes > 0 && window_bytes >= self.snapshot_every_bytes)
-    }
-}
-
 /// Recovery-fold interface: replays a bounded run of [`OrDelta`]s onto a resident
 /// OR-Map slot to reconstruct the value the full-snapshot path would have
 /// produced.
@@ -2373,43 +2316,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    // -----------------------------------------------------------------------
-    // OrDeltaCheckpointPolicy — the delta-fold depth bound (types-only seam)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn full_snapshot_only_snapshots_every_op() {
-        // The K=1 fallback must snapshot on the FIRST delta of every window
-        // (delta_index is 1-indexed), so recovery never folds a delta. A 0-indexed
-        // read of should_checkpoint would silently fold the first op instead.
-        let p = OrDeltaCheckpointPolicy::full_snapshot_only();
-        assert!(p.should_checkpoint(1, 0));
-        assert!(p.should_checkpoint(1, u64::MAX));
-    }
-
-    #[test]
-    fn should_checkpoint_honors_k_and_b_independently() {
-        let p = OrDeltaCheckpointPolicy {
-            snapshot_every_ops: 4,
-            snapshot_every_bytes: 1000,
-        };
-        // Below both thresholds → fold as a delta.
-        assert!(!p.should_checkpoint(1, 0));
-        assert!(!p.should_checkpoint(3, 999));
-        // K trips at the K-th delta.
-        assert!(p.should_checkpoint(4, 0));
-        // B trips independently of op count.
-        assert!(p.should_checkpoint(1, 1000));
-
-        // snapshot_every_bytes == 0 disables the byte trigger entirely.
-        let no_b = OrDeltaCheckpointPolicy {
-            snapshot_every_ops: 4,
-            snapshot_every_bytes: 0,
-        };
-        assert!(!no_b.should_checkpoint(1, u64::MAX));
-        assert!(no_b.should_checkpoint(4, 0));
     }
 
     // -----------------------------------------------------------------------
