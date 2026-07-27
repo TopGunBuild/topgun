@@ -2,11 +2,11 @@
 
 [![License](https://img.shields.io/github/license/TopGunBuild/topgun)](LICENSE) [![CI](https://img.shields.io/github/actions/workflow/status/TopGunBuild/topgun/rust.yml?branch=main&label=CI)](.github/workflows/rust.yml) [![Docker](https://github.com/TopGunBuild/topgun/actions/workflows/docker.yml/badge.svg)](https://github.com/TopGunBuild/topgun/actions/workflows/docker.yml) [![npm](https://img.shields.io/npm/v/@topgunbuild/client)](https://www.npmjs.com/package/@topgunbuild/client) [![Discord](https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/NDpMG4dmJu) [![GitHub Stars](https://img.shields.io/github/stars/TopGunBuild/topgun?style=social)](https://github.com/TopGunBuild/topgun)
 
-> **v2.0 — single-node stable; cluster features in progress.** The TypeScript client and Rust server APIs are stable for single-node deployments. Cluster-mode capabilities (Raft-backed distributed locks, cross-node replication) are being actively developed.
+> **v2 — single-node core, in active hardening.** The TypeScript client and Rust server APIs are stable for single-node development and self-hosted evaluation. Before we recommend unattended production use, we're completing a public stabilization program: a machine-checked [invariant catalog](INVARIANTS.md) (every durability claim mapped to an enforcing test — gaps marked honestly), a crash-recovery proof harness, and a 72-hour endurance gate. Durability trade-offs are documented, not hidden (e.g. the default `batched` fsync acks before fsync — see the server docs). Cluster-mode (Raft-backed locks, cross-node replication) is in progress.
 
 Build real-time apps that work offline. Local writes are instant and survive disconnects; reconnecting clients sync seamlessly with automatic conflict resolution. Self-host today with the embedded backend, or wire up Postgres when you need it. Apache-2.0, Rust server, TypeScript client. AI agents talk to your data natively through MCP.
 
-TopGun v2 is a complete rewrite. It's not a port — it's a new architecture designed for production workloads.
+TopGun v2 is a complete rewrite. It's not a port — it's a new architecture built to earn production trust; the status note above says what we do and don't yet claim.
 
 **[Live Demo](https://demo.topgun.build/)** — try it in your browser
 
@@ -86,7 +86,7 @@ export TOPGUN_NO_AUTH=0                       # 0 = enforce auth, 1 = dev-only b
 
 **3. Single-node deployment**
 
-Single-node is fully consistent and production-ready for workloads that fit one server:
+Single-node is fully consistent and stable for workloads that fit one server; the stabilization gates we're completing before recommending unattended production use are public ([INVARIANTS.md](INVARIANTS.md) + the [roadmap](https://topgun.build/docs/roadmap)):
 
 ```bash
 docker compose up --build
