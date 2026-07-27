@@ -33,11 +33,15 @@ use proptest::test_runner::{FileFailurePersistence, RngAlgorithm, TestRng, TestR
 use tokio::runtime::Handle;
 use tokio::task::block_in_place;
 
-use super::driver::{run_case, RunConfig, RunOutcome};
+use topgun_core::types::Value;
+
+use super::driver::{or_view_pair, run_case, RunConfig, RunOutcome};
 use super::{
     Case, CaseShape, DefectMode, GcCrashPoint, Incarnation, IncarnationEnd, InvariantViolation,
-    Key, OracleConfig, WorkOp, MAX_KEY_INDEX,
+    Key, OrMutation, OrSlot, OracleConfig, WorkOp, MAX_KEY_INDEX,
 };
+use crate::service::domain::crdt::OrMapSemanticView;
+use crate::storage::record::RecordValue;
 
 // ---------------------------------------------------------------------------
 // Async bridge for the synchronous proptest body (R10 — re-declared LOCALLY)
@@ -1094,4 +1098,474 @@ fn ac7_tg_wal_003_gc_crash_point_both_directions() {
         !hit.is_empty(),
         "AC7(b): counterexample must be a non-empty generated sequence"
     );
+}
+
+// ---------------------------------------------------------------------------
+// TG-OR-003 — the OR delta-fold differential recovery family
+// ---------------------------------------------------------------------------
+//
+// Every frame these cases fold is SYNTHETIC: no production path emits a
+// `WalOp::OrDelta` yet, and the reader has to be provable before a producer
+// exists — an orphaned delta frame does not self-heal the way an orphaned
+// snapshot frame does. The frames enter through the driver's OBSERVED append
+// seam (`assign_wal_sequence` → `wal_append` → `promote_wal_sequence`), so the
+// reference model's sequence space stays identical to the store's; nothing here
+// reaches the raw `WalWriter` append entry point and nothing here allocates a
+// sequence of its own.
+//
+// The reference these compare against is what the FULL-SNAPSHOT path would have
+// persisted, computed by the model through the same live apply the write path
+// uses. What the differential therefore exercises is the WAL plumbing where a
+// delta fold can actually lose a mutation: the fold base, the base's storage
+// SHAPE, the sequence ordering, and the absolute-set semantics of a snapshot
+// frame sharing the window.
+
+/// An `OrDelta` injection op: one synthetic delta frame for `key`.
+fn or_add(key: Key, tag: &str) -> WorkOp {
+    WorkOp::OrDelta {
+        key,
+        mutation: OrMutation::Add {
+            tag: tag.to_string(),
+        },
+    }
+}
+
+fn or_remove(key: Key, tag: &str) -> WorkOp {
+    WorkOp::OrDelta {
+        key,
+        mutation: OrMutation::Remove {
+            tag: tag.to_string(),
+        },
+    }
+}
+
+fn or_prune(key: Key, tags: &[&str]) -> WorkOp {
+    WorkOp::OrDelta {
+        key,
+        mutation: OrMutation::Prune {
+            tags: tags.iter().map(|t| (*t).to_string()).collect(),
+        },
+    }
+}
+
+/// A full-snapshot OR write through the real store `add` — the frame kind legacy
+/// WALs carry and bulk/SYNC ingestion still produces.
+fn or_snapshot(key: Key, live: &[&str], tombstones: &[&str]) -> WorkOp {
+    WorkOp::OrStore {
+        key,
+        slot: OrSlot::Map {
+            live: live.iter().map(|t| (*t).to_string()).collect(),
+            tombstones: tombstones.iter().map(|t| (*t).to_string()).collect(),
+        },
+    }
+}
+
+/// A LEGACY tombstone-only blob (`RecordValue::OrTombstones`), the pre-unified
+/// storage shape an older server persisted.
+fn or_legacy_tombstones(key: Key, tags: &[&str]) -> WorkOp {
+    WorkOp::OrStore {
+        key,
+        slot: OrSlot::LegacyTombstones {
+            tags: tags.iter().map(|t| (*t).to_string()).collect(),
+        },
+    }
+}
+
+/// The expected semantic view: live tags (through the harness's own tag→value
+/// coupling) and tombstone tags, canonically sorted the way the oracle sorts.
+fn expect_view(live: &[&str], tombstones: &[&str]) -> OrMapSemanticView {
+    let mut live: Vec<(String, String)> = live.iter().map(|t| or_view_pair(t)).collect();
+    live.sort();
+    let mut tombstones: Vec<String> = tombstones.iter().map(|t| (*t).to_string()).collect();
+    tombstones.sort();
+    OrMapSemanticView { live, tombstones }
+}
+
+/// A trailing read-only incarnation, so the run's LAST recovery has actually run
+/// before the final durable state is captured.
+fn settle(key: Key) -> Incarnation {
+    Incarnation {
+        ops: vec![WorkOp::Read { key }],
+        end: IncarnationEnd::CleanShutdown,
+    }
+}
+
+/// Runs `case` on the baseline (no defect) path and asserts the oracles are silent.
+fn run_or_case(case: &Case) -> RunOutcome {
+    let outcome = block_on_async(run_case(case, &RunConfig::baseline()));
+    assert!(
+        outcome.violations.is_empty(),
+        "TG-OR-003: the OR delta-fold recovery path must report zero violations, got {:?}",
+        outcome.violations
+    );
+    outcome
+}
+
+/// AC1 — recovery equivalence across a modelled incarnation loss, over all THREE
+/// fold-base shapes R1.3 distinguishes, plus the SPEC-345 gauge.
+///
+/// One case, three keys, one crash:
+/// - key 0: a durable `RecordValue::OrMap` base (snapshot flushed, then deltas above
+///   the watermark) — the ordinary shape;
+/// - key 1: an ABSENT base — a legitimate first write, folded onto the empty OR-Map,
+///   never an error;
+/// - key 2: a durable LEGACY `RecordValue::OrTombstones` base under a following delta —
+///   the shape `crdt::apply_or_delta` is a SILENT no-op on. Without the fold's
+///   normalize step the delta is dropped with no `Err` and no flag, which the
+///   `OrMap`-base keys cannot see: this arm is what makes that failure observable.
+///
+/// The gauge is asserted through the REAL boot-time `reconcile_tombstone_bytes`
+/// walk (the same one the server bootstrap runs after `WalRecovery::run`), never a
+/// second copy of its accounting: `tag-a` and `tag-d` are the only tombstones the
+/// recovered keyspace holds, at 5 bytes each.
+#[test]
+fn tg_or_003_ac1_recovery_equivalence_over_every_fold_base_shape() {
+    let case: Case = vec![
+        Incarnation {
+            ops: vec![
+                // Durable bases: an OrMap for key 0, a legacy blob for key 2. The flush
+                // resolves their frames and lifts the watermark above them, so recovery
+                // starts from the STORE, not from these frames.
+                or_snapshot(0, &["tag-a"], &[]),
+                or_legacy_tombstones(2, &["tag-d"]),
+                WorkOp::FlushTick { advance_ms: 5_000 },
+                // The un-applied delta window: no queue entry owns these, so nothing
+                // flushes them and the watermark cannot advance past them.
+                or_add(0, "tag-b"),
+                or_remove(0, "tag-a"),
+                or_add(1, "tag-c"),
+                or_add(2, "tag-e"),
+            ],
+            end: IncarnationEnd::Crash,
+        },
+        settle(0),
+    ];
+
+    let outcome = run_or_case(&case);
+
+    assert_eq!(
+        outcome.final_or_view(0),
+        expect_view(&["tag-b"], &["tag-a"]),
+        "AC1: an OrMap base must fold the window in sequence order (add tag-b, remove tag-a)"
+    );
+    assert_eq!(
+        outcome.final_or_view(1),
+        expect_view(&["tag-c"], &[]),
+        "AC1: an ABSENT base is a legitimate first write — the delta folds onto the empty OR-Map"
+    );
+    assert_eq!(
+        outcome.final_or_view(2),
+        expect_view(&["tag-e"], &["tag-d"]),
+        "AC1: a LEGACY OrTombstones base must be normalized before the apply — without that step \
+         the apply is a silent no-op and tag-e is lost with no error"
+    );
+    assert_eq!(
+        outcome.reconciled_tombstone_bytes,
+        u64::try_from("tag-a".len() + "tag-d".len()).expect("tombstone byte total fits u64"),
+        "AC1: the SPEC-345 gauge, recomputed by the real boot-time reconciliation over the \
+         recovered keyspace, must account for exactly the surviving tombstones"
+    );
+}
+
+/// AC5 (behavioural half) — the fold reproduces the LIVE algebra across a mixed
+/// add / remove / re-add / prune window, not merely "some" set operation.
+///
+/// The re-add of an already-tombstoned tag is the discriminator: remove-wins means
+/// it is SUPPRESSED. A hand-written fold that reimplemented the algebra and missed
+/// that clause resurrects `tag-a` here, and a fold that dropped the tombstone
+/// instead of retaining it also diverges. (The structural half — that the fold body
+/// names `apply_or_delta` and `normalize_to_or_map` — is asserted in `wal/mod.rs`.)
+#[test]
+fn tg_or_003_ac5_fold_reproduces_the_live_or_algebra() {
+    let case: Case = vec![
+        Incarnation {
+            ops: vec![
+                or_add(0, "tag-a"),
+                or_add(0, "tag-b"),
+                or_remove(0, "tag-a"),
+                // Remove-wins: suppressed, never resurrected.
+                or_add(0, "tag-a"),
+                or_remove(0, "tag-b"),
+                // Pure tombstone-set subtraction, reclaiming one of the two.
+                or_prune(0, &["tag-b"]),
+            ],
+            end: IncarnationEnd::Crash,
+        },
+        settle(0),
+    ];
+
+    let outcome = run_or_case(&case);
+
+    assert_eq!(
+        outcome.final_or_view(0),
+        expect_view(&[], &["tag-a"]),
+        "AC5: remove-wins must suppress the re-add of a tombstoned tag, and the prune must \
+         reclaim exactly the tag it names"
+    );
+    assert_eq!(
+        outcome.reconciled_tombstone_bytes,
+        u64::try_from("tag-a".len()).expect("tombstone byte total fits u64"),
+        "AC5: the gauge follows the surviving tombstone set — the pruned tag is no longer counted"
+    );
+}
+
+/// AC3(a) — a full-snapshot OR frame ABOVE the watermark, followed by deltas for the
+/// same key, with the durable store holding NOTHING for that key.
+///
+/// This is the exact case the withdrawn "a checkpoint frame is never a fold base /
+/// is at most a delta-skip hint" rule loses: under it, frame 1's content is DISCARDED
+/// and the delta folds onto `None`, so `tag-a` vanishes silently. Recovery must instead
+/// apply the snapshot in its own sequence position and then fold the delta onto it.
+#[test]
+fn tg_or_003_ac3a_snapshot_above_watermark_is_applied_then_folded_onto() {
+    let case: Case = vec![
+        Incarnation {
+            // No FlushTick: the snapshot never reaches the durable store, so the whole
+            // key exists only as WAL frames.
+            ops: vec![or_snapshot(0, &["tag-a"], &[]), or_add(0, "tag-b")],
+            end: IncarnationEnd::Crash,
+        },
+        settle(0),
+    ];
+
+    let outcome = run_or_case(&case);
+
+    assert_eq!(
+        outcome.final_or_view(0),
+        expect_view(&["tag-a", "tag-b"], &[]),
+        "AC3(a): the snapshot frame above the watermark carries the only copy of tag-a — treating \
+         it as a skip hint rather than applying it loses that add silently"
+    );
+}
+
+/// AC3(b) — a legacy WAL carrying ONLY full-snapshot OR frames replays correctly:
+/// no fail-closed, no loss. This is the corpus every server already on disk has.
+#[test]
+fn tg_or_003_ac3b_snapshot_only_legacy_window_replays() {
+    let case: Case = vec![
+        Incarnation {
+            ops: vec![
+                or_snapshot(0, &["tag-a"], &[]),
+                or_snapshot(1, &["tag-b"], &["tag-c"]),
+            ],
+            end: IncarnationEnd::Crash,
+        },
+        settle(0),
+    ];
+
+    let outcome = run_or_case(&case);
+
+    assert_eq!(
+        outcome.final_or_view(0),
+        expect_view(&["tag-a"], &[]),
+        "AC3(b): a snapshot-only window must replay unchanged"
+    );
+    assert_eq!(
+        outcome.final_or_view(1),
+        expect_view(&["tag-b"], &["tag-c"]),
+        "AC3(b): a snapshot's tombstone set replays with it"
+    );
+    assert_eq!(
+        outcome.reconciled_tombstone_bytes,
+        u64::try_from("tag-c".len()).expect("tombstone byte total fits u64"),
+        "AC3(b): the gauge accounts for the replayed snapshot's tombstones"
+    );
+}
+
+/// AC3(c) — a snapshot frame that TOMBSTONES a tag the durable store still holds
+/// LIVE. Absolute-set semantics (R4.3) are required: the frame was computed from
+/// this node's own state at its sequence, so it already subsumes every effect at or
+/// below it, removes included. A naive union/merge resurrects `tag-a` — deletes do
+/// not self-heal — and fails this test.
+#[test]
+fn tg_or_003_ac3c_snapshot_frame_is_an_absolute_set_not_a_union() {
+    let case: Case = vec![
+        Incarnation {
+            ops: vec![
+                // Durable: tag-a live.
+                or_snapshot(0, &["tag-a"], &[]),
+                WorkOp::FlushTick { advance_ms: 5_000 },
+                // Above the watermark, never flushed: the same key with tag-a removed.
+                or_snapshot(0, &[], &["tag-a"]),
+            ],
+            end: IncarnationEnd::Crash,
+        },
+        settle(0),
+    ];
+
+    let outcome = run_or_case(&case);
+
+    assert_eq!(
+        outcome.final_or_view(0),
+        expect_view(&[], &["tag-a"]),
+        "AC3(c): replaying a full-snapshot OR frame REPLACES the durable value; unioning it with \
+         the store's older value would resurrect the removed tag-a"
+    );
+}
+
+/// AC3(d) — a cross-kind / legacy base under a delta: the durable store holds a
+/// shape `crdt::apply_or_delta` refuses to touch when the window's first frame for
+/// the key is an `OrDelta`. The fold normalizes through the live
+/// `crdt::normalize_to_or_map` first, so the delta lands; skipping the normalize
+/// drops it with no error at all.
+///
+/// The post-state is RECORDED LITERALLY, because "the delta lands" does not
+/// determine it. A non-OR base — key 1's `RecordValue::Lww` — normalizes to an
+/// EMPTY OR-Map, so the Lww value is DISCARDED and the recovered slot holds exactly
+/// the delta's own effect and nothing of the prior value. That is LIVE-PATH
+/// IDENTICAL (both OR merge closures normalize the same way, so a live `OR_ADD`
+/// onto an Lww slot does precisely this) and is therefore correct by delegation —
+/// not loss introduced by the fold, and not something to "helpfully" preserve.
+#[test]
+fn tg_or_003_ac3d_cross_kind_base_normalizes_and_records_its_post_state() {
+    let case: Case = vec![
+        Incarnation {
+            ops: vec![
+                // key 0: legacy tombstone-only blob, made durable.
+                or_legacy_tombstones(0, &["tag-a"]),
+                // key 1: a non-OR (LWW) durable value.
+                WorkOp::Append { key: 1, millis: 10 },
+                WorkOp::FlushTick { advance_ms: 5_000 },
+                // First frame for each key in the un-applied window is a DELTA.
+                or_add(0, "tag-b"),
+                or_add(1, "tag-c"),
+            ],
+            end: IncarnationEnd::Crash,
+        },
+        settle(0),
+    ];
+
+    let outcome = run_or_case(&case);
+
+    // (i) Legacy OrTombstones base: the blob's tags survive the upgrade and the
+    // delta lands on top of them.
+    assert_eq!(
+        outcome.final_or_view(0),
+        expect_view(&["tag-b"], &["tag-a"]),
+        "AC3(d): a legacy OrTombstones base must be normalized into the unified OrMap shape, \
+         carrying its tags forward, before the delta applies"
+    );
+
+    // (ii) Non-OR (Lww) base — the literal post-state, asserted as a whole value so
+    // no reviewer mistakes the discarded Lww for a regression and no later change
+    // silently starts preserving it.
+    let recovered = outcome
+        .final_value(1)
+        .expect("AC3(d): the folded delta must leave a record for key 1");
+    match recovered {
+        RecordValue::OrMap {
+            records,
+            tombstones,
+        } => {
+            assert_eq!(
+                records.len(),
+                1,
+                "AC3(d): the recovered slot holds exactly the delta's own effect"
+            );
+            assert_eq!(records[0].tag, "tag-c");
+            assert_eq!(records[0].value, Value::String("v-tag-c".to_string()));
+            assert!(
+                tombstones.is_empty(),
+                "AC3(d): normalizing an Lww base yields an EMPTY OR-Map, so there are no tombstones"
+            );
+        }
+        other => panic!(
+            "AC3(d): folding a delta onto a non-OR base must leave a RecordValue::OrMap holding \
+             only the delta's effect — the Lww value is discarded exactly as a live OR_ADD onto \
+             an Lww slot discards it; got {other:?}"
+        ),
+    }
+}
+
+/// AC4 — `OrDelta::Prune` is a PURE tombstone-set subtraction: no counters, no
+/// preconditions, no error on an already-absent tag, and re-applying the same prune
+/// changes nothing. Idempotency here is what makes re-folding a flushed-but-unmarked
+/// window safe.
+#[test]
+fn tg_or_003_ac4_prune_is_an_idempotent_tombstone_set_subtraction() {
+    let case: Case = vec![
+        Incarnation {
+            ops: vec![
+                or_snapshot(0, &["tag-a"], &["tag-b", "tag-c"]),
+                WorkOp::FlushTick { advance_ms: 5_000 },
+                // Names one present tag and one that was never there; the absent tag is
+                // not an error, and the live entry is untouched.
+                or_prune(0, &["tag-b", "tag-absent"]),
+                // The identical prune again: a no-op, not a double subtraction.
+                or_prune(0, &["tag-b", "tag-absent"]),
+                // An empty prune is representable and changes nothing.
+                or_prune(0, &[]),
+            ],
+            end: IncarnationEnd::Crash,
+        },
+        settle(0),
+    ];
+
+    let outcome = run_or_case(&case);
+
+    assert_eq!(
+        outcome.final_or_view(0),
+        expect_view(&["tag-a"], &["tag-c"]),
+        "AC4: the prune drops exactly the tombstone tags it names, leaves the live set alone, and \
+         is a no-op on an absent tag"
+    );
+    assert_eq!(
+        outcome.reconciled_tombstone_bytes,
+        u64::try_from("tag-c".len()).expect("tombstone byte total fits u64"),
+        "AC4: the gauge follows the surviving tombstone set exactly once, however often the prune \
+         is applied"
+    );
+}
+
+/// AC16 — every synthetic frame enters through the OBSERVED append path, verified
+/// structurally over the harness's own source.
+///
+/// The needles are assembled at run time rather than written as literals, because a
+/// source-scanning assertion whose own file contains its needle is self-defeating —
+/// it would report the check itself as a violation.
+///
+/// The behavioural half of AC16 lives in the driver's injection arm: it asserts
+/// EXACTLY ONE observed `(partition, sequence)` per injected frame, the same
+/// discipline the `Append` / `Remove` arms use, so a change that stops firing the
+/// observer fails loudly instead of silently blinding the oracle.
+#[test]
+fn tg_or_003_ac16_injection_rides_the_observed_append_seam_only() {
+    let sources = [
+        ("mod.rs", include_str!("mod.rs")),
+        ("driver.rs", include_str!("driver.rs")),
+        ("cases.rs", include_str!("cases.rs")),
+    ];
+    let raw_append = ["wal", ".append("].concat();
+    let writer_append = ["WalWriter", "::append"].concat();
+    for (name, src) in sources {
+        assert!(
+            !src.contains(&raw_append),
+            "AC16: {name} must not append to the WAL directly — a frame appended around \
+             `assign_wal_sequence` is invisible to the append observer, which is the only channel \
+             carrying a sequence name into the reference model"
+        );
+        assert!(
+            !src.contains(&writer_append),
+            "AC16: {name} must not name the raw WalWriter append path"
+        );
+    }
+
+    // The seam itself, in order: seed, mint (fires the observer), append, then
+    // promote — with a rollback for the failed-append path so no tracked sequence is
+    // left that no frame bears.
+    let driver_src = include_str!("driver.rs");
+    let mut cursor = 0usize;
+    for step in [
+        "store.ensure_wal_seeded(partition).await",
+        "store.assign_wal_sequence(partition)",
+        "store.wal_append(partition, &entry).await",
+        "store.rollback_wal_sequence(partition, seq)",
+        "store.promote_wal_sequence(partition, seq)",
+    ] {
+        let at = driver_src[cursor..].find(step).map(|i| i + cursor);
+        let at = at.unwrap_or_else(|| {
+            panic!("AC16: the injection seam must call `{step}` after the preceding step")
+        });
+        cursor = at + step.len();
+    }
 }
