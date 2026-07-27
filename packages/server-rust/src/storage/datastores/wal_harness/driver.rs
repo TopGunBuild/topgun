@@ -1393,6 +1393,48 @@ mod smoke {
         assert_eq!(ReferenceModel::unresolved(&model, p), vec![3]);
     }
 
+    /// Both directions of the `value_equality` reference point, over ONE modelled
+    /// history: key 0 written 20 → 30 → 10 (non-monotone in arrival order), then
+    /// recovered as 20 — a state that has LOST the true LWW winner (30). The MAX-live
+    /// reference flags it; the latest-arrival reference (10) does NOT, because 20 is
+    /// not strictly older than 10. That blind spot — any clobber landing in
+    /// `[latest_arrival, max_live)` — is why the oracle references the maximum:
+    /// a proof instrument that can silently pass is not a proof.
+    #[test]
+    fn value_equality_max_live_reference_catches_what_latest_arrival_misses() {
+        let mut model = LogModel::default();
+        let p: PartitionId = 7;
+        for (step, millis) in [(0_usize, 20_i64), (1, 30), (2, 10)] {
+            let seq = Sequence::try_from(step).expect("step fits a sequence") + 1;
+            model.bind_sequence(p, 0, step, seq);
+            model.record_ack(0, step, 0, ModelValue::Live { millis });
+        }
+
+        let latest_arrival = match model.acked_value(0) {
+            Some(ModelValue::Live { millis }) => *millis,
+            other => panic!("expected a live latest-arrival value, got {other:?}"),
+        };
+        let max_live = model.max_live_millis(0).expect("a live key has a maximum");
+        assert_eq!(
+            (latest_arrival, max_live),
+            (10, 30),
+            "non-monotone arrival order must make the two reference points DIFFER"
+        );
+
+        // The timestamp a stale re-replay of the oldest frame leaves durable.
+        let recovered = 20_i64;
+        assert!(
+            recovered >= latest_arrival,
+            "direction 1: the latest-arrival reference MISSES this clobber \
+             (recovered {recovered} is not strictly older than {latest_arrival})"
+        );
+        assert!(
+            recovered < max_live,
+            "direction 2: the max-live reference CATCHES this clobber \
+             (recovered {recovered} is strictly older than {max_live})"
+        );
+    }
+
     /// A remove CLEARS the max-live reference, so a re-created key is compared only
     /// against its own timestamps. Without the clear, a re-creation legitimately
     /// older than the removed value would be reported as a clobber it is not.

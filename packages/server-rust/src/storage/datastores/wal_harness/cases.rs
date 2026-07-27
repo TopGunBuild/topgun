@@ -755,6 +755,98 @@ fn ac4_5_replay_clobber_caught_by_value_equality_oracle() {
 }
 
 // ---------------------------------------------------------------------------
+// AC12 — the value_equality oracle's reference point on a NON-MONOTONE key
+// ---------------------------------------------------------------------------
+
+/// A replay clobber over a key whose writes are NON-MONOTONE in arrival order must
+/// still be caught. This is the regression case for the oracle's reference point:
+/// against the old latest-arrival reference the very same run is silent, because the
+/// clobbered-in value is NEWER than the last arrival while still being OLDER than the
+/// key's true LWW winner.
+///
+/// Key 0 is written 20 → 30 → 10 (arrival order), so the last arrival (10) and the
+/// max live millis (30) DIFFER. As in `ac4_5_...`, the FIRST write's flush is rejected
+/// (store unhealthy) so its ts=20 frame strands un-applied and holds the partition
+/// watermark back; the later writes coalesce in the staging buffer and the healthy
+/// flush persists the surviving value (ts=10) durably, but their frames stay
+/// un-applied behind the stranded one. At recovery the blind in-order pass replays
+/// 20 → 30 → 10, then the seam re-replays the OLDEST frame (ts=20) over it, so the
+/// durable value ends at 20 — the true winner (30) is lost.
+///
+/// `recovered = 20` is NOT strictly older than the latest arrival (10), so the old
+/// reference reports nothing; it IS strictly older than the max live millis (30), so
+/// the current reference reports `AckedValueMismatch { expected: 30, recovered: 20 }`.
+/// The two reference points are compared directly, over one modelled history, by
+/// `driver.rs::value_equality_max_live_reference_catches_what_latest_arrival_misses`.
+#[test]
+fn ac12_non_monotone_replay_clobber_caught_by_max_live_reference() {
+    let case: Case = vec![
+        Incarnation {
+            ops: vec![
+                WorkOp::Append { key: 0, millis: 20 },
+                WorkOp::SetStoreHealth { healthy: false },
+                WorkOp::FlushTick { advance_ms: 5_000 },
+                WorkOp::SetStoreHealth { healthy: true },
+                WorkOp::Append { key: 0, millis: 30 },
+                WorkOp::Append { key: 0, millis: 10 },
+                WorkOp::FlushTick { advance_ms: 5_000 },
+            ],
+            end: IncarnationEnd::Crash,
+        },
+        Incarnation {
+            ops: vec![WorkOp::Read { key: 0 }],
+            end: IncarnationEnd::CleanShutdown,
+        },
+    ];
+
+    let value_eq = OracleConfig {
+        value_equality: true,
+    };
+
+    // (a) defect present: the clobber is caught AGAINST THE MAXIMUM (30), not the
+    // latest arrival (10) — the recovered 20 sits inside the old reference's blind
+    // spot `[latest_arrival, max_live)`.
+    let defect_cfg = RunConfig {
+        defect: DefectMode::ReplayClobberOlderFrame,
+        oracle: value_eq,
+        ..RunConfig::baseline()
+    };
+    let defect_outcome = block_on_async(run_case(&case, &defect_cfg));
+    let mismatch = defect_outcome.violations.iter().find_map(|v| match v {
+        InvariantViolation::AckedValueMismatch {
+            key,
+            expected_millis,
+            recovered_millis,
+            ..
+        } => Some((*key, *expected_millis, *recovered_millis)),
+        _ => None,
+    });
+    assert_eq!(
+        mismatch,
+        Some((0, 30, 20)),
+        "AC12: the non-monotone replay clobber must be caught against the MAX live millis \
+         (key 0, expected 30, recovered 20); got violations {:?}",
+        defect_outcome.violations
+    );
+
+    // (b) discriminator: the fixed path over the identical non-monotone history is
+    // GREEN — the max-live reference does not manufacture a violation out of
+    // out-of-timestamp-order writes.
+    let fixed_cfg = RunConfig {
+        defect: DefectMode::None,
+        oracle: value_eq,
+        ..RunConfig::baseline()
+    };
+    let fixed_outcome = block_on_async(run_case(&case, &fixed_cfg));
+    assert!(
+        fixed_outcome.violations.is_empty(),
+        "AC12: the fixed path must report zero violations for the identical non-monotone run; \
+         got {:?}",
+        fixed_outcome.violations
+    );
+}
+
+// ---------------------------------------------------------------------------
 // AC1 / AC5 / AC6 — TG-WAL-009 stale-Remove-clobber proof via the O1 oracle
 // ---------------------------------------------------------------------------
 
