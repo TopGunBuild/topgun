@@ -28,6 +28,8 @@ use topgun_core::types::Value;
 
 use super::*;
 use crate::service::middleware::init_observability;
+use crate::storage::record::reconcile_tombstone_bytes;
+use crate::storage::tombstone_gauge::with_isolated_gauge;
 use crate::storage::wal::{
     wal_fail_stop, WalFailStopTier, WalRecovery, WalWriter, FAIL_STOP_TEST_LOCK,
 };
@@ -1783,23 +1785,6 @@ async fn stored_millis(
     }
 }
 
-/// The durable tombstone-byte ground truth, computed the way the boot-time
-/// reconciliation computes it.
-///
-/// The production `reconcile_tombstone_bytes` lives in the server BINARY and
-/// cannot be called from the lib test binary, so this asserts the quantity it
-/// derives — the durable sum — rather than the function call.
-async fn durable_tombstone_bytes(store: &Arc<crate::storage::datastores::RedbDataStore>) -> usize {
-    let mut total = 0usize;
-    let batch = store.scan_values(TEST_MAP, false, 0).await.expect("scan");
-    for (_key, value) in &batch.records {
-        if let RecordValue::OrMap { tombstones, .. } = value {
-            total += tombstones.iter().map(String::len).sum::<usize>();
-        }
-    }
-    total
-}
-
 #[tokio::test]
 async fn a_re_replayed_window_lands_on_the_newest_frame_and_moves_no_tombstone_bytes() {
     let partition = 258;
@@ -1826,7 +1811,20 @@ async fn a_re_replayed_window_lands_on_the_newest_frame_and_moves_no_tombstone_b
         drop(store);
     }
 
-    let before = durable_tombstone_bytes(&redb).await;
+    // The durable tombstone-byte ground truth is read through the PRODUCTION boot
+    // reconciliation, so this test and the server share one accounting and cannot
+    // drift apart. Three differences from the test-local sum this replaced, all
+    // deliberate: it walks EVERY map via `list_maps` rather than `TEST_MAP` alone
+    // (equivalent here, because `TEST_MAP` is the only map this module ever
+    // writes), it returns `u64` rather than `usize`, and it re-baselines the
+    // tombstone-bytes gauge as a side effect. That side effect is why the call is
+    // scoped to a fresh isolated sink: the absolute-set path trips a
+    // `debug_assert!` on the process-global gauge once ANY test in this binary has
+    // fired an `add`, and that gauge is shared across the whole lib test binary.
+    let (before, _scoped_gauge) = with_isolated_gauge(reconcile_tombstone_bytes(
+        Arc::clone(&redb) as Arc<dyn MapDataStore>
+    ))
+    .await;
 
     // Replay the window twice. Re-replay is what widening `[W, max]` makes
     // routine, so landing on the newest frame must be a property of the window,
@@ -1848,9 +1846,12 @@ async fn a_re_replayed_window_lands_on_the_newest_frame_and_moves_no_tombstone_b
     // The gauge assertion kept in its only non-vacuous form: replay bypasses the
     // gauge helpers entirely, so "gauge unchanged" proves nothing — the durable
     // ground truth a boot reconciliation would recompute is what must hold.
+    let (after, _scoped_gauge) = with_isolated_gauge(reconcile_tombstone_bytes(
+        Arc::clone(&redb) as Arc<dyn MapDataStore>
+    ))
+    .await;
     assert_eq!(
-        durable_tombstone_bytes(&redb).await,
-        before,
+        after, before,
         "re-replaying the widened window must not move the durable tombstone \
          ground truth"
     );
