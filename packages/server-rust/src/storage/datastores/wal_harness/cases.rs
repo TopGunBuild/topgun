@@ -25,6 +25,8 @@
 //! without a preceding crash or leave a dangling crash, because `Recover` is not a
 //! generated op: it is what the driver does when it starts the next incarnation.
 
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use proptest::prelude::*;
@@ -33,15 +35,18 @@ use proptest::test_runner::{FileFailurePersistence, RngAlgorithm, TestRng, TestR
 use tokio::runtime::Handle;
 use tokio::task::block_in_place;
 
+use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
 
+use super::super::{DelayedEntry, DelayedOp, WriteBehindDataStore};
 use super::driver::{or_view_pair, run_case, RunConfig, RunOutcome};
 use super::{
     Case, CaseShape, DefectMode, GcCrashPoint, Incarnation, IncarnationEnd, InvariantViolation,
     Key, OrMutation, OrSlot, OracleConfig, WorkOp, MAX_KEY_INDEX,
 };
 use crate::service::domain::crdt::OrMapSemanticView;
-use crate::storage::record::RecordValue;
+use crate::storage::record::{OrMapEntry, RecordValue};
+use crate::storage::wal::{OrDelta, WalOp};
 
 // ---------------------------------------------------------------------------
 // Async bridge for the synchronous proptest body (R10 — re-declared LOCALLY)
@@ -1192,13 +1197,44 @@ fn settle(key: Key) -> Incarnation {
 
 /// Runs `case` on the baseline (no defect) path and asserts the oracles are silent.
 fn run_or_case(case: &Case) -> RunOutcome {
-    let outcome = block_on_async(run_case(case, &RunConfig::baseline()));
+    run_or_case_with(case, &RunConfig::baseline(), "baseline")
+}
+
+/// Runs `case` under `config` and asserts the oracles are silent.
+///
+/// The configurable form exists for the re-replay seam
+/// ([`DefectMode::ReReplayOldestFrameGateOn`]), which is NOT a defect: it puts an
+/// already-applied frame back through replay, which is the only in-harness way to
+/// observe an OR frame being folded onto a store that already reflects it.
+///
+/// `what` names the arm, because a case family whose arms share one assertion
+/// message cannot tell a reader WHICH shape regressed.
+fn run_or_case_with(case: &Case, config: &RunConfig, what: &str) -> RunOutcome {
+    let outcome = block_on_async(run_case(case, config));
     assert!(
         outcome.violations.is_empty(),
-        "TG-OR-003: the OR delta-fold recovery path must report zero violations, got {:?}",
+        "TG-OR-003 ({what}): the OR delta-fold recovery path must report zero violations, got {:?}",
         outcome.violations
     );
     outcome
+}
+
+/// The re-replay seam with the `RecordValue::Lww` merge gate left in its production
+/// state: after the in-order pass, each partition's OLDEST un-applied frame is
+/// replayed once more. A case that arranges that frame to be an OR frame the store
+/// already reflects turns "OR merge-idempotency holds by construction" into a
+/// machine-checked observation.
+fn re_replay_oldest() -> RunConfig {
+    RunConfig {
+        defect: DefectMode::ReReplayOldestFrameGateOn,
+        ..RunConfig::baseline()
+    }
+}
+
+/// Byte total of a tombstone tag set, as the tombstone-bytes gauge accounts for it
+/// (`TG-OR-004`).
+fn tombstone_bytes(tags: &[&str]) -> u64 {
+    u64::try_from(tags.iter().map(|t| t.len()).sum::<usize>()).expect("tombstone bytes fit u64")
 }
 
 /// AC1 — recovery equivalence across a modelled incarnation loss, over all THREE
@@ -1515,6 +1551,557 @@ fn tg_or_003_ac4_prune_is_an_idempotent_tombstone_set_subtraction() {
         "AC4: the gauge follows the surviving tombstone set exactly once, however often the prune \
          is applied"
     );
+}
+
+/// AC2 — the STRANDED BASE and the RE-FOLD of a window recovery has already seen.
+///
+/// Three arms, all reaching the same last-acked semantic set:
+///
+/// - **(a) stranded base.** A real `mark_applied` + the segment GC it drives run
+///   BETWEEN the key's earlier ops and its later, un-applied deltas. After the
+///   `GcTick` the earlier frames are no longer enumerated as un-applied, so the ONLY
+///   surviving copy of `tag-a` / `tag-z` is the DURABLE STORE. A fold that seeds from
+///   `None`/empty when the store holds the key writes the delta's own effect over the
+///   whole slot and strands those tags with no error to observe.
+/// - **(b) a crash point INSIDE the flushed-but-unmarked window.** The same ops
+///   without the `GcTick`: the snapshot is durable in the inner store yet still
+///   enumerated un-applied, so recovery replays it a second time before folding the
+///   deltas above it. Re-applying work the store already reflects must change nothing.
+/// - **(c) the re-fold.** Arm (a) again with the oldest un-applied frame replayed once
+///   more AFTER the in-order pass. That oldest frame is the `Remove` delta, already
+///   folded in this same recovery, so a fold that double-applies it (a tombstone push
+///   that lost its dedup) duplicates the tombstone — visible on the semantic set AND
+///   on the gauge.
+///
+/// The interleaving is built the honest way: real store writes plus `FlushTick` /
+/// `GcTick` advance the watermark FIRST, and only then does the injected delta land
+/// above it. Nothing here fabricates a resolution for an injected sequence.
+///
+/// The watermark-overshoot half of the original stranded-entry scenario is NOT here:
+/// this asserts fold/base behaviour GIVEN a prefix-complete watermark (`TG-WB-001`).
+#[test]
+fn tg_or_003_ac2_stranded_base_and_re_fold_idempotency() {
+    // The durable base carries two tags the delta window never mentions, so a fold
+    // that ignores the base cannot reproduce the expected set by accident.
+    let stranded: Case = vec![
+        Incarnation {
+            ops: vec![
+                or_snapshot(0, &["tag-a", "tag-b"], &["tag-z"]),
+                // Resolves the snapshot's sequence, which lifts the prefix-complete
+                // watermark to it.
+                WorkOp::FlushTick { advance_ms: 5_000 },
+                // The real `mark_applied` at that watermark, plus its segment GC.
+                WorkOp::GcTick,
+                // Above the watermark, owned by no queue entry: nothing flushes these,
+                // so they stay un-applied until recovery folds them.
+                or_remove(0, "tag-b"),
+                or_add(0, "tag-c"),
+            ],
+            end: IncarnationEnd::Crash,
+        },
+        settle(0),
+    ];
+    let expected = expect_view(&["tag-a", "tag-c"], &["tag-b", "tag-z"]);
+    let expected_bytes = tombstone_bytes(&["tag-b", "tag-z"]);
+
+    let outcome = run_or_case(&stranded);
+    assert_eq!(
+        outcome.final_or_view(0),
+        expected,
+        "AC2(a): after mark_applied + segment GC the durable store is the ONLY carrier of tag-a \
+         and tag-z — seeding the fold from an empty OR-Map strands them"
+    );
+    assert_eq!(
+        outcome.reconciled_tombstone_bytes, expected_bytes,
+        "AC2(a): the gauge follows the recovered tombstone set, base tombstones included"
+    );
+
+    // (b) The crash lands in the flushed-but-unmarked window: same ops, no GcTick.
+    let unmarked: Case = vec![
+        Incarnation {
+            ops: vec![
+                or_snapshot(0, &["tag-a", "tag-b"], &["tag-z"]),
+                WorkOp::FlushTick { advance_ms: 5_000 },
+                or_remove(0, "tag-b"),
+                or_add(0, "tag-c"),
+            ],
+            end: IncarnationEnd::Crash,
+        },
+        settle(0),
+    ];
+    let outcome = run_or_case(&unmarked);
+    assert_eq!(
+        outcome.final_or_view(0),
+        expected,
+        "AC2(b): a window that is durable but not yet marked applied replays in full — the \
+         re-applied snapshot must not disturb the deltas folded above it"
+    );
+    assert_eq!(
+        outcome.reconciled_tombstone_bytes, expected_bytes,
+        "AC2(b): re-applying a durable snapshot must not move the gauge"
+    );
+
+    // (c) The re-fold: the oldest un-applied frame (the Remove delta) is folded a
+    // second time onto a store that already reflects it.
+    let outcome = run_or_case_with(&stranded, &re_replay_oldest(), "AC2(c) re-fold");
+    assert_eq!(
+        outcome.final_or_view(0),
+        expected,
+        "AC2(c): re-folding a delta the store already reflects is a set-algebra no-op — a \
+         double-applied Remove would carry a duplicate tombstone"
+    );
+    assert_eq!(
+        outcome.reconciled_tombstone_bytes, expected_bytes,
+        "AC2(c): and the gauge is unmoved by the re-fold"
+    );
+}
+
+/// AC11(d) — OR merge-idempotency, in BOTH frame shapes, on the semantic set AND on
+/// the gauge (`TG-OR-003` / `TG-OR-004`).
+///
+/// "The fold delegates to the single live apply, so re-replaying a frame the store
+/// already reflects is the same idempotent set op the live path performs" is a claim
+/// this case turns into an observation. Each arm runs the SAME case twice — once on
+/// the baseline path, once with the oldest un-applied frame replayed a second time
+/// after the in-order pass — and asserts the two runs are indistinguishable.
+///
+/// The three arms differ in what that oldest frame is:
+/// - a full-snapshot `WalOp::Store` OR frame (absolute set, written through again);
+/// - an `Add` delta (tombstone-guarded `retain` + `push`);
+/// - a `Remove` delta (the tombstone dedup — the arm the gauge can see break).
+#[test]
+fn tg_or_003_ac11d_re_replaying_an_applied_or_frame_is_a_no_op() {
+    // (i) SNAPSHOT shape. The key's only frame is the snapshot, so at the re-replay
+    // the store already holds exactly what that frame carries.
+    let snapshot_case: Case = vec![
+        Incarnation {
+            ops: vec![or_snapshot(0, &["tag-a"], &["tag-b"])],
+            end: IncarnationEnd::Crash,
+        },
+        settle(0),
+    ];
+    let once = run_or_case(&snapshot_case);
+    let twice = run_or_case_with(&snapshot_case, &re_replay_oldest(), "AC11(d) snapshot");
+    assert_eq!(
+        twice.final_or_view(0),
+        once.final_or_view(0),
+        "AC11(d): re-replaying an applied full-snapshot OR frame must leave the semantic set \
+         exactly where the single replay left it"
+    );
+    assert_eq!(
+        twice.final_or_view(0),
+        expect_view(&["tag-a"], &["tag-b"]),
+        "AC11(d): and that set is the frame's own absolute content"
+    );
+    assert_eq!(
+        twice.reconciled_tombstone_bytes, once.reconciled_tombstone_bytes,
+        "AC11(d): the gauge is a no-op too — a snapshot re-write that appended its tombstones \
+         instead of replacing them would double it"
+    );
+    assert_eq!(
+        twice.reconciled_tombstone_bytes,
+        tombstone_bytes(&["tag-b"])
+    );
+
+    // (ii) DELTA shape, oldest frame = an Add. The durable base is made durable and
+    // marked applied first, so the oldest UN-APPLIED frame is the delta itself.
+    let add_case: Case = vec![
+        Incarnation {
+            ops: vec![
+                or_snapshot(0, &["tag-a"], &[]),
+                WorkOp::FlushTick { advance_ms: 5_000 },
+                WorkOp::GcTick,
+                or_add(0, "tag-c"),
+                or_remove(0, "tag-a"),
+            ],
+            end: IncarnationEnd::Crash,
+        },
+        settle(0),
+    ];
+    let once = run_or_case(&add_case);
+    let twice = run_or_case_with(&add_case, &re_replay_oldest(), "AC11(d) Add delta");
+    assert_eq!(
+        twice.final_or_view(0),
+        once.final_or_view(0),
+        "AC11(d): re-applying an Add the store already holds must not duplicate the record — \
+         the apply removes any same-tag entry before pushing"
+    );
+    assert_eq!(
+        twice.final_or_view(0),
+        expect_view(&["tag-c"], &["tag-a"]),
+        "AC11(d): and the later Remove in the same window is not undone by the re-fold"
+    );
+    assert_eq!(
+        twice.reconciled_tombstone_bytes,
+        once.reconciled_tombstone_bytes
+    );
+
+    // (iii) DELTA shape, oldest frame = a Remove — the arm the gauge can see break.
+    let remove_case: Case = vec![
+        Incarnation {
+            ops: vec![
+                or_snapshot(0, &["tag-a"], &[]),
+                WorkOp::FlushTick { advance_ms: 5_000 },
+                WorkOp::GcTick,
+                or_remove(0, "tag-a"),
+            ],
+            end: IncarnationEnd::Crash,
+        },
+        settle(0),
+    ];
+    let once = run_or_case(&remove_case);
+    let twice = run_or_case_with(&remove_case, &re_replay_oldest(), "AC11(d) Remove delta");
+    assert_eq!(
+        twice.final_or_view(0),
+        once.final_or_view(0),
+        "AC11(d): a re-issued Remove must not duplicate its tombstone"
+    );
+    assert_eq!(
+        twice.final_or_view(0),
+        expect_view(&[], &["tag-a"]),
+        "AC11(d): the tombstone set holds the tag exactly once"
+    );
+    assert_eq!(
+        twice.reconciled_tombstone_bytes, once.reconciled_tombstone_bytes,
+        "AC11(d): the gauge counts the tombstone once however often the frame is folded"
+    );
+    assert_eq!(
+        twice.reconciled_tombstone_bytes,
+        tombstone_bytes(&["tag-a"])
+    );
+}
+
+/// AC10(ii-b) — the BEHAVIOURAL half of WAL compatibility: a WAL holding only
+/// `Store` and `Remove` frames replays to the same semantic set it did before the
+/// delta variant existed.
+///
+/// This EXTENDS `tg_or_003_ac3b_snapshot_only_legacy_window_replays`, which covers
+/// the OR snapshot frames only. A legacy WAL also carries LWW `Store` frames and
+/// `Remove` frames, and those are the frames a codec change would perturb, so the
+/// behavioural half is asserted over all three.
+///
+/// "Only `Store`/`Remove` frames" is machine-checked rather than eyeballed: the case
+/// is scanned for an `OrDelta` injection before it runs.
+///
+/// The BYTE half of AC10(ii) lives in `format.rs`
+/// (`legacy_corpus_decodes_and_re_encodes_byte_identically`), and AC10(iii) — the
+/// proof that nothing emits a delta frame, which is what makes "the byte stream is
+/// unchanged" a fact rather than an assumption — is
+/// `tg_or_003_ac9_no_production_path_constructs_a_delta_frame` below.
+#[test]
+fn tg_or_003_ac10ii_b_legacy_store_and_remove_only_wal_replays_unchanged() {
+    let case: Case = vec![
+        Incarnation {
+            ops: vec![
+                // An OR snapshot frame, an LWW frame, and a Remove over the LWW key.
+                or_snapshot(0, &["tag-a"], &["tag-b"]),
+                WorkOp::Append { key: 1, millis: 10 },
+                WorkOp::Append { key: 2, millis: 20 },
+                WorkOp::Remove { key: 1 },
+            ],
+            end: IncarnationEnd::Crash,
+        },
+        settle(0),
+    ];
+
+    for incarnation in &case {
+        for op in &incarnation.ops {
+            assert!(
+                !matches!(op, WorkOp::OrDelta { .. }),
+                "AC10(ii-b): this case's WAL must hold only Store and Remove frames — an \
+                 injected delta would make it a mixed-frame window, which AC3 covers instead"
+            );
+        }
+    }
+
+    let outcome = run_or_case(&case);
+
+    assert_eq!(
+        outcome.final_or_view(0),
+        expect_view(&["tag-a"], &["tag-b"]),
+        "AC10(ii-b): an OR snapshot frame replays to its own absolute set"
+    );
+    assert!(
+        outcome.final_value(1).is_none(),
+        "AC10(ii-b): a Remove frame replays as a delete, not as a resurrection"
+    );
+    assert!(
+        matches!(outcome.final_value(2), Some(RecordValue::Lww { .. })),
+        "AC10(ii-b): an LWW Store frame replays to its value"
+    );
+    assert_eq!(
+        outcome.reconciled_tombstone_bytes,
+        tombstone_bytes(&["tag-b"]),
+        "AC10(ii-b): the gauge over a legacy window is what it always was"
+    );
+}
+
+/// AC7(b) — the coalesce ROUTE, asserted on the SURVIVOR side, with its vehicle NAMED.
+///
+/// The predicate half (`WalOp::OrDelta { .. }.subsumes_on_coalesce()` is `false`, over
+/// an exhaustive match with no catch-all) is asserted in `wal/mod.rs`'s own inline
+/// tests. This is the OTHER half: what that answer ROUTES the retired sequences to.
+///
+/// It calls `WriteBehindDataStore::coalesce_wal_sequences` directly, passing the
+/// variant's own answer, and asserts BOTH halves of the carry-forward route — the fn
+/// returns `None` (nothing is early-resolved) AND the retired sequences now live on
+/// the survivor, which will resolve them together with its own at its terminal
+/// outcome. Dropping them instead would leave them pending with no owner and pin the
+/// partition watermark forever.
+///
+/// The predicate is read off the SURVIVOR, never the predecessor: a survivor carrying
+/// only its own delta subsumes nothing regardless of what it displaces. A test phrased
+/// as "a coalesce over an `OrDelta` predecessor" would assert a route the code never
+/// consults, so no such arm exists here.
+#[test]
+fn tg_or_003_ac7b_an_or_delta_survivor_carries_the_retired_sequences_forward() {
+    let survivor_subsumes = WalOp::OrDelta {
+        delta: OrDelta::Add {
+            entry: OrMapEntry {
+                value: Value::String("v-tag-a".to_string()),
+                tag: "tag-a".to_string(),
+                timestamp: Timestamp {
+                    millis: 0,
+                    counter: 0,
+                    node_id: String::new(),
+                },
+            },
+        },
+    }
+    .subsumes_on_coalesce();
+
+    let mut survivor = DelayedEntry {
+        map: "wm".to_string(),
+        key: "k".to_string(),
+        operation: DelayedOp::Store {
+            value: RecordValue::OrMap {
+                records: Vec::new(),
+                tombstones: Vec::new(),
+            },
+            expiration_time: 0,
+        },
+        store_time: 0,
+        sequence: 1,
+        retry_count: 0,
+        wal_sequences: BTreeSet::from([11]),
+    };
+    let retired = BTreeSet::from([7, 9]);
+
+    let early_resolve =
+        WriteBehindDataStore::coalesce_wal_sequences(survivor_subsumes, &mut survivor, retired);
+
+    assert!(
+        early_resolve.is_none(),
+        "AC7(b): nothing may be early-resolved behind a non-subsuming survivor — resolving the \
+         retired frames here would let WAL GC drop mutations the survivor does not re-carry"
+    );
+    assert_eq!(
+        survivor.wal_sequences,
+        BTreeSet::from([7, 9, 11]),
+        "AC7(b): the retired sequences are carried forward onto the survivor, which resolves \
+         them with its own; dropping them would leave them pending with no owner and stall the \
+         partition watermark"
+    );
+
+    // Asserted LAST so the two route halves above are the ones that go RED when the
+    // predicate is flipped — this binds the route to the variant's OWN answer rather
+    // than to a hand-written `false`.
+    assert!(
+        !survivor_subsumes,
+        "AC7(b): a delta frame carries only its own mutation, so it re-carries nothing of the \
+         frame it displaces"
+    );
+}
+
+/// AC9 / AC10(iii) — NO production path constructs a `WalOp::OrDelta` frame.
+///
+/// Every delta frame this part folds is synthetic, which is the design: the reader is
+/// provable before a writer exists. That only holds if "no writer exists" is itself
+/// checked, and a repo-wide grep cannot check it — `wal/mod.rs` carries its tests in
+/// an inline `mod tests` in the SAME file, so a textual search cannot separate a test
+/// construction site from a production one.
+///
+/// The instrument therefore has three parts:
+///
+/// 1. **Prefix scan.** Each WAL source is truncated at its inline test module and the
+///    remaining production prefix must hold ZERO construction sites. Truncation is
+///    exactly equivalent to "no non-test construction site" because `TG-OR-003` makes
+///    it a RULE, not an accident: a delta frame is constructed only inside those
+///    files' own `mod tests`, and in `wal_harness/`. Nothing above a marker builds one
+///    under a `#[cfg(test)]` gate, so the scan can neither pass nor fail for the wrong
+///    reason.
+/// 2. **Belt, by file.** No source under `src/` outside the WAL codec and the harness
+///    so much as NAMES the variant.
+/// 3. **Belt, by construction — package-wide.** Every construction site anywhere in
+///    the crate, benches included, lives in one of those same files. This is the
+///    stronger of the two belts: it is scoped by what the code DOES, not by where it
+///    sits, so an exhaustive `WalOp` match arm in a bench (a destructuring pattern the
+///    compiler forces, which builds nothing) passes it on its own merits.
+///
+/// Construction is distinguished from destructuring structurally, because the variant
+/// appears in production code as a match PATTERN in two places — the coalesce
+/// predicate's arm and recovery's replay arm — and a literal search for the variant
+/// name would report both. A brace group of `..`, or one followed by `=>`, is a
+/// pattern; anything else builds a value. The classifier is guarded against silently
+/// finding nothing: it must report the harness's own real construction site, and the
+/// production prefix it clears must still CONTAIN the variant's name.
+#[test]
+fn tg_or_003_ac9_no_production_path_constructs_a_delta_frame() {
+    const WAL_MOD: &str = include_str!("../../wal/mod.rs");
+    const WAL_FORMAT: &str = include_str!("../../wal/format.rs");
+
+    // Guard the classifier first: an instrument that reports zero because it can see
+    // nothing is not a proof. The harness's own injection seam builds a real frame.
+    assert_eq!(
+        or_delta_construction_sites(include_str!("driver.rs")),
+        1,
+        "AC9: the classifier must see the harness's own construction site — if it cannot, its \
+         zero over the production prefix means nothing"
+    );
+
+    for (name, src) in [("wal/mod.rs", WAL_MOD), ("wal/format.rs", WAL_FORMAT)] {
+        let prefix = production_prefix(name, src);
+        assert_eq!(
+            or_delta_construction_sites(prefix),
+            0,
+            "AC9: {name}'s production prefix must construct no delta frame — adding an emitter \
+             here collapses the reader-before-writer order this proof rests on"
+        );
+    }
+
+    // Non-vacuity of the prefix scan itself: `wal/mod.rs`'s production code DOES name
+    // the variant (the coalesce arm and the replay arm), so a prefix that had been
+    // truncated to nothing would be caught here rather than reported as clean.
+    assert!(
+        code_only(production_prefix("wal/mod.rs", WAL_MOD)).contains("WalOp::OrDelta"),
+        "AC9: the truncated prefix must still contain the production replay arm, otherwise the \
+         zero above is an artefact of scanning an empty string"
+    );
+
+    // Belt (2): by file, over `src/`.
+    let package = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for path in rust_sources(&package.join("src")) {
+        let src = std::fs::read_to_string(&path).expect("read a checked-in source");
+        let rel = relative_slash_path(package, &path);
+        assert!(
+            !src.contains("WalOp::OrDelta") || is_delta_frame_home(&rel),
+            "AC9: {rel} names the delta variant, but only the WAL codec and the crash harness \
+             may — a mention outside them is where an emitter would appear"
+        );
+    }
+
+    // Belt (3): by construction, over the whole package.
+    for path in rust_sources(package) {
+        let src = std::fs::read_to_string(&path).expect("read a checked-in source");
+        let rel = relative_slash_path(package, &path);
+        assert!(
+            or_delta_construction_sites(&src) == 0 || is_delta_frame_home(&rel),
+            "AC9: {rel} CONSTRUCTS a delta frame outside the WAL codec and the crash harness"
+        );
+    }
+}
+
+/// The files a synthetic delta frame may be built in: the WAL codec's own tests and
+/// the crash harness that injects them.
+fn is_delta_frame_home(rel: &str) -> bool {
+    rel == "src/storage/wal/mod.rs"
+        || rel == "src/storage/wal/format.rs"
+        || rel.starts_with("src/storage/datastores/wal_harness/")
+}
+
+/// `path` relative to `root`, with `/` separators so an assertion reads the same on
+/// every platform.
+fn relative_slash_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Every checked-in `.rs` under `root`, build artefacts excluded.
+fn rust_sources(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // `target/` holds generated sources that are not part of the crate.
+                if path.file_name().is_some_and(|n| n == "target") {
+                    continue;
+                }
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+/// `src` truncated at its inline test module.
+fn production_prefix<'a>(name: &str, src: &'a str) -> &'a str {
+    // The escaped newline is not a newline in THIS file, so the search cannot land on
+    // this line when the scanner is ever pointed at the harness itself.
+    let marker = "#[cfg(test)]\nmod tests {";
+    let end = src
+        .find(marker)
+        .unwrap_or_else(|| panic!("{name} carries its tests in an inline `mod tests`"));
+    &src[..end]
+}
+
+/// `src` with whole-line comments dropped, so a doc link or a prose mention of the
+/// variant is never mistaken for code.
+fn code_only(src: &str) -> String {
+    src.lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// How many times `src` CONSTRUCTS the delta `WalOp` variant.
+///
+/// A brace group of `..` is a wildcard pattern and one followed by `=>` is a match
+/// arm; neither builds a value. Everything else does. Nested braces are matched, so a
+/// delta built inline inside the frame is one site, not two.
+fn or_delta_construction_sites(src: &str) -> usize {
+    let code = code_only(src);
+    let mut sites = 0usize;
+    for path in ["WalOp::OrDelta", "Self::OrDelta"] {
+        let mut from = 0usize;
+        while let Some(offset) = code[from..].find(path) {
+            from += offset + path.len();
+            let rest = code[from..].trim_start();
+            // A bare mention — an import, a string, a qualified path with no field
+            // list — constructs nothing.
+            let Some(body) = rest.strip_prefix('{') else {
+                continue;
+            };
+            let mut depth = 1usize;
+            let close = body
+                .char_indices()
+                .find_map(|(i, ch)| {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => depth -= 1,
+                        _ => {}
+                    }
+                    (depth == 0).then_some(i)
+                })
+                .expect("a variant's field list closes its brace");
+            let fields = body[..close].trim();
+            let after = body[close + 1..].trim_start();
+            if fields != ".." && !after.starts_with("=>") {
+                sites += 1;
+            }
+        }
+    }
+    sites
 }
 
 /// AC16 — every synthetic frame enters through the OBSERVED append path, verified
