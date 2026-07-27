@@ -3764,7 +3764,8 @@ mod tests {
     ///
     /// The charge is gated on the apply's "this tombstone is genuinely new"
     /// report; charging per remove instead would inflate the gauge without bound
-    /// under client retries, and the SPEC-345 hard gate reads that number.
+    /// under client retries, and the tombstone byte-slope hard gate (TG-OR-004)
+    /// reads that number.
     #[tokio::test]
     async fn duplicate_or_remove_charges_tombstone_bytes_once() {
         let store = Arc::new(ArmableStore::default());
