@@ -345,7 +345,11 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   equal `or_map_semantic_view` (live set + tombstones + pruned), with the durable store as fold
   base and snapshot frames as in-order absolute-set inputs.
 - **Maintaining code:** types + oracle landed (SPEC-346); fold delegates to the live apply path
-  (single-algebra rule, SPEC-349 R-mandate).
+  (single-algebra rule, SPEC-349 R-mandate). That path now has a named anchor: `crdt.rs::apply_or_delta`
+  — the ONE extracted pure apply of the add-wins / remove-wins / prune algebra, which the live OR_ADD,
+  OR_REMOVE and epoch-prune call sites all route through (SPEC-349a). The delta fold must delegate to
+  that symbol rather than re-implement the algebra; a second hand-written copy is what this invariant
+  forbids, and the symbol is what SPEC-349b's delegation is checked against.
 - **Enforcing test:** `NAKED — the OR delta-fold differential recovery proof does not exist yet.
   It lands as a case on the cross-incarnation harness
   (packages/server-rust/src/storage/datastores/wal_harness/), driven by SPEC-349b — not a fork`.
@@ -360,10 +364,18 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Statement:** `add_tombstone_bytes` fires on the real OR-remove path and `sub_tombstone_bytes`
   on the real epoch-prune path (mutation-proven both directions); tests bind task-local isolated
   gauges — no order-dependent global reads; negative controls never read a shared counter.
-- **Maintaining code:** `record.rs` fns delegating through the scoped sink resolver.
-- **Enforcing test:** SPEC-351 suite (9 tests) — real-prune-path coverage
-  (`crdt.rs:1394` mutation → deterministic RED), per-binding tripwire, private-counter foreign
-  traffic control.
+- **Maintaining code:** `record.rs` fns delegating through the scoped sink resolver, plus the two
+  counter call sites in `crdt.rs`: `add_tombstone_bytes` inside the OR_REMOVE mutate closure's
+  new-tombstone guard, and `sub_tombstone_bytes` in `crdt.rs::prune_epoch_tombstones`'s post-write
+  `Ok(_)` arm behind `dropped`. Both deliberately sit OUTSIDE the extracted pure apply
+  (`crdt.rs::apply_or_delta`, which is counter-free by contract — TG-OR-003). That purity rule is NOT
+  permission to move them into it: the decrement in particular must fire only after the durable write
+  succeeds, because the gauge tracks bytes actually resident, not bytes removed from an in-memory copy.
+  Citations are kept line-number-free on purpose — the SPEC-349 extraction relocated the surrounding
+  code, and a line citation would have drifted silently.
+- **Enforcing test:** SPEC-351 suite (9 tests) — real-prune-path coverage at
+  `crdt.rs::prune_epoch_tombstones`, post-write `Ok(_)` arm (mutating that `sub_tombstone_bytes` call
+  → deterministic RED), per-binding tripwire, private-counter foreign traffic control.
 - **Violation consequence:** the SPEC-345 tombstone hard gate reads a fiction; the 72h soak's
   primary instrument lies.
 - **Discovered by:** SPEC-351 audit C1 (the gauge was previously asserted only against a test
