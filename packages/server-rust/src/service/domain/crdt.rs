@@ -569,8 +569,8 @@ impl CrdtService {
                 let entry = new_entry_opt
                     .take()
                     .expect("OR_ADD merge closure runs exactly once");
-                // The apply hands the delta back as a witness; this path owes no
-                // durable record of it, so the outcome is dropped here.
+                // The apply consumes the delta; this path owes no durable record
+                // of it, so the outcome is dropped here.
                 apply_or_delta(OrDelta::Add { entry }, value);
                 // Match the prior path, which always re-persisted the slot even
                 // when remove-wins suppressed the add.
@@ -1233,11 +1233,18 @@ fn normalize_to_or_map(value: &mut RecordValue) -> bool {
     true
 }
 
-/// What one [`apply_or_delta`] call did, plus the delta it did it with.
+/// What one [`apply_or_delta`] call did.
 ///
 /// Callers key their own side effects (the tombstone-bytes gauge, the epoch
 /// frontier stamp, the "re-persist this slot" signal) off these flags, which is
 /// what lets the apply itself stay pure.
+///
+/// Deliberately carries no copy of the delta. A caller that needs to record what
+/// it applied already holds the delta and must serialize it BEFORE handing it
+/// over — borrowing costs nothing, whereas returning it would force the entry to
+/// have two owners (the resident slot and the returned copy) and so charge a
+/// value-sized clone to every accepted add on the hot path. The flags below are
+/// the only thing a caller cannot derive for itself.
 #[derive(Debug)]
 pub(crate) struct OrApplyOutcome {
     /// `Add`: the entry was inserted (`false` = suppressed by remove-wins).
@@ -1253,22 +1260,14 @@ pub(crate) struct OrApplyOutcome {
     pub new_tombstone: bool,
     /// `Prune`: how many tombstone tags were actually dropped.
     pub pruned: usize,
-    /// The delta this call consumed, returned unchanged. Ownership goes out the
-    /// same door it came in, so the mutation point that produced the new value
-    /// also still holds the delta describing it and can forward it as a durable
-    /// witness without rebuilding or re-deriving one.
-    #[allow(
-        dead_code,
-        reason = "the witness has no reader until the OR write path emits per-op \
-                  delta frames; it is returned here so that wiring adds a \
-                  forward at the call site instead of re-shaping this seam, \
-                  which would risk a witness derived separately from the value"
-    )]
-    pub witness: OrDelta,
 }
 
-/// Applies exactly ONE [`OrDelta`] to a resident OR-Map slot and hands the delta
-/// back so the caller can forward it as a witness of what it mutated.
+/// Applies exactly ONE [`OrDelta`] to a resident OR-Map slot, consuming it.
+///
+/// Takes the delta BY VALUE and moves its payload straight into the slot, so an
+/// accepted add transfers the entry exactly once with no copy. A caller that must
+/// durably record what it applied serializes from a borrow before calling; the
+/// delta is gone afterwards, by design.
 ///
 /// This is the ONE implementation of the add-wins / remove-wins / prune algebra:
 /// the live `OR_ADD`, `OR_REMOVE` and epoch-prune paths all route through it, so a
@@ -1296,27 +1295,25 @@ pub(crate) fn apply_or_delta(delta: OrDelta, value: &mut RecordValue) -> OrApply
         tombstones,
     } = value
     {
-        match &delta {
+        match delta {
             OrDelta::Add { entry } => {
                 // Remove-wins: a tag already observed-removed is never resurrected.
                 if !tombstones.contains(&entry.tag) {
                     // Remove any existing entry with the same tag (idempotent re-add).
                     records.retain(|e| e.tag != entry.tag);
-                    // The resident slot and the returned witness are two owners of
-                    // one entry, so an accepted add copies it exactly once here;
-                    // a suppressed add copies nothing.
-                    records.push(entry.clone());
+                    // Moved, not copied: the slot becomes the entry's only owner.
+                    records.push(entry);
                     added = true;
                 }
             }
             OrDelta::Remove { tag } => {
                 // Drop only the matched tag, preserving every concurrent survivor.
-                records.retain(|e| e.tag != *tag);
+                records.retain(|e| e.tag != tag);
                 // Dedup: a re-issued remove must not duplicate the tombstone, so
                 // only a genuinely-new tag is reported back to the caller (which
                 // is what keeps its gauge and epoch stamp exactly-once).
-                if !tombstones.contains(tag) {
-                    tombstones.push(tag.clone());
+                if !tombstones.contains(&tag) {
+                    tombstones.push(tag);
                     new_tombstone = true;
                 }
             }
@@ -1332,7 +1329,6 @@ pub(crate) fn apply_or_delta(delta: OrDelta, value: &mut RecordValue) -> OrApply
         added,
         new_tombstone,
         pruned,
-        witness: delta,
     }
 }
 
@@ -1385,7 +1381,7 @@ pub(crate) struct OrMapSemanticView {
 /// - `Add` builds `records` with `records.retain(|e| e.tag != entry.tag)` then
 ///   `records.push(...)` — the vector is in **operation-insertion order**, never
 ///   sorted.
-/// - `Remove` appends with `tombstones.push(tag.clone())` — also insertion order.
+/// - `Remove` appends with `tombstones.push(tag)` — also insertion order.
 /// - `Prune` `retain`s in place, preserving whatever order was there.
 /// - `storage/record.rs` declares `records: Vec<OrMapEntry>` / `tombstones:
 ///   Vec<String>` with no ordering invariant, and OR-Map cross-node convergence
