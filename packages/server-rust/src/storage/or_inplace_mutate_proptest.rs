@@ -942,8 +942,8 @@ mod tests {
     //
     // The OR_ADD write path moves its entry into the closure with
     // `Option::take().expect(...)`, so a hidden re-invocation would panic there
-    // — but only that panic guards it, and TG-OR-001's literal call-counter
-    // assertion is catalogued NAKED (TODO-602). A counter closes the OR half:
+    // — but that panic was the ONLY guard, which left TG-OR-001 asserted
+    // nowhere literally. A counter closes the OR half:
     // a re-invocation would double-apply the CRDT mutation, and on the remove
     // path double-charge the tombstone-byte gauge, on any caller whose closure
     // is not `take`-shaped.
