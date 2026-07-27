@@ -346,6 +346,12 @@ struct BufferEntry {
 struct LogModel {
     /// Latest acked value per key (O1 holds only the latest per key).
     acked: HashMap<Key, ModelValue>,
+    /// Per-key MAXIMUM acked live HLC millis — the true LWW winner, which is what
+    /// the `value_equality` oracle must compare a recovered timestamp against.
+    /// Deliberately SEPARATE from `acked` (latest arrival): the two coincide only
+    /// while a key's writes are monotone in arrival order, and O1/O2 need the
+    /// latest-arrival view. Cleared on a remove so a re-created key starts fresh.
+    max_live_millis: HashMap<Key, i64>,
     /// `Acked ∧ ¬DurablyApplied ∧ ¬Indeterminate`, per partition (the O2
     /// "unresolved" set).
     unresolved: HashMap<PartitionId, BTreeSet<Sequence>>,
@@ -381,6 +387,18 @@ impl LogModel {
     /// so the two pending views stay in lockstep, while preserving the original
     /// `store_time` on the surviving entry.
     fn ack(&mut self, p: PartitionId, seq: Sequence, key: Key, value: ModelValue, store_time: i64) {
+        match &value {
+            ModelValue::Live { millis } => {
+                let entry = self.max_live_millis.entry(key).or_insert(*millis);
+                *entry = (*entry).max(*millis);
+            }
+            // A remove wipes the key's live history: a later re-creation must be
+            // compared against ITS own timestamps, not against a value the remove
+            // already superseded.
+            ModelValue::Tombstone => {
+                self.max_live_millis.remove(&key);
+            }
+        }
         self.acked.insert(key, value);
 
         let effective_store_time = if let Some(prev) = self.buffer.remove(&key) {
@@ -468,6 +486,13 @@ impl LogModel {
 
     fn has_indeterminate(&self, p: PartitionId) -> bool {
         self.indeterminate.get(&p).is_some_and(|s| !s.is_empty())
+    }
+
+    /// The `value_equality` oracle's reference point: the MAXIMUM acked live millis
+    /// for `key`, or `None` when the model holds no live ack for it (never written,
+    /// or removed since).
+    fn max_live_millis(&self, key: Key) -> Option<i64> {
+        self.max_live_millis.get(&key).copied()
     }
 }
 
@@ -1103,45 +1128,38 @@ impl Driver {
                     .push(InvariantViolation::AckedWriteLost { key, incarnation });
             }
 
-            // value_equality oracle (opt-in, R5): a present acked-live value must
-            // NOT carry a timestamp OLDER than the model's latest acked HLC millis.
-            // A stale re-replay clobber resurrects an older durable value — the exact
-            // regression TG-WAL-006's fix prevents. Only a strictly-older recovered
-            // timestamp is flagged: a recovered value NEWER than the model's
-            // last-arrival is the LWW-by-timestamp winner (never data loss), so it
-            // must not false-positive when the generator emits out-of-timestamp-order
-            // writes for a key. Off by default; enabled explicitly for the
-            // closing-evidence and regression runs.
+            // value_equality oracle (opt-in, R5): a present acked-live value must NOT
+            // carry a timestamp OLDER than the MAXIMUM acked live HLC millis the model
+            // holds for the key — the true LWW winner. A stale re-replay clobber
+            // resurrects an older durable value — the exact regression TG-WAL-006's fix
+            // prevents. Only a strictly-older recovered timestamp is flagged: a recovered
+            // value at or above the maximum is the LWW-by-timestamp winner (never data
+            // loss), so it must not false-positive when the generator emits
+            // out-of-timestamp-order writes for a key. The reference is the MAXIMUM rather
+            // than the latest arrival because the two coincide only on keys whose writes
+            // are monotone in arrival order; against a latest-arrival reference any clobber
+            // landing in `[latest_arrival, max_live)` is invisible. Off by default; enabled
+            // explicitly for the closing-evidence and regression runs.
             //
-            // Soundness domain (two constraints, both currently satisfied):
-            //  1. Value coupling (do not break in `lww()`): comparing millis alone is
-            //     sound only because `lww(millis)` makes value a pure function of millis
-            //     and fixes `counter:0`/`node_id:""`, so full-`Timestamp` order collapses
-            //     to millis order and equal millis implies an identical value. A generator
-            //     that emitted distinct values at equal millis, or varied counter/node_id,
-            //     would let an equal-millis different-value clobber slip this check.
-            //  2. Reference point: `expected` is the model's LATEST-ARRIVAL millis, which
-            //     equals the true LWW winner (max timestamp) only when a key's writes are
-            //     MONOTONE in arrival order — as production HLC always is, and as the sole
-            //     `value_equality: true` case (`ac4_5_...`) is by construction. If a defect
-            //     run ever used a non-monotone key (arrival 20, 30, 10) a clobber landing in
-            //     `[latest_arrival, max_acked)` (e.g. recovered 20 vs latest-arrival 10)
-            //     would slip the strictly-older check. Making the oracle sound for
-            //     non-monotone defect runs needs a per-key max-live-millis reference.
+            // Soundness constraint — value coupling (do not break in `lww()`): comparing
+            // millis alone is sound only because `lww(millis)` makes value a pure function
+            // of millis and fixes `counter:0`/`node_id:""`, so full-`Timestamp` order
+            // collapses to millis order and equal millis implies an identical value. A
+            // generator that emitted distinct values at equal millis, or varied
+            // counter/node_id, would let an equal-millis different-value clobber slip this
+            // check.
             if self.config.oracle.value_equality {
-                if let (
-                    ModelValue::Live { millis: expected },
-                    Some(RecordValue::Lww { timestamp, .. }),
-                ) = (&value, &loaded)
+                if let (Some(expected), Some(RecordValue::Lww { timestamp, .. })) =
+                    (self.model.max_live_millis(key), &loaded)
                 {
                     let recovered = i64::try_from(timestamp.millis).unwrap_or(i64::MAX);
-                    if recovered < *expected {
+                    if recovered < expected {
                         self.outcome
                             .violations
                             .push(InvariantViolation::AckedValueMismatch {
                                 key,
                                 incarnation,
-                                expected_millis: *expected,
+                                expected_millis: expected,
                                 recovered_millis: recovered,
                             });
                     }
@@ -1373,5 +1391,26 @@ mod smoke {
         model.record_ack(0, 2, 2, ModelValue::Live { millis: 3 });
         model.on_crash();
         assert_eq!(ReferenceModel::unresolved(&model, p), vec![3]);
+    }
+
+    /// A remove CLEARS the max-live reference, so a re-created key is compared only
+    /// against its own timestamps. Without the clear, a re-creation legitimately
+    /// older than the removed value would be reported as a clobber it is not.
+    #[test]
+    fn value_equality_max_live_reference_clears_on_remove() {
+        let mut model = LogModel::default();
+        let p: PartitionId = 7;
+
+        model.bind_sequence(p, 0, 0, 1);
+        model.record_ack(0, 0, 0, ModelValue::Live { millis: 30 });
+        assert_eq!(model.max_live_millis(0), Some(30));
+
+        model.bind_sequence(p, 0, 1, 2);
+        model.record_ack(0, 1, 0, ModelValue::Tombstone);
+        assert_eq!(model.max_live_millis(0), None);
+
+        model.bind_sequence(p, 0, 2, 3);
+        model.record_ack(0, 2, 0, ModelValue::Live { millis: 5 });
+        assert_eq!(model.max_live_millis(0), Some(5));
     }
 }

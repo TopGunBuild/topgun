@@ -207,10 +207,12 @@ pub(crate) enum BootSeedMode {
 
 /// Which oracles are active for a run (R5).
 ///
-/// `value_equality` gates an equality check between the model's latest acked value (its HLC
-/// millis) and the recovered value's `RecordValue::Lww` timestamp, layered on top of O1/O2. When on,
-/// a recovered value whose timestamp does not match the model's latest acked write is reported as an
-/// `AckedValueMismatch` — the shape a stale re-replay clobber produces.
+/// `value_equality` gates a comparison between the model's per-key MAX acked live HLC millis (the
+/// true LWW winner, held separately from O1/O2's latest-arrival `acked` value) and the recovered
+/// value's `RecordValue::Lww` timestamp, layered on top of O1/O2. When on, a recovered value whose
+/// timestamp is older than that maximum is reported as an `AckedValueMismatch` — the shape a stale
+/// re-replay clobber produces. The maximum (not the latest arrival) is the reference so that a
+/// clobber over a key whose writes are non-monotone in arrival order is still caught.
 ///
 /// It defaults to `false` deliberately: the equality oracle is opt-in per run, and
 /// `ac11_value_equality_defaults_off` guards that `OracleConfig::default()` never silently enables
@@ -357,10 +359,11 @@ pub(crate) enum InvariantViolation {
     },
 
     /// `TG-WAL-006`: the recovered `RecordValue::Lww` value for `key` carries a timestamp STRICTLY
-    /// OLDER than the model's latest acked HLC millis — a stale re-replayed frame clobbered a newer
-    /// durable value. Only reported when the `value_equality` oracle is enabled. A recovered value
-    /// newer than the model's last-arrival is the LWW winner and is NOT flagged. Carries the
-    /// incarnation the mismatch surfaced at, the model's expected millis, and the recovered millis.
+    /// OLDER than the MAXIMUM acked live HLC millis the model holds for that key — a stale
+    /// re-replayed frame clobbered a newer durable value. Only reported when the `value_equality`
+    /// oracle is enabled. A recovered value at or newer than that maximum is the LWW winner and is
+    /// NOT flagged. Carries the incarnation the mismatch surfaced at, the model's expected millis
+    /// (the maximum), and the recovered millis.
     AckedValueMismatch {
         key: Key,
         incarnation: usize,
