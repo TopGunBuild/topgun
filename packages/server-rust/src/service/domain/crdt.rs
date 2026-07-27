@@ -1561,7 +1561,8 @@ pub(crate) async fn prune_epoch_tombstones(
     clippy::collapsible_match
 )]
 mod tests {
-    use std::sync::Arc;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::{Arc, Weak};
 
     use parking_lot::Mutex;
     use topgun_core::messages::Message;
@@ -1578,6 +1579,11 @@ mod tests {
     use crate::storage::datastores::NullDataStore;
     use crate::storage::factory::RecordStoreFactory;
     use crate::storage::impls::StorageConfig;
+    use crate::storage::map_data_store::{LeafSink, MapDataStore, ScanBatch, ScanCursor};
+    use crate::storage::mutation_observer::MutationObserver;
+    use crate::storage::record::Record;
+    use crate::storage::record_store::RecordStore;
+    use crate::storage::tombstone_gauge::with_isolated_gauge;
 
     fn make_factory() -> Arc<RecordStoreFactory> {
         Arc::new(RecordStoreFactory::new(
@@ -3161,7 +3167,29 @@ mod tests {
         Arc<RecordStoreFactory>,
         Arc<TombstoneFrontier>,
     ) {
-        let factory = make_factory();
+        make_service_with_frontier_and_store(Arc::new(NullDataStore), Vec::new())
+    }
+
+    /// Same wiring as [`make_service_with_frontier`], with the backing datastore
+    /// and the store observers supplied by the caller.
+    ///
+    /// A separate constructor rather than a changed signature on the existing
+    /// fixtures: the `NullDataStore`-backed tests must keep running against
+    /// byte-identical wiring, so a test that needs a real (failable, retaining)
+    /// backend cannot perturb them.
+    fn make_service_with_frontier_and_store(
+        data_store: Arc<dyn MapDataStore>,
+        observers: Vec<Arc<dyn MutationObserver>>,
+    ) -> (
+        Arc<CrdtService>,
+        Arc<RecordStoreFactory>,
+        Arc<TombstoneFrontier>,
+    ) {
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            data_store,
+            observers,
+        ));
         let registry = Arc::new(ConnectionRegistry::new());
         let query_registry = Arc::new(QueryRegistry::new());
         let frontier = Arc::new(TombstoneFrontier::new(None));
@@ -3310,6 +3338,690 @@ mod tests {
         assert_eq!(
             net_delta, expected,
             "three OR_REMOVE charges minus the single epoch-1 tag the prune drops"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Where the tombstone-byte counters fire, and what the prune does with the
+    // two dispositions a bare `Ok(false)` conflates
+    // -----------------------------------------------------------------------
+
+    /// A retaining `MapDataStore` whose writes can be ARMED to fail for named
+    /// keys AFTER a test has already seeded through it.
+    ///
+    /// Arm-ability — not retention — is what makes the counter-position tests
+    /// reachable at all. An `OR_REMOVE` propagates its write error before the
+    /// tombstone is epoch-stamped, so a store that failed from the start would
+    /// leave the frontier index empty and the prune sweep with nothing to drain:
+    /// there would be no tombstone in existence to assert anything about. Seeding
+    /// un-armed lands the resident record, its durable counterpart and the
+    /// frontier ref; arming then fails exactly the write under test.
+    ///
+    /// Retention is defensive rather than load-bearing: it lets a test compare
+    /// what stayed DURABLE against what the byte gauge claims, which is the whole
+    /// reason the prune decrement sits behind a successful write (TG-OR-004).
+    #[derive(Default)]
+    struct ArmableStore {
+        data: Mutex<HashMap<(String, String), RecordValue>>,
+        reject_keys: Mutex<HashSet<String>>,
+    }
+
+    impl ArmableStore {
+        /// Fail every subsequent write to `key`. Reads keep working, so a test can
+        /// still inspect what survived durably.
+        fn reject_writes_to(&self, key: &str) {
+            self.reject_keys.lock().insert(key.to_string());
+        }
+
+        fn durable(&self, map: &str, key: &str) -> Option<RecordValue> {
+            self.data
+                .lock()
+                .get(&(map.to_string(), key.to_string()))
+                .cloned()
+        }
+
+        /// Place a durable record no resident slot mirrors, so the next read of
+        /// that key goes through the rehydration path.
+        fn seed_durable(&self, map: &str, key: &str, value: RecordValue) {
+            self.data
+                .lock()
+                .insert((map.to_string(), key.to_string()), value);
+        }
+    }
+
+    #[async_trait]
+    impl MapDataStore for ArmableStore {
+        async fn add(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            _exp: i64,
+            _now: i64,
+        ) -> anyhow::Result<()> {
+            if self.reject_keys.lock().contains(key) {
+                return Err(anyhow::anyhow!("armed write rejection for {key}"));
+            }
+            self.data
+                .lock()
+                .insert((map.to_string(), key.to_string()), value.clone());
+            Ok(())
+        }
+
+        async fn add_backup(
+            &self,
+            _: &str,
+            _: &str,
+            _: &RecordValue,
+            _: i64,
+            _: i64,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn remove(&self, map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
+            self.data.lock().remove(&(map.to_string(), key.to_string()));
+            Ok(())
+        }
+
+        async fn remove_backup(&self, _: &str, _: &str, _: i64) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+            Ok(self
+                .data
+                .lock()
+                .get(&(map.to_string(), key.to_string()))
+                .cloned())
+        }
+
+        async fn load_all(
+            &self,
+            map: &str,
+            keys: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            let guard = self.data.lock();
+            Ok(keys
+                .iter()
+                .filter_map(|key| {
+                    guard
+                        .get(&(map.to_string(), key.clone()))
+                        .map(|value| (key.clone(), value.clone()))
+                })
+                .collect())
+        }
+
+        async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+            let mut guard = self.data.lock();
+            for key in keys {
+                guard.remove(&(map.to_string(), key.clone()));
+            }
+            Ok(())
+        }
+
+        async fn enumerate_leaves(
+            &self,
+            _: &str,
+            _: bool,
+            _: &mut dyn LeafSink,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn scan_values(&self, _: &str, _: bool, _: u64) -> anyhow::Result<ScanBatch> {
+            Ok(ScanBatch::default())
+        }
+
+        async fn scan_values_batched(
+            &self,
+            _: &str,
+            _: bool,
+            _: ScanCursor,
+            _: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            Ok(ScanBatch::default())
+        }
+
+        fn is_loadable(&self, _: &str) -> bool {
+            true
+        }
+
+        fn pending_operation_count(&self) -> u64 {
+            0
+        }
+
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            Ok(0)
+        }
+
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn flush_key(
+            &self,
+            _: &str,
+            _: &str,
+            _: &RecordValue,
+            _: bool,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn reset(&self) {}
+
+        /// A real (non-null) backend, so the full write-through path runs and a
+        /// non-resident key is rehydrated from durable state on read.
+        fn is_null(&self) -> bool {
+            false
+        }
+    }
+
+    /// Evicts named keys the instant the record store rehydrates them.
+    ///
+    /// This is the only in-process lever that manufactures the "evicted between
+    /// the rehydrating read and the in-place write" race: `on_load` fires after
+    /// the hydrated record has entered the engine and before the caller's next
+    /// write, so a store that evicts there leaves the following `update_in_place`
+    /// with no resident slot to mutate — exactly the state the prune has to tell
+    /// apart from "the tag was already gone".
+    #[derive(Default)]
+    struct EvictOnRehydrate {
+        store: Mutex<Option<Weak<dyn RecordStore>>>,
+        keys: Mutex<HashSet<String>>,
+    }
+
+    impl EvictOnRehydrate {
+        /// Held as a `Weak` so the observer, which the store's own observer chain
+        /// owns, does not keep that store alive through a cycle.
+        fn arm(&self, store: &Arc<dyn RecordStore>, key: &str) {
+            *self.store.lock() = Some(Arc::downgrade(store));
+            self.keys.lock().insert(key.to_string());
+        }
+    }
+
+    impl MutationObserver for EvictOnRehydrate {
+        fn on_put(&self, _: &str, _: &Record, _: Option<&RecordValue>, _: bool) {}
+        fn on_update(&self, _: &str, _: &Record, _: &RecordValue, _: &RecordValue, _: bool) {}
+        fn on_remove(&self, _: &str, _: &Record, _: bool) {}
+        fn on_evict(&self, _: &str, _: &Record, _: bool) {}
+        fn on_load(&self, key: &str, _: &Record, _: bool) {
+            // Drop both guards before evicting: the eviction re-enters the
+            // observer chain (on_evict), and holding these across that call would
+            // be a self-deadlock waiting to happen.
+            let armed = self.keys.lock().contains(key);
+            if !armed {
+                return;
+            }
+            let store = self.store.lock().clone();
+            if let Some(store) = store.and_then(|weak| weak.upgrade()) {
+                store.evict(key, false);
+            }
+        }
+        fn on_replication_put(&self, _: &str, _: &Record, _: bool) {}
+        fn on_clear(&self) {}
+        fn on_reset(&self) {}
+        fn on_destroy(&self, _: bool) {}
+    }
+
+    /// Open both prune gates past epoch 1 only: the low-water mark STRICTLY past
+    /// epoch 1 (cursor 2) and the byte-durability fence wide open. Both are
+    /// injected, so which epoch drains is deterministic — no wall clock, no
+    /// background sweeper.
+    async fn open_prune_gates_past_epoch_one(frontier: &TombstoneFrontier) {
+        let client: String = "a5:alice|dev-1".into();
+        frontier.set_delivered(ConnectionId(1), 100);
+        assert!(
+            frontier
+                .confirm_apply_ack(&client, 2, ConnectionId(1))
+                .await
+        );
+        assert_eq!(frontier.low_water_mark(), 2);
+        frontier.set_durable_epoch_watermark(1000);
+    }
+
+    /// The apply is PURE: no arm of it moves the tombstone-byte gauge, however
+    /// many tombstones it appends or drops.
+    ///
+    /// This is the property a delta-fold recovery caller depends on — folding a
+    /// durable delta must reconstruct state without perturbing a gauge whose
+    /// post-recovery truth comes from the boot re-baseline instead.
+    #[tokio::test]
+    async fn or_apply_moves_no_tombstone_bytes_on_any_arm() {
+        let tag = "T1";
+        let entry = OrMapEntry {
+            value: Value::Int(1),
+            tag: tag.to_string(),
+            timestamp: make_timestamp(),
+        };
+
+        let ((), delta) = with_isolated_gauge(async {
+            let mut value = RecordValue::OrMap {
+                records: Vec::new(),
+                tombstones: Vec::new(),
+            };
+            // Every arm, in both its effective and its no-op disposition, so a
+            // counter hidden on any one of them would show up here.
+            assert!(
+                apply_or_delta(
+                    OrDelta::Add {
+                        entry: entry.clone()
+                    },
+                    &mut value
+                )
+                .added,
+                "a fresh add lands"
+            );
+            assert!(
+                apply_or_delta(
+                    OrDelta::Remove {
+                        tag: tag.to_string()
+                    },
+                    &mut value
+                )
+                .new_tombstone,
+                "the first remove appends a genuinely-new tombstone"
+            );
+            assert!(
+                !apply_or_delta(
+                    OrDelta::Remove {
+                        tag: tag.to_string()
+                    },
+                    &mut value
+                )
+                .new_tombstone,
+                "a re-issued remove appends nothing"
+            );
+            assert!(
+                !apply_or_delta(OrDelta::Add { entry }, &mut value).added,
+                "remove-wins suppresses the re-add"
+            );
+            assert_eq!(
+                apply_or_delta(
+                    OrDelta::Prune {
+                        tags: vec![tag.to_string()]
+                    },
+                    &mut value
+                )
+                .pruned,
+                1,
+                "the prune drops the tombstone"
+            );
+            assert_eq!(
+                apply_or_delta(
+                    OrDelta::Prune {
+                        tags: vec!["absent".to_string()]
+                    },
+                    &mut value
+                )
+                .pruned,
+                0,
+                "pruning an unknown tag drops nothing"
+            );
+        })
+        .await;
+
+        assert_eq!(
+            delta, 0,
+            "the apply is pure: appending and dropping tombstones must move no \
+             gauge bytes, because every counter belongs to the caller at the \
+             position that knows whether the durable write succeeded"
+        );
+    }
+
+    /// Structural companion to `or_apply_moves_no_tombstone_bytes_on_any_arm`:
+    /// the apply's own body does not so much as NAME a byte counter, so the
+    /// purity contract cannot be re-broken by a counter on a path the behavioural
+    /// test happens not to drive.
+    #[test]
+    fn or_apply_body_names_no_tombstone_byte_counter() {
+        const SOURCE: &str = include_str!("crdt.rs");
+
+        let start = SOURCE
+            .find("pub(crate) fn apply_or_delta(")
+            .expect("the apply seam is defined in this file");
+        let tail = &SOURCE[start..];
+        let end = tail
+            .find("\n}\n")
+            .expect("the apply's body closes at a column-0 brace");
+        let body = &tail[..end];
+
+        for counter in [
+            "add_tombstone_bytes",
+            "sub_tombstone_bytes",
+            "set_tombstone_bytes",
+        ] {
+            assert!(
+                !body.contains(counter),
+                "the apply must stay counter-free, found `{counter}` in its body"
+            );
+        }
+    }
+
+    /// A genuinely-new tombstone is charged to the gauge even when the durable
+    /// write that follows FAILS.
+    ///
+    /// The charge is atomic with the resident push, under the engine's per-key
+    /// lock, so a failed write plus a client retry counts the tag exactly once:
+    /// the retry finds the tag already resident and adds nothing. A charge moved
+    /// after the write would be skipped here, and then skipped again on the
+    /// retry, leaving the gauge short of a tombstone that IS resident — which
+    /// later underflows on prune.
+    #[tokio::test]
+    async fn or_remove_charges_tombstone_bytes_when_the_durable_write_fails() {
+        let store = Arc::new(ArmableStore::default());
+        let (svc, factory, _frontier) = make_service_with_frontier_and_store(
+            Arc::clone(&store) as Arc<dyn MapDataStore>,
+            Vec::new(),
+        );
+        let tag = "T1";
+
+        // Seed UN-ARMED, so the failure lands on the remove under test and not on
+        // the record-creating write before it.
+        Arc::clone(&svc)
+            .oneshot(or_add_op("m", "k1", "v1", tag))
+            .await
+            .unwrap();
+        store.reject_writes_to("k1");
+
+        let (result, delta) = with_isolated_gauge(async {
+            Arc::clone(&svc).oneshot(or_remove_op("m", "k1", tag)).await
+        })
+        .await;
+
+        assert!(
+            result.is_err(),
+            "the armed store must fail the OR_REMOVE write-through"
+        );
+        assert_eq!(
+            delta,
+            tag.len() as u64,
+            "the tombstone is charged inside the mutate closure, before the \
+             durable write, so a failed write cannot skip the charge"
+        );
+
+        // The tag is resident-but-not-durable: the gauge counts it because the
+        // retry will find it resident, not because it reached the backend.
+        let (_, resident) = read_or_map(&factory, "m", "k1").await;
+        assert!(
+            resident.contains(&tag.to_string()),
+            "the resident slot keeps the tombstone the closure appended"
+        );
+        let durable = store.durable("m", "k1");
+        assert!(
+            matches!(&durable, Some(RecordValue::OrMap { tombstones, .. }) if tombstones.is_empty()),
+            "the rejected write must leave the durable copy without the \
+             tombstone, got {durable:?}"
+        );
+    }
+
+    /// A re-issued OR_REMOVE of the same tag charges the gauge ONCE.
+    ///
+    /// The charge is gated on the apply's "this tombstone is genuinely new"
+    /// report; charging per remove instead would inflate the gauge without bound
+    /// under client retries, and the SPEC-345 hard gate reads that number.
+    #[tokio::test]
+    async fn duplicate_or_remove_charges_tombstone_bytes_once() {
+        let store = Arc::new(ArmableStore::default());
+        let (svc, factory, _frontier) = make_service_with_frontier_and_store(
+            Arc::clone(&store) as Arc<dyn MapDataStore>,
+            Vec::new(),
+        );
+        let tag = "T1";
+
+        Arc::clone(&svc)
+            .oneshot(or_add_op("m", "k1", "v1", tag))
+            .await
+            .unwrap();
+
+        let ((), delta) = with_isolated_gauge(async {
+            for _ in 0..2 {
+                Arc::clone(&svc)
+                    .oneshot(or_remove_op("m", "k1", tag))
+                    .await
+                    .unwrap();
+            }
+        })
+        .await;
+
+        assert_eq!(
+            delta,
+            tag.len() as u64,
+            "two removes of the same tag are one tombstone, so they are one charge"
+        );
+        // Pins the charge to the tombstone set, so a gauge delta cannot be
+        // explained by a second tombstone having really been appended.
+        let (_, resident) = read_or_map(&factory, "m", "k1").await;
+        assert_eq!(
+            resident,
+            vec![tag.to_string()],
+            "the duplicate remove must not duplicate the tombstone"
+        );
+    }
+
+    /// A prune whose durable write FAILS leaves the gauge exactly where it was.
+    ///
+    /// The decrement fires only in the post-write arm: the gauge tracks bytes
+    /// that are actually still out there, not bytes removed from an in-memory
+    /// copy. Decrementing inside the mutate closure would credit back a tag that
+    /// is still durable, and the frontier ref is re-indexed for retry precisely
+    /// because the reclaim has NOT happened yet.
+    #[tokio::test]
+    async fn prune_leaves_tombstone_bytes_unmoved_when_the_durable_write_fails() {
+        let store = Arc::new(ArmableStore::default());
+        let (svc, factory, frontier) = make_service_with_frontier_and_store(
+            Arc::clone(&store) as Arc<dyn MapDataStore>,
+            Vec::new(),
+        );
+        let (t1, t2) = ("T1", "T2");
+
+        let ((), delta) = with_isolated_gauge(async {
+            // Seed un-armed: k1's tombstone lands in epoch 1 and its frontier ref
+            // is indexed, which is what gives the sweep something to drain.
+            for (key, val, tag) in [("k1", "v1", t1), ("k2", "v2", t2)] {
+                Arc::clone(&svc)
+                    .oneshot(or_add_op("m", key, val, tag))
+                    .await
+                    .unwrap();
+                Arc::clone(&svc)
+                    .oneshot(or_remove_op("m", key, tag))
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(frontier.current_epoch(), 2, "epochs 1..=2 stamped");
+            open_prune_gates_past_epoch_one(&frontier).await;
+
+            // Only NOW arm the rejection, so the drain finds epoch 1's ref and the
+            // prune's own write is the one that fails.
+            store.reject_writes_to("k1");
+            prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
+
+            // Attribution: the closure ran and the in-memory copy lost the tag,
+            // while the durable copy still holds it. That divergence is exactly
+            // why the decrement may not fire from inside the closure.
+            let (_, resident) = read_or_map(&factory, "m", "k1").await;
+            assert!(
+                !resident.contains(&t1.to_string()),
+                "the prune closure ran and dropped the tag from the resident slot"
+            );
+            let durable = store.durable("m", "k1");
+            assert!(
+                matches!(&durable, Some(RecordValue::OrMap { tombstones, .. }) if tombstones.contains(&t1.to_string())),
+                "the rejected write must leave the tag durable, got {durable:?}"
+            );
+        })
+        .await;
+
+        assert_eq!(
+            delta,
+            (t1.len() + t2.len()) as u64,
+            "both OR_REMOVE charges stand and the failed prune returns nothing: \
+             a decrement from inside the mutate closure would credit back bytes \
+             that are still durable"
+        );
+    }
+
+    /// Evicted between the rehydrating read and the in-place write: the frontier
+    /// ref is re-indexed so a later sweep retries.
+    ///
+    /// The closure never ran, so nothing was reclaimed while a durable tombstone
+    /// still exists. The drain already removed the ref's index entry, so dropping
+    /// it here would orphan that tag un-prunable forever.
+    #[tokio::test]
+    async fn prune_restores_the_tombstone_ref_when_the_key_is_evicted_mid_write() {
+        let store = Arc::new(ArmableStore::default());
+        let evictor = Arc::new(EvictOnRehydrate::default());
+        let (svc, factory, frontier) = make_service_with_frontier_and_store(
+            Arc::clone(&store) as Arc<dyn MapDataStore>,
+            vec![Arc::clone(&evictor) as Arc<dyn MutationObserver>],
+        );
+        let (t1, t2) = ("T1", "T2");
+
+        for (key, val, tag) in [("k1", "v1", t1), ("k2", "v2", t2)] {
+            Arc::clone(&svc)
+                .oneshot(or_add_op("m", key, val, tag))
+                .await
+                .unwrap();
+            Arc::clone(&svc)
+                .oneshot(or_remove_op("m", key, tag))
+                .await
+                .unwrap();
+        }
+        open_prune_gates_past_epoch_one(&frontier).await;
+
+        // Model the race: drop k1 from memory (its durable tombstone survives),
+        // then evict it again the moment the sweep's rehydrating read puts it
+        // back, so the in-place write finds no resident slot.
+        let k1_store = factory.get_or_create("m", hash_to_partition("k1"));
+        assert!(
+            k1_store.evict("k1", false).is_some(),
+            "precondition: k1 is resident before the modelled eviction"
+        );
+        evictor.arm(&k1_store, "k1");
+
+        prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
+
+        let durable = store.durable("m", "k1");
+        assert!(
+            matches!(&durable, Some(RecordValue::OrMap { tombstones, .. }) if tombstones.contains(&t1.to_string())),
+            "nothing was reclaimed: the tag is still durable, got {durable:?}"
+        );
+        let retryable = frontier.drain_prunable_tombstones();
+        assert!(
+            retryable
+                .iter()
+                .any(|(epoch, r)| *epoch == 1 && r.key == "k1" && r.tag == t1),
+            "an un-reclaimed tombstone must be re-indexed for a later sweep, got {retryable:?}"
+        );
+    }
+
+    /// The tag was genuinely already gone: the closure RAN and removed nothing,
+    /// so the frontier ref must NOT come back.
+    ///
+    /// There is nothing left to reclaim, and re-indexing a ref no write will ever
+    /// satisfy livelocks the sweep on it forever. This is the disposition a bare
+    /// `Ok(false)` cannot distinguish from the eviction race above, which is why
+    /// the decision is keyed off a flag the closure itself sets.
+    #[tokio::test]
+    async fn prune_does_not_restore_the_tombstone_ref_when_the_tag_is_already_gone() {
+        let store = Arc::new(ArmableStore::default());
+        let (svc, factory, frontier) = make_service_with_frontier_and_store(
+            Arc::clone(&store) as Arc<dyn MapDataStore>,
+            Vec::new(),
+        );
+
+        // A resident record whose tombstone set does NOT hold the tag the sweep
+        // is about to look for.
+        Arc::clone(&svc)
+            .oneshot(or_add_op("m", "k1", "v1", "T1"))
+            .await
+            .unwrap();
+        let ghost = "GHOST";
+        assert_eq!(
+            frontier.stamp_tombstone("m", "k1", ghost),
+            1,
+            "the ghost ref sits in epoch 1"
+        );
+        // A second stamp advances the epoch counter so the low-water mark can sit
+        // strictly past the ghost's epoch without making this one eligible too.
+        assert_eq!(
+            frontier.stamp_tombstone("m", "k2", "FILLER"),
+            2,
+            "the filler pins epoch 2"
+        );
+        open_prune_gates_past_epoch_one(&frontier).await;
+
+        prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
+
+        let retryable = frontier.drain_prunable_tombstones();
+        assert!(
+            !retryable.iter().any(|(_, r)| r.tag == ghost),
+            "a tag that is already gone must not be re-indexed, or the sweep \
+             livelocks on it, got {retryable:?}"
+        );
+    }
+
+    /// A prune that upgrades a legacy-shaped slot but drops no tag still owes —
+    /// and performs — a durable write.
+    ///
+    /// A shape change IS a value change. Reporting "unchanged" would leave the
+    /// resident slot upgraded with a stale cost while the durable record kept the
+    /// legacy shape until some unrelated later write happened to re-persist it.
+    /// The gauge stays put, because nothing was pruned.
+    #[tokio::test]
+    async fn prune_persists_a_legacy_shape_upgrade_with_nothing_pruned() {
+        let store = Arc::new(ArmableStore::default());
+        let (svc, factory, frontier) = make_service_with_frontier_and_store(
+            Arc::clone(&store) as Arc<dyn MapDataStore>,
+            Vec::new(),
+        );
+
+        // Durable-only, in the pre-OrMap shape an older server wrote, holding a
+        // tombstone the sweep is NOT asked to drop.
+        store.seed_durable(
+            "m",
+            "k1",
+            RecordValue::OrTombstones {
+                tags: vec!["OLD".to_string()],
+            },
+        );
+        let ghost = "GHOST";
+        assert_eq!(
+            frontier.stamp_tombstone("m", "k1", ghost),
+            1,
+            "the ghost ref sits in epoch 1"
+        );
+        assert_eq!(
+            frontier.stamp_tombstone("m", "k2", "FILLER"),
+            2,
+            "the filler pins epoch 2"
+        );
+        open_prune_gates_past_epoch_one(&frontier).await;
+
+        let ((), delta) = with_isolated_gauge(async {
+            prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
+        })
+        .await;
+
+        let durable = store.durable("m", "k1");
+        assert!(
+            matches!(
+                &durable,
+                Some(RecordValue::OrMap { records, tombstones })
+                    if records.is_empty() && tombstones == &vec!["OLD".to_string()]
+            ),
+            "the shape upgrade must reach the durable record, got {durable:?}"
+        );
+        let (_, resident) = read_or_map(&factory, "m", "k1").await;
+        assert_eq!(
+            resident,
+            vec!["OLD".to_string()],
+            "the upgrade preserves the legacy tombstone set"
+        );
+        assert_eq!(
+            delta, 0,
+            "no tag was pruned, so a normalize-only write moves no gauge bytes"
         );
     }
 
