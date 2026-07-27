@@ -717,6 +717,31 @@ mod tombstone_bytes_gauge_tests {
         }
     }
 
+    /// A non-OR record, so the walk's arm selection is exercised over more than
+    /// the OR arms alone.
+    fn lww_record_value() -> RecordValue {
+        RecordValue::Lww {
+            value: Value::String("plain".to_string()),
+            timestamp: Timestamp {
+                millis: 2,
+                counter: 0,
+                node_id: "node-a".to_string(),
+            },
+        }
+    }
+
+    async fn seed_primary(
+        store: &Arc<dyn MapDataStore>,
+        map: &str,
+        key: &str,
+        value: &RecordValue,
+    ) {
+        store
+            .add(map, key, value, 0, 0)
+            .await
+            .expect("seed a primary record");
+    }
+
     /// The boot reconciliation recomputes the tombstone-byte total from what is
     /// actually persisted, so it is driven here against a real redb keyspace that
     /// has been seeded. A `MapDataStore` double returning an empty `ScanBatch`
@@ -734,79 +759,31 @@ mod tombstone_bytes_gauge_tests {
     ///   tables only and the walk scans each map with `is_backup = false`.
     #[tokio::test]
     async fn reconcile_re_baselines_the_gauge_to_the_durable_primary_ormap_tombstone_sum() {
+        // 4 + 6 + 5 — the primary-partition `OrMap` tombstones and nothing else.
+        const EXPECTED_TOTAL: u64 = 15;
+
         let dir = tempfile::tempdir().expect("tempdir");
         let store: Arc<dyn MapDataStore> =
             Arc::new(RedbDataStore::new(dir.path().join("reconcile.redb")).expect("redb open"));
 
-        // Lengths are spelled as `repeat` counts rather than literal runs of
-        // characters so the expected total below cannot drift from a miscount.
-        let counted_a = "a".repeat(4);
-        let counted_b = "b".repeat(6);
-        let counted_c = "c".repeat(5);
+        // Tag lengths are spelled as `repeat` counts rather than literal runs of
+        // characters so the expected total cannot drift from a miscount.
         let excluded_legacy = "d".repeat(20);
-        let excluded_backup = "e".repeat(9);
-        // 4 + 6 + 5 — the primary-partition `OrMap` tombstones and nothing else.
-        const EXPECTED_TOTAL: u64 = 15;
 
         // Two maps, so the per-map loop over `list_maps` is genuinely iterated,
         // and one non-OR record, so the walk's arm selection is exercised.
+        let counted = or_map_with_tombstones(vec!["a".repeat(4), "b".repeat(6)]);
+        seed_primary(&store, "reconcile_a", "k1", &counted).await;
+        let counted = or_map_with_tombstones(vec!["c".repeat(5)]);
+        seed_primary(&store, "reconcile_b", "k1", &counted).await;
+        seed_primary(&store, "reconcile_b", "k2", &lww_record_value()).await;
+        let legacy = RecordValue::OrTombstones {
+            tags: vec![excluded_legacy.clone()],
+        };
+        seed_primary(&store, "reconcile_a", "legacy", &legacy).await;
+        let backup = or_map_with_tombstones(vec!["e".repeat(9)]);
         store
-            .add(
-                "reconcile_a",
-                "k1",
-                &or_map_with_tombstones(vec![counted_a, counted_b]),
-                0,
-                0,
-            )
-            .await
-            .expect("seed primary OrMap in the first map");
-        store
-            .add(
-                "reconcile_b",
-                "k1",
-                &or_map_with_tombstones(vec![counted_c]),
-                0,
-                0,
-            )
-            .await
-            .expect("seed primary OrMap in the second map");
-        store
-            .add(
-                "reconcile_b",
-                "k2",
-                &RecordValue::Lww {
-                    value: Value::String("plain".to_string()),
-                    timestamp: Timestamp {
-                        millis: 2,
-                        counter: 0,
-                        node_id: "node-a".to_string(),
-                    },
-                },
-                0,
-                0,
-            )
-            .await
-            .expect("seed an LWW record");
-        store
-            .add(
-                "reconcile_a",
-                "legacy",
-                &RecordValue::OrTombstones {
-                    tags: vec![excluded_legacy.clone()],
-                },
-                0,
-                0,
-            )
-            .await
-            .expect("seed the legacy tombstone-only blob");
-        store
-            .add_backup(
-                "reconcile_a",
-                "backup-key",
-                &or_map_with_tombstones(vec![excluded_backup.clone()]),
-                0,
-                0,
-            )
+            .add_backup("reconcile_a", "backup-key", &backup, 0, 0)
             .await
             .expect("seed a backup OrMap row");
 
