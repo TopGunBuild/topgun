@@ -18,9 +18,33 @@ import { ChevronRight } from 'lucide-react';
 
 # Roadmap
 
-Last updated: 2026-05-22
+Last updated: 2026-07-27
 
 This page tracks the maturity level of distributed primitives across deployment modes and consolidates every Planned / not-yet-implemented feature into one auditable status table. It is the canonical single source of truth for "what works today vs what is planned."
+
+## Stabilization Status
+
+TopGun is in an active, **public** hardening program before we recommend unattended production
+use. The receipts are in the repository, not in marketing copy:
+
+- **[Invariant catalog](https://github.com/TopGunBuild/topgun/blob/main/INVARIANTS.md)** — every
+  durability/correctness invariant the system relies on, each mapped to the test that enforces
+  it. Invariants without an enforcing test are marked `NAKED` with a tracking issue, visibly and
+  on purpose; CI fails if that count grows silently.
+- **Crash-recovery proof harness** — a model-based generative test that drives
+  write / flush / crash-at-any-point / recover / GC sequences against an independent reference
+  model, with process-restart crossings inside each case. It re-detects every restart-boundary
+  bug class we have found and fixed.
+- **A 72-hour endurance gate** — the final exam (sustained churn + kill -9 loops with hard
+  memory/disk/tombstone gates) runs once the remaining gates above are closed; we publish the
+  criteria rather than the adjective "production-ready".
+
+Known, documented trade-offs (not hidden): the default `batched` WAL fsync policy acks writes
+before fsync — an unclean crash can lose the last ~10 ms group-commit window server-side (the
+originating client re-converges via its local op-log); set `TOPGUN_WAL_FSYNC_POLICY=per_op` for
+acked-implies-durable. See the server configuration docs for the full list.
+
+Single-node APIs are stable for development and self-hosted evaluation today.
 
 ## Distributed Primitives Maturity
 
