@@ -43,17 +43,49 @@ pub const FRAME_MAGIC: u32 = 0x54_47_57_4C;
 /// recovery can refuse to read frames written by a newer binary rather than
 /// silently mis-interpreting them as corruption.
 ///
-/// Version-discipline note for the planned OR-delta frame (see
-/// [`crate::storage::wal::OrDelta`]): appending a per-op OR mutation instead of a
-/// full snapshot is carried as a new `WalOp` payload inside the same frame
-/// envelope, which is an additive MsgPack-named change — it does NOT alter the
-/// header layout. A legacy binary that meets a delta frame fails `WalEntry`
-/// deserialization, which `decode_all` reports as `Corruption` (a fail-closed
-/// refusal to start, never a silent mis-read), so mixed old/new recovery is
-/// already safe WITHOUT a version bump. Bumping this byte when the delta frame
-/// lands is therefore an explicit-signal choice rather than a safety requirement;
-/// either way the CRC32C + length-bound + exhaustive-`FrameDecodeResult` envelope
-/// below is preserved.
+/// # Version discipline for the OR-delta frame: DECIDED — NO BUMP
+///
+/// The per-op OR mutation ([`crate::storage::wal::OrDelta`], carried as the
+/// `WalOp::OrDelta` variant) is an additive MsgPack-named payload inside this
+/// UNCHANGED frame envelope: the header layout is untouched, so the CRC32C +
+/// length-bound + exhaustive-[`FrameDecodeResult`] guarantees below are inherited
+/// with no code change here. This byte therefore stays at `1`, and a bump is out
+/// of contract until a dedicated migration owns it (TODO-617).
+///
+/// A bump would not be a stronger signal, it would be an outage in BOTH
+/// directions, because `decode_all` returns [`FrameDecodeResult::UnknownVersion`]
+/// on ANY version mismatch and recovery treats that as fail-closed:
+/// - a bumped binary would refuse every legacy WAL already on disk, and
+/// - an older binary would refuse every WAL written after the bump.
+///
+/// One-step compatibility is what the no-bump choice buys, and it is what any
+/// future bump must plan a migration for.
+///
+/// ## What an older binary ACTUALLY does with a frame it cannot deserialize
+///
+/// Stated in full because the guarantee is NOT the unqualified "always fails
+/// closed" it is easy to assume — writing that here would be a false invariant
+/// in code. Verified against `decode_all`'s payload-deserialization branch and
+/// `WalRecovery::decode_segment_or_refuse`, the behaviour has TWO cases, decided
+/// purely by the frame's POSITION:
+///
+/// - **Mid-segment (the frame is NOT the last in the byte stream) ⇒ genuinely
+///   fail-closed.** The deserialize failure is classified as
+///   [`FrameDecodeResult::Corruption`] and recovery refuses to start.
+/// - **Trailing frame on the ACTIVE segment (it IS the last) ⇒ SILENT DROP, not
+///   a refusal.** The same branch sees `next_offset >= total_len` and returns
+///   [`FrameDecodeResult::TruncatedTail`] instead, which recovery TOLERATES on the
+///   last segment: it warns, replays the intact prefix, and `WalWriter`'s open
+///   path then durably truncates the segment to that prefix before reopening it
+///   for append — so the frame is physically gone, not merely skipped. The newest
+///   frame is the most likely position for the newest mutation, so this is not an
+///   exotic corner.
+///
+/// Nothing is broken by that asymmetry at present: no code path emits a delta
+/// frame, so no delta-bearing WAL exists on disk. It is recorded here because the
+/// first commit that DOES emit one is the first commit at which an older binary
+/// can meet one, and the trailing-frame case is a decision it must make with the
+/// real behaviour in front of it rather than the assumed one.
 pub const FRAME_VERSION: u8 = 1;
 
 /// Total header bytes: 4 (magic) + 1 (version) + 4 (length) + 4 (crc32c).
@@ -360,6 +392,140 @@ mod tests {
             timestamp: None,
             sequence: seq,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // OR delta frame: version discipline, codec envelope, golden shape
+    // -----------------------------------------------------------------------
+
+    /// The golden frame the OR-delta on-disk shape is pinned to.
+    ///
+    /// A checked-in artifact rather than a shape re-derived from prose, so the
+    /// eventual emitter binds to a FILE: any drift in the variant's field shape,
+    /// its wire key, or the codec that carries it moves these bytes and is caught
+    /// here instead of on a production disk.
+    const GOLDEN_OR_DELTA_FRAME: &[u8] = include_bytes!("fixtures/or_delta_frame_v1.msgpack");
+
+    /// WAL frames encoded before `WalOp::OrDelta` existed.
+    ///
+    /// Kept as bytes, not as a corpus this binary regenerates: only bytes a
+    /// PREVIOUS encoder produced can show that adding the variant left
+    /// `Store`/`Remove` encoding untouched.
+    const LEGACY_CORPUS: &[u8] = include_bytes!("fixtures/legacy_wal_corpus_349a.bin");
+
+    /// The exact entry `GOLDEN_OR_DELTA_FRAME` holds. An OR delta frame carries
+    /// no entry timestamp: the merge gate is LWW-scoped and never consults it,
+    /// and OR ordering comes from the sequence rather than the HLC.
+    fn make_or_delta_entry() -> WalEntry {
+        use crate::storage::record::OrMapEntry;
+        use crate::storage::wal::OrDelta;
+
+        WalEntry {
+            map: "rooms".to_string(),
+            key: "lobby".to_string(),
+            op: WalOp::OrDelta {
+                delta: OrDelta::Add {
+                    entry: OrMapEntry {
+                        value: Value::String("carol".to_string()),
+                        tag: "tag-c1".to_string(),
+                        timestamp: Timestamp {
+                            millis: 1_700_000_002_000,
+                            counter: 0,
+                            node_id: "node-c".to_string(),
+                        },
+                    },
+                },
+            },
+            timestamp: None,
+            sequence: 11,
+        }
+    }
+
+    #[test]
+    fn frame_version_is_unchanged_at_1() {
+        // The OR delta frame is an additive payload inside this envelope. A bump
+        // would make this binary refuse every legacy WAL on disk AND make an
+        // older binary refuse every WAL written after it — see FRAME_VERSION.
+        assert_eq!(
+            FRAME_VERSION, 1,
+            "bumping the frame version breaks one-step compatibility in both directions"
+        );
+    }
+
+    #[test]
+    fn round_trip_or_delta_entry() {
+        // The codec is agnostic to the WalOp variant — serde owns the
+        // discriminant inside the payload — so the new frame inherits the
+        // CRC32C + length-bound envelope with no change to encode/decode_all.
+        let entry = make_or_delta_entry();
+        let encoded = encode(&entry).expect("encode should succeed");
+        match decode_all(&encoded) {
+            FrameDecodeResult::Complete(entries) => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0], entry);
+            }
+            other => panic!("Expected Complete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn or_delta_frame_encodes_byte_equal_to_the_golden_fixture() {
+        let encoded = encode(&make_or_delta_entry()).expect("encode should succeed");
+        assert_eq!(
+            encoded, GOLDEN_OR_DELTA_FRAME,
+            "the OR delta on-disk shape changed; a shape change is a format decision, \
+             not an implementation detail — do not regenerate the fixture to make this pass"
+        );
+    }
+
+    #[test]
+    fn golden_or_delta_fixture_decodes_to_the_pinned_entry() {
+        match decode_all(GOLDEN_OR_DELTA_FRAME) {
+            FrameDecodeResult::Complete(entries) => {
+                assert_eq!(entries.len(), 1, "the fixture holds exactly one frame");
+                assert_eq!(entries[0], make_or_delta_entry());
+            }
+            other => panic!("Expected Complete from the golden fixture, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_corpus_decodes_and_re_encodes_byte_identically() {
+        // Half 1: a WAL written before the variant existed still decodes cleanly
+        // — no UnknownVersion, no Corruption, and no TruncatedTail either, since
+        // a tolerated tail would silently shrink the corpus and hide half 2.
+        let entries = match decode_all(LEGACY_CORPUS) {
+            FrameDecodeResult::Complete(entries) => entries,
+            other => panic!("Expected Complete for the legacy corpus, got {other:?}"),
+        };
+        assert!(!entries.is_empty(), "the corpus must not be empty");
+
+        // Half 2: re-encoding each decoded entry with the CURRENT encoder must
+        // reproduce the original bytes frame for frame. This is what makes
+        // "byte-identical" falsifiable: had adding the variant perturbed
+        // Store/Remove encoding at all — a move off to_vec_named, an
+        // internally-tagged representation, a field reorder — the bytes would
+        // differ here. A corpus this binary generated could detect none of that.
+        let mut offset = 0usize;
+        for (i, entry) in entries.iter().enumerate() {
+            let frame = encode(entry).expect("re-encode should succeed");
+            let end = offset + frame.len();
+            assert!(
+                end <= LEGACY_CORPUS.len(),
+                "frame {i} re-encoded longer than the remaining corpus"
+            );
+            assert_eq!(
+                &LEGACY_CORPUS[offset..end],
+                frame.as_slice(),
+                "frame {i} does not re-encode to its original bytes"
+            );
+            offset = end;
+        }
+        assert_eq!(
+            offset,
+            LEGACY_CORPUS.len(),
+            "the re-encoded frames must account for every byte of the corpus"
+        );
     }
 
     // -----------------------------------------------------------------------
