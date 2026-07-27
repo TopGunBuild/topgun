@@ -311,13 +311,20 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Statement:** one call invokes `mutate` at most once (doc-contract, SPEC-347); gauge side
   effects inside the closure must not double-count.
 - **Maintaining code:** doc-contract + DashMap shard-lock path.
-- **Enforcing test:** partial —
-  `or_inplace_mutate_proptest.rs::new_tombstone_counted_once_across_write_failure_and_retry`
-  proves no double-count across fail+retry; the literal call-counter assertion (`AtomicUsize
-  == 1` per call) is `NAKED (TODO-602)`.
+- **Enforcing test:** the literal call-counter assertion now exists —
+  `or_inplace_mutate_proptest.rs::update_in_place_invokes_the_mutate_closure_exactly_once_per_call`
+  counts invocations per call (`AtomicUsize`) on the insert, occupied and failed-write-through
+  paths, and `::update_in_place_admits_the_take_once_shape_the_or_add_path_uses` pins the OR_ADD
+  `Option::take` shape; both are mutation-proven RED against a second `mutate` call in either
+  `engines/hashmap.rs` arm.
+  `::new_tombstone_counted_once_across_write_failure_and_retry` covers the gauge half (no
+  double-count across fail+retry).
+  Scope of that evidence, stated honestly: it counts the production pair the record-store factory
+  builds (`DefaultRecordStore` + `HashMapStorage`). Other `RecordStore` impls, including the trait's
+  own default fallback, are not counted.
 - **Violation consequence:** hidden internal retry double-applies CRDT mutations/gauge deltas.
 - **Discovered by:** SPEC-347 review minors.
-- **Status:** decided; enforcement partial.
+- **Status:** decided, **enforced** for the production store/engine pair.
 
 ### TG-OR-002: OR observers receive the documented `old_value` contract (post-image)
 
@@ -338,7 +345,11 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   equal `or_map_semantic_view` (live set + tombstones + pruned), with the durable store as fold
   base and snapshot frames as in-order absolute-set inputs.
 - **Maintaining code:** types + oracle landed (SPEC-346); fold delegates to the live apply path
-  (single-algebra rule, SPEC-349 R-mandate).
+  (single-algebra rule, SPEC-349 R-mandate). That path now has a named anchor: `crdt.rs::apply_or_delta`
+  — the ONE extracted pure apply of the add-wins / remove-wins / prune algebra, which the live OR_ADD,
+  OR_REMOVE and epoch-prune call sites all route through (SPEC-349a). The delta fold must delegate to
+  that symbol rather than re-implement the algebra; a second hand-written copy is what this invariant
+  forbids, and the symbol is what SPEC-349b's delegation is checked against.
 - **Enforcing test:** `NAKED — the OR delta-fold differential recovery proof does not exist yet.
   It lands as a case on the cross-incarnation harness
   (packages/server-rust/src/storage/datastores/wal_harness/), driven by SPEC-349b — not a fork`.
@@ -353,10 +364,20 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Statement:** `add_tombstone_bytes` fires on the real OR-remove path and `sub_tombstone_bytes`
   on the real epoch-prune path (mutation-proven both directions); tests bind task-local isolated
   gauges — no order-dependent global reads; negative controls never read a shared counter.
-- **Maintaining code:** `record.rs` fns delegating through the scoped sink resolver.
-- **Enforcing test:** SPEC-351 suite (9 tests) — real-prune-path coverage
-  (`crdt.rs:1394` mutation → deterministic RED), per-binding tripwire, private-counter foreign
-  traffic control.
+- **Maintaining code:** `record.rs` fns delegating through the scoped sink resolver, plus the two
+  counter call sites in `crdt.rs`: `add_tombstone_bytes` inside the OR_REMOVE mutate closure's
+  new-tombstone guard, and `sub_tombstone_bytes` in `crdt.rs::prune_epoch_tombstones`'s post-write
+  `Ok(_)` arm behind `dropped`. Both deliberately sit OUTSIDE the extracted pure apply
+  (`crdt.rs::apply_or_delta`, whose counter-freeness is itself asserted, behaviourally by
+  `crdt.rs::or_apply_moves_no_tombstone_bytes_on_any_arm` and structurally by
+  `::or_apply_body_names_no_tombstone_byte_counter`). That purity rule is NOT
+  permission to move them into it: the decrement in particular must fire only after the durable write
+  succeeds, because the gauge tracks bytes actually resident, not bytes removed from an in-memory copy.
+  Citations are kept line-number-free on purpose — the SPEC-349 extraction relocated the surrounding
+  code, and a line citation would have drifted silently.
+- **Enforcing test:** SPEC-351 suite (9 tests) — real-prune-path coverage at
+  `crdt.rs::prune_epoch_tombstones`, post-write `Ok(_)` arm (mutating that `sub_tombstone_bytes` call
+  → deterministic RED), per-binding tripwire, private-counter foreign traffic control.
 - **Violation consequence:** the SPEC-345 tombstone hard gate reads a fiction; the 72h soak's
   primary instrument lies.
 - **Discovered by:** SPEC-351 audit C1 (the gauge was previously asserted only against a test

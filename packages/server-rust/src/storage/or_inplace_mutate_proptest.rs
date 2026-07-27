@@ -935,4 +935,146 @@ mod tests {
             );
         });
     }
+
+    // -----------------------------------------------------------------------
+    // TG-OR-001, counted rather than inferred: one `update_in_place` call
+    // invokes the mutate closure EXACTLY once.
+    //
+    // The OR_ADD write path moves its entry into the closure with
+    // `Option::take().expect(...)`, so a hidden re-invocation would panic there
+    // — but that panic was the ONLY guard, which left TG-OR-001 asserted
+    // nowhere literally. A counter closes the OR half:
+    // a re-invocation would double-apply the CRDT mutation, and on the remove
+    // path double-charge the tombstone-byte gauge, on any caller whose closure
+    // is not `take`-shaped.
+    //
+    // This asserts the run-once property of the `update_in_place` seam itself,
+    // over the same store + engine pair the record-store factory builds in
+    // production. It says nothing about which production call sites are wired
+    // to that seam — see this module's header.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn update_in_place_invokes_the_mutate_closure_exactly_once_per_call() {
+        block_on_async(async {
+            let datastore = Arc::new(RetainingCountingStore::default());
+            let store = store_sharing(&datastore);
+
+            let calls = AtomicUsize::new(0);
+            let mut counted = |value: &mut RecordValue| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                normalize(value);
+                true
+            };
+            // Insert (no resident slot yet).
+            store
+                .update_in_place(
+                    KEY,
+                    Some(empty_ormap()),
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::CrdtMerge,
+                    &mut counted,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                1,
+                "the insert path must invoke the closure exactly once"
+            );
+
+            // Occupied (mutate the resident slot).
+            store
+                .update_in_place(
+                    KEY,
+                    Some(empty_ormap()),
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::CrdtMerge,
+                    &mut counted,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                2,
+                "the occupied path must invoke the closure exactly once"
+            );
+
+            // A failed durable write must not be retried behind the caller's
+            // back: the retry is the caller's decision, and a silent internal
+            // one would re-apply the mutation the closure already made.
+            datastore.fail_adds.store(1, Ordering::Relaxed);
+            assert!(
+                store
+                    .update_in_place(
+                        KEY,
+                        Some(empty_ormap()),
+                        ExpiryPolicy::NONE,
+                        CallerProvenance::CrdtMerge,
+                        &mut counted,
+                    )
+                    .await
+                    .is_err(),
+                "injected write-through failure must surface to the caller"
+            );
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                3,
+                "a failed write-through must not re-invoke the closure"
+            );
+        });
+    }
+
+    #[test]
+    fn update_in_place_admits_the_take_once_shape_the_or_add_path_uses() {
+        block_on_async(async {
+            let datastore = Arc::new(RetainingCountingStore::default());
+            let store = store_sharing(&datastore);
+
+            // The production OR_ADD closure's exact shape: the entry is MOVED in,
+            // so a second invocation of this one call's closure would panic on
+            // the empty take rather than silently double-applying.
+            let mut entry_opt = Some(OrMapEntry {
+                value: Value::Int(7),
+                tag: "t-once".to_string(),
+                timestamp: ts(1),
+            });
+            let mut merge_once = move |value: &mut RecordValue| {
+                normalize(value);
+                let entry = entry_opt
+                    .take()
+                    .expect("OR_ADD merge closure runs exactly once");
+                if let RecordValue::OrMap {
+                    records,
+                    tombstones,
+                } = value
+                {
+                    if !tombstones.contains(&entry.tag) {
+                        records.retain(|r| r.tag != entry.tag);
+                        records.push(entry);
+                    }
+                }
+                true
+            };
+
+            store
+                .update_in_place(
+                    KEY,
+                    Some(empty_ormap()),
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::CrdtMerge,
+                    &mut merge_once,
+                )
+                .await
+                .unwrap();
+
+            let resident = store.get(KEY, false).await.unwrap().map(|r| r.value);
+            let (records, _) = read_state(resident);
+            assert_eq!(
+                records.len(),
+                1,
+                "the moved entry lands exactly once, with no second application"
+            );
+        });
+    }
 }

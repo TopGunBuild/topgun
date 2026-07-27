@@ -17,7 +17,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 DOC="INVARIANTS.md"
-NAKED_BASELINE=5
+NAKED_BASELINE=4
 
 [ -f "$DOC" ] || { echo "FAIL: $DOC missing"; exit 1; }
 

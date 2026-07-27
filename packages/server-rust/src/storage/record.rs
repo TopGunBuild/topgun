@@ -4,11 +4,13 @@
 //! [`Record`], [`RecordMetadata`], [`RecordValue`], and [`OrMapEntry`].
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
 
+use super::map_data_store::MapDataStore;
 use super::tombstone_gauge::with_sink;
 
 /// Process-monotonic counter for minting per-write identity tokens.
@@ -84,7 +86,8 @@ pub fn tombstone_bytes() -> u64 {
 ///
 /// This is the **only** absolute-set path for the gauge. It exists exclusively
 /// for the one-time startup reconciliation that runs after WAL recovery
-/// completes (see `bin/topgun_server.rs`): the process-local
+/// completes (see [`reconcile_tombstone_bytes`], which the server bootstrap
+/// invokes at that point): the process-local
 /// [`ProcessGauge`](super::tombstone_gauge::ProcessGauge) atomic and both exported Prometheus series
 /// (`topgun_ormap_tombstone_bytes_total` and `topgun_ormap_tombstone_bytes`)
 /// reset to zero/absent on every process start and never re-count rehydrated
@@ -126,8 +129,9 @@ pub fn set_tombstone_bytes(total: u64) {
 /// clients re-sync). This surfaces that at boot so an operator sees the pinned
 /// bytes are deliberate, not a leak.
 ///
-/// Kept a pure `count -> Option<message>` decision so it is unit-testable off the
-/// bin-only boot walk that supplies the count.
+/// Kept a pure `count -> Option<message>` decision so it is unit-testable
+/// independently of [`reconcile_tombstone_bytes`], the boot walk that supplies
+/// the count.
 #[must_use]
 pub fn legacy_tombstone_warning(legacy_row_count: u64) -> Option<String> {
     (legacy_row_count > 0).then(|| {
@@ -136,6 +140,146 @@ pub fn legacy_tombstone_warning(legacy_row_count: u64) -> Option<String> {
              recreate the datastore to reclaim"
         )
     })
+}
+
+/// One-time startup reconciliation of the OR-Map tombstone-bytes gauge.
+///
+/// Runs exactly once, after WAL recovery completes and strictly before the
+/// listener accepts connections, for durable backends only. Walks the full
+/// persisted primary keyspace via the cursor-batched scan surface, sums
+/// `tag.len()` over every tombstone string in every persisted `OrMap` record,
+/// and re-baselines the gauge to that absolute total via [`set_tombstone_bytes`].
+/// This makes the scraped `topgun_ormap_tombstone_bytes_total` series survive a
+/// `kill -9` restart — the gauge otherwise resets to 0 on every process start
+/// and never re-counts rehydrated (redb-persisted) tombstones.
+///
+/// Returns the reconciled total it passed to [`set_tombstone_bytes`], so a
+/// caller (or a test) can assert the reconciled sum through this function
+/// rather than re-deriving it from a second walk.
+///
+/// Never runs on any read/write/rehydration path — boot-only, exactly-once. On
+/// scan failure it logs a WARN, returns `0` and leaves the process-local gauge
+/// at its default (0): reconciliation is a monitoring-accuracy improvement, not
+/// a durability invariant, so a failed reconcile degrades to today's
+/// process-local behavior rather than aborting startup.
+///
+/// `pub` because its consumer is the server bootstrap in
+/// `src/bin/topgun_server.rs` — a separate `[[bin]]` target that links this
+/// crate externally and therefore cannot see `pub(crate)` items. The boot-only
+/// contract travels with that exposure and binds every caller: like
+/// [`set_tombstone_bytes`], which it re-baselines through, it MUST NEVER be
+/// called on the hot read/write path — only once, at boot, before the listener
+/// accepts connections. It is not a general-purpose runtime API: it is a full
+/// O(keyspace) walk and an absolute gauge re-baseline, both of which are only
+/// sound while nothing else is writing.
+///
+/// Legacy `RecordValue::OrTombstones { tags }` blobs are deliberately excluded
+/// from the sum. The live `add_tombstone_bytes` gauge never counts them either:
+/// the read path folds their tags into the unified `OrMap.tombstones` view
+/// WITHOUT emitting to the gauge, so summing them here would over-count relative
+/// to the live gauge this seed re-baselines.
+///
+/// `list_maps` on the redb backend enumerates primary partitions only, so backup
+/// tombstones are excluded — correct for the single-node soak/demo tier this
+/// targets; a future cluster/backup-accounting revisit is out of scope here.
+pub async fn reconcile_tombstone_bytes(store: Arc<dyn MapDataStore>) -> u64 {
+    // Every `tracing` site below keeps the `topgun_server::bootstrap` target even
+    // though this walk now lives in the library rather than the binary: the target
+    // string is an operator-facing boot-log filter contract, so re-targeting it to
+    // this module's path would silently break deployed log filters. The gauge's own
+    // tripwire in `tombstone_gauge` already emits under the same target from inside
+    // the lib, so this is not a novel arrangement.
+    let maps = match store.list_maps().await {
+        Ok(maps) => maps,
+        Err(err) => {
+            tracing::warn!(
+                target: "topgun_server::bootstrap",
+                error = %err,
+                "tombstone-bytes reconciliation skipped: list_maps failed; gauge stays process-local"
+            );
+            return 0;
+        }
+    };
+
+    let mut total: u64 = 0;
+    let mut records_scanned: u64 = 0;
+    // Folded into this existing boot-only walk (no second O(keyspace) scan): the
+    // count of legacy tombstone-only blobs, which a clean-slate store never grows
+    // but a rehydrated pre-epoch store still carries. Durable backends only — this
+    // reconcile runs solely under the redb/postgres startup arm.
+    let mut legacy_rows: u64 = 0;
+
+    for map in &maps {
+        // Walk the whole map: first batch, then follow the cursor until exhausted
+        // so every record is visited regardless of map size. Each batch is itself
+        // cost-bounded, keeping resident cost under the TOPGUN_MAX_RAM_MB ceiling —
+        // a memory-safety property, not just a startup-latency one.
+        let mut batch = match store.scan_values(map, false, 0).await {
+            Ok(batch) => batch,
+            Err(err) => {
+                tracing::warn!(
+                    target: "topgun_server::bootstrap",
+                    map = %map,
+                    error = %err,
+                    "tombstone-bytes reconciliation skipped: scan_values failed; gauge stays process-local"
+                );
+                return 0;
+            }
+        };
+
+        loop {
+            for (_key, value) in &batch.records {
+                records_scanned += 1;
+                match value {
+                    RecordValue::OrMap { tombstones, .. } => {
+                        for tag in tombstones {
+                            total += tag.len() as u64;
+                        }
+                    }
+                    RecordValue::OrTombstones { .. } => legacy_rows += 1,
+                    RecordValue::Lww { .. } => {}
+                }
+            }
+
+            match batch.next_cursor.take() {
+                None => break,
+                Some(cursor) => {
+                    batch = match store.scan_values_batched(map, false, cursor, 0).await {
+                        Ok(next) => next,
+                        Err(err) => {
+                            tracing::warn!(
+                                target: "topgun_server::bootstrap",
+                                map = %map,
+                                error = %err,
+                                "tombstone-bytes reconciliation skipped: scan_values_batched failed; gauge stays process-local"
+                            );
+                            return 0;
+                        }
+                    };
+                }
+            }
+        }
+    }
+
+    set_tombstone_bytes(total);
+
+    tracing::info!(
+        target: "topgun_server::bootstrap",
+        tombstone_bytes = total,
+        records_scanned = records_scanned,
+        maps = maps.len(),
+        "OR-Map tombstone-bytes gauge reconciled from persisted keyspace"
+    );
+
+    if let Some(warning) = legacy_tombstone_warning(legacy_rows) {
+        tracing::warn!(
+            target: "topgun_server::bootstrap",
+            legacy_tombstone_rows = legacy_rows,
+            "{warning}"
+        );
+    }
+
+    total
 }
 
 /// Minimum elapsed milliseconds before a read access updates `last_access_time`.
@@ -465,6 +609,7 @@ pub struct Record {
 #[cfg(test)]
 mod tombstone_bytes_gauge_tests {
     use super::*;
+    use crate::storage::datastores::RedbDataStore;
     use crate::storage::tombstone_gauge::with_isolated_gauge;
 
     // Every test here binds a private sink for the duration of its own future,
@@ -549,6 +694,140 @@ mod tombstone_bytes_gauge_tests {
         assert_eq!(
             delta, 0,
             "a serde round-trip contributes nothing to the scope"
+        );
+    }
+
+    /// An `OrMap` slot carrying one live entry plus the given tombstones.
+    ///
+    /// The live entry's own `tag` is never a tombstone, so it must contribute
+    /// nothing to the reconciled total — a walk that summed record tags as well
+    /// would show up as an over-count.
+    fn or_map_with_tombstones(tombstones: Vec<String>) -> RecordValue {
+        RecordValue::OrMap {
+            records: vec![OrMapEntry {
+                value: Value::String("live".to_string()),
+                tag: "live-tag".to_string(),
+                timestamp: Timestamp {
+                    millis: 1,
+                    counter: 0,
+                    node_id: "node-a".to_string(),
+                },
+            }],
+            tombstones,
+        }
+    }
+
+    /// A non-OR record, so the walk's arm selection is exercised over more than
+    /// the OR arms alone.
+    fn lww_record_value() -> RecordValue {
+        RecordValue::Lww {
+            value: Value::String("plain".to_string()),
+            timestamp: Timestamp {
+                millis: 2,
+                counter: 0,
+                node_id: "node-a".to_string(),
+            },
+        }
+    }
+
+    async fn seed_primary(
+        store: &Arc<dyn MapDataStore>,
+        map: &str,
+        key: &str,
+        value: &RecordValue,
+    ) {
+        store
+            .add(map, key, value, 0, 0)
+            .await
+            .expect("seed a primary record");
+    }
+
+    /// The boot reconciliation recomputes the tombstone-byte total from what is
+    /// actually persisted, so it is driven here against a real redb keyspace that
+    /// has been seeded. A `MapDataStore` double returning an empty `ScanBatch`
+    /// would walk nothing and pass while proving nothing.
+    ///
+    /// The same seeded corpus pins the walk's two deliberate exclusions. Each
+    /// probe carries a tag whose length makes the corpus-with-that-probe total
+    /// differ from the expected one, so no regression that starts counting it can
+    /// leave the assertion coincidentally green:
+    ///
+    /// - legacy `OrTombstones` blobs are not summed, because the live
+    ///   `add_tombstone_bytes` path never counts them either — summing them here
+    ///   would over-count relative to the gauge this walk re-baselines;
+    /// - backup rows are not summed, because `list_maps` enumerates primary
+    ///   tables only and the walk scans each map with `is_backup = false`.
+    #[tokio::test]
+    async fn reconcile_re_baselines_the_gauge_to_the_durable_primary_ormap_tombstone_sum() {
+        // 4 + 6 + 5 — the primary-partition `OrMap` tombstones and nothing else.
+        const EXPECTED_TOTAL: u64 = 15;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn MapDataStore> =
+            Arc::new(RedbDataStore::new(dir.path().join("reconcile.redb")).expect("redb open"));
+
+        // Tag lengths are spelled as `repeat` counts rather than literal runs of
+        // characters so the expected total cannot drift from a miscount.
+        let excluded_legacy = "d".repeat(20);
+
+        // Two maps, so the per-map loop over `list_maps` is genuinely iterated,
+        // and one non-OR record, so the walk's arm selection is exercised.
+        let counted = or_map_with_tombstones(vec!["a".repeat(4), "b".repeat(6)]);
+        seed_primary(&store, "reconcile_a", "k1", &counted).await;
+        let counted = or_map_with_tombstones(vec!["c".repeat(5)]);
+        seed_primary(&store, "reconcile_b", "k1", &counted).await;
+        seed_primary(&store, "reconcile_b", "k2", &lww_record_value()).await;
+        let legacy = RecordValue::OrTombstones {
+            tags: vec![excluded_legacy.clone()],
+        };
+        seed_primary(&store, "reconcile_a", "legacy", &legacy).await;
+        let backup = or_map_with_tombstones(vec!["e".repeat(9)]);
+        store
+            .add_backup("reconcile_a", "backup-key", &backup, 0, 0)
+            .await
+            .expect("seed a backup OrMap row");
+
+        // An exclusion asserted over a corpus that never held the excluded row is
+        // vacuous, so both probes are confirmed present before the walk runs.
+        match store
+            .load("reconcile_a", "legacy")
+            .await
+            .expect("load the legacy row back")
+        {
+            Some(RecordValue::OrTombstones { tags }) => assert_eq!(
+                tags,
+                vec![excluded_legacy],
+                "the legacy exclusion probe must be stored with its tag intact"
+            ),
+            other => panic!("legacy OrTombstones probe did not land: {other:?}"),
+        }
+        let backup_batch = store
+            .scan_values("reconcile_a", true, 0)
+            .await
+            .expect("scan the backup table");
+        assert_eq!(
+            backup_batch.records.len(),
+            1,
+            "the backup exclusion probe must be stored in the backup table"
+        );
+
+        // Scoped sink: the walk's `set_tombstone_bytes` is an absolute set, which
+        // trips the process-global gauge's tripwire once any test in this binary
+        // has fired an add, and a shared counter could also be perturbed by
+        // foreign traffic. The returned sink value is the walk's own re-baseline.
+        let (returned_total, gauge_after) =
+            with_isolated_gauge(reconcile_tombstone_bytes(Arc::clone(&store))).await;
+
+        assert_eq!(
+            returned_total, EXPECTED_TOTAL,
+            "the reconciled total must be the exact sum of primary-partition \
+             OrMap tombstone tag bytes — legacy blobs (20 bytes) and backup rows \
+             (9 bytes) excluded, record tags never counted"
+        );
+        assert_eq!(
+            gauge_after, EXPECTED_TOTAL,
+            "the walk must re-baseline the gauge to the total it returns, so the \
+             returned value and the observed gauge cannot drift apart"
         );
     }
 }
