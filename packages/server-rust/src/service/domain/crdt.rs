@@ -562,7 +562,9 @@ impl CrdtService {
                 // Upgrade a legacy non-OrMap resident slot (an OrTombstones blob
                 // from an older server) to the unified OrMap shape first, matching
                 // the prior get -> read_or_map_state -> put path — otherwise the add
-                // is dropped and the legacy blob re-persisted unchanged.
+                // is dropped and the legacy blob re-persisted unchanged. Its
+                // shape-change report is irrelevant on this path: the closure
+                // re-persists unconditionally below, so the write is already owed.
                 normalize_to_or_map(value);
                 let entry = new_entry_opt
                     .take()
@@ -628,6 +630,8 @@ impl CrdtService {
                 let mut apply_remove = |value: &mut RecordValue| {
                     // Upgrade a legacy OrTombstones blob to OrMap first (see OR_ADD);
                     // otherwise the tombstone append is dropped on the upgrade path.
+                    // Shape-change report ignored for the same reason as OR_ADD:
+                    // this closure returns true unconditionally.
                     normalize_to_or_map(value);
                     // Only a genuinely-new tag is counted and epoch-stamped, which
                     // the apply reports back via `new_tombstone`.
@@ -1204,20 +1208,29 @@ fn read_or_map_state(value: Option<RecordValue>) -> (Vec<OrMapEntry>, Vec<String
 /// `OrMap` is left untouched. Without this the in-place merge closure would fail
 /// its `OrMap` pattern match, silently drop the mutation, and re-persist the
 /// legacy blob unchanged — losing an acked write on the upgrade path.
-fn normalize_to_or_map(value: &mut RecordValue) {
-    if !matches!(value, RecordValue::OrMap { .. }) {
-        let (records, tombstones) = read_or_map_state(Some(std::mem::replace(
-            value,
-            RecordValue::OrMap {
-                records: Vec::new(),
-                tombstones: Vec::new(),
-            },
-        )));
-        *value = RecordValue::OrMap {
-            records,
-            tombstones,
-        };
+///
+/// Returns `true` iff the slot's shape actually changed (a non-`OrMap` slot was
+/// replaced), and `false` when the slot was already `OrMap`. A shape change IS a
+/// value change, so a caller whose closure returns "was anything modified?" owes
+/// a durable write for it: reporting `false` there would leave the resident slot
+/// upgraded with a stale `metadata.cost` while the durable record keeps the legacy
+/// shape until some unrelated later write happens to re-persist it.
+fn normalize_to_or_map(value: &mut RecordValue) -> bool {
+    if matches!(value, RecordValue::OrMap { .. }) {
+        return false;
     }
+    let (records, tombstones) = read_or_map_state(Some(std::mem::replace(
+        value,
+        RecordValue::OrMap {
+            records: Vec::new(),
+            tombstones: Vec::new(),
+        },
+    )));
+    *value = RecordValue::OrMap {
+        records,
+        tombstones,
+    };
+    true
 }
 
 /// What one [`apply_or_delta`] call did, plus the delta it did it with.
@@ -1422,7 +1435,12 @@ pub(crate) fn or_map_semantic_view(value: Option<RecordValue>) -> OrMapSemanticV
 /// A ref whose storage drop FAILS (read or write error) is handed back to the
 /// frontier via `restore_tombstone_ref` so a later sweep retries it — dropping
 /// it here would orphan the tag un-prunable in storage forever, since the drain
-/// already removed its index entry.
+/// already removed its index entry. The same restore covers the one non-error
+/// case that also reclaimed nothing: the key was evicted between the rehydrating
+/// `get` and the in-place write, so the mutate closure never ran. That is told
+/// apart from "the closure ran and the tag was already gone" — which must NOT be
+/// restored, or the prune loop livelocks on it — by a flag the closure itself
+/// sets, because the `Ok(bool)` from `update_in_place` conflates the two.
 pub(crate) async fn prune_epoch_tombstones(
     frontier: &TombstoneFrontier,
     factory: &RecordStoreFactory,
@@ -1451,8 +1469,21 @@ pub(crate) async fn prune_epoch_tombstones(
         // mutate only the present record, never create one), owing a durable write
         // only when a tombstone was actually removed.
         let mut dropped = false;
+        // Whether the mutate closure ran at all. `update_in_place` reports only
+        // `Ok(bool)` here, which cannot tell "the key was evicted between the
+        // rehydrating get above and this write, so nothing was mutated" apart from
+        // "the closure ran and found no matching tag". Those two need opposite
+        // dispositions below, and only the closure itself knows which happened.
+        let mut ran = false;
         let result = {
             let mut drop_tag = |value: &mut RecordValue| {
+                ran = true;
+                // Upgrade a legacy OrTombstones blob to OrMap first, as the live
+                // add/remove closures do — otherwise the prune would fail its
+                // OrMap match and silently re-persist the legacy blob. Not
+                // reachable today (the drop below is the only mutation on this
+                // path), so this is a defence against a future caller, not a fix.
+                let shape_changed = normalize_to_or_map(value);
                 // Same apply as the live add/remove paths, so a pruned tag is
                 // removed by exactly the algebra the write path defines. The
                 // gauge decrement deliberately stays OUT of the closure (see the
@@ -1464,7 +1495,12 @@ pub(crate) async fn prune_epoch_tombstones(
                     value,
                 );
                 dropped = outcome.pruned > 0;
-                dropped
+                // A normalize that upgraded the shape owes a durable write even
+                // with nothing pruned: the production store keeps the closure's
+                // mutation to the resident slot on a `false` return but skips the
+                // re-cost and the write-through, which would leave the slot
+                // upgraded with a stale cost and no durable counterpart.
+                shape_changed || dropped
             };
             store
                 .update_in_place(
@@ -1483,6 +1519,25 @@ pub(crate) async fn prune_epoch_tombstones(
             Ok(_) => {
                 if dropped {
                     crate::storage::record::sub_tombstone_bytes(r.tag.len() as u64);
+                }
+                // The closure never ran: the key was evicted between the
+                // rehydrating get and this write, so init=None mutated nothing
+                // while a durable tombstone may well still exist. Hand the ref
+                // back so a later sweep retries it — the drain already removed
+                // its index entry, so dropping it here would orphan the tag
+                // un-prunable forever. Keyed off `ran` and never off the
+                // `update_in_place` bool, so a normalize-only write (which
+                // reports "changed" with nothing pruned) cannot livelock the
+                // loop by getting the ref restored on every pass. `dropped`
+                // implies `ran`, so the gauge above and this arm are exclusive.
+                if !ran {
+                    tracing::debug!(
+                        map = %r.map,
+                        key = %r.key,
+                        epoch,
+                        "prune found key evicted mid-write, re-indexing tombstone for retry"
+                    );
+                    frontier.restore_tombstone_ref(epoch, r);
                 }
             }
             Err(e) => {
