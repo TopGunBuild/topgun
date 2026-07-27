@@ -127,6 +127,12 @@ pub enum WalOp {
     },
     /// Tombstone: remove the record from the store.
     Remove,
+    /// Per-op OR-Map mutation. Recovery folds it onto the key's CURRENT durable
+    /// value (never onto a WAL-window checkpoint) — see [`OrDeltaFold`].
+    OrDelta {
+        /// The single mutation this frame records.
+        delta: crate::storage::wal::OrDelta,
+    },
     /// A framing that carries only part of a key's state, so a successor CANNOT
     /// re-derive it. Exists to keep the coalesce predicate's `false` branch —
     /// and the carry-forward route it selects — under test before any real
@@ -160,6 +166,11 @@ impl WalOp {
                 // Full CRDT snapshot; a bare legacy value is also a complete state.
                 WalStorePayload::Record(_) | WalStorePayload::Legacy(_) => true,
             },
+            // Partial state: a per-op delta carries only its own mutation, so
+            // dropping the predecessor would lose information this survivor
+            // cannot re-derive. The retired sequences must ride along via the
+            // carry-forward route instead of resolving early.
+            Self::OrDelta { .. } => false,
             // Partial state: dropping the predecessor would lose information the
             // survivor does not carry, so the retired sequences must ride along
             // instead of resolving early.
@@ -1795,6 +1806,17 @@ impl WalRecovery {
                 // seam, not through this arm.
                 inner_store.remove(&entry.map, &entry.key, now).await
             }
+            // The store-seeded fold arrives with the recovery wiring; until then
+            // this arm refuses rather than silently dropping the mutation, since
+            // an unfoldable delta is a permanently lost write (a full-snapshot
+            // frame self-heals on the next snapshot — a delta never does).
+            // Unreachable in practice: nothing constructs this variant yet.
+            WalOp::OrDelta { .. } => Err(anyhow::anyhow!(
+                "OR delta replay is not yet wired: map={}, key={}, sequence={}",
+                entry.map,
+                entry.key,
+                entry.sequence
+            )),
             // An explicit arm rather than a `_` catch-all: the exhaustiveness is
             // what forces a future framing to declare its replay semantics here
             // instead of inheriting someone else's. This variant is never
@@ -3723,6 +3745,49 @@ mod tests {
                 .is_err(),
             "a framing with no replay semantics must surface an error, never be \
              silently absorbed by a catch-all arm"
+        );
+    }
+
+    #[test]
+    fn an_or_delta_survivor_does_not_subsume_on_coalesce() {
+        // Read off the SURVIVOR's own framing: a per-op delta carries only its
+        // own mutation, so it cannot make a predecessor redundant. `true` here
+        // would early-resolve the retired frame and permanently lose the
+        // mutation it carries — a delta, unlike a snapshot, never self-heals.
+        assert!(
+            !WalOp::OrDelta {
+                delta: OrDelta::Remove {
+                    tag: "tag-1".to_string(),
+                },
+            }
+            .subsumes_on_coalesce(),
+            "an OR delta survivor carries only its own mutation, so it subsumes nothing"
+        );
+        assert!(
+            !WalOp::OrDelta {
+                delta: OrDelta::Add {
+                    entry: OrMapEntry {
+                        value: TgValue::Int(1),
+                        tag: "tag-2".to_string(),
+                        timestamp: Timestamp {
+                            millis: 1,
+                            counter: 0,
+                            node_id: "n1".to_string(),
+                        },
+                    },
+                },
+            }
+            .subsumes_on_coalesce(),
+            "the answer is a property of the framing, not of the mutation kind"
+        );
+        assert!(
+            !WalOp::OrDelta {
+                delta: OrDelta::Prune {
+                    tags: vec!["tag-3".to_string()],
+                },
+            }
+            .subsumes_on_coalesce(),
+            "the answer is a property of the framing, not of the mutation kind"
         );
     }
 
