@@ -1215,7 +1215,7 @@ fn read_or_map_state(value: Option<RecordValue>) -> (Vec<OrMapEntry>, Vec<String
 /// a durable write for it: reporting `false` there would leave the resident slot
 /// upgraded with a stale `metadata.cost` while the durable record keeps the legacy
 /// shape until some unrelated later write happens to re-persist it.
-fn normalize_to_or_map(value: &mut RecordValue) -> bool {
+pub(crate) fn normalize_to_or_map(value: &mut RecordValue) -> bool {
     if matches!(value, RecordValue::OrMap { .. }) {
         return false;
     }
