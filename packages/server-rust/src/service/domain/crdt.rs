@@ -3420,6 +3420,13 @@ mod tests {
         }
 
         async fn remove(&self, map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
+            // An armed key rejects every durable write, not just `add` — otherwise a
+            // path that deletes instead of writing would silently succeed against a
+            // store the test believes is failing, and the assertion would pass for
+            // the wrong reason.
+            if self.reject_keys.lock().contains(key) {
+                return Err(anyhow::anyhow!("armed write rejection for {key}"));
+            }
             self.data.lock().remove(&(map.to_string(), key.to_string()));
             Ok(())
         }
@@ -3687,16 +3694,17 @@ mod tests {
             .expect("the apply's body closes at a column-0 brace");
         let body = &tail[..end];
 
-        for counter in [
-            "add_tombstone_bytes",
-            "sub_tombstone_bytes",
-            "set_tombstone_bytes",
-        ] {
-            assert!(
-                !body.contains(counter),
-                "the apply must stay counter-free, found `{counter}` in its body"
-            );
-        }
+        // Match the suffix rather than the three current counter names, so a
+        // future `*_tombstone_bytes` counter cannot be added to the apply without
+        // tripping this. Name-matching still cannot see a counter reached through
+        // a differently-named local helper — the behavioural sibling
+        // (`or_apply_moves_no_tombstone_bytes_on_any_arm`) is the primary guard
+        // and catches that for every arm it drives; this one is the cheap
+        // structural backstop.
+        assert!(
+            !body.contains("_tombstone_bytes"),
+            "the apply must stay counter-free, found a `*_tombstone_bytes` call in its body"
+        );
     }
 
     /// A genuinely-new tombstone is charged to the gauge even when the durable
