@@ -1682,10 +1682,13 @@ impl WalRecovery {
     ///   when the WAL recorded none) whose intent is always-merge, so they BYPASS
     ///   the gate and keep the pre-existing blind replay.
     /// - `RecordValue::OrMap`/`OrTombstones` frames carried by a `WalOp::Store`
-    ///   BYPASS the gate: their convergence is set-union of tags+tombstones, not a
-    ///   scalar timestamp max, and such a frame is a post-RMW COMPLETE snapshot of
-    ///   the key that is monotone in `wal_seq` order, so in-sequence replay
-    ///   converges to the newest snapshot regardless of re-replay. That argument
+    ///   BYPASS the gate: their CROSS-NODE convergence is set-union of
+    ///   tags+tombstones, not a scalar timestamp max — replay itself is never a
+    ///   union but an absolute-set REPLACE, since unioning a snapshot onto the
+    ///   durable value would resurrect tombstoned tags. Such a frame is a post-RMW
+    ///   COMPLETE snapshot of the key that is monotone in `wal_seq` order, so
+    ///   in-sequence replay converges to the newest snapshot regardless of
+    ///   re-replay. That argument
     ///   covers snapshot framing only — a `WalOp::OrDelta` frame is not a snapshot
     ///   and rests on the separate argument below. OR merge-idempotency as its own
     ///   property is owned by `TG-OR-003`, not this path.
