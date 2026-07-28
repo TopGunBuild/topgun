@@ -61,14 +61,18 @@ use super::super::{
 };
 use super::{
     BootSeedMode, Case, CaseShape, DefectMode, GcCrashPoint, IncarnationEnd, InvariantViolation,
-    Key, ModelValue, OracleConfig, OracleCoverage, OracleCoverageFloors, PartitionId,
-    ReferenceModel, Sequence, WorkOp, MAX_KEY_INDEX,
+    Key, ModelValue, OrMutation, OrSlot, OracleConfig, OracleCoverage, OracleCoverageFloors,
+    PartitionId, ReferenceModel, Sequence, WorkOp, MAX_KEY_INDEX,
+};
+use crate::service::domain::crdt::{
+    apply_or_delta, normalize_to_or_map, or_map_semantic_view, OrMapSemanticView,
 };
 use crate::storage::map_data_store::{LeafSink, MapDataStore, ScanBatch, ScanCursor};
-use crate::storage::record::RecordValue;
+use crate::storage::record::{reconcile_tombstone_bytes, OrMapEntry, RecordValue};
+use crate::storage::tombstone_gauge::with_isolated_gauge;
 use crate::storage::wal::{
-    GcCrashPoint as WalGcCrashPoint, GcOrderMode as WalGcOrderMode, Wal, WalFsyncPolicy,
-    WalRecovery, WalWriter,
+    GcCrashPoint as WalGcCrashPoint, GcOrderMode as WalGcOrderMode, OrDelta, Wal, WalEntry,
+    WalFsyncPolicy, WalOp, WalRecovery, WalWriter,
 };
 
 /// The single map every harness key lives in.
@@ -182,6 +186,25 @@ impl MapDataStore for HarnessInnerStore {
         Ok(Vec::new())
     }
 
+    /// The maps this double currently holds a record for.
+    ///
+    /// Implemented (rather than left at the trait's empty default) because the boot-time
+    /// tombstone-bytes reconciliation walks `list_maps` → `scan_values`; with the default the walk
+    /// would visit nothing and the gauge assertion would pass vacuously against any recovered
+    /// state at all.
+    async fn list_maps(&self) -> anyhow::Result<Vec<String>> {
+        let mut maps: Vec<String> = self
+            .data
+            .lock()
+            .await
+            .keys()
+            .map(|(map, _)| map.clone())
+            .collect();
+        maps.sort_unstable();
+        maps.dedup();
+        Ok(maps)
+    }
+
     async fn enumerate_leaves(
         &self,
         _map: &str,
@@ -191,13 +214,30 @@ impl MapDataStore for HarnessInnerStore {
         Ok(())
     }
 
+    /// Every live record of `map`, in one batch with no continuation cursor.
+    ///
+    /// Single-batch is honest for a double holding at most a handful of keys, and it keeps
+    /// [`Self::scan_values_batched`] unreachable: the reconciliation walk only follows a cursor
+    /// this never hands out.
     async fn scan_values(
         &self,
-        _map: &str,
+        map: &str,
         _is_backup: bool,
         _max_batch_cost: u64,
     ) -> anyhow::Result<ScanBatch> {
-        Ok(ScanBatch::default())
+        let mut records: Vec<(String, RecordValue)> = self
+            .data
+            .lock()
+            .await
+            .iter()
+            .filter(|((m, _), value)| m == map && value.is_some())
+            .filter_map(|((_, key), value)| value.clone().map(|v| (key.clone(), v)))
+            .collect();
+        records.sort_by(|(a, _), (b, _)| a.cmp(b));
+        Ok(ScanBatch {
+            records,
+            next_cursor: None,
+        })
     }
 
     async fn scan_values_batched(
@@ -293,6 +333,71 @@ impl RunConfig {
 pub(crate) struct RunOutcome {
     pub violations: Vec<InvariantViolation>,
     pub coverage: OracleCoverage,
+    /// What the durable store holds for each key when the run ends, so a case can
+    /// assert a recovered post-state LITERALLY rather than only through the model.
+    /// Load-bearing where "the delta landed" does not determine the post-state — a
+    /// non-OR base normalizes to an EMPTY OR-Map, so the prior value is discarded
+    /// and only the delta's own effect survives.
+    pub final_values: Vec<(Key, Option<RecordValue>)>,
+    /// What the durable store held for each key when the run's FIRST recovery began —
+    /// the base the fold actually seeds from.
+    ///
+    /// Captured because a case whose arms are NAMED for their base shape (an `OrMap`
+    /// base, a legacy `OrTombstones` blob, a cross-kind `Lww` slot) otherwise asserts
+    /// only the post-state, which every shape can reach. Recovery normalizes a legacy
+    /// base into `OrMap`, so by the time `final_values` is read the shape that
+    /// discriminated the arm is gone: a regression making `or_legacy_tombstones` write
+    /// an `OrMap` would leave those cases green while silently deleting the coverage
+    /// they exist for.
+    pub recovery_base_values: Vec<(Key, Option<RecordValue>)>,
+    /// The tombstone-bytes gauge (`TG-OR-004`) as the real boot-time reconciliation walk
+    /// recomputes it over the final durable keyspace — the same function the server
+    /// bootstrap runs after `WalRecovery::run`, never a second copy of its accounting.
+    /// Scoped to an isolated gauge sink so a harness run never perturbs the process
+    /// gauge another test may be asserting on.
+    pub reconciled_tombstone_bytes: u64,
+    /// How many frames the re-replay seam actually put back through replay, summed
+    /// over every recovery this run performed.
+    ///
+    /// The seam's own assertions all expect a CLEAN outcome, and "the seam never
+    /// fired" is clean too — so a case that selects a re-replay mode asserts this is
+    /// non-zero. Without it, degrading the mode back to a no-op leaves the entire
+    /// family green and its idempotency proof becomes vacuous.
+    pub re_replayed_frames: usize,
+}
+
+impl RunOutcome {
+    /// The durable value `key` ends the run with (`None` = no record at all).
+    pub fn final_value(&self, key: Key) -> Option<&RecordValue> {
+        self.final_values
+            .iter()
+            .find(|(k, _)| *k == key)
+            .and_then(|(_, v)| v.as_ref())
+    }
+
+    /// The semantic view of the durable slot `key` ends the run with.
+    pub fn final_or_view(&self, key: Key) -> OrMapSemanticView {
+        or_map_semantic_view(self.final_value(key).cloned())
+    }
+
+    /// The SHAPE of the durable base `key`'s fold seeded from, as a name a case can
+    /// assert on: `"OrMap"`, `"OrTombstones"`, `"Lww"`, or `"absent"`.
+    ///
+    /// A name rather than the value itself, because what a base-shape arm is named for
+    /// is the variant, not its contents — those are already pinned by the post-state.
+    pub fn recovery_base_kind(&self, key: Key) -> &'static str {
+        match self
+            .recovery_base_values
+            .iter()
+            .find(|(k, _)| *k == key)
+            .and_then(|(_, v)| v.as_ref())
+        {
+            None => "absent",
+            Some(RecordValue::OrMap { .. }) => "OrMap",
+            Some(RecordValue::OrTombstones { .. }) => "OrTombstones",
+            Some(RecordValue::Lww { .. }) => "Lww",
+        }
+    }
 }
 
 impl RunOutcome {
@@ -346,6 +451,12 @@ struct BufferEntry {
 struct LogModel {
     /// Latest acked value per key (O1 holds only the latest per key).
     acked: HashMap<Key, ModelValue>,
+    /// Per-key MAXIMUM acked live HLC millis — the true LWW winner, which is what
+    /// the `value_equality` oracle must compare a recovered timestamp against.
+    /// Deliberately SEPARATE from `acked` (latest arrival): the two coincide only
+    /// while a key's writes are monotone in arrival order, and O1/O2 need the
+    /// latest-arrival view. Cleared on a remove so a re-created key starts fresh.
+    max_live_millis: HashMap<Key, i64>,
     /// `Acked ∧ ¬DurablyApplied ∧ ¬Indeterminate`, per partition (the O2
     /// "unresolved" set).
     unresolved: HashMap<PartitionId, BTreeSet<Sequence>>,
@@ -360,6 +471,35 @@ struct LogModel {
     /// The store time the trait facade stamps a `record_ack` with (the driver
     /// sets it to the virtual clock before issuing the op).
     cur_store_time: i64,
+    /// How the op the driver is currently issuing is backed in the implementation
+    /// (the driver sets it before every op, exactly as it sets `cur_store_time`).
+    /// A WAL-only op owns no queue entry, so no flush can ever resolve it.
+    cur_op_backing: OpBacking,
+    /// The value the model expects each key's durable slot to hold, replicating
+    /// what the LIVE write path would have left there. It is the OR fold's
+    /// reference base: an `OrDelta` op reads this key's slot, normalizes and
+    /// applies through the SAME live functions the write path uses, and the result
+    /// becomes the acked [`ModelValue::Or`] recovery must reproduce.
+    ///
+    /// Deliberately NOT a second copy of the OR algebra: the model reproduces the
+    /// snapshot path's outcome by calling it, so what the differential compares is
+    /// the WAL plumbing — frame shape, sequence order, fold base, normalization —
+    /// which is where a delta-fold can actually lose a mutation.
+    expected_slot: HashMap<Key, RecordValue>,
+}
+
+/// Whether the op the driver is issuing gets a queued (flushable) entry in the
+/// implementation, or exists only as a WAL frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum OpBacking {
+    /// The store buffered a `DelayedEntry` for it: a due-time flush resolves its
+    /// sequence, and a later write to the same key coalesces over it.
+    #[default]
+    Queued,
+    /// A frame with no queue entry (the synthetic `OrDelta` injection): nothing
+    /// flushes it, so its sequence stays unresolved until recovery folds it — the
+    /// acked, un-applied window state the fold has to reconstruct.
+    WalOnly,
 }
 
 impl LogModel {
@@ -381,7 +521,30 @@ impl LogModel {
     /// so the two pending views stay in lockstep, while preserving the original
     /// `store_time` on the surviving entry.
     fn ack(&mut self, p: PartitionId, seq: Sequence, key: Key, value: ModelValue, store_time: i64) {
+        match &value {
+            ModelValue::Live { millis } => {
+                let entry = self.max_live_millis.entry(key).or_insert(*millis);
+                *entry = (*entry).max(*millis);
+            }
+            // Both wipe the key's LWW history. A remove supersedes it, so a later
+            // re-creation must be compared against ITS own timestamps; an OR write
+            // replaces the slot with a non-Lww shape, which no LWW timestamp
+            // describes any more.
+            ModelValue::Tombstone | ModelValue::Or { .. } => {
+                self.max_live_millis.remove(&key);
+            }
+        }
         self.acked.insert(key, value);
+
+        // A WAL-only frame owns no queue entry: it coalesces with nothing, retires
+        // nothing, and no flush can resolve it. Recording a buffered entry for it
+        // would let the model resolve a sequence the implementation still holds
+        // pending — the model's unresolved set would then be a subset of the truth,
+        // which is a false-GREEN shape for O2.
+        if self.cur_op_backing == OpBacking::WalOnly {
+            self.unresolved_set(p).insert(seq);
+            return;
+        }
 
         let effective_store_time = if let Some(prev) = self.buffer.remove(&key) {
             // Subsuming coalesce: the predecessor's sequences resolve early.
@@ -468,6 +631,54 @@ impl LogModel {
 
     fn has_indeterminate(&self, p: PartitionId) -> bool {
         self.indeterminate.get(&p).is_some_and(|s| !s.is_empty())
+    }
+
+    /// The `value_equality` oracle's reference point: the MAXIMUM acked live millis
+    /// for `key`, or `None` when the model holds no live ack for it (never written,
+    /// or removed since).
+    fn max_live_millis(&self, key: Key) -> Option<i64> {
+        self.max_live_millis.get(&key).copied()
+    }
+
+    /// Records the whole-slot value an absolute-set write left for `key` (an LWW
+    /// append or an OR snapshot). Absolute, never a merge: that is what the write
+    /// path does and what replaying its frame does.
+    fn set_slot(&mut self, key: Key, value: RecordValue) {
+        self.expected_slot.insert(key, value);
+    }
+
+    /// Records that `key` holds nothing (a remove).
+    fn clear_slot(&mut self, key: Key) {
+        self.expected_slot.remove(&key);
+    }
+
+    /// Applies ONE OR delta to `key`'s expected slot the way the LIVE OR write path
+    /// applies it to the resident slot — normalize the slot's storage shape first,
+    /// then apply — and returns the semantic view recovery must reproduce.
+    ///
+    /// Calling the live functions is the point, not a shortcut: the reference this
+    /// differential compares against is "what the full-snapshot path would have
+    /// persisted", and a second hand-written copy of the add-wins / remove-wins /
+    /// prune algebra here would be free to drift from it (`TG-OR-003`).
+    fn apply_or_delta_to_slot(&mut self, key: Key, delta: &OrDelta) -> OrMapSemanticView {
+        let mut value = self
+            .expected_slot
+            .remove(&key)
+            .unwrap_or(RecordValue::OrMap {
+                records: Vec::new(),
+                tombstones: Vec::new(),
+            });
+        normalize_to_or_map(&mut value);
+        apply_or_delta(delta.clone(), &mut value);
+        let view = or_map_semantic_view(Some(value.clone()));
+        self.expected_slot.insert(key, value);
+        view
+    }
+
+    /// The semantic view of `key`'s expected slot — the model's OR value after an
+    /// absolute-set OR snapshot write.
+    fn slot_or_view(&self, key: Key) -> OrMapSemanticView {
+        or_map_semantic_view(self.expected_slot.get(&key).cloned())
     }
 }
 
@@ -662,6 +873,23 @@ pub(crate) async fn run_case(case: &Case, config: &RunConfig) -> RunOutcome {
         }
     }
 
+    // Final durable state, captured once the last incarnation has ended, so a case
+    // can assert the post-state it cares about literally.
+    for key in 0..=MAX_KEY_INDEX {
+        let key_str = driver.key_str(key).to_string();
+        let value = driver.inner.load(TEST_MAP, &key_str).await.ok().flatten();
+        driver.outcome.final_values.push((key, value));
+    }
+
+    // The gauge, through the REAL boot-time reconciliation the server bootstrap runs
+    // after recovery — never a second copy of its accounting. The isolated scope keeps
+    // the absolute re-baseline off the process gauge other tests read.
+    let (reconciled, _sink_total) = with_isolated_gauge(reconcile_tombstone_bytes(
+        Arc::clone(&inner) as Arc<dyn MapDataStore>,
+    ))
+    .await;
+    driver.outcome.reconciled_tombstone_bytes = reconciled;
+
     driver.outcome
 }
 
@@ -736,12 +964,13 @@ impl Driver {
 
         // Apply the run's defect seams (R6).
         match self.config.defect {
-            // Both replay-clobber defects are recovery-side seams (see `recover`),
-            // so they install nothing on the store.
+            // The replay-side modes are recovery-side seams (see `recover`), so they
+            // install nothing on the store.
             DefectMode::None
             | DefectMode::UnlinkThenFsync
             | DefectMode::ReplayClobberOlderFrame
-            | DefectMode::ReplayStaleRemoveOverNewerValue => {}
+            | DefectMode::ReplayStaleRemoveOverNewerValue
+            | DefectMode::ReReplayOldestFrameGateOn => {}
             DefectMode::ScalarMaxWatermark => {
                 store.test_set_watermark_mode(WatermarkMode::ScalarMax);
             }
@@ -795,39 +1024,13 @@ impl Driver {
         step: usize,
     ) -> bool {
         let mut ended = false;
+        // Every op is queue-backed unless its own arm says otherwise; set here so a
+        // WAL-only op can never leak its backing into the next op's ack.
+        self.model.cur_op_backing = OpBacking::Queued;
         match op {
             WorkOp::Append { key, millis } => {
-                let value = lww(*millis);
-                let now = self.clock;
-                let res = store
-                    .add(TEST_MAP, self.key_str(*key), &value, 0, now)
+                self.append_lww(store, *key, *millis, incarnation, step)
                     .await;
-                let observed = Self::drain_observed();
-                if res.is_ok() {
-                    // A successful `add` mints exactly one WAL frame, so exactly one
-                    // sequence must have been observed. A mismatch means the append
-                    // path started coalescing/deduplicating before assigning a
-                    // sequence, which would silently misalign the model↔sequence
-                    // binding and blind the oracle — fail loud rather than drift.
-                    assert_eq!(
-                        observed.len(),
-                        1,
-                        "add must append exactly one WAL frame per call"
-                    );
-                    // Bind the sequence NAME, then let the MODEL decide the ack
-                    // transition (R5.0): identifier from the impl, lifecycle from
-                    // the model's own log.
-                    self.model.cur_store_time = now;
-                    for (p, s) in observed {
-                        self.model.bind_sequence(p, incarnation, step, s);
-                        self.model.record_ack(
-                            incarnation,
-                            step,
-                            *key,
-                            ModelValue::Live { millis: *millis },
-                        );
-                    }
-                }
             }
             WorkOp::Remove { key } => {
                 let now = self.clock;
@@ -840,6 +1043,7 @@ impl Driver {
                         "remove must append exactly one WAL frame per call"
                     );
                     self.model.cur_store_time = now;
+                    self.model.clear_slot(*key);
                     for (p, s) in observed {
                         self.model.bind_sequence(p, incarnation, step, s);
                         self.model
@@ -877,6 +1081,7 @@ impl Driver {
                         "remove_all must append exactly one WAL frame per input key"
                     );
                     for ((p, s), key) in observed.iter().zip(keys.iter()) {
+                        self.model.clear_slot(*key);
                         self.model
                             .ack(*p, *s, *key, ModelValue::Tombstone, store_time);
                     }
@@ -911,12 +1116,189 @@ impl Driver {
             WorkOp::Read { key } => {
                 let _ = store.load(TEST_MAP, self.key_str(*key)).await;
             }
+            WorkOp::OrStore { key, slot } => {
+                self.store_or_snapshot(store, *key, slot, incarnation, step)
+                    .await;
+            }
+            WorkOp::OrDelta { key, mutation } => {
+                self.inject_or_delta(store, *key, mutation, incarnation, step)
+                    .await;
+            }
         }
 
         if !ended {
             self.evaluate_o2(store).await;
         }
         ended
+    }
+
+    /// Writes an LWW record through the real `WriteBehindDataStore::add`.
+    async fn append_lww(
+        &mut self,
+        store: &Arc<WriteBehindDataStore>,
+        key: Key,
+        millis: i64,
+        incarnation: usize,
+        step: usize,
+    ) {
+        let value = lww(millis);
+        let now = self.clock;
+        let res = store.add(TEST_MAP, self.key_str(key), &value, 0, now).await;
+        let observed = Self::drain_observed();
+        if res.is_err() {
+            return;
+        }
+        // A successful `add` mints exactly one WAL frame, so exactly one sequence must
+        // have been observed. A mismatch means the append path started
+        // coalescing/deduplicating before assigning a sequence, which would silently
+        // misalign the model↔sequence binding and blind the oracle — fail loud rather
+        // than drift.
+        assert_eq!(
+            observed.len(),
+            1,
+            "add must append exactly one WAL frame per call"
+        );
+        // Bind the sequence NAME, then let the MODEL decide the ack transition (R5.0):
+        // identifier from the impl, lifecycle from the model's own log.
+        self.model.cur_store_time = now;
+        self.model.set_slot(key, value);
+        for (p, s) in observed {
+            self.model.bind_sequence(p, incarnation, step, s);
+            self.model
+                .record_ack(incarnation, step, key, ModelValue::Live { millis });
+        }
+    }
+
+    /// Writes an OR-shaped whole-slot value through the SAME real entry point
+    /// [`WorkOp::Append`] drives: one `WalOp::Store` frame carrying the key's complete
+    /// post-state, plus a queued entry a later flush can make durable.
+    async fn store_or_snapshot(
+        &mut self,
+        store: &Arc<WriteBehindDataStore>,
+        key: Key,
+        slot: &OrSlot,
+        incarnation: usize,
+        step: usize,
+    ) {
+        let value = or_record(slot);
+        let now = self.clock;
+        let res = store.add(TEST_MAP, self.key_str(key), &value, 0, now).await;
+        let observed = Self::drain_observed();
+        if res.is_err() {
+            return;
+        }
+        assert_eq!(
+            observed.len(),
+            1,
+            "an OR snapshot add must append exactly one WAL frame per call"
+        );
+        self.model.cur_store_time = now;
+        // ABSOLUTE SET in the model too: a full-snapshot OR frame carries the live set
+        // AND the tombstone set as of its own sequence, so replaying it replaces the
+        // slot rather than unioning with it.
+        self.model.set_slot(key, value);
+        let view = self.model.slot_or_view(key);
+        for (p, s) in observed {
+            self.model.bind_sequence(p, incarnation, step, s);
+            self.model.record_ack(
+                incarnation,
+                step,
+                key,
+                ModelValue::Or { view: view.clone() },
+            );
+        }
+    }
+
+    /// Puts ONE synthetic `WalOp::OrDelta` frame on disk through the OBSERVED APPEND
+    /// PATH, mirroring `WriteBehindDataStore::add` step for step: seed the partition,
+    /// mint the sequence at the one chokepoint that names it, append the frame, then
+    /// promote (or roll back) the sequence.
+    ///
+    /// The sequence is minted by `assign_wal_sequence` and NEVER by the harness. That
+    /// is the whole reason this goes through the store rather than through the
+    /// `WalWriter` the driver also holds: `assign_wal_sequence` is the single point at
+    /// which a sequence is minted for a mutation and the only channel by which a
+    /// sequence NAME reaches the reference model, and it is the same allocator
+    /// `WriteBehindDataStore` uses for every other write. A frame appended around it
+    /// would carry a sequence out of an allocation space the store is also handing
+    /// out of, and would be invisible to the model — desynchronizing the model's
+    /// sequence space from the store's, which manufactures false GREENs in exactly
+    /// the case family that closes `TG-OR-003`.
+    ///
+    /// No `DelayedEntry` is created, deliberately: nothing flushes this frame, so its
+    /// sequence stays pending and the partition watermark cannot advance past it.
+    /// That IS the acked, un-applied window state the recovery fold must reconstruct,
+    /// and fabricating a resolution for it would erase the property under test.
+    async fn inject_or_delta(
+        &mut self,
+        store: &Arc<WriteBehindDataStore>,
+        key: Key,
+        mutation: &OrMutation,
+        incarnation: usize,
+        step: usize,
+    ) {
+        let partition = self.partition;
+        let delta = or_delta(mutation);
+
+        // 1. Seed before the partition hands out its first sequence, so the watermark
+        //    this frame holds back already accounts for a prior incarnation's leftovers.
+        store.ensure_wal_seeded(partition).await;
+        // 2. THE SEAM: mint the sequence, firing the append observer synchronously.
+        let seq = store.assign_wal_sequence(partition);
+        // 3. Append the frame at the pinned on-disk shape, built by the single
+        //    constructor that owns that shape.
+        //
+        //    The writer refuses delta frames by construction — nothing in this
+        //    build may emit one — so a ONE-SHOT permit is granted for exactly
+        //    this frame. The append consumes it, which is what keeps the grant
+        //    from spanning its own `.await`: every OTHER op in the run rides the
+        //    real write path under the refusal, so a production path that
+        //    started emitting deltas fail-stops the harness instead of blending
+        //    into the injected ones.
+        let entry = or_delta_frame(TEST_MAP, self.key_str(key), delta.clone(), seq);
+        self.wal.test_permit_one_or_delta_append();
+        let appended = store.wal_append(partition, &entry).await;
+        assert!(
+            !self.wal.test_or_delta_permit_outstanding(),
+            "the injected append must CONSUME its permit — one left outstanding would admit some \
+             later delta frame, which is exactly the emitter the guard exists to catch"
+        );
+        // Drain in BOTH outcomes: the observer fired at the assign, so leaving the
+        // observation in the sink would misattribute it to the next op.
+        let observed = Self::drain_observed();
+
+        // 4. A tracked sequence no frame bears would pin the watermark forever.
+        if appended.is_err() {
+            store.rollback_wal_sequence(partition, seq);
+            return;
+        }
+        store.promote_wal_sequence(partition, seq);
+
+        // The same exactly-one discipline the `Append` / `Remove` arms use: a change
+        // that stops firing the observer must fail loudly here rather than silently
+        // blind the oracle.
+        assert_eq!(
+            observed.len(),
+            1,
+            "an OrDelta injection must mint exactly one WAL sequence through the observed \
+             append path"
+        );
+
+        self.model.cur_store_time = self.clock;
+        self.model.cur_op_backing = OpBacking::WalOnly;
+        // Model side: fold the delta onto the key's expected slot exactly as the live
+        // write path would, and ack the resulting semantic view. Identifier from the
+        // implementation, lifecycle from the model.
+        let view = self.model.apply_or_delta_to_slot(key, &delta);
+        for (p, s) in observed {
+            self.model.bind_sequence(p, incarnation, step, s);
+            self.model.record_ack(
+                incarnation,
+                step,
+                key,
+                ModelValue::Or { view: view.clone() },
+            );
+        }
     }
 
     /// Drives the REAL due-time drain + coalescing at the virtual deadline, then
@@ -1093,9 +1475,18 @@ impl Driver {
             let key_str = self.key_strings[usize::from(key) % self.key_strings.len()].clone();
             let loaded = self.inner.load(TEST_MAP, &key_str).await.ok().flatten();
             let present = loaded.is_some();
-            let violated = match value {
+            let violated = match &value {
                 ModelValue::Live { .. } => !present,
                 ModelValue::Tombstone => present,
+                // Recovery-equivalence (`TG-OR-003`): the reconstructed slot must hold
+                // the same live `(tag, value)` set and the same tombstone set the
+                // full-snapshot path would have left — SEMANTIC-SET, not byte-for-byte,
+                // because the resident vectors are in operation-insertion order and no
+                // canonical ordering exists. An absent record compares as the empty
+                // view, so an emptied OR slot and a missing one are the same state
+                // (they are), while a dropped add or a resurrected tag differs and is
+                // reported as an acked write recovery did not reproduce.
+                ModelValue::Or { view } => or_map_semantic_view(loaded.clone()) != *view,
             };
             if violated {
                 self.outcome
@@ -1103,45 +1494,38 @@ impl Driver {
                     .push(InvariantViolation::AckedWriteLost { key, incarnation });
             }
 
-            // value_equality oracle (opt-in, R5): a present acked-live value must
-            // NOT carry a timestamp OLDER than the model's latest acked HLC millis.
-            // A stale re-replay clobber resurrects an older durable value — the exact
-            // regression TG-WAL-006's fix prevents. Only a strictly-older recovered
-            // timestamp is flagged: a recovered value NEWER than the model's
-            // last-arrival is the LWW-by-timestamp winner (never data loss), so it
-            // must not false-positive when the generator emits out-of-timestamp-order
-            // writes for a key. Off by default; enabled explicitly for the
-            // closing-evidence and regression runs.
+            // value_equality oracle (opt-in, R5): a present acked-live value must NOT
+            // carry a timestamp OLDER than the MAXIMUM acked live HLC millis the model
+            // holds for the key — the true LWW winner. A stale re-replay clobber
+            // resurrects an older durable value — the exact regression TG-WAL-006's fix
+            // prevents. Only a strictly-older recovered timestamp is flagged: a recovered
+            // value at or above the maximum is the LWW-by-timestamp winner (never data
+            // loss), so it must not false-positive when the generator emits
+            // out-of-timestamp-order writes for a key. The reference is the MAXIMUM rather
+            // than the latest arrival because the two coincide only on keys whose writes
+            // are monotone in arrival order; against a latest-arrival reference any clobber
+            // landing in `[latest_arrival, max_live)` is invisible. Off by default; enabled
+            // explicitly for the closing-evidence and regression runs.
             //
-            // Soundness domain (two constraints, both currently satisfied):
-            //  1. Value coupling (do not break in `lww()`): comparing millis alone is
-            //     sound only because `lww(millis)` makes value a pure function of millis
-            //     and fixes `counter:0`/`node_id:""`, so full-`Timestamp` order collapses
-            //     to millis order and equal millis implies an identical value. A generator
-            //     that emitted distinct values at equal millis, or varied counter/node_id,
-            //     would let an equal-millis different-value clobber slip this check.
-            //  2. Reference point: `expected` is the model's LATEST-ARRIVAL millis, which
-            //     equals the true LWW winner (max timestamp) only when a key's writes are
-            //     MONOTONE in arrival order — as production HLC always is, and as the sole
-            //     `value_equality: true` case (`ac4_5_...`) is by construction. If a defect
-            //     run ever used a non-monotone key (arrival 20, 30, 10) a clobber landing in
-            //     `[latest_arrival, max_acked)` (e.g. recovered 20 vs latest-arrival 10)
-            //     would slip the strictly-older check. Making the oracle sound for
-            //     non-monotone defect runs needs a per-key max-live-millis reference.
+            // Soundness constraint — value coupling (do not break in `lww()`): comparing
+            // millis alone is sound only because `lww(millis)` makes value a pure function
+            // of millis and fixes `counter:0`/`node_id:""`, so full-`Timestamp` order
+            // collapses to millis order and equal millis implies an identical value. A
+            // generator that emitted distinct values at equal millis, or varied
+            // counter/node_id, would let an equal-millis different-value clobber slip this
+            // check.
             if self.config.oracle.value_equality {
-                if let (
-                    ModelValue::Live { millis: expected },
-                    Some(RecordValue::Lww { timestamp, .. }),
-                ) = (&value, &loaded)
+                if let (Some(expected), Some(RecordValue::Lww { timestamp, .. })) =
+                    (self.model.max_live_millis(key), &loaded)
                 {
                     let recovered = i64::try_from(timestamp.millis).unwrap_or(i64::MAX);
-                    if recovered < *expected {
+                    if recovered < expected {
                         self.outcome
                             .violations
                             .push(InvariantViolation::AckedValueMismatch {
                                 key,
                                 incarnation,
-                                expected_millis: *expected,
+                                expected_millis: expected,
                                 recovered_millis: recovered,
                             });
                     }
@@ -1185,6 +1569,17 @@ impl Driver {
     /// partition unresolved view to match the empty post-recovery pending map.
     /// `next_incarnation` is the index the loss surfaces at (for the O1 record).
     async fn recover(&mut self, next_incarnation: usize) {
+        // The fold's base, read BEFORE replay normalizes it away. Only the first
+        // recovery's base is kept: that is the one a case's base-shape arm names, and
+        // every later recovery necessarily sees whatever the previous one left.
+        if self.outcome.recovery_base_values.is_empty() {
+            for key in 0..=MAX_KEY_INDEX {
+                let key_str = self.key_str(key).to_string();
+                let value = self.inner.load(TEST_MAP, &key_str).await.ok().flatten();
+                self.outcome.recovery_base_values.push((key, value));
+            }
+        }
+
         let mut recovery = WalRecovery::new(Arc::clone(&self.wal), vec![self.partition]);
         // Both replay-clobber defects re-replay each partition's oldest un-applied
         // frame over the newer durable value the in-order pass left behind.
@@ -1195,16 +1590,33 @@ impl Driver {
         // unconditional (no gate to disable — the `merge_gate=false` below is a
         // vestigial no-op for the Remove arm). The out-of-order re-replay seam is
         // what produces the clobber; in-order replay never does.
-        if matches!(
-            self.config.defect,
-            DefectMode::ReplayClobberOlderFrame | DefectMode::ReplayStaleRemoveOverNewerValue
-        ) {
-            recovery.test_set_replay_merge_gate(false);
-            recovery.test_set_re_replay_oldest_frame(true);
+        //
+        // The two seams are SELECTED INDEPENDENTLY: `ReReplayOldestFrameGateOn`
+        // takes the re-replay seam alone, leaving the gate in its production state,
+        // so a run can discriminate "the gate defeats the stale re-replay" from the
+        // trivial "no re-replay happened".
+        match self.config.defect {
+            DefectMode::ReplayClobberOlderFrame | DefectMode::ReplayStaleRemoveOverNewerValue => {
+                recovery.test_set_replay_merge_gate(false);
+                recovery.test_set_re_replay_oldest_frame(true);
+            }
+            DefectMode::ReReplayOldestFrameGateOn => {
+                recovery.test_set_re_replay_oldest_frame(true);
+            }
+            DefectMode::None
+            | DefectMode::ScalarMaxWatermark
+            | DefectMode::EmptyBootSeed
+            | DefectMode::InclusiveOffByOne
+            | DefectMode::UnlinkThenFsync => {}
         }
         let _ = recovery
             .run(Arc::clone(&self.inner) as Arc<dyn MapDataStore>)
             .await;
+        // Carried out of the recovery so a case can pin that the seam FIRED, not
+        // only that the run stayed clean. Summed across incarnations: a later
+        // recovery legitimately finds nothing un-applied, so only the run total is
+        // meaningful.
+        self.outcome.re_replayed_frames += recovery.test_re_replayed_frames();
 
         if self.store_healthy {
             // O1 is evaluated ONLY after a recovery performed with a healthy inner
@@ -1241,6 +1653,81 @@ fn lww(millis: i64) -> RecordValue {
             counter: 0,
             node_id: String::new(),
         },
+    }
+}
+
+/// The OR-Map entry a tag names.
+///
+/// The value is a pure function of the tag, so a snapshot op and a delta op that mention the same
+/// tag mean the same entry, and the `(tag, value)` pairs the semantic-equivalence oracle compares
+/// are deterministic. The HLC is fixed because the oracle deliberately excludes it: a tag is unique
+/// per add, so `(tag, value)` already identifies a survivor.
+fn or_entry(tag: &str) -> OrMapEntry {
+    OrMapEntry {
+        value: Value::String(format!("v-{tag}")),
+        tag: tag.to_string(),
+        timestamp: Timestamp {
+            millis: 0,
+            counter: 0,
+            node_id: String::new(),
+        },
+    }
+}
+
+/// The `(tag, canonical-value)` pair the entry for `tag` appears as in an
+/// [`OrMapSemanticView`].
+///
+/// Exposed so a case builds its expected view through the SAME tag→value coupling the harness
+/// writes with, instead of restating the value format at every assertion site.
+pub(crate) fn or_view_pair(tag: &str) -> (String, String) {
+    let entry = or_entry(tag);
+    (entry.tag, format!("{:?}", entry.value))
+}
+
+/// The whole-slot `RecordValue` an [`OrSlot`] denotes.
+fn or_record(slot: &OrSlot) -> RecordValue {
+    match slot {
+        OrSlot::Map { live, tombstones } => RecordValue::OrMap {
+            records: live.iter().map(|tag| or_entry(tag)).collect(),
+            tombstones: tombstones.clone(),
+        },
+        OrSlot::LegacyTombstones { tags } => RecordValue::OrTombstones { tags: tags.clone() },
+    }
+}
+
+/// The ONE on-disk shape an injected OR delta frame takes — the whole envelope, not
+/// just its payload.
+///
+/// Factored out of [`Driver::inject_or_delta`] so the harness has a single definition
+/// of that envelope for a test to bind to the checked-in golden bytes. The compiler
+/// already guarantees the *payload* is the production `storage::wal::OrDelta`; what it
+/// cannot guarantee is the framing around it — which `WalOp` variant carries it,
+/// whether an entry timestamp rides along, and what any of it encodes to. A synthetic
+/// frame that drifts there would keep the differential green while diverging from the
+/// artifact a future emitter binds to, so the frame's byte image is asserted against
+/// the golden fixture through THIS constructor.
+///
+/// `timestamp` stays `None`: the merge gate is Lww-scoped and never consults it, and
+/// OR ordering comes from the sequence, not from an HLC.
+pub(super) fn or_delta_frame(map: &str, key: &str, delta: OrDelta, sequence: u64) -> WalEntry {
+    WalEntry {
+        map: map.to_string(),
+        key: key.to_string(),
+        op: WalOp::OrDelta { delta },
+        timestamp: None,
+        sequence,
+    }
+}
+
+/// The real `storage::wal::OrDelta` an [`OrMutation`] denotes — the ONE delta shape that reaches
+/// disk. The harness's own enum exists only to keep [`WorkOp`] `Eq` (see [`OrMutation`]).
+fn or_delta(mutation: &OrMutation) -> OrDelta {
+    match mutation {
+        OrMutation::Add { tag } => OrDelta::Add {
+            entry: or_entry(tag),
+        },
+        OrMutation::Remove { tag } => OrDelta::Remove { tag: tag.clone() },
+        OrMutation::Prune { tags } => OrDelta::Prune { tags: tags.clone() },
     }
 }
 
@@ -1373,5 +1860,68 @@ mod smoke {
         model.record_ack(0, 2, 2, ModelValue::Live { millis: 3 });
         model.on_crash();
         assert_eq!(ReferenceModel::unresolved(&model, p), vec![3]);
+    }
+
+    /// Both directions of the `value_equality` reference point, over ONE modelled
+    /// history: key 0 written 20 → 30 → 10 (non-monotone in arrival order), then
+    /// recovered as 20 — a state that has LOST the true LWW winner (30). The MAX-live
+    /// reference flags it; the latest-arrival reference (10) does NOT, because 20 is
+    /// not strictly older than 10. That blind spot — any clobber landing in
+    /// `[latest_arrival, max_live)` — is why the oracle references the maximum:
+    /// a proof instrument that can silently pass is not a proof.
+    #[test]
+    fn value_equality_max_live_reference_catches_what_latest_arrival_misses() {
+        let mut model = LogModel::default();
+        let p: PartitionId = 7;
+        for (step, millis) in [(0_usize, 20_i64), (1, 30), (2, 10)] {
+            let seq = Sequence::try_from(step).expect("step fits a sequence") + 1;
+            model.bind_sequence(p, 0, step, seq);
+            model.record_ack(0, step, 0, ModelValue::Live { millis });
+        }
+
+        let latest_arrival = match model.acked_value(0) {
+            Some(ModelValue::Live { millis }) => *millis,
+            other => panic!("expected a live latest-arrival value, got {other:?}"),
+        };
+        let max_live = model.max_live_millis(0).expect("a live key has a maximum");
+        assert_eq!(
+            (latest_arrival, max_live),
+            (10, 30),
+            "non-monotone arrival order must make the two reference points DIFFER"
+        );
+
+        // The timestamp a stale re-replay of the oldest frame leaves durable.
+        let recovered = 20_i64;
+        assert!(
+            recovered >= latest_arrival,
+            "direction 1: the latest-arrival reference MISSES this clobber \
+             (recovered {recovered} is not strictly older than {latest_arrival})"
+        );
+        assert!(
+            recovered < max_live,
+            "direction 2: the max-live reference CATCHES this clobber \
+             (recovered {recovered} is strictly older than {max_live})"
+        );
+    }
+
+    /// A remove CLEARS the max-live reference, so a re-created key is compared only
+    /// against its own timestamps. Without the clear, a re-creation legitimately
+    /// older than the removed value would be reported as a clobber it is not.
+    #[test]
+    fn value_equality_max_live_reference_clears_on_remove() {
+        let mut model = LogModel::default();
+        let p: PartitionId = 7;
+
+        model.bind_sequence(p, 0, 0, 1);
+        model.record_ack(0, 0, 0, ModelValue::Live { millis: 30 });
+        assert_eq!(model.max_live_millis(0), Some(30));
+
+        model.bind_sequence(p, 0, 1, 2);
+        model.record_ack(0, 1, 0, ModelValue::Tombstone);
+        assert_eq!(model.max_live_millis(0), None);
+
+        model.bind_sequence(p, 0, 2, 3);
+        model.record_ack(0, 2, 0, ModelValue::Live { millis: 5 });
+        assert_eq!(model.max_live_millis(0), Some(5));
     }
 }

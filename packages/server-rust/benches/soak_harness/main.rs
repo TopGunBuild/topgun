@@ -1301,6 +1301,9 @@ fn classify_frame(op: &WalOp) -> Option<bool> {
     // an OR-side snapshot. Legacy bare-Value frames replay as LWW.
     match op {
         WalOp::Remove => None,
+        // A per-op OR mutation is an OR-side frame like the snapshot it replaces,
+        // so the growth accounting keeps attributing it to the OR bucket.
+        WalOp::OrDelta { .. } => Some(true),
         WalOp::Store { value, .. } => match value {
             WalStorePayload::Record(
                 RecordValue::OrMap { .. } | RecordValue::OrTombstones { .. },

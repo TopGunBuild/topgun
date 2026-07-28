@@ -61,13 +61,55 @@ pub(crate) type PartitionId = u32;
 /// WAL sequence number, matching `write_behind.rs`'s and `wal/mod.rs`'s `u64` sequence space.
 pub(crate) type Sequence = u64;
 
+/// One OR-Map mutation the harness can put on disk, shaped 1:1 on
+/// `storage::wal::OrDelta` (`Add` / `Remove` / `Prune`).
+///
+/// The harness carries its own shape rather than embedding `storage::wal::OrDelta` directly
+/// because that type holds a `Value`, which is only `PartialEq` — a float `NaN` makes equality
+/// non-reflexive — while a [`WorkOp`] must stay `Eq` so a [`Case`] compares and shrinks as a plain
+/// value. The driver converts one of these to the real `OrDelta` at the injection site, so there is
+/// still exactly ONE delta shape on disk.
+///
+/// An `Add` names only its tag: the value it carries is a pure function of the tag (see the
+/// driver's `or_entry`), which keeps the `(tag, value)` pairs of the semantic-equivalence oracle
+/// deterministic and lets a snapshot op and a delta op agree on what "the same entry" means.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OrMutation {
+    /// `OR_ADD` of `tag`. Suppressed by remove-wins if the tag is already tombstoned.
+    Add { tag: String },
+    /// `OR_REMOVE` of `tag`: drops it from the live set and tombstones it.
+    Remove { tag: String },
+    /// Epoch-GC prune: drops these tags from the tombstone set. An already-absent tag is not an
+    /// error — the fold is a pure set subtraction.
+    Prune { tags: Vec<String> },
+}
+
+/// An OR-shaped whole-slot value a [`WorkOp::OrStore`] writes through the real store `add`,
+/// i.e. what a full-snapshot OR frame carries.
+///
+/// The two variants are the two OR storage shapes recovery can meet as a fold BASE: the modern
+/// unified `RecordValue::OrMap` and the LEGACY tombstone-only `RecordValue::OrTombstones` blob an
+/// older server persisted, which the fold must normalize rather than swallow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OrSlot {
+    /// A modern `RecordValue::OrMap` snapshot: the live tags and the tombstone tags as of the
+    /// frame's own sequence.
+    Map {
+        live: Vec<String>,
+        tombstones: Vec<String>,
+    },
+    /// A legacy `RecordValue::OrTombstones` blob (tombstone tags only, no live records).
+    LegacyTombstones { tags: Vec<String> },
+}
+
 /// The op alphabet a generated case draws from (R2). Each variant drives exactly one real
 /// store/WAL entry point — the harness MUST NOT invent a separate code path for any of these.
 ///
 /// # Extension seam (R9, `TG-OR-003`)
-/// Adding an `OrDelta`-shaped variant here (for the OR-Map delta-fold recovery proof — see
-/// [`ModelValue`]'s doc-comment) requires no change to how the driver dispatches ops, crosses
-/// incarnations, or shrinks a [`Case`].
+/// The `OrDelta`-shaped variant (for the OR-Map delta-fold recovery proof — see [`ModelValue`]'s
+/// doc-comment) required no change to how the driver dispatches ops, crosses incarnations, or
+/// shrinks a [`Case`]: it is one more arm on the same dispatch, and the incarnation/crash/recover
+/// machinery never inspects an op's kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkOp {
     /// Drives the real `WriteBehindDataStore::add` (LWW record). `millis` is the epoch-millisecond
@@ -88,6 +130,20 @@ pub(crate) enum WorkOp {
     SetStoreHealth { healthy: bool },
     /// Reads through the store (staging buffer + inner).
     Read { key: Key },
+    /// Drives the real `WriteBehindDataStore::add` with an OR-shaped whole-slot value — the
+    /// full-snapshot OR frame recovery must keep supporting (legacy WALs on disk carry only these,
+    /// and bulk/SYNC ingestion still sets a whole slot). Same entry point as [`WorkOp::Append`],
+    /// with an OR value instead of an LWW one.
+    OrStore { key: Key, slot: OrSlot },
+    /// Injects exactly ONE synthetic `WalOp::OrDelta` frame through the REAL observed append path
+    /// (`ensure_wal_seeded` → `assign_wal_sequence` → `wal_append` → `promote_wal_sequence`), the
+    /// same chokepoints `WriteBehindDataStore::add` takes.
+    ///
+    /// Synthetic is the design, not a shortcut: no production path emits a delta frame yet, and the
+    /// reader must be provable before a producer exists. The frame deliberately owns NO queued
+    /// entry, so nothing flushes it and the partition watermark cannot advance past it — that is
+    /// exactly the "acked, un-applied window" state recovery has to reconstruct.
+    OrDelta { key: Key, mutation: OrMutation },
 }
 
 /// How an incarnation ends (R1). `Recover` is deliberately not a generated op — it is what the
@@ -182,6 +238,13 @@ pub(crate) enum DefectMode {
     /// manufactures it. Caught by the O1 `AckedWriteLost` oracle (expected Live, got
     /// absent) — NO new oracle needed.
     ReplayStaleRemoveOverNewerValue,
+    /// NOT a defect: the stale re-replay seam (`re_replay_oldest_frame`) with the
+    /// `RecordValue::Lww` merge gate left ON — the production gate configuration under
+    /// an out-of-order replay. It exists so a run can DISCRIMINATE "the gate defeats a
+    /// stale re-replay" (`TG-WAL-006`) from the trivial "no re-replay happened at all"
+    /// that [`DefectMode::None`] proves. A run under this mode is expected GREEN; a
+    /// violation here means the gate stopped holding.
+    ReReplayOldestFrameGateOn,
 }
 
 /// `wal/mod.rs::mark_applied` crash-injection point (R7), fired between the sidecar write+fsync
@@ -207,10 +270,12 @@ pub(crate) enum BootSeedMode {
 
 /// Which oracles are active for a run (R5).
 ///
-/// `value_equality` gates an equality check between the model's latest acked value (its HLC
-/// millis) and the recovered value's `RecordValue::Lww` timestamp, layered on top of O1/O2. When on,
-/// a recovered value whose timestamp does not match the model's latest acked write is reported as an
-/// `AckedValueMismatch` — the shape a stale re-replay clobber produces.
+/// `value_equality` gates a comparison between the model's per-key MAX acked live HLC millis (the
+/// true LWW winner, held separately from O1/O2's latest-arrival `acked` value) and the recovered
+/// value's `RecordValue::Lww` timestamp, layered on top of O1/O2. When on, a recovered value whose
+/// timestamp is older than that maximum is reported as an `AckedValueMismatch` — the shape a stale
+/// re-replay clobber produces. The maximum (not the latest arrival) is the reference so that a
+/// clobber over a key whose writes are non-monotone in arrival order is still caught.
 ///
 /// It defaults to `false` deliberately: the equality oracle is opt-in per run, and
 /// `ac11_value_equality_defaults_off` guards that `OracleConfig::default()` never silently enables
@@ -250,20 +315,31 @@ pub(crate) struct OracleCoverage {
     pub floors: OracleCoverageFloors,
 }
 
-/// The reference model's value shape for a single key: LWW-only for this spec.
+/// The reference model's value shape for a single key.
 ///
 /// # Extension seam (R9, `TG-OR-003`)
 /// The OR-Map delta-fold recovery proof (catalogued as `TG-OR-003` in `INVARIANTS.md`; the spec
-/// that lands it is found by following that ID) adds an OR-shaped variant here — carrying the
-/// observed-remove tag set an OR-Map needs — instead of forking the model. Adding it requires no
-/// change to [`WorkOp`] dispatch or to the driver/oracle/shrinking machinery: the OR-Map delta-fold
-/// recovery proof lands as a case on this harness, not a fork.
+/// that lands it is found by following that ID) lands as the [`ModelValue::Or`] variant here —
+/// carrying the observed-remove state an OR-Map needs — instead of forking the model. It required
+/// no change to [`WorkOp`] dispatch or to the driver/oracle/shrinking machinery: the OR-Map
+/// delta-fold recovery proof is a case on this harness, not a fork.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ModelValue {
     /// An acked live value, carrying the epoch-millisecond timestamp it was written with.
     Live { millis: i64 },
     /// An acked tombstone (the key was removed after being live).
     Tombstone,
+    /// An acked OR-Map slot, held as the ORDER-INDEPENDENT semantic view recovery must reproduce:
+    /// the live `(tag, value)` set and the tombstone set.
+    ///
+    /// The view — not a `RecordValue` — is the model's value on purpose. `records`/`tombstones`
+    /// are stored in operation-insertion order and no canonical byte ordering exists, so
+    /// byte-equality would be a false "data loss" signal; semantic-set equivalence is the invariant
+    /// (`TG-OR-003`). Reusing `crdt::OrMapSemanticView` rather than declaring a parallel shape
+    /// keeps the model comparing through the SAME equivalence oracle the recovery proof cites.
+    Or {
+        view: crate::service::domain::crdt::OrMapSemanticView,
+    },
 }
 
 /// The model side of every oracle comparison (R5.0): a record of what the driver did and observed,
@@ -357,10 +433,11 @@ pub(crate) enum InvariantViolation {
     },
 
     /// `TG-WAL-006`: the recovered `RecordValue::Lww` value for `key` carries a timestamp STRICTLY
-    /// OLDER than the model's latest acked HLC millis — a stale re-replayed frame clobbered a newer
-    /// durable value. Only reported when the `value_equality` oracle is enabled. A recovered value
-    /// newer than the model's last-arrival is the LWW winner and is NOT flagged. Carries the
-    /// incarnation the mismatch surfaced at, the model's expected millis, and the recovered millis.
+    /// OLDER than the MAXIMUM acked live HLC millis the model holds for that key — a stale
+    /// re-replayed frame clobbered a newer durable value. Only reported when the `value_equality`
+    /// oracle is enabled. A recovered value at or newer than that maximum is the LWW winner and is
+    /// NOT flagged. Carries the incarnation the mismatch surfaced at, the model's expected millis
+    /// (the maximum), and the recovered millis.
     AckedValueMismatch {
         key: Key,
         incarnation: usize,

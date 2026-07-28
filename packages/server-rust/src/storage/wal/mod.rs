@@ -127,10 +127,28 @@ pub enum WalOp {
     },
     /// Tombstone: remove the record from the store.
     Remove,
+    /// Per-op OR-Map mutation. Recovery folds it onto the key's CURRENT durable
+    /// value (never onto a WAL-window checkpoint) — see [`OrDeltaFold`].
+    OrDelta {
+        /// The single mutation this frame records.
+        delta: crate::storage::wal::OrDelta,
+    },
     /// A framing that carries only part of a key's state, so a successor CANNOT
-    /// re-derive it. Exists to keep the coalesce predicate's `false` branch —
-    /// and the carry-forward route it selects — under test before any real
-    /// delta framing lands.
+    /// re-derive it.
+    ///
+    /// [`WalOp::OrDelta`] now answers the coalesce predicate's `false` branch on
+    /// the production side, but this variant keeps two roles that no production
+    /// variant can take over:
+    ///
+    /// - It is the only `WalOp` with no replay semantics — its
+    ///   [`WalRecovery::replay_entry`] arm returns an error rather than applying
+    ///   anything — so it is what keeps recovery's behaviour on a frame kind it
+    ///   cannot apply under test. `OrDelta` cannot fill that role: it folds
+    ///   successfully.
+    /// - It keeps the survivor-side mixed case (`snapshot_ops_subsume_on_coalesce`)
+    ///   able to pair a subsuming op against a non-subsuming one WITHOUT binding
+    ///   that proof to the OR variant's coalesce answer, so a later change to
+    ///   that answer cannot silently hollow the mixed case out (`TG-OR-003`).
     ///
     /// Sited on this externally-tagged enum rather than on the `untagged`
     /// [`WalStorePayload`], where an extra arm would shift untagged decode
@@ -160,6 +178,11 @@ impl WalOp {
                 // Full CRDT snapshot; a bare legacy value is also a complete state.
                 WalStorePayload::Record(_) | WalStorePayload::Legacy(_) => true,
             },
+            // Partial state: a per-op delta carries only its own mutation, so
+            // dropping the predecessor would lose information this survivor
+            // cannot re-derive. The retired sequences must ride along via the
+            // carry-forward route instead of resolving early.
+            Self::OrDelta { .. } => false,
             // Partial state: dropping the predecessor would lose information the
             // survivor does not carry, so the retired sequences must ride along
             // instead of resolving early.
@@ -192,7 +215,7 @@ pub enum WalStorePayload {
 }
 
 // ---------------------------------------------------------------------------
-// OrDelta — per-op OR-Map mutation seam (interface only; not yet wired)
+// OrDelta — per-op OR-Map mutation seam (recovery-read side)
 // ---------------------------------------------------------------------------
 
 /// The minimal per-op OR-Map mutation an OR write would append **instead of** a
@@ -205,12 +228,12 @@ pub enum WalStorePayload {
 /// append O(1) per op; recovery folds the deltas back onto the resident slot
 /// (see [`OrDeltaFold`]).
 ///
-/// This models the spec's candidate shape
-/// `{ added: Option<OrMapEntry>, removed_tag: Option<String>, pruned_tags: Vec<String> }`
-/// as an **enum discriminant** rather than a bag of `Option`s: a single OR op is
-/// exactly one of add / remove, and an epoch-GC sweep is a prune — an enum makes
-/// the illegal "both added and removed set" state unrepresentable and satisfies
-/// the op-kind-discriminant type-mapping rule (serde owns the tag; there is no
+/// The shape is an **enum discriminant** rather than a bag of `Option`s
+/// (`{ added: Option<OrMapEntry>, removed_tag: Option<String>, pruned_tags:
+/// Vec<String> }`): a single OR op is exactly one of add / remove, and an
+/// epoch-GC sweep is a prune — an enum makes the illegal "both added and removed
+/// set" state unrepresentable and satisfies the op-kind-discriminant
+/// type-mapping rule (serde owns the tag; there is no
 /// `r#type` field). The set-algebra a fold must apply matches the resident CRDT
 /// exactly: add-wins (retain concurrent survivors, an already-tombstoned tag is
 /// never resurrected), remove-wins (drop the matched tag from records, record its
@@ -232,15 +255,31 @@ pub enum WalStorePayload {
 ///   [`format::FrameDecodeResult`] variant and NEVER panic on malformed input —
 ///   folding a decoded delta happens only on the `Complete` / tolerated
 ///   `TruncatedTail` arms, exactly like the current Store replay.
-/// - **Version discipline**: introducing an `OrDelta`-carrying `WalOp` variant is
-///   an additive MsgPack-named change. A legacy binary reading a new delta frame
-///   fails `WalEntry` deserialization, which `decode_all` already classifies as
-///   `Corruption` (a *refusal to start*, never a silent mis-read) — so mixed
-///   old/new recovery fails closed. Whether the wiring step also bumps
-///   [`format::FRAME_VERSION`] for an explicit signal (rather than relying on the
-///   deserialize-refusal) is the version-discipline decision to settle when the
-///   delta frame lands; the safety floor (fail-closed, no silent corruption) holds
-///   either way.
+/// - **Version discipline**: an `OrDelta`-carrying `WalOp` variant is an additive
+///   MsgPack-named change inside the UNCHANGED frame envelope, so
+///   [`format::FRAME_VERSION`] stays where it is — a bump is out of contract
+///   until a dedicated migration owns it (TODO-617). A bump would not be a
+///   stronger signal but an outage in both directions: `decode_all` treats ANY
+///   version mismatch as fail-closed, so a bumped binary would refuse every
+///   legacy WAL already on disk and an older binary would refuse every WAL
+///   written after the bump.
+///
+///   What a LEGACY binary does with a delta frame it cannot deserialize has TWO
+///   cases, decided purely by the frame's POSITION, and the unqualified
+///   "always fails closed" reading is FALSE — writing it here would be a false
+///   invariant in code:
+///   - **mid-segment** (not the last frame in the byte stream) ⇒
+///     [`format::FrameDecodeResult::Corruption`] ⇒ genuine refusal to start;
+///   - **trailing frame on the ACTIVE segment** ⇒
+///     [`format::FrameDecodeResult::TruncatedTail`], which recovery TOLERATES on
+///     the last segment: it warns, replays the intact prefix, and `WalWriter`'s
+///     open path then DURABLY TRUNCATES the segment to that prefix. The mutation
+///     is silently dropped and physically gone, not merely skipped — and the
+///     newest frame is the most likely position for the newest mutation.
+///
+///   Nothing is broken by that asymmetry today, because no code path emits a
+///   delta frame and no delta-bearing WAL exists on disk. See
+///   [`format::FRAME_VERSION`] for the full record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum OrDelta {
@@ -270,72 +309,25 @@ pub enum OrDelta {
     },
 }
 
-/// Checkpoint policy that bounds delta-fold depth (the PRIMARY delta design:
-/// checkpoint + bounded-deltas, not an unbounded fold chain).
+/// Recovery-fold interface: applies ONE [`OrDelta`] to an OR-Map slot,
+/// reconstructing the value the full-snapshot path would have produced. The
+/// returned value is a `RecordValue::OrMap`.
 ///
-/// A pure "fold every delta since key creation" chain is unbounded → slow
-/// recovery and fragile (one lost/corrupt delta breaks all subsequent state).
-/// Instead, a full-snapshot frame (the existing `WalOp::Store` of the whole
-/// `RecordValue::OrMap`) is emitted every `snapshot_every_ops` (K) ops **or**
-/// `snapshot_every_bytes` (B) accumulated delta bytes per key, whichever trips
-/// first; recovery folds only the deltas since that key's last checkpoint. This
-/// bounds recovery cost, localizes corruption blast-radius to one checkpoint
-/// window, still yields the ~100× WAL reduction, and degrades naturally to a
-/// **K=1 full-snapshot-only fallback** (see [`Self::full_snapshot_only`]) the
-/// recovery path can drop to on ANY fold anomaly.
+/// `base` is the key's CURRENT DURABLE STORE value — always, with no exception.
+/// `None` means the store holds no record for the key at all, which is a
+/// legitimate first write rather than an error; it never means "the replay
+/// window opened on a checkpoint". Recovery replays the WHOLE un-applied window
+/// (every entry above the partition's applied watermark) in strict sequence
+/// order, writing each folded result back before the next frame for the key
+/// reads it, so the DURABLE STORE is the accumulator.
 ///
-/// The concrete K / B values are a deliberately-unset design parameter: they are
-/// resolved at the R1 `/xask` design gate with the live measurement in hand, not
-/// guessed here without data. Counts are integers (ops, bytes) — never `f64`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OrDeltaCheckpointPolicy {
-    /// K: emit a full-snapshot frame after this many deltas on a key. `1` means
-    /// "snapshot every op" — the full-snapshot-only fallback.
-    pub snapshot_every_ops: u32,
-    /// B: emit a full-snapshot frame once accumulated delta bytes on a key reach
-    /// this threshold, independent of op count.
-    pub snapshot_every_bytes: u64,
-}
-
-impl OrDeltaCheckpointPolicy {
-    /// The K=1 fallback: every OR op emits a full snapshot, so recovery never
-    /// folds a delta. This is the behaviourally-identical-to-today mode the
-    /// recovery path drops to whenever a fold anomaly is detected, and the
-    /// baseline the differential recovery test exercises.
-    #[must_use]
-    pub const fn full_snapshot_only() -> Self {
-        Self {
-            snapshot_every_ops: 1,
-            snapshot_every_bytes: 0,
-        }
-    }
-
-    /// Whether the current op must be materialized as a full snapshot instead of a
-    /// delta under this policy.
-    ///
-    /// `delta_index` is **1-indexed**: the first delta after a checkpoint is
-    /// `delta_index = 1` (NOT `0` — passing the pre-op count is an off-by-one that
-    /// would make `full_snapshot_only()` fold the first op of every window instead
-    /// of snapshotting it). `window_bytes` is the delta bytes accumulated in the
-    /// current checkpoint window including this op. With `snapshot_every_ops = K`,
-    /// the op snapshots when `delta_index >= K`, so the K=1 `full_snapshot_only()`
-    /// policy snapshots on `delta_index = 1` — every op — and never folds a delta.
-    #[must_use]
-    pub const fn should_checkpoint(&self, delta_index: u32, window_bytes: u64) -> bool {
-        delta_index >= self.snapshot_every_ops
-            || (self.snapshot_every_bytes > 0 && window_bytes >= self.snapshot_every_bytes)
-    }
-}
-
-/// Recovery-fold interface: replays a bounded run of [`OrDelta`]s onto a resident
-/// OR-Map slot to reconstruct the value the full-snapshot path would have
-/// produced.
-///
-/// **Interface only — the production recovery path is NOT wired to this in Wave
-/// 1.** `base` is the resident slot as of the key's last full-snapshot checkpoint
-/// (`None` for a key whose first frame in the replay window is itself a
-/// checkpoint, i.e. an empty starting slot); `deltas` are the checkpoint-window
-/// deltas in WAL sequence order. The returned value is a `RecordValue::OrMap`.
+/// **No frame is a skip hint.** A full-snapshot `WalOp::Store` OR frame inside
+/// the window is applied in its own sequence position as an ABSOLUTE SET, like
+/// every other frame — never consulted as a base the fold starts FROM. Reading
+/// one as a base would discard its content whenever the coalesced store write
+/// had not yet landed, silently losing every add it carried; and it could not
+/// help in the other direction either, since nothing at or below the watermark
+/// is ever a recovery input (`TG-OR-003`).
 ///
 /// ## Recovery-equivalence invariant (SEMANTIC-SET, not byte-for-byte)
 ///
@@ -347,13 +339,18 @@ impl OrDeltaCheckpointPolicy {
 /// then `push(...)`; it never canonically sorts), and cross-node OR-Map
 /// convergence is set-based, so no canonical byte ordering exists to make
 /// bit-equality a robust invariant. The differential recovery test asserts
-/// this semantic-set equivalence (via the equivalence oracle defined alongside
-/// the OR write path), including the K=1 full-snapshot-only fallback.
+/// this semantic-set equivalence, via the equivalence oracle defined alongside
+/// the OR write path.
 pub trait OrDeltaFold {
-    /// Fold `deltas` (checkpoint-window, in sequence order) onto `base`,
-    /// returning the reconstructed `RecordValue::OrMap`. Must apply the exact
-    /// add-wins / remove-wins / prune algebra the resident CRDT slot uses.
-    fn fold(&self, base: Option<RecordValue>, deltas: &[OrDelta]) -> RecordValue;
+    /// Apply `delta` to `base`, returning the reconstructed
+    /// `RecordValue::OrMap`.
+    ///
+    /// ONE frame per call, deliberately: a single-delta parameter is what stops
+    /// a key's frames from being collected out of the replay stream and folded
+    /// as a batch, which is the window-fold shape this trait no longer has. The
+    /// add-wins / remove-wins / prune algebra is not re-stated by an
+    /// implementor — it is the same live apply the resident CRDT slot uses.
+    fn fold(base: Option<RecordValue>, delta: &OrDelta) -> RecordValue;
 }
 
 // ---------------------------------------------------------------------------
@@ -483,6 +480,30 @@ pub struct WalWriter {
     /// Batched-commit group-commit timer: shared notifier woken every ~10 ms.
     /// When `policy == Batched`, the writer also fsyncs after every 100 ops.
     batch_flush_tx: tokio::sync::watch::Sender<()>,
+    /// A ONE-SHOT permit to put a single `WalOp::OrDelta` frame on disk.
+    ///
+    /// `false` in the one production constructor, and the only thing that sets
+    /// it is a `#[cfg(test)]` seam — the field is private, so nothing outside
+    /// this module can name it at all, and in a release build nothing can reach
+    /// the permitted state. That is what makes the refusal in `append` a
+    /// structural no-emitter guard rather than a convention: the reader lands
+    /// before the writer (`TG-OR-003`), so a delta frame reaching the durable
+    /// log today is a programming bug no matter which shape of code produced it
+    /// — an aliased import, a macro, a generated body. Whichever path emits it
+    /// dies loudly at the boundary that would have made it durable.
+    ///
+    /// **One-shot, not a mode.** `append` CONSUMES the permit with a
+    /// compare-exchange, so it admits exactly one frame per grant. A permit held
+    /// open across a `.await` would otherwise be open for every concurrent
+    /// appender on this writer, which is precisely the window an injecting
+    /// harness must not leave for a real emitter to slip through: with the
+    /// permit consumed, a second delta frame racing the injected one fail-stops
+    /// whichever of the two loses.
+    ///
+    /// Not `#[cfg(test)]` itself, deliberately: a field that vanished from a
+    /// release build would take the guard with it and leave production the only
+    /// configuration nothing checks.
+    allow_or_delta: std::sync::atomic::AtomicBool,
     /// Forces the pre-unlink watermark re-read to return this value instead of
     /// the sidecar's.
     ///
@@ -657,6 +678,9 @@ impl WalWriter {
             policy,
             partitions: AsyncMutex::new(HashMap::new()),
             batch_flush_tx,
+            // Nothing may emit a delta frame until the writer lands; this is the
+            // only constructor, so the guard in `append` is armed everywhere.
+            allow_or_delta: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             gc_revalidation_override: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -1032,8 +1056,10 @@ impl WalWriter {
 /// classification only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WalFailStopTier {
-    /// The WAL's own rotation bookkeeping is inconsistent: an append targeted a
-    /// sealed segment. No frame of the entry reached the segment.
+    /// A programming bug detected BEFORE the entry was framed, so no byte of it
+    /// reached the segment: an append targeted a sealed segment (the WAL's own
+    /// rotation bookkeeping is inconsistent), or it carried a frame kind this
+    /// build has no writer for.
     P,
     /// A write, flush or fsync failed after the entry may already have been
     /// framed into the segment, so the frame's durability is unknown.
@@ -1095,6 +1121,35 @@ pub(crate) fn wal_fail_stop(tier: WalFailStopTier, ctx: &str) -> ! {
 #[async_trait]
 impl Wal for WalWriter {
     async fn append(&self, partition: u32, entry: &WalEntry) -> anyhow::Result<()> {
+        // No writer for this frame kind exists yet: recovery reads delta frames
+        // before anything emits them (`TG-OR-003`), so one arriving here is a
+        // programming bug — a partially-built emitter, or a merge that landed
+        // the writer ahead of its compatibility criteria. Refusing at the
+        // boundary that makes a frame durable is what makes "nothing emits a
+        // delta" a property of the CODE rather than of a source scan: it holds
+        // against every shape of emitter, including the ones a text scan cannot
+        // see. Checked first, so the entry is not even encoded.
+        if matches!(entry.op, WalOp::OrDelta { .. })
+            && self
+                .allow_or_delta
+                .compare_exchange(
+                    true,
+                    false,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .is_err()
+        {
+            wal_fail_stop(
+                WalFailStopTier::P,
+                &format!(
+                    "append carried an OrDelta frame, which no path in this build may write: \
+                     partition={partition}, sequence={}, map={}, key={}",
+                    entry.sequence, entry.map, entry.key
+                ),
+            );
+        }
+
         let frame = format::encode(entry)?;
 
         let handle = self.handle(partition).await?;
@@ -1614,6 +1669,16 @@ pub struct WalRecovery {
     /// a production build.
     #[cfg(test)]
     re_replay_oldest_frame: bool,
+    /// How many frames the `re_replay_oldest_frame` seam actually put back through
+    /// replay during `run`.
+    ///
+    /// Exists so a case can assert the seam FIRED, not only that its outcome was
+    /// clean. Every assertion over the gate-on seam expects GREEN — and a seam that
+    /// silently stopped firing is GREEN too, so without this counter the whole
+    /// re-replay family would hollow out into "no re-replay happened → no clobber",
+    /// which is the trivial configuration the seam was written to replace.
+    #[cfg(test)]
+    re_replayed_frames: std::sync::atomic::AtomicUsize,
 }
 
 impl WalRecovery {
@@ -1627,6 +1692,8 @@ impl WalRecovery {
             replay_merge_gate: true,
             #[cfg(test)]
             re_replay_oldest_frame: false,
+            #[cfg(test)]
+            re_replayed_frames: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -1643,6 +1710,17 @@ impl WalRecovery {
     #[cfg(test)]
     pub(crate) fn test_set_re_replay_oldest_frame(&mut self, enabled: bool) {
         self.re_replay_oldest_frame = enabled;
+    }
+
+    /// Test-only: how many frames the re-replay seam actually replayed during `run`.
+    ///
+    /// `Relaxed` is sufficient on both ends: the seam increments from inside `run`
+    /// and every reader observes it only after `run`'s future has completed, so the
+    /// await point already carries the happens-before edge.
+    #[cfg(test)]
+    pub(crate) fn test_re_replayed_frames(&self) -> usize {
+        self.re_replayed_frames
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Discovers partition IDs by scanning `wal_dir` for segment files
@@ -1684,12 +1762,17 @@ impl WalRecovery {
     /// - `WalStorePayload::Legacy` frames carry a SYNTHESIZED timestamp (zero-epoch
     ///   when the WAL recorded none) whose intent is always-merge, so they BYPASS
     ///   the gate and keep the pre-existing blind replay.
-    /// - `RecordValue::OrMap`/`OrTombstones` frames BYPASS the gate: their
-    ///   convergence is set-union of tags+tombstones, not a scalar timestamp max,
-    ///   and each per-key OR frame is a post-RMW full snapshot that is monotone in
-    ///   `wal_seq` order, so in-sequence replay converges to the newest snapshot
-    ///   regardless of re-replay. OR merge-idempotency as its own property is owned
-    ///   by `TG-OR-003`, not this path.
+    /// - `RecordValue::OrMap`/`OrTombstones` frames carried by a `WalOp::Store`
+    ///   BYPASS the gate: their CROSS-NODE convergence is set-union of
+    ///   tags+tombstones, not a scalar timestamp max — replay itself is never a
+    ///   union but an absolute-set REPLACE, since unioning a snapshot onto the
+    ///   durable value would resurrect tombstoned tags. Such a frame is a post-RMW
+    ///   COMPLETE snapshot of the key that is monotone in `wal_seq` order, so
+    ///   in-sequence replay converges to the newest snapshot regardless of
+    ///   re-replay. That argument
+    ///   covers snapshot framing only — a `WalOp::OrDelta` frame is not a snapshot
+    ///   and rests on the separate argument below. OR merge-idempotency as its own
+    ///   property is owned by `TG-OR-003`, not this path.
     /// - A cross-kind case (stored value is not `Lww` while the incoming frame is)
     ///   cannot be compared by timestamp, so it also BYPASSES the gate and writes
     ///   through.
@@ -1712,6 +1795,23 @@ impl WalRecovery {
     /// is unreachable except by re-applying an already-applied older frame — the
     /// harness `re_replay_oldest_frame` seam, never a production path (see
     /// INVARIANTS.md TG-WAL-009 for the full state-machine argument).
+    ///
+    /// A `WalOp::OrDelta` frame is FOLDED, not written through. The arm loads the
+    /// key's CURRENT durable value, folds THIS ONE delta onto it via
+    /// [`OrDeltaFold::fold`], and writes the result back, so the durable store —
+    /// never a WAL-window checkpoint — is both the fold base and the accumulator,
+    /// and each frame is applied in its own sequence position inside the single
+    /// replay stream rather than batched per key. Re-replay is a semantic no-op
+    /// because the folded algebra IS the live one and its ops are idempotent set
+    /// ops (retain, dedup push, subtract) — not because a delta is a snapshot. A
+    /// delta carries only its own mutation, which is why it can never be skipped
+    /// or dropped: a dropped remove resurrects an entry, and unlike a full-snapshot
+    /// frame a delta is never repaired by a later frame.
+    ///
+    /// A `WalOp::Store` frame carrying an OR value stays a SUPPORTED input and is
+    /// applied in its sequence position as an ABSOLUTE SET, never as a fold-base
+    /// skip hint and never as a union — see the arm for why the snapshot's
+    /// completeness is what licenses the replace.
     async fn replay_entry(
         inner_store: &Arc<dyn MapDataStore>,
         entry: &WalEntry,
@@ -1770,6 +1870,38 @@ impl WalRecovery {
                     }
                 }
 
+                // ABSOLUTE SET, in this frame's sequence position — for an OR
+                // value as much as for an LWW one. `add` REPLACES the key's
+                // value with this frame's; it never unions the frame with the
+                // value the store already holds, and it is never a "skip the
+                // fold up to here" hint. A delta frame later in the window then
+                // folds onto what this frame just wrote.
+                //
+                // What licenses the replace is that a `WalOp::Store` OR frame is
+                // a COMPLETE post-state snapshot of ONE key: it carries the live
+                // set AND the tombstone set as of its own sequence, so every
+                // effect at or below that sequence — removes included — is
+                // already inside it. Completeness, not recency, is the load-
+                // bearing condition: a partial or live-set-only OR snapshot
+                // would make this replace UNSAFE, because the tombstones it
+                // omitted would come back from the store's older value. That
+                // completeness is TG-WAL-012, and it holds by the payload TYPE
+                // — `WalEntry` is per-key and carries a whole `RecordValue`,
+                // whose `OrMap` shape has no partial form to frame.
+                //
+                // A naive union/merge here would be a correctness trap in the
+                // other direction: the store's pre-crash value may still hold a
+                // tag live that this frame tombstoned, and unioning resurrects
+                // it. Deletes do not self-heal.
+                //
+                // Ordering and window bounds are inherited, not re-derived here:
+                // the APPLIED watermark is prefix-complete and never leads
+                // durable state (TG-WAL-005 — the wal_seq-space tracker; NOT
+                // TG-WB-001, which is the entry-space FLUSHED watermark and
+                // explicitly independent of it), sequences are minted strictly
+                // monotone per partition in that same wal_seq space at append
+                // time (TG-WAL-010), and the window is replayed strictly
+                // ascending in it (TG-WAL-011).
                 inner_store
                     .add(
                         &entry.map,
@@ -1794,6 +1926,27 @@ impl WalRecovery {
                 // synthetic out-of-order clobber via its `re_replay_oldest_frame`
                 // seam, not through this arm.
                 inner_store.remove(&entry.map, &entry.key, now).await
+            }
+            WalOp::OrDelta { delta } => {
+                // Store-seeded, one frame at a time: load the key's CURRENT
+                // durable value, fold this ONE delta onto it, write it back. The
+                // durable store is the accumulator, so nothing here collects a
+                // key's deltas out of the replay stream — the next frame for this
+                // key reads what this one just wrote, exactly as the live path's
+                // read-modify-write does.
+                let base = inner_store.load(&entry.map, &entry.key).await?;
+                let folded = <Self as OrDeltaFold>::fold(base, delta);
+
+                // Expiration `0` ("no expiry"): `load` returns no TTL and `add`
+                // requires one, and a delta frame carries no expiration field —
+                // it records a mutation, not a whole slot. `0` matches the live
+                // OR write path, which writes both OR closures with
+                // `ExpiryPolicy::NONE`, so the fold introduces no TTL drift. An
+                // OR path that starts writing TTLs would need the frame to carry
+                // one; it is not a value this arm may invent.
+                inner_store
+                    .add(&entry.map, &entry.key, &folded, 0, now)
+                    .await
             }
             // An explicit arm rather than a `_` catch-all: the exhaustiveness is
             // what forces a future framing to declare its replay semantics here
@@ -1828,10 +1981,24 @@ impl WalRecovery {
     /// `replay_entry` reads the current durable value and discards a frame whose HLC
     /// timestamp is strictly older, so a stale replayed frame can no longer clobber a
     /// newer durable value written outside the window (e.g. a frameless write-behind
-    /// flush). `OrMap`/`OrTombstones` frames are idempotent by pre-existing
-    /// monotonicity (post-RMW full snapshots, monotone in `wal_seq` order), not by
-    /// this merge; their own merge-idempotency property is owned by `TG-OR-003`.
-    /// Legacy frames keep always-merge replay.
+    /// flush). Legacy frames keep always-merge replay.
+    ///
+    /// OR frames come in TWO kinds, and each is idempotent under a DIFFERENT
+    /// argument — neither argument covers the other kind (`TG-OR-003`):
+    ///
+    /// - **Snapshot frames** — a `WalOp::Store` carrying `RecordValue::OrMap` or
+    ///   `RecordValue::OrTombstones` — are idempotent by pre-existing
+    ///   monotonicity: they are post-RMW full snapshots, monotone in `wal_seq`
+    ///   order, so re-applying one cannot move the slot backwards. Not by this
+    ///   merge, which is Lww-scoped.
+    /// - **`WalOp::OrDelta` frames** are idempotent by SET-ALGEBRA FOLD
+    ///   idempotency through the single live apply seam, `crdt::apply_or_delta`:
+    ///   `Add` is a tombstone-guarded `retain` + `push`, `Remove` dedups the
+    ///   tombstone, and `Prune` is pure tombstone-set subtraction. The property
+    ///   holds for the WHOLE un-applied window replayed in sequence order from
+    ///   the durable-store base, which is exactly what this pass does.
+    ///   Monotonicity is NOT the argument here and cannot be offered as one: a
+    ///   delta carries only its own mutation, so it is monotone in nothing.
     ///
     /// `WalOp::Remove` re-replay is idempotent under a DISTINCT invariant
     /// (`TG-WAL-009`) WITHOUT a gate: a Remove replays UNCONDITIONALLY, identical to
@@ -1909,10 +2076,17 @@ impl WalRecovery {
                     Ok(()) => {
                         // Only a success that is still contiguous with the prefix
                         // may advance the frontier. Once an entry has failed, later
-                        // successes are kept (replay is idempotent for Lww via the
-                        // read-compare in `replay_entry`, and for OR via snapshot
-                        // monotonicity, so re-running them next boot is free) but
-                        // they must NOT license GC of the frame that failed.
+                        // successes are kept — re-running them next boot is free —
+                        // but they must NOT license GC of the frame that failed.
+                        //
+                        // "Free" rests on a different argument per frame kind:
+                        // Lww on the read-compare in `replay_entry`; a
+                        // `WalOp::Store` OR snapshot on monotonicity; and a
+                        // `WalOp::OrDelta` on set-algebra fold idempotency
+                        // through `crdt::apply_or_delta`, over the whole
+                        // un-applied window replayed in sequence order from the
+                        // durable-store base. Monotonicity does not cover the
+                        // delta kind.
                         if first_failed.is_none() {
                             frontier = entry.sequence;
                         }
@@ -1948,6 +2122,8 @@ impl WalRecovery {
                 if let Some(oldest) = entries.first() {
                     let _ =
                         Self::replay_entry(&inner_store, oldest, now, self.replay_merge_gate).await;
+                    self.re_replayed_frames
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
 
@@ -1996,6 +2172,57 @@ impl WalRecovery {
     }
 }
 
+/// The recovery fold: ONE delta, folded onto the key's CURRENT durable value.
+///
+/// `WalRecovery` is the implementor because it is already the object that owns
+/// replay — a separate fold type would be a second seam over the same algebra.
+/// The receiver is dropped because the fold is a pure function of
+/// `(base, delta)`: `replay_entry` is an associated function reached as
+/// `WalRecovery::replay_entry(inner_store, entry, now, merge_gate)` and holds no
+/// `WalRecovery` value to call a method on.
+///
+/// The fold owns no algebra of its own. It normalizes the base through the live
+/// `crdt::normalize_to_or_map` and applies through the live
+/// `crdt::apply_or_delta` — the same two functions the runtime OR write path
+/// calls, in the same order (TG-OR-003). A second hand-written copy of either
+/// would be free to drift from what the write path actually did, and on this
+/// path drift is a silently lost mutation rather than a visible error.
+impl OrDeltaFold for WalRecovery {
+    /// One frame, one call: the caller passes the store's value as `base` and
+    /// writes the result straight back, so the DURABLE STORE is the accumulator.
+    /// The parameter is a single delta, not a window, so a key's frames cannot be
+    /// collected out of the replay stream and folded as a batch.
+    fn fold(base: Option<RecordValue>, delta: &OrDelta) -> RecordValue {
+        // An absent record is a legitimate first write, not an error: the empty
+        // OR-Map here is byte-identical to the `init` value the live OR_ADD /
+        // OR_REMOVE paths hand `update_in_place` for an absent slot.
+        let mut value = base.unwrap_or(RecordValue::OrMap {
+            records: Vec::new(),
+            tombstones: Vec::new(),
+        });
+
+        // MUST precede the apply. `apply_or_delta` is a silent no-op on a value
+        // that is not `RecordValue::OrMap` — no `Err`, no flag — so a legacy
+        // `OrTombstones` blob or a cross-kind durable value would swallow this
+        // delta with nothing for an oracle to observe. Upgrading the storage
+        // shape is a concern of the slot, and this is the slot's one normalizer.
+        crate::service::domain::crdt::normalize_to_or_map(&mut value);
+
+        // The fold borrows and the apply consumes, so each delta is cloned once.
+        // That is deliberate: the by-value apply is what keeps the LIVE path free
+        // of a value-sized copy per accepted add, and this cost sits on the cold
+        // boot path, bounded by the un-applied replay window.
+        //
+        // The returned flags are deliberately dropped. They exist for the live
+        // path's tombstone-bytes gauge, which recovery does not maintain
+        // incrementally — the boot-time `reconcile_tombstone_bytes` recompute
+        // runs after replay and is the gauge's source of truth (TG-OR-004).
+        crate::service::domain::crdt::apply_or_delta(delta.clone(), &mut value);
+
+        value
+    }
+}
+
 /// Current wall-clock time as millis since epoch.
 fn current_millis() -> i64 {
     i64::try_from(
@@ -2018,6 +2245,30 @@ fn current_millis() -> i64 {
 /// cannot see them at all.
 #[cfg(test)]
 impl WalWriter {
+    /// Grants a ONE-SHOT permit for the next `WalOp::OrDelta` append.
+    ///
+    /// The only thing that opens the append guard, and `#[cfg(test)]` so a
+    /// release build cannot name it. `append` consumes the permit, so a harness
+    /// that injects synthetic delta frames grants one per injected frame and
+    /// every OTHER write in the same run — including the ones riding the real
+    /// write path — stays under the refusal, even across the injected append's
+    /// own `.await`.
+    pub(crate) fn test_permit_one_or_delta_append(&self) {
+        self.allow_or_delta
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether a granted permit is still unconsumed.
+    ///
+    /// A permit that outlives the append it was granted for is a hole: it would
+    /// admit some LATER delta frame, which is the emitter this guard exists to
+    /// catch. The harness asserts on this after every injection, the same
+    /// exactly-one discipline it applies to the append observer.
+    pub(crate) fn test_or_delta_permit_outstanding(&self) -> bool {
+        self.allow_or_delta
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Seals the partition's active segment in place.
     ///
     /// Seal/rotate always installs a FRESH active segment under the same lock, so
@@ -2109,40 +2360,206 @@ mod tests {
     use topgun_core::types::Value as TgValue;
 
     // -----------------------------------------------------------------------
-    // OrDeltaCheckpointPolicy — the delta-fold depth bound (types-only seam)
+    // Doc-contract assertions
+    //
+    // The OR contracts in this file are load-bearing rather than decorative:
+    // `WalRecovery::run`'s idempotency paragraph is the text the
+    // contiguous-success frontier cites to justify keeping post-failure
+    // successes and re-replaying the window on the next boot. A contract that
+    // under-describes a frame kind is therefore a false invariant in code, not
+    // stale prose, so these assertions read this file's own source and fail the
+    // build when a required clause goes missing or a withdrawn one returns.
+    //
+    // Every assertion runs on a WHITESPACE-NORMALIZED view. A single-line
+    // search is NOT equivalent: several of the phrases below are line-wrapped
+    // inside comments, so an un-normalized absence check would pass without
+    // anyone having touched the contract it claims to police.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn full_snapshot_only_snapshots_every_op() {
-        // The K=1 fallback must snapshot on the FIRST delta of every window
-        // (delta_index is 1-indexed), so recovery never folds a delta. A 0-indexed
-        // read of should_checkpoint would silently fold the first op instead.
-        let p = OrDeltaCheckpointPolicy::full_snapshot_only();
-        assert!(p.should_checkpoint(1, 0));
-        assert!(p.should_checkpoint(1, u64::MAX));
+    /// This file's own source, truncated at the inline test module.
+    ///
+    /// Truncating is what keeps the assertions non-vacuous: the phrases they
+    /// search for are spelled out as literals in the tests themselves, so a
+    /// whole-file view would match a test's own argument instead of the
+    /// production contract it is meant to check.
+    fn production_source() -> &'static str {
+        const SOURCE: &str = include_str!("mod.rs");
+        // The escaped newline in this literal is not a newline in this file, so
+        // the search cannot land on this line instead of the real marker.
+        let marker = "#[cfg(test)]\nmod tests {";
+        let end = SOURCE
+            .find(marker)
+            .expect("this file carries its tests in an inline `mod tests`");
+        &SOURCE[..end]
+    }
+
+    /// Strips comment markers and indentation and collapses every run of
+    /// whitespace to one space, so a phrase assertion can be neither satisfied
+    /// nor defeated by where a line happens to wrap.
+    fn normalized(src: &str) -> String {
+        src.lines()
+            .map(str::trim_start)
+            .map(|l| {
+                l.trim_start_matches("//!")
+                    .trim_start_matches("///")
+                    .trim_start_matches("//")
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The source from `start` up to the next `end`, so a phrase can be
+    /// required of ONE contract rather than of the file as a whole.
+    fn slice_between<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let from = src
+            .find(start)
+            .unwrap_or_else(|| panic!("region anchor not found: {start:?}"));
+        let rest = &src[from..];
+        let to = rest
+            .find(end)
+            .unwrap_or_else(|| panic!("region end anchor not found after {start:?}: {end:?}"));
+        &rest[..to]
     }
 
     #[test]
-    fn should_checkpoint_honors_k_and_b_independently() {
-        let p = OrDeltaCheckpointPolicy {
-            snapshot_every_ops: 4,
-            snapshot_every_bytes: 1000,
-        };
-        // Below both thresholds → fold as a delta.
-        assert!(!p.should_checkpoint(1, 0));
-        assert!(!p.should_checkpoint(3, 999));
-        // K trips at the K-th delta.
-        assert!(p.should_checkpoint(4, 0));
-        // B trips independently of op count.
-        assert!(p.should_checkpoint(1, 1000));
+    fn or_doc_contracts_carry_no_withdrawn_or_provenance_clause() {
+        let src = normalized(production_source());
 
-        // snapshot_every_bytes == 0 disables the byte trigger entirely.
-        let no_b = OrDeltaCheckpointPolicy {
-            snapshot_every_ops: 4,
-            snapshot_every_bytes: 0,
-        };
-        assert!(!no_b.should_checkpoint(1, u64::MAX));
-        assert!(no_b.should_checkpoint(4, 0));
+        for phrase in [
+            // The WAL-window-only fold base. A snapshot frame read as the
+            // checkpoint the fold starts FROM silently loses every add it
+            // carries whenever the coalesced store write had not yet landed.
+            "the resident slot as of the key's last full-snapshot checkpoint",
+            // The window-fold shape the single-delta signature replaced.
+            "checkpoint-window deltas in WAL sequence order",
+            // The frontier's sole OR justification from before there were two
+            // OR frame kinds. Monotonicity does not cover a delta frame.
+            "for OR via snapshot monotonicity",
+            // Prose provenance: which wave, gate or spec produced the code
+            // belongs in the commit message, never in the contract.
+            "before any real delta framing lands",
+            "NOT wired to this in Wave 1",
+            "resolved at the R1 `/xask` design gate",
+            "This models the spec's candidate shape",
+        ] {
+            assert!(
+                !src.contains(phrase),
+                "a withdrawn or provenance clause is still in a doc-contract: {phrase:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_non_subsuming_doc_states_the_role_no_other_variant_fills() {
+        let src = normalized(production_source());
+        assert!(
+            src.contains("the only `WalOp` with no replay semantics"),
+            "the `TestNonSubsuming` doc must state the coverage no other variant \
+             can supply, so the reason the variant survives stays checkable \
+             rather than assumed by whoever next reads the enum"
+        );
+    }
+
+    #[test]
+    fn frontier_idempotency_contract_splits_the_two_or_frame_kinds() {
+        let src = production_source();
+
+        let regions = [
+            (
+                "`run`'s doc-contract",
+                slice_between(
+                    src,
+                    "/// Replays all un-applied entries for every partition",
+                    "pub async fn run(",
+                ),
+            ),
+            (
+                "the frontier loop's inline comment",
+                slice_between(
+                    src,
+                    "// Only a success that is still contiguous with the prefix",
+                    "if first_failed.is_none()",
+                ),
+            ),
+        ];
+
+        for (what, region) in regions {
+            let region = normalized(region);
+            for needle in ["WalOp::OrDelta", "apply_or_delta"] {
+                assert!(
+                    region.contains(needle),
+                    "{what} must name `{needle}`: a delta frame is idempotent by \
+                     set-algebra fold idempotency through the live apply, NOT by \
+                     the snapshot monotonicity that covers `WalOp::Store` OR frames"
+                );
+            }
+        }
+    }
+
+    /// The structural half of the single-algebra rule: the fold DELEGATES, and
+    /// writes no OR algebra of its own.
+    ///
+    /// The behavioural half — a mixed add / remove / re-add / prune window whose
+    /// outcome only the live algebra produces — lives in the harness's case
+    /// family. It cannot see this property: a second, hand-written copy of the
+    /// algebra that currently AGREES passes every differential case while being
+    /// exactly the fork `TG-OR-003` forbids, and it would diverge silently the
+    /// first time the live path changed under it.
+    ///
+    /// ADVISORY GRADE, and deliberately so. Both halves are text assertions over
+    /// one region of one file: the positive half requires the two calls in their
+    /// argument-bearing form, so a prose mention of either symbol cannot satisfy
+    /// it, and the negative half names the shapes a hand-rolled fold reaches for.
+    /// Neither is a proof that no algebra exists — a helper called from the fold
+    /// would carry its body out of this region. What they do is make the drift
+    /// visible at the place a reviewer already reads.
+    #[test]
+    fn or_delta_fold_delegates_to_the_live_seams_and_writes_no_algebra_of_its_own() {
+        let region = slice_between(
+            production_source(),
+            "impl OrDeltaFold for WalRecovery {",
+            "fn current_millis(",
+        );
+
+        // The absence half below is satisfied by an EMPTY region, so a slice that
+        // had collapsed — anchors that drifted onto adjacent text, a fold moved
+        // out from between them — would read as clean rather than as broken.
+        assert!(
+            region.lines().count() > 10,
+            "the sliced fold region is too small to be the fold: the absence assertions below \
+             would pass on it vacuously"
+        );
+
+        for call in [
+            "crdt::normalize_to_or_map(&mut value)",
+            "crdt::apply_or_delta(delta.clone(), &mut value)",
+        ] {
+            assert!(
+                normalized(region).contains(call),
+                "the fold must reach the live OR algebra through `{call}` — the runtime write \
+                 path's own two functions, in that order. A copy here is free to drift from what \
+                 the write path did, and on this path drift is a silently lost mutation"
+            );
+        }
+
+        // Comment lines are dropped so prose cannot turn this red; a TRAILING
+        // comment on a code line survives, which is the bound this strip has.
+        let code: String = region
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        for shape in ["records.", "tombstones.", ".retain(", ".push(", ".dedup("] {
+            assert!(
+                !code.contains(shape),
+                "the fold body touches `{shape}` — reaching into the OR-Map's own fields is how a \
+                 second add-wins / remove-wins / prune implementation starts. The fold normalizes \
+                 and applies; the algebra belongs to `crdt`"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2610,6 +3027,196 @@ mod tests {
                 },
             }),
             "a legacy frame must always-merge (bypass the gate) even over a newer value"
+        );
+    }
+
+    fn or_entry(tag: &str, value: i64) -> OrMapEntry {
+        OrMapEntry {
+            value: TgValue::Int(value),
+            tag: tag.to_string(),
+            timestamp: ts(u64::try_from(value).unwrap()),
+        }
+    }
+
+    fn or_delta_frame(key: &str, delta: OrDelta) -> WalEntry {
+        WalEntry {
+            map: "m".to_string(),
+            key: key.to_string(),
+            op: WalOp::OrDelta { delta },
+            timestamp: None,
+            sequence: 1,
+        }
+    }
+
+    async fn load_or(store: &Arc<dyn MapDataStore>, key: &str) -> Option<RecordValue> {
+        store.load("m", key).await.unwrap()
+    }
+
+    /// The OR delta arm is a store-seeded fold: it loads the key's CURRENT durable
+    /// value, folds ONE delta onto it through the live apply, and writes it back —
+    /// so consecutive frames accumulate IN THE STORE and the live add-wins /
+    /// remove-wins / prune algebra is what recovery reproduces.
+    #[tokio::test]
+    async fn replay_or_delta_folds_onto_the_durable_value() {
+        let store: Arc<dyn MapDataStore> = Arc::new(MergeProbeStore::default());
+
+        // An absent base is a legitimate first write: it folds onto an empty OR-Map.
+        WalRecovery::replay_entry(
+            &store,
+            &or_delta_frame(
+                "k",
+                OrDelta::Add {
+                    entry: or_entry("t1", 1),
+                },
+            ),
+            0,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            load_or(&store, "k").await,
+            Some(RecordValue::OrMap {
+                records: vec![or_entry("t1", 1)],
+                tombstones: vec![],
+            }),
+            "an absent base is a first write, not an error"
+        );
+
+        // The NEXT frame folds onto what the previous one wrote: the store is the
+        // accumulator, so remove-wins and prune see the full accumulated state.
+        for delta in [
+            OrDelta::Remove {
+                tag: "t1".to_string(),
+            },
+            OrDelta::Add {
+                entry: or_entry("t1", 1),
+            },
+        ] {
+            WalRecovery::replay_entry(&store, &or_delta_frame("k", delta), 0, true)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            load_or(&store, "k").await,
+            Some(RecordValue::OrMap {
+                records: vec![],
+                tombstones: vec!["t1".to_string()],
+            }),
+            "remove-wins must survive the fold: a tombstoned tag is never resurrected"
+        );
+
+        WalRecovery::replay_entry(
+            &store,
+            &or_delta_frame(
+                "k",
+                OrDelta::Prune {
+                    tags: vec!["t1".to_string()],
+                },
+            ),
+            0,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            load_or(&store, "k").await,
+            Some(RecordValue::OrMap {
+                records: vec![],
+                tombstones: vec![],
+            }),
+            "prune subtracts from the accumulated tombstone set"
+        );
+    }
+
+    /// The fold normalizes its base through the LIVE normalizer before applying.
+    /// Without that step `apply_or_delta` is a SILENT no-op on a legacy
+    /// `OrTombstones` blob and the mutation is lost with no error at all — the one
+    /// failure this assertion exists to catch.
+    #[tokio::test]
+    async fn replay_or_delta_normalizes_a_legacy_base() {
+        let store: Arc<dyn MapDataStore> = Arc::new(MergeProbeStore::default());
+
+        let legacy_base = RecordValue::OrTombstones {
+            tags: vec!["gone".to_string()],
+        };
+        store.add("m", "legacy", &legacy_base, 0, 0).await.unwrap();
+        WalRecovery::replay_entry(
+            &store,
+            &or_delta_frame(
+                "legacy",
+                OrDelta::Add {
+                    entry: or_entry("live", 2),
+                },
+            ),
+            0,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            load_or(&store, "legacy").await,
+            Some(RecordValue::OrMap {
+                records: vec![or_entry("live", 2)],
+                tombstones: vec!["gone".to_string()],
+            }),
+            "a legacy OrTombstones base must be normalized, not skipped: the delta lands \
+             and the pre-existing tombstones survive"
+        );
+    }
+
+    /// A `WalOp::Store` OR frame inside the window is an ABSOLUTE SET applied in its
+    /// sequence position — a union would keep a tag live that the snapshot
+    /// tombstoned — and a later delta folds onto what that frame wrote.
+    #[tokio::test]
+    async fn replay_or_snapshot_is_absolute_set_then_deltas_fold_onto_it() {
+        let store: Arc<dyn MapDataStore> = Arc::new(MergeProbeStore::default());
+
+        store
+            .add(
+                "m",
+                "mixed",
+                &RecordValue::OrMap {
+                    records: vec![or_entry("a", 3)],
+                    tombstones: vec![],
+                },
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        let snapshot = RecordValue::OrMap {
+            records: vec![],
+            tombstones: vec!["a".to_string()],
+        };
+        WalRecovery::replay_entry(&store, &record_frame("mixed", snapshot.clone()), 0, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            load_or(&store, "mixed").await,
+            Some(snapshot),
+            "a snapshot frame replaces the accumulated value (absolute set), never unions with it"
+        );
+
+        for delta in [
+            OrDelta::Add {
+                entry: or_entry("a", 3),
+            },
+            OrDelta::Add {
+                entry: or_entry("b", 4),
+            },
+        ] {
+            WalRecovery::replay_entry(&store, &or_delta_frame("mixed", delta), 0, true)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            load_or(&store, "mixed").await,
+            Some(RecordValue::OrMap {
+                records: vec![or_entry("b", 4)],
+                tombstones: vec!["a".to_string()],
+            }),
+            "deltas after a snapshot fold onto the snapshot: the tag it tombstoned stays dead"
         );
     }
 
@@ -3726,6 +4333,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_or_delta_survivor_does_not_subsume_on_coalesce() {
+        // Read off the SURVIVOR's own framing: a per-op delta carries only its
+        // own mutation, so it cannot make a predecessor redundant. `true` here
+        // would early-resolve the retired frame and permanently lose the
+        // mutation it carries — a delta, unlike a snapshot, never self-heals.
+        assert!(
+            !WalOp::OrDelta {
+                delta: OrDelta::Remove {
+                    tag: "tag-1".to_string(),
+                },
+            }
+            .subsumes_on_coalesce(),
+            "an OR delta survivor carries only its own mutation, so it subsumes nothing"
+        );
+        assert!(
+            !WalOp::OrDelta {
+                delta: OrDelta::Add {
+                    entry: OrMapEntry {
+                        value: TgValue::Int(1),
+                        tag: "tag-2".to_string(),
+                        timestamp: Timestamp {
+                            millis: 1,
+                            counter: 0,
+                            node_id: "n1".to_string(),
+                        },
+                    },
+                },
+            }
+            .subsumes_on_coalesce(),
+            "the answer is a property of the framing, not of the mutation kind"
+        );
+        assert!(
+            !WalOp::OrDelta {
+                delta: OrDelta::Prune {
+                    tags: vec!["tag-3".to_string()],
+                },
+            }
+            .subsumes_on_coalesce(),
+            "the answer is a property of the framing, not of the mutation kind"
+        );
+    }
+
     #[tokio::test]
     async fn a_flush_key_only_terminal_advances_the_durable_sidecar() {
         use crate::storage::datastores::{WalBootstrap, WriteBehindConfig, WriteBehindDataStore};
@@ -3869,6 +4519,119 @@ mod tests {
             before + 1,
             "The pre-check stops BEFORE the write path, so the sequence never \
              reaches the residual (B) disposition — a second record would mean it did"
+        );
+    }
+
+    /// The structural half of the no-emitter proof: whatever code constructs a
+    /// delta frame, it cannot make one DURABLE in a build that has no writer.
+    ///
+    /// This is what a source scan cannot do. A scan asks whether any text in the
+    /// tree looks like an emitter, and every such scan is evadable by a shape it
+    /// was not written to see. This asks the opposite question — whether a delta
+    /// frame ever arrives at the one function that puts bytes on disk — and gets
+    /// the answer from the frame itself, so an aliased import, a macro-generated
+    /// body or a `build.rs`-produced emitter fails here identically.
+    #[tokio::test]
+    async fn appending_an_or_delta_frame_fail_stops_at_tier_p() {
+        // Serialised against every other fail-stop assertion: the observation log
+        // is process-global, so a concurrent tier would make the index read below
+        // return someone else's entry.
+        let _guard = FAIL_STOP_TEST_LOCK.lock().await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let wal = Arc::new(WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap());
+
+        let before = WalWriter::test_fail_stop_observations().len();
+
+        // Run the append on its own task so the fail-stop's test-mode panic is
+        // caught by the JoinHandle instead of unwinding the test itself.
+        let wal_clone = Arc::clone(&wal);
+        let outcome = tokio::spawn(async move {
+            wal_clone
+                .append(0, &or_delta_frame("k", OrDelta::Remove { tag: "t".into() }))
+                .await
+        })
+        .await
+        .err();
+        assert!(
+            outcome.is_some_and(|e| e.is_panic()),
+            "a delta frame reaching the append boundary must fail-stop, not return: nothing in \
+             this build may write one, so it is a programming bug rather than an I/O condition"
+        );
+
+        let observed = WalWriter::test_fail_stop_observations();
+        assert_eq!(
+            observed.get(before),
+            Some(&WalFailStopTier::P),
+            "an unwritable frame kind is a programming bug caught before framing: tier P, not \
+             tier B"
+        );
+        assert_eq!(
+            observed.len(),
+            before + 1,
+            "the check runs BEFORE the encode and the write path, so the entry never reaches the \
+             residual (B) disposition — a second record would mean it did"
+        );
+    }
+
+    /// Non-vacuity of the guard above, in both directions.
+    ///
+    /// Without this a `WalWriter` that refused EVERY append would satisfy the
+    /// fail-stop test just as well, and the harness seam that permits one
+    /// injected frame could rot with nothing noticing. It also pins the permit's
+    /// SCOPE: it is ONE-SHOT, so the frame after it fail-stops like any other.
+    /// That is what keeps a real emitter from riding through the window an
+    /// injecting harness opens — including across the injected append's own
+    /// `.await`, where a mode flag would be open to every concurrent appender.
+    #[tokio::test]
+    async fn the_or_delta_append_guard_refuses_only_delta_frames_and_only_while_armed() {
+        let _guard = FAIL_STOP_TEST_LOCK.lock().await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let wal = Arc::new(WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap());
+
+        // A frame kind this build DOES write is unaffected by the guard.
+        wal.append(0, &make_wal_entry(1))
+            .await
+            .expect("a Store frame must append with the guard armed");
+
+        // The test seam is the only thing that opens it — and it opens it for
+        // real: the frame kind that fail-stops above now reaches disk.
+        wal.test_permit_one_or_delta_append();
+        assert!(
+            wal.test_or_delta_permit_outstanding(),
+            "a granted permit must be observable, or the consumption assertion below proves nothing"
+        );
+        let mut delta = or_delta_frame("k", OrDelta::Remove { tag: "t".into() });
+        delta.sequence = 2;
+        wal.append(0, &delta)
+            .await
+            .expect("the injection seam must be able to put a synthetic delta frame on disk");
+
+        // The permit is ONE-SHOT: the append consumed it, so the refusal is back
+        // without anyone having to close it.
+        assert!(
+            !wal.test_or_delta_permit_outstanding(),
+            "the append must CONSUME the permit rather than leave a mode open across it"
+        );
+        let before = WalWriter::test_fail_stop_observations().len();
+        let wal_clone = Arc::clone(&wal);
+        let outcome = tokio::spawn(async move {
+            let mut delta = or_delta_frame("k", OrDelta::Remove { tag: "t".into() });
+            delta.sequence = 3;
+            wal_clone.append(0, &delta).await
+        })
+        .await
+        .err();
+        assert!(
+            outcome.is_some_and(|e| e.is_panic()),
+            "the permit must cover ONE append: a second delta frame is an emitter, and must \
+             fail-stop like any other"
+        );
+        assert_eq!(
+            WalWriter::test_fail_stop_observations().get(before),
+            Some(&WalFailStopTier::P),
+            "the re-armed refusal is the same programming-bug disposition, not a degraded one"
         );
     }
 

@@ -261,6 +261,31 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Discovered by:** SPEC-354 Review v2 (cataloguing the gate-free warrant's premises).
 - **Status:** decided, **enforced**.
 
+### TG-WAL-012: A `WalOp::Store` OR frame is a COMPLETE post-state snapshot of one key
+
+- **Scope:** `WalOp::Store` frames carrying `WalStorePayload::Record(RecordValue::OrMap { .. })`
+  — the frame kind legacy WALs hold and bulk/SYNC ingestion still produces — as read by
+  `WalRecovery::replay_entry`'s absolute-set `add`.
+- **Statement:** such a frame carries the key's WHOLE post-state as of its own sequence: the live
+  record set AND the tombstone set. Every effect at or below that sequence, removes included, is
+  therefore already inside it. No partial, live-set-only or field-projected OR snapshot is framed.
+- **Maintaining code:** the payload TYPE, not a runtime check. `WalEntry` is per-key and its
+  `value` is a `WalStorePayload::Record(RecordValue)` — one whole value — and `RecordValue::OrMap`
+  carries `records` and `tombstones` as non-optional fields. A partial OR snapshot is
+  unrepresentable, not merely unwritten.
+- **Enforcing test:** `wal_harness::cases::tg_or_003_ac3c_snapshot_frame_is_an_absolute_set_not_a_union`
+  enforces the CONSEQUENCE — a snapshot tombstoning a live durable tag must REPLACE the slot, not
+  union with it. The property ITSELF is COMPILER/TYPE-backed, the two-kinds-of-backing precedent of
+  `TG-WAL-009`'s premise (b): it holds by construction of the payload type, so there is no mutation
+  that could redden a behavioural test without failing to compile first, and it needs no test of
+  its own for the same reason premise (b) cites none.
+- **Violation consequence:** the absolute-set `add` in `replay_entry` becomes UNSAFE. Completeness,
+  not recency, is what licenses that replace: tombstones a partial snapshot omitted would come back
+  from the store's older value, resurrecting deleted tags after a crash. It is the load-bearing
+  precondition of the OR fold's warrant (`TG-OR-003`).
+- **Discovered by:** SPEC-349b Review v1 — the one precondition of that warrant left uncatalogued.
+- **Status:** decided, **enforced (type-backed)**.
+
 ### TG-WB-001: The flushed watermark is prefix-complete — no mid-range hole
 
 - **Scope:** entry-ordering-space `pending_seqs` / `flushed_watermark()` (tombstone fence
@@ -340,7 +365,10 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 
 ### TG-OR-003: OR delta-fold recovery is semantic-set-equivalent to the snapshot path
 
-- **Scope:** `OrDelta`/`OrDeltaFold` (SPEC-346 types; unwired until SPEC-349).
+- **Scope:** `OrDelta`/`OrDeltaFold`, wired on the RECOVERY READ side: `WalRecovery::replay_entry`'s
+  `WalOp::OrDelta` arm and `impl OrDeltaFold for WalRecovery`. No emitter exists yet — every frame the
+  enforcing test folds is synthesised at the codec level and injected through the harness's observed
+  append seam.
 - **Statement:** folding any op sequence through the delta path and the full-snapshot path yields
   equal `or_map_semantic_view` (live set + tombstones + pruned), with the durable store as fold
   base and snapshot frames as in-order absolute-set inputs.
@@ -350,13 +378,35 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   OR_REMOVE and epoch-prune call sites all route through (SPEC-349a). The delta fold must delegate to
   that symbol rather than re-implement the algebra; a second hand-written copy is what this invariant
   forbids, and the symbol is what SPEC-349b's delegation is checked against.
-- **Enforcing test:** `NAKED — the OR delta-fold differential recovery proof does not exist yet.
-  It lands as a case on the cross-incarnation harness
-  (packages/server-rust/src/storage/datastores/wal_harness/), driven by SPEC-349b — not a fork`.
+- **Enforcing test:** the `tg_or_003_*` case family in
+  `packages/server-rust/src/storage/datastores/wal_harness/cases.rs` — a case family on the
+  cross-incarnation harness, driven through its existing `Driver` and reference model, NOT a fork.
+  14 cases: `tg_or_003_ac1_recovery_equivalence_over_every_fold_base_shape` (all three R1.3 fold-base
+  shapes — durable `OrMap`, absent, legacy `OrTombstones` — plus the tombstone-bytes gauge via the real
+  `storage::record::reconcile_tombstone_bytes` boot walk), `…ac3a…` (snapshot above the watermark with
+  an empty store), `…ac3b…` (snapshot-only legacy window), `…ac3c…` (absolute-set: a snapshot
+  tombstoning a live durable tag), `…ac3d…` (cross-kind/legacy base under a delta, post-state pinned
+  literally), `…ac4…` (`Prune` as pure tombstone-set subtraction), `…ac5…` (single-algebra
+  behavioural: remove-wins suppression of a re-added tombstoned tag), `…ac16…` (the injection rides the
+  observed append seam only), `…ac2…` (stranded base + re-fold idempotency across `mark_applied` +
+  segment GC), `…ac7b…` (the non-subsuming survivor's carry-forward route), `…ac9…` (no production
+  construction site — ADVISORY hygiene, an early warning that names the offending file at review
+  time; the property itself is held by `WalWriter::append`'s tier-P refusal of any delta frame, which
+  reads the frame rather than the source and so is blind to no emitter shape),
+  `…ac9_injected_frames_carry_the_golden_on_disk_shape…` (the harness's synthetic frames bound to the
+  checked-in golden bytes), `…ac10ii_b…` (legacy `Store`/`Remove`-only replay), `…ac11d…` (re-replay
+  of an applied OR frame is a no-op on set AND gauge — the OR merge-idempotency residual).
+  Mutation-proven: deleting the fold's `normalize_to_or_map` call reddens exactly the non-`OrMap`
+  base-shape arms while the `OrMap`-only cases stay green; dropping `apply_or_delta`'s tombstone dedup
+  reddens exactly the re-fold arms; and an emitter hidden behind an `include!` of a non-`.rs` fragment
+  passes the scan while fail-stopping the append guard, which is what makes the demotion above honest
+  rather than a downgrade.
 - **Violation consequence:** silent post-crash divergence of OR state — the class the oracle was
   built to kill.
 - **Discovered by:** SPEC-346 design.
-- **Status:** open (SPEC-349a/b).
+- **Status:** decided, **enforced** (reader side). The emitter lands separately; until it does, the
+  invariant is proven against synthetic frames, which is the point of landing the reader first — an
+  unfoldable delta frame on disk is a permanently lost mutation, not a self-healing one.
 
 ### TG-OR-004: The tombstone-bytes gauge tracks the REAL add and prune paths, test-isolatable
 
