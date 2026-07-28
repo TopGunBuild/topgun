@@ -480,17 +480,25 @@ pub struct WalWriter {
     /// Batched-commit group-commit timer: shared notifier woken every ~10 ms.
     /// When `policy == Batched`, the writer also fsyncs after every 100 ops.
     batch_flush_tx: tokio::sync::watch::Sender<()>,
-    /// Whether this writer may put a `WalOp::OrDelta` frame on disk.
+    /// A ONE-SHOT permit to put a single `WalOp::OrDelta` frame on disk.
     ///
-    /// `false` in the one production constructor, and the ONLY thing that can
-    /// set it is a `#[cfg(test)]` seam, so in a release build no code path can
-    /// reach the `true` state at all. That is what makes the refusal in
-    /// `append` a structural no-emitter guard rather than a convention: the
-    /// reader lands before the writer (`TG-OR-003`), so a delta frame reaching
-    /// the durable log today is a programming bug no matter which shape of code
-    /// produced it — an aliased import, a macro, a generated body. Whichever
-    /// path emits it dies loudly at the boundary that would have made it
-    /// durable.
+    /// `false` in the one production constructor, and the only thing that sets
+    /// it is a `#[cfg(test)]` seam — the field is private, so nothing outside
+    /// this module can name it at all, and in a release build nothing can reach
+    /// the permitted state. That is what makes the refusal in `append` a
+    /// structural no-emitter guard rather than a convention: the reader lands
+    /// before the writer (`TG-OR-003`), so a delta frame reaching the durable
+    /// log today is a programming bug no matter which shape of code produced it
+    /// — an aliased import, a macro, a generated body. Whichever path emits it
+    /// dies loudly at the boundary that would have made it durable.
+    ///
+    /// **One-shot, not a mode.** `append` CONSUMES the permit with a
+    /// compare-exchange, so it admits exactly one frame per grant. A permit held
+    /// open across a `.await` would otherwise be open for every concurrent
+    /// appender on this writer, which is precisely the window an injecting
+    /// harness must not leave for a real emitter to slip through: with the
+    /// permit consumed, a second delta frame racing the injected one fail-stops
+    /// whichever of the two loses.
     ///
     /// Not `#[cfg(test)]` itself, deliberately: a field that vanished from a
     /// release build would take the guard with it and leave production the only
@@ -1122,9 +1130,15 @@ impl Wal for WalWriter {
         // against every shape of emitter, including the ones a text scan cannot
         // see. Checked first, so the entry is not even encoded.
         if matches!(entry.op, WalOp::OrDelta { .. })
-            && !self
+            && self
                 .allow_or_delta
-                .load(std::sync::atomic::Ordering::Relaxed)
+                .compare_exchange(
+                    true,
+                    false,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .is_err()
         {
             wal_fail_stop(
                 WalFailStopTier::P,
@@ -2206,17 +2220,28 @@ fn current_millis() -> i64 {
 /// cannot see them at all.
 #[cfg(test)]
 impl WalWriter {
-    /// Lets this writer accept `WalOp::OrDelta` frames, or stops it again.
+    /// Grants a ONE-SHOT permit for the next `WalOp::OrDelta` append.
     ///
-    /// The ONLY thing that can clear the append guard, and `#[cfg(test)]` so a
-    /// release build cannot name it. A harness that puts synthetic delta frames
-    /// on disk opens the guard for exactly the append it injects and closes it
-    /// again straight after, so every OTHER write in the same run — including
-    /// the ones that ride the real write path — stays under the refusal and
-    /// would fail-stop if that path ever started emitting deltas.
-    pub(crate) fn test_set_allow_or_delta(&self, allow: bool) {
+    /// The only thing that opens the append guard, and `#[cfg(test)]` so a
+    /// release build cannot name it. `append` consumes the permit, so a harness
+    /// that injects synthetic delta frames grants one per injected frame and
+    /// every OTHER write in the same run — including the ones riding the real
+    /// write path — stays under the refusal, even across the injected append's
+    /// own `.await`.
+    pub(crate) fn test_permit_one_or_delta_append(&self) {
         self.allow_or_delta
-            .store(allow, std::sync::atomic::Ordering::Relaxed);
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether a granted permit is still unconsumed.
+    ///
+    /// A permit that outlives the append it was granted for is a hole: it would
+    /// admit some LATER delta frame, which is the emitter this guard exists to
+    /// catch. The harness asserts on this after every injection, the same
+    /// exactly-one discipline it applies to the append observer.
+    pub(crate) fn test_or_delta_permit_outstanding(&self) -> bool {
+        self.allow_or_delta
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Seals the partition's active segment in place.
@@ -2472,6 +2497,15 @@ mod tests {
             production_source(),
             "impl OrDeltaFold for WalRecovery {",
             "fn current_millis(",
+        );
+
+        // The absence half below is satisfied by an EMPTY region, so a slice that
+        // had collapsed — anchors that drifted onto adjacent text, a fold moved
+        // out from between them — would read as clean rather than as broken.
+        assert!(
+            region.lines().count() > 10,
+            "the sliced fold region is too small to be the fold: the absence assertions below \
+             would pass on it vacuously"
         );
 
         for call in [
@@ -4518,11 +4552,12 @@ mod tests {
     /// Non-vacuity of the guard above, in both directions.
     ///
     /// Without this a `WalWriter` that refused EVERY append would satisfy the
-    /// fail-stop test just as well, and the harness seam that opens the guard
-    /// for one injected frame could rot with nothing noticing. It also pins the
-    /// seam's SCOPE: closing it re-arms the refusal, which is what keeps every
-    /// other write in an injection run — the ones riding the real write path —
-    /// under the guard.
+    /// fail-stop test just as well, and the harness seam that permits one
+    /// injected frame could rot with nothing noticing. It also pins the permit's
+    /// SCOPE: it is ONE-SHOT, so the frame after it fail-stops like any other.
+    /// That is what keeps a real emitter from riding through the window an
+    /// injecting harness opens — including across the injected append's own
+    /// `.await`, where a mode flag would be open to every concurrent appender.
     #[tokio::test]
     async fn the_or_delta_append_guard_refuses_only_delta_frames_and_only_while_armed() {
         let _guard = FAIL_STOP_TEST_LOCK.lock().await;
@@ -4537,15 +4572,23 @@ mod tests {
 
         // The test seam is the only thing that opens it — and it opens it for
         // real: the frame kind that fail-stops above now reaches disk.
-        wal.test_set_allow_or_delta(true);
+        wal.test_permit_one_or_delta_append();
+        assert!(
+            wal.test_or_delta_permit_outstanding(),
+            "a granted permit must be observable, or the consumption assertion below proves nothing"
+        );
         let mut delta = or_delta_frame("k", OrDelta::Remove { tag: "t".into() });
         delta.sequence = 2;
         wal.append(0, &delta)
             .await
             .expect("the injection seam must be able to put a synthetic delta frame on disk");
 
-        // Closing it re-arms the refusal within the same writer's lifetime.
-        wal.test_set_allow_or_delta(false);
+        // The permit is ONE-SHOT: the append consumed it, so the refusal is back
+        // without anyone having to close it.
+        assert!(
+            !wal.test_or_delta_permit_outstanding(),
+            "the append must CONSUME the permit rather than leave a mode open across it"
+        );
         let before = WalWriter::test_fail_stop_observations().len();
         let wal_clone = Arc::clone(&wal);
         let outcome = tokio::spawn(async move {
@@ -4557,8 +4600,8 @@ mod tests {
         .err();
         assert!(
             outcome.is_some_and(|e| e.is_panic()),
-            "the seam must be scoped to the appends it wraps: a delta frame appended after it \
-             closes is an emitter, and must fail-stop like any other"
+            "the permit must cover ONE append: a second delta frame is an emitter, and must \
+             fail-stop like any other"
         );
         assert_eq!(
             WalWriter::test_fail_stop_observations().get(before),
