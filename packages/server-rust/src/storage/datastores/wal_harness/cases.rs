@@ -2005,8 +2005,78 @@ fn tg_or_003_ac9_no_production_path_constructs_a_delta_frame() {
     const WAL_MOD: &str = include_str!("../../wal/mod.rs");
     const WAL_FORMAT: &str = include_str!("../../wal/format.rs");
 
-    // Guard the classifier first: an instrument that reports zero because it can see
-    // nothing is not a proof. The harness's own injection seam builds a real frame.
+    // Guard the classifier FIRST: every belt below is a zero, and a zero from an
+    // instrument that can see nothing is not a proof.
+    assert_classifier_discriminates();
+
+    for (name, src) in [("wal/mod.rs", WAL_MOD), ("wal/format.rs", WAL_FORMAT)] {
+        let production = production_source(name, src);
+        assert_eq!(
+            or_delta_construction_sites(&production),
+            0,
+            "AC9: {name}'s production code must construct no delta frame — adding an emitter here \
+             collapses the reader-before-writer order this proof rests on"
+        );
+    }
+
+    // Non-vacuity of that scan itself: `wal/mod.rs`'s production code DOES name the
+    // variant (the coalesce arm and the replay arm), so a source that had been excised
+    // down to nothing would be caught here rather than reported as clean.
+    assert!(
+        production_source("wal/mod.rs", WAL_MOD).contains("WalOp::OrDelta"),
+        "AC9: the excised source must still contain the production replay arm, otherwise the zero \
+         above is an artefact of scanning an empty string"
+    );
+
+    let package = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let lib_sources = walked_sources(package, &package.join("src"));
+    let package_sources = walked_sources(package, package);
+
+    // Non-vacuity of the WALK, which both belts below rest on: a walk that returned
+    // nothing would satisfy every assertion made over it. It must reach the file the
+    // production prefix above came from, and the package walk must genuinely reach
+    // further than the `src/` one, or its extra scope over benches is imaginary.
+    assert!(
+        lib_sources
+            .iter()
+            .any(|(rel, _)| rel == "src/storage/wal/mod.rs"),
+        "AC9: the source walk must reach the WAL module, otherwise the belts below scan nothing"
+    );
+    assert!(
+        package_sources.len() > lib_sources.len(),
+        "AC9: the package walk must reach sources outside `src/` — that extra reach is what \
+         covers the bench binaries"
+    );
+
+    // Belt (2): by file, over `src/`.
+    for (rel, src) in &lib_sources {
+        assert!(
+            !src.contains("WalOp::OrDelta") || is_delta_frame_home(rel),
+            "AC9: {rel} names the delta variant, but only the WAL codec and the crash harness \
+             may — a mention outside them is where an emitter would appear"
+        );
+    }
+
+    // Belt (3): by construction, over the whole package. Scoped by what the code
+    // DOES rather than by where it sits, so an exhaustive `WalOp` match arm in a
+    // bench — a destructuring pattern the compiler forces, which builds nothing —
+    // passes on its own merits instead of needing an exemption.
+    for (rel, src) in &package_sources {
+        assert!(
+            or_delta_construction_sites(src) == 0 || is_delta_frame_home(rel),
+            "AC9: {rel} CONSTRUCTS a delta frame outside the WAL codec and the crash harness"
+        );
+    }
+}
+
+/// Every discrimination the AC9 belts borrow from the classifier, asserted before any
+/// of them reads a zero from it.
+///
+/// Lifted out of the test body so the belts stay legible as three belts. Each sample
+/// below is a shape the tree itself never writes — which is exactly why it needs a
+/// sample: an arm no source exercises is policed by untested code.
+fn assert_classifier_discriminates() {
+    // The harness's own injection seam builds a real frame.
     assert_eq!(
         or_delta_construction_sites(include_str!("driver.rs")),
         1,
@@ -2089,65 +2159,6 @@ fn tg_or_003_ac9_no_production_path_constructs_a_delta_frame() {
         "AC9: comments, string literals, and unbalanced braces construct nothing — a scan that \
          counted them would block unrelated work with a failure over text the compiler never sees"
     );
-
-    for (name, src) in [("wal/mod.rs", WAL_MOD), ("wal/format.rs", WAL_FORMAT)] {
-        let production = production_source(name, src);
-        assert_eq!(
-            or_delta_construction_sites(&production),
-            0,
-            "AC9: {name}'s production code must construct no delta frame — adding an emitter here \
-             collapses the reader-before-writer order this proof rests on"
-        );
-    }
-
-    // Non-vacuity of that scan itself: `wal/mod.rs`'s production code DOES name the
-    // variant (the coalesce arm and the replay arm), so a source that had been excised
-    // down to nothing would be caught here rather than reported as clean.
-    assert!(
-        production_source("wal/mod.rs", WAL_MOD).contains("WalOp::OrDelta"),
-        "AC9: the excised source must still contain the production replay arm, otherwise the zero \
-         above is an artefact of scanning an empty string"
-    );
-
-    let package = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let lib_sources = walked_sources(package, &package.join("src"));
-    let package_sources = walked_sources(package, package);
-
-    // Non-vacuity of the WALK, which both belts below rest on: a walk that returned
-    // nothing would satisfy every assertion made over it. It must reach the file the
-    // production prefix above came from, and the package walk must genuinely reach
-    // further than the `src/` one, or its extra scope over benches is imaginary.
-    assert!(
-        lib_sources
-            .iter()
-            .any(|(rel, _)| rel == "src/storage/wal/mod.rs"),
-        "AC9: the source walk must reach the WAL module, otherwise the belts below scan nothing"
-    );
-    assert!(
-        package_sources.len() > lib_sources.len(),
-        "AC9: the package walk must reach sources outside `src/` — that extra reach is what \
-         covers the bench binaries"
-    );
-
-    // Belt (2): by file, over `src/`.
-    for (rel, src) in &lib_sources {
-        assert!(
-            !src.contains("WalOp::OrDelta") || is_delta_frame_home(rel),
-            "AC9: {rel} names the delta variant, but only the WAL codec and the crash harness \
-             may — a mention outside them is where an emitter would appear"
-        );
-    }
-
-    // Belt (3): by construction, over the whole package. Scoped by what the code
-    // DOES rather than by where it sits, so an exhaustive `WalOp` match arm in a
-    // bench — a destructuring pattern the compiler forces, which builds nothing —
-    // passes on its own merits instead of needing an exemption.
-    for (rel, src) in &package_sources {
-        assert!(
-            or_delta_construction_sites(src) == 0 || is_delta_frame_home(rel),
-            "AC9: {rel} CONSTRUCTS a delta frame outside the WAL codec and the crash harness"
-        );
-    }
 }
 
 /// The files a synthetic delta frame may be built in: the WAL codec's own tests and
