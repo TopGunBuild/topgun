@@ -314,16 +314,16 @@ mod tests {
         }
     }
 
-    /// Mirror of the private `normalize_to_or_map` in `crdt.rs`: upgrade a legacy
-    /// non-`OrMap` slot to the unified `OrMap` shape in place before an in-place merge.
+    /// The LIVE normalize the production OR merge closures call, not a copy of it.
+    ///
+    /// This side of the differential exists to mirror the production write path, so a
+    /// second hand-written normalize here would be the one thing it must not be: a
+    /// fork that keeps agreeing with the path under test while both drift away from
+    /// the real algebra. (The legacy arm's `read_state` IS a deliberate
+    /// reimplementation — it reproduces the OLD get→build→put behaviour, which is
+    /// exactly what the differential compares against.)
     fn normalize(value: &mut RecordValue) {
-        if !matches!(value, RecordValue::OrMap { .. }) {
-            let (records, tombstones) = read_state(Some(std::mem::replace(value, empty_ormap())));
-            *value = RecordValue::OrMap {
-                records,
-                tombstones,
-            };
-        }
+        crate::service::domain::crdt::normalize_to_or_map(value);
     }
 
     struct Harness {
