@@ -381,7 +381,7 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Enforcing test:** the `tg_or_003_*` case family in
   `packages/server-rust/src/storage/datastores/wal_harness/cases.rs` — a case family on the
   cross-incarnation harness, driven through its existing `Driver` and reference model, NOT a fork.
-  13 cases: `tg_or_003_ac1_recovery_equivalence_over_every_fold_base_shape` (all three R1.3 fold-base
+  14 cases: `tg_or_003_ac1_recovery_equivalence_over_every_fold_base_shape` (all three R1.3 fold-base
   shapes — durable `OrMap`, absent, legacy `OrTombstones` — plus the tombstone-bytes gauge via the real
   `storage::record::reconcile_tombstone_bytes` boot walk), `…ac3a…` (snapshot above the watermark with
   an empty store), `…ac3b…` (snapshot-only legacy window), `…ac3c…` (absolute-set: a snapshot
@@ -390,11 +390,17 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   behavioural: remove-wins suppression of a re-added tombstoned tag), `…ac16…` (the injection rides the
   observed append seam only), `…ac2…` (stranded base + re-fold idempotency across `mark_applied` +
   segment GC), `…ac7b…` (the non-subsuming survivor's carry-forward route), `…ac9…` (no production
-  construction site), `…ac10ii_b…` (legacy `Store`/`Remove`-only replay), `…ac11d…` (re-replay of an
-  applied OR frame is a no-op on set AND gauge — the OR merge-idempotency residual). Mutation-proven:
-  deleting the fold's `normalize_to_or_map` call reddens exactly the non-`OrMap` base-shape arms while
-  the `OrMap`-only cases stay green; dropping `apply_or_delta`'s tombstone dedup reddens exactly the
-  re-fold arms.
+  construction site — ADVISORY hygiene, an early warning that names the offending file at review
+  time; the property itself is held by `WalWriter::append`'s tier-P refusal of any delta frame, which
+  reads the frame rather than the source and so is blind to no emitter shape),
+  `…ac9_injected_frames_carry_the_golden_on_disk_shape…` (the harness's synthetic frames bound to the
+  checked-in golden bytes), `…ac10ii_b…` (legacy `Store`/`Remove`-only replay), `…ac11d…` (re-replay
+  of an applied OR frame is a no-op on set AND gauge — the OR merge-idempotency residual).
+  Mutation-proven: deleting the fold's `normalize_to_or_map` call reddens exactly the non-`OrMap`
+  base-shape arms while the `OrMap`-only cases stay green; dropping `apply_or_delta`'s tombstone dedup
+  reddens exactly the re-fold arms; and an emitter hidden behind an `include!` of a non-`.rs` fragment
+  passes the scan while fail-stopping the append guard, which is what makes the demotion above honest
+  rather than a downgrade.
 - **Violation consequence:** silent post-crash divergence of OR state — the class the oracle was
   built to kill.
 - **Discovered by:** SPEC-346 design.
