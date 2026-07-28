@@ -339,7 +339,7 @@ pub(crate) struct RunOutcome {
     /// non-OR base normalizes to an EMPTY OR-Map, so the prior value is discarded
     /// and only the delta's own effect survives.
     pub final_values: Vec<(Key, Option<RecordValue>)>,
-    /// The SPEC-345 tombstone-bytes gauge as the real boot-time reconciliation walk
+    /// The tombstone-bytes gauge (`TG-OR-004`) as the real boot-time reconciliation walk
     /// recomputes it over the final durable keyspace — the same function the server
     /// bootstrap runs after `WalRecovery::run`, never a second copy of its accounting.
     /// Scoped to an isolated gauge sink so a harness run never perturbs the process

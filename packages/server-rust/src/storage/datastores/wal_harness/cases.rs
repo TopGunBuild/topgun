@@ -1238,7 +1238,7 @@ fn tombstone_bytes(tags: &[&str]) -> u64 {
 }
 
 /// AC1 — recovery equivalence across a modelled incarnation loss, over all THREE
-/// fold-base shapes R1.3 distinguishes, plus the SPEC-345 gauge.
+/// fold-base shapes R1.3 distinguishes, plus the tombstone-bytes gauge (`TG-OR-004`).
 ///
 /// One case, three keys, one crash:
 /// - key 0: a durable `RecordValue::OrMap` base (snapshot flushed, then deltas above
@@ -1298,7 +1298,7 @@ fn tg_or_003_ac1_recovery_equivalence_over_every_fold_base_shape() {
     assert_eq!(
         outcome.reconciled_tombstone_bytes,
         u64::try_from("tag-a".len() + "tag-d".len()).expect("tombstone byte total fits u64"),
-        "AC1: the SPEC-345 gauge, recomputed by the real boot-time reconciliation over the \
+        "AC1: the tombstone-bytes gauge, recomputed by the real boot-time reconciliation over the \
          recovered keyspace, must account for exactly the surviving tombstones"
     );
 }
