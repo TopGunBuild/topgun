@@ -1803,7 +1803,10 @@ impl WalRecovery {
                 // already inside it. Completeness, not recency, is the load-
                 // bearing condition: a partial or live-set-only OR snapshot
                 // would make this replace UNSAFE, because the tombstones it
-                // omitted would come back from the store's older value.
+                // omitted would come back from the store's older value. That
+                // completeness is TG-WAL-012, and it holds by the payload TYPE
+                // — `WalEntry` is per-key and carries a whole `RecordValue`,
+                // whose `OrMap` shape has no partial form to frame.
                 //
                 // A naive union/merge here would be a correctness trap in the
                 // other direction: the store's pre-crash value may still hold a
@@ -1811,9 +1814,13 @@ impl WalRecovery {
                 // it. Deletes do not self-heal.
                 //
                 // Ordering and window bounds are inherited, not re-derived here:
-                // the applied watermark is prefix-complete and never leads
-                // durable state (TG-WB-001 / TG-WAL-003), and the window is
-                // replayed strictly ascending (TG-WAL-011).
+                // the APPLIED watermark is prefix-complete and never leads
+                // durable state (TG-WAL-005 — the wal_seq-space tracker; NOT
+                // TG-WB-001, which is the entry-space FLUSHED watermark and
+                // explicitly independent of it), sequences are minted strictly
+                // monotone per partition in that same wal_seq space at append
+                // time (TG-WAL-010), and the window is replayed strictly
+                // ascending in it (TG-WAL-011).
                 inner_store
                     .add(
                         &entry.map,

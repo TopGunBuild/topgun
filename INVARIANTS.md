@@ -261,6 +261,31 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Discovered by:** SPEC-354 Review v2 (cataloguing the gate-free warrant's premises).
 - **Status:** decided, **enforced**.
 
+### TG-WAL-012: A `WalOp::Store` OR frame is a COMPLETE post-state snapshot of one key
+
+- **Scope:** `WalOp::Store` frames carrying `WalStorePayload::Record(RecordValue::OrMap { .. })`
+  — the frame kind legacy WALs hold and bulk/SYNC ingestion still produces — as read by
+  `WalRecovery::replay_entry`'s absolute-set `add`.
+- **Statement:** such a frame carries the key's WHOLE post-state as of its own sequence: the live
+  record set AND the tombstone set. Every effect at or below that sequence, removes included, is
+  therefore already inside it. No partial, live-set-only or field-projected OR snapshot is framed.
+- **Maintaining code:** the payload TYPE, not a runtime check. `WalEntry` is per-key and its
+  `value` is a `WalStorePayload::Record(RecordValue)` — one whole value — and `RecordValue::OrMap`
+  carries `records` and `tombstones` as non-optional fields. A partial OR snapshot is
+  unrepresentable, not merely unwritten.
+- **Enforcing test:** `wal_harness::cases::tg_or_003_ac3c_snapshot_frame_is_an_absolute_set_not_a_union`
+  enforces the CONSEQUENCE — a snapshot tombstoning a live durable tag must REPLACE the slot, not
+  union with it. The property ITSELF is COMPILER/TYPE-backed, the two-kinds-of-backing precedent of
+  `TG-WAL-009`'s premise (b): it holds by construction of the payload type, so there is no mutation
+  that could redden a behavioural test without failing to compile first, and it needs no test of
+  its own for the same reason premise (b) cites none.
+- **Violation consequence:** the absolute-set `add` in `replay_entry` becomes UNSAFE. Completeness,
+  not recency, is what licenses that replace: tombstones a partial snapshot omitted would come back
+  from the store's older value, resurrecting deleted tags after a crash. It is the load-bearing
+  precondition of the OR fold's warrant (`TG-OR-003`).
+- **Discovered by:** SPEC-349b Review v1 — the one precondition of that warrant left uncatalogued.
+- **Status:** decided, **enforced (type-backed)**.
+
 ### TG-WB-001: The flushed watermark is prefix-complete — no mid-range hole
 
 - **Scope:** entry-ordering-space `pending_seqs` / `flushed_watermark()` (tombstone fence
