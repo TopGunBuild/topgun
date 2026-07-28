@@ -1946,14 +1946,20 @@ fn tg_or_003_ac7b_an_or_delta_survivor_carries_the_retired_sequences_forward() {
 /// name would report both. A brace group of `..`, or one followed by `=>`, is a
 /// pattern; anything else builds a value.
 ///
-/// The classifier reads the IMPORT form too (`use ..::WalOp::OrDelta;` followed by a
-/// bare `OrDelta { .. }`), which no search for a qualified path can see. Nothing in the
-/// tree writes that form, so the arm is exercised over a synthetic sample below —
-/// otherwise the one shape that could carry an emitter past all three parts would be
+/// The classifier reads the IMPORT forms too — `use ..::WalOp::OrDelta;` followed by a
+/// bare `OrDelta { .. }`, and the RENAME `use ..::WalOp::OrDelta as X;` followed by
+/// `X { .. }`, which carries the variant's name nowhere near the site that builds it.
+/// Neither is visible to any search for a qualified path, and nothing in the tree
+/// writes either form, so both arms are exercised over synthetic samples below —
+/// otherwise the shapes most able to carry an emitter past all three parts would be
 /// policed by untested code.
 ///
+/// What this instrument is scoped to catch — an ACCIDENTAL emitter, not an adversarial
+/// one — is stated at [`or_delta_construction_sites`], along with where the frame's
+/// wire-shape guarantee actually comes from. Read that before adding a fourth shape.
+///
 /// The classifier is guarded against silently finding nothing: it must report the
-/// harness's own real construction site, must report the import form, and the
+/// harness's own real construction site, must report both import forms, and the
 /// production source it clears must still CONTAIN the variant's name.
 #[test]
 fn tg_or_003_ac9_no_production_path_constructs_a_delta_frame() {
@@ -1984,9 +1990,28 @@ fn tg_or_003_ac9_no_production_path_constructs_a_delta_frame() {
          unqualified — no qualified-path search can, and nothing in the tree writes that form, so \
          this sample is the only thing keeping the arm alive"
     );
+    // The RENAME form: the variant's own name never appears at the site that builds
+    // it, so neither a qualified-path search nor the bare-name arm above can see this
+    // emitter. Nothing in the tree writes it either, which makes this sample the only
+    // thing keeping the arm alive.
+    let rename_form = concat!(
+        "use crate::storage::wal::WalOp::OrDelta as Aliased;\n",
+        "fn emit(delta: crate::storage::wal::OrDelta) -> WalOp { Aliased { delta } }\n",
+    );
+    assert_eq!(
+        or_delta_construction_sites(rename_form),
+        1,
+        "AC9: the classifier must resolve a RENAMED import — an emitter behind \
+         `use ..::WalOp::OrDelta as X;` constructs the variant with the variant's name nowhere in \
+         sight, which is precisely what a name-based scan misses"
+    );
     // The counterweight: the variant's own field DECLARATION has the same bare shape
-    // and builds nothing. Counting it would fail the codec's own scan below.
+    // and builds nothing. The `use` line is load-bearing in this sample — it is what
+    // makes the bare name resolve to the variant, so without it the sample would pass
+    // for the wrong reason and the codec's own declaration (in a file that DOES import
+    // the variant) would still be miscounted against it.
     let declaration_form = concat!(
+        "use crate::storage::wal::WalOp::OrDelta;\n",
         "pub enum WalOp {\n",
         "    Remove,\n",
         "    OrDelta { delta: crate::storage::wal::OrDelta },\n",
@@ -1995,7 +2020,20 @@ fn tg_or_003_ac9_no_production_path_constructs_a_delta_frame() {
     assert_eq!(
         or_delta_construction_sites(declaration_form),
         0,
-        "AC9: a variant DECLARATION is not a construction site"
+        "AC9: a variant DECLARATION is not a construction site, even where the bare name resolves \
+         to the variant"
+    );
+    // A rename that binds the variant back to its own name leaves the bare arm live
+    // and must not be counted twice.
+    let self_rename_form = concat!(
+        "use crate::storage::wal::WalOp::OrDelta as OrDelta;\n",
+        "fn emit(delta: crate::storage::wal::OrDelta) -> WalOp { OrDelta { delta } }\n",
+    );
+    assert_eq!(
+        or_delta_construction_sites(self_rename_form),
+        1,
+        "AC9: a self-rename is one binding, so its emitter is one site — a double count here \
+         would make the belts fail over emitter counts nobody wrote"
     );
     // Text that only LOOKS like a construction: a line comment, a NESTED block comment,
     // a string literal, and a field list with no closing brace. The first three would
@@ -2273,35 +2311,84 @@ fn char_literal_len(rest: &[u8]) -> Option<usize> {
 
 /// How many times `src` CONSTRUCTS the delta `WalOp` variant.
 ///
-/// All three qualifier forms that reach the variant are counted: `WalOp::OrDelta`,
-/// `Self::OrDelta`, and — in a file that imports the variant unqualified — a bare
-/// `OrDelta`. The bare form is the one no search for a qualified path can see, and it
-/// is exactly what an emitter written behind `use ..::WalOp::OrDelta;` looks like.
+/// Every form that reaches the variant is counted: the qualified `WalOp::OrDelta` and
+/// `Self::OrDelta`; a bare `OrDelta` in a file that imports the variant unqualified;
+/// and a RENAMED import (`use ..::WalOp::OrDelta as X;` then `X { .. }`), which puts
+/// the variant's own name nowhere near its construction site at all. The last two are
+/// what no search for a qualified path can see.
 ///
 /// A brace group of `..` is a wildcard pattern and one followed by `=>` is a match
 /// arm; neither builds a value. Everything else does. Nested braces are matched, so a
-/// delta built inline inside the frame is one site, not two.
+/// delta built inline inside the frame is one site, not two. Occurrences inside an
+/// `enum` BODY are skipped: the variant's own field declaration has the same
+/// `OrDelta { .. }` shape as a construction and builds nothing.
+///
+/// # Threat model — what this instrument does and does not police
+///
+/// It is a safety net against an ACCIDENTAL emitter. The reader-before-writer order
+/// this proof rests on is easy to break by reflex, and every form above is one a
+/// contributor could reach for without meaning to smuggle anything past a check.
+///
+/// It is NOT an adversarial control, and it does not claim to be. Any source scan is
+/// evadable by someone trying — a macro, an `include!`, a build script, a `transmute`
+/// — and answering each new evasion shape with another string rule is an arms race the
+/// scanner loses by construction. An emitter written to defeat this belongs to code
+/// review, not to a test assertion.
+///
+/// What that honesty costs is bounded, because this is not where the frame's wire
+/// shape is guaranteed. That guarantee is the checked-in byte fixture plus the
+/// cross-binary compatibility criteria that land WITH the emitter; until they do, this
+/// detector holds the ordering at accident scope, which is the scope it can actually
+/// hold.
 fn or_delta_construction_sites(src: &str) -> usize {
     let code = code_only(src);
-    // A bare `OrDelta` resolves to the VARIANT only where the file imports it. Without
-    // that import the bare name is the delta ENUM — whose own variants carry the braces
-    // (`OrDelta::Add { .. }`) — or, inside the codec, the `WalOp` variant's own field
-    // DECLARATION. Neither builds a frame.
-    let bare_is_variant = imports_bare_delta_variant(&code);
+    // The variant's own field DECLARATION is textually a construction, so an enum
+    // body is scanned for nothing.
+    let skip = enum_body_spans(&code);
+    let aliases = delta_variant_aliases(&code);
+    // A bare `OrDelta` resolves to the VARIANT only where the file imports it under
+    // that name. Without such an import the bare name is the delta ENUM — whose own
+    // variants carry the braces (`OrDelta::Add { .. }`) — which builds no frame.
+    let bare_is_variant =
+        imports_bare_delta_variant(&code) || aliases.iter().any(|a| a == NAME_OR_DELTA);
+    let mut sites = construction_sites_named(&code, NAME_OR_DELTA, bare_is_variant, &skip);
+    for alias in aliases.iter().filter(|a| a.as_str() != NAME_OR_DELTA) {
+        // A rename binds a LOCAL name only: `WalOp::X` never resolves, so the alias is
+        // scanned in bare position exclusively.
+        sites += construction_sites_named(&code, alias, true, &skip);
+    }
+    sites
+}
+
+/// How many times `code` constructs the delta variant under the local name `name`,
+/// ignoring occurrences inside the `skip` ranges.
+///
+/// `bare_names_variant` says whether `name` standing alone resolves to the variant.
+/// Qualified prefixes are honoured only for the variant's real name, since a rename
+/// target is reachable through no path.
+fn construction_sites_named(
+    code: &str,
+    name: &str,
+    bare_names_variant: bool,
+    skip: &[(usize, usize)],
+) -> usize {
     let mut sites = 0usize;
     let mut from = 0usize;
-    while let Some(offset) = code[from..].find(NAME_OR_DELTA) {
+    while let Some(offset) = code[from..].find(name) {
         let at = from + offset;
-        from = at + NAME_OR_DELTA.len();
+        from = at + name.len();
+        if skip.iter().any(|&(start, end)| at >= start && at < end) {
+            continue;
+        }
         let before = &code[..at];
         let names_variant = if before.ends_with("WalOp::") || before.ends_with("Self::") {
-            true
+            name == NAME_OR_DELTA
         } else if before.ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == ':') {
             // A longer path or identifier: `wal::OrDelta` is the enum and `MyOrDelta`
             // is some other item, so neither names the variant.
             false
         } else {
-            bare_is_variant && !is_declaration_position(before)
+            bare_names_variant && !is_declaration_position(before)
         };
         if !names_variant {
             continue;
@@ -2327,13 +2414,114 @@ fn or_delta_construction_sites(src: &str) -> usize {
     sites
 }
 
-/// Whether `code` brings the delta VARIANT into scope unqualified, which is the only
-/// way a bare `OrDelta { .. }` can name it.
+/// The byte ranges of every `enum` BODY in `code`.
+///
+/// `OrDelta { delta: OrDelta }` inside `enum WalOp` is the variant's DECLARATION and
+/// builds nothing, yet it is spelled exactly like a construction. The codec imports
+/// the variant, so without this the codec's own declaration would be counted against
+/// it — a false positive that fails CI over text no emitter could hide in, since a
+/// value cannot be constructed inside an enum body at all.
+fn enum_body_spans(code: &str) -> Vec<(usize, usize)> {
+    const KEYWORD: &str = "enum ";
+    let mut spans = Vec::new();
+    let mut from = 0usize;
+    while let Some(offset) = code[from..].find(KEYWORD) {
+        let at = from + offset;
+        from = at + KEYWORD.len();
+        // Never the tail of a longer identifier (`my_enum `).
+        if code[..at].ends_with(|c: char| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        let Some(brace) = code[from..].find('{') else {
+            break;
+        };
+        let body_start = from + brace + 1;
+        let Some(close) = matching_close(&code[body_start..]) else {
+            break;
+        };
+        spans.push((body_start, body_start + close));
+        from = body_start + close;
+    }
+    spans
+}
+
+/// Whether `code` brings the delta VARIANT into scope under its OWN name, which is
+/// what lets a bare `OrDelta { .. }` name it.
 ///
 /// Matched per import ITEM rather than over the file, because a whole-file search for
 /// the two halves would be satisfied by any `use` line at all once the variant is
 /// named anywhere else in the source.
 fn imports_bare_delta_variant(code: &str) -> bool {
+    use_items(code).iter().any(|item| {
+        item.contains("WalOp::")
+            // A glob over the variants (`WalOp::*`) brings the variant in just as an
+            // explicit or braced list does.
+            && (item.contains('*') || names_unaliased_variant(item))
+    })
+}
+
+/// The local names a rename import binds the delta variant to
+/// (`use ..::WalOp::OrDelta as X;` → `["X"]`).
+///
+/// The rename is the one import form that carries the variant's name nowhere near the
+/// code that builds it, so a scanner that knows only the bare name is blind to an
+/// emitter written behind it.
+fn delta_variant_aliases(code: &str) -> Vec<String> {
+    let mut aliases: Vec<String> = Vec::new();
+    for item in use_items(code) {
+        if !item.contains("WalOp::") {
+            continue;
+        }
+        for alias in variant_name_occurrences(&item).filter_map(rename_target) {
+            if !aliases.contains(&alias) {
+                aliases.push(alias);
+            }
+        }
+    }
+    aliases
+}
+
+/// Whether `item` names the variant WITHOUT renaming it away.
+fn names_unaliased_variant(item: &str) -> bool {
+    variant_name_occurrences(item).any(|after| rename_target(after).is_none())
+}
+
+/// The text following each whole-token occurrence of the variant's bare name in
+/// `text` — the position an `as` rename would sit in.
+fn variant_name_occurrences(text: &str) -> impl Iterator<Item = &str> {
+    let mut rest = text;
+    std::iter::from_fn(move || {
+        while let Some(at) = rest.find(NAME_OR_DELTA) {
+            let after = &rest[at + NAME_OR_DELTA.len()..];
+            rest = after;
+            // `OrDeltaSomething` is a different item entirely.
+            if !after.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+                return Some(after);
+            }
+        }
+        None
+    })
+}
+
+/// The identifier an `as` immediately following an imported name renames it to.
+fn rename_target(after: &str) -> Option<String> {
+    let tail = after.trim_start().strip_prefix("as")?;
+    // `as` must be its own keyword, not the head of `asset`.
+    if !tail.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let alias: String = tail
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    (!alias.is_empty()).then_some(alias)
+}
+
+/// Every `use` item's text — the span between `use` and its `;` — for the items that
+/// OPEN a declaration rather than appear mid-expression.
+fn use_items(code: &str) -> Vec<String> {
+    let mut items = Vec::new();
     let mut rest = code;
     while let Some(at) = rest.find("use ") {
         let line_start = rest[..at].rfind('\n').map_or(0, |i| i + 1);
@@ -2343,14 +2531,9 @@ fn imports_bare_delta_variant(code: &str) -> bool {
         if !opens_an_item {
             continue;
         }
-        let item = &rest[..rest.find(';').unwrap_or(rest.len())];
-        // A glob over the variants (`WalOp::*`) brings the variant in just as an
-        // explicit or braced list does.
-        if item.contains("WalOp::") && (item.contains(NAME_OR_DELTA) || item.contains('*')) {
-            return true;
-        }
+        items.push(rest[..rest.find(';').unwrap_or(rest.len())].to_string());
     }
-    false
+    items
 }
 
 /// The variant's bare name, spelled once so the import check and the scanner cannot
