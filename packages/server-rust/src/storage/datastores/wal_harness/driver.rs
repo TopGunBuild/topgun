@@ -356,6 +356,14 @@ pub(crate) struct RunOutcome {
     /// Scoped to an isolated gauge sink so a harness run never perturbs the process
     /// gauge another test may be asserting on.
     pub reconciled_tombstone_bytes: u64,
+    /// How many frames the re-replay seam actually put back through replay, summed
+    /// over every recovery this run performed.
+    ///
+    /// The seam's own assertions all expect a CLEAN outcome, and "the seam never
+    /// fired" is clean too — so a case that selects a re-replay mode asserts this is
+    /// non-zero. Without it, degrading the mode back to a no-op leaves the entire
+    /// family green and its idempotency proof becomes vacuous.
+    pub re_replayed_frames: usize,
 }
 
 impl RunOutcome {
@@ -1604,6 +1612,11 @@ impl Driver {
         let _ = recovery
             .run(Arc::clone(&self.inner) as Arc<dyn MapDataStore>)
             .await;
+        // Carried out of the recovery so a case can pin that the seam FIRED, not
+        // only that the run stayed clean. Summed across incarnations: a later
+        // recovery legitimately finds nothing un-applied, so only the run total is
+        // meaningful.
+        self.outcome.re_replayed_frames += recovery.test_re_replayed_frames();
 
         if self.store_healthy {
             // O1 is evaluated ONLY after a recovery performed with a healthy inner

@@ -1669,6 +1669,16 @@ pub struct WalRecovery {
     /// a production build.
     #[cfg(test)]
     re_replay_oldest_frame: bool,
+    /// How many frames the `re_replay_oldest_frame` seam actually put back through
+    /// replay during `run`.
+    ///
+    /// Exists so a case can assert the seam FIRED, not only that its outcome was
+    /// clean. Every assertion over the gate-on seam expects GREEN — and a seam that
+    /// silently stopped firing is GREEN too, so without this counter the whole
+    /// re-replay family would hollow out into "no re-replay happened → no clobber",
+    /// which is the trivial configuration the seam was written to replace.
+    #[cfg(test)]
+    re_replayed_frames: std::sync::atomic::AtomicUsize,
 }
 
 impl WalRecovery {
@@ -1682,6 +1692,8 @@ impl WalRecovery {
             replay_merge_gate: true,
             #[cfg(test)]
             re_replay_oldest_frame: false,
+            #[cfg(test)]
+            re_replayed_frames: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -1698,6 +1710,17 @@ impl WalRecovery {
     #[cfg(test)]
     pub(crate) fn test_set_re_replay_oldest_frame(&mut self, enabled: bool) {
         self.re_replay_oldest_frame = enabled;
+    }
+
+    /// Test-only: how many frames the re-replay seam actually replayed during `run`.
+    ///
+    /// `Relaxed` is sufficient on both ends: the seam increments from inside `run`
+    /// and every reader observes it only after `run`'s future has completed, so the
+    /// await point already carries the happens-before edge.
+    #[cfg(test)]
+    pub(crate) fn test_re_replayed_frames(&self) -> usize {
+        self.re_replayed_frames
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Discovers partition IDs by scanning `wal_dir` for segment files
@@ -2099,6 +2122,8 @@ impl WalRecovery {
                 if let Some(oldest) = entries.first() {
                     let _ =
                         Self::replay_entry(&inner_store, oldest, now, self.replay_merge_gate).await;
+                    self.re_replayed_frames
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
 

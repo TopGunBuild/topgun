@@ -779,6 +779,15 @@ fn ac4_5_replay_clobber_caught_by_value_equality_oracle() {
          must discard the older frame; got {:?}",
         gate_on_outcome.violations
     );
+    // Without this, arm (c) degrades into arm (b): a seam that never fired is GREEN
+    // for the same trivial reason (b) is, and the discrimination this arm exists for
+    // is silently gone.
+    assert!(
+        gate_on_outcome.re_replayed_frames >= 1,
+        "AC5: arm (c) must actually re-replay a stale frame — a GREEN run that \
+         re-replayed nothing is arm (b), not a demonstration that the merge gate \
+         defeated an out-of-order frame"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1216,6 +1225,17 @@ fn run_or_case_with(case: &Case, config: &RunConfig, what: &str) -> RunOutcome {
         "TG-OR-003 ({what}): the OR delta-fold recovery path must report zero violations, got {:?}",
         outcome.violations
     );
+    // Non-vacuity. Every assertion above expects a CLEAN run, and a seam that
+    // stopped firing produces a clean run too — so the arm that exists to observe a
+    // second fold must prove a second fold actually happened.
+    if matches!(config.defect, DefectMode::ReReplayOldestFrameGateOn) {
+        assert!(
+            outcome.re_replayed_frames >= 1,
+            "TG-OR-003 ({what}): the re-replay seam must actually FIRE — this arm's whole \
+             content is an already-applied frame being folded a second time, so a run that \
+             re-replayed nothing proves only the trivial 'no re-replay → no clobber'"
+        );
+    }
     outcome
 }
 
