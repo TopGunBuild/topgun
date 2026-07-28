@@ -1325,8 +1325,12 @@ fn tg_or_003_ac1_recovery_equivalence_over_every_fold_base_shape() {
 /// The re-add of an already-tombstoned tag is the discriminator: remove-wins means
 /// it is SUPPRESSED. A hand-written fold that reimplemented the algebra and missed
 /// that clause resurrects `tag-a` here, and a fold that dropped the tombstone
-/// instead of retaining it also diverges. (The structural half — that the fold body
-/// names `apply_or_delta` and `normalize_to_or_map` — is asserted in `wal/mod.rs`.)
+/// instead of retaining it also diverges.
+///
+/// This case cannot see the OTHER half of the same rule — that the fold body writes no
+/// algebra of its own. A hand-written copy that currently AGREES passes here while being
+/// exactly the fork the rule forbids. That half is asserted structurally in `wal/mod.rs`,
+/// by `or_delta_fold_delegates_to_the_live_seams_and_writes_no_algebra_of_its_own`.
 #[test]
 fn tg_or_003_ac5_fold_reproduces_the_live_or_algebra() {
     let case: Case = vec![
@@ -2014,13 +2018,21 @@ fn tg_or_003_ac9_injected_frames_carry_the_golden_on_disk_shape() {
     );
 }
 
-/// AC9 / AC10(iii) — NO production path constructs a `WalOp::OrDelta` frame.
+/// AC9 / AC10(iii) — NO production path constructs a `WalOp::OrDelta` frame,
+/// checked textually as EARLY WARNING.
 ///
 /// Every delta frame this part folds is synthetic, which is the design: the reader is
 /// provable before a writer exists. That only holds if "no writer exists" is itself
 /// checked, and a repo-wide grep cannot check it — `wal/mod.rs` carries its tests in
 /// an inline `mod tests` in the SAME file, so a textual search cannot separate a test
 /// construction site from a production one.
+///
+/// **What actually holds the property is `WalWriter::append`'s tier-P refusal of any
+/// delta frame** (see [`or_delta_construction_sites`]'s threat model). A source scan
+/// answers "does anything LOOK like an emitter", which is evadable; the append guard
+/// answers "did a delta frame reach the disk", which is not. This test survives that
+/// demotion because naming the offending file at review time is cheaper than reading
+/// a fail-stop out of a test run — but a zero here is a hygiene result, not the proof.
 ///
 /// The instrument therefore has three parts:
 ///
@@ -2048,16 +2060,18 @@ fn tg_or_003_ac9_injected_frames_carry_the_golden_on_disk_shape() {
 /// pattern; anything else builds a value.
 ///
 /// The classifier reads the IMPORT forms too — `use ..::WalOp::OrDelta;` followed by a
-/// bare `OrDelta { .. }`, and the RENAME `use ..::WalOp::OrDelta as X;` followed by
-/// `X { .. }`, which carries the variant's name nowhere near the site that builds it.
-/// Neither is visible to any search for a qualified path, and nothing in the tree
-/// writes either form, so both arms are exercised over synthetic samples below —
-/// otherwise the shapes most able to carry an emitter past all three parts would be
-/// policed by untested code.
+/// bare `OrDelta { .. }`; the VARIANT rename `use ..::WalOp::OrDelta as X;` followed by
+/// `X { .. }`, which carries the variant's name nowhere near the site that builds it;
+/// and the ENUM rename `use ..::WalOp as X;` followed by `X::OrDelta { .. }`, whose
+/// qualified path spells the enum's name nowhere. None is visible to a search for a
+/// qualified path, and nothing in the tree writes any of them, so every arm is
+/// exercised over synthetic samples below — otherwise the shapes most able to carry an
+/// emitter past all three parts would be policed by untested code.
 ///
 /// What this instrument is scoped to catch — an ACCIDENTAL emitter, not an adversarial
-/// one — is stated at [`or_delta_construction_sites`], along with where the frame's
-/// wire-shape guarantee actually comes from. Read that before adding a fourth shape.
+/// one — is stated at [`or_delta_construction_sites`], along with what does hold the
+/// property and where the frame's wire-shape guarantee comes from. Read that before
+/// adding a fifth shape.
 ///
 /// The classifier is guarded against silently finding nothing: it must report the
 /// harness's own real construction site, must report both import forms, and the
@@ -2175,6 +2189,21 @@ fn assert_classifier_discriminates() {
         "AC9: the classifier must resolve a RENAMED import — an emitter behind \
          `use ..::WalOp::OrDelta as X;` constructs the variant with the variant's name nowhere in \
          sight, which is precisely what a name-based scan misses"
+    );
+    // The ENUM rename: the emitter writes a qualified path, but the qualifier is a
+    // local alias, so nothing at the construction site spells `WalOp::OrDelta` and
+    // no `use` item carries `WalOp::` at all. It is the sibling of the variant
+    // rename above and is exactly as ordinary to write.
+    let enum_rename_form = concat!(
+        "use crate::storage::wal::WalOp as Aliased;\n",
+        "fn emit(delta: crate::storage::wal::OrDelta) -> Aliased { Aliased::OrDelta { delta } }\n",
+    );
+    assert_eq!(
+        or_delta_construction_sites(enum_rename_form),
+        1,
+        "AC9: the classifier must resolve a renamed ENUM — behind `use ..::WalOp as X;` the \
+         emitter builds the variant through a qualified path that spells the enum's name \
+         nowhere, so no search for `WalOp::` can see it"
     );
     // The counterweight: the variant's own field DECLARATION has the same bare shape
     // and builds nothing. The `use` line is load-bearing in this sample — it is what
@@ -2435,23 +2464,30 @@ fn char_literal_len(rest: &[u8]) -> Option<usize> {
 /// `enum` BODY are skipped: the variant's own field declaration has the same
 /// `OrDelta { .. }` shape as a construction and builds nothing.
 ///
-/// # Threat model — what this instrument does and does not police
+/// # Threat model — ADVISORY hygiene, not the guarantee
 ///
-/// It is a safety net against an ACCIDENTAL emitter. The reader-before-writer order
-/// this proof rests on is easy to break by reflex, and every form above is one a
-/// contributor could reach for without meaning to smuggle anything past a check.
+/// **This scan is not what holds the no-emitter property.** That is
+/// `WalWriter::append`, which fail-stops at tier P on any `WalOp::OrDelta` frame
+/// unless a `#[cfg(test)]` seam has opened the guard for that exact append. The
+/// refusal reads the FRAME, not the source text, so every emitter shape dies at it
+/// identically — a renamed variant, a renamed enum, a macro expansion, an
+/// `include!`, a build-script-generated body, a `transmute`. It is compiler-enforced
+/// in a release build, where nothing can even name the seam that would open it.
 ///
-/// It is NOT an adversarial control, and it does not claim to be. Any source scan is
-/// evadable by someone trying — a macro, an `include!`, a build script, a `transmute`
-/// — and answering each new evasion shape with another string rule is an arms race the
-/// scanner loses by construction. An emitter written to defeat this belongs to code
-/// review, not to a test assertion.
+/// What this scan adds on top is EARLY WARNING: it names the file and the line at
+/// review time, before anyone has to read a fail-stop out of a test run. That is
+/// worth having and it is all it claims. It stays a text scan, so it stays evadable
+/// by construction, and answering each newly-found evasion shape with another string
+/// rule would be an arms race — one this instrument no longer has to win, because
+/// losing a round of it now costs early warning rather than the property.
 ///
-/// What that honesty costs is bounded, because this is not where the frame's wire
-/// shape is guaranteed. That guarantee is the checked-in byte fixture plus the
-/// cross-binary compatibility criteria that land WITH the emitter; until they do, this
-/// detector holds the ordering at accident scope, which is the scope it can actually
-/// hold.
+/// The forms above are therefore chosen for how ORDINARY they are, not for how
+/// adversarial: each is one a contributor could reach for without meaning to smuggle
+/// anything past a check. A shape written specifically to defeat this belongs to
+/// code review — and to the append guard, which will stop it regardless.
+///
+/// The frame's wire SHAPE is guaranteed elsewhere again: the checked-in byte fixture
+/// plus the cross-binary compatibility criteria that land WITH the emitter.
 fn or_delta_construction_sites(src: &str) -> usize {
     let code = code_only(src);
     // The variant's own field DECLARATION is textually a construction, so an enum
@@ -2463,11 +2499,17 @@ fn or_delta_construction_sites(src: &str) -> usize {
     // variants carry the braces (`OrDelta::Add { .. }`) — which builds no frame.
     let bare_is_variant =
         imports_bare_delta_variant(&code) || aliases.iter().any(|a| a == NAME_OR_DELTA);
-    let mut sites = construction_sites_named(&code, NAME_OR_DELTA, bare_is_variant, &skip);
+    // The paths a qualified `..::OrDelta { .. }` can be written through: the enum's
+    // own name, `Self` inside its impls, and any local name a `use ..::WalOp as X;`
+    // binds it to.
+    let mut qualifiers = vec![NAME_WAL_OP.to_string(), "Self".to_string()];
+    qualifiers.extend(delta_enum_aliases(&code));
+    let mut sites =
+        construction_sites_named(&code, NAME_OR_DELTA, bare_is_variant, &qualifiers, &skip);
     for alias in aliases.iter().filter(|a| a.as_str() != NAME_OR_DELTA) {
-        // A rename binds a LOCAL name only: `WalOp::X` never resolves, so the alias is
-        // scanned in bare position exclusively.
-        sites += construction_sites_named(&code, alias, true, &skip);
+        // A VARIANT rename binds a LOCAL name only: `WalOp::X` never resolves, so the
+        // alias is scanned in bare position exclusively — hence no qualifiers.
+        sites += construction_sites_named(&code, alias, true, &[], &skip);
     }
     sites
 }
@@ -2476,12 +2518,14 @@ fn or_delta_construction_sites(src: &str) -> usize {
 /// ignoring occurrences inside the `skip` ranges.
 ///
 /// `bare_names_variant` says whether `name` standing alone resolves to the variant.
-/// Qualified prefixes are honoured only for the variant's real name, since a rename
-/// target is reachable through no path.
+/// `qualifiers` are the local names the enum is reachable through, so `X::OrDelta`
+/// counts wherever `X` names the enum; a VARIANT rename target is reachable through
+/// no path at all and is therefore scanned with none.
 fn construction_sites_named(
     code: &str,
     name: &str,
     bare_names_variant: bool,
+    qualifiers: &[String],
     skip: &[(usize, usize)],
 ) -> usize {
     let mut sites = 0usize;
@@ -2493,8 +2537,11 @@ fn construction_sites_named(
             continue;
         }
         let before = &code[..at];
-        let names_variant = if before.ends_with("WalOp::") || before.ends_with("Self::") {
-            name == NAME_OR_DELTA
+        let qualified = qualifiers
+            .iter()
+            .any(|q| before.ends_with(&format!("{q}::")));
+        let names_variant = if qualified {
+            true
         } else if before.ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == ':') {
             // A longer path or identifier: `wal::OrDelta` is the enum and `MyOrDelta`
             // is some other item, so neither names the variant.
@@ -2598,13 +2645,40 @@ fn names_unaliased_variant(item: &str) -> bool {
     variant_name_occurrences(item).any(|after| rename_target(after).is_none())
 }
 
+/// The local names a rename import binds the `WalOp` ENUM to
+/// (`use ..::WalOp as X;` → `["X"]`), each of which makes `X::OrDelta { .. }` a
+/// qualified construction of the variant.
+///
+/// Renaming the enum is the sibling of renaming the variant, and it hides the
+/// emitter just as well: the path that builds the frame carries neither the
+/// enum's name nor — for a search that only knows `WalOp::` — anything that
+/// looks like a qualified construction at all.
+fn delta_enum_aliases(code: &str) -> Vec<String> {
+    let mut aliases: Vec<String> = Vec::new();
+    for item in use_items(code) {
+        // `WalOp::OrDelta as X` renames the VARIANT, not the enum: the `as` sits
+        // after the variant, so no rename target is read here.
+        for alias in name_occurrences(&item, NAME_WAL_OP).filter_map(rename_target) {
+            if !aliases.contains(&alias) {
+                aliases.push(alias);
+            }
+        }
+    }
+    aliases
+}
+
 /// The text following each whole-token occurrence of the variant's bare name in
 /// `text` — the position an `as` rename would sit in.
 fn variant_name_occurrences(text: &str) -> impl Iterator<Item = &str> {
+    name_occurrences(text, NAME_OR_DELTA)
+}
+
+/// The text following each whole-token occurrence of `name` in `text`.
+fn name_occurrences<'a>(text: &'a str, name: &'a str) -> impl Iterator<Item = &'a str> {
     let mut rest = text;
     std::iter::from_fn(move || {
-        while let Some(at) = rest.find(NAME_OR_DELTA) {
-            let after = &rest[at + NAME_OR_DELTA.len()..];
+        while let Some(at) = rest.find(name) {
+            let after = &rest[at + name.len()..];
             rest = after;
             // `OrDeltaSomething` is a different item entirely.
             if !after.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
@@ -2651,6 +2725,9 @@ fn use_items(code: &str) -> Vec<String> {
 /// The variant's bare name, spelled once so the import check and the scanner cannot
 /// drift apart.
 const NAME_OR_DELTA: &str = "OrDelta";
+
+/// The enum's bare name, for the same reason.
+const NAME_WAL_OP: &str = "WalOp";
 
 /// Whether the bare name ending `before` sits in a DECLARATION or type position
 /// (`enum OrDelta {`, `impl .. for OrDelta {`, `-> OrDelta {`), where the brace that
