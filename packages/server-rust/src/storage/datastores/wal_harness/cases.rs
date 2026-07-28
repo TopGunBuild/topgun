@@ -39,7 +39,7 @@ use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
 
 use super::super::{DelayedEntry, DelayedOp, WriteBehindDataStore};
-use super::driver::{or_view_pair, run_case, RunConfig, RunOutcome};
+use super::driver::{or_delta_frame, or_view_pair, run_case, RunConfig, RunOutcome};
 use super::{
     Case, CaseShape, DefectMode, GcCrashPoint, Incarnation, IncarnationEnd, InvariantViolation,
     Key, OrMutation, OrSlot, OracleConfig, WorkOp, MAX_KEY_INDEX,
@@ -1949,6 +1949,68 @@ fn tg_or_003_ac7b_an_or_delta_survivor_carries_the_retired_sequences_forward() {
         !survivor_subsumes,
         "AC7(b): a delta frame carries only its own mutation, so it re-carries nothing of the \
          frame it displaces"
+    );
+}
+
+/// The canonical on-disk bytes of an OR delta frame — the checked-in artifact a future
+/// emitter binds to instead of re-deriving the shape from prose.
+///
+/// Loaded here as well as from `wal/format.rs`'s tests, and deliberately so: one end of
+/// the anti-drift device is the codec, the other is this differential. A device that
+/// binds only the codec end leaves the proof's own frames free to drift.
+const GOLDEN_OR_DELTA_FRAME: &[u8] = include_bytes!("../../wal/fixtures/or_delta_frame_v1.msgpack");
+
+/// AC9 — the frames this family injects carry the SAME on-disk shape as the golden
+/// fixture, asserted in bytes rather than by inspection.
+///
+/// Every delta frame the differential folds is synthetic, so its shape is only as
+/// trustworthy as whatever pins it. The Rust type system pins the payload — an
+/// injection cannot carry anything but a production `storage::wal::OrDelta` — but not
+/// the envelope or its encoding: a serde rename on the variant's field, a change to the
+/// enum's tag key, or an injection that started riding an entry timestamp would all
+/// leave this family green while moving the bytes a future emitter has to match.
+///
+/// The binding runs the golden bytes back through the harness's own frame constructor:
+/// decode the fixture, hand its delta and identifiers to [`or_delta_frame`] — the one
+/// the injection seam itself calls — and require the re-encoded frame to be the golden
+/// bytes exactly. A one-sided drift on either end reddens here.
+#[test]
+fn tg_or_003_ac9_injected_frames_carry_the_golden_on_disk_shape() {
+    use crate::storage::wal::format::{decode_all, encode, FrameDecodeResult};
+
+    let golden = match decode_all(GOLDEN_OR_DELTA_FRAME) {
+        FrameDecodeResult::Complete(entries) => {
+            assert_eq!(
+                entries.len(),
+                1,
+                "the golden fixture holds exactly one frame"
+            );
+            entries.into_iter().next().expect("one frame")
+        }
+        other => panic!("the golden fixture must decode Complete, got {other:?}"),
+    };
+
+    let delta = match &golden.op {
+        WalOp::OrDelta { delta } => delta.clone(),
+        other => panic!("the golden fixture must carry an OrDelta frame, got {other:?}"),
+    };
+
+    // Identifiers come from the fixture so the comparison isolates SHAPE: the harness
+    // writes its own map/key/sequence, and none of the three is part of the contract
+    // the fixture pins.
+    let rebuilt = or_delta_frame(&golden.map, &golden.key, delta, golden.sequence);
+    assert_eq!(
+        rebuilt, golden,
+        "AC9: the harness's frame constructor no longer builds the entry the golden \
+         fixture holds — the differential's synthetic frames have drifted from the \
+         on-disk contract"
+    );
+    assert_eq!(
+        encode(&rebuilt).expect("encode should succeed"),
+        GOLDEN_OR_DELTA_FRAME,
+        "AC9: the harness's frame encodes to different bytes than the golden fixture; a \
+         shape change is a format decision, not an implementation detail — do not \
+         regenerate the fixture to make this pass"
     );
 }
 

@@ -1237,18 +1237,9 @@ impl Driver {
         store.ensure_wal_seeded(partition).await;
         // 2. THE SEAM: mint the sequence, firing the append observer synchronously.
         let seq = store.assign_wal_sequence(partition);
-        // 3. Append the frame at the pinned on-disk shape. `timestamp` stays `None`:
-        //    the merge gate is Lww-scoped and never consults it, and OR ordering comes
-        //    from the sequence, not from an HLC.
-        let entry = WalEntry {
-            map: TEST_MAP.to_string(),
-            key: self.key_str(key).to_string(),
-            op: WalOp::OrDelta {
-                delta: delta.clone(),
-            },
-            timestamp: None,
-            sequence: seq,
-        };
+        // 3. Append the frame at the pinned on-disk shape, built by the single
+        //    constructor that owns that shape.
+        let entry = or_delta_frame(TEST_MAP, self.key_str(key), delta.clone(), seq);
         let appended = store.wal_append(partition, &entry).await;
         // Drain in BOTH outcomes: the observer fired at the assign, so leaving the
         // observation in the sink would misattribute it to the next op.
@@ -1674,6 +1665,30 @@ fn or_record(slot: &OrSlot) -> RecordValue {
             tombstones: tombstones.clone(),
         },
         OrSlot::LegacyTombstones { tags } => RecordValue::OrTombstones { tags: tags.clone() },
+    }
+}
+
+/// The ONE on-disk shape an injected OR delta frame takes — the whole envelope, not
+/// just its payload.
+///
+/// Factored out of [`Driver::inject_or_delta`] so the harness has a single definition
+/// of that envelope for a test to bind to the checked-in golden bytes. The compiler
+/// already guarantees the *payload* is the production `storage::wal::OrDelta`; what it
+/// cannot guarantee is the framing around it — which `WalOp` variant carries it,
+/// whether an entry timestamp rides along, and what any of it encodes to. A synthetic
+/// frame that drifts there would keep the differential green while diverging from the
+/// artifact a future emitter binds to, so the frame's byte image is asserted against
+/// the golden fixture through THIS constructor.
+///
+/// `timestamp` stays `None`: the merge gate is Lww-scoped and never consults it, and
+/// OR ordering comes from the sequence, not from an HLC.
+pub(super) fn or_delta_frame(map: &str, key: &str, delta: OrDelta, sequence: u64) -> WalEntry {
+    WalEntry {
+        map: map.to_string(),
+        key: key.to_string(),
+        op: WalOp::OrDelta { delta },
+        timestamp: None,
+        sequence,
     }
 }
 
