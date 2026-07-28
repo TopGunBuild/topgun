@@ -1923,13 +1923,15 @@ fn tg_or_003_ac7b_an_or_delta_survivor_carries_the_retired_sequences_forward() {
 ///
 /// The instrument therefore has three parts:
 ///
-/// 1. **Prefix scan.** Each WAL source is truncated at its inline test module and the
-///    remaining production prefix must hold ZERO construction sites. Truncation is
-///    exactly equivalent to "no non-test construction site" because `TG-OR-003` makes
-///    it a RULE, not an accident: a delta frame is constructed only inside those
-///    files' own `mod tests`, and in `wal_harness/`. Nothing above a marker builds one
-///    under a `#[cfg(test)]` gate, so the scan can neither pass nor fail for the wrong
-///    reason.
+/// 1. **Production-source scan.** Each WAL source has the BODY of its inline test
+///    module excised — not the file truncated at it, because Rust permits items after
+///    `mod tests { .. }` and those two files are exempt from the belts below, so an
+///    emitter placed under their test module would be seen by nothing. What remains
+///    must hold ZERO construction sites. Excising the module is exactly equivalent to
+///    "no non-test construction site" because `TG-OR-003` makes it a RULE, not an
+///    accident: a delta frame is constructed only inside those files' own `mod tests`,
+///    and in `wal_harness/`. Nothing outside a test module builds one under a
+///    `#[cfg(test)]` gate, so the scan can neither pass nor fail for the wrong reason.
 /// 2. **Belt, by file.** No source under `src/` outside the WAL codec and the harness
 ///    so much as NAMES the variant.
 /// 3. **Belt, by construction — package-wide.** Every construction site anywhere in
@@ -1942,9 +1944,17 @@ fn tg_or_003_ac7b_an_or_delta_survivor_carries_the_retired_sequences_forward() {
 /// appears in production code as a match PATTERN in two places — the coalesce
 /// predicate's arm and recovery's replay arm — and a literal search for the variant
 /// name would report both. A brace group of `..`, or one followed by `=>`, is a
-/// pattern; anything else builds a value. The classifier is guarded against silently
-/// finding nothing: it must report the harness's own real construction site, and the
-/// production prefix it clears must still CONTAIN the variant's name.
+/// pattern; anything else builds a value.
+///
+/// The classifier reads the IMPORT form too (`use ..::WalOp::OrDelta;` followed by a
+/// bare `OrDelta { .. }`), which no search for a qualified path can see. Nothing in the
+/// tree writes that form, so the arm is exercised over a synthetic sample below —
+/// otherwise the one shape that could carry an emitter past all three parts would be
+/// policed by untested code.
+///
+/// The classifier is guarded against silently finding nothing: it must report the
+/// harness's own real construction site, must report the import form, and the
+/// production source it clears must still CONTAIN the variant's name.
 #[test]
 fn tg_or_003_ac9_no_production_path_constructs_a_delta_frame() {
     const WAL_MOD: &str = include_str!("../../wal/mod.rs");
@@ -1959,23 +1969,67 @@ fn tg_or_003_ac9_no_production_path_constructs_a_delta_frame() {
          zero over the production prefix means nothing"
     );
 
+    // Non-vacuity of the IMPORT-FORM arm, which the tree itself never exercises: an
+    // emitter that imports the variant and builds it unqualified is the one shape a
+    // search for the qualified paths cannot see. Literals are stripped before scanning,
+    // so these samples cannot be counted against this file when it is walked below.
+    let import_form = concat!(
+        "use crate::storage::wal::WalOp::OrDelta;\n",
+        "fn emit(delta: crate::storage::wal::OrDelta) -> WalOp { OrDelta { delta } }\n",
+    );
+    assert_eq!(
+        or_delta_construction_sites(import_form),
+        1,
+        "AC9: the classifier must see an emitter that imports the variant and constructs it \
+         unqualified — no qualified-path search can, and nothing in the tree writes that form, so \
+         this sample is the only thing keeping the arm alive"
+    );
+    // The counterweight: the variant's own field DECLARATION has the same bare shape
+    // and builds nothing. Counting it would fail the codec's own scan below.
+    let declaration_form = concat!(
+        "pub enum WalOp {\n",
+        "    Remove,\n",
+        "    OrDelta { delta: crate::storage::wal::OrDelta },\n",
+        "}\n",
+    );
+    assert_eq!(
+        or_delta_construction_sites(declaration_form),
+        0,
+        "AC9: a variant DECLARATION is not a construction site"
+    );
+    // Text that only LOOKS like a construction: a line comment, a NESTED block comment,
+    // a string literal, and a field list with no closing brace. The first three would
+    // fail CI over text that compiles to nothing; the fourth would abort the scan.
+    let text_only = concat!(
+        "// WalOp::OrDelta { delta: a }\n",
+        "/* outer /* WalOp::OrDelta { delta: b } */ still commented */\n",
+        "let s = \"WalOp::OrDelta { delta: c }\";\n",
+        "fn truncated() { WalOp::OrDelta {\n",
+    );
+    assert_eq!(
+        or_delta_construction_sites(text_only),
+        0,
+        "AC9: comments, string literals, and unbalanced braces construct nothing — a scan that \
+         counted them would block unrelated work with a failure over text the compiler never sees"
+    );
+
     for (name, src) in [("wal/mod.rs", WAL_MOD), ("wal/format.rs", WAL_FORMAT)] {
-        let prefix = production_prefix(name, src);
+        let production = production_source(name, src);
         assert_eq!(
-            or_delta_construction_sites(prefix),
+            or_delta_construction_sites(&production),
             0,
-            "AC9: {name}'s production prefix must construct no delta frame — adding an emitter \
-             here collapses the reader-before-writer order this proof rests on"
+            "AC9: {name}'s production code must construct no delta frame — adding an emitter here \
+             collapses the reader-before-writer order this proof rests on"
         );
     }
 
-    // Non-vacuity of the prefix scan itself: `wal/mod.rs`'s production code DOES name
-    // the variant (the coalesce arm and the replay arm), so a prefix that had been
-    // truncated to nothing would be caught here rather than reported as clean.
+    // Non-vacuity of that scan itself: `wal/mod.rs`'s production code DOES name the
+    // variant (the coalesce arm and the replay arm), so a source that had been excised
+    // down to nothing would be caught here rather than reported as clean.
     assert!(
-        code_only(production_prefix("wal/mod.rs", WAL_MOD)).contains("WalOp::OrDelta"),
-        "AC9: the truncated prefix must still contain the production replay arm, otherwise the \
-         zero above is an artefact of scanning an empty string"
+        production_source("wal/mod.rs", WAL_MOD).contains("WalOp::OrDelta"),
+        "AC9: the excised source must still contain the production replay arm, otherwise the zero \
+         above is an artefact of scanning an empty string"
     );
 
     let package = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -2073,64 +2127,260 @@ fn rust_sources(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// `src` truncated at its inline test module.
-fn production_prefix<'a>(name: &str, src: &'a str) -> &'a str {
-    // The escaped newline is not a newline in THIS file, so the search cannot land on
-    // this line when the scanner is ever pointed at the harness itself.
+/// `src`'s production code: comments and literals stripped, with the BODY of its
+/// inline test module excised.
+///
+/// The body is EXCISED rather than the file truncated at the module header, because
+/// Rust permits items after `mod tests { .. }` and both files this runs over are
+/// exempt from the belts by [`is_delta_frame_home`] — an emitter added BELOW their
+/// test module would otherwise be seen by nothing at all.
+fn production_source(name: &str, src: &str) -> String {
+    let code = code_only(src);
+    // The escaped newline is not a newline in THIS file, and literals are stripped
+    // above in any case, so the search cannot land on this line when the scanner is
+    // pointed at the harness itself.
     let marker = "#[cfg(test)]\nmod tests {";
-    let end = src
+    let start = code
         .find(marker)
         .unwrap_or_else(|| panic!("{name} carries its tests in an inline `mod tests`"));
-    &src[..end]
+    let body = start + marker.len();
+    // A test module that does not close its brace would make the excision span
+    // arbitrary, so this is a hard precondition rather than a skip.
+    let close = matching_close(&code[body..])
+        .unwrap_or_else(|| panic!("{name}'s inline `mod tests` must close its brace"));
+    let mut out = code[..start].to_string();
+    out.push_str(&code[body + close + 1..]);
+    out
 }
 
-/// `src` with whole-line comments dropped, so a doc link or a prose mention of the
-/// variant is never mistaken for code.
+/// `src` with comments and literals stripped, so a doc link, a prose mention, or a
+/// name spelled inside a string is never mistaken for code.
+///
+/// A whole-line filter is not enough: a `/* .. */` block comment (which NESTS in
+/// Rust) or a string literal holding the variant's name would be read as a real
+/// construction site and fail CI over text that compiles to nothing. Newlines are
+/// preserved so a line-oriented search over the result still lines up with the lines
+/// the code occupies.
 fn code_only(src: &str) -> String {
-    src.lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let bytes = src.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut at = 0usize;
+    while at < bytes.len() {
+        let rest = &bytes[at..];
+        if rest.starts_with(b"//") {
+            while at < bytes.len() && bytes[at] != b'\n' {
+                at += 1;
+            }
+            continue;
+        }
+        if rest.starts_with(b"/*") {
+            let mut depth = 1usize;
+            at += 2;
+            while at < bytes.len() && depth > 0 {
+                if bytes[at..].starts_with(b"/*") {
+                    depth += 1;
+                    at += 2;
+                } else if bytes[at..].starts_with(b"*/") {
+                    depth -= 1;
+                    at += 2;
+                } else {
+                    if bytes[at] == b'\n' {
+                        out.push(b'\n');
+                    }
+                    at += 1;
+                }
+            }
+            continue;
+        }
+        if let Some(len) = raw_string_len(rest) {
+            at += len;
+            continue;
+        }
+        if bytes[at] == b'"' {
+            at += 1;
+            while at < bytes.len() {
+                match bytes[at] {
+                    b'\\' => at += 2,
+                    b'"' => {
+                        at += 1;
+                        break;
+                    }
+                    _ => at += 1,
+                }
+            }
+            continue;
+        }
+        if let Some(len) = char_literal_len(rest) {
+            at += len;
+            continue;
+        }
+        out.push(bytes[at]);
+        at += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The byte length of the raw string literal opening at `rest` (`r".."`, `r#".."#`,
+/// and their `b`-prefixed forms), if one does.
+///
+/// Raw strings honour no escapes, so one closes at the first quote followed by the
+/// same run of hashes it opened with.
+fn raw_string_len(rest: &[u8]) -> Option<usize> {
+    let mut at = usize::from(rest.first() == Some(&b'b'));
+    if rest.get(at) != Some(&b'r') {
+        return None;
+    }
+    at += 1;
+    let hashes = rest[at..].iter().take_while(|&&b| b == b'#').count();
+    at += hashes;
+    if rest.get(at) != Some(&b'"') {
+        return None;
+    }
+    at += 1;
+    while at < rest.len() {
+        let closes = rest[at] == b'"'
+            && rest[at + 1..]
+                .iter()
+                .take(hashes)
+                .filter(|&&b| b == b'#')
+                .count()
+                == hashes;
+        if closes {
+            return Some(at + 1 + hashes);
+        }
+        at += 1;
+    }
+    // Unterminated in the text handed over: consume the remainder rather than fall
+    // back to scanning string content as code.
+    Some(rest.len())
+}
+
+/// The byte length of the char literal opening at `rest`, if one does.
+///
+/// A `'` opens a literal only in the `'x'` and `'\x'` shapes; anywhere else it is a
+/// lifetime tick, which must survive so the code around it still parses as code.
+fn char_literal_len(rest: &[u8]) -> Option<usize> {
+    if rest.first() != Some(&b'\'') {
+        return None;
+    }
+    if rest.get(1) == Some(&b'\\') {
+        // `'\n'`, `'\''`, `'\u{7f}'` — a lifetime can never contain a backslash.
+        let close = rest.iter().skip(2).position(|&b| b == b'\'')? + 2;
+        return Some(close + 1);
+    }
+    (rest.get(2) == Some(&b'\'')).then_some(3)
 }
 
 /// How many times `src` CONSTRUCTS the delta `WalOp` variant.
+///
+/// All three qualifier forms that reach the variant are counted: `WalOp::OrDelta`,
+/// `Self::OrDelta`, and — in a file that imports the variant unqualified — a bare
+/// `OrDelta`. The bare form is the one no search for a qualified path can see, and it
+/// is exactly what an emitter written behind `use ..::WalOp::OrDelta;` looks like.
 ///
 /// A brace group of `..` is a wildcard pattern and one followed by `=>` is a match
 /// arm; neither builds a value. Everything else does. Nested braces are matched, so a
 /// delta built inline inside the frame is one site, not two.
 fn or_delta_construction_sites(src: &str) -> usize {
     let code = code_only(src);
+    // A bare `OrDelta` resolves to the VARIANT only where the file imports it. Without
+    // that import the bare name is the delta ENUM — whose own variants carry the braces
+    // (`OrDelta::Add { .. }`) — or, inside the codec, the `WalOp` variant's own field
+    // DECLARATION. Neither builds a frame.
+    let bare_is_variant = imports_bare_delta_variant(&code);
     let mut sites = 0usize;
-    for path in ["WalOp::OrDelta", "Self::OrDelta"] {
-        let mut from = 0usize;
-        while let Some(offset) = code[from..].find(path) {
-            from += offset + path.len();
-            let rest = code[from..].trim_start();
-            // A bare mention — an import, a string, a qualified path with no field
-            // list — constructs nothing.
-            let Some(body) = rest.strip_prefix('{') else {
-                continue;
-            };
-            let mut depth = 1usize;
-            let close = body
-                .char_indices()
-                .find_map(|(i, ch)| {
-                    match ch {
-                        '{' => depth += 1,
-                        '}' => depth -= 1,
-                        _ => {}
-                    }
-                    (depth == 0).then_some(i)
-                })
-                .expect("a variant's field list closes its brace");
-            let fields = body[..close].trim();
-            let after = body[close + 1..].trim_start();
-            if fields != ".." && !after.starts_with("=>") {
-                sites += 1;
-            }
+    let mut from = 0usize;
+    while let Some(offset) = code[from..].find(NAME_OR_DELTA) {
+        let at = from + offset;
+        from = at + NAME_OR_DELTA.len();
+        let before = &code[..at];
+        let names_variant = if before.ends_with("WalOp::") || before.ends_with("Self::") {
+            true
+        } else if before.ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == ':') {
+            // A longer path or identifier: `wal::OrDelta` is the enum and `MyOrDelta`
+            // is some other item, so neither names the variant.
+            false
+        } else {
+            bare_is_variant && !is_declaration_position(before)
+        };
+        if !names_variant {
+            continue;
+        }
+        let rest = code[from..].trim_start();
+        // A bare mention — an import, a qualified path with no field list —
+        // constructs nothing.
+        let Some(body) = rest.strip_prefix('{') else {
+            continue;
+        };
+        // An unbalanced brace cannot be a field list. Skipping keeps the scan from
+        // aborting on text that only LOOKS like one, so a malformed fragment fails no
+        // file it does not belong to.
+        let Some(close) = matching_close(body) else {
+            continue;
+        };
+        let fields = body[..close].trim();
+        let after = body[close + 1..].trim_start();
+        if fields != ".." && !after.starts_with("=>") {
+            sites += 1;
         }
     }
     sites
+}
+
+/// Whether `code` brings the delta VARIANT into scope unqualified, which is the only
+/// way a bare `OrDelta { .. }` can name it.
+///
+/// Matched per import ITEM rather than over the file, because a whole-file search for
+/// the two halves would be satisfied by any `use` line at all once the variant is
+/// named anywhere else in the source.
+fn imports_bare_delta_variant(code: &str) -> bool {
+    let mut rest = code;
+    while let Some(at) = rest.find("use ") {
+        let line_start = rest[..at].rfind('\n').map_or(0, |i| i + 1);
+        let head = rest[line_start..at].trim();
+        let opens_an_item = head.is_empty() || head.starts_with("pub");
+        rest = &rest[at + "use ".len()..];
+        if !opens_an_item {
+            continue;
+        }
+        let item = &rest[..rest.find(';').unwrap_or(rest.len())];
+        // A glob over the variants (`WalOp::*`) brings the variant in just as an
+        // explicit or braced list does.
+        if item.contains("WalOp::") && (item.contains(NAME_OR_DELTA) || item.contains('*')) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The variant's bare name, spelled once so the import check and the scanner cannot
+/// drift apart.
+const NAME_OR_DELTA: &str = "OrDelta";
+
+/// Whether the bare name ending `before` sits in a DECLARATION or type position
+/// (`enum OrDelta {`, `impl .. for OrDelta {`, `-> OrDelta {`), where the brace that
+/// follows opens a field list or a block rather than a struct-expression.
+fn is_declaration_position(before: &str) -> bool {
+    let head = before.trim_end();
+    head.ends_with("->")
+        || matches!(
+            head.split_whitespace().next_back(),
+            Some("enum" | "struct" | "impl" | "trait" | "type" | "union" | "for" | "mod" | "use")
+        )
+}
+
+/// The offset within `body` — the text just past an opening brace — of the `}` that
+/// closes it, or `None` when the braces do not balance.
+fn matching_close(body: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    body.char_indices().find_map(|(i, ch)| {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            _ => {}
+        }
+        (depth == 0).then_some(i)
+    })
 }
 
 /// AC16 — every synthetic frame enters through the OBSERVED append path, verified
@@ -2139,6 +2389,11 @@ fn or_delta_construction_sites(src: &str) -> usize {
 /// The needles are assembled at run time rather than written as literals, because a
 /// source-scanning assertion whose own file contains its needle is self-defeating —
 /// it would report the check itself as a violation.
+///
+/// The negative half runs over a WHITESPACE-FREE view of the code, mirroring the
+/// technique `wal/mod.rs`'s own doc-contract tests use: `self.wal\n    .append(` is the
+/// same call as `wal.append(`, so a needle carrying a space or a line break in it would
+/// let the wrapped form through and quietly weaken the assertion to nothing.
 ///
 /// The behavioural half of AC16 lives in the driver's injection arm: it asserts
 /// EXACTLY ONE observed `(partition, sequence)` per injected frame, the same
@@ -2154,6 +2409,10 @@ fn tg_or_003_ac16_injection_rides_the_observed_append_seam_only() {
     let raw_append = ["wal", ".append("].concat();
     let writer_append = ["WalWriter", "::append"].concat();
     for (name, src) in sources {
+        let src: String = code_only(src)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .concat();
         assert!(
             !src.contains(&raw_append),
             "AC16: {name} must not append to the WAL directly — a frame appended around \
