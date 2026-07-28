@@ -339,6 +339,17 @@ pub(crate) struct RunOutcome {
     /// non-OR base normalizes to an EMPTY OR-Map, so the prior value is discarded
     /// and only the delta's own effect survives.
     pub final_values: Vec<(Key, Option<RecordValue>)>,
+    /// What the durable store held for each key when the run's FIRST recovery began —
+    /// the base the fold actually seeds from.
+    ///
+    /// Captured because a case whose arms are NAMED for their base shape (an `OrMap`
+    /// base, a legacy `OrTombstones` blob, a cross-kind `Lww` slot) otherwise asserts
+    /// only the post-state, which every shape can reach. Recovery normalizes a legacy
+    /// base into `OrMap`, so by the time `final_values` is read the shape that
+    /// discriminated the arm is gone: a regression making `or_legacy_tombstones` write
+    /// an `OrMap` would leave those cases green while silently deleting the coverage
+    /// they exist for.
+    pub recovery_base_values: Vec<(Key, Option<RecordValue>)>,
     /// The tombstone-bytes gauge (`TG-OR-004`) as the real boot-time reconciliation walk
     /// recomputes it over the final durable keyspace — the same function the server
     /// bootstrap runs after `WalRecovery::run`, never a second copy of its accounting.
@@ -359,6 +370,25 @@ impl RunOutcome {
     /// The semantic view of the durable slot `key` ends the run with.
     pub fn final_or_view(&self, key: Key) -> OrMapSemanticView {
         or_map_semantic_view(self.final_value(key).cloned())
+    }
+
+    /// The SHAPE of the durable base `key`'s fold seeded from, as a name a case can
+    /// assert on: `"OrMap"`, `"OrTombstones"`, `"Lww"`, or `"absent"`.
+    ///
+    /// A name rather than the value itself, because what a base-shape arm is named for
+    /// is the variant, not its contents — those are already pinned by the post-state.
+    pub fn recovery_base_kind(&self, key: Key) -> &'static str {
+        match self
+            .recovery_base_values
+            .iter()
+            .find(|(k, _)| *k == key)
+            .and_then(|(_, v)| v.as_ref())
+        {
+            None => "absent",
+            Some(RecordValue::OrMap { .. }) => "OrMap",
+            Some(RecordValue::OrTombstones { .. }) => "OrTombstones",
+            Some(RecordValue::Lww { .. }) => "Lww",
+        }
     }
 }
 
@@ -1526,6 +1556,17 @@ impl Driver {
     /// partition unresolved view to match the empty post-recovery pending map.
     /// `next_incarnation` is the index the loss surfaces at (for the O1 record).
     async fn recover(&mut self, next_incarnation: usize) {
+        // The fold's base, read BEFORE replay normalizes it away. Only the first
+        // recovery's base is kept: that is the one a case's base-shape arm names, and
+        // every later recovery necessarily sees whatever the previous one left.
+        if self.outcome.recovery_base_values.is_empty() {
+            for key in 0..=MAX_KEY_INDEX {
+                let key_str = self.key_str(key).to_string();
+                let value = self.inner.load(TEST_MAP, &key_str).await.ok().flatten();
+                self.outcome.recovery_base_values.push((key, value));
+            }
+        }
+
         let mut recovery = WalRecovery::new(Arc::clone(&self.wal), vec![self.partition]);
         // Both replay-clobber defects re-replay each partition's oldest un-applied
         // frame over the newer durable value the in-order pass left behind.

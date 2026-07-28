@@ -1279,6 +1279,22 @@ fn tg_or_003_ac1_recovery_equivalence_over_every_fold_base_shape() {
 
     let outcome = run_or_case(&case);
 
+    // The three fold-base SHAPES this case is named for, asserted where the fold reads
+    // them. Recovery normalizes a legacy blob into `OrMap`, so the post-states below
+    // are reachable from any base: without this the arms would stay green after a
+    // regression that made `or_legacy_tombstones` write an `OrMap` and quietly deleted
+    // the only coverage of the normalize step.
+    assert_eq!(
+        [
+            outcome.recovery_base_kind(0),
+            outcome.recovery_base_kind(1),
+            outcome.recovery_base_kind(2)
+        ],
+        ["OrMap", "absent", "OrTombstones"],
+        "AC1: the three R1.3 base shapes must actually reach the store — a durable OrMap, no \
+         record at all, and a LEGACY OrTombstones blob"
+    );
+
     assert_eq!(
         outcome.final_or_view(0),
         expect_view(&["tag-b"], &["tag-a"]),
@@ -1431,6 +1447,16 @@ fn tg_or_003_ac3c_snapshot_frame_is_an_absolute_set_not_a_union() {
 
     let outcome = run_or_case(&case);
 
+    // The discrimination rests on the store actually holding tag-a LIVE when replay
+    // starts: against an absent base a union and a replace agree, and the assertion
+    // below would pass without testing anything.
+    assert_eq!(
+        outcome.recovery_base_kind(0),
+        "OrMap",
+        "AC3(c): the absolute-set arm needs a durable OrMap base — with no base at all, union and \
+         replace are indistinguishable"
+    );
+
     assert_eq!(
         outcome.final_or_view(0),
         expect_view(&[], &["tag-a"]),
@@ -1472,6 +1498,17 @@ fn tg_or_003_ac3d_cross_kind_base_normalizes_and_records_its_post_state() {
     ];
 
     let outcome = run_or_case(&case);
+
+    // The two base shapes the arms below are named for. Both normalize to `OrMap`
+    // during replay, so neither post-state can witness the shape the fold started
+    // from — a legacy blob silently written as an `OrMap`, or an Lww slot that never
+    // landed, would leave the assertions below green over coverage that had vanished.
+    assert_eq!(
+        [outcome.recovery_base_kind(0), outcome.recovery_base_kind(1)],
+        ["OrTombstones", "Lww"],
+        "AC3(d): the cross-kind arms need a LEGACY tombstone blob and a non-OR Lww slot as the \
+         durable bases the deltas fold onto"
+    );
 
     // (i) Legacy OrTombstones base: the blob's tags survive the upgrade and the
     // delta lands on top of them.
@@ -1578,7 +1615,9 @@ fn tg_or_003_ac4_prune_is_an_idempotent_tombstone_set_subtraction() {
 /// above it. Nothing here fabricates a resolution for an injected sequence.
 ///
 /// The watermark-overshoot half of the original stranded-entry scenario is NOT here:
-/// this asserts fold/base behaviour GIVEN a prefix-complete watermark (`TG-WB-001`).
+/// this asserts fold/base behaviour GIVEN a prefix-complete APPLIED watermark
+/// (`TG-WAL-005` — the wal_seq-space tracker `mark_applied` advances, not the
+/// entry-space flushed watermark of `TG-WB-001`).
 #[test]
 fn tg_or_003_ac2_stranded_base_and_re_fold_idempotency() {
     // The durable base carries two tags the delta window never mentions, so a fold
