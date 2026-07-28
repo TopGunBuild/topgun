@@ -480,6 +480,22 @@ pub struct WalWriter {
     /// Batched-commit group-commit timer: shared notifier woken every ~10 ms.
     /// When `policy == Batched`, the writer also fsyncs after every 100 ops.
     batch_flush_tx: tokio::sync::watch::Sender<()>,
+    /// Whether this writer may put a `WalOp::OrDelta` frame on disk.
+    ///
+    /// `false` in the one production constructor, and the ONLY thing that can
+    /// set it is a `#[cfg(test)]` seam, so in a release build no code path can
+    /// reach the `true` state at all. That is what makes the refusal in
+    /// `append` a structural no-emitter guard rather than a convention: the
+    /// reader lands before the writer (`TG-OR-003`), so a delta frame reaching
+    /// the durable log today is a programming bug no matter which shape of code
+    /// produced it — an aliased import, a macro, a generated body. Whichever
+    /// path emits it dies loudly at the boundary that would have made it
+    /// durable.
+    ///
+    /// Not `#[cfg(test)]` itself, deliberately: a field that vanished from a
+    /// release build would take the guard with it and leave production the only
+    /// configuration nothing checks.
+    allow_or_delta: std::sync::atomic::AtomicBool,
     /// Forces the pre-unlink watermark re-read to return this value instead of
     /// the sidecar's.
     ///
@@ -654,6 +670,9 @@ impl WalWriter {
             policy,
             partitions: AsyncMutex::new(HashMap::new()),
             batch_flush_tx,
+            // Nothing may emit a delta frame until the writer lands; this is the
+            // only constructor, so the guard in `append` is armed everywhere.
+            allow_or_delta: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             gc_revalidation_override: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -1029,8 +1048,10 @@ impl WalWriter {
 /// classification only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WalFailStopTier {
-    /// The WAL's own rotation bookkeeping is inconsistent: an append targeted a
-    /// sealed segment. No frame of the entry reached the segment.
+    /// A programming bug detected BEFORE the entry was framed, so no byte of it
+    /// reached the segment: an append targeted a sealed segment (the WAL's own
+    /// rotation bookkeeping is inconsistent), or it carried a frame kind this
+    /// build has no writer for.
     P,
     /// A write, flush or fsync failed after the entry may already have been
     /// framed into the segment, so the frame's durability is unknown.
@@ -1092,6 +1113,29 @@ pub(crate) fn wal_fail_stop(tier: WalFailStopTier, ctx: &str) -> ! {
 #[async_trait]
 impl Wal for WalWriter {
     async fn append(&self, partition: u32, entry: &WalEntry) -> anyhow::Result<()> {
+        // No writer for this frame kind exists yet: recovery reads delta frames
+        // before anything emits them (`TG-OR-003`), so one arriving here is a
+        // programming bug — a partially-built emitter, or a merge that landed
+        // the writer ahead of its compatibility criteria. Refusing at the
+        // boundary that makes a frame durable is what makes "nothing emits a
+        // delta" a property of the CODE rather than of a source scan: it holds
+        // against every shape of emitter, including the ones a text scan cannot
+        // see. Checked first, so the entry is not even encoded.
+        if matches!(entry.op, WalOp::OrDelta { .. })
+            && !self
+                .allow_or_delta
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            wal_fail_stop(
+                WalFailStopTier::P,
+                &format!(
+                    "append carried an OrDelta frame, which no path in this build may write: \
+                     partition={partition}, sequence={}, map={}, key={}",
+                    entry.sequence, entry.map, entry.key
+                ),
+            );
+        }
+
         let frame = format::encode(entry)?;
 
         let handle = self.handle(partition).await?;
@@ -2162,6 +2206,19 @@ fn current_millis() -> i64 {
 /// cannot see them at all.
 #[cfg(test)]
 impl WalWriter {
+    /// Lets this writer accept `WalOp::OrDelta` frames, or stops it again.
+    ///
+    /// The ONLY thing that can clear the append guard, and `#[cfg(test)]` so a
+    /// release build cannot name it. A harness that puts synthetic delta frames
+    /// on disk opens the guard for exactly the append it injects and closes it
+    /// again straight after, so every OTHER write in the same run — including
+    /// the ones that ride the real write path — stays under the refusal and
+    /// would fail-stop if that path ever started emitting deltas.
+    pub(crate) fn test_set_allow_or_delta(&self, allow: bool) {
+        self.allow_or_delta
+            .store(allow, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Seals the partition's active segment in place.
     ///
     /// Seal/rotate always installs a FRESH active segment under the same lock, so
@@ -2389,6 +2446,60 @@ mod tests {
                      the snapshot monotonicity that covers `WalOp::Store` OR frames"
                 );
             }
+        }
+    }
+
+    /// The structural half of the single-algebra rule: the fold DELEGATES, and
+    /// writes no OR algebra of its own.
+    ///
+    /// The behavioural half — a mixed add / remove / re-add / prune window whose
+    /// outcome only the live algebra produces — lives in the harness's case
+    /// family. It cannot see this property: a second, hand-written copy of the
+    /// algebra that currently AGREES passes every differential case while being
+    /// exactly the fork `TG-OR-003` forbids, and it would diverge silently the
+    /// first time the live path changed under it.
+    ///
+    /// ADVISORY GRADE, and deliberately so. Both halves are text assertions over
+    /// one region of one file: the positive half requires the two calls in their
+    /// argument-bearing form, so a prose mention of either symbol cannot satisfy
+    /// it, and the negative half names the shapes a hand-rolled fold reaches for.
+    /// Neither is a proof that no algebra exists — a helper called from the fold
+    /// would carry its body out of this region. What they do is make the drift
+    /// visible at the place a reviewer already reads.
+    #[test]
+    fn or_delta_fold_delegates_to_the_live_seams_and_writes_no_algebra_of_its_own() {
+        let region = slice_between(
+            production_source(),
+            "impl OrDeltaFold for WalRecovery {",
+            "fn current_millis(",
+        );
+
+        for call in [
+            "crdt::normalize_to_or_map(&mut value)",
+            "crdt::apply_or_delta(delta.clone(), &mut value)",
+        ] {
+            assert!(
+                normalized(region).contains(call),
+                "the fold must reach the live OR algebra through `{call}` — the runtime write \
+                 path's own two functions, in that order. A copy here is free to drift from what \
+                 the write path did, and on this path drift is a silently lost mutation"
+            );
+        }
+
+        // Comment lines are dropped so prose cannot turn this red; a TRAILING
+        // comment on a code line survives, which is the bound this strip has.
+        let code: String = region
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        for shape in ["records.", "tombstones.", ".retain(", ".push(", ".dedup("] {
+            assert!(
+                !code.contains(shape),
+                "the fold body touches `{shape}` — reaching into the OR-Map's own fields is how a \
+                 second add-wins / remove-wins / prune implementation starts. The fold normalizes \
+                 and applies; the algebra belongs to `crdt`"
+            );
         }
     }
 
@@ -4349,6 +4460,110 @@ mod tests {
             before + 1,
             "The pre-check stops BEFORE the write path, so the sequence never \
              reaches the residual (B) disposition — a second record would mean it did"
+        );
+    }
+
+    /// The structural half of the no-emitter proof: whatever code constructs a
+    /// delta frame, it cannot make one DURABLE in a build that has no writer.
+    ///
+    /// This is what a source scan cannot do. A scan asks whether any text in the
+    /// tree looks like an emitter, and every such scan is evadable by a shape it
+    /// was not written to see. This asks the opposite question — whether a delta
+    /// frame ever arrives at the one function that puts bytes on disk — and gets
+    /// the answer from the frame itself, so an aliased import, a macro-generated
+    /// body or a `build.rs`-produced emitter fails here identically.
+    #[tokio::test]
+    async fn appending_an_or_delta_frame_fail_stops_at_tier_p() {
+        // Serialised against every other fail-stop assertion: the observation log
+        // is process-global, so a concurrent tier would make the index read below
+        // return someone else's entry.
+        let _guard = FAIL_STOP_TEST_LOCK.lock().await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let wal = Arc::new(WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap());
+
+        let before = WalWriter::test_fail_stop_observations().len();
+
+        // Run the append on its own task so the fail-stop's test-mode panic is
+        // caught by the JoinHandle instead of unwinding the test itself.
+        let wal_clone = Arc::clone(&wal);
+        let outcome = tokio::spawn(async move {
+            wal_clone
+                .append(0, &or_delta_frame("k", OrDelta::Remove { tag: "t".into() }))
+                .await
+        })
+        .await
+        .err();
+        assert!(
+            outcome.is_some_and(|e| e.is_panic()),
+            "a delta frame reaching the append boundary must fail-stop, not return: nothing in \
+             this build may write one, so it is a programming bug rather than an I/O condition"
+        );
+
+        let observed = WalWriter::test_fail_stop_observations();
+        assert_eq!(
+            observed.get(before),
+            Some(&WalFailStopTier::P),
+            "an unwritable frame kind is a programming bug caught before framing: tier P, not \
+             tier B"
+        );
+        assert_eq!(
+            observed.len(),
+            before + 1,
+            "the check runs BEFORE the encode and the write path, so the entry never reaches the \
+             residual (B) disposition — a second record would mean it did"
+        );
+    }
+
+    /// Non-vacuity of the guard above, in both directions.
+    ///
+    /// Without this a `WalWriter` that refused EVERY append would satisfy the
+    /// fail-stop test just as well, and the harness seam that opens the guard
+    /// for one injected frame could rot with nothing noticing. It also pins the
+    /// seam's SCOPE: closing it re-arms the refusal, which is what keeps every
+    /// other write in an injection run — the ones riding the real write path —
+    /// under the guard.
+    #[tokio::test]
+    async fn the_or_delta_append_guard_refuses_only_delta_frames_and_only_while_armed() {
+        let _guard = FAIL_STOP_TEST_LOCK.lock().await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let wal = Arc::new(WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap());
+
+        // A frame kind this build DOES write is unaffected by the guard.
+        wal.append(0, &make_wal_entry(1))
+            .await
+            .expect("a Store frame must append with the guard armed");
+
+        // The test seam is the only thing that opens it — and it opens it for
+        // real: the frame kind that fail-stops above now reaches disk.
+        wal.test_set_allow_or_delta(true);
+        let mut delta = or_delta_frame("k", OrDelta::Remove { tag: "t".into() });
+        delta.sequence = 2;
+        wal.append(0, &delta)
+            .await
+            .expect("the injection seam must be able to put a synthetic delta frame on disk");
+
+        // Closing it re-arms the refusal within the same writer's lifetime.
+        wal.test_set_allow_or_delta(false);
+        let before = WalWriter::test_fail_stop_observations().len();
+        let wal_clone = Arc::clone(&wal);
+        let outcome = tokio::spawn(async move {
+            let mut delta = or_delta_frame("k", OrDelta::Remove { tag: "t".into() });
+            delta.sequence = 3;
+            wal_clone.append(0, &delta).await
+        })
+        .await
+        .err();
+        assert!(
+            outcome.is_some_and(|e| e.is_panic()),
+            "the seam must be scoped to the appends it wraps: a delta frame appended after it \
+             closes is an emitter, and must fail-stop like any other"
+        );
+        assert_eq!(
+            WalWriter::test_fail_stop_observations().get(before),
+            Some(&WalFailStopTier::P),
+            "the re-armed refusal is the same programming-bug disposition, not a degraded one"
         );
     }
 

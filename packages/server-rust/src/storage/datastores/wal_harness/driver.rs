@@ -1239,8 +1239,17 @@ impl Driver {
         let seq = store.assign_wal_sequence(partition);
         // 3. Append the frame at the pinned on-disk shape, built by the single
         //    constructor that owns that shape.
+        //
+        //    The writer refuses delta frames by construction — nothing in this
+        //    build may emit one — so the guard is opened for exactly this append
+        //    and closed again immediately. Scoping it this tightly is the point:
+        //    every OTHER op in the run rides the real write path under the
+        //    refusal, so a production path that started emitting deltas
+        //    fail-stops the harness instead of blending into the injected ones.
         let entry = or_delta_frame(TEST_MAP, self.key_str(key), delta.clone(), seq);
+        self.wal.test_set_allow_or_delta(true);
         let appended = store.wal_append(partition, &entry).await;
+        self.wal.test_set_allow_or_delta(false);
         // Drain in BOTH outcomes: the observer fired at the assign, so leaving the
         // observation in the sink would misattribute it to the next op.
         let observed = Self::drain_observed();
