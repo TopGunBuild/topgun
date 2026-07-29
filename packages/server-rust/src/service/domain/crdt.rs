@@ -2301,6 +2301,117 @@ mod tests {
         );
     }
 
+    /// The share of OR writes that carry NO witness, measured deterministically.
+    ///
+    /// This seam does not change which writes happen: an op that took no effect
+    /// still re-persists its whole slot, exactly as before. Those writes are the
+    /// residual a delta-framing consumer cannot shrink, so the plateau argument
+    /// downstream needs the share as a number rather than as a hope. Eliminating
+    /// the residual — gating the unconditional re-persist on the same flags — is
+    /// tracked separately and deliberately not attempted here.
+    ///
+    /// Sequential and seeded, not concurrent: whether a given add is suppressed
+    /// depends on interleaving, so a concurrent driver would report a different
+    /// ratio per run and could not be consumed as a fixed term. The same seed must
+    /// therefore reproduce the same counts, which the caller below asserts by
+    /// running it twice.
+    async fn measure_none_witness_share(seed: u64) -> (usize, usize) {
+        const KEYS: u64 = 48;
+        const EPOCH_WIDTH: u64 = 100;
+        const ROUNDS: u64 = 480;
+
+        let spy = Arc::new(WitnessSpyStore::standalone(true));
+        let (svc, factory, frontier) = make_service_with_frontier_and_store(
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+            Vec::new(),
+        );
+        frontier.set_epoch_width(EPOCH_WIDTH);
+
+        // A pinned linear congruential generator rather than a random source, so
+        // the op sequence is a function of the seed alone.
+        let mut state = seed;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state >> 33
+        };
+
+        for round in 0..ROUNDS {
+            let key = format!("ork-{}", next() % KEYS);
+            let tag = format!("t-{round}");
+
+            // The churn pair the soak drives: a unique tag added then removed.
+            Arc::clone(&svc)
+                .oneshot(or_add_op("m", &key, "v", &tag))
+                .await
+                .unwrap();
+            Arc::clone(&svc)
+                .oneshot(or_remove_op("m", &key, &tag))
+                .await
+                .unwrap();
+
+            // Every fifth round also replays an op that cannot take effect: a
+            // re-add of the tag just tombstoned, and a re-issue of the same
+            // remove. These are the residual's two add/remove sources.
+            if round % 5 == 0 {
+                Arc::clone(&svc)
+                    .oneshot(or_add_op("m", &key, "v", &tag))
+                    .await
+                    .unwrap();
+                Arc::clone(&svc)
+                    .oneshot(or_remove_op("m", &key, &tag))
+                    .await
+                    .unwrap();
+            }
+        }
+
+        // Open both prune conjuncts and sweep, so effective prunes are in the mix
+        // too rather than being excluded by an unreachable gate.
+        let client: String = "a5:alice|dev-1".into();
+        frontier.set_delivered(ConnectionId(1), 10_000);
+        frontier
+            .confirm_apply_ack(&client, frontier.low_water_mark() + 50, ConnectionId(1))
+            .await;
+        frontier.set_durable_epoch_watermark(100_000);
+        prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
+
+        let observed = spy.observations();
+        let total = observed.len();
+        let none = observed.iter().filter(|o| o.witness.is_none()).count();
+        (none, total)
+    }
+
+    #[tokio::test]
+    async fn the_none_witness_share_is_measured_and_reproducible() {
+        const SEED: u64 = 0x5EED_349C;
+
+        let (none_a, total_a) = measure_none_witness_share(SEED).await;
+        let (none_b, total_b) = measure_none_witness_share(SEED).await;
+
+        assert!(
+            total_a > 0,
+            "the driver must have produced OR writes to measure"
+        );
+        assert_eq!(
+            (none_a, total_a),
+            (none_b, total_b),
+            "the same seed must reproduce the same counts, or the number is not a \
+             term anything downstream can consume"
+        );
+        // Recorded rather than bounded: this seam does not change the residual, so
+        // a threshold here would be an invented contract. The number belongs in the
+        // completion record.
+        // Tenths of a percent in integer arithmetic: a float cast of a usize is
+        // lossy on 64-bit targets, and the ratio needs no float to be exact.
+        let tenths = none_a * 1000 / total_a;
+        println!(
+            "none-witness OR writes: {none_a}/{total_a} ({}.{}%) at seed {SEED:#x}",
+            tenths / 10,
+            tenths % 10
+        );
+    }
+
     /// None of the files this change touches may name the delta frame variant.
     ///
     /// A package-wide belt already scans raw file contents for that literal and
