@@ -361,6 +361,18 @@ mod tests {
         }
     }
 
+    /// The write-owed answer for a closure that carries no OR delta.
+    ///
+    /// Every closure in this module is in that class: they mirror the OR logic
+    /// locally and own no witness gate, so the witness is always absent and only
+    /// the write-owed flag varies.
+    fn write_owed(changed: bool) -> crate::storage::MutateOutcome {
+        crate::storage::MutateOutcome {
+            changed,
+            witness: None,
+        }
+    }
+
     /// Apply an op through the NEW in-place mutate path — mirrors the production
     /// `crdt.rs` OR write path exactly (same mutate closures, same gauge calls).
     async fn apply_inplace(store: &DefaultRecordStore, op: &OrOp) {
@@ -385,10 +397,7 @@ mod tests {
                             records.push(e);
                         }
                     }
-                    crate::storage::MutateOutcome {
-                        changed: true,
-                        witness: None,
-                    }
+                    write_owed(true)
                 };
                 store
                     .update_in_place(
@@ -418,10 +427,7 @@ mod tests {
                             add_tombstone_bytes(tag.len() as u64);
                         }
                     }
-                    crate::storage::MutateOutcome {
-                        changed: true,
-                        witness: None,
-                    }
+                    write_owed(true)
                 };
                 store
                     .update_in_place(
@@ -448,10 +454,7 @@ mod tests {
                             tombstones.retain(|t| t != tag);
                             dropped = tombstones.len() != before;
                         }
-                        crate::storage::MutateOutcome {
-                            changed: dropped,
-                            witness: None,
-                        }
+                        write_owed(dropped)
                     };
                     store
                         .update_in_place(
@@ -911,10 +914,7 @@ mod tests {
                         add_tombstone_bytes(tag.len() as u64);
                     }
                 }
-                crate::storage::MutateOutcome {
-                    changed: true,
-                    witness: None,
-                }
+                write_owed(true)
             };
 
             // Exact equality, not a saturating delta: saturation would mask a
@@ -984,10 +984,7 @@ mod tests {
             let mut counted = |value: &mut RecordValue| {
                 calls.fetch_add(1, Ordering::Relaxed);
                 normalize(value);
-                crate::storage::MutateOutcome {
-                    changed: true,
-                    witness: None,
-                }
+                write_owed(true)
             };
             // Insert (no resident slot yet).
             store
@@ -1077,10 +1074,7 @@ mod tests {
                         records.push(entry);
                     }
                 }
-                crate::storage::MutateOutcome {
-                    changed: true,
-                    witness: None,
-                }
+                write_owed(true)
             };
 
             store
@@ -1164,10 +1158,7 @@ mod tests {
                 let whole_slot = whole_slot.clone();
                 move |value: &mut RecordValue| {
                     *value = whole_slot.clone();
-                    crate::storage::MutateOutcome {
-                        changed: true,
-                        witness: None,
-                    }
+                    write_owed(true)
                 }
             };
             store

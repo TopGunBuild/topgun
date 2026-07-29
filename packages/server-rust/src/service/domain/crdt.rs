@@ -1800,6 +1800,174 @@ mod tests {
         haystack.matches(needle).count()
     }
 
+    /// Every checked-in `.rs` under this package, as `(path, source)`.
+    ///
+    /// Re-implemented here rather than shared: the equivalent walkers live in
+    /// `wal_harness/cases.rs` as private fns, so they are unreachable from this
+    /// file. A cascade that lands in a file the walk never visits would satisfy
+    /// every assertion made over the result, which is why the callers below
+    /// assert the walk reached named files before reading any zero out of it.
+    fn package_rust_sources() -> Vec<(String, String)> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // Build output is not checked in, and it contains generated
+                    // sources that would pollute every count.
+                    if path.file_name().is_some_and(|name| name == "target") {
+                        continue;
+                    }
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    if let Ok(src) = std::fs::read_to_string(&path) {
+                        out.push((path.display().to_string(), src));
+                    }
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(std::path::Path::new(env!("CARGO_MANIFEST_DIR")), &mut out);
+        out
+    }
+
+    /// Count a needle across the package, returning `(total, per-file hits)`.
+    fn count_across_package(needle: &str) -> (usize, Vec<(String, usize)>) {
+        let sources = package_rust_sources();
+        assert!(
+            sources
+                .iter()
+                .any(|(path, _)| path.ends_with("service/domain/crdt.rs")),
+            "the walk must reach this file, or every count below is vacuous"
+        );
+        assert!(
+            sources
+                .iter()
+                .any(|(path, _)| path.ends_with("storage/map_data_store.rs")),
+            "the walk must reach the store trait, or every count below is vacuous"
+        );
+        let mut per_file = Vec::new();
+        let mut total = 0;
+        for (path, src) in &sources {
+            let hits = count(&normalized(src), needle);
+            if hits > 0 {
+                total += hits;
+                per_file.push((path.clone(), hits));
+            }
+        }
+        (total, per_file)
+    }
+
+    /// The witness-aware methods are defaulted, and NOTHING in production
+    /// overrides them: every production store reaches the defaulted bodies.
+    ///
+    /// This is what makes the seam inert, so it is counted rather than argued.
+    /// The one sanctioned override of the two store-side methods is the test spy
+    /// in this file; the demand predicate's one sanctioned override is the
+    /// record store's delegation to its backend.
+    ///
+    /// Every needle is rebuilt from parts. That is load-bearing, not stylistic:
+    /// this scan is hosted in the same file it counts over, so a needle written
+    /// as one literal would find ITSELF — and the demand-predicate needle's
+    /// allowed set excludes this file, so a self-match would fail the assertion
+    /// on a correct implementation.
+    #[test]
+    fn the_witness_methods_reach_no_production_implementor() {
+        let store_side = [
+            concat!("fn ", "add_with_witness"),
+            concat!("fn ", "wants_or_witness"),
+        ];
+        for needle in store_side {
+            let (total, per_file) = count_across_package(needle);
+            assert_eq!(
+                total, 2,
+                "{needle} must exist exactly twice -- the defaulted definition and the one \
+                 test spy; anything else is an implementor cascade. Found: {per_file:?}"
+            );
+            assert!(
+                per_file
+                    .iter()
+                    .any(|(path, _)| path.ends_with("storage/map_data_store.rs")),
+                "{needle} must be found at its definition, or the scan matched nothing \
+                 and its zero means nothing. Found: {per_file:?}"
+            );
+            assert!(
+                per_file
+                    .iter()
+                    .any(|(path, _)| path.ends_with("service/domain/crdt.rs")),
+                "{needle}'s one sanctioned override is the spy in this file. Found: {per_file:?}"
+            );
+        }
+
+        // The demand predicate is asymmetric: its allowed set is the record
+        // store's definition plus the ONE delegation, and it explicitly excludes
+        // this file.
+        let demand = concat!("fn ", "or_witness_wanted");
+        let (total, per_file) = count_across_package(demand);
+        assert_eq!(
+            total, 2,
+            "{demand} must exist exactly twice -- the defaulted definition and the one \
+             delegation. Found: {per_file:?}"
+        );
+        assert!(
+            per_file
+                .iter()
+                .any(|(path, _)| path.ends_with("storage/record_store.rs")),
+            "{demand} must be found at its definition. Found: {per_file:?}"
+        );
+        assert!(
+            per_file
+                .iter()
+                .any(|(path, _)| path.ends_with("impls/default_record_store.rs")),
+            "{demand}'s one sanctioned delegation lives with the record store. \
+             Found: {per_file:?}"
+        );
+        assert!(
+            !per_file
+                .iter()
+                .any(|(path, _)| path.ends_with("service/domain/crdt.rs")),
+            "{demand} must NOT appear in this file -- if it does, the needle matched \
+             its own literal. Found: {per_file:?}"
+        );
+    }
+
+    /// None of the files this change touches may name the delta frame variant.
+    ///
+    /// A package-wide belt already scans raw file contents for that literal and
+    /// admits it only in the WAL's own modules, so a single occurrence here --
+    /// in code, a string literal or an assertion message -- turns that belt red,
+    /// and every repair available for it is forbidden. Re-asserted locally so
+    /// the trap surfaces from this file's own test run rather than from the
+    /// harness. Frame-kind assertions are therefore written positively, which
+    /// entails the negative: the only other inhabitants are the store frame, the
+    /// remove frame, and a test-only variant.
+    #[test]
+    fn no_file_this_change_touches_names_the_delta_frame_variant() {
+        let needle = concat!("WalOp", "::", "OrDelta");
+        let touched = [
+            "service/domain/crdt.rs",
+            "storage/record_store.rs",
+            "storage/impls/default_record_store.rs",
+            "storage/map_data_store.rs",
+            "storage/or_inplace_mutate_proptest.rs",
+        ];
+        let sources = package_rust_sources();
+        for suffix in touched {
+            let (path, src) = sources
+                .iter()
+                .find(|(path, _)| path.ends_with(suffix))
+                .unwrap_or_else(|| panic!("{suffix} must be reachable, or its zero is vacuous"));
+            assert_eq!(
+                src.matches(needle).count(),
+                0,
+                "{path} names the delta frame variant; the package-wide belt scans raw \
+                 contents and admits it only in the WAL's own modules"
+            );
+        }
+    }
+
     /// Power (a): a phrase that spans a doc-comment line break is found by the
     /// normalized view and is NOT found by a plain `contains` on the raw source.
     ///
@@ -3896,6 +4064,400 @@ mod tests {
         fn is_null(&self) -> bool {
             false
         }
+    }
+
+    /// One write as the store boundary saw it, with whatever witness rode along.
+    #[derive(Debug, Clone)]
+    struct WitnessObservation {
+        map: String,
+        key: String,
+        value: RecordValue,
+        witness: Option<OrDelta>,
+    }
+
+    /// Observes what actually crosses the store boundary, and can answer the
+    /// demand signal either way.
+    ///
+    /// This is deliberately ONE type covering every configuration the assertions
+    /// need — armed and unarmed, standalone and delegating. A second data-store
+    /// implementation in this file would keep the file-level allow-list green
+    /// while inflating the per-file site count the cascade assertion reads, so
+    /// the count would stop meaning "nobody overrode this".
+    ///
+    /// When `inner` is set every call is forwarded to it, so the spy can sit in
+    /// front of a real WAL-backed store and observe without displacing it; when
+    /// it is `None` the spy is itself the backend, holding its own map.
+    struct WitnessSpyStore {
+        inner: Option<Arc<dyn MapDataStore>>,
+        armed: bool,
+        observed: Mutex<Vec<WitnessObservation>>,
+        data: Mutex<HashMap<(String, String), RecordValue>>,
+    }
+
+    impl WitnessSpyStore {
+        /// Standalone backend. `armed` decides the answer to the demand signal,
+        /// which is the whole point of the unarmed configuration: it proves the
+        /// demand gate suppresses a witness the effect gate would have produced.
+        fn standalone(armed: bool) -> Self {
+            Self {
+                inner: None,
+                armed,
+                observed: Mutex::new(Vec::new()),
+                data: Mutex::new(HashMap::new()),
+            }
+        }
+
+        fn observations(&self) -> Vec<WitnessObservation> {
+            self.observed.lock().clone()
+        }
+
+        /// Every witness the boundary received, in arrival order.
+        fn witnesses(&self) -> Vec<Option<OrDelta>> {
+            self.observed
+                .lock()
+                .iter()
+                .map(|seen| seen.witness.clone())
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl MapDataStore for WitnessSpyStore {
+        async fn add(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            if let Some(inner) = &self.inner {
+                return inner.add(map, key, value, expiration_time, now).await;
+            }
+            self.data
+                .lock()
+                .insert((map.to_string(), key.to_string()), value.clone());
+            Ok(())
+        }
+
+        /// Records the pair, then persists exactly as the defaulted body would.
+        ///
+        /// Recording BOTH the value and the witness is what lets a caller check
+        /// they describe the same mutation: a witness folded onto the pre-image
+        /// has to reproduce the value that was written beside it.
+        async fn add_with_witness(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+            witness: Option<&OrDelta>,
+        ) -> anyhow::Result<()> {
+            self.observed.lock().push(WitnessObservation {
+                map: map.to_string(),
+                key: key.to_string(),
+                value: value.clone(),
+                witness: witness.cloned(),
+            });
+            if let Some(inner) = &self.inner {
+                return inner
+                    .add_with_witness(map, key, value, expiration_time, now, witness)
+                    .await;
+            }
+            self.add(map, key, value, expiration_time, now).await
+        }
+
+        fn wants_or_witness(&self) -> bool {
+            self.armed
+        }
+
+        async fn add_backup(
+            &self,
+            _: &str,
+            _: &str,
+            _: &RecordValue,
+            _: i64,
+            _: i64,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            if let Some(inner) = &self.inner {
+                return inner.remove(map, key, now).await;
+            }
+            self.data.lock().remove(&(map.to_string(), key.to_string()));
+            Ok(())
+        }
+
+        async fn remove_backup(&self, _: &str, _: &str, _: i64) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+            if let Some(inner) = &self.inner {
+                return inner.load(map, key).await;
+            }
+            Ok(self
+                .data
+                .lock()
+                .get(&(map.to_string(), key.to_string()))
+                .cloned())
+        }
+
+        async fn load_all(
+            &self,
+            map: &str,
+            keys: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            if let Some(inner) = &self.inner {
+                return inner.load_all(map, keys).await;
+            }
+            let guard = self.data.lock();
+            Ok(keys
+                .iter()
+                .filter_map(|key| {
+                    guard
+                        .get(&(map.to_string(), key.clone()))
+                        .map(|value| (key.clone(), value.clone()))
+                })
+                .collect())
+        }
+
+        async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+            if let Some(inner) = &self.inner {
+                return inner.remove_all(map, keys).await;
+            }
+            let mut guard = self.data.lock();
+            for key in keys {
+                guard.remove(&(map.to_string(), key.clone()));
+            }
+            Ok(())
+        }
+
+        async fn enumerate_leaves(
+            &self,
+            _: &str,
+            _: bool,
+            _: &mut dyn LeafSink,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn scan_values(&self, _: &str, _: bool, _: u64) -> anyhow::Result<ScanBatch> {
+            Ok(ScanBatch::default())
+        }
+
+        async fn scan_values_batched(
+            &self,
+            _: &str,
+            _: bool,
+            _: ScanCursor,
+            _: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            Ok(ScanBatch::default())
+        }
+
+        fn is_loadable(&self, _: &str) -> bool {
+            true
+        }
+
+        fn pending_operation_count(&self) -> u64 {
+            self.inner
+                .as_ref()
+                .map_or(0, |inner| inner.pending_operation_count())
+        }
+
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            match &self.inner {
+                Some(inner) => inner.soft_flush().await,
+                None => Ok(0),
+            }
+        }
+
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            match &self.inner {
+                Some(inner) => inner.hard_flush().await,
+                None => Ok(()),
+            }
+        }
+
+        async fn flush_key(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            deleted: bool,
+        ) -> anyhow::Result<()> {
+            match &self.inner {
+                Some(inner) => inner.flush_key(map, key, value, deleted).await,
+                None => Ok(()),
+            }
+        }
+
+        fn reset(&self) {}
+
+        /// A real (non-null) backend, so the full write-through path runs.
+        fn is_null(&self) -> bool {
+            false
+        }
+    }
+
+    /// An order-insensitive view of an OR slot, for comparing a folded witness
+    /// against the value that was written beside it.
+    ///
+    /// Deliberately local rather than reusing the delta-fold equivalence oracle
+    /// defined earlier in this file: that oracle's own contract states the
+    /// differential recovery test is its first consumer, so consuming it here
+    /// would make that contract false.
+    fn canonical_or_slot(value: &RecordValue) -> (Vec<(String, String)>, Vec<String>) {
+        match value {
+            RecordValue::OrMap {
+                records,
+                tombstones,
+            } => {
+                let mut live: Vec<(String, String)> = records
+                    .iter()
+                    .map(|entry| (entry.tag.clone(), format!("{:?}", entry.value)))
+                    .collect();
+                live.sort();
+                let mut dead = tombstones.clone();
+                dead.sort();
+                (live, dead)
+            }
+            other => (vec![(String::new(), format!("{other:?}"))], Vec::new()),
+        }
+    }
+
+    fn empty_or_slot() -> RecordValue {
+        RecordValue::OrMap {
+            records: Vec::new(),
+            tombstones: Vec::new(),
+        }
+    }
+
+    /// Drive at least one EFFECTIVE mutation of each kind — an accepted add, a
+    /// genuinely-new tombstone, and a prune that drops a tag — through the real
+    /// service over the given spy, and confirm each really took effect.
+    ///
+    /// Two keys rather than one because the epoch gate only opens once the
+    /// low-water mark has moved past the first epoch, and this fixture stamps one
+    /// epoch per tombstone.
+    ///
+    /// Shared so both callers below assert over the SAME effect cases: one proves
+    /// the demand gate suppresses every one of them, the other proves the
+    /// witnesses they produce describe the writes they rode with.
+    async fn drive_effective_or_mutations_of_every_kind(spy: &Arc<WitnessSpyStore>) {
+        let (svc, factory, frontier) = make_service_with_frontier_and_store(
+            Arc::clone(spy) as Arc<dyn MapDataStore>,
+            Vec::new(),
+        );
+
+        for (key, value, tag) in [("k1", "v1", "T1"), ("k2", "v2", "T2")] {
+            Arc::clone(&svc)
+                .oneshot(or_add_op("m", key, value, tag))
+                .await
+                .unwrap();
+            Arc::clone(&svc)
+                .oneshot(or_remove_op("m", key, tag))
+                .await
+                .unwrap();
+
+            // The add was accepted and the remove stamped a NEW tombstone, or
+            // two of the three effect kinds never happened here.
+            let mid = spy.load("m", key).await.unwrap();
+            assert!(
+                matches!(&mid, Some(RecordValue::OrMap { tombstones, .. })
+                         if tombstones.contains(&tag.to_string())),
+                "precondition: the remove must have stamped a new tombstone, got {mid:?}"
+            );
+        }
+
+        open_prune_gates_past_epoch_one(&frontier).await;
+        prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
+
+        // At least one prune dropped a tag, or the third effect kind is a
+        // no-effect op wearing an effective op's name.
+        let mut pruned_any = false;
+        for (key, tag) in [("k1", "T1"), ("k2", "T2")] {
+            let after = spy.load("m", key).await.unwrap();
+            if matches!(&after, Some(RecordValue::OrMap { tombstones, .. })
+                        if !tombstones.contains(&tag.to_string()))
+            {
+                pruned_any = true;
+            }
+        }
+        assert!(
+            pruned_any,
+            "precondition: the sweep must have dropped at least one tombstone"
+        );
+    }
+
+    /// With no consumer armed, the boundary receives NO witness -- not even for
+    /// the three mutations that did take effect.
+    ///
+    /// This is what separates the demand gate from the effect gate
+    /// behaviourally: on these three inputs the effect gate alone would have
+    /// produced a witness every time, so neither gate can be deleted while the
+    /// other silently absorbs its job.
+    #[tokio::test]
+    async fn an_unarmed_consumer_receives_no_witness_even_for_effective_mutations() {
+        let spy = Arc::new(WitnessSpyStore::standalone(false));
+        drive_effective_or_mutations_of_every_kind(&spy).await;
+
+        let witnesses = spy.witnesses();
+        assert!(
+            witnesses.len() >= 3,
+            "the boundary must have seen at least the effective writes, saw {}",
+            witnesses.len()
+        );
+        assert!(
+            witnesses.iter().all(Option::is_none),
+            "an unarmed consumer must receive no witness at all, got {witnesses:?}"
+        );
+    }
+
+    /// The witness and the value handed to the boundary describe the SAME
+    /// mutation.
+    ///
+    /// Asserted by folding each witness onto the previous value written for that
+    /// key and requiring the result to equal the value it arrived with. A witness
+    /// that described a different op -- or the same op on a different value --
+    /// would not reproduce it.
+    #[tokio::test]
+    async fn a_witness_folds_onto_the_pre_image_to_give_the_value_it_rode_with() {
+        let spy = Arc::new(WitnessSpyStore::standalone(true));
+        drive_effective_or_mutations_of_every_kind(&spy).await;
+
+        let seen = spy.observations();
+        let mut pre_image: HashMap<(String, String), RecordValue> = HashMap::new();
+        let (mut adds, mut removes, mut prunes) = (0usize, 0usize, 0usize);
+        for observation in &seen {
+            let slot = (observation.map.clone(), observation.key.clone());
+            if let Some(delta) = observation.witness.clone() {
+                match &delta {
+                    OrDelta::Add { .. } => adds += 1,
+                    OrDelta::Remove { .. } => removes += 1,
+                    OrDelta::Prune { .. } => prunes += 1,
+                }
+                let mut base = pre_image.get(&slot).cloned().unwrap_or_else(empty_or_slot);
+                apply_or_delta(delta, &mut base);
+                assert_eq!(
+                    canonical_or_slot(&base),
+                    canonical_or_slot(&observation.value),
+                    "the witness for {slot:?} did not reproduce the value it rode with"
+                );
+            }
+            pre_image.insert(slot, observation.value.clone());
+        }
+        // All three kinds must be represented, or a kind whose witness is never
+        // produced would pass this vacuously.
+        assert!(
+            adds > 0 && removes > 0 && prunes > 0,
+            "every effect kind must have produced a witness to fold; \
+             adds={adds} removes={removes} prunes={prunes}"
+        );
     }
 
     /// Evicts named keys the instant the record store rehydrates them.
