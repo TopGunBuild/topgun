@@ -1581,6 +1581,322 @@ mod tests {
     use crate::storage::record_store::RecordStore;
     use crate::storage::tombstone_gauge::with_isolated_gauge;
 
+    // -----------------------------------------------------------------------
+    // Normalized source search
+    //
+    // A doc-contract assertion that greps the raw file is decided by where a
+    // line happens to wrap, not by what the contract says: the same phrase is
+    // found or missed depending on indentation, a doc-comment break, a string
+    // literal's `\` continuation, or a method call split across a line break.
+    // Every one of those has already produced an assertion that was green
+    // because it could not see its own subject. These four steps put the source
+    // into one shape so a phrase assertion measures the contract instead.
+    //
+    // The steps are re-implemented here rather than shared: the equivalents in
+    // `storage/wal/mod.rs` are private to that file's `mod tests`, there is no
+    // test-support module in this package, and adding one is tracked separately
+    // (TODO-620).
+    // -----------------------------------------------------------------------
+
+    /// Step 1 — drop leading indentation and one `//`, `///` or `//!` marker, so
+    /// a phrase reads the same whether it sits in prose or in a doc-comment.
+    fn strip_comment_markers(src: &str) -> String {
+        src.lines()
+            .map(|line| {
+                let trimmed = line.trim_start_matches([' ', '\t']);
+                match trimmed.strip_prefix("//") {
+                    Some(rest) => rest
+                        .strip_prefix('/')
+                        .or_else(|| rest.strip_prefix('!'))
+                        .unwrap_or(rest)
+                        .to_string(),
+                    None => line.to_string(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Step 2 — drop Rust string-literal line continuations: a trailing `\`
+    /// together with the following line's leading whitespace. Without this a
+    /// phrase written inside a wrapped `reason = "…"` attribute is unfindable,
+    /// because the raw text carries a backslash in the middle of the sentence.
+    fn strip_line_continuations(src: &str) -> String {
+        let chars: Vec<char> = src.chars().collect();
+        let mut out = String::with_capacity(src.len());
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '\\' && chars.get(i + 1) == Some(&'\n') {
+                i += 2;
+                while chars.get(i).is_some_and(|c| c.is_whitespace()) {
+                    i += 1;
+                }
+                out.push(' ');
+                continue;
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+        out
+    }
+
+    /// Step 3 — collapse every whitespace run, newlines included, to one space.
+    fn collapse_whitespace(src: &str) -> String {
+        src.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// Step 4 — delete every space immediately before a `.`, immediately after a
+    /// `.`, and immediately before a `(`.
+    ///
+    /// This is what makes a call expression split across a line break match its
+    /// single-line spelling: step 3 turns the break into one space, so
+    /// `foo\n.bar()` would otherwise read as `foo .bar()` and a needle written
+    /// the way the code reads on one line measures zero.
+    ///
+    /// The same rule tightens prose as collateral — a sentence boundary becomes
+    /// `by design.This is`, and a prose parenthetical becomes `owners(the`. A
+    /// needle spanning either MUST therefore be written in the tightened form.
+    fn tighten_call_expressions(src: &str) -> String {
+        let chars: Vec<char> = src.chars().collect();
+        let mut out = String::with_capacity(src.len());
+        let mut i = 0;
+        while i < chars.len() {
+            match chars[i] {
+                ' ' if matches!(chars.get(i + 1), Some('.' | '(')) => {
+                    i += 1;
+                }
+                '.' => {
+                    out.push('.');
+                    i += 1;
+                    if chars.get(i) == Some(&' ') {
+                        i += 1;
+                    }
+                }
+                c => {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+        }
+        out
+    }
+
+    /// The one normalized view every phrase assertion in this module runs
+    /// through: markers, then `\` continuations, then whitespace, then call
+    /// tightening. The order is load-bearing — step 2 must run before step 3, or
+    /// the continuation's backslash survives with a space glued to it.
+    fn normalized(src: &str) -> String {
+        tighten_call_expressions(&collapse_whitespace(&strip_line_continuations(
+            &strip_comment_markers(src),
+        )))
+    }
+
+    /// Markers plus whitespace only — the weakest shape in the tree, kept here
+    /// solely to demonstrate what it cannot see.
+    fn normalized_marker_only(src: &str) -> String {
+        collapse_whitespace(&strip_comment_markers(src))
+    }
+
+    /// Steps 1-3 — everything but call tightening, kept here solely to
+    /// demonstrate that step 4 is doing real work.
+    fn normalized_without_call_tightening(src: &str) -> String {
+        collapse_whitespace(&strip_line_continuations(&strip_comment_markers(src)))
+    }
+
+    /// The slice from the first `start` anchor to the next `end` anchor after
+    /// it, so a phrase can be required of ONE contract rather than of the whole
+    /// file.
+    ///
+    /// Panics on a missing anchor, because a moved anchor must fail loudly
+    /// rather than silently widen the scope. Panics below `min_len` too: an end
+    /// anchor that drifts *earlier* truncates the region without going missing,
+    /// which turns a presence assertion red and an absence assertion vacuously
+    /// green, and a missing-anchor panic cannot see it.
+    fn region<'a>(src: &'a str, start: &str, end: &str, min_len: usize) -> &'a str {
+        let from = src
+            .find(start)
+            .unwrap_or_else(|| panic!("region start anchor not found: {start:?}"));
+        let rest = &src[from..];
+        let to = rest
+            .find(end)
+            .unwrap_or_else(|| panic!("region end anchor not found after start: {end:?}"));
+        let slice = &rest[..to + end.len()];
+        assert!(
+            slice.len() >= min_len,
+            "region {start:?}..{end:?} is {} bytes, below the {min_len} minimum -- the end anchor \
+             drifted earlier and truncated the scope",
+            slice.len()
+        );
+        slice
+    }
+
+    /// Non-overlapping occurrence count, so an assertion pins a number rather
+    /// than a boolean.
+    fn count(haystack: &str, needle: &str) -> usize {
+        haystack.matches(needle).count()
+    }
+
+    /// Power (a): a phrase that spans a doc-comment line break is found by the
+    /// normalized view and is NOT found by a plain `contains` on the raw source.
+    ///
+    /// The needle is reconstructed from parts so this file never contains its
+    /// own literal needle — otherwise the scan counts itself and the number
+    /// stops measuring the contract.
+    #[test]
+    fn normalized_view_sees_through_doc_comment_wrapping() {
+        const SOURCE: &str = include_str!("crdt.rs");
+        let needle = concat!(
+            "in particular the prune decrement ",
+            "must stay outside this function"
+        );
+
+        assert!(
+            !SOURCE.contains(needle),
+            "the driver must span a doc-comment line break, or this power proves nothing"
+        );
+        assert_eq!(
+            count(&normalized(SOURCE), needle),
+            1,
+            "the normalized view must find a phrase the raw source cannot"
+        );
+    }
+
+    /// Power (b): a phrase that spans a string-literal `\` continuation is found
+    /// by the normalized view and is NOT found by the markers-plus-whitespace
+    /// shape.
+    ///
+    /// Mutation proof: drop `strip_line_continuations` from `normalized` and the
+    /// helper collapses onto the weak shape, which measures zero here.
+    #[test]
+    fn normalized_view_sees_through_string_literal_continuations() {
+        const SOURCE: &str = include_str!("crdt.rs");
+        let needle = concat!(
+            "the live OR_ADD path re-persists ",
+            "unconditionally and so reads no flag"
+        );
+
+        assert!(
+            !SOURCE.contains(needle),
+            "the driver must span a `\\` continuation, or this power proves nothing"
+        );
+        assert_eq!(
+            count(&normalized_marker_only(SOURCE), needle),
+            0,
+            "markers plus whitespace cannot see through a `\\` continuation"
+        );
+        assert_eq!(
+            count(&normalized(SOURCE), needle),
+            1,
+            "the continuation strip is what makes this phrase measurable"
+        );
+    }
+
+    /// Power (c), part 1: a region is strictly narrower than the whole source,
+    /// so a phrase can be required of one closure rather than of 5000 lines.
+    #[test]
+    fn region_narrows_the_scanned_scope() {
+        const SOURCE: &str = include_str!("crdt.rs");
+        let view = normalized(SOURCE);
+        let scoped = region(
+            &view,
+            concat!("let mut ", "merge_add"),
+            concat!(".update_in_", "place("),
+            400,
+        );
+
+        assert!(
+            scoped.len() < view.len(),
+            "a region that is not strictly shorter than the file is not scoping anything"
+        );
+    }
+
+    /// Power (c), part 2: a start anchor that has moved fails loudly instead of
+    /// silently widening the scope.
+    #[test]
+    #[should_panic(expected = "region start anchor not found")]
+    fn region_panics_on_a_missing_start_anchor() {
+        const SOURCE: &str = include_str!("crdt.rs");
+        region(
+            &normalized(SOURCE),
+            concat!("an anchor that ", "no source file carries"),
+            concat!(".update_in_", "place("),
+            1,
+        );
+    }
+
+    /// Power (c), part 3: the same for an end anchor.
+    #[test]
+    #[should_panic(expected = "region end anchor not found")]
+    fn region_panics_on_a_missing_end_anchor() {
+        const SOURCE: &str = include_str!("crdt.rs");
+        region(
+            &normalized(SOURCE),
+            concat!("let mut ", "merge_add"),
+            concat!("an anchor that ", "no source file carries"),
+            1,
+        );
+    }
+
+    /// Power (c), part 4: both anchors present but the slice is too short --
+    /// the failure mode a missing-anchor panic cannot detect.
+    ///
+    /// Mutation proof: weaken or delete the `min_len` assertion and this stops
+    /// panicking.
+    #[test]
+    #[should_panic(expected = "below the")]
+    fn region_panics_when_the_slice_is_shorter_than_min_len() {
+        const SOURCE: &str = include_str!("crdt.rs");
+        region(
+            &normalized(SOURCE),
+            concat!("let mut ", "merge_add"),
+            concat!(".update_in_", "place("),
+            100_000,
+        );
+    }
+
+    /// Power (d): a call expression split across a line break is found in its
+    /// single-line spelling, and the one-space spelling is not.
+    ///
+    /// This is the regression case that motivated step 4 -- an assertion
+    /// requiring the entry to reach the apply by move measured zero against a
+    /// tree that did exactly that, because the call spans two lines.
+    ///
+    /// Mutation proof: drop `tighten_call_expressions` from `normalized` and the
+    /// last two assertions swap, reddening this test.
+    #[test]
+    fn normalized_view_sees_a_call_split_across_a_line_break() {
+        const SOURCE: &str = include_str!("crdt.rs");
+        let single_line = concat!("new_entry_opt", ".take()");
+        let one_space = concat!("new_entry_opt ", ".take()");
+
+        assert_eq!(count(SOURCE, single_line), 0, "raw source, tight spelling");
+        assert_eq!(count(SOURCE, one_space), 0, "raw source, spaced spelling");
+
+        let without_step_4 = normalized_without_call_tightening(SOURCE);
+        assert_eq!(
+            count(&without_step_4, single_line),
+            0,
+            "steps 1-3 leave the line break as a space, so the tight spelling is unfindable"
+        );
+        assert_eq!(
+            count(&without_step_4, one_space),
+            1,
+            "steps 1-3 yield the spaced spelling nobody would write by hand"
+        );
+
+        let full = normalized(SOURCE);
+        assert_eq!(
+            count(&full, single_line),
+            1,
+            "step 4 is what makes the call match the way it reads on one line"
+        );
+        assert_eq!(
+            count(&full, one_space),
+            0,
+            "step 4 must leave no spaced spelling behind"
+        );
+    }
+
     fn make_factory() -> Arc<RecordStoreFactory> {
         Arc::new(RecordStoreFactory::new(
             StorageConfig::default(),
