@@ -2187,6 +2187,120 @@ mod tests {
         }
     }
 
+    /// A witness crossing the boundary changes NOTHING on disk: a real WAL, fed
+    /// by a real OR_ADD under an armed demand gate, still receives only
+    /// full-record frames.
+    ///
+    /// Driven against a REAL write-ahead log writer rather than a recording
+    /// double. The append-time refusal that would catch a delta frame lives in
+    /// the concrete writer's `append`, not in the log trait, so a spy log would
+    /// record whatever it was handed and could never fail-stop — a proof built on
+    /// one would be green on an instrument incapable of going red.
+    ///
+    /// The frame-kind assertion is written POSITIVELY, which entails the negative:
+    /// the only other inhabitants of the op enum are a remove frame, the delta
+    /// frame, and a test-only variant. Writing it as "is not a delta frame" would
+    /// put that variant's name in this file, and a package-wide belt scans raw
+    /// file contents for exactly that string and admits it only in the log's own
+    /// modules.
+    #[tokio::test]
+    async fn an_armed_witness_still_lands_only_full_record_frames_in_a_real_wal() {
+        use crate::storage::datastores::{WalBootstrap, WriteBehindConfig, WriteBehindDataStore};
+        use crate::storage::wal::format::{decode_all, FrameDecodeResult};
+        use crate::storage::wal::segment::parse_segment_filename;
+        use crate::storage::wal::{Wal, WalFsyncPolicy, WalOp, WalWriter};
+
+        let wal_dir = tempfile::tempdir().unwrap();
+        // Every frame is fsynced before the write acks, so the read-back below
+        // cannot pass by observing an empty segment.
+        let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+        let write_behind = WriteBehindDataStore::new_with_wal(
+            Arc::new(NullDataStore) as Arc<dyn MapDataStore>,
+            // Long delays keep the frame un-applied for the read-back below: the
+            // watermark advancing would let segment reclamation remove exactly the
+            // frames under assertion. Durability does not depend on this — the
+            // per-op policy fsyncs each frame before its write acks.
+            WriteBehindConfig {
+                write_delay_ms: 60_000,
+                flush_interval_ms: 60_000,
+                shutdown_timeout_ms: 5_000,
+                ..WriteBehindConfig::default()
+            },
+            Some(WalBootstrap {
+                wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                sequence_start: 1,
+            }),
+        );
+
+        // Armed, so the production closure really does build a witness and hand
+        // it across the boundary — the whole point is that it changes nothing.
+        let spy = Arc::new(WitnessSpyStore::wrapping(
+            Arc::clone(&write_behind) as Arc<dyn MapDataStore>,
+            true,
+        ));
+        let (svc, _factory, _frontier) = make_service_with_frontier_and_store(
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+            Vec::new(),
+        );
+
+        Arc::clone(&svc)
+            .oneshot(or_add_op("m", "k1", "v1", "T1"))
+            .await
+            .unwrap();
+
+        // The witness really did cross the boundary, or this asserts nothing
+        // about what a witness-carrying write does to the log.
+        let carried: Vec<Option<OrDelta>> = spy.witnesses();
+        assert!(
+            carried.iter().any(Option::is_some),
+            "the armed gate must have handed a witness across the boundary, got {carried:?}"
+        );
+
+        let mut decoded = 0usize;
+        let mut listing: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(wal_dir.path()).unwrap().flatten() {
+            listing.push(format!(
+                "{} ({} bytes)",
+                entry.path().display(),
+                entry.metadata().map(|m| m.len()).unwrap_or(0)
+            ));
+            let path = entry.path();
+            // The log directory also holds per-partition applied-watermark files,
+            // which carry no frames. Selected by the log's OWN segment-name parser
+            // rather than by guessing an extension.
+            let is_segment = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(parse_segment_filename)
+                .is_some();
+            if !path.is_file() || !is_segment {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            let entries = match decode_all(&bytes) {
+                FrameDecodeResult::Complete(entries) => entries,
+                FrameDecodeResult::TruncatedTail { complete } => complete,
+                FrameDecodeResult::CleanEof => Vec::new(),
+                other => panic!("unexpected decode result for {}: {other:?}", path.display()),
+            };
+            for wal_entry in entries {
+                assert!(
+                    matches!(wal_entry.op, WalOp::Store { .. }),
+                    "a witness-carrying write must still frame the full record, \
+                     got a different frame kind in {}",
+                    path.display()
+                );
+                decoded += 1;
+            }
+        }
+        // Non-vacuity: a universally-quantified claim over zero frames is free.
+        assert!(
+            decoded >= 1,
+            "at least one frame must have been decoded, or the claim above is vacuous; \
+             log dir held: {listing:?}"
+        );
+    }
+
     /// None of the files this change touches may name the delta frame variant.
     ///
     /// A package-wide belt already scans raw file contents for that literal and
@@ -4355,6 +4469,17 @@ mod tests {
         fn standalone(armed: bool) -> Self {
             Self {
                 inner: None,
+                armed,
+                observed: Mutex::new(Vec::new()),
+                data: Mutex::new(HashMap::new()),
+            }
+        }
+
+        /// Wraps a real backend, so writes land in that backend's WAL while the
+        /// spy still records what the boundary was handed.
+        fn wrapping(inner: Arc<dyn MapDataStore>, armed: bool) -> Self {
+            Self {
+                inner: Some(inner),
                 armed,
                 observed: Mutex::new(Vec::new()),
                 data: Mutex::new(HashMap::new()),
