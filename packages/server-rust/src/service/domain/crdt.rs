@@ -2057,6 +2057,136 @@ mod tests {
         }
     }
 
+    /// The unarmed OR_ADD path still MOVES its entry into the apply, and clones
+    /// nothing.
+    ///
+    /// This is the cost claim of the whole seam, asserted structurally rather than
+    /// trusted: the entry reaches the apply by move exactly as it did before, and
+    /// no clone of it appears outside the demand-gated branch. Region-scoped
+    /// because the absence needle is NOT zero file-wide — two unrelated sites
+    /// clone an `entry` — so an unscoped assertion would be red at HEAD on code
+    /// this seam never touched.
+    ///
+    /// The `min_len` floor guards the failure a missing-anchor panic cannot see:
+    /// an end anchor that drifts EARLIER truncates the region silently, which
+    /// would turn the presence needles red and the absence needle vacuously green.
+    #[test]
+    fn the_unarmed_add_path_moves_its_entry_and_clones_nothing() {
+        const SOURCE: &str = include_str!("crdt.rs");
+        let view = normalized(SOURCE);
+        let scope = region(
+            &view,
+            concat!("let mut ", "merge_add"),
+            concat!(".update_in_", "place("),
+            400,
+        );
+
+        let moved = concat!("new_entry_opt", ".take()");
+        let handed_to_apply = concat!("apply_or_delta(OrDelta::Add ", "{ entry }, value)");
+        let cloned = concat!("entry", ".clone()");
+
+        assert_eq!(
+            count(scope, moved),
+            1,
+            "the entry must still leave its slot by move, not by copy"
+        );
+        assert_eq!(
+            count(scope, handed_to_apply),
+            1,
+            "the entry must still reach the apply by move"
+        );
+        assert_eq!(
+            count(scope, cloned),
+            0,
+            "nothing may clone the entry outside the demand-gated branch"
+        );
+
+        // The region is doing real work: the absence needle is non-zero file-wide,
+        // so this would be red at HEAD without the scoping.
+        assert_eq!(
+            count(&view, cloned),
+            2,
+            "file-wide clones of an entry are unrelated sites; if this moved, \
+             re-check whether the region still isolates the OR_ADD closure"
+        );
+    }
+
+    /// The in-place write-through reads no pre-image, so no diff can be computed
+    /// there.
+    ///
+    /// A witness is never derived by comparing before and after: doing so would
+    /// re-introduce the read-modify-write copy the in-place seam exists to remove,
+    /// and would be a second implementation of the OR algebra. The absence of a
+    /// read on this path is what makes that structurally impossible.
+    #[test]
+    fn the_in_place_write_through_reads_no_pre_image() {
+        const SOURCE: &str = include_str!("../../storage/impls/default_record_store.rs");
+        let view = normalized(SOURCE);
+        let scope = region(
+            &view,
+            concat!("async fn update_in_", "place("),
+            concat!("async fn ", "remove("),
+            1000,
+        );
+
+        // Non-vacuity: the write-through itself must be inside the region, or the
+        // zero below is measured over the wrong slice.
+        assert!(
+            scope.contains(concat!("CallerProvenance", "::Client")),
+            "the region must contain the write-through's provenance check"
+        );
+        assert_eq!(
+            count(scope, concat!(".get", "(")),
+            0,
+            "a pre-image read on this path is what a diff would need; there is none"
+        );
+    }
+
+    /// There is still exactly ONE implementation of the OR algebra.
+    ///
+    /// Threading a witness must not spawn a second copy of add-wins/remove-wins/
+    /// prune — a recovery fold and the write path drifting apart is the failure
+    /// this counts against (TG-OR-003). The long form of the needle is used
+    /// deliberately: a shorter one also matches an unrelated harness symbol whose
+    /// name merely contains it.
+    #[test]
+    fn the_or_algebra_has_exactly_one_implementation() {
+        let needle = concat!("pub(crate) fn ", "apply_or_delta(");
+        let (total, per_file) = count_across_package(needle);
+        assert_eq!(
+            total, 2,
+            "expected the definition plus the one pre-existing source-scanning \
+             literal, both in the CRDT service; a third means a second algebra. \
+             Found: {per_file:?}"
+        );
+        assert!(
+            per_file.len() == 1 && per_file[0].0.ends_with("service/domain/crdt.rs"),
+            "both occurrences must live in the CRDT service. Found: {per_file:?}"
+        );
+
+        // And the store-side files gained only types and defaulted methods: no
+        // diff or merge helper slipped in alongside them.
+        let sources = package_rust_sources();
+        for suffix in [
+            "storage/record_store.rs",
+            "storage/impls/default_record_store.rs",
+            "storage/map_data_store.rs",
+        ] {
+            let (path, src) = sources
+                .iter()
+                .find(|(path, _)| path.ends_with(suffix))
+                .unwrap_or_else(|| panic!("{suffix} must be reachable, or its zero is vacuous"));
+            let view = normalized(src);
+            for helper in [concat!("fn ", "diff"), concat!("fn ", "merge")] {
+                assert_eq!(
+                    count(&view, helper),
+                    0,
+                    "{path} must gain no {helper} helper -- the algebra stays in one place"
+                );
+            }
+        }
+    }
+
     /// None of the files this change touches may name the delta frame variant.
     ///
     /// A package-wide belt already scans raw file contents for that literal and
