@@ -1933,6 +1933,130 @@ mod tests {
         );
     }
 
+    /// The OR doc-contracts say what the code now does, and none of them still
+    /// asserts a claim this seam falsified.
+    ///
+    /// Three contracts went false when the witness route landed: the apply's
+    /// instruction to serialize from a borrow ahead of the call, the outcome
+    /// struct's instruction to serialize before handing the delta over together
+    /// with the cost rationale that justified it, and the dead-code allowance on
+    /// a flag the effect gate now reads. Each is asserted ABSENT, and each has a
+    /// shorter sub-phrase asserted too, so the rewrite cannot be satisfied by
+    /// deleting only the words the longer phrase adds and leaving the claim
+    /// standing in shortened form.
+    ///
+    /// The prose here deliberately paraphrases rather than quotes those clauses.
+    /// An earlier draft quoted one of them across a line break, and the
+    /// normalized view joined it back into a match, so this test counted its own
+    /// commentary and reported the contract un-rewritten.
+    ///
+    /// The clauses that must SURVIVE are pinned at the same time, because a
+    /// rewrite that quietly dropped the purity clause or the placement rule would
+    /// otherwise pass. Every needle is rebuilt from parts: these assertions are
+    /// hosted in the file they count over, so a needle written as one literal
+    /// would hold every required-0 row at one forever and read every required-1
+    /// row as two.
+    ///
+    /// This assertion was RUN against the unmodified tree before the rewrite and
+    /// observed red on all six absent rows; a version of it that had been written
+    /// afterwards could not distinguish "the clause is gone" from "the needle
+    /// never matched".
+    #[test]
+    fn or_doc_contracts_carry_no_falsified_clause() {
+        const SOURCE: &str = include_str!("crdt.rs");
+        let view = normalized(SOURCE);
+
+        let required_absent = [
+            ("P1", concat!("serializes from a borrow ", "before calling")),
+            (
+                "P2",
+                concat!(
+                    "the live OR_ADD path re-persists ",
+                    "unconditionally and so reads no flag"
+                ),
+            ),
+            (
+                "P2s",
+                concat!("re-persists unconditionally ", "and so reads no flag"),
+            ),
+            (
+                "P5",
+                concat!(
+                    "already holds the delta and must serialize ",
+                    "it BEFORE handing it over"
+                ),
+            ),
+            (
+                "P6",
+                concat!("must serialize it ", "BEFORE handing it over"),
+            ),
+            (
+                "P7",
+                concat!(
+                    "charge a value-sized clone ",
+                    "to every accepted add on the hot path"
+                ),
+            ),
+        ];
+
+        let survivors: Vec<String> = required_absent
+            .iter()
+            .map(|(id, phrase)| (id, phrase, count(&view, phrase)))
+            .filter(|(_, _, found)| *found != 0)
+            .map(|(id, phrase, found)| format!("{id}: {found} x {phrase:?}"))
+            .collect();
+        assert!(
+            survivors.is_empty(),
+            "falsified doc-contract clauses still present ({} of {}):\n  {}",
+            survivors.len(),
+            required_absent.len(),
+            survivors.join("\n  ")
+        );
+
+        // Clauses that must survive the rewrite — the first four unchanged from
+        // before it, the last two the rewrite's own statement of the pinned route.
+        let required_present = [
+            (
+                "P3",
+                concat!("PURE: no gauge counters, ", "no tombstone frontier, no I/O"),
+            ),
+            (
+                "P4",
+                concat!(
+                    "in particular the prune decrement ",
+                    "must stay outside this function"
+                ),
+            ),
+            (
+                "P8",
+                concat!("Deliberately carries ", "no copy of the delta"),
+            ),
+            (
+                "P9",
+                concat!(
+                    "The flags below are the only thing ",
+                    "a caller cannot derive for itself"
+                ),
+            ),
+            (
+                "P10",
+                concat!("the post-image entry recovered ", "from the slot by tag"),
+            ),
+            (
+                "P11",
+                concat!("reads its own copy back out ", "of the post-image slot"),
+            ),
+        ];
+
+        for (id, phrase) in required_present {
+            assert_eq!(
+                count(&view, phrase),
+                1,
+                "{id} must be present exactly once: {phrase:?}"
+            );
+        }
+    }
+
     /// None of the files this change touches may name the delta frame variant.
     ///
     /// A package-wide belt already scans raw file contents for that literal and
@@ -4457,6 +4581,177 @@ mod tests {
             adds > 0 && removes > 0 && prunes > 0,
             "every effect kind must have produced a witness to fold; \
              adds={adds} removes={removes} prunes={prunes}"
+        );
+    }
+
+    /// A witness exists if and only if the mutation actually took effect.
+    ///
+    /// The two no-effect rows here are the ones that matter: both still owe a
+    /// durable write — the closures re-persist the slot unconditionally, exactly
+    /// as they did before this seam — so both DO reach the store boundary. What
+    /// they must not carry is a witness. Recording a mutation that did not happen
+    /// is how a replay would resurrect a suppressed add.
+    #[tokio::test]
+    async fn only_an_effective_add_or_remove_carries_a_witness() {
+        let spy = Arc::new(WitnessSpyStore::standalone(true));
+        let (svc, _factory, _frontier) = make_service_with_frontier_and_store(
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+            Vec::new(),
+        );
+
+        for op in [
+            or_add_op("m", "k1", "v1", "T1"), // effect: inserted
+            or_remove_op("m", "k1", "T1"),    // effect: new tombstone
+            or_add_op("m", "k1", "v1", "T1"), // NO effect: remove-wins suppressed
+            or_remove_op("m", "k1", "T1"),    // NO effect: duplicate remove
+        ] {
+            Arc::clone(&svc).oneshot(op).await.unwrap();
+        }
+
+        let seen: Vec<Option<OrDelta>> = spy
+            .observations()
+            .into_iter()
+            .filter(|obs| obs.map == "m" && obs.key == "k1")
+            .map(|obs| obs.witness)
+            .collect();
+        assert_eq!(
+            seen.len(),
+            4,
+            "all four ops owe a durable write, so all four must reach the boundary; saw {seen:?}"
+        );
+
+        assert!(
+            matches!(&seen[0], Some(OrDelta::Add { entry }) if entry.tag == "T1"),
+            "an accepted add carries its entry, got {:?}",
+            seen[0]
+        );
+        assert!(
+            matches!(&seen[1], Some(OrDelta::Remove { tag }) if tag == "T1"),
+            "a genuinely-new tombstone carries its tag, got {:?}",
+            seen[1]
+        );
+        assert!(
+            seen[2].is_none(),
+            "a remove-wins-suppressed add changed nothing and must carry no witness, got {:?}",
+            seen[2]
+        );
+        assert!(
+            seen[3].is_none(),
+            "a duplicate remove changed nothing and must carry no witness, got {:?}",
+            seen[3]
+        );
+    }
+
+    /// A sweep whose tag was already gone reaches the store boundary NOT AT ALL.
+    ///
+    /// The write-owed answer for this row is `false` — nothing was pruned and no
+    /// shape changed — so the in-place seam reports "unchanged" and never performs
+    /// a write-through. There is therefore no witness to inspect, and that is the
+    /// contract: the absence of a witness here is the absence of a whole write.
+    ///
+    /// Stated as a boundary-write count rather than as "every witness is None",
+    /// because over an empty observation set that phrasing is vacuously true. An
+    /// earlier draft asserted exactly that and passed while proving nothing.
+    #[tokio::test]
+    async fn a_sweep_whose_tag_was_already_gone_writes_nothing_at_all() {
+        let spy = Arc::new(WitnessSpyStore::standalone(true));
+        let (svc, factory, frontier) = make_service_with_frontier_and_store(
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+            Vec::new(),
+        );
+
+        // A resident record whose tombstone set does NOT hold the tag the sweep
+        // will look for, so the prune closure runs and matches nothing.
+        Arc::clone(&svc)
+            .oneshot(or_add_op("m", "k1", "v1", "T1"))
+            .await
+            .unwrap();
+        let ghost = "GHOST";
+        assert_eq!(
+            frontier.stamp_tombstone("m", "k1", ghost),
+            1,
+            "the ghost ref sits in epoch 1"
+        );
+        // Advances the epoch counter so the low-water mark can sit strictly past
+        // the ghost's epoch without making this one eligible too.
+        assert_eq!(
+            frontier.stamp_tombstone("m", "k2", "FILLER"),
+            2,
+            "the filler pins epoch 2"
+        );
+        open_prune_gates_past_epoch_one(&frontier).await;
+
+        let before = spy.observations().len();
+        prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
+
+        // Non-vacuity: the sweep must actually have consumed the ghost ref, i.e.
+        // the closure RAN and reported "already gone". Without this, a sweep that
+        // never fired would satisfy the zero below.
+        let retryable = frontier.drain_prunable_tombstones();
+        assert!(
+            !retryable.iter().any(|(_, r)| r.tag == ghost),
+            "the sweep must have run and consumed the ghost ref, got {retryable:?}"
+        );
+        assert_eq!(
+            spy.observations().len(),
+            before,
+            "a sweep that pruned nothing and changed no shape owes no durable write, \
+             so it must not reach the store boundary at all"
+        );
+    }
+
+    /// A shape upgrade that drops no tag DOES write, and carries no witness.
+    ///
+    /// This is the `pruned == 0` row where the gate is actually observable: a
+    /// legacy-shaped slot is upgraded, so the write is owed and performed, and the
+    /// boundary sees a real write whose witness must still be absent because
+    /// nothing was pruned. The already-gone row above cannot prove this — it
+    /// performs no write, so it has no witness to be wrong about.
+    #[tokio::test]
+    async fn a_shape_upgrade_that_prunes_nothing_writes_without_a_witness() {
+        let spy = Arc::new(WitnessSpyStore::standalone(true));
+        let (svc, factory, frontier) = make_service_with_frontier_and_store(
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+            Vec::new(),
+        );
+
+        // Durable-only, in the pre-OrMap shape an older server wrote, holding a
+        // tombstone the sweep is NOT asked to drop. Rehydrating it makes the prune
+        // closure normalize the shape while pruning nothing.
+        spy.add(
+            "m",
+            "k1",
+            &RecordValue::OrTombstones {
+                tags: vec!["OLD".to_string()],
+            },
+            0,
+            0,
+        )
+        .await
+        .unwrap();
+        let ghost = "GHOST";
+        assert_eq!(frontier.stamp_tombstone("m", "k1", ghost), 1);
+        assert_eq!(frontier.stamp_tombstone("m", "k2", "FILLER"), 2);
+        open_prune_gates_past_epoch_one(&frontier).await;
+
+        let before = spy.observations().len();
+        prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
+
+        let after: Vec<Option<OrDelta>> = spy
+            .observations()
+            .into_iter()
+            .skip(before)
+            .map(|obs| obs.witness)
+            .collect();
+        // Non-vacuity: the upgrade must have owed and performed a real write, or
+        // there is no witness to be absent.
+        assert!(
+            !after.is_empty(),
+            "the shape upgrade owes a durable write, so the boundary must have seen one"
+        );
+        assert!(
+            after.iter().all(Option::is_none),
+            "nothing was pruned, so the write must carry no witness, got {after:?}"
         );
     }
 
