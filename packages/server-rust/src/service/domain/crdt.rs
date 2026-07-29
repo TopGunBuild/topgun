@@ -35,7 +35,7 @@ use crate::service::registry::{ManagedService, ServiceContext};
 use crate::service::security::WriteAdmission;
 use crate::storage::record::{OrMapEntry, RecordValue};
 use crate::storage::wal::OrDelta;
-use crate::storage::{CallerProvenance, ExpiryPolicy, RecordStoreFactory};
+use crate::storage::{CallerProvenance, ExpiryPolicy, MutateOutcome, RecordStoreFactory};
 use crate::tombstone_frontier_impl::TombstoneFrontier;
 use crate::traits::SchemaProvider;
 
@@ -558,6 +558,11 @@ impl CrdtService {
             // closure runs exactly once (per key, under the writer lock above),
             // so the take can never come up empty (TG-OR-001).
             let mut new_entry_opt = Some(new_entry);
+            // Read the witness demand ONCE per op, before the closure exists: when
+            // nothing beneath the store consumes deltas the closure keeps the
+            // zero-copy shape above and builds no witness at all, so the hot path
+            // pays a predicate call rather than a clone.
+            let witness_wanted = store.or_witness_wanted();
             let mut merge_add = move |value: &mut RecordValue| {
                 // Upgrade a legacy non-OrMap resident slot (an OrTombstones blob
                 // from an older server) to the unified OrMap shape first, matching
@@ -569,12 +574,38 @@ impl CrdtService {
                 let entry = new_entry_opt
                     .take()
                     .expect("OR_ADD merge closure runs exactly once");
-                // The apply consumes the delta; this path owes no durable record
-                // of it, so the outcome is dropped here.
-                apply_or_delta(OrDelta::Add { entry }, value);
+                // A tag survives the move so the applied entry can be found again
+                // afterwards; one `String`, and only when a consumer asked for a
+                // witness at all.
+                let witness_tag = if witness_wanted {
+                    Some(entry.tag.clone())
+                } else {
+                    None
+                };
+                // The apply consumes the delta.
+                let outcome = apply_or_delta(OrDelta::Add { entry }, value);
+                // A witness, when one is owed, is read back out of the slot the
+                // apply just wrote it into, so it is literally the post-image
+                // entry rather than anything re-derived from a before/after
+                // comparison. Remove-wins may have suppressed the add, and a
+                // suppressed op has nothing to record: only `added` yields one.
+                // `apply_or_delta` retains-then-pushes by tag, so at most one
+                // resident entry can carry it.
+                let witness = match (witness_tag, outcome.added, &*value) {
+                    (Some(tag), true, RecordValue::OrMap { records, .. }) => records
+                        .iter()
+                        .find(|resident| resident.tag == tag)
+                        .map(|applied| OrDelta::Add {
+                            entry: applied.clone(),
+                        }),
+                    _ => None,
+                };
                 // Match the prior path, which always re-persisted the slot even
                 // when remove-wins suppressed the add.
-                true
+                MutateOutcome {
+                    changed: true,
+                    witness,
+                }
             };
             store
                 .update_in_place(
@@ -627,6 +658,10 @@ impl CrdtService {
             // all concurrent records, which is the data-loss bug.
             let mut stamped_new_tombstone = false;
             {
+                // Read the witness demand ONCE per op, before the closure exists
+                // (see OR_ADD): with no consumer beneath the store nothing is
+                // built.
+                let witness_wanted = store.or_witness_wanted();
                 let mut apply_remove = |value: &mut RecordValue| {
                     // Upgrade a legacy OrTombstones blob to OrMap first (see OR_ADD);
                     // otherwise the tombstone append is dropped on the upgrade path.
@@ -647,9 +682,20 @@ impl CrdtService {
                         crate::storage::record::add_tombstone_bytes(tag.len() as u64);
                         stamped_new_tombstone = true;
                     }
+                    // Only a genuinely-new tombstone changed the OR state, so only
+                    // that op has anything to record; a duplicate remove hands back
+                    // nothing.
+                    let witness = if witness_wanted && outcome.new_tombstone {
+                        Some(OrDelta::Remove { tag: tag.clone() })
+                    } else {
+                        None
+                    };
                     // Match the prior path, which always re-persisted the slot even
                     // for a duplicate (already-tombstoned) remove.
-                    true
+                    MutateOutcome {
+                        changed: true,
+                        witness,
+                    }
                 };
                 store
                     .update_in_place(
@@ -1239,22 +1285,19 @@ pub(crate) fn normalize_to_or_map(value: &mut RecordValue) -> bool {
 /// frontier stamp, the "re-persist this slot" signal) off these flags, which is
 /// what lets the apply itself stay pure.
 ///
-/// Deliberately carries no copy of the delta. A caller that needs to record what
-/// it applied already holds the delta and must serialize it BEFORE handing it
-/// over — borrowing costs nothing, whereas returning it would force the entry to
-/// have two owners (the resident slot and the returned copy) and so charge a
-/// value-sized clone to every accepted add on the hot path. The flags below are
-/// the only thing a caller cannot derive for itself.
+/// Deliberately carries no copy of the delta: the apply consumes its argument,
+/// and an accepted add leaves the resident slot as the entry's only owner. A
+/// caller that needs to record what it applied reads its own copy back out of
+/// the post-image slot AFTER these flags report an effect, and only when a
+/// consumer beneath the store has demanded a witness at all — so the copy that
+/// gives an entry a second owner costs one entry per *effective* op under an
+/// armed consumer, and nothing whatsoever where no store demands one. The flags
+/// below are the only thing a caller cannot derive for itself.
 #[derive(Debug)]
 pub(crate) struct OrApplyOutcome {
-    /// `Add`: the entry was inserted (`false` = suppressed by remove-wins).
-    #[allow(
-        dead_code,
-        reason = "part of the apply seam's return contract; the live OR_ADD path \
-                  re-persists unconditionally and so reads no flag, while a \
-                  delta-fold caller distinguishes a suppressed add from an \
-                  applied one"
-    )]
+    /// `Add`: the entry was inserted (`false` = suppressed by remove-wins), which
+    /// is what tells a witness-building caller a suppressed add apart from an
+    /// applied one.
     pub added: bool,
     /// `Remove`: a genuinely-new tombstone tag was appended (`false` = duplicate remove).
     pub new_tombstone: bool,
@@ -1265,9 +1308,14 @@ pub(crate) struct OrApplyOutcome {
 /// Applies exactly ONE [`OrDelta`] to a resident OR-Map slot, consuming it.
 ///
 /// Takes the delta BY VALUE and moves its payload straight into the slot, so an
-/// accepted add transfers the entry exactly once with no copy. A caller that must
-/// durably record what it applied serializes from a borrow before calling; the
-/// delta is gone afterwards, by design.
+/// accepted add transfers the entry exactly once with no copy; the delta is gone
+/// afterwards, by design. A caller that must durably record what it applied
+/// therefore keeps its own delta-sized copy — for an add, the post-image entry
+/// recovered from the slot by tag; for a remove or a prune, the tag or tag list
+/// it already holds — and hands it back as the mutate closure's witness. That
+/// copy is taken only where a consumer beneath the store has demanded a witness
+/// and only after this function has reported an effect, so a path with no
+/// consumer allocates nothing for it.
 ///
 /// This is the ONE implementation of the add-wins / remove-wins / prune algebra:
 /// the live `OR_ADD`, `OR_REMOVE` and epoch-prune paths all route through it, so a
@@ -1471,6 +1519,9 @@ pub(crate) async fn prune_epoch_tombstones(
         // "the closure ran and found no matching tag". Those two need opposite
         // dispositions below, and only the closure itself knows which happened.
         let mut ran = false;
+        // Read the witness demand ONCE per op, before the closure exists (see the
+        // OR_ADD path): with no consumer beneath the store nothing is built.
+        let witness_wanted = store.or_witness_wanted();
         let result = {
             let mut drop_tag = |value: &mut RecordValue| {
                 ran = true;
@@ -1484,19 +1535,32 @@ pub(crate) async fn prune_epoch_tombstones(
                 // removed by exactly the algebra the write path defines. The
                 // gauge decrement deliberately stays OUT of the closure (see the
                 // post-write arm below).
-                let outcome = apply_or_delta(
-                    OrDelta::Prune {
-                        tags: vec![r.tag.clone()],
-                    },
-                    value,
-                );
+                let tags = vec![r.tag.clone()];
+                // The apply consumes the tag list, so a second copy is retained
+                // across it -- but only when a consumer asked for a witness.
+                let witness_tags = if witness_wanted {
+                    Some(tags.clone())
+                } else {
+                    None
+                };
+                let outcome = apply_or_delta(OrDelta::Prune { tags }, value);
                 dropped = outcome.pruned > 0;
+                // A sweep that matched nothing changed no OR state and so has
+                // nothing to record, even where it still owes a write for the
+                // shape upgrade below.
+                let witness = match witness_tags {
+                    Some(tags) if outcome.pruned > 0 => Some(OrDelta::Prune { tags }),
+                    _ => None,
+                };
                 // A normalize that upgraded the shape owes a durable write even
                 // with nothing pruned: the production store keeps the closure's
                 // mutation to the resident slot on a `false` return but skips the
                 // re-cost and the write-through, which would leave the slot
                 // upgraded with a stale cost and no durable counterpart.
-                shape_changed || dropped
+                MutateOutcome {
+                    changed: shape_changed || dropped,
+                    witness,
+                }
             };
             store
                 .update_in_place(
@@ -1770,10 +1834,7 @@ mod tests {
     #[test]
     fn normalized_view_sees_through_string_literal_continuations() {
         const SOURCE: &str = include_str!("crdt.rs");
-        let needle = concat!(
-            "the live OR_ADD path re-persists ",
-            "unconditionally and so reads no flag"
-        );
+        let needle = concat!("the differential recovery test ", "is the first consumer");
 
         assert!(
             !SOURCE.contains(needle),
