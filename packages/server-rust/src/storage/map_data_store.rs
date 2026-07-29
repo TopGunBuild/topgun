@@ -2,8 +2,9 @@
 //!
 //! Defines [`MapDataStore`], the Layer 3 abstraction over write-through and
 //! write-behind persistence strategies. The [`RecordStore`](super::RecordStore)
-//! calls `add()` / `remove()` on every mutation; the implementation decides
-//! when and how to actually persist the data.
+//! calls `add()` (directly, or as the default body of `add_with_witness()`) /
+//! `remove()` on every mutation; the implementation decides when and how to
+//! actually persist the data.
 //!
 //! Also defines [`DurableMerkleIndex`] and [`MerkleSession`]: a residency-
 //! independent Merkle computation surface that materialises the full coordinate-
@@ -15,6 +16,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 
 use super::record::RecordValue;
+use super::wal::OrDelta;
 use topgun_core::hash::fnv1a_hash;
 
 /// Which CRDT-kind tree a durable leaf belongs to.
@@ -135,8 +137,15 @@ pub trait LeafSink: Send {
 ///
 /// Provides the abstraction over write-through and write-behind strategies.
 /// The [`RecordStore`](super::RecordStore) calls [`add()`](MapDataStore::add)
-/// / [`remove()`](MapDataStore::remove) on every mutation. The implementation
-/// decides when and how to actually persist the data.
+/// / [`remove()`](MapDataStore::remove) on every mutation — with one indirection
+/// worth naming, because it is the doc an implementor reads before concluding
+/// it need not override anything: the in-place write path calls
+/// [`add_with_witness()`](MapDataStore::add_with_witness), whose default body
+/// delegates straight to [`add()`](MapDataStore::add) and drops the witness. A
+/// store that overrides neither that method nor
+/// [`wants_or_witness()`](MapDataStore::wants_or_witness) therefore still sees
+/// every mutation arrive through [`add()`](MapDataStore::add), unchanged. The
+/// implementation decides when and how to actually persist the data.
 ///
 /// Used as `Arc<dyn MapDataStore>`.
 #[async_trait]
@@ -152,6 +161,47 @@ pub trait MapDataStore: Send + Sync {
         expiration_time: i64,
         now: i64,
     ) -> anyhow::Result<()>;
+
+    /// Persist a record together with the delta that produced it.
+    ///
+    /// `expiration_time` is absolute millis since epoch (0 = no expiry).
+    /// `witness` is the OR delta that was just applied to `value`, so the two
+    /// always describe the same op: a store that records deltas durably gets
+    /// the one the mutation point already built and never has to re-derive or
+    /// diff it. Callers with no per-op delta — every LWW write, bulk and SYNC
+    /// ingestion, cross-node merge, rehydration — pass `None`, and so does
+    /// every caller whenever [`wants_or_witness()`](MapDataStore::wants_or_witness)
+    /// answered `false`.
+    ///
+    /// The default body delegates to [`add()`](MapDataStore::add) and IGNORES
+    /// the witness, so a backend that consumes no deltas persists exactly what
+    /// it persists without this method and needs no override.
+    async fn add_with_witness(
+        &self,
+        map: &str,
+        key: &str,
+        value: &RecordValue,
+        expiration_time: i64,
+        now: i64,
+        witness: Option<&OrDelta>,
+    ) -> anyhow::Result<()> {
+        // Dropped rather than forwarded: a store that has not asked for a
+        // witness has nowhere to put one, and the full value below is a
+        // complete record of the mutation on its own.
+        let _ = witness;
+        self.add(map, key, value, expiration_time, now).await
+    }
+
+    /// Whether this store consumes the `witness` handed to
+    /// [`add_with_witness()`](MapDataStore::add_with_witness).
+    ///
+    /// Read by the write path before it builds a witness, so a store that
+    /// ignores deltas costs the mutation path nothing at all rather than a
+    /// discarded copy. Defaulted to `false`: only a backend that actually
+    /// records deltas overrides it.
+    fn wants_or_witness(&self) -> bool {
+        false
+    }
 
     /// Persist a backup record.
     async fn add_backup(
