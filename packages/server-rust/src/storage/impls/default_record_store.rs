@@ -14,7 +14,10 @@ use crate::storage::engine::{FetchResult, IterationCursor, StorageEngine};
 use crate::storage::map_data_store::MapDataStore;
 use crate::storage::mutation_observer::{CompositeMutationObserver, MutationObserver};
 use crate::storage::record::{Record, RecordMetadata, RecordValue};
-use crate::storage::record_store::{CallerProvenance, ExpiryPolicy, ExpiryReason, RecordStore};
+use crate::storage::record_store::{
+    CallerProvenance, ExpiryPolicy, ExpiryReason, MutateOutcome, RecordStore,
+};
+use crate::storage::wal::OrDelta;
 
 /// Returns the current wall-clock time as milliseconds since the Unix epoch.
 ///
@@ -239,7 +242,7 @@ impl RecordStore for DefaultRecordStore {
         init: Option<RecordValue>,
         expiry: ExpiryPolicy,
         provenance: CallerProvenance,
-        mutate: &mut (dyn for<'a> FnMut(&'a mut RecordValue) -> bool + Send),
+        mutate: &mut (dyn for<'a> FnMut(&'a mut RecordValue) -> MutateOutcome + Send),
     ) -> anyhow::Result<bool> {
         use crate::storage::engine::UpdateInPlaceOutcome;
 
@@ -251,9 +254,19 @@ impl RecordStore for DefaultRecordStore {
             |value: &RecordValue| crate::storage::record::estimated_cost(value) + key.len() as u64;
 
         // Re-borrow the `&mut (dyn FnMut + Send)` as the plain `&mut dyn FnMut`
-        // the engine seam expects. The wrapper is only ever called synchronously
-        // inside update_in_place (before any await), so it needs no Send bound.
-        let mut engine_mutate = |value: &mut RecordValue| mutate(value);
+        // the engine seam expects, and split the outcome so the engine keeps its
+        // `-> bool` closure: only `changed` is what the engine decides on. The
+        // witness is stashed in a local instead of travelling through the engine
+        // because the wrapper is only ever called synchronously inside
+        // update_in_place (before any await) — so it needs no Send bound, and the
+        // closure's borrow of `witness` ends when the engine call returns, which
+        // makes the captured delta readable at the write-through below.
+        let mut witness: Option<OrDelta> = None;
+        let mut engine_mutate = |value: &mut RecordValue| {
+            let mutated = mutate(value);
+            witness = mutated.witness;
+            mutated.changed
+        };
         let outcome = self
             .engine
             .update_in_place(key, now, init, &mut engine_mutate, &cost_of);
@@ -293,8 +306,19 @@ impl RecordStore for DefaultRecordStore {
             CallerProvenance::Client | CallerProvenance::CrdtMerge
         ) {
             let expiration_time = self.compute_expiration_time(&expiry, now);
+            // The witness rides alongside the very value it describes, so a store
+            // that records deltas can never pair one with a different write. A
+            // store that records none takes the defaulted body, which drops the
+            // witness and persists exactly the bytes a plain add() would have.
             self.data_store
-                .add(&self.name, key, &record.value, expiration_time, now)
+                .add_with_witness(
+                    &self.name,
+                    key,
+                    &record.value,
+                    expiration_time,
+                    now,
+                    witness.as_ref(),
+                )
                 .await?;
 
             // Mark clean in place under the engine's per-key lock only when the
@@ -308,6 +332,16 @@ impl RecordStore for DefaultRecordStore {
         }
 
         Ok(true)
+    }
+
+    /// Delegates to the backing [`MapDataStore`], the only layer beneath this
+    /// store that a witness can reach: the in-place write-through is the sole
+    /// place one is forwarded, and it forwards to exactly this store. Asking the
+    /// backend directly keeps the answer honest when the backend is swapped,
+    /// instead of pinning a constant here that a witness-recording backend would
+    /// silently contradict.
+    fn or_witness_wanted(&self) -> bool {
+        self.data_store.wants_or_witness()
     }
 
     async fn remove(
