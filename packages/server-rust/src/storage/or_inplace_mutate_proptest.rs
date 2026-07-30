@@ -31,10 +31,18 @@
 //!
 //! These tests are therefore evidence for the **in-place mutation contract
 //! only**: that a mutation routed through `update_in_place` moves the gauge
-//! exactly once across a write-failure/retry, and that the net delta reconciles
-//! with the tombstones left resident. They must NOT be cited as evidence that
+//! exactly once across a write-failure/retry, that the net delta reconciles
+//! with the tombstones left resident, and that a mutation carrying no OR delta
+//! still persists its whole value through the store boundary's defaulted
+//! delegation. They must NOT be cited as evidence that
 //! any production call site is correctly wired — coverage of the production
 //! prune path lives with that path's own test.
+//!
+//! The closures in this module **re-implement** the OR add/remove/prune logic
+//! locally rather than calling the extracted apply, and they own no
+//! witness-construction gate. That is deliberate and must stay so: a gate proof
+//! sited here would mutate this file's own copy of the gate rather than the
+//! production one, which is exactly what the paragraph above refuses.
 
 #[cfg(test)]
 mod tests {
@@ -353,6 +361,18 @@ mod tests {
         }
     }
 
+    /// The write-owed answer for a closure that carries no OR delta.
+    ///
+    /// Every closure in this module is in that class: they mirror the OR logic
+    /// locally and own no witness gate, so the witness is always absent and only
+    /// the write-owed flag varies.
+    fn write_owed(changed: bool) -> crate::storage::MutateOutcome {
+        crate::storage::MutateOutcome {
+            changed,
+            witness: None,
+        }
+    }
+
     /// Apply an op through the NEW in-place mutate path — mirrors the production
     /// `crdt.rs` OR write path exactly (same mutate closures, same gauge calls).
     async fn apply_inplace(store: &DefaultRecordStore, op: &OrOp) {
@@ -377,7 +397,7 @@ mod tests {
                             records.push(e);
                         }
                     }
-                    true
+                    write_owed(true)
                 };
                 store
                     .update_in_place(
@@ -407,7 +427,7 @@ mod tests {
                             add_tombstone_bytes(tag.len() as u64);
                         }
                     }
-                    true
+                    write_owed(true)
                 };
                 store
                     .update_in_place(
@@ -434,7 +454,7 @@ mod tests {
                             tombstones.retain(|t| t != tag);
                             dropped = tombstones.len() != before;
                         }
-                        dropped
+                        write_owed(dropped)
                     };
                     store
                         .update_in_place(
@@ -894,7 +914,7 @@ mod tests {
                         add_tombstone_bytes(tag.len() as u64);
                     }
                 }
-                true
+                write_owed(true)
             };
 
             // Exact equality, not a saturating delta: saturation would mask a
@@ -964,7 +984,7 @@ mod tests {
             let mut counted = |value: &mut RecordValue| {
                 calls.fetch_add(1, Ordering::Relaxed);
                 normalize(value);
-                true
+                write_owed(true)
             };
             // Insert (no resident slot yet).
             store
@@ -1054,7 +1074,7 @@ mod tests {
                         records.push(entry);
                     }
                 }
-                true
+                write_owed(true)
             };
 
             store
@@ -1074,6 +1094,94 @@ mod tests {
                 records.len(),
                 1,
                 "the moved entry lands exactly once, with no second application"
+            );
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // A writer that carries no per-op delta hands the store boundary nothing,
+    // and the durable result is indistinguishable from a plain add().
+    //
+    // Most writers are in this class: every LWW write, bulk/SYNC ingestion,
+    // cross-node merge and read-repair, eviction rehydrate. None of them owns a
+    // delta, so all of them pass no witness — and the store boundary they reach
+    // must therefore behave exactly as it did before a witness could be carried
+    // at all. `RetainingCountingStore` overrides neither witness-aware method,
+    // so it observes the defaulted delegation rather than a bespoke path: if
+    // that delegation ever stopped forwarding to `add()`, the counter below
+    // would read 0 and the retained value would be missing.
+    //
+    // Both halves assert the FULL value is what lands, not a reduced one — the
+    // witness is additive, and nothing about it may narrow what is persisted.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_writer_without_a_delta_persists_the_whole_value_through_the_default_body() {
+        block_on_async(async {
+            // Half 1 — the LWW path, which owns no OR delta and never could.
+            let datastore = Arc::new(RetainingCountingStore::default());
+            let store = store_sharing(&datastore);
+
+            let lww = RecordValue::Lww {
+                value: Value::Int(4242),
+                timestamp: ts(1_700_000_000_000),
+            };
+            store
+                .put(
+                    KEY,
+                    lww.clone(),
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Client,
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                datastore.adds.load(Ordering::Relaxed),
+                1,
+                "an LWW write must still reach the data store exactly once"
+            );
+            assert_eq!(
+                datastore.load(MAP, KEY).await.unwrap(),
+                Some(lww),
+                "the LWW value must be persisted whole, exactly as before"
+            );
+
+            // Half 2 — a bulk/SYNC-shaped OR write: the whole slot is replaced
+            // in one go rather than mutated per-op, so there is no per-op delta
+            // to describe it and the closure hands back no witness.
+            let datastore = Arc::new(RetainingCountingStore::default());
+            let store = store_sharing(&datastore);
+
+            let whole_slot = build_slot(3, 2);
+            let mut ingest = {
+                let whole_slot = whole_slot.clone();
+                move |value: &mut RecordValue| {
+                    *value = whole_slot.clone();
+                    write_owed(true)
+                }
+            };
+            store
+                .update_in_place(
+                    KEY,
+                    Some(empty_ormap()),
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::CrdtMerge,
+                    &mut ingest,
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                datastore.adds.load(Ordering::Relaxed),
+                1,
+                "a witness-free in-place write must still reach add() exactly once, \
+                 through the defaulted delegation"
+            );
+            assert_eq!(
+                datastore.load(MAP, KEY).await.unwrap(),
+                Some(whole_slot),
+                "the full slot must be persisted, not a reduced or delta-shaped value"
             );
         });
     }

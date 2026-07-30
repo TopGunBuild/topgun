@@ -35,7 +35,7 @@ use crate::service::registry::{ManagedService, ServiceContext};
 use crate::service::security::WriteAdmission;
 use crate::storage::record::{OrMapEntry, RecordValue};
 use crate::storage::wal::OrDelta;
-use crate::storage::{CallerProvenance, ExpiryPolicy, RecordStoreFactory};
+use crate::storage::{CallerProvenance, ExpiryPolicy, MutateOutcome, RecordStoreFactory};
 use crate::tombstone_frontier_impl::TombstoneFrontier;
 use crate::traits::SchemaProvider;
 
@@ -558,6 +558,11 @@ impl CrdtService {
             // closure runs exactly once (per key, under the writer lock above),
             // so the take can never come up empty (TG-OR-001).
             let mut new_entry_opt = Some(new_entry);
+            // Read the witness demand ONCE per op, before the closure exists: when
+            // nothing beneath the store consumes deltas the closure keeps the
+            // zero-copy shape above and builds no witness at all, so the hot path
+            // pays a predicate call rather than a clone.
+            let witness_wanted = store.or_witness_wanted();
             let mut merge_add = move |value: &mut RecordValue| {
                 // Upgrade a legacy non-OrMap resident slot (an OrTombstones blob
                 // from an older server) to the unified OrMap shape first, matching
@@ -569,12 +574,51 @@ impl CrdtService {
                 let entry = new_entry_opt
                     .take()
                     .expect("OR_ADD merge closure runs exactly once");
-                // The apply consumes the delta; this path owes no durable record
-                // of it, so the outcome is dropped here.
-                apply_or_delta(OrDelta::Add { entry }, value);
+                // A tag survives the move so the applied entry can be found again
+                // afterwards; one `String`, and only when a consumer asked for a
+                // witness at all.
+                let witness_tag = if witness_wanted {
+                    Some(entry.tag.clone())
+                } else {
+                    None
+                };
+                // The apply consumes the delta.
+                let outcome = apply_or_delta(OrDelta::Add { entry }, value);
+                // A witness, when one is owed, is read back out of the slot the
+                // apply just wrote it into, so it is literally the post-image
+                // entry rather than anything re-derived from a before/after
+                // comparison. Remove-wins may have suppressed the add, and a
+                // suppressed op has nothing to record: only `added` yields one.
+                // `apply_or_delta` retains-then-pushes by tag, so at most one
+                // resident entry can carry it.
+                let witness_owed = witness_tag.is_some() && outcome.added;
+                let witness = match (witness_tag, outcome.added, &*value) {
+                    (Some(tag), true, RecordValue::OrMap { records, .. }) => records
+                        .iter()
+                        .find(|resident| resident.tag == tag)
+                        .map(|applied| OrDelta::Add {
+                            entry: applied.clone(),
+                        }),
+                    _ => None,
+                };
+                // An owed witness that comes back `None` is the silent-divergence
+                // shape: the lookup missed, the caller falls back to a full
+                // snapshot, and a consumer sees nothing while believing it is
+                // being fed. Only two states can produce it — the apply reported
+                // `added` without leaving the tag resident, or it left a shape
+                // other than `OrMap` behind — and the algebra admits neither, so
+                // the conjunction is enforced here rather than only argued.
+                debug_assert!(
+                    !witness_owed || witness.is_some(),
+                    "an accepted OR_ADD owes a witness: the post-image lookup for \
+                     the applied tag must find the entry the apply just wrote"
+                );
                 // Match the prior path, which always re-persisted the slot even
                 // when remove-wins suppressed the add.
-                true
+                MutateOutcome {
+                    changed: true,
+                    witness,
+                }
             };
             store
                 .update_in_place(
@@ -627,6 +671,10 @@ impl CrdtService {
             // all concurrent records, which is the data-loss bug.
             let mut stamped_new_tombstone = false;
             {
+                // Read the witness demand ONCE per op, before the closure exists
+                // (see OR_ADD): with no consumer beneath the store nothing is
+                // built.
+                let witness_wanted = store.or_witness_wanted();
                 let mut apply_remove = |value: &mut RecordValue| {
                     // Upgrade a legacy OrTombstones blob to OrMap first (see OR_ADD);
                     // otherwise the tombstone append is dropped on the upgrade path.
@@ -647,9 +695,20 @@ impl CrdtService {
                         crate::storage::record::add_tombstone_bytes(tag.len() as u64);
                         stamped_new_tombstone = true;
                     }
+                    // Only a genuinely-new tombstone changed the OR state, so only
+                    // that op has anything to record; a duplicate remove hands back
+                    // nothing.
+                    let witness = if witness_wanted && outcome.new_tombstone {
+                        Some(OrDelta::Remove { tag: tag.clone() })
+                    } else {
+                        None
+                    };
                     // Match the prior path, which always re-persisted the slot even
                     // for a duplicate (already-tombstoned) remove.
-                    true
+                    MutateOutcome {
+                        changed: true,
+                        witness,
+                    }
                 };
                 store
                     .update_in_place(
@@ -1239,22 +1298,19 @@ pub(crate) fn normalize_to_or_map(value: &mut RecordValue) -> bool {
 /// frontier stamp, the "re-persist this slot" signal) off these flags, which is
 /// what lets the apply itself stay pure.
 ///
-/// Deliberately carries no copy of the delta. A caller that needs to record what
-/// it applied already holds the delta and must serialize it BEFORE handing it
-/// over — borrowing costs nothing, whereas returning it would force the entry to
-/// have two owners (the resident slot and the returned copy) and so charge a
-/// value-sized clone to every accepted add on the hot path. The flags below are
-/// the only thing a caller cannot derive for itself.
+/// Deliberately carries no copy of the delta: the apply consumes its argument,
+/// and an accepted add leaves the resident slot as the entry's only owner. A
+/// caller that needs to record what it applied reads its own copy back out of
+/// the post-image slot AFTER these flags report an effect, and only when a
+/// consumer beneath the store has demanded a witness at all — so the copy that
+/// gives an entry a second owner costs one entry per *effective* op under an
+/// armed consumer, and nothing whatsoever where no store demands one. The flags
+/// below are the only thing a caller cannot derive for itself.
 #[derive(Debug)]
 pub(crate) struct OrApplyOutcome {
-    /// `Add`: the entry was inserted (`false` = suppressed by remove-wins).
-    #[allow(
-        dead_code,
-        reason = "part of the apply seam's return contract; the live OR_ADD path \
-                  re-persists unconditionally and so reads no flag, while a \
-                  delta-fold caller distinguishes a suppressed add from an \
-                  applied one"
-    )]
+    /// `Add`: the entry was inserted (`false` = suppressed by remove-wins), which
+    /// is what tells a witness-building caller a suppressed add apart from an
+    /// applied one.
     pub added: bool,
     /// `Remove`: a genuinely-new tombstone tag was appended (`false` = duplicate remove).
     pub new_tombstone: bool,
@@ -1265,9 +1321,14 @@ pub(crate) struct OrApplyOutcome {
 /// Applies exactly ONE [`OrDelta`] to a resident OR-Map slot, consuming it.
 ///
 /// Takes the delta BY VALUE and moves its payload straight into the slot, so an
-/// accepted add transfers the entry exactly once with no copy. A caller that must
-/// durably record what it applied serializes from a borrow before calling; the
-/// delta is gone afterwards, by design.
+/// accepted add transfers the entry exactly once with no copy; the delta is gone
+/// afterwards, by design. A caller that must durably record what it applied
+/// therefore keeps its own delta-sized copy — for an add, the post-image entry
+/// recovered from the slot by tag; for a remove or a prune, the tag or tag list
+/// it already holds — and hands it back as the mutate closure's witness. That
+/// copy is taken only where a consumer beneath the store has demanded a witness
+/// and only after this function has reported an effect, so a path with no
+/// consumer allocates nothing for it.
 ///
 /// This is the ONE implementation of the add-wins / remove-wins / prune algebra:
 /// the live `OR_ADD`, `OR_REMOVE` and epoch-prune paths all route through it, so a
@@ -1471,6 +1532,9 @@ pub(crate) async fn prune_epoch_tombstones(
         // "the closure ran and found no matching tag". Those two need opposite
         // dispositions below, and only the closure itself knows which happened.
         let mut ran = false;
+        // Read the witness demand ONCE per op, before the closure exists (see the
+        // OR_ADD path): with no consumer beneath the store nothing is built.
+        let witness_wanted = store.or_witness_wanted();
         let result = {
             let mut drop_tag = |value: &mut RecordValue| {
                 ran = true;
@@ -1484,19 +1548,32 @@ pub(crate) async fn prune_epoch_tombstones(
                 // removed by exactly the algebra the write path defines. The
                 // gauge decrement deliberately stays OUT of the closure (see the
                 // post-write arm below).
-                let outcome = apply_or_delta(
-                    OrDelta::Prune {
-                        tags: vec![r.tag.clone()],
-                    },
-                    value,
-                );
+                let tags = vec![r.tag.clone()];
+                // The apply consumes the tag list, so a second copy is retained
+                // across it -- but only when a consumer asked for a witness.
+                let witness_tags = if witness_wanted {
+                    Some(tags.clone())
+                } else {
+                    None
+                };
+                let outcome = apply_or_delta(OrDelta::Prune { tags }, value);
                 dropped = outcome.pruned > 0;
+                // A sweep that matched nothing changed no OR state and so has
+                // nothing to record, even where it still owes a write for the
+                // shape upgrade below.
+                let witness = match witness_tags {
+                    Some(tags) if outcome.pruned > 0 => Some(OrDelta::Prune { tags }),
+                    _ => None,
+                };
                 // A normalize that upgraded the shape owes a durable write even
                 // with nothing pruned: the production store keeps the closure's
                 // mutation to the resident slot on a `false` return but skips the
                 // re-cost and the write-through, which would leave the slot
                 // upgraded with a stale cost and no durable counterpart.
-                shape_changed || dropped
+                MutateOutcome {
+                    changed: shape_changed || dropped,
+                    witness,
+                }
             };
             store
                 .update_in_place(
@@ -1580,6 +1657,971 @@ mod tests {
     use crate::storage::record::Record;
     use crate::storage::record_store::RecordStore;
     use crate::storage::tombstone_gauge::with_isolated_gauge;
+
+    // -----------------------------------------------------------------------
+    // Normalized source search
+    //
+    // A doc-contract assertion that greps the raw file is decided by where a
+    // line happens to wrap, not by what the contract says: the same phrase is
+    // found or missed depending on indentation, a doc-comment break, a string
+    // literal's `\` continuation, or a method call split across a line break.
+    // Every one of those has already produced an assertion that was green
+    // because it could not see its own subject. These four steps put the source
+    // into one shape so a phrase assertion measures the contract instead.
+    //
+    // The steps are re-implemented here rather than shared: the equivalents in
+    // `storage/wal/mod.rs` are private to that file's `mod tests`, there is no
+    // test-support module in this package, and adding one is tracked separately
+    // (TODO-620). That pointer is load-bearing, not provenance: the contract
+    // this instrument is meant to satisfy is ONE normalizer in ONE home, this
+    // copy is the third and does NOT satisfy it, and the divergence class the
+    // normalizer exists to catch is exactly the class a silently-forked
+    // normalizer would reintroduce. Naming the owner keeps the gap honest
+    // rather than letting the duplication read as intentional.
+    // -----------------------------------------------------------------------
+
+    /// Step 1 — drop leading indentation and one `//`, `///` or `//!` marker, so
+    /// a phrase reads the same whether it sits in prose or in a doc-comment.
+    fn strip_comment_markers(src: &str) -> String {
+        src.lines()
+            .map(|line| {
+                let trimmed = line.trim_start_matches([' ', '\t']);
+                match trimmed.strip_prefix("//") {
+                    Some(rest) => rest
+                        .strip_prefix('/')
+                        .or_else(|| rest.strip_prefix('!'))
+                        .unwrap_or(rest)
+                        .to_string(),
+                    None => line.to_string(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Step 2 — drop Rust string-literal line continuations: a trailing `\`
+    /// together with the following line's leading whitespace. Without this a
+    /// phrase written inside a wrapped `reason = "…"` attribute is unfindable,
+    /// because the raw text carries a backslash in the middle of the sentence.
+    fn strip_line_continuations(src: &str) -> String {
+        let chars: Vec<char> = src.chars().collect();
+        let mut out = String::with_capacity(src.len());
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '\\' && chars.get(i + 1) == Some(&'\n') {
+                i += 2;
+                while chars.get(i).is_some_and(|c| c.is_whitespace()) {
+                    i += 1;
+                }
+                out.push(' ');
+                continue;
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+        out
+    }
+
+    /// Step 3 — collapse every whitespace run, newlines included, to one space.
+    fn collapse_whitespace(src: &str) -> String {
+        src.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// Step 4 — delete every space immediately before a `.`, immediately after a
+    /// `.`, and immediately before a `(`.
+    ///
+    /// This is what makes a call expression split across a line break match its
+    /// single-line spelling: step 3 turns the break into one space, so
+    /// `foo\n.bar()` would otherwise read as `foo .bar()` and a needle written
+    /// the way the code reads on one line measures zero.
+    ///
+    /// The same rule tightens prose as collateral — a sentence boundary becomes
+    /// `by design.This is`, and a prose parenthetical becomes `owners(the`. A
+    /// needle spanning either MUST therefore be written in the tightened form.
+    fn tighten_call_expressions(src: &str) -> String {
+        let chars: Vec<char> = src.chars().collect();
+        let mut out = String::with_capacity(src.len());
+        let mut i = 0;
+        while i < chars.len() {
+            match chars[i] {
+                ' ' if matches!(chars.get(i + 1), Some('.' | '(')) => {
+                    i += 1;
+                }
+                '.' => {
+                    out.push('.');
+                    i += 1;
+                    if chars.get(i) == Some(&' ') {
+                        i += 1;
+                    }
+                }
+                c => {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+        }
+        out
+    }
+
+    /// The one normalized view every phrase assertion in this module runs
+    /// through: markers, then `\` continuations, then whitespace, then call
+    /// tightening. The order is load-bearing — step 2 must run before step 3, or
+    /// the continuation's backslash survives with a space glued to it.
+    fn normalized(src: &str) -> String {
+        tighten_call_expressions(&collapse_whitespace(&strip_line_continuations(
+            &strip_comment_markers(src),
+        )))
+    }
+
+    /// Markers plus whitespace only — the weakest shape in the tree, kept here
+    /// solely to demonstrate what it cannot see.
+    fn normalized_marker_only(src: &str) -> String {
+        collapse_whitespace(&strip_comment_markers(src))
+    }
+
+    /// Steps 1-3 — everything but call tightening, kept here solely to
+    /// demonstrate that step 4 is doing real work.
+    fn normalized_without_call_tightening(src: &str) -> String {
+        collapse_whitespace(&strip_line_continuations(&strip_comment_markers(src)))
+    }
+
+    /// The slice from the first `start` anchor to the next `end` anchor after
+    /// it, so a phrase can be required of ONE contract rather than of the whole
+    /// file.
+    ///
+    /// Panics on a missing anchor, because a moved anchor must fail loudly
+    /// rather than silently widen the scope. Panics below `min_len` too: an end
+    /// anchor that drifts *earlier* truncates the region without going missing,
+    /// which turns a presence assertion red and an absence assertion vacuously
+    /// green, and a missing-anchor panic cannot see it.
+    fn region<'a>(src: &'a str, start: &str, end: &str, min_len: usize) -> &'a str {
+        let from = src
+            .find(start)
+            .unwrap_or_else(|| panic!("region start anchor not found: {start:?}"));
+        let rest = &src[from..];
+        let to = rest
+            .find(end)
+            .unwrap_or_else(|| panic!("region end anchor not found after start: {end:?}"));
+        let slice = &rest[..to + end.len()];
+        assert!(
+            slice.len() >= min_len,
+            "region {start:?}..{end:?} is {} bytes, below the {min_len} minimum -- the end anchor \
+             drifted earlier and truncated the scope",
+            slice.len()
+        );
+        slice
+    }
+
+    /// Non-overlapping occurrence count, so an assertion pins a number rather
+    /// than a boolean.
+    fn count(haystack: &str, needle: &str) -> usize {
+        haystack.matches(needle).count()
+    }
+
+    /// Every checked-in `.rs` under this package, as `(path, source)`.
+    ///
+    /// Re-implemented here rather than shared: the equivalent walkers live in
+    /// `wal_harness/cases.rs` as private fns, so they are unreachable from this
+    /// file. A cascade that lands in a file the walk never visits would satisfy
+    /// every assertion made over the result, which is why the callers below
+    /// assert the walk reached named files before reading any zero out of it.
+    fn package_rust_sources() -> Vec<(String, String)> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // Build output is not checked in, and it contains generated
+                    // sources that would pollute every count.
+                    if path.file_name().is_some_and(|name| name == "target") {
+                        continue;
+                    }
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    if let Ok(src) = std::fs::read_to_string(&path) {
+                        out.push((path.display().to_string(), src));
+                    }
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(std::path::Path::new(env!("CARGO_MANIFEST_DIR")), &mut out);
+        out
+    }
+
+    /// Count a needle across the package, returning `(total, per-file hits)`.
+    fn count_across_package(needle: &str) -> (usize, Vec<(String, usize)>) {
+        let sources = package_rust_sources();
+        assert!(
+            sources
+                .iter()
+                .any(|(path, _)| path.ends_with("service/domain/crdt.rs")),
+            "the walk must reach this file, or every count below is vacuous"
+        );
+        assert!(
+            sources
+                .iter()
+                .any(|(path, _)| path.ends_with("storage/map_data_store.rs")),
+            "the walk must reach the store trait, or every count below is vacuous"
+        );
+        let mut per_file = Vec::new();
+        let mut total = 0;
+        for (path, src) in &sources {
+            let hits = count(&normalized(src), needle);
+            if hits > 0 {
+                total += hits;
+                per_file.push((path.clone(), hits));
+            }
+        }
+        (total, per_file)
+    }
+
+    /// The witness-aware methods are defaulted, and NOTHING in production
+    /// overrides them: every production store reaches the defaulted bodies.
+    ///
+    /// This is what makes the seam inert, so it is counted rather than argued.
+    /// The one sanctioned override of the two store-side methods is the test spy
+    /// in this file; the demand predicate's one sanctioned override is the
+    /// record store's delegation to its backend.
+    ///
+    /// Every needle is rebuilt from parts. That is load-bearing, not stylistic:
+    /// this scan is hosted in the same file it counts over, so a needle written
+    /// as one literal would find ITSELF — and the demand-predicate needle's
+    /// allowed set excludes this file, so a self-match would fail the assertion
+    /// on a correct implementation.
+    #[test]
+    fn the_witness_methods_reach_no_production_implementor() {
+        let store_side = [
+            concat!("fn ", "add_with_witness"),
+            concat!("fn ", "wants_or_witness"),
+        ];
+        for needle in store_side {
+            let (total, per_file) = count_across_package(needle);
+            assert_eq!(
+                total, 2,
+                "{needle} must exist exactly twice -- the defaulted definition and the one \
+                 test spy; anything else is an implementor cascade. Found: {per_file:?}"
+            );
+            assert!(
+                per_file
+                    .iter()
+                    .any(|(path, _)| path.ends_with("storage/map_data_store.rs")),
+                "{needle} must be found at its definition, or the scan matched nothing \
+                 and its zero means nothing. Found: {per_file:?}"
+            );
+            assert!(
+                per_file
+                    .iter()
+                    .any(|(path, _)| path.ends_with("service/domain/crdt.rs")),
+                "{needle}'s one sanctioned override is the spy in this file. Found: {per_file:?}"
+            );
+        }
+
+        // The demand predicate is asymmetric: its allowed set is the record
+        // store's definition plus the ONE delegation, and it explicitly excludes
+        // this file.
+        let demand = concat!("fn ", "or_witness_wanted");
+        let (total, per_file) = count_across_package(demand);
+        assert_eq!(
+            total, 2,
+            "{demand} must exist exactly twice -- the defaulted definition and the one \
+             delegation. Found: {per_file:?}"
+        );
+        assert!(
+            per_file
+                .iter()
+                .any(|(path, _)| path.ends_with("storage/record_store.rs")),
+            "{demand} must be found at its definition. Found: {per_file:?}"
+        );
+        assert!(
+            per_file
+                .iter()
+                .any(|(path, _)| path.ends_with("impls/default_record_store.rs")),
+            "{demand}'s one sanctioned delegation lives with the record store. \
+             Found: {per_file:?}"
+        );
+        assert!(
+            !per_file
+                .iter()
+                .any(|(path, _)| path.ends_with("service/domain/crdt.rs")),
+            "{demand} must NOT appear in this file -- if it does, the needle matched \
+             its own literal. Found: {per_file:?}"
+        );
+    }
+
+    /// The OR doc-contracts say what the code now does, and none of them still
+    /// asserts a claim this seam falsified.
+    ///
+    /// Three contracts went false when the witness route landed: the apply's
+    /// instruction to serialize from a borrow ahead of the call, the outcome
+    /// struct's instruction to serialize before handing the delta over together
+    /// with the cost rationale that justified it, and the dead-code allowance on
+    /// a flag the effect gate now reads. Each is asserted ABSENT, and each has a
+    /// shorter sub-phrase asserted too, so the rewrite cannot be satisfied by
+    /// deleting only the words the longer phrase adds and leaving the claim
+    /// standing in shortened form.
+    ///
+    /// The prose here deliberately paraphrases rather than quotes those clauses.
+    /// An earlier draft quoted one of them across a line break, and the
+    /// normalized view joined it back into a match, so this test counted its own
+    /// commentary and reported the contract un-rewritten.
+    ///
+    /// The clauses that must SURVIVE are pinned at the same time, because a
+    /// rewrite that quietly dropped the purity clause or the placement rule would
+    /// otherwise pass. Every needle is rebuilt from parts: these assertions are
+    /// hosted in the file they count over, so a needle written as one literal
+    /// would hold every required-0 row at one forever and read every required-1
+    /// row as two.
+    ///
+    /// This assertion was RUN against the unmodified tree before the rewrite and
+    /// observed red on all six absent rows; a version of it that had been written
+    /// afterwards could not distinguish "the clause is gone" from "the needle
+    /// never matched".
+    #[test]
+    fn or_doc_contracts_carry_no_falsified_clause() {
+        const SOURCE: &str = include_str!("crdt.rs");
+        let view = normalized(SOURCE);
+
+        let required_absent = [
+            ("P1", concat!("serializes from a borrow ", "before calling")),
+            (
+                "P2",
+                concat!(
+                    "the live OR_ADD path re-persists ",
+                    "unconditionally and so reads no flag"
+                ),
+            ),
+            (
+                "P2s",
+                concat!("re-persists unconditionally ", "and so reads no flag"),
+            ),
+            (
+                "P5",
+                concat!(
+                    "already holds the delta and must serialize ",
+                    "it BEFORE handing it over"
+                ),
+            ),
+            (
+                "P6",
+                concat!("must serialize it ", "BEFORE handing it over"),
+            ),
+            (
+                "P7",
+                concat!(
+                    "charge a value-sized clone ",
+                    "to every accepted add on the hot path"
+                ),
+            ),
+        ];
+
+        let survivors: Vec<String> = required_absent
+            .iter()
+            .map(|(id, phrase)| (id, phrase, count(&view, phrase)))
+            .filter(|(_, _, found)| *found != 0)
+            .map(|(id, phrase, found)| format!("{id}: {found} x {phrase:?}"))
+            .collect();
+        assert!(
+            survivors.is_empty(),
+            "falsified doc-contract clauses still present ({} of {}):\n  {}",
+            survivors.len(),
+            required_absent.len(),
+            survivors.join("\n  ")
+        );
+
+        // Clauses that must survive the rewrite — the first four unchanged from
+        // before it, the last two the rewrite's own statement of the pinned route.
+        let required_present = [
+            (
+                "P3",
+                concat!("PURE: no gauge counters, ", "no tombstone frontier, no I/O"),
+            ),
+            (
+                "P4",
+                concat!(
+                    "in particular the prune decrement ",
+                    "must stay outside this function"
+                ),
+            ),
+            (
+                "P8",
+                concat!("Deliberately carries ", "no copy of the delta"),
+            ),
+            (
+                "P9",
+                concat!(
+                    "The flags below are the only thing ",
+                    "a caller cannot derive for itself"
+                ),
+            ),
+            (
+                "P10",
+                concat!("the post-image entry recovered ", "from the slot by tag"),
+            ),
+            (
+                "P11",
+                concat!("reads its own copy back out ", "of the post-image slot"),
+            ),
+        ];
+
+        for (id, phrase) in required_present {
+            assert_eq!(
+                count(&view, phrase),
+                1,
+                "{id} must be present exactly once: {phrase:?}"
+            );
+        }
+    }
+
+    /// The unarmed OR_ADD path still MOVES its entry into the apply, and clones
+    /// nothing.
+    ///
+    /// This is the cost claim of the whole seam, asserted structurally rather than
+    /// trusted: the entry reaches the apply by move exactly as it did before, and
+    /// no clone of it appears outside the demand-gated branch. Region-scoped
+    /// because the absence needle is NOT zero file-wide — two unrelated sites
+    /// clone an `entry` — so an unscoped assertion would be red at HEAD on code
+    /// this seam never touched.
+    ///
+    /// The `min_len` floor guards the failure a missing-anchor panic cannot see:
+    /// an end anchor that drifts EARLIER truncates the region silently, which
+    /// would turn the presence needles red and the absence needle vacuously green.
+    #[test]
+    fn the_unarmed_add_path_moves_its_entry_and_clones_nothing() {
+        const SOURCE: &str = include_str!("crdt.rs");
+        let view = normalized(SOURCE);
+        let scope = region(
+            &view,
+            concat!("let mut ", "merge_add"),
+            concat!(".update_in_", "place("),
+            400,
+        );
+
+        let moved = concat!("new_entry_opt", ".take()");
+        let handed_to_apply = concat!("apply_or_delta(OrDelta::Add ", "{ entry }, value)");
+        let cloned = concat!("entry", ".clone()");
+
+        assert_eq!(
+            count(scope, moved),
+            1,
+            "the entry must still leave its slot by move, not by copy"
+        );
+        assert_eq!(
+            count(scope, handed_to_apply),
+            1,
+            "the entry must still reach the apply by move"
+        );
+        assert_eq!(
+            count(scope, cloned),
+            0,
+            "nothing may clone the entry outside the demand-gated branch"
+        );
+
+        // The region is doing real work: the absence needle is non-zero file-wide,
+        // so this would be red at HEAD without the scoping.
+        assert_eq!(
+            count(&view, cloned),
+            2,
+            "file-wide clones of an entry are unrelated sites; if this moved, \
+             re-check whether the region still isolates the OR_ADD closure"
+        );
+    }
+
+    /// The in-place write-through reads no pre-image, so no diff can be computed
+    /// there.
+    ///
+    /// A witness is never derived by comparing before and after: doing so would
+    /// re-introduce the read-modify-write copy the in-place seam exists to remove,
+    /// and would be a second implementation of the OR algebra. The absence of a
+    /// read on this path is what makes that structurally impossible.
+    #[test]
+    fn the_in_place_write_through_reads_no_pre_image() {
+        const SOURCE: &str = include_str!("../../storage/impls/default_record_store.rs");
+        let view = normalized(SOURCE);
+        let scope = region(
+            &view,
+            concat!("async fn update_in_", "place("),
+            concat!("async fn ", "remove("),
+            1000,
+        );
+
+        // Non-vacuity: the write-through itself must be inside the region, or the
+        // zero below is measured over the wrong slice.
+        assert!(
+            scope.contains(concat!("CallerProvenance", "::Client")),
+            "the region must contain the write-through's provenance check"
+        );
+        assert_eq!(
+            count(scope, concat!(".get", "(")),
+            0,
+            "a pre-image read on this path is what a diff would need; there is none"
+        );
+    }
+
+    /// There is still exactly ONE implementation of the OR algebra.
+    ///
+    /// Threading a witness must not spawn a second copy of add-wins/remove-wins/
+    /// prune — a recovery fold and the write path drifting apart is the failure
+    /// this counts against (TG-OR-003). The long form of the needle is used
+    /// deliberately: a shorter one also matches an unrelated harness symbol whose
+    /// name merely contains it.
+    #[test]
+    fn the_or_algebra_has_exactly_one_implementation() {
+        let needle = concat!("pub(crate) fn ", "apply_or_delta(");
+        let (total, per_file) = count_across_package(needle);
+        assert_eq!(
+            total, 2,
+            "expected the definition plus the one pre-existing source-scanning \
+             literal, both in the CRDT service; a third means a second algebra. \
+             Found: {per_file:?}"
+        );
+        assert!(
+            per_file.len() == 1 && per_file[0].0.ends_with("service/domain/crdt.rs"),
+            "both occurrences must live in the CRDT service. Found: {per_file:?}"
+        );
+
+        // And the store-side files gained only types and defaulted methods: no
+        // diff or merge helper slipped in alongside them.
+        let sources = package_rust_sources();
+        for suffix in [
+            "storage/record_store.rs",
+            "storage/impls/default_record_store.rs",
+            "storage/map_data_store.rs",
+        ] {
+            let (path, src) = sources
+                .iter()
+                .find(|(path, _)| path.ends_with(suffix))
+                .unwrap_or_else(|| panic!("{suffix} must be reachable, or its zero is vacuous"));
+            let view = normalized(src);
+            for helper in [concat!("fn ", "diff"), concat!("fn ", "merge")] {
+                assert_eq!(
+                    count(&view, helper),
+                    0,
+                    "{path} must gain no {helper} helper -- the algebra stays in one place"
+                );
+            }
+        }
+    }
+
+    /// A witness crossing the boundary changes NOTHING on disk: a real WAL, fed
+    /// by a real OR_ADD under an armed demand gate, still receives only
+    /// full-record frames.
+    ///
+    /// Driven against a REAL write-ahead log writer rather than a recording
+    /// double. The append-time refusal that would catch a delta frame lives in
+    /// the concrete writer's `append`, not in the log trait, so a spy log would
+    /// record whatever it was handed and could never fail-stop — a proof built on
+    /// one would be green on an instrument incapable of going red.
+    ///
+    /// The frame-kind assertion is written POSITIVELY, which entails the negative:
+    /// the only other inhabitants of the op enum are a remove frame, the delta
+    /// frame, and a test-only variant. Writing it as "is not a delta frame" would
+    /// put that variant's name in this file, and a package-wide belt scans raw
+    /// file contents for exactly that string and admits it only in the log's own
+    /// modules.
+    #[tokio::test]
+    async fn an_armed_witness_still_lands_only_full_record_frames_in_a_real_wal() {
+        use crate::storage::datastores::{WalBootstrap, WriteBehindConfig, WriteBehindDataStore};
+        use crate::storage::wal::format::{decode_all, FrameDecodeResult};
+        use crate::storage::wal::segment::parse_segment_filename;
+        use crate::storage::wal::{Wal, WalFsyncPolicy, WalOp, WalWriter};
+
+        let wal_dir = tempfile::tempdir().unwrap();
+        // Every frame is fsynced before the write acks, so the read-back below
+        // cannot pass by observing an empty segment.
+        let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+        let write_behind = WriteBehindDataStore::new_with_wal(
+            Arc::new(NullDataStore) as Arc<dyn MapDataStore>,
+            // Long delays keep the frame un-applied for the read-back below: the
+            // watermark advancing would let segment reclamation remove exactly the
+            // frames under assertion. Durability does not depend on this — the
+            // per-op policy fsyncs each frame before its write acks.
+            WriteBehindConfig {
+                write_delay_ms: 60_000,
+                flush_interval_ms: 60_000,
+                shutdown_timeout_ms: 5_000,
+                ..WriteBehindConfig::default()
+            },
+            Some(WalBootstrap {
+                wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                sequence_start: 1,
+            }),
+        );
+
+        // Armed, so the production closure really does build a witness and hand
+        // it across the boundary — the whole point is that it changes nothing.
+        let spy = Arc::new(WitnessSpyStore::wrapping(
+            Arc::clone(&write_behind) as Arc<dyn MapDataStore>,
+            true,
+        ));
+        let (svc, _factory, _frontier) = make_service_with_frontier_and_store(
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+            Vec::new(),
+        );
+
+        Arc::clone(&svc)
+            .oneshot(or_add_op("m", "k1", "v1", "T1"))
+            .await
+            .unwrap();
+
+        // The witness really did cross the boundary, or this asserts nothing
+        // about what a witness-carrying write does to the log.
+        let carried: Vec<Option<OrDelta>> = spy.witnesses();
+        assert!(
+            carried.iter().any(Option::is_some),
+            "the armed gate must have handed a witness across the boundary, got {carried:?}"
+        );
+
+        let mut decoded = 0usize;
+        let mut listing: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(wal_dir.path()).unwrap().flatten() {
+            listing.push(format!(
+                "{} ({} bytes)",
+                entry.path().display(),
+                entry.metadata().map(|m| m.len()).unwrap_or(0)
+            ));
+            let path = entry.path();
+            // The log directory also holds per-partition applied-watermark files,
+            // which carry no frames. Selected by the log's OWN segment-name parser
+            // rather than by guessing an extension.
+            let is_segment = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(parse_segment_filename)
+                .is_some();
+            if !path.is_file() || !is_segment {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            let entries = match decode_all(&bytes) {
+                FrameDecodeResult::Complete(entries) => entries,
+                FrameDecodeResult::TruncatedTail { complete } => complete,
+                FrameDecodeResult::CleanEof => Vec::new(),
+                other => panic!("unexpected decode result for {}: {other:?}", path.display()),
+            };
+            for wal_entry in entries {
+                assert!(
+                    matches!(wal_entry.op, WalOp::Store { .. }),
+                    "a witness-carrying write must still frame the full record, \
+                     got a different frame kind in {}",
+                    path.display()
+                );
+                decoded += 1;
+            }
+        }
+        // Non-vacuity: a universally-quantified claim over zero frames is free.
+        assert!(
+            decoded >= 1,
+            "at least one frame must have been decoded, or the claim above is vacuous; \
+             log dir held: {listing:?}"
+        );
+    }
+
+    /// The share of OR writes that carry NO witness, measured deterministically.
+    ///
+    /// This seam does not change which writes happen: an op that took no effect
+    /// still re-persists its whole slot, exactly as before. Those writes are the
+    /// residual a delta-framing consumer cannot shrink, so the plateau argument
+    /// downstream needs the share as a number rather than as a hope. Eliminating
+    /// the residual — gating the unconditional re-persist on the same flags — is
+    /// tracked separately and deliberately not attempted here.
+    ///
+    /// Sequential and seeded, not concurrent: whether a given add is suppressed
+    /// depends on interleaving, so a concurrent driver would report a different
+    /// ratio per run and could not be consumed as a fixed term. The same seed must
+    /// therefore reproduce the same counts, which the caller below asserts by
+    /// running it twice.
+    async fn measure_none_witness_share(seed: u64) -> (usize, usize) {
+        const KEYS: u64 = 48;
+        const EPOCH_WIDTH: u64 = 100;
+        const ROUNDS: u64 = 480;
+
+        let spy = Arc::new(WitnessSpyStore::standalone(true));
+        let (svc, factory, frontier) = make_service_with_frontier_and_store(
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+            Vec::new(),
+        );
+        frontier.set_epoch_width(EPOCH_WIDTH);
+
+        // A pinned linear congruential generator rather than a random source, so
+        // the op sequence is a function of the seed alone.
+        let mut state = seed;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state >> 33
+        };
+
+        for round in 0..ROUNDS {
+            let key = format!("ork-{}", next() % KEYS);
+            let tag = format!("t-{round}");
+
+            // The churn pair the soak drives: a unique tag added then removed.
+            Arc::clone(&svc)
+                .oneshot(or_add_op("m", &key, "v", &tag))
+                .await
+                .unwrap();
+            Arc::clone(&svc)
+                .oneshot(or_remove_op("m", &key, &tag))
+                .await
+                .unwrap();
+
+            // Every fifth round also replays an op that cannot take effect: a
+            // re-add of the tag just tombstoned, and a re-issue of the same
+            // remove. These are the residual's two add/remove sources.
+            if round % 5 == 0 {
+                Arc::clone(&svc)
+                    .oneshot(or_add_op("m", &key, "v", &tag))
+                    .await
+                    .unwrap();
+                Arc::clone(&svc)
+                    .oneshot(or_remove_op("m", &key, &tag))
+                    .await
+                    .unwrap();
+            }
+        }
+
+        // Open both prune conjuncts and sweep, so effective prunes are in the mix
+        // too rather than being excluded by an unreachable gate.
+        let client: String = "a5:alice|dev-1".into();
+        frontier.set_delivered(ConnectionId(1), 10_000);
+        frontier
+            .confirm_apply_ack(&client, frontier.low_water_mark() + 50, ConnectionId(1))
+            .await;
+        frontier.set_durable_epoch_watermark(100_000);
+        prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
+
+        let observed = spy.observations();
+        let total = observed.len();
+        let none = observed.iter().filter(|o| o.witness.is_none()).count();
+        (none, total)
+    }
+
+    #[tokio::test]
+    async fn the_none_witness_share_is_measured_and_reproducible() {
+        const SEED: u64 = 0x5EED_349C;
+
+        let (none_a, total_a) = measure_none_witness_share(SEED).await;
+        let (none_b, total_b) = measure_none_witness_share(SEED).await;
+
+        assert!(
+            total_a > 0,
+            "the driver must have produced OR writes to measure"
+        );
+        assert_eq!(
+            (none_a, total_a),
+            (none_b, total_b),
+            "the same seed must reproduce the same counts, or the number is not a \
+             term anything downstream can consume"
+        );
+        // Recorded rather than bounded: this seam does not change the residual, so
+        // a threshold here would be an invented contract. The number belongs in the
+        // completion record.
+        // Tenths of a percent in integer arithmetic: a float cast of a usize is
+        // lossy on 64-bit targets, and the ratio needs no float to be exact.
+        let tenths = none_a * 1000 / total_a;
+        println!(
+            "none-witness OR writes: {none_a}/{total_a} ({}.{}%) at seed {SEED:#x}",
+            tenths / 10,
+            tenths % 10
+        );
+    }
+
+    /// None of the files this change touches may name the delta frame variant.
+    ///
+    /// A package-wide belt already scans raw file contents for that literal and
+    /// admits it only in the WAL's own modules, so a single occurrence here --
+    /// in code, a string literal or an assertion message -- turns that belt red,
+    /// and every repair available for it is forbidden. Re-asserted locally so
+    /// the trap surfaces from this file's own test run rather than from the
+    /// harness. Frame-kind assertions are therefore written positively, which
+    /// entails the negative: the only other inhabitants are the store frame, the
+    /// remove frame, and a test-only variant.
+    #[test]
+    fn no_file_this_change_touches_names_the_delta_frame_variant() {
+        let needle = concat!("WalOp", "::", "OrDelta");
+        let touched = [
+            "service/domain/crdt.rs",
+            "storage/record_store.rs",
+            "storage/impls/default_record_store.rs",
+            "storage/map_data_store.rs",
+            "storage/or_inplace_mutate_proptest.rs",
+        ];
+        let sources = package_rust_sources();
+        for suffix in touched {
+            let (path, src) = sources
+                .iter()
+                .find(|(path, _)| path.ends_with(suffix))
+                .unwrap_or_else(|| panic!("{suffix} must be reachable, or its zero is vacuous"));
+            assert_eq!(
+                src.matches(needle).count(),
+                0,
+                "{path} names the delta frame variant; the package-wide belt scans raw \
+                 contents and admits it only in the WAL's own modules"
+            );
+        }
+    }
+
+    /// Power (a): a phrase that spans a doc-comment line break is found by the
+    /// normalized view and is NOT found by a plain `contains` on the raw source.
+    ///
+    /// The needle is reconstructed from parts so this file never contains its
+    /// own literal needle — otherwise the scan counts itself and the number
+    /// stops measuring the contract.
+    #[test]
+    fn normalized_view_sees_through_doc_comment_wrapping() {
+        const SOURCE: &str = include_str!("crdt.rs");
+        let needle = concat!(
+            "in particular the prune decrement ",
+            "must stay outside this function"
+        );
+
+        assert!(
+            !SOURCE.contains(needle),
+            "the driver must span a doc-comment line break, or this power proves nothing"
+        );
+        assert_eq!(
+            count(&normalized(SOURCE), needle),
+            1,
+            "the normalized view must find a phrase the raw source cannot"
+        );
+    }
+
+    /// Power (b): a phrase that spans a string-literal `\` continuation is found
+    /// by the normalized view and is NOT found by the markers-plus-whitespace
+    /// shape.
+    ///
+    /// Mutation proof: drop `strip_line_continuations` from `normalized` and the
+    /// helper collapses onto the weak shape, which measures zero here.
+    #[test]
+    fn normalized_view_sees_through_string_literal_continuations() {
+        const SOURCE: &str = include_str!("crdt.rs");
+        let needle = concat!("the differential recovery test ", "is the first consumer");
+
+        assert!(
+            !SOURCE.contains(needle),
+            "the driver must span a `\\` continuation, or this power proves nothing"
+        );
+        assert_eq!(
+            count(&normalized_marker_only(SOURCE), needle),
+            0,
+            "markers plus whitespace cannot see through a `\\` continuation"
+        );
+        assert_eq!(
+            count(&normalized(SOURCE), needle),
+            1,
+            "the continuation strip is what makes this phrase measurable"
+        );
+    }
+
+    /// Power (c), part 1: a region is strictly narrower than the whole source,
+    /// so a phrase can be required of one closure rather than of 5000 lines.
+    #[test]
+    fn region_narrows_the_scanned_scope() {
+        const SOURCE: &str = include_str!("crdt.rs");
+        let view = normalized(SOURCE);
+        let scoped = region(
+            &view,
+            concat!("let mut ", "merge_add"),
+            concat!(".update_in_", "place("),
+            400,
+        );
+
+        assert!(
+            scoped.len() < view.len(),
+            "a region that is not strictly shorter than the file is not scoping anything"
+        );
+    }
+
+    /// Power (c), part 2: a start anchor that has moved fails loudly instead of
+    /// silently widening the scope.
+    #[test]
+    #[should_panic(expected = "region start anchor not found")]
+    fn region_panics_on_a_missing_start_anchor() {
+        const SOURCE: &str = include_str!("crdt.rs");
+        region(
+            &normalized(SOURCE),
+            concat!("an anchor that ", "no source file carries"),
+            concat!(".update_in_", "place("),
+            1,
+        );
+    }
+
+    /// Power (c), part 3: the same for an end anchor.
+    #[test]
+    #[should_panic(expected = "region end anchor not found")]
+    fn region_panics_on_a_missing_end_anchor() {
+        const SOURCE: &str = include_str!("crdt.rs");
+        region(
+            &normalized(SOURCE),
+            concat!("let mut ", "merge_add"),
+            concat!("an anchor that ", "no source file carries"),
+            1,
+        );
+    }
+
+    /// Power (c), part 4: both anchors present but the slice is too short --
+    /// the failure mode a missing-anchor panic cannot detect.
+    ///
+    /// Mutation proof: weaken or delete the `min_len` assertion and this stops
+    /// panicking.
+    #[test]
+    #[should_panic(expected = "below the")]
+    fn region_panics_when_the_slice_is_shorter_than_min_len() {
+        const SOURCE: &str = include_str!("crdt.rs");
+        region(
+            &normalized(SOURCE),
+            concat!("let mut ", "merge_add"),
+            concat!(".update_in_", "place("),
+            100_000,
+        );
+    }
+
+    /// Power (d): a call expression split across a line break is found in its
+    /// single-line spelling, and the one-space spelling is not.
+    ///
+    /// This is the regression case that motivated step 4 -- an assertion
+    /// requiring the entry to reach the apply by move measured zero against a
+    /// tree that did exactly that, because the call spans two lines.
+    ///
+    /// Mutation proof: drop `tighten_call_expressions` from `normalized` and the
+    /// last two assertions swap, reddening this test.
+    #[test]
+    fn normalized_view_sees_a_call_split_across_a_line_break() {
+        const SOURCE: &str = include_str!("crdt.rs");
+        let single_line = concat!("new_entry_opt", ".take()");
+        let one_space = concat!("new_entry_opt ", ".take()");
+
+        assert_eq!(count(SOURCE, single_line), 0, "raw source, tight spelling");
+        assert_eq!(count(SOURCE, one_space), 0, "raw source, spaced spelling");
+
+        let without_step_4 = normalized_without_call_tightening(SOURCE);
+        assert_eq!(
+            count(&without_step_4, single_line),
+            0,
+            "steps 1-3 leave the line break as a space, so the tight spelling is unfindable"
+        );
+        assert_eq!(
+            count(&without_step_4, one_space),
+            1,
+            "steps 1-3 yield the spaced spelling nobody would write by hand"
+        );
+
+        let full = normalized(SOURCE);
+        assert_eq!(
+            count(&full, single_line),
+            1,
+            "step 4 is what makes the call match the way it reads on one line"
+        );
+        assert_eq!(
+            count(&full, one_space),
+            0,
+            "step 4 must leave no spaced spelling behind"
+        );
+    }
 
     fn make_factory() -> Arc<RecordStoreFactory> {
         Arc::new(RecordStoreFactory::new(
@@ -3519,6 +4561,582 @@ mod tests {
         fn is_null(&self) -> bool {
             false
         }
+    }
+
+    /// One write as the store boundary saw it, with whatever witness rode along.
+    #[derive(Debug, Clone)]
+    struct WitnessObservation {
+        map: String,
+        key: String,
+        value: RecordValue,
+        witness: Option<OrDelta>,
+    }
+
+    /// Observes what actually crosses the store boundary, and can answer the
+    /// demand signal either way.
+    ///
+    /// This is deliberately ONE type covering every configuration the assertions
+    /// need — armed and unarmed, standalone and delegating. A second data-store
+    /// implementation in this file would keep the file-level allow-list green
+    /// while inflating the per-file site count the cascade assertion reads, so
+    /// the count would stop meaning "nobody overrode this".
+    ///
+    /// When `inner` is set every call is forwarded to it, so the spy can sit in
+    /// front of a real WAL-backed store and observe without displacing it; when
+    /// it is `None` the spy is itself the backend, holding its own map.
+    struct WitnessSpyStore {
+        inner: Option<Arc<dyn MapDataStore>>,
+        armed: bool,
+        observed: Mutex<Vec<WitnessObservation>>,
+        data: Mutex<HashMap<(String, String), RecordValue>>,
+    }
+
+    impl WitnessSpyStore {
+        /// Standalone backend. `armed` decides the answer to the demand signal,
+        /// which is the whole point of the unarmed configuration: it proves the
+        /// demand gate suppresses a witness the effect gate would have produced.
+        fn standalone(armed: bool) -> Self {
+            Self {
+                inner: None,
+                armed,
+                observed: Mutex::new(Vec::new()),
+                data: Mutex::new(HashMap::new()),
+            }
+        }
+
+        /// Wraps a real backend, so writes land in that backend's WAL while the
+        /// spy still records what the boundary was handed.
+        fn wrapping(inner: Arc<dyn MapDataStore>, armed: bool) -> Self {
+            Self {
+                inner: Some(inner),
+                armed,
+                observed: Mutex::new(Vec::new()),
+                data: Mutex::new(HashMap::new()),
+            }
+        }
+
+        fn observations(&self) -> Vec<WitnessObservation> {
+            self.observed.lock().clone()
+        }
+
+        /// Every witness the boundary received, in arrival order.
+        fn witnesses(&self) -> Vec<Option<OrDelta>> {
+            self.observed
+                .lock()
+                .iter()
+                .map(|seen| seen.witness.clone())
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl MapDataStore for WitnessSpyStore {
+        async fn add(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            if let Some(inner) = &self.inner {
+                return inner.add(map, key, value, expiration_time, now).await;
+            }
+            self.data
+                .lock()
+                .insert((map.to_string(), key.to_string()), value.clone());
+            Ok(())
+        }
+
+        /// Records the pair, then persists exactly as the defaulted body would.
+        ///
+        /// Recording BOTH the value and the witness is what lets a caller check
+        /// they describe the same mutation: a witness folded onto the pre-image
+        /// has to reproduce the value that was written beside it.
+        async fn add_with_witness(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+            witness: Option<&OrDelta>,
+        ) -> anyhow::Result<()> {
+            self.observed.lock().push(WitnessObservation {
+                map: map.to_string(),
+                key: key.to_string(),
+                value: value.clone(),
+                witness: witness.cloned(),
+            });
+            if let Some(inner) = &self.inner {
+                return inner
+                    .add_with_witness(map, key, value, expiration_time, now, witness)
+                    .await;
+            }
+            self.add(map, key, value, expiration_time, now).await
+        }
+
+        fn wants_or_witness(&self) -> bool {
+            self.armed
+        }
+
+        async fn add_backup(
+            &self,
+            _: &str,
+            _: &str,
+            _: &RecordValue,
+            _: i64,
+            _: i64,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            if let Some(inner) = &self.inner {
+                return inner.remove(map, key, now).await;
+            }
+            self.data.lock().remove(&(map.to_string(), key.to_string()));
+            Ok(())
+        }
+
+        async fn remove_backup(&self, _: &str, _: &str, _: i64) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+            if let Some(inner) = &self.inner {
+                return inner.load(map, key).await;
+            }
+            Ok(self
+                .data
+                .lock()
+                .get(&(map.to_string(), key.to_string()))
+                .cloned())
+        }
+
+        async fn load_all(
+            &self,
+            map: &str,
+            keys: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            if let Some(inner) = &self.inner {
+                return inner.load_all(map, keys).await;
+            }
+            let guard = self.data.lock();
+            Ok(keys
+                .iter()
+                .filter_map(|key| {
+                    guard
+                        .get(&(map.to_string(), key.clone()))
+                        .map(|value| (key.clone(), value.clone()))
+                })
+                .collect())
+        }
+
+        async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+            if let Some(inner) = &self.inner {
+                return inner.remove_all(map, keys).await;
+            }
+            let mut guard = self.data.lock();
+            for key in keys {
+                guard.remove(&(map.to_string(), key.clone()));
+            }
+            Ok(())
+        }
+
+        async fn enumerate_leaves(
+            &self,
+            _: &str,
+            _: bool,
+            _: &mut dyn LeafSink,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn scan_values(&self, _: &str, _: bool, _: u64) -> anyhow::Result<ScanBatch> {
+            Ok(ScanBatch::default())
+        }
+
+        async fn scan_values_batched(
+            &self,
+            _: &str,
+            _: bool,
+            _: ScanCursor,
+            _: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            Ok(ScanBatch::default())
+        }
+
+        fn is_loadable(&self, _: &str) -> bool {
+            true
+        }
+
+        fn pending_operation_count(&self) -> u64 {
+            self.inner
+                .as_ref()
+                .map_or(0, |inner| inner.pending_operation_count())
+        }
+
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            match &self.inner {
+                Some(inner) => inner.soft_flush().await,
+                None => Ok(0),
+            }
+        }
+
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            match &self.inner {
+                Some(inner) => inner.hard_flush().await,
+                None => Ok(()),
+            }
+        }
+
+        async fn flush_key(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            deleted: bool,
+        ) -> anyhow::Result<()> {
+            match &self.inner {
+                Some(inner) => inner.flush_key(map, key, value, deleted).await,
+                None => Ok(()),
+            }
+        }
+
+        fn reset(&self) {}
+
+        /// A real (non-null) backend, so the full write-through path runs.
+        fn is_null(&self) -> bool {
+            false
+        }
+    }
+
+    /// An order-insensitive view of an OR slot, for comparing a folded witness
+    /// against the value that was written beside it.
+    ///
+    /// Deliberately local rather than reusing the delta-fold equivalence oracle
+    /// defined earlier in this file: that oracle's own contract states the
+    /// differential recovery test is its first consumer, so consuming it here
+    /// would make that contract false.
+    fn canonical_or_slot(value: &RecordValue) -> (Vec<(String, String)>, Vec<String>) {
+        match value {
+            RecordValue::OrMap {
+                records,
+                tombstones,
+            } => {
+                let mut live: Vec<(String, String)> = records
+                    .iter()
+                    .map(|entry| (entry.tag.clone(), format!("{:?}", entry.value)))
+                    .collect();
+                live.sort();
+                let mut dead = tombstones.clone();
+                dead.sort();
+                (live, dead)
+            }
+            other => (vec![(String::new(), format!("{other:?}"))], Vec::new()),
+        }
+    }
+
+    fn empty_or_slot() -> RecordValue {
+        RecordValue::OrMap {
+            records: Vec::new(),
+            tombstones: Vec::new(),
+        }
+    }
+
+    /// Drive at least one EFFECTIVE mutation of each kind — an accepted add, a
+    /// genuinely-new tombstone, and a prune that drops a tag — through the real
+    /// service over the given spy, and confirm each really took effect.
+    ///
+    /// Two keys rather than one because the epoch gate only opens once the
+    /// low-water mark has moved past the first epoch, and this fixture stamps one
+    /// epoch per tombstone.
+    ///
+    /// Shared so both callers below assert over the SAME effect cases: one proves
+    /// the demand gate suppresses every one of them, the other proves the
+    /// witnesses they produce describe the writes they rode with.
+    async fn drive_effective_or_mutations_of_every_kind(spy: &Arc<WitnessSpyStore>) {
+        let (svc, factory, frontier) = make_service_with_frontier_and_store(
+            Arc::clone(spy) as Arc<dyn MapDataStore>,
+            Vec::new(),
+        );
+
+        for (key, value, tag) in [("k1", "v1", "T1"), ("k2", "v2", "T2")] {
+            Arc::clone(&svc)
+                .oneshot(or_add_op("m", key, value, tag))
+                .await
+                .unwrap();
+            Arc::clone(&svc)
+                .oneshot(or_remove_op("m", key, tag))
+                .await
+                .unwrap();
+
+            // The add was accepted and the remove stamped a NEW tombstone, or
+            // two of the three effect kinds never happened here.
+            let mid = spy.load("m", key).await.unwrap();
+            assert!(
+                matches!(&mid, Some(RecordValue::OrMap { tombstones, .. })
+                         if tombstones.contains(&tag.to_string())),
+                "precondition: the remove must have stamped a new tombstone, got {mid:?}"
+            );
+        }
+
+        open_prune_gates_past_epoch_one(&frontier).await;
+        prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
+
+        // At least one prune dropped a tag, or the third effect kind is a
+        // no-effect op wearing an effective op's name.
+        let mut pruned_any = false;
+        for (key, tag) in [("k1", "T1"), ("k2", "T2")] {
+            let after = spy.load("m", key).await.unwrap();
+            if matches!(&after, Some(RecordValue::OrMap { tombstones, .. })
+                        if !tombstones.contains(&tag.to_string()))
+            {
+                pruned_any = true;
+            }
+        }
+        assert!(
+            pruned_any,
+            "precondition: the sweep must have dropped at least one tombstone"
+        );
+    }
+
+    /// With no consumer armed, the boundary receives NO witness -- not even for
+    /// the three mutations that did take effect.
+    ///
+    /// This is what separates the demand gate from the effect gate
+    /// behaviourally: on these three inputs the effect gate alone would have
+    /// produced a witness every time, so neither gate can be deleted while the
+    /// other silently absorbs its job.
+    #[tokio::test]
+    async fn an_unarmed_consumer_receives_no_witness_even_for_effective_mutations() {
+        let spy = Arc::new(WitnessSpyStore::standalone(false));
+        drive_effective_or_mutations_of_every_kind(&spy).await;
+
+        let witnesses = spy.witnesses();
+        assert!(
+            witnesses.len() >= 3,
+            "the boundary must have seen at least the effective writes, saw {}",
+            witnesses.len()
+        );
+        assert!(
+            witnesses.iter().all(Option::is_none),
+            "an unarmed consumer must receive no witness at all, got {witnesses:?}"
+        );
+    }
+
+    /// The witness and the value handed to the boundary describe the SAME
+    /// mutation.
+    ///
+    /// Asserted by folding each witness onto the previous value written for that
+    /// key and requiring the result to equal the value it arrived with. A witness
+    /// that described a different op -- or the same op on a different value --
+    /// would not reproduce it.
+    #[tokio::test]
+    async fn a_witness_folds_onto_the_pre_image_to_give_the_value_it_rode_with() {
+        let spy = Arc::new(WitnessSpyStore::standalone(true));
+        drive_effective_or_mutations_of_every_kind(&spy).await;
+
+        let seen = spy.observations();
+        let mut pre_image: HashMap<(String, String), RecordValue> = HashMap::new();
+        let (mut adds, mut removes, mut prunes) = (0usize, 0usize, 0usize);
+        for observation in &seen {
+            let slot = (observation.map.clone(), observation.key.clone());
+            if let Some(delta) = observation.witness.clone() {
+                match &delta {
+                    OrDelta::Add { .. } => adds += 1,
+                    OrDelta::Remove { .. } => removes += 1,
+                    OrDelta::Prune { .. } => prunes += 1,
+                }
+                let mut base = pre_image.get(&slot).cloned().unwrap_or_else(empty_or_slot);
+                apply_or_delta(delta, &mut base);
+                assert_eq!(
+                    canonical_or_slot(&base),
+                    canonical_or_slot(&observation.value),
+                    "the witness for {slot:?} did not reproduce the value it rode with"
+                );
+            }
+            pre_image.insert(slot, observation.value.clone());
+        }
+        // All three kinds must be represented, or a kind whose witness is never
+        // produced would pass this vacuously.
+        assert!(
+            adds > 0 && removes > 0 && prunes > 0,
+            "every effect kind must have produced a witness to fold; \
+             adds={adds} removes={removes} prunes={prunes}"
+        );
+    }
+
+    /// A witness exists if and only if the mutation actually took effect.
+    ///
+    /// The two no-effect rows here are the ones that matter: both still owe a
+    /// durable write — the closures re-persist the slot unconditionally, exactly
+    /// as they did before this seam — so both DO reach the store boundary. What
+    /// they must not carry is a witness. Recording a mutation that did not happen
+    /// is how a replay would resurrect a suppressed add.
+    #[tokio::test]
+    async fn only_an_effective_add_or_remove_carries_a_witness() {
+        let spy = Arc::new(WitnessSpyStore::standalone(true));
+        let (svc, _factory, _frontier) = make_service_with_frontier_and_store(
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+            Vec::new(),
+        );
+
+        for op in [
+            or_add_op("m", "k1", "v1", "T1"), // effect: inserted
+            or_remove_op("m", "k1", "T1"),    // effect: new tombstone
+            or_add_op("m", "k1", "v1", "T1"), // NO effect: remove-wins suppressed
+            or_remove_op("m", "k1", "T1"),    // NO effect: duplicate remove
+        ] {
+            Arc::clone(&svc).oneshot(op).await.unwrap();
+        }
+
+        let seen: Vec<Option<OrDelta>> = spy
+            .observations()
+            .into_iter()
+            .filter(|obs| obs.map == "m" && obs.key == "k1")
+            .map(|obs| obs.witness)
+            .collect();
+        assert_eq!(
+            seen.len(),
+            4,
+            "all four ops owe a durable write, so all four must reach the boundary; saw {seen:?}"
+        );
+
+        assert!(
+            matches!(&seen[0], Some(OrDelta::Add { entry }) if entry.tag == "T1"),
+            "an accepted add carries its entry, got {:?}",
+            seen[0]
+        );
+        assert!(
+            matches!(&seen[1], Some(OrDelta::Remove { tag }) if tag == "T1"),
+            "a genuinely-new tombstone carries its tag, got {:?}",
+            seen[1]
+        );
+        assert!(
+            seen[2].is_none(),
+            "a remove-wins-suppressed add changed nothing and must carry no witness, got {:?}",
+            seen[2]
+        );
+        assert!(
+            seen[3].is_none(),
+            "a duplicate remove changed nothing and must carry no witness, got {:?}",
+            seen[3]
+        );
+    }
+
+    /// A sweep whose tag was already gone reaches the store boundary NOT AT ALL.
+    ///
+    /// The write-owed answer for this row is `false` — nothing was pruned and no
+    /// shape changed — so the in-place seam reports "unchanged" and never performs
+    /// a write-through. There is therefore no witness to inspect, and that is the
+    /// contract: the absence of a witness here is the absence of a whole write.
+    ///
+    /// Stated as a boundary-write count rather than as "every witness is None",
+    /// because over an empty observation set that phrasing is vacuously true. An
+    /// earlier draft asserted exactly that and passed while proving nothing.
+    #[tokio::test]
+    async fn a_sweep_whose_tag_was_already_gone_writes_nothing_at_all() {
+        let spy = Arc::new(WitnessSpyStore::standalone(true));
+        let (svc, factory, frontier) = make_service_with_frontier_and_store(
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+            Vec::new(),
+        );
+
+        // A resident record whose tombstone set does NOT hold the tag the sweep
+        // will look for, so the prune closure runs and matches nothing.
+        Arc::clone(&svc)
+            .oneshot(or_add_op("m", "k1", "v1", "T1"))
+            .await
+            .unwrap();
+        let ghost = "GHOST";
+        assert_eq!(
+            frontier.stamp_tombstone("m", "k1", ghost),
+            1,
+            "the ghost ref sits in epoch 1"
+        );
+        // Advances the epoch counter so the low-water mark can sit strictly past
+        // the ghost's epoch without making this one eligible too.
+        assert_eq!(
+            frontier.stamp_tombstone("m", "k2", "FILLER"),
+            2,
+            "the filler pins epoch 2"
+        );
+        open_prune_gates_past_epoch_one(&frontier).await;
+
+        let before = spy.observations().len();
+        prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
+
+        // Non-vacuity: the sweep must actually have consumed the ghost ref, i.e.
+        // the closure RAN and reported "already gone". Without this, a sweep that
+        // never fired would satisfy the zero below.
+        let retryable = frontier.drain_prunable_tombstones();
+        assert!(
+            !retryable.iter().any(|(_, r)| r.tag == ghost),
+            "the sweep must have run and consumed the ghost ref, got {retryable:?}"
+        );
+        assert_eq!(
+            spy.observations().len(),
+            before,
+            "a sweep that pruned nothing and changed no shape owes no durable write, \
+             so it must not reach the store boundary at all"
+        );
+    }
+
+    /// A shape upgrade that drops no tag DOES write, and carries no witness.
+    ///
+    /// This is the `pruned == 0` row where the gate is actually observable: a
+    /// legacy-shaped slot is upgraded, so the write is owed and performed, and the
+    /// boundary sees a real write whose witness must still be absent because
+    /// nothing was pruned. The already-gone row above cannot prove this — it
+    /// performs no write, so it has no witness to be wrong about.
+    #[tokio::test]
+    async fn a_shape_upgrade_that_prunes_nothing_writes_without_a_witness() {
+        let spy = Arc::new(WitnessSpyStore::standalone(true));
+        let (svc, factory, frontier) = make_service_with_frontier_and_store(
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+            Vec::new(),
+        );
+
+        // Durable-only, in the pre-OrMap shape an older server wrote, holding a
+        // tombstone the sweep is NOT asked to drop. Rehydrating it makes the prune
+        // closure normalize the shape while pruning nothing.
+        spy.add(
+            "m",
+            "k1",
+            &RecordValue::OrTombstones {
+                tags: vec!["OLD".to_string()],
+            },
+            0,
+            0,
+        )
+        .await
+        .unwrap();
+        let ghost = "GHOST";
+        assert_eq!(frontier.stamp_tombstone("m", "k1", ghost), 1);
+        assert_eq!(frontier.stamp_tombstone("m", "k2", "FILLER"), 2);
+        open_prune_gates_past_epoch_one(&frontier).await;
+
+        let before = spy.observations().len();
+        prune_epoch_tombstones(&frontier, &factory, &svc.key_writer).await;
+
+        let after: Vec<Option<OrDelta>> = spy
+            .observations()
+            .into_iter()
+            .skip(before)
+            .map(|obs| obs.witness)
+            .collect();
+        // Non-vacuity: the upgrade must have owed and performed a real write, or
+        // there is no witness to be absent.
+        assert!(
+            !after.is_empty(),
+            "the shape upgrade owes a durable write, so the boundary must have seen one"
+        );
+        assert!(
+            after.iter().all(Option::is_none),
+            "nothing was pruned, so the write must carry no witness, got {after:?}"
+        );
     }
 
     /// Evicts named keys the instant the record store rehydrates them.

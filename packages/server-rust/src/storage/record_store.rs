@@ -6,13 +6,14 @@
 //! expiry, eviction, and mutation observation.
 //!
 //! Also defines supporting types: [`CallerProvenance`], [`ExpiryPolicy`],
-//! and [`ExpiryReason`].
+//! [`ExpiryReason`], and [`MutateOutcome`].
 
 use async_trait::async_trait;
 
 use super::engine::{FetchResult, IterationCursor, StorageEngine};
 use super::map_data_store::MapDataStore;
 use super::record::{Record, RecordValue};
+use super::wal::OrDelta;
 
 /// Origin of a write operation.
 ///
@@ -66,6 +67,34 @@ pub enum ExpiryReason {
     MaxIdle,
 }
 
+/// What a [`RecordStore::update_in_place`] mutate closure reports back.
+///
+/// `changed` carries the persist obligation that the closure's old `bool`
+/// return carried: `true` exactly when the closure altered the value and a
+/// write-through is owed, `false` for a no-op.
+///
+/// `witness` optionally carries the OR delta the closure just applied to the
+/// value it was handed. It exists so a store that durably records deltas
+/// receives the one the mutation point already built, instead of re-deriving it
+/// from a before/after comparison — which would need the pre-image and so
+/// reintroduce the whole-slot clone the in-place seam exists to avoid. It is
+/// `Some` only when something beneath the store actually consumes a witness
+/// ([`RecordStore::or_witness_wanted`]) and the mutation took effect; every
+/// caller with no per-op delta (LWW writes, bulk and SYNC ingestion, cross-node
+/// merge, rehydration) leaves it `None`. A layer that cannot forward it drops
+/// it, which is always safe — the full value is written either way.
+///
+/// Defined in the storage layer, not alongside the CRDT apply that populates
+/// it, so this trait never names a `service::domain` type and the storage →
+/// service dependency direction stays one-way.
+#[derive(Debug)]
+pub struct MutateOutcome {
+    /// Whether the closure altered the value, so a write-through is owed.
+    pub changed: bool,
+    /// The OR delta that was applied, when a consumer demanded one.
+    pub witness: Option<OrDelta>,
+}
+
 /// Per-map-per-partition record store.
 ///
 /// Primary interface that operation handlers interact with.
@@ -116,15 +145,20 @@ pub trait RecordStore: Send + Sync {
     /// WITHOUT a full get→build→put round trip.
     ///
     /// `mutate` runs synchronously under the engine's per-key write lock and
-    /// returns `true` if it made a change that must be persisted, or `false`
-    /// for a no-op (e.g. a prune whose target tag was already gone). It MUST
-    /// return `true` whenever it altered the value, and is invoked **at most
-    /// once** per call — callers may rely on single invocation.
+    /// returns a [`MutateOutcome`] whose `changed` is `true` if it made a change
+    /// that must be persisted, or `false` for a no-op (e.g. a prune whose target
+    /// tag was already gone). `changed` MUST be `true` whenever the closure
+    /// altered the value, and the closure is invoked **at most once** per call —
+    /// callers may rely on single invocation. Its `witness` is the OR delta just
+    /// applied, present only when [`or_witness_wanted`](RecordStore::or_witness_wanted)
+    /// answered `true`; an implementation that has nowhere to forward a witness
+    /// drops it and still writes the full value.
     ///
     /// If the key is absent: when `init` is `Some`, a fresh record is created
-    /// from it, `mutate` is applied, and (on a `true` return) `on_put` fires;
-    /// when `init` is `None`, the call is a no-op. Returns `true` when a record
-    /// was created or updated (a write-through was owed), `false` otherwise.
+    /// from it, `mutate` is applied, and (on a `changed` outcome) `on_put`
+    /// fires; when `init` is `None`, the call is a no-op. Returns `true` when a
+    /// record was created or updated (a write-through was owed), `false`
+    /// otherwise.
     ///
     /// This exists for the OR-Map write path, whose per-op read-modify-write
     /// otherwise cloned the whole ~130 KB resident snapshot on every op. The OR
@@ -139,7 +173,7 @@ pub trait RecordStore: Send + Sync {
         init: Option<RecordValue>,
         expiry: ExpiryPolicy,
         provenance: CallerProvenance,
-        mutate: &mut (dyn for<'a> FnMut(&'a mut RecordValue) -> bool + Send),
+        mutate: &mut (dyn for<'a> FnMut(&'a mut RecordValue) -> MutateOutcome + Send),
     ) -> anyhow::Result<bool> {
         let existing = self.get(key, false).await?;
         let mut value = match existing {
@@ -149,11 +183,39 @@ pub trait RecordStore: Send + Sync {
                 None => return Ok(false),
             },
         };
-        if !mutate(&mut value) {
+        let outcome = mutate(&mut value);
+        // The witness is dropped here by construction: this fallback persists
+        // through `put`, which has no witness-carrying seam beneath it, so a
+        // store reached this way cannot observe a delta even in principle.
+        //
+        // Reaching here WITH a witness means a store answered the demand signal
+        // affirmatively while leaving this fallback in place — the caller then
+        // pays to build a delta that nothing can receive, and its consumer sees
+        // nothing while believing it is being fed. The two must be overridden
+        // together, so the half-override is caught loudly in tests rather than
+        // becoming a silent divergence.
+        debug_assert!(
+            outcome.witness.is_none(),
+            "a store whose fallback update_in_place is in use must not demand a \
+             witness: this path cannot deliver one"
+        );
+        if !outcome.changed {
             return Ok(false);
         }
         self.put(key, value, expiry, provenance).await?;
         Ok(true)
+    }
+
+    /// Whether anything beneath this store consumes an [`OrDelta`] witness.
+    ///
+    /// Read once per op, **before** the mutate closure is built, so a caller
+    /// that would otherwise materialize a delta into
+    /// [`MutateOutcome::witness`] can skip constructing it altogether when
+    /// nothing will take it. Defaulted to `false`, so a store with no witness
+    /// consumer beneath it inherits the no-cost path without overriding
+    /// anything.
+    fn or_witness_wanted(&self) -> bool {
+        false
     }
 
     /// Remove a record, returning the old value.
