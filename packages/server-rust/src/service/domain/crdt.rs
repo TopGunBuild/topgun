@@ -591,6 +591,7 @@ impl CrdtService {
                 // suppressed op has nothing to record: only `added` yields one.
                 // `apply_or_delta` retains-then-pushes by tag, so at most one
                 // resident entry can carry it.
+                let witness_owed = witness_tag.is_some() && outcome.added;
                 let witness = match (witness_tag, outcome.added, &*value) {
                     (Some(tag), true, RecordValue::OrMap { records, .. }) => records
                         .iter()
@@ -600,6 +601,18 @@ impl CrdtService {
                         }),
                     _ => None,
                 };
+                // An owed witness that comes back `None` is the silent-divergence
+                // shape: the lookup missed, the caller falls back to a full
+                // snapshot, and a consumer sees nothing while believing it is
+                // being fed. Only two states can produce it — the apply reported
+                // `added` without leaving the tag resident, or it left a shape
+                // other than `OrMap` behind — and the algebra admits neither, so
+                // the conjunction is enforced here rather than only argued.
+                debug_assert!(
+                    !witness_owed || witness.is_some(),
+                    "an accepted OR_ADD owes a witness: the post-image lookup for \
+                     the applied tag must find the entry the apply just wrote"
+                );
                 // Match the prior path, which always re-persisted the slot even
                 // when remove-wins suppressed the add.
                 MutateOutcome {
