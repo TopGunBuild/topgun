@@ -184,12 +184,24 @@ pub trait RecordStore: Send + Sync {
             },
         };
         let outcome = mutate(&mut value);
-        if !outcome.changed {
-            return Ok(false);
-        }
         // The witness is dropped here by construction: this fallback persists
         // through `put`, which has no witness-carrying seam beneath it, so a
         // store reached this way cannot observe a delta even in principle.
+        //
+        // Reaching here WITH a witness means a store answered the demand signal
+        // affirmatively while leaving this fallback in place — the caller then
+        // pays to build a delta that nothing can receive, and its consumer sees
+        // nothing while believing it is being fed. The two must be overridden
+        // together, so the half-override is caught loudly in tests rather than
+        // becoming a silent divergence.
+        debug_assert!(
+            outcome.witness.is_none(),
+            "a store whose fallback update_in_place is in use must not demand a \
+             witness: this path cannot deliver one"
+        );
+        if !outcome.changed {
+            return Ok(false);
+        }
         self.put(key, value, expiry, provenance).await?;
         Ok(true)
     }
