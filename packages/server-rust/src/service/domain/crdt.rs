@@ -1672,7 +1672,12 @@ mod tests {
     // The steps are re-implemented here rather than shared: the equivalents in
     // `storage/wal/mod.rs` are private to that file's `mod tests`, there is no
     // test-support module in this package, and adding one is tracked separately
-    // (TODO-620).
+    // (TODO-620). That pointer is load-bearing, not provenance: the contract
+    // this instrument is meant to satisfy is ONE normalizer in ONE home, this
+    // copy is the third and does NOT satisfy it, and the divergence class the
+    // normalizer exists to catch is exactly the class a silently-forked
+    // normalizer would reintroduce. Naming the owner keeps the gap honest
+    // rather than letting the duplication read as intentional.
     // -----------------------------------------------------------------------
 
     /// Step 1 — drop leading indentation and one `//`, `///` or `//!` marker, so
