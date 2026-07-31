@@ -262,7 +262,24 @@ mod tests {
     /// dropped with its buffer still full (a `kill -9` inside the write-behind
     /// window), and the surviving WAL is replayed into a FRESH backend. Returns
     /// the reconstructed OR-Map.
-    async fn churn_then_crash_and_recover(or_delta_wal: bool) -> RecordValue {
+    /// Total bytes the WAL segments under `dir` occupy on disk.
+    ///
+    /// Deliberately a BYTE total and never a frame-variant name: this module is
+    /// held to semantic assertions, and the belts forbid it naming the variant.
+    /// Bytes are also the property that actually matters — the whole point of
+    /// per-op framing is what lands on disk, so measuring it directly is
+    /// stronger than recognising a discriminant.
+    fn wal_bytes_on_disk(dir: &std::path::Path) -> u64 {
+        std::fs::read_dir(dir)
+            .expect("the wal directory must be readable")
+            .flatten()
+            .filter(|entry| entry.path().is_file())
+            .map(|entry| entry.metadata().map(|m| m.len()).unwrap_or(0))
+            .sum()
+    }
+
+    /// Returns the reconstructed OR-Map and the bytes its churn put on disk.
+    async fn churn_then_crash_and_recover(or_delta_wal: bool) -> (RecordValue, u64) {
         let wal_dir = tempfile::tempdir().expect("wal tempdir");
         let pre_crash_dir = tempfile::tempdir().expect("pre-crash backend tempdir");
         let recovered_dir = tempfile::tempdir().expect("recovered backend tempdir");
@@ -302,6 +319,10 @@ mod tests {
         // nothing but the WAL can carry the churn across.
         drop(store);
 
+        // Measured after the crash and before replay, so it is exactly what the
+        // churn wrote — replay adds nothing to this directory.
+        let wal_bytes = wal_bytes_on_disk(wal_dir.path());
+
         let recovered_backend: Arc<dyn MapDataStore> = Arc::new(
             RedbDataStore::new(recovered_dir.path().join("recovered.redb"))
                 .expect("recovered redb should open"),
@@ -311,11 +332,13 @@ mod tests {
             .await
             .expect("recovery must succeed on an intact WAL");
 
-        recovered_backend
+        let recovered = recovered_backend
             .load(MAP, KEY)
             .await
             .expect("recovered backend load should not error")
-            .expect("every acked OR mutation was durable, so the key must exist after recovery")
+            .expect("every acked OR mutation was durable, so the key must exist after recovery");
+
+        (recovered, wal_bytes)
     }
 
     // -----------------------------------------------------------------------
@@ -354,7 +377,7 @@ mod tests {
             "partition oracle: the removed tag must be tombstoned (tombstones={converged_tombs:?})"
         );
 
-        let recovered = churn_then_crash_and_recover(true).await;
+        let (recovered, _) = churn_then_crash_and_recover(true).await;
         let recovered_live = live_entries(&recovered);
         let recovered_tombs = tombstone_tags(&recovered);
 
@@ -386,8 +409,8 @@ mod tests {
     /// the comparison is over the live and tombstone sets, not the encoding.
     #[tokio::test(flavor = "multi_thread")]
     async fn or_recovery_is_invariant_under_the_framing_switch() {
-        let armed = churn_then_crash_and_recover(true).await;
-        let rolled_back = churn_then_crash_and_recover(false).await;
+        let (armed, armed_bytes) = churn_then_crash_and_recover(true).await;
+        let (rolled_back, snapshot_bytes) = churn_then_crash_and_recover(false).await;
 
         assert_eq!(
             live_entries(&armed),
@@ -408,6 +431,18 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             expected_live_tags(),
             "the armed run must actually have recovered the churn, not an empty map"
+        );
+
+        // The equalities above are the OBLIGATION; this is what stops them being
+        // vacuous. If the write path ever stopped delivering a witness, both runs
+        // would frame full snapshots, every semantic set would still match, and
+        // the differential would pass while asserting nothing about framing at
+        // all. The two runs must therefore be observably DIFFERENT on disk.
+        assert!(
+            armed_bytes < snapshot_bytes,
+            "the armed run put {armed_bytes} B on disk and the rolled-back run \
+             {snapshot_bytes} B: identical totals mean both runs framed the same way, so the \
+             equalities above compared a store against itself"
         );
     }
 }

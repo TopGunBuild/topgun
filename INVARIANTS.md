@@ -419,8 +419,13 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Discovered by:** SPEC-346 design.
 - **Status:** decided, **enforced** on both sides. The synthetic-frame caveat is RETIRED: the reader
   has now folded frames a REAL producer wrote — the store-boundary emission proof drives the live
-  write-behind emitter into a real `WalWriter`, and the simulation recovery case carries a delta
-  frame written by the production path through crash recovery. The harness still synthesises frames,
+  write-behind emitter into a real `WalWriter` and asserts the emitted variant on disk. The
+  simulation recovery case runs the same churn through a crash under BOTH settings of the framing
+  switch and requires the two recovered states to be semantic-set equal; it asserts framing only
+  through a **byte-total divergence** between the two runs, because the belts forbid that module
+  naming the variant. *(That divergence is load-bearing, not decoration: without it a write path
+  that stopped delivering a witness would frame snapshots on both sides and the differential would
+  pass while comparing a store against itself.)* The harness still synthesises frames,
   but by choice rather than necessity: synthesis is what lets a case place a delta on a fold base a
   real write reaches only when interrupted at the right instant. Landing the reader first remains the
   right order, for the reason that has not changed — an unfoldable delta frame on disk is a
