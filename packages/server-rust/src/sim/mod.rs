@@ -51,5 +51,7 @@ pub mod network;
 /// in-place mutate write path.
 #[cfg(test)]
 mod or_churn_inplace;
+#[cfg(test)]
+mod or_delta_recovery;
 
 pub mod tombstone_gc_proof;
