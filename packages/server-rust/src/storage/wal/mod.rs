@@ -2549,6 +2549,54 @@ mod tests {
         }),
     ];
 
+    /// A phrase each source is KNOWN to contain, as `(source, control)`.
+    ///
+    /// The absence loop below is eighteen assertions that a count is zero, and a
+    /// zero has two causes: the claim is gone, or the scan never read the file.
+    /// A moved `include_str!` path, a truncating helper, a renamed catalog — any
+    /// of them turns this instrument silently vacuous while it still reports
+    /// green. Each control is a phrase whose disappearance would itself be a
+    /// finding, so the control cannot rot into a tautology.
+    ///
+    /// Rebuilt from parts for the same reason the needles are: two of these
+    /// sources are this very file.
+    #[allow(clippy::type_complexity)]
+    const SOURCE_CONTROLS: [(&str, fn() -> &'static str, fn() -> String); 7] = [
+        (
+            "INVARIANTS.md",
+            || INVARIANTS_MD,
+            || format!("TG-OR-{}: OR delta-fold recovery", "003"),
+        ),
+        ("wal/mod.rs (production prefix)", production_source, || {
+            format!("pub struct Wal{} {}", "Writer", "{")
+        }),
+        (
+            "wal/format.rs",
+            || WAL_FORMAT_RS,
+            || format!("pub const FRAME_{}: u8 = 1;", "VERSION"),
+        ),
+        (
+            "wal_harness/mod.rs",
+            || WAL_HARNESS_MOD_RS,
+            || format!("# Crash-model limit {}", "(normative)"),
+        ),
+        (
+            "wal_harness/cases.rs",
+            || WAL_HARNESS_CASES_RS,
+            || format!("fn is_delta_frame_{}(rel: &str) -> bool", "home"),
+        ),
+        (
+            "datastores/write_behind.rs",
+            || WRITE_BEHIND_RS,
+            || format!("pub struct WriteBehindDataStore {}", "{"),
+        ),
+        (
+            "service/domain/crdt.rs",
+            || CRDT_RS,
+            || format!("pub struct CrdtService {}", "{"),
+        ),
+    ];
+
     /// No file in this repository asserts that no emitter exists.
     ///
     /// Every count runs on the WHITESPACE-NORMALIZED view, never on raw lines. A
@@ -2558,6 +2606,20 @@ mod tests {
     /// false green is the exact defect class this scan replaces.
     #[test]
     fn no_document_still_claims_that_nothing_emits_a_delta_frame() {
+        // Positive controls FIRST, so a scan that reads nothing cannot report
+        // eighteen clean absences off six empty strings.
+        for (name, source, control) in SOURCE_CONTROLS
+            .iter()
+            .map(|(name, source, control)| (name, source(), control()))
+        {
+            assert!(
+                normalized(source).contains(&control),
+                "{name}: the scan cannot see this source -- {control:?} is missing, so every \
+                 absence asserted below would be an artefact of reading the wrong bytes, not a \
+                 property of the tree"
+            );
+        }
+
         assert_eq!(
             SWEPT_NEEDLES.len(),
             16,
