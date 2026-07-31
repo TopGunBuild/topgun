@@ -4747,8 +4747,6 @@ mod tests {
     /// WAL is safe to roll back across while the node keeps writing delta frames.
     #[test]
     fn an_unrecognised_or_delta_wal_value_stays_armed_and_names_itself() {
-        let captured: Arc<std::sync::Mutex<Vec<u8>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
-
         #[derive(Clone)]
         struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
         impl std::io::Write for CapturedLog {
@@ -4763,6 +4761,8 @@ mod tests {
                 Ok(())
             }
         }
+
+        let captured: Arc<std::sync::Mutex<Vec<u8>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
         // Scoped, never a global install: this test binary is shared and runs in
         // parallel, so a global subscriber would leak into every other test.
