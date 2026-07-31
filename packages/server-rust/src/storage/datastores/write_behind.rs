@@ -329,11 +329,30 @@ impl WriteBehindConfig {
     /// leaves it ARMED rather than rolling an operator back to snapshot framing
     /// they did not ask for: this is a kill-switch, and a typo in one must not
     /// quietly change the durable encoding a running node writes.
+    ///
+    /// Staying armed is deliberate, but staying SILENT about it is not. A
+    /// misspelled disarm (`flase`, or a value some env systems deliver with its
+    /// quotes still attached) otherwise leaves an operator believing the WAL is
+    /// safe to roll back across while the node keeps writing delta frames, and
+    /// the effective-value boot line reports the armed truth nobody asked about.
+    /// The warning names the unrecognised value so the typo is visible at boot
+    /// rather than at the downgrade that fails because of it.
     fn parse_or_delta_wal(raw: &str) -> bool {
-        !matches!(
-            raw.trim().to_lowercase().as_str(),
-            "false" | "0" | "no" | "off"
-        )
+        let normalized = raw.trim().to_lowercase();
+        if matches!(normalized.as_str(), "false" | "0" | "no" | "off") {
+            return false;
+        }
+        if !matches!(normalized.as_str(), "true" | "1" | "yes" | "on") {
+            tracing::warn!(
+                target: "topgun_server::storage::write_behind",
+                var = "TOPGUN_OR_DELTA_WAL",
+                value = %raw,
+                "Unrecognised value; leaving OR delta framing ARMED. Only \
+                 false/0/no/off (case-insensitive) disarm it — check for a typo \
+                 if you meant to roll this node back to full-snapshot framing"
+            );
+        }
+        true
     }
 
     /// Parses one `TOPGUN_WAL_FSYNC_POLICY` value.
