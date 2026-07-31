@@ -1878,13 +1878,18 @@ mod tests {
         (total, per_file)
     }
 
-    /// The witness-aware methods are defaulted, and NOTHING in production
-    /// overrides them: every production store reaches the defaulted bodies.
+    /// The witness-aware methods are defaulted, and exactly ONE production store
+    /// overrides them: the write-behind store, where an OR mutation becomes a
+    /// delta WAL frame. Every other production store reaches the defaulted
+    /// bodies unchanged.
     ///
-    /// This is what makes the seam inert, so it is counted rather than argued.
-    /// The one sanctioned override of the two store-side methods is the test spy
-    /// in this file; the demand predicate's one sanctioned override is the
-    /// record store's delegation to its backend.
+    /// "Exactly one" is the bound that keeps the seam reviewable, so it is
+    /// counted rather than argued: a second override would be a second place
+    /// deciding how an OR write is framed on disk, and only a count stops one
+    /// appearing unnoticed. The sanctioned overrides of the two store-side
+    /// methods are that emitter and the test spy in this file; the demand
+    /// predicate's one sanctioned override is the record store's delegation to
+    /// its backend.
     ///
     /// Every needle is rebuilt from parts. That is load-bearing, not stylistic:
     /// this scan is hosted in the same file it counts over, so a needle written

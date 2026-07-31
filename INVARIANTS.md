@@ -366,9 +366,11 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 ### TG-OR-003: OR delta-fold recovery is semantic-set-equivalent to the snapshot path
 
 - **Scope:** `OrDelta`/`OrDeltaFold`, wired on the RECOVERY READ side: `WalRecovery::replay_entry`'s
-  `WalOp::OrDelta` arm and `impl OrDeltaFold for WalRecovery`. No emitter exists yet — every frame the
-  enforcing test folds is synthesised at the codec level and injected through the harness's observed
-  append seam.
+  `WalOp::OrDelta` arm and `impl OrDeltaFold for WalRecovery`. The matching WRITE side is live:
+  `WriteBehindDataStore::add_with_witness` frames an OR mutation as `WalOp::OrDelta` when its
+  `TOPGUN_OR_DELTA_WAL` arming flag is on **and** the mutation point handed it a witness; a `None`
+  witness or a disarmed flag still frames a full snapshot, so both frame kinds remain reachable in
+  production and both are in scope for this invariant.
 - **Statement:** folding any op sequence through the delta path and the full-snapshot path yields
   equal `or_map_semantic_view` (live set + tombstones + pruned), with the durable store as fold
   base and snapshot frames as in-order absolute-set inputs.
@@ -378,6 +380,12 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   OR_REMOVE and epoch-prune call sites all route through (SPEC-349a). The delta fold must delegate to
   that symbol rather than re-implement the algebra; a second hand-written copy is what this invariant
   forbids, and the symbol is what SPEC-349b's delegation is checked against.
+  The WRITE side is maintained code too: `storage/datastores/write_behind.rs`'s `add_with_witness`
+  and `wants_or_witness` overrides — the ONE production emitter of `WalOp::OrDelta`, gated by
+  `WriteBehindConfig::or_delta_wal` — and the witness-capture point on `service/domain/crdt.rs`'s
+  OR write path, which produces the mutation the frame carries. A second store-side override of
+  either method is a second framing decision, and the package-wide symbol count hosted in `crdt.rs`
+  is what forbids one appearing unnoticed.
 - **Enforcing test:** the `tg_or_003_*` case family in
   `packages/server-rust/src/storage/datastores/wal_harness/cases.rs` — a case family on the
   cross-incarnation harness, driven through its existing `Driver` and reference model, NOT a fork.
@@ -389,24 +397,34 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   literally), `…ac4…` (`Prune` as pure tombstone-set subtraction), `…ac5…` (single-algebra
   behavioural: remove-wins suppression of a re-added tombstoned tag), `…ac16…` (the injection rides the
   observed append seam only), `…ac2…` (stranded base + re-fold idempotency across `mark_applied` +
-  segment GC), `…ac7b…` (the non-subsuming survivor's carry-forward route), `…ac9…` (no production
-  construction site — ADVISORY hygiene, an early warning that names the offending file at review
-  time; the property itself is held by `WalWriter::append`'s tier-P refusal of any delta frame, which
-  reads the frame rather than the source and so is blind to no emitter shape),
+  segment GC), `…ac7b…` (the non-subsuming survivor's carry-forward route), `…ac9…` (delta-frame
+  construction stays inside its sanctioned home — ADVISORY ONLY, an early warning that names the
+  offending file at review time, with **nothing stronger standing behind it**: the tier-P append
+  refusal that used to hold the property at frame level is retired, because the sanctioned emitter
+  would have fail-stopped on its first OR write),
   `…ac9_injected_frames_carry_the_golden_on_disk_shape…` (the harness's synthetic frames bound to the
   checked-in golden bytes), `…ac10ii_b…` (legacy `Store`/`Remove`-only replay), `…ac11d…` (re-replay
   of an applied OR frame is a no-op on set AND gauge — the OR merge-idempotency residual).
   Mutation-proven: deleting the fold's `normalize_to_or_map` call reddens exactly the non-`OrMap`
-  base-shape arms while the `OrMap`-only cases stay green; dropping `apply_or_delta`'s tombstone dedup
-  reddens exactly the re-fold arms; and an emitter hidden behind an `include!` of a non-`.rs` fragment
-  passes the scan while fail-stopping the append guard, which is what makes the demotion above honest
-  rather than a downgrade.
+  base-shape arms while the `OrMap`-only cases stay green; and dropping `apply_or_delta`'s tombstone
+  dedup reddens exactly the re-fold arms.
+  Limit of the `…ac9…` belt, recorded rather than left implicit: a construction hidden behind an
+  `include!` of a non-`.rs` fragment, a macro, a build-script body or an aliased import the
+  classifier does not model passes the scan **and nothing catches it afterwards**. That is why the
+  belt is labelled advisory above, and why what actually binds at the byte level is named separately:
+  the fold equivalence measured by the cases here, the store-boundary emission proof in
+  `write_behind.rs`, and the checked-in golden bytes the emitter's own output is pinned to.
 - **Violation consequence:** silent post-crash divergence of OR state — the class the oracle was
   built to kill.
 - **Discovered by:** SPEC-346 design.
-- **Status:** decided, **enforced** (reader side). The emitter lands separately; until it does, the
-  invariant is proven against synthetic frames, which is the point of landing the reader first — an
-  unfoldable delta frame on disk is a permanently lost mutation, not a self-healing one.
+- **Status:** decided, **enforced** on both sides. The synthetic-frame caveat is RETIRED: the reader
+  has now folded frames a REAL producer wrote — the store-boundary emission proof drives the live
+  write-behind emitter into a real `WalWriter`, and the simulation recovery case carries a delta
+  frame written by the production path through crash recovery. The harness still synthesises frames,
+  but by choice rather than necessity: synthesis is what lets a case place a delta on a fold base a
+  real write reaches only when interrupted at the right instant. Landing the reader first remains the
+  right order, for the reason that has not changed — an unfoldable delta frame on disk is a
+  permanently lost mutation, not a self-healing one.
 
 ### TG-OR-004: The tombstone-bytes gauge tracks the REAL add and prune paths, test-isolatable
 

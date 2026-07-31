@@ -1118,11 +1118,21 @@ fn ac7_tg_wal_003_gc_crash_point_both_directions() {
 // TG-OR-003 — the OR delta-fold differential recovery family
 // ---------------------------------------------------------------------------
 //
-// Every frame these cases fold is SYNTHETIC: no production path emits a
-// `WalOp::OrDelta` yet, and the reader has to be provable before a producer
-// exists — an orphaned delta frame does not self-heal the way an orphaned
-// snapshot frame does. The frames enter through the driver's OBSERVED append
-// seam (`assign_wal_sequence` → `wal_append` → `promote_wal_sequence`), so the
+// Every frame these cases fold is SYNTHETIC — which is now a property of THIS
+// HARNESS rather than of the tree. A production emitter exists: the write-behind
+// store frames an OR mutation as a `WalOp::OrDelta`, and that emission is proven
+// at the store boundary in `write_behind.rs`'s own inline tests.
+//
+// Synthesising here is deliberate, because driving the emitter would cede
+// control over WHERE in the fold a delta lands. These cases need it to land on
+// bases a real write reaches only when interrupted at the right instant — a
+// stranded base, a legacy `OrTombstones` base, an acked window with nothing
+// queued behind it. Those are precisely the positions where an orphaned delta
+// frame does not self-heal the way an orphaned snapshot frame does, which is the
+// loss class this family exists to rule out.
+//
+// The frames enter through the driver's OBSERVED append seam
+// (`assign_wal_sequence` → `wal_append` → `promote_wal_sequence`), so the
 // reference model's sequence space stays identical to the store's; nothing here
 // reaches the raw `WalWriter` append entry point and nothing here allocates a
 // sequence of its own.
@@ -1848,9 +1858,16 @@ fn tg_or_003_ac11d_re_replaying_an_applied_or_frame_is_a_no_op() {
 ///
 /// The BYTE half of AC10(ii) lives in `format.rs`
 /// (`legacy_corpus_decodes_and_re_encodes_byte_identically`), and AC10(iii) — the
-/// proof that nothing emits a delta frame, which is what makes "the byte stream is
-/// unchanged" a fact rather than an assumption — is
-/// `tg_or_003_ac9_no_production_path_constructs_a_delta_frame` below.
+/// proof that delta construction stays inside its sanctioned home — is
+/// `tg_or_003_ac9_delta_construction_stays_inside_its_sanctioned_home` below.
+///
+/// A producer of delta frames now exists, so "the legacy byte stream is unchanged"
+/// is no longer underwritten by the absence of one. What underwrites it is
+/// narrower and still exact: the emitter only ever adds a frame of the NEW kind.
+/// It re-encodes no `Store` and no `Remove`, and the frame version is deliberately
+/// not bumped, so every frame a pre-emitter WAL holds decodes and replays through
+/// the path it always did. That is the property this case measures behaviourally
+/// and `format.rs` measures byte-wise.
 #[test]
 fn tg_or_003_ac10ii_b_legacy_store_and_remove_only_wal_replays_unchanged() {
     let case: Case = vec![
@@ -2345,9 +2362,17 @@ fn rust_sources(root: &Path) -> Vec<PathBuf> {
 /// inline test module excised.
 ///
 /// The body is EXCISED rather than the file truncated at the module header, because
-/// Rust permits items after `mod tests { .. }` and both files this runs over are
-/// exempt from the belts by [`is_delta_frame_home`] — an emitter added BELOW their
-/// test module would otherwise be seen by nothing at all.
+/// Rust permits items after `mod tests { .. }` and both files this runs over — the
+/// WAL codec's `mod.rs` and its `format.rs` — are homes under
+/// [`is_delta_frame_home`], so an emitter added BELOW their test module would
+/// otherwise be seen by nothing at all.
+///
+/// Being a home no longer means "test-only": the home set now includes the file the
+/// production emitter lives in. This scan does not run over that file and is not
+/// what covers it — the by-file and by-construction belts place it, and the
+/// store-boundary emission proof plus the golden-fixture pin are what hold its
+/// output. What this part still asserts, exactly, is that the CODEC builds a delta
+/// frame only under its own tests.
 fn production_source(name: &str, src: &str) -> String {
     let code = code_only(src);
     // The escaped newline is not a newline in THIS file, and literals are stripped
@@ -2499,27 +2524,32 @@ fn char_literal_len(rest: &[u8]) -> Option<usize> {
 /// `enum` BODY are skipped: the variant's own field declaration has the same
 /// `OrDelta { .. }` shape as a construction and builds nothing.
 ///
-/// # Threat model — ADVISORY hygiene, not the guarantee
+/// # Threat model — ADVISORY hygiene, with nothing stronger standing behind it
 ///
-/// **This scan is not what holds the no-emitter property.** That is
-/// `WalWriter::append`, which fail-stops at tier P on any `WalOp::OrDelta` frame
-/// unless a `#[cfg(test)]` seam has opened the guard for that exact append. The
-/// refusal reads the FRAME, not the source text, so every emitter shape dies at it
-/// identically — a renamed variant, a renamed enum, a macro expansion, an
-/// `include!`, a build-script-generated body, a `transmute`. It is compiler-enforced
-/// in a release build, where nothing can even name the seam that would open it.
+/// **This scan is the only textual control left, and it is advisory.** It used to
+/// be the weaker of two: `WalWriter::append` fail-stopped at tier P on any delta
+/// frame, reading the FRAME rather than the source text, so every construction
+/// shape died at it identically — a renamed variant, a renamed enum, a macro
+/// expansion, an `include!`, a build-script-generated body, a `transmute`. That
+/// refusal is RETIRED. It had to be: the sanctioned emitter is a production write
+/// path, and the refusal would have aborted it on its first OR write.
 ///
-/// What this scan adds on top is EARLY WARNING: it names the file and the line at
-/// review time, before anyone has to read a fail-stop out of a test run. That is
-/// worth having and it is all it claims. It stays a text scan, so it stays evadable
-/// by construction, and answering each newly-found evasion shape with another string
-/// rule would be an arms race — one this instrument no longer has to win, because
-/// losing a round of it now costs early warning rather than the property.
+/// So a shape that evades the text scan is no longer caught by anything, and
+/// answering each newly-found evasion with another string rule would be an arms
+/// race this instrument cannot win. What still binds at the byte level binds
+/// elsewhere and on different objects: recovery's fold equivalence (the cases
+/// above), the store-boundary emission proof, and the checked-in golden bytes the
+/// emitter's own output is pinned to. None of those is a source scan, and none of
+/// them is this one — which is why the scan is recorded as advisory rather than
+/// quietly leaned on.
 ///
-/// The forms above are therefore chosen for how ORDINARY they are, not for how
-/// adversarial: each is one a contributor could reach for without meaning to smuggle
-/// anything past a check. A shape written specifically to defeat this belongs to
-/// code review — and to the append guard, which will stop it regardless.
+/// What it is worth is EARLY WARNING: it names the file and the line at review
+/// time. The forms above are therefore chosen for how ORDINARY they are, not for
+/// how adversarial — each is one a contributor could reach for without meaning to
+/// smuggle anything past a check. An ACCIDENTAL construction outside the home set
+/// is the whole of what it is scoped to catch. A shape written specifically to
+/// defeat it belongs to code review, and this instrument must not be read as
+/// covering that.
 ///
 /// The frame's wire SHAPE is guaranteed elsewhere again: the checked-in byte fixture
 /// plus the cross-binary compatibility criteria that land WITH the emitter.
