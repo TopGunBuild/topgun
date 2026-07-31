@@ -61,17 +61,38 @@ pub const FRAME_MAGIC: u32 = 0x54_47_57_4C;
 /// One-step compatibility is what the no-bump choice buys, and it is what any
 /// future bump must plan a migration for.
 ///
-/// ## What an older binary ACTUALLY does with a frame it cannot deserialize
+/// ## Which binaries are safe rollback targets — the boundary, stated
+///
+/// "An older binary cannot read this WAL" is true of a bounded set, and writing
+/// it unqualified would overstate the problem in one direction while hiding it
+/// in the other. The contract is **one-step**:
+///
+/// - Any binary at or after the one that taught recovery to FOLD `WalOp::OrDelta`
+///   — the reader landed one change before this emitter, deliberately in that
+///   order — is a **safe rollback target**: it decodes both frame kinds and loses
+///   nothing. Rolling forward is likewise unaffected.
+/// - Only a binary predating that reader cannot deserialize a delta frame. The
+///   three-case behaviour below is a statement about **those** binaries.
+/// - A two-step downgrade to a pre-reader binary is **out of contract**. It is
+///   not claimed to work; what it actually does is the next section.
+///
+/// ## What a PRE-READER binary ACTUALLY does with a frame it cannot deserialize
 ///
 /// Stated in full because the guarantee is NOT the unqualified "always fails
 /// closed" it is easy to assume — writing that here would be a false invariant
 /// in code. Verified against `decode_all`'s payload-deserialization branch and
-/// `WalRecovery::decode_segment_or_refuse`, the behaviour has TWO cases, decided
-/// purely by the frame's POSITION:
+/// `WalRecovery::decode_segment_or_refuse`, the behaviour has THREE cases,
+/// decided purely by the frame's POSITION — and only ONE of them is silent:
 ///
 /// - **Mid-segment (the frame is NOT the last in the byte stream) ⇒ genuinely
 ///   fail-closed.** The deserialize failure is classified as
-///   [`FrameDecodeResult::Corruption`] and recovery refuses to start.
+///   [`FrameDecodeResult::Corruption`] and recovery refuses to start. Under mixed
+///   traffic this is the ORDINARY position — any write to that partition after
+///   the delta, before rotation, puts the delta here.
+/// - **Trailing frame on a SEALED (non-active) segment ⇒ also fail-closed.** The
+///   [`FrameDecodeResult::TruncatedTail`] below is tolerated only on the LAST
+///   segment (`tolerate_tail = idx == last_idx`); on any earlier one a torn tail
+///   is corruption and recovery refuses to start.
 /// - **Trailing frame on the ACTIVE segment (it IS the last) ⇒ SILENT DROP, not
 ///   a refusal.** The same branch sees `next_offset >= total_len` and returns
 ///   [`FrameDecodeResult::TruncatedTail`] instead, which recovery TOLERATES on the
@@ -92,14 +113,18 @@ pub const FRAME_MAGIC: u32 = 0x54_47_57_4C;
 /// recorded above — so the practical consequence is stated here rather than
 /// discovered by an operator:
 ///
-/// - Rolling a node BACK across this commit is not a clean reversal. The older
-///   binary cannot deserialize a delta frame, and the trailing-frame case is
-///   the likely one for the newest write on each partition's active segment, so
-///   the rollback may **silently drop that mutation** and durably truncate the
-///   segment to the intact prefix.
-/// - A rollback that must not lose those writes has to drain the WAL under the
-///   new binary first, or run with `TOPGUN_OR_DELTA_WAL=false` long enough for
-///   every delta frame already on disk to be applied and garbage-collected.
+/// - Rolling a node back to any binary that already folds `WalOp::OrDelta` is a
+///   clean reversal — that is the whole point of the one-step contract above,
+///   and it is the ordinary rollback an operator performs.
+/// - Rolling back PAST the reader is not a clean reversal. A mid-segment delta
+///   frame, or a trailing one on a sealed segment, **refuses to start**; a
+///   trailing one on the active segment — the likely position for the newest
+///   write on each partition — is **silently dropped**, and the segment is then
+///   durably truncated to the intact prefix.
+/// - A rollback past the reader that must not hit either outcome has to drain
+///   the WAL under the new binary first, or run with `TOPGUN_OR_DELTA_WAL=false`
+///   long enough for every delta frame already on disk to be applied and
+///   garbage-collected.
 pub const FRAME_VERSION: u8 = 1;
 
 /// Total header bytes: 4 (magic) + 1 (version) + 4 (length) + 4 (crc32c).

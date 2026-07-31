@@ -214,7 +214,17 @@ The default `TOPGUN_WAL_FSYNC_POLICY=batched` acks a write once its WAL frame is
 
 ### Rolling a node BACK across OR delta framing (`TOPGUN_OR_DELTA_WAL`)
 
-A node running the default `TOPGUN_OR_DELTA_WAL=true` writes OR delta frames that an older binary cannot deserialize. The WAL frame version is deliberately **not** bumped, so a rollback does not fail loudly: the older binary reads the delta frame as a corrupt trailing frame — the likely position for the newest write on each partition's active segment — **silently drops that mutation and durably truncates the segment to the intact prefix.** A rollback that must not lose those writes has to drain the WAL under the new binary first, or run with `TOPGUN_OR_DELTA_WAL=false` long enough for every delta frame already on disk to be applied and garbage-collected. Rolling *forward* is unaffected: the new binary reads both frame kinds.
+A node running the default `TOPGUN_OR_DELTA_WAL=true` writes OR delta frames. The WAL frame version is deliberately **not** bumped, so which binaries can still read that WAL is a question with a precise answer.
+
+**Which rollback targets are safe.** The contract is **one-step**: any binary at or after the OR delta *reader* (the SPEC-349b merge point) is a **safe rollback target** — it decodes both frame kinds and loses nothing. Only a **pre-349b** binary cannot deserialize a delta frame, so "an older binary cannot read this WAL" is a statement about pre-349b binaries and nothing else. A two-step downgrade to pre-349b is **out of contract** — it is not claimed to work, and the paragraph below is what it does instead. Rolling *forward* is unaffected: a newer binary reads both frame kinds.
+
+**What a pre-349b binary actually does, by frame position.** There are three cases and only one of them is silent, so the guarantee is NOT the unqualified "always fails closed" it is easy to assume:
+
+- **Mid-segment** (any frame written to that partition after the delta, before rotation) — the deserialize failure is classified as `Corruption` and recovery **refuses to start**, naming the file and offset. Under mixed traffic this is the *ordinary* position, not an exotic one.
+- **Trailing frame on a SEALED (non-active) segment** — reported as a truncated tail on a segment that is not the last, which is also corruption: recovery **refuses to start**.
+- **Trailing frame on the ACTIVE segment** — the one silent case, and the likely position for the newest write on each partition. Recovery tolerates it, warns, replays the intact prefix, and `WalWriter`'s open path then **durably truncates the segment to that prefix**, so the mutation is physically gone rather than merely skipped.
+
+A rollback to a pre-349b binary that must not hit either the refusal or the silent drop has to drain the WAL under the new binary first, or run with `TOPGUN_OR_DELTA_WAL=false` long enough for every delta frame already on disk to be applied and garbage-collected.
 
 Note (write-behind flush, distinct from the fsync policy above): Write-Behind buffers acked writes for ~1s before persisting to the durable backend. Acceptable for the demo server tier; crash-safe shutdown drain + WAL recovery land separately (TODO-339, post-HN). Until that lands, an unclean shutdown can lose buffered writes that have not yet been flushed.
 
