@@ -4707,6 +4707,105 @@ mod tests {
         )]));
     }
 
+    /// `TOPGUN_OR_DELTA_WAL` reaches the field, and only a falsey WORD disarms.
+    ///
+    /// The kill-switch's whole operator contract is written in terms of the
+    /// VARIABLE, so asserting the config field alone leaves the half an operator
+    /// actually touches — the name of the key, and the parse — unasserted. A typo
+    /// in the lookup key would be invisible to every other test in this file.
+    #[test]
+    fn from_source_parses_the_or_delta_wal_kill_switch() {
+        // Armed by default: the seam is on unless an operator turns it off.
+        assert!(WriteBehindConfig::from_source(config_source(&[])).or_delta_wal);
+
+        for falsey in ["false", "0", "no", "off", "FALSE", " Off "] {
+            let cfg =
+                WriteBehindConfig::from_source(config_source(&[("TOPGUN_OR_DELTA_WAL", falsey)]));
+            assert!(
+                !cfg.or_delta_wal,
+                "{falsey:?} is an explicit disarm and must reach the field"
+            );
+        }
+
+        for truthy in ["true", "1", "yes", "on", "TRUE"] {
+            let cfg =
+                WriteBehindConfig::from_source(config_source(&[("TOPGUN_OR_DELTA_WAL", truthy)]));
+            assert!(cfg.or_delta_wal, "{truthy:?} must leave the seam armed");
+        }
+    }
+
+    /// An UNRECOGNISED value leaves the seam ARMED — and says so.
+    ///
+    /// Both halves are load-bearing and neither is checkable from the other.
+    /// Staying armed is the deliberate direction: a typo must not quietly change
+    /// the durable encoding a running node writes, which is the opposite choice
+    /// from the fsync policy next door, and that asymmetry is only defensible
+    /// while the typo is VISIBLE. A silent arm leaves an operator believing the
+    /// WAL is safe to roll back across while the node keeps writing delta frames.
+    #[test]
+    fn an_unrecognised_or_delta_wal_value_stays_armed_and_names_itself() {
+        let captured: Arc<std::sync::Mutex<Vec<u8>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        #[derive(Clone)]
+        struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for CapturedLog {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        // Scoped, never a global install: this test binary is shared and runs in
+        // parallel, so a global subscriber would leak into every other test.
+        let writer = CapturedLog(Arc::clone(&captured));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+
+        // A misspelled disarm, and a value some env systems deliver with its
+        // quotes still attached -- the two shapes that actually reach operators.
+        let cfgs = tracing::subscriber::with_default(subscriber, || {
+            ["flase", "\"false\""].map(|raw| {
+                WriteBehindConfig::from_source(config_source(&[("TOPGUN_OR_DELTA_WAL", raw)]))
+            })
+        });
+
+        for (raw, cfg) in ["flase", "\"false\""].iter().zip(cfgs.iter()) {
+            assert!(
+                cfg.or_delta_wal,
+                "{raw:?} is not an explicit disarm, so the seam must stay ARMED rather than \
+                 roll a node back to an encoding nobody asked for"
+            );
+        }
+
+        let logged = String::from_utf8(
+            captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
+        .expect("captured log is utf-8");
+
+        for raw in ["flase", "\"false\""] {
+            assert!(
+                logged.contains(raw),
+                "the warning must NAME the unrecognised value {raw:?} so the typo is visible at \
+                 boot rather than at the downgrade that fails because of it; captured: {logged}"
+            );
+        }
+        assert!(
+            logged.contains("TOPGUN_OR_DELTA_WAL"),
+            "the warning must name the variable it is about; captured: {logged}"
+        );
+    }
+
     /// Wiring-only smoke test for the real `from_env` → `std::env` seam. The sole
     /// env-mutating config test, `#[serial]` so it cannot race the env-free tests
     /// above. Parse logic is covered by `from_source_*`; here we only prove
