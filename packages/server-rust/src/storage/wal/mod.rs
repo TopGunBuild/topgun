@@ -2422,6 +2422,230 @@ mod tests {
         }
     }
 
+    /// Every source this repository ships, keyed by the sweep id that found the
+    /// no-emitter claim it used to carry.
+    ///
+    /// The invariant catalog is five levels above this file. Reaching it takes a
+    /// package → repo-root build-time edge, and that edge is taken deliberately:
+    /// the alternative is leaving the catalog's own clauses uninstrumented, which
+    /// is precisely how they survived three audits while the code around them
+    /// moved.
+    const INVARIANTS_MD: &str = include_str!("../../../../../INVARIANTS.md");
+    const WAL_FORMAT_RS: &str = include_str!("format.rs");
+    const WAL_HARNESS_MOD_RS: &str = include_str!("../datastores/wal_harness/mod.rs");
+    const WAL_HARNESS_CASES_RS: &str = include_str!("../datastores/wal_harness/cases.rs");
+    const WRITE_BEHIND_RS: &str = include_str!("../datastores/write_behind.rs");
+    const CRDT_RS: &str = include_str!("../../service/domain/crdt.rs");
+
+    /// A no-emitter claim the sweep returned, as `(sweep id, source, needle)`.
+    ///
+    /// The needle is rebuilt from parts at every row without exception. That is
+    /// load-bearing rather than stylistic: two rows target this very file, and a
+    /// third targets a file a package-walking scan reaches, so a needle written
+    /// as one literal would find ITSELF and report a claim that is not there.
+    type SweptNeedle = (&'static str, fn() -> &'static str, fn() -> String);
+
+    /// The falsified claim sites the repo-wide normalized sweep returns.
+    ///
+    /// Derived from the sweep, never maintained beside it. The length assertion
+    /// below is what makes that derivation checkable: adding a claim site and
+    /// adding a needle are otherwise independent acts, and every false green in
+    /// this lineage came from exactly that independence.
+    #[allow(clippy::type_complexity)]
+    const SWEPT_NEEDLES: [SweptNeedle; 16] = [
+        (
+            "b1",
+            || WAL_FORMAT_RS,
+            || format!("no code path {} a delta frame", "emits"),
+        ),
+        ("b4", production_source, || {
+            format!("no code path {} a delta frame", "emits")
+        }),
+        (
+            "b2",
+            || WAL_HARNESS_MOD_RS,
+            || format!("no production path {} a delta frame yet", "emits"),
+        ),
+        (
+            "b3",
+            || WAL_HARNESS_CASES_RS,
+            || format!("proof that {} emits a delta frame", "nothing"),
+        ),
+        (
+            "b5",
+            || INVARIANTS_MD,
+            || format!("No {} exists yet", "emitter"),
+        ),
+        (
+            "b6",
+            || INVARIANTS_MD,
+            || format!("The {} lands separately", "emitter"),
+        ),
+        (
+            "b7",
+            || INVARIANTS_MD,
+            || format!("held by `WalWriter::append`'s tier-P {}", "refusal"),
+        ),
+        (
+            "b8",
+            || INVARIANTS_MD,
+            || format!("fail-stopping the {} guard", "append"),
+        ),
+        (
+            "b9",
+            || WAL_HARNESS_CASES_RS,
+            || format!("no production path emits a `WalOp::OrDelta` {}", "yet"),
+        ),
+        (
+            "b10",
+            || WAL_HARNESS_CASES_RS,
+            || format!("This scan is not what holds the {} property", "no-emitter"),
+        ),
+        (
+            "b11",
+            || WRITE_BEHIND_RS,
+            || format!("No production framing answers `false` {}", "yet"),
+        ),
+        ("b12", production_source, || {
+            format!("a property of the CODE rather than of a {} scan", "source")
+        }),
+        (
+            "b13",
+            || CRDT_RS,
+            || format!("{} in production overrides them", "NOTHING"),
+        ),
+        (
+            "b14",
+            || INVARIANTS_MD,
+            || format!("no production {} site", "construction"),
+        ),
+        (
+            "b15",
+            || WAL_HARNESS_CASES_RS,
+            || format!("NO production path {} a", "constructs"),
+        ),
+        (
+            "b16",
+            || WAL_HARNESS_CASES_RS,
+            || format!("reader is provable before a {} exists", "writer"),
+        ),
+    ];
+
+    /// A second phrase living INSIDE b1's and b4's claim text.
+    ///
+    /// Held apart from the swept set so it cannot inflate the parity count: an
+    /// extra belt that silently raised the total would make the parity number
+    /// unfalsifiable, which is the bookkeeping failure this instrument exists to
+    /// close rather than to repeat.
+    #[allow(clippy::type_complexity)]
+    const SUPPLEMENTARY_NEEDLES: [SweptNeedle; 2] = [
+        (
+            "s1",
+            || WAL_FORMAT_RS,
+            || format!("no delta-bearing WAL exists {}", "on disk"),
+        ),
+        ("s2", production_source, || {
+            format!("no delta-bearing WAL exists {}", "on disk")
+        }),
+    ];
+
+    /// No file in this repository asserts that no emitter exists.
+    ///
+    /// Every count runs on the WHITESPACE-NORMALIZED view, never on raw lines. A
+    /// bare single-line search does not satisfy this: the two claims that started
+    /// this lineage were both line-wrapped inside doc comments, so a raw search
+    /// for them returned zero before a single character had been changed. That
+    /// false green is the exact defect class this scan replaces.
+    #[test]
+    fn no_document_still_claims_that_nothing_emits_a_delta_frame() {
+        assert_eq!(
+            SWEPT_NEEDLES.len(),
+            16,
+            "the needle set is DERIVED from the repo-wide normalized sweep, not maintained \
+             beside it. If the sweep now returns a different number of falsified sites, that \
+             is a finding to surface -- never an array to edit until this passes again"
+        );
+
+        for (id, source, needle) in SWEPT_NEEDLES
+            .iter()
+            .chain(SUPPLEMENTARY_NEEDLES.iter())
+            .map(|(id, source, needle)| (id, source(), needle()))
+        {
+            let hits = normalized(source).matches(&needle).count();
+            assert_eq!(
+                hits, 0,
+                "{id}: a production path DOES emit delta frames now -- \
+                 `write_behind::add_with_witness` is the emitter -- so the claim {needle:?} \
+                 is false and must not survive anywhere in the tree"
+            );
+        }
+    }
+
+    /// The emitter, the retired guard and every instrument the emitter reddens
+    /// move as ONE unit.
+    ///
+    /// Asserted in both directions, because a one-directional check is what let
+    /// an emitter land beside instruments that still encoded its absence. An
+    /// armed emitter beside a live append guard aborts the process on the first
+    /// production OR write; a retired guard with no emitter removes a structural
+    /// protection while documenting a path that does not exist; and an emitter
+    /// beside an un-flipped source-scanning instrument is a CI break handed to
+    /// whoever merges next. All three are the same seam.
+    #[test]
+    fn the_emitter_the_guard_and_every_instrument_it_reddens_move_together() {
+        // The emitter's file is scanned to its inline test module and no
+        // further. Its own tests name the frame freely -- they are the proof the
+        // emitter works -- so scanning the whole file would let a tree whose
+        // PRODUCTION emitter had been deleted still pass this check off its
+        // leftover tests, which is the false green in miniature.
+        let emitter_source = &WRITE_BEHIND_RS[..WRITE_BEHIND_RS
+            .find("#[cfg(test)]\nmod tests {")
+            .expect("the emitter's file carries its tests in an inline `mod tests`")];
+        let emitter_present = normalized(emitter_source).contains(&format!(
+            "fn add_with_{}",
+            // Rebuilt from parts: an in-package scan counts this symbol's
+            // definitions, and a literal here would be a fourth one.
+            "witness"
+        )) && emitter_source.contains("WalOp::OrDelta");
+        assert!(
+            emitter_present,
+            "the write-behind store must override the witness-bearing add and frame the \
+             delta -- without it every clause below documents a path that does not exist"
+        );
+
+        let guard_source = normalized(production_source());
+        for residue in [
+            format!("allow_or_{}", "delta"),
+            format!("test_permit_one_or_delta_{}", "append"),
+            format!("test_or_delta_permit_{}", "outstanding"),
+        ] {
+            assert!(
+                !guard_source.contains(&residue),
+                "the emitter is live, so {residue} must be gone: the append guard would \
+                 fail-stop the process on the first production OR write"
+            );
+        }
+
+        let cases = normalized(WAL_HARNESS_CASES_RS);
+        assert!(
+            cases.contains("src/storage/datastores/write_behind.rs"),
+            "belts 2 and 3 must admit the emitter's file, or they are RED against the very \
+             change that makes them meaningful"
+        );
+
+        let crdt = normalized(CRDT_RS);
+        assert!(
+            crdt.contains("assert_eq!( total, 3,") || crdt.contains("total, 3,"),
+            "the store-side implementor scan must count THREE -- the defaulted definition, \
+             the one production override, and the one test spy"
+        );
+        assert!(
+            crdt.contains("total, 2,"),
+            "the demand-predicate scan counts a DIFFERENT symbol this spec adds no \
+             implementor of, so its count must NOT have moved with the store-side one"
+        );
+    }
+
     /// The structural half of the single-algebra rule: the fold DELEGATES, and
     /// writes no OR algebra of its own.
     ///

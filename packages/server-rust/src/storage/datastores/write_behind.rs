@@ -3348,6 +3348,9 @@ mod tests {
         /// `proceed` before returning. Lets a test read the outer store's
         /// `flushed_watermark()` while a flush's inner add is in flight.
         add_gate: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
+        /// What `add()` was actually asked to persist, kept apart from `seeded`
+        /// so no existing expectation about `load()` changes.
+        persisted: DashMap<(String, String), RecordValue>,
     }
 
     impl SpyDataStore {
@@ -3357,7 +3360,15 @@ mod tests {
                 seeded: DashMap::new(),
                 fail_add: std::sync::atomic::AtomicBool::new(false),
                 add_gate: Mutex::new(None),
+                persisted: DashMap::new(),
             }
+        }
+
+        /// The value the inner store was handed for a key, if any.
+        fn persisted(&self, map: &str, key: &str) -> Option<RecordValue> {
+            self.persisted
+                .get(&(map.to_string(), key.to_string()))
+                .map(|v| v.value().clone())
         }
 
         fn calls(&self) -> Arc<Mutex<Vec<SpyCall>>> {
@@ -3393,7 +3404,7 @@ mod tests {
             &self,
             map: &str,
             key: &str,
-            _value: &RecordValue,
+            value: &RecordValue,
             _expiration_time: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
@@ -3401,6 +3412,8 @@ mod tests {
                 map: map.to_string(),
                 key: key.to_string(),
             });
+            self.persisted
+                .insert((map.to_string(), key.to_string()), value.clone());
             // If a gate is installed, consume it: signal that the add is now in
             // flight, then park until the test lets it proceed.
             let gate = self.add_gate.lock().unwrap().take();
@@ -5381,6 +5394,537 @@ mod tests {
             WalWatermarkAlarm::AbandonedWrite {
                 origin: PendingOrigin::Abandoned,
             }
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The store boundary's emission behaviour, over a REAL write-ahead log
+    // -----------------------------------------------------------------------
+    //
+    // Driven against a real `WalWriter` rather than a recording double. The
+    // append-time refusal that used to reject a delta frame lived in the
+    // concrete writer, not in the log trait, so a spy log would have recorded
+    // whatever it was handed and could never have fail-stopped — a proof built
+    // on one would be green on an instrument incapable of going red.
+
+    /// The 64-byte payload both framing arms carry, so a size comparison
+    /// measures the FRAMING and not two different values.
+    const PINNED_64_BYTE_VALUE: &str =
+        "the very same sixty-four byte utf8 payload on both sides of it!!";
+    /// A 16-character tag, the width the OR entry pins.
+    const PINNED_16_CHAR_TAG: &str = "tag-0123456789ab";
+
+    fn pinned_or_entry() -> OrMapEntry {
+        OrMapEntry {
+            value: Value::String(PINNED_64_BYTE_VALUE.to_string()),
+            tag: PINNED_16_CHAR_TAG.to_string(),
+            timestamp: Timestamp {
+                millis: 1_700_000_000_000,
+                counter: 7,
+                node_id: "node-a".to_string(),
+            },
+        }
+    }
+
+    fn pinned_or_snapshot() -> RecordValue {
+        RecordValue::OrMap {
+            records: vec![pinned_or_entry()],
+            tombstones: Vec::new(),
+        }
+    }
+
+    /// A store bound to a real log at `dir`, framing under `armed`.
+    ///
+    /// The delays are long so the frame stays un-applied for the read-back:
+    /// the watermark advancing would let segment reclamation remove exactly the
+    /// frames under assertion. Durability does not depend on them — the per-op
+    /// policy fsyncs each frame before its write acks, so a read-back cannot
+    /// pass by observing an empty segment.
+    fn store_over_a_real_wal(
+        dir: &std::path::Path,
+        armed: bool,
+    ) -> (Arc<dyn Wal>, Arc<WriteBehindDataStore>) {
+        use crate::storage::wal::WalWriter;
+
+        let wal = WalWriter::new(dir.to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+        let store = WriteBehindDataStore::new_with_wal(
+            Arc::new(crate::storage::datastores::null::NullDataStore) as Arc<dyn MapDataStore>,
+            WriteBehindConfig {
+                write_delay_ms: 60_000,
+                flush_interval_ms: 60_000,
+                shutdown_timeout_ms: 5_000,
+                or_delta_wal: armed,
+                ..WriteBehindConfig::default()
+            },
+            Some(WalBootstrap {
+                wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                sequence_start: 1,
+            }),
+        );
+        (wal as Arc<dyn Wal>, store)
+    }
+
+    /// Every frame the log directory holds, read back off disk.
+    ///
+    /// Segments are selected by the log's OWN name parser rather than by
+    /// guessing an extension: the directory also holds per-partition
+    /// applied-watermark files, which carry no frames.
+    fn frames_on_disk(dir: &std::path::Path) -> Vec<WalEntry> {
+        use crate::storage::wal::format::{decode_all, FrameDecodeResult};
+        use crate::storage::wal::segment::parse_segment_filename;
+
+        let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file()
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .and_then(parse_segment_filename)
+                        .is_some()
+            })
+            .collect();
+        paths.sort();
+
+        let mut out = Vec::new();
+        for path in paths {
+            let bytes = std::fs::read(&path).unwrap();
+            let entries = match decode_all(&bytes) {
+                FrameDecodeResult::Complete(entries) => entries,
+                FrameDecodeResult::TruncatedTail { complete } => complete,
+                FrameDecodeResult::CleanEof => Vec::new(),
+                other => panic!("unexpected decode result for {}: {other:?}", path.display()),
+            };
+            out.extend(entries);
+        }
+        out
+    }
+
+    /// The per-op OR frame is no larger than three times the mean full-record
+    /// LWW frame, on a payload shape pinned so the ratio measures framing.
+    ///
+    /// Both frames carry the SAME 64-byte string; the OR side additionally
+    /// carries its 16-character tag and its own timestamp, which is the honest
+    /// per-op floor rather than a favourable one. Sizes are the whole encoded
+    /// entry, CRC and header included, because that is what reaches the disk.
+    #[test]
+    fn a_per_op_or_frame_costs_no_more_than_three_full_record_lww_frames() {
+        use crate::storage::wal::format::encode;
+
+        let lww = WalEntry {
+            map: "rooms".to_string(),
+            key: "lobby".to_string(),
+            op: WalOp::Store {
+                value: WalStorePayload::Record(RecordValue::Lww {
+                    value: Value::String(PINNED_64_BYTE_VALUE.to_string()),
+                    timestamp: Timestamp {
+                        millis: 1_700_000_000_000,
+                        counter: 7,
+                        node_id: "node-a".to_string(),
+                    },
+                }),
+                expiration_time: None,
+            },
+            timestamp: None,
+            sequence: 11,
+        };
+        let or = WalEntry {
+            map: "rooms".to_string(),
+            key: "lobby".to_string(),
+            op: WalOp::OrDelta {
+                delta: OrDelta::Add {
+                    entry: pinned_or_entry(),
+                },
+            },
+            timestamp: None,
+            sequence: 11,
+        };
+
+        assert_eq!(
+            PINNED_64_BYTE_VALUE.len(),
+            64,
+            "the comparison is only meaningful on the payload width it pins"
+        );
+        assert_eq!(PINNED_16_CHAR_TAG.chars().count(), 16);
+
+        let lww_bytes = encode(&lww).unwrap().len();
+        let or_bytes = encode(&or).unwrap().len();
+        // Frame sizes are hundreds of bytes, far inside f64's exact-integer
+        // range, so the ratio is reported rather than asserted on.
+        #[allow(clippy::cast_precision_loss)]
+        let ratio = or_bytes as f64 / lww_bytes as f64;
+        eprintln!("frame sizes: lww={lww_bytes}B or_delta={or_bytes}B ratio={ratio:.3}");
+        assert!(
+            or_bytes <= lww_bytes * 3,
+            "a per-op OR frame must not reamplify: lww={lww_bytes}B or_delta={or_bytes}B \
+             ratio={ratio:.3}"
+        );
+    }
+
+    /// An armed store hands the witness straight to the log, and the process
+    /// survives doing it.
+    ///
+    /// Surviving is the assertion, not a side effect: the retired append guard
+    /// aborted the process on the first delta frame it saw, so a build that
+    /// still carried it would take this test's whole harness down rather than
+    /// fail it.
+    #[tokio::test]
+    async fn an_armed_store_frames_the_witness_it_is_handed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_wal, store) = store_over_a_real_wal(dir.path(), true);
+        // The demand gate and the emission arm cannot diverge: an armed store
+        // that framed a delta while telling the mutation point not to build one
+        // would be an emitter fed nothing, which is the shape that looks
+        // complete and moves no bytes.
+        assert!(
+            store.wants_or_witness(),
+            "an armed store must ASK for the witness it is about to frame"
+        );
+        let delta = OrDelta::Add {
+            entry: pinned_or_entry(),
+        };
+
+        store
+            .add_with_witness(
+                "rooms",
+                "lobby",
+                &pinned_or_snapshot(),
+                0,
+                1_700_000_000_000,
+                Some(&delta),
+            )
+            .await
+            .unwrap();
+
+        let frames = frames_on_disk(dir.path());
+        // Non-vacuity: a claim quantified over zero frames is free.
+        assert!(
+            !frames.is_empty(),
+            "at least one frame must have been decoded, or the claim below is vacuous"
+        );
+        let deltas: Vec<&WalEntry> = frames
+            .iter()
+            .filter(|e| matches!(e.op, WalOp::OrDelta { .. }))
+            .collect();
+        assert_eq!(
+            deltas.len(),
+            1,
+            "an armed witness-carrying write frames exactly one delta, got {frames:?}"
+        );
+        match &deltas[0].op {
+            WalOp::OrDelta {
+                delta: on_disk_payload,
+            } => assert_eq!(
+                on_disk_payload, &delta,
+                "the framed delta must be the witness the caller handed over, not a \
+                 re-derivation of it"
+            ),
+            other => panic!("filtered for a delta frame, got {other:?}"),
+        }
+    }
+
+    /// The delta arm shrinks the FRAME and nothing else: the queued write-behind
+    /// entry and the durable store write still carry the full record.
+    ///
+    /// Without this the delta framing would be a data-loss change dressed as an
+    /// encoding change — the inner store would receive a mutation instead of the
+    /// state every reader of it expects.
+    #[tokio::test]
+    async fn a_delta_frame_never_shrinks_what_is_queued_or_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = Arc::new(SpyDataStore::new());
+        let wal =
+            crate::storage::wal::WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::PerOp)
+                .unwrap();
+        let store = WriteBehindDataStore::new_with_wal(
+            Arc::clone(&inner) as Arc<dyn MapDataStore>,
+            WriteBehindConfig {
+                write_delay_ms: 0,
+                flush_interval_ms: 5,
+                shutdown_timeout_ms: 5_000,
+                or_delta_wal: true,
+                ..WriteBehindConfig::default()
+            },
+            Some(WalBootstrap {
+                wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                sequence_start: 1,
+            }),
+        );
+
+        let snapshot = pinned_or_snapshot();
+        store
+            .add_with_witness(
+                "rooms",
+                "lobby",
+                &snapshot,
+                0,
+                1_700_000_000_000,
+                Some(&OrDelta::Add {
+                    entry: pinned_or_entry(),
+                }),
+            )
+            .await
+            .unwrap();
+
+        // The value the store serves before any flush is the full record, which
+        // is the queued entry read back through the only accessor that exists.
+        assert_eq!(
+            store.load("rooms", "lobby").await.unwrap(),
+            Some(snapshot.clone()),
+            "the queued entry must carry the full record, not the delta"
+        );
+
+        store.hard_flush().await.unwrap();
+        assert_eq!(
+            inner.persisted("rooms", "lobby"),
+            Some(snapshot),
+            "the durable store must receive the full record, not the delta"
+        );
+    }
+
+    /// A store handed no witness frames the full snapshot, and so does a store
+    /// whose kill-switch is off even when it IS handed one.
+    ///
+    /// The two halves are asserted against each other because the rollback claim
+    /// is unconditional: the flag is the authority and the witness is evidence,
+    /// so a caller that bypasses the demand gate still gets today's framing. A
+    /// branch keyed on the witness alone would read no flag at all and make the
+    /// store disagree with its own rollback switch — and the disagreement would
+    /// be invisible from either half on its own.
+    #[tokio::test]
+    async fn the_rollback_switch_frames_a_snapshot_whatever_the_caller_hands_it() {
+        let delta = OrDelta::Add {
+            entry: pinned_or_entry(),
+        };
+        let mut baselines = Vec::new();
+        for (armed, witness) in [(false, None), (false, Some(&delta)), (true, None)] {
+            let dir = tempfile::tempdir().unwrap();
+            let (_wal, store) = store_over_a_real_wal(dir.path(), armed);
+            assert_eq!(
+                store.wants_or_witness(),
+                armed,
+                "the demand gate must answer the SAME flag the framing branch reads, or \
+                 the write path pays for a witness the store then throws away"
+            );
+            store
+                .add_with_witness(
+                    "rooms",
+                    "lobby",
+                    &pinned_or_snapshot(),
+                    0,
+                    1_700_000_000_000,
+                    witness,
+                )
+                .await
+                .unwrap();
+
+            let frames = frames_on_disk(dir.path());
+            assert_eq!(
+                frames.len(),
+                1,
+                "armed={armed} witness={}: exactly one frame is expected",
+                witness.is_some()
+            );
+            assert!(
+                matches!(frames[0].op, WalOp::Store { .. }),
+                "armed={armed} witness={}: must frame the full snapshot, got {:?}",
+                witness.is_some(),
+                frames[0].op
+            );
+            // Nothing here diffs anything: the caller's witness is the only delta
+            // that exists, and this arm ignores it entirely.
+            baselines.push(crate::storage::wal::format::encode(&frames[0]).unwrap());
+        }
+
+        assert_eq!(
+            baselines[0], baselines[1],
+            "the kill-switch is unconditional: a bypassing caller's `Some` witness must \
+             produce the same bytes as the witness-free write, or the rollback is only \
+             approximately byte-identical"
+        );
+        assert_eq!(
+            baselines[0], baselines[2],
+            "an armed store handed no witness must frame the same snapshot bytes as the \
+             rolled-back store, or bulk, SYNC, read-repair and rehydrate have changed \
+             representation without asking"
+        );
+    }
+
+    /// The arming flag is read in exactly two expression positions, and the
+    /// demand predicate names no other.
+    ///
+    /// A second switch — another config field, an env read, an atomic — could
+    /// otherwise let the demand gate and the emission arm diverge, which is the
+    /// shape that produces a predicate answering `true` while every witness
+    /// still arrives `None`.
+    #[test]
+    fn one_flag_arms_both_the_demand_gate_and_the_framing_branch() {
+        const SOURCE: &str = include_str!("write_behind.rs");
+        let marker = "#[cfg(test)]\nmod tests {";
+        let production = &SOURCE[..SOURCE.find(marker).expect("inline tests module")];
+        let flag = concat!("self.config.", "or_delta_wal");
+
+        assert_eq!(
+            production.matches(flag).count(),
+            2,
+            "the arming flag must be read in exactly two expression positions -- the \
+             demand predicate's body and the left conjunct of the framing branch"
+        );
+        assert!(
+            production.contains(concat!("self.config.or_delta_wal && ", "witness.is_some()")),
+            "the framing branch's left conjunct must be the flag itself, not the witness \
+             alone: a branch that reads no flag cannot be rolled back"
+        );
+
+        let predicate_start = production
+            .find(concat!("fn wants_or_", "witness(&self) -> bool {"))
+            .expect("the demand predicate is overridden here");
+        let body = &production[predicate_start..];
+        let body = &body[..body.find("\n    }").expect("the predicate's body ends")];
+        assert_eq!(
+            body.matches(flag).count(),
+            1,
+            "the demand predicate must return the arming flag and nothing else"
+        );
+        for other in ["env::var", "AtomicBool", "OnceLock"] {
+            assert!(
+                !body.contains(other),
+                "the demand predicate must name no second switch, found {other}"
+            );
+        }
+    }
+
+    /// Writes a real WAL, at this tree's framing, for the cross-binary
+    /// compatibility script to hand to an older binary.
+    ///
+    /// A FIXTURE GENERATOR, not a proof — hence `#[ignore]`: the property it
+    /// serves is asserted by `scripts/wal-compat-worktree.sh`, which runs a
+    /// binary built from another commit and so cannot live inside this process.
+    /// The in-process crash model runs ONE binary by construction.
+    ///
+    /// `TG_WAL_COMPAT_POSITION` selects where the delta frame sits, because a
+    /// decoder that does not know the variant treats a trailing frame as a torn
+    /// tail and a mid-segment one as corruption.
+    #[tokio::test]
+    #[ignore = "fixture generator for scripts/wal-compat-worktree.sh"]
+    async fn emit_a_wal_this_tree_wrote_for_the_cross_binary_compat_script() {
+        let out = std::env::var("TG_WAL_COMPAT_OUT")
+            .expect("TG_WAL_COMPAT_OUT must name the directory to write the WAL into");
+        let trailing = std::env::var("TG_WAL_COMPAT_POSITION")
+            .as_deref()
+            .unwrap_or("trailing")
+            == "trailing";
+        let dir = std::path::PathBuf::from(&out);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let (_wal, store) = store_over_a_real_wal(&dir, true);
+        store
+            .add_with_witness(
+                "rooms",
+                "lobby",
+                &pinned_or_snapshot(),
+                0,
+                1_700_000_000_000,
+                Some(&OrDelta::Add {
+                    entry: pinned_or_entry(),
+                }),
+            )
+            .await
+            .unwrap();
+        if !trailing {
+            // A frame the old decoder understands, appended AFTER the delta, so
+            // the delta is no longer the last frame in the byte stream.
+            store
+                .add(
+                    "rooms",
+                    "lobby",
+                    &RecordValue::Lww {
+                        value: Value::String("after-the-delta".to_string()),
+                        timestamp: Timestamp {
+                            millis: 1_700_000_000_001,
+                            counter: 0,
+                            node_id: "node-a".to_string(),
+                        },
+                    },
+                    0,
+                    1_700_000_000_001,
+                )
+                .await
+                .unwrap();
+        }
+
+        let frames = frames_on_disk(&dir);
+        assert!(
+            frames.iter().any(|e| matches!(e.op, WalOp::OrDelta { .. })),
+            "the generated WAL must actually carry a delta frame, or the script proves \
+             nothing about one"
+        );
+        eprintln!("TG_WAL_COMPAT_EMITTED {} frames into {out}", frames.len());
+    }
+
+    /// The emitted frame is the checked-in on-disk shape, byte-for-byte, once
+    /// the one identity the log assigns is normalized away.
+    ///
+    /// The fixture is a fully concrete frame behind a CRC over all of it, and
+    /// the writer assigns its own sequence, so whole-frame equality would be RED
+    /// on identity rather than on shape. Normalizing the sequence — and only the
+    /// sequence — keeps the comparison genuinely byte-level on everything the
+    /// fixture pins. An added field, a renamed key, a changed serde tag or a
+    /// bumped version reddens here; a different sequence must not.
+    #[tokio::test]
+    async fn the_emitted_frame_is_the_golden_on_disk_shape() {
+        use crate::storage::wal::format::{decode_all, encode, FrameDecodeResult};
+
+        const GOLDEN: &[u8] = include_bytes!("../wal/fixtures/or_delta_frame_v1.msgpack");
+
+        let golden = match decode_all(GOLDEN) {
+            FrameDecodeResult::Complete(entries) => {
+                assert_eq!(entries.len(), 1, "the fixture holds exactly one frame");
+                entries.into_iter().next().expect("one frame")
+            }
+            other => panic!("the fixture must decode Complete, got {other:?}"),
+        };
+        let golden_delta = match &golden.op {
+            WalOp::OrDelta { delta } => delta.clone(),
+            other => panic!("the fixture must carry a delta frame, got {other:?}"),
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_wal, store) = store_over_a_real_wal(dir.path(), true);
+        store
+            .add_with_witness(
+                &golden.map,
+                &golden.key,
+                &pinned_or_snapshot(),
+                0,
+                1_700_000_000_000,
+                Some(&golden_delta),
+            )
+            .await
+            .unwrap();
+
+        let frames = frames_on_disk(dir.path());
+        assert_eq!(frames.len(), 1, "exactly one frame is expected");
+        let emitted = &frames[0];
+
+        assert_eq!(
+            emitted.op, golden.op,
+            "the emitter's frame must carry the fixture's payload shape"
+        );
+        assert_eq!(
+            emitted.timestamp, golden.timestamp,
+            "an OR frame carries no log-level timestamp: its entries carry their own"
+        );
+
+        let mut normalized_golden = golden.clone();
+        normalized_golden.sequence = emitted.sequence;
+        assert_eq!(
+            encode(&normalized_golden).unwrap(),
+            encode(emitted).unwrap(),
+            "the emitter encodes different bytes than the checked-in on-disk shape. A \
+             shape change is a format decision that re-proves the reader first -- it is \
+             never a reason to regenerate the fixture"
         );
     }
 }
