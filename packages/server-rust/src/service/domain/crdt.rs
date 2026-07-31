@@ -5008,6 +5008,22 @@ mod tests {
             effective >= 2,
             "the two effective writes must have framed something, saw {effective}"
         );
+        // And they framed something OTHER than a full record. Without this the
+        // test asserts only what the no-effect ops do, so a service path that had
+        // stopped delivering a witness entirely — every op framing a snapshot —
+        // would satisfy every assertion below. This is the one place the whole
+        // chain (mutate closure → witness → store → frame) is observed end to
+        // end; the variant it must NOT be is named, never the one it must be, so
+        // the belts still hold over this file.
+        for frame in &frames(wal_dir.path())[..effective] {
+            assert!(
+                !matches!(frame.op, WalOp::Store { .. }),
+                "an EFFECTIVE OR write must not frame a full record: the witness never \
+                 reached the store, so the no-effect assertions below compare like with like \
+                 and prove nothing (sequence {})",
+                frame.sequence
+            );
+        }
 
         for op in [
             or_add_op("m", "k1", "v1", "T1"), // NO effect: remove-wins suppressed

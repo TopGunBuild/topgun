@@ -1886,11 +1886,21 @@ impl WalRecovery {
 
                 // Expiration `0` ("no expiry"): `load` returns no TTL and `add`
                 // requires one, and a delta frame carries no expiration field —
-                // it records a mutation, not a whole slot. `0` matches the live
-                // OR write path, which writes both OR closures with
-                // `ExpiryPolicy::NONE`, so the fold introduces no TTL drift. An
-                // OR path that starts writing TTLs would need the frame to carry
-                // one; it is not a value this arm may invent.
+                // it records a mutation, not a whole slot. `0` matches what the
+                // live OR write path produces today, so the fold introduces no
+                // TTL drift. An OR path that starts writing TTLs would need the
+                // frame to carry one; it is not a value this arm may invent.
+                //
+                // KNOWN BOUND, stated rather than implied (TODO-627): "produces
+                // `0` today" is a property of the CONFIGURATION, not of the OR
+                // policy. `ExpiryPolicy::NONE` resolves through
+                // `compute_expiration_time`, which falls back to
+                // `StorageConfig::default_ttl_millis` — a real, evictable field
+                // that is `0` in every production wiring but is not required to
+                // be. If a map-level default TTL is ever wired, the snapshot arm
+                // carries the expiry across recovery and this arm discards it,
+                // silently. Nothing currently detects that divergence, which is
+                // why the bound is written here instead of being trusted.
                 inner_store
                     .add(&entry.map, &entry.key, &folded, 0, now)
                     .await
@@ -2695,16 +2705,42 @@ mod tests {
              change that makes them meaningful"
         );
 
+        // Both halves of the implementor scan live in ONE fn, so a whole-file
+        // `contains` cannot tell them apart: `"total, 2,"` is satisfied by any
+        // `2` anywhere in the file, including an unrelated one, which would let a
+        // wrongly-bumped demand assertion pass the very clause written to catch
+        // it. Slice the two regions and assert each against its own count.
         let crdt = normalized(CRDT_RS);
+        let store_side = slice_between(
+            &crdt,
+            concat!("let store_", "side = ["),
+            concat!("let demand = ", "concat!"),
+        );
         assert!(
-            crdt.contains("assert_eq!( total, 3,") || crdt.contains("total, 3,"),
+            store_side.contains("assert_eq!( total, 3,"),
             "the store-side implementor scan must count THREE -- the defaulted definition, \
              the one production override, and the one test spy"
         );
         assert!(
-            crdt.contains("total, 2,"),
+            store_side.contains("storage/datastores/write_behind.rs"),
+            "the store-side scan's allowlist must admit the emitter's file, or the count of \
+             three is satisfied by some other third home"
+        );
+
+        let demand = slice_between(
+            &crdt,
+            concat!("let demand = ", "concat!"),
+            concat!("fn or_doc_contracts_carry_no_", "falsified_clause"),
+        );
+        assert!(
+            demand.contains("assert_eq!( total, 2,"),
             "the demand-predicate scan counts a DIFFERENT symbol this spec adds no \
              implementor of, so its count must NOT have moved with the store-side one"
+        );
+        assert!(
+            !demand.contains("assert_eq!( total, 3,"),
+            "the demand-predicate scan must NOT have been bumped alongside the store-side \
+             one: that would be a false edit asserting an implementor that does not exist"
         );
     }
 

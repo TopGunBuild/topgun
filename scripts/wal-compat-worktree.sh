@@ -152,4 +152,6 @@ if [ "$fail" -ne 0 ]; then
   echo "WAL cross-binary compatibility: FAILED"
   exit 1
 fi
-echo "WAL cross-binary compatibility: both frame positions behave as documented"
+echo "WAL cross-binary compatibility: both frame positions satisfy the ONE-STEP contract"
+echo "  (the pre-reader refuse-to-start / silent-tail-drop split is described in this"
+echo "   script's header and asserted NOWHERE -- see the base-commit caveat above)"

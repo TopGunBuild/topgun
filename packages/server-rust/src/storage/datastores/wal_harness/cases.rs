@@ -2172,8 +2172,9 @@ fn tg_or_003_ac9_delta_construction_stays_inside_its_sanctioned_home() {
     for (rel, src) in &lib_sources {
         assert!(
             !src.contains("WalOp::OrDelta") || is_delta_frame_home(rel),
-            "AC9: {rel} names the delta variant, but only the WAL codec and the crash harness \
-             may — a mention outside them is where an emitter would appear"
+            "AC9: {rel} names the delta variant, but only the WAL codec, the crash harness \
+             and the write-behind emitter may — a mention outside them is where a SECOND \
+             emitter would appear"
         );
     }
 
@@ -2184,7 +2185,8 @@ fn tg_or_003_ac9_delta_construction_stays_inside_its_sanctioned_home() {
     for (rel, src) in &package_sources {
         assert!(
             or_delta_construction_sites(src) == 0 || is_delta_frame_home(rel),
-            "AC9: {rel} CONSTRUCTS a delta frame outside the WAL codec and the crash harness"
+            "AC9: {rel} CONSTRUCTS a delta frame outside the WAL codec, the crash harness \
+             and the one sanctioned emitter"
         );
     }
 }
