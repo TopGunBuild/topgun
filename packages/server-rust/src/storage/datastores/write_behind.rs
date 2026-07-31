@@ -2372,24 +2372,27 @@ impl MapDataStore for WriteBehindDataStore {
         // frame differs. Nothing here diffs anything — the mutation point already
         // built this delta, and re-deriving it would be a second copy of the OR
         // algebra (`TG-OR-003`).
-        let wal_op = if self.config.or_delta_wal && witness.is_some() {
-            WalOp::OrDelta {
-                // Cloned into the frame rather than borrowed: this store defers
-                // its inner-store write, so the caller's reference must not be
-                // held past this call.
-                delta: witness
-                    .cloned()
-                    .expect("the conjunction above already established the witness is present"),
-            }
-        } else {
-            WalOp::Store {
+        //
+        // Written as a guarded match rather than a boolean conjunction so the
+        // witness's presence is established by the BINDING instead of re-derived
+        // afterwards: an `if` on `witness.is_some()` leaves an unwrap on the far
+        // side of the branch, and a later edit that weakens the guard turns that
+        // unwrap into a live production panic on the write path.
+        let wal_op = match witness {
+            // Cloned into the frame rather than borrowed: this store defers its
+            // inner-store write, so the caller's reference must not be held past
+            // this call.
+            Some(delta) if self.config.or_delta_wal => WalOp::OrDelta {
+                delta: delta.clone(),
+            },
+            _ => WalOp::Store {
                 value: WalStorePayload::Record(value.clone()),
                 expiration_time: if expiration_time == 0 {
                     None
                 } else {
                     Some(expiration_time)
                 },
-            }
+            },
         };
         let wal_entry = WalEntry {
             map: map.to_string(),
@@ -5887,12 +5890,13 @@ mod tests {
             production.matches(flag).count(),
             2,
             "the arming flag must be read in exactly two expression positions -- the \
-             demand predicate's body and the left conjunct of the framing branch"
+             demand predicate's body and the guard on the framing branch's delta arm"
         );
         assert!(
-            production.contains(concat!("self.config.or_delta_wal && ", "witness.is_some()")),
-            "the framing branch's left conjunct must be the flag itself, not the witness \
-             alone: a branch that reads no flag cannot be rolled back"
+            production.contains(concat!("Some(delta) if self.config.", "or_delta_wal =>")),
+            "the delta arm must be GUARDED BY THE FLAG, not by the witness alone: a branch \
+             that reads no flag cannot be rolled back. The guard also carries the witness's \
+             presence as a binding, so no arm of this match can unwrap it"
         );
 
         let predicate_start = production
