@@ -20,7 +20,7 @@ use crate::storage::map_data_store::{
 };
 use crate::storage::record::RecordValue;
 use crate::storage::wal::{
-    describe_wal_watermark_metrics, Wal, WalEntry, WalFsyncPolicy, WalOp, WalStorePayload,
+    describe_wal_watermark_metrics, OrDelta, Wal, WalEntry, WalFsyncPolicy, WalOp, WalStorePayload,
     WAL_WATERMARK_LAG_GAUGE,
 };
 
@@ -84,6 +84,24 @@ pub struct WriteBehindConfig {
     /// raising `flush_interval_ms` or `shutdown_timeout_ms` requires raising
     /// this alongside them.
     pub wal_watermark_stall_bound_ms: u64,
+    /// Whether an OR mutation may be framed as a per-op delta in the WAL
+    /// instead of a full record snapshot.
+    ///
+    /// This is the SINGLE arming flag of the delta-framing seam, and it arms
+    /// BOTH halves of it: it is what
+    /// [`wants_or_witness()`](MapDataStore::wants_or_witness) returns, and it is
+    /// the left conjunct of the framing branch in
+    /// [`add_with_witness()`](MapDataStore::add_with_witness). One flag, so the
+    /// demand gate and the emission arm cannot diverge — a store that demands a
+    /// witness always frames it, and a store that frames deltas is always fed
+    /// one. A second, independent switch for either half would permit exactly
+    /// the divergence this field exists to make impossible.
+    ///
+    /// `false` is a true zero-cost rollback rather than a discarded-work one:
+    /// the demand gate answers `false` first, so the mutation path never builds
+    /// a witness at all, and every write frames the full snapshot exactly as it
+    /// did before the seam existed.
+    pub or_delta_wal: bool,
 }
 
 /// Absolute lower clamp on [`WriteBehindConfig::reconfirm_delay_ms`].
@@ -124,6 +142,7 @@ impl Default for WriteBehindConfig {
             wal_dir: PathBuf::from("./topgun-wal"),
             wal_fsync_policy: WalFsyncPolicy::Batched,
             wal_watermark_stall_bound_ms: 60_000,
+            or_delta_wal: true,
         }
     }
 }
@@ -145,6 +164,7 @@ impl WriteBehindConfig {
     /// | `TOPGUN_WAL_DIR` | `wal_dir` | `./topgun-wal` |
     /// | `TOPGUN_WAL_FSYNC_POLICY` | `wal_fsync_policy` | `batched` |
     /// | `TOPGUN_WAL_WATERMARK_STALL_BOUND_MS` | `wal_watermark_stall_bound_ms` | 60 000 ms — raise it alongside `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` / `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS`, whose defaults this default is derived from |
+    /// | `TOPGUN_OR_DELTA_WAL` | `or_delta_wal` | `true` — the delta-framing kill-switch; `false` restores full-snapshot framing for every OR write |
     ///
     /// Fields not covered by env vars (`write_delay_ms`, `max_retries`,
     /// `backoff_base_ms`, `backoff_cap_ms`) retain their [`Self::default`] values.
@@ -271,25 +291,8 @@ impl WriteBehindConfig {
         }
 
         // Parse TOPGUN_WAL_FSYNC_POLICY → wal_fsync_policy (WalFsyncPolicy)
-        //
-        // An unknown value is FATAL: silently falling back to the Batched default
-        // here is exactly what masked a durability regression through a full RED
-        // soak (a misspelled durable policy quietly ran with the weaker default).
-        // Refusing to start forces the misconfiguration to surface at boot rather
-        // than as silent data loss on the next unclean shutdown.
         if let Some(raw) = get("TOPGUN_WAL_FSYNC_POLICY") {
-            match raw.trim().parse::<WalFsyncPolicy>() {
-                Ok(policy) => {
-                    cfg.wal_fsync_policy = policy;
-                }
-                Err(err) => {
-                    panic!(
-                        "TOPGUN_WAL_FSYNC_POLICY={raw:?} is not a valid WAL fsync policy: {err}. \
-                         Refusing to start: an unknown durability policy must not be silently \
-                         downgraded to a weaker default. Set a valid value or unset the variable."
-                    );
-                }
-            }
+            cfg.wal_fsync_policy = Self::parse_fsync_policy(&raw);
         }
 
         // Parse TOPGUN_WAL_WATERMARK_STALL_BOUND_MS → wal_watermark_stall_bound_ms
@@ -307,7 +310,54 @@ impl WriteBehindConfig {
                 Self::parse_stall_bound_ms(&raw, defaults.wal_watermark_stall_bound_ms);
         }
 
+        // Parse TOPGUN_OR_DELTA_WAL → or_delta_wal
+        //
+        // Read ONCE here, never per write: the flag arms both the demand gate
+        // and the framing branch, and a value that could change under a running
+        // store would let those two halves observe different answers for the
+        // same op.
+        if let Some(raw) = get("TOPGUN_OR_DELTA_WAL") {
+            cfg.or_delta_wal = Self::parse_or_delta_wal(&raw);
+        }
+
         cfg
+    }
+
+    /// Parses one `TOPGUN_OR_DELTA_WAL` value.
+    ///
+    /// Only an explicit falsey word disables the seam. An unrecognised value
+    /// leaves it ARMED rather than rolling an operator back to snapshot framing
+    /// they did not ask for: this is a kill-switch, and a typo in one must not
+    /// quietly change the durable encoding a running node writes.
+    fn parse_or_delta_wal(raw: &str) -> bool {
+        !matches!(
+            raw.trim().to_lowercase().as_str(),
+            "false" | "0" | "no" | "off"
+        )
+    }
+
+    /// Parses one `TOPGUN_WAL_FSYNC_POLICY` value.
+    ///
+    /// An unknown value is FATAL: silently falling back to the `Batched` default
+    /// here is exactly what masked a durability regression through a full RED
+    /// soak (a misspelled durable policy quietly ran with the weaker default).
+    /// Refusing to start forces the misconfiguration to surface at boot rather
+    /// than as silent data loss on the next unclean shutdown.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `raw` does not parse to a known [`WalFsyncPolicy`].
+    fn parse_fsync_policy(raw: &str) -> WalFsyncPolicy {
+        match raw.trim().parse::<WalFsyncPolicy>() {
+            Ok(policy) => policy,
+            Err(err) => {
+                panic!(
+                    "TOPGUN_WAL_FSYNC_POLICY={raw:?} is not a valid WAL fsync policy: {err}. \
+                     Refusing to start: an unknown durability policy must not be silently \
+                     downgraded to a weaker default. Set a valid value or unset the variable."
+                );
+            }
+        }
     }
 
     /// Parses one `TOPGUN_WAL_WATERMARK_STALL_BOUND_MS` value.
@@ -940,10 +990,13 @@ pub struct WriteBehindDataStore {
     classifier_seam: ClassifierSeam,
     /// Forces every coalesce survivor to answer "does not subsume".
     ///
-    /// No production framing answers `false` yet, so without this the
-    /// carry-forward route — and the abandoned-survivor stall that keeps a
-    /// retired frame replayable — would ship unexercised until the first
-    /// partial-state framing lands.
+    /// A production framing now answers `false` — the delta frame this store
+    /// emits under an armed `or_delta_wal` carries only its own mutation — so
+    /// the carry-forward route is reachable without this seam. It stays because
+    /// reaching it that way depends on which ops a run happens to coalesce,
+    /// while this forces the shape deterministically: the abandoned-survivor
+    /// stall that keeps a retired frame replayable is exercised on every run
+    /// rather than on the runs that happen to produce the right interleaving.
     #[cfg(test)]
     force_non_subsuming_survivor: AtomicBool,
     /// Selects whether boot seeding populates a partition's pending map from
@@ -2211,6 +2264,35 @@ impl MapDataStore for WriteBehindDataStore {
         expiration_time: i64,
         now: i64,
     ) -> anyhow::Result<()> {
+        // One write path, not two. Every caller without a per-op delta — every
+        // LWW write, bulk and SYNC ingestion, cross-node merge, rehydration —
+        // arrives here, and it is the same code the witness-bearing callers run
+        // with the witness set. A second body would let the two drift.
+        self.add_with_witness(map, key, value, expiration_time, now, None)
+            .await
+    }
+
+    /// Whether the mutation point should build an OR witness for this store.
+    ///
+    /// Returns the store's SINGLE arming flag — the same field the framing
+    /// branch in [`Self::add_with_witness`] tests. One flag, so the demand gate
+    /// and the emission arm move together: armed means a witness is demanded,
+    /// built, delivered and framed; unarmed means nothing upstream builds one at
+    /// all, so the rollback costs the write path nothing rather than paying for
+    /// a witness it then discards.
+    fn wants_or_witness(&self) -> bool {
+        self.config.or_delta_wal
+    }
+
+    async fn add_with_witness(
+        &self,
+        map: &str,
+        key: &str,
+        value: &RecordValue,
+        expiration_time: i64,
+        now: i64,
+        witness: Option<&OrDelta>,
+    ) -> anyhow::Result<()> {
         // Reject new writes once graceful drain is in progress so any out-of-order
         // arrival is visible as an error rather than silently lost. In the normal
         // shutdown sequence the HTTP server is already draining before the shutdown
@@ -2245,22 +2327,50 @@ impl MapDataStore for WriteBehindDataStore {
         // Append to WAL and satisfy the fsync policy before touching in-memory
         // state. This must happen before returning Ok(()) so a crash after ack
         // still has the write in the WAL for recovery to replay.
-        // Persist the full RecordValue so OR-Map adds and tombstones survive a
-        // kill -9 in the write-behind window — not just LWW scalars. The WAL
-        // entry timestamp is the LWW idempotency-dedup key; OR values carry their
-        // own per-entry timestamps inside the record, so it stays None for them.
+        // The WAL entry timestamp is the LWW idempotency-dedup key; OR values
+        // carry their own per-entry timestamps inside the record, so it stays
+        // None for them — including for the delta framing below, whose payload
+        // is an OR mutation by construction.
         let wal_timestamp = if let RecordValue::Lww { timestamp, .. } = value {
             Some(timestamp.clone())
         } else {
             None
         };
-        let wal_op = WalOp::Store {
-            value: WalStorePayload::Record(value.clone()),
-            expiration_time: if expiration_time == 0 {
-                None
-            } else {
-                Some(expiration_time)
-            },
+        // FAIL-CLOSED CONJUNCTION. The config's arming flag is the AUTHORITY —
+        // one flag, the same field `wants_or_witness` returns — and the
+        // witness is EVIDENCE, never authority. A `Some` witness with the
+        // flag off is a caller that bypassed the demand gate, and it gets
+        // today's full snapshot; keying the branch on the `Option` alone would
+        // read no flag at all and make the store disagree with its own rollback
+        // switch. Every combination other than (armed, `Some`) frames the full
+        // record, so the failure mode of any divergence is LESS delta framing,
+        // never an unexpected delta frame on disk.
+        //
+        // The snapshot arm persists the full `RecordValue` so OR-Map adds and
+        // tombstones survive a kill -9 in the write-behind window — not just LWW
+        // scalars. The delta arm does not shrink what is QUEUED or STORED: the
+        // full value still rides the write-behind entry below, and only the WAL
+        // frame differs. Nothing here diffs anything — the mutation point already
+        // built this delta, and re-deriving it would be a second copy of the OR
+        // algebra (`TG-OR-003`).
+        let wal_op = if self.config.or_delta_wal && witness.is_some() {
+            WalOp::OrDelta {
+                // Cloned into the frame rather than borrowed: this store defers
+                // its inner-store write, so the caller's reference must not be
+                // held past this call.
+                delta: witness
+                    .cloned()
+                    .expect("the conjunction above already established the witness is present"),
+            }
+        } else {
+            WalOp::Store {
+                value: WalStorePayload::Record(value.clone()),
+                expiration_time: if expiration_time == 0 {
+                    None
+                } else {
+                    Some(expiration_time)
+                },
+            }
         };
         let wal_entry = WalEntry {
             map: map.to_string(),

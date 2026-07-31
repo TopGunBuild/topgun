@@ -1247,22 +1247,8 @@ impl Driver {
         let seq = store.assign_wal_sequence(partition);
         // 3. Append the frame at the pinned on-disk shape, built by the single
         //    constructor that owns that shape.
-        //
-        //    The writer refuses delta frames by construction — nothing in this
-        //    build may emit one — so a ONE-SHOT permit is granted for exactly
-        //    this frame. The append consumes it, which is what keeps the grant
-        //    from spanning its own `.await`: every OTHER op in the run rides the
-        //    real write path under the refusal, so a production path that
-        //    started emitting deltas fail-stops the harness instead of blending
-        //    into the injected ones.
         let entry = or_delta_frame(TEST_MAP, self.key_str(key), delta.clone(), seq);
-        self.wal.test_permit_one_or_delta_append();
         let appended = store.wal_append(partition, &entry).await;
-        assert!(
-            !self.wal.test_or_delta_permit_outstanding(),
-            "the injected append must CONSUME its permit — one left outstanding would admit some \
-             later delta frame, which is exactly the emitter the guard exists to catch"
-        );
         // Drain in BOTH outcomes: the observer fired at the assign, so leaving the
         // observation in the sink would misattribute it to the next op.
         let observed = Self::drain_observed();

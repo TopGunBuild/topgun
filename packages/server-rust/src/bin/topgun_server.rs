@@ -287,6 +287,7 @@ fn log_boot_summary(
         wal_dir = %write_behind_config.wal_dir.display(),
         wal_fsync_policy = ?write_behind_config.wal_fsync_policy,
         wal_watermark_stall_bound_ms = write_behind_config.wal_watermark_stall_bound_ms,
+        or_delta_wal = write_behind_config.or_delta_wal,
         policies_loaded,
         rbac_configured,
         "eviction + write-behind + WAL initialized"
@@ -2087,14 +2088,18 @@ mod tests {
     }
 
     #[test]
-    fn the_boot_summary_carries_the_effective_stall_bound() {
+    fn the_boot_summary_carries_the_effective_stall_bound_and_delta_framing_switch() {
         let captured = CapturedLog::default();
         let writer = captured.clone();
 
-        // A value no default and no other field could coincidentally produce, so
-        // a substring hit cannot be someone else's number.
+        // Values no default and no other field could coincidentally produce, so
+        // a substring hit cannot be someone else's number. `or_delta_wal` is the
+        // OPPOSITE of its default, which is what makes it discriminating: a
+        // field wired to a literal, or to the wrong config member, still renders
+        // the default and fails the assertion below.
         let write_behind_config = WriteBehindConfig {
             wal_watermark_stall_bound_ms: 42_123,
+            or_delta_wal: false,
             ..WriteBehindConfig::default()
         };
 
@@ -2129,6 +2134,16 @@ mod tests {
         assert!(
             rendered.contains("wal_watermark_stall_bound_ms=42123"),
             "the operator-facing boot line must carry the EFFECTIVE stall bound; \
+             captured: {rendered}"
+        );
+        // The delta-framing kill-switch decides whether OR writes reach the WAL
+        // as per-op deltas or as full snapshots, and rolling it back is the
+        // documented mitigation for a delta-related incident. An operator who
+        // cannot read its effective value off the boot line cannot tell which
+        // framing the running node is using.
+        assert!(
+            rendered.contains("or_delta_wal=false"),
+            "the operator-facing boot line must carry the EFFECTIVE OR delta-framing switch; \
              captured: {rendered}"
         );
     }

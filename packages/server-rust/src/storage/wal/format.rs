@@ -81,11 +81,25 @@ pub const FRAME_MAGIC: u32 = 0x54_47_57_4C;
 ///   frame is the most likely position for the newest mutation, so this is not an
 ///   exotic corner.
 ///
-/// Nothing is broken by that asymmetry at present: no code path emits a delta
-/// frame, so no delta-bearing WAL exists on disk. It is recorded here because the
-/// first commit that DOES emit one is the first commit at which an older binary
-/// can meet one, and the trailing-frame case is a decision it must make with the
-/// real behaviour in front of it rather than the assumed one.
+/// ## The rollback caveat is LIVE from this commit on
+///
+/// This IS the commit that emits delta frames: the write-behind store frames an
+/// OR mutation as `WalOp::OrDelta` whenever its arming flag is on and the
+/// mutation point handed it a witness. Delta-bearing WALs therefore exist on
+/// disk, and the asymmetry above is no longer hypothetical.
+///
+/// The disposition is unchanged and deliberate — **NO BUMP**, for the reasons
+/// recorded above — so the practical consequence is stated here rather than
+/// discovered by an operator:
+///
+/// - Rolling a node BACK across this commit is not a clean reversal. The older
+///   binary cannot deserialize a delta frame, and the trailing-frame case is
+///   the likely one for the newest write on each partition's active segment, so
+///   the rollback may **silently drop that mutation** and durably truncate the
+///   segment to the intact prefix.
+/// - A rollback that must not lose those writes has to drain the WAL under the
+///   new binary first, or run with `TOPGUN_OR_DELTA_WAL=false` long enough for
+///   every delta frame already on disk to be applied and garbage-collected.
 pub const FRAME_VERSION: u8 = 1;
 
 /// Total header bytes: 4 (magic) + 1 (version) + 4 (length) + 4 (crc32c).
