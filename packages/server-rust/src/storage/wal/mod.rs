@@ -2600,15 +2600,21 @@ mod tests {
             || WAL_HARNESS_CASES_RS,
             || format!("fn is_delta_frame_{}(rel: &str) -> bool", "home"),
         ),
+        // These two split one character EARLIER than the others on purpose. Split
+        // at the brace, the row's own literal still carries the whole control as a
+        // prefix, so a source mis-pointed at THIS file would satisfy its own
+        // control and the mis-point would go unreported. Splitting inside the
+        // identifier leaves no such prefix here — the same reason every needle
+        // below is rebuilt from parts.
         (
             "datastores/write_behind.rs",
             || WRITE_BEHIND_RS,
-            || format!("pub struct WriteBehindDataStore {}", "{"),
+            || format!("pub struct WriteBehindDataStor{}", "e {"),
         ),
         (
             "service/domain/crdt.rs",
             || CRDT_RS,
-            || format!("pub struct CrdtService {}", "{"),
+            || format!("pub struct CrdtServic{}", "e {"),
         ),
     ];
 
