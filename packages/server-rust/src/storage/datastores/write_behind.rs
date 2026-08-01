@@ -3065,6 +3065,31 @@ impl MapDataStore for WriteBehindDataStore {
         }
     }
 
+    /// Persists `value` for `(map, key)` directly, superseding whatever this
+    /// store has buffered for that key.
+    ///
+    /// # Caller obligation (load-bearing, not advisory)
+    ///
+    /// `value` MUST subsume every buffered op this store holds for `(map, key)`
+    /// — it has to be the state the key would have had if those ops had been
+    /// applied in order. This site writes **no WAL frame of its own**: it makes
+    /// the caller's value durable in the inner store and then resolves the
+    /// superseded entry's WAL sequences, retiring their frames without ever
+    /// having applied them. A caller that passes a value which does not carry a
+    /// superseded `Remove`'s effect therefore loses that acked delete outright,
+    /// with no crash involved: the delete's frame is resolved away while the
+    /// value that replaced it never expressed the deletion.
+    ///
+    /// The obligation is currently **vacuous** — every caller is under
+    /// `#[cfg(test)]` and passes the key's full current value — and it is
+    /// written here because it stops being vacuous the moment a production
+    /// caller (an eviction path, say) is wired to this method.
+    ///
+    /// The crash-window counterpart is different and is a no-op: a crash inside
+    /// the inner-store write leaves the superseded frames un-resolved and
+    /// therefore still enumerable, and `TG-WAL-009`'s ascending replay puts the
+    /// newer frame after the older `Remove`. See
+    /// `tests::flush_key_frameless_window_leaves_no_enumerable_past_older_remove`.
     async fn flush_key(
         &self,
         map: &str,
