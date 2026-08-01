@@ -68,7 +68,7 @@
 //! verdict (including its `passed` flag), but whether that verdict gates the run
 //! is decided in `main.rs`, not here. The byte **slope** is now a HARD gate
 //! there. The gauge is restart-survivable (`reconcile_tombstone_bytes` in
-//! `bin/topgun_server.rs` re-seeds it via `set_tombstone_bytes` at boot) AND
+//! `storage/record.rs` re-seeds it via `set_tombstone_bytes` at boot) AND
 //! decrementable within a process life: every tombstone-add increments it and
 //! a successful prune-drop decrements it (`sub_tombstone_bytes`, wired on the
 //! CRDT write path's remove/prune handling). Decrementing alone is not
