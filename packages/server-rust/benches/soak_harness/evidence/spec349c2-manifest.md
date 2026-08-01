@@ -48,13 +48,29 @@ an enumerated one, which is the form a reader can actually check:
 | `benches/soak_harness/report.rs` | Three additive report structs + four additive fields on `SoakReport`/`ProgressSnapshot` | **No** — serialization-only. Nothing read by a sampler, an assessment, or the write path. |
 | `benches/soak_harness/main.rs` | Populates those fields from counters the summary already loaded; deletes a local struct made redundant by them | **No** — same counters, same values, one additional consumer. |
 | `src/storage/datastores/write_behind.rs` | One `///` block (the TODO-628 pointer) | **No** — doc-comment; not compiled into semantics. |
+| `tests/soak_wal_census.rs` | Additive `#[test]` fns asserting the fields above against a fixture | **No** — a `tests/` integration target. It is linked into neither the measured `topgun-server` binary nor the `soak_harness` bench, so no code path under measurement can reach it; it only reads. |
+
+**The table must agree with the command.** `git diff --name-only d6922f08..HEAD -- '*.rs'` returns
+**four** paths, and all four are rows above. An earlier revision listed three — omitting
+`tests/soak_wal_census.rs` — which left a reader running the named command with a count the table did
+not match. Since the enumeration's whole purpose is that it is checkable, an incomplete one is worse
+than no enumeration at all, and the count is called out here so the check is a comparison rather
+than a scan.
+
+**Scope of this attestation, stated so it is not over-read: it covers `.rs` only.** One non-`.rs`
+file in the measurement chain also changed after the runs — `spec349c2-fit.awk`, which computes every
+slope in §2. Two changes landed there (`int()` truncation on the gauge scrape; `rows_total` renamed
+`rows_used`), and both are **fit-neutral**: re-running the committed script over the committed CSVs
+reproduces every §2.1 and §2.3 figure to the digit. That is a verified reproduction, not an
+argument — anyone can re-run it. The runner (`spec349c2-plateau.sh`) also changed, but it produces no
+figure in this manifest; it produces future runs.
 
 So: **the committed artifacts in this directory were produced by `d6922f08`, and every `.rs` change
-since is additive telemetry or documentation that cannot alter the measured path.** The weaker,
+since is additive telemetry, documentation or test that cannot alter the measured path.** The weaker,
 enumerated claim is the honest one; the reader is not asked to trust that the diff is empty, only to
 check that each hunk is emission-only. Re-running either arm on today's HEAD would produce the same
-series plus the fields the runs are missing — which is exactly why §7.3 records those fields as
-unrecoverable for these two runs rather than quietly back-filling them.
+series plus the fields these runs' JSON is missing — fields whose values, for these two runs, are
+recoverable from the committed console logs (§7.3) rather than back-filled.
 
 **Host / OS.** `Darwin MacBookPro 25.5.0` (Darwin Kernel 25.5.0, `RELEASE_ARM64_T6000`, arm64),
 macOS 26.5.2 (build 25F84), `MacBookPro18,2`, 10 CPUs, 32 GiB RAM. Toolchain
