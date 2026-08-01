@@ -54,6 +54,8 @@ BASE="spec349c2-emitter-${STATE}"
 CSV_OUT="${OUT_DIR}/${BASE}.csv"
 JSON_OUT="${OUT_DIR}/${BASE}.soak.json"
 PROGRESS_OUT="${OUT_DIR}/${BASE}.progress.jsonl"
+# The effective-matrix echo, committed beside the series it describes.
+MATRIX_OUT="${OUT_DIR}/${BASE}.matrix.txt"
 # The harness derives the mechanism report's path from --json-output via Rust's
 # `Path::with_extension`, which replaces the LAST extension only: it writes
 # "<base>.soak.mechanism.json". The ledger for these runs names
@@ -258,14 +260,14 @@ rm -f "$STOP_FILE" "$FAIL_FILE"
 
 # Refuse to silently overwrite artifacts: a re-run that clobbers a recorded
 # series destroys the only copy of a 60-minute measurement.
-for f in "$CSV_OUT" "$JSON_OUT" "$PROGRESS_OUT" "$MECH_OUT" "$MECH_RAW"; do
+for f in "$CSV_OUT" "$JSON_OUT" "$PROGRESS_OUT" "$MECH_OUT" "$MECH_RAW" "$MATRIX_OUT"; do
   if [ -e "$f" ] && [ "${SPEC349C2_FORCE:-0}" != "1" ]; then
     echo "FATAL: artifact already exists: $f" >&2
     echo "       Move it aside, or re-run with SPEC349C2_FORCE=1 to overwrite." >&2
     exit 1
   fi
 done
-for f in "$CSV_OUT" "$JSON_OUT" "$PROGRESS_OUT"; do
+for f in "$CSV_OUT" "$JSON_OUT" "$PROGRESS_OUT" "$MATRIX_OUT"; do
   d="$(dirname "$f")"
   if [ ! -w "$d" ]; then
     echo "FATAL: artifact directory is not writable: $d" >&2
@@ -309,26 +311,34 @@ if [ -n "$(resolve_server_pid)" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Report the effective matrix before starting (this goes to the console log
-#    beside the run, and is what the manifest's env-matrix section is copied
-#    from).
+# 6. Report the effective matrix before starting.
+#
+#    This block is `tee`d into a COMMITTED artifact, not merely printed. It used
+#    to go to this script's own stdout only -- $CONSOLE_LOG captures the
+#    redirected harness child, not the runner -- which left one field (the
+#    dirty-tree flag) attested by the run record rather than observable in any
+#    artifact, and left the whole block living in a scratch file under target/.
+#    The matrix that describes a run has to outlive the run's working directory.
 # ---------------------------------------------------------------------------
-echo
-echo "=== spec349c2 plateau run: emitter ${STATE} ==="
-echo "  repo HEAD:      $(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo '<not a git checkout>')"
-echo "  dirty tree:     $(test -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null || true)" && echo yes || echo no)"
-echo "  host/OS:        $(uname -a)"
-echo "  data dir:       $DATA_DIR"
-echo "  csv:            $CSV_OUT"
-echo "  soak.json:      $JSON_OUT"
-echo "  mechanism.json: $MECH_OUT (harness writes $(basename "$MECH_RAW"); renamed after the run)"
-echo "  progress.jsonl: $PROGRESS_OUT"
-echo "  console log:    $CONSOLE_LOG"
-echo "  duration:       ${DURATION}s$( [ "$SMOKE" = "1" ] && echo '  <-- SMOKE OVERRIDE')"
-echo "  csv cadence:    ${SAMPLE_INTERVAL}s"
-echo "  TOPGUN_OR_DELTA_WAL: ${TOPGUN_OR_DELTA_WAL:-<unset: armed by default>}"
-echo "  TOPGUN_EPOCH_WIDTH:  ${TOPGUN_EPOCH_WIDTH:-<unset: production default 1000>}"
-echo
+{
+  echo
+  echo "=== spec349c2 plateau run: emitter ${STATE} ==="
+  echo "  repo HEAD:      $(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo '<not a git checkout>')"
+  echo "  dirty tree:     $(test -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null || true)" && echo yes || echo no)"
+  echo "  host/OS:        $(uname -a)"
+  echo "  data dir:       $DATA_DIR"
+  echo "  csv:            $CSV_OUT"
+  echo "  soak.json:      $JSON_OUT"
+  echo "  mechanism.json: $MECH_OUT (harness writes $(basename "$MECH_RAW"); renamed after the run)"
+  echo "  progress.jsonl: $PROGRESS_OUT"
+  echo "  matrix:         $MATRIX_OUT"
+  echo "  console log:    $CONSOLE_LOG"
+  echo "  duration:       ${DURATION}s$( [ "$SMOKE" = "1" ] && echo '  <-- SMOKE OVERRIDE')"
+  echo "  csv cadence:    ${SAMPLE_INTERVAL}s"
+  echo "  TOPGUN_OR_DELTA_WAL: ${TOPGUN_OR_DELTA_WAL:-<unset: armed by default>}"
+  echo "  TOPGUN_EPOCH_WIDTH:  ${TOPGUN_EPOCH_WIDTH:-<unset: production default 1000>}"
+  echo
+} | tee "$MATRIX_OUT"
 
 # ---------------------------------------------------------------------------
 # 7. Launch.
@@ -418,6 +428,43 @@ kib_to_mb() { awk -v k="${1:-0}" 'BEGIN { printf "%.3f", k / 1024 }'; }
 # "du failed" recorded as 0 would punch a spurious hole in a rising series and
 # drag the fit toward zero -- a silent measurement error, which is the one class
 # of failure these runs cannot tolerate.
+# Scrape the server's own decrementable OR-Map tombstone-bytes gauge off the
+# same /metrics endpoint the harness scrapes. Recorded as a CSV column so the
+# series that decides the tombstone-byte HARD gate survives the run in a
+# committed artifact -- the verdict used to be reconstructable only from the
+# harness's stdout, which lives in a scratch file under target/ and is gone by
+# the time anyone re-reads a failed run.
+#
+# A failed scrape yields ABSENT rather than 0: a zero is a real measurement
+# ("no tombstone bytes") and must never be forged from a transport error. The
+# post-run column check below is what turns an all-ABSENT column into a
+# declared instrument defect.
+TOMBSTONE_METRIC='topgun_ormap_tombstone_bytes'
+tombstone_bytes() {
+  local body
+  body="$(curl -fsS --max-time 5 "http://127.0.0.1:${SERVER_PORT}/metrics" 2>/dev/null)" || {
+    printf 'ABSENT'
+    return 0
+  }
+  # Take the first non-comment sample line for the metric, bare or labelled,
+  # and truncate Prometheus's trailing ".0" float rendering to a whole count --
+  # the same two readings the harness's own parser accepts.
+  printf '%s' "$body" | awk -v m="$TOMBSTONE_METRIC" '
+    /^[[:space:]]*#/ { next }
+    {
+      name = $1
+      if (name == m || index(name, m "{") == 1) {
+        v = $2
+        sub(/\.0+$/, "", v)
+        print v
+        found = 1
+        exit
+      }
+    }
+    END { if (!found) printf "ABSENT" }
+  '
+}
+
 du_kib() {  # $1 = path
   if [ ! -e "$1" ]; then
     printf 'ABSENT'
@@ -539,16 +586,28 @@ emit_row() {
     esac
   done
 
-  printf '%d,%s,%s,%s,%s\n' \
+  # The gauge column is held to a weaker rule than the four above: a scrape
+  # that fails is written as an empty cell, NOT as a fatal. A transient /metrics
+  # miss must not abort a 72-hour run over a diagnostic column, and an empty
+  # cell is honestly distinguishable from a measured zero. Systematic failure
+  # is caught after the run, where an all-empty column is an instrument defect.
+  local tomb
+  tomb="$(tombstone_bytes)"
+  case "$tomb" in
+    ''|ABSENT|*[!0-9]*) tomb="" ;;
+  esac
+
+  printf '%d,%s,%s,%s,%s,%s\n' \
     "$elapsed" \
     "$(kib_to_mb "$rss_kib")" \
     "$(kib_to_mb "$wal_kib")" \
     "$(kib_to_mb "$redb_kib")" \
     "$(kib_to_mb "$total_kib")" \
+    "$tomb" \
     >> "$CSV_OUT"
 }
 
-echo 'elapsed_secs,rss_mb,wal_mb,redb_mb,disk_total_mb' > "$CSV_OUT"
+echo 'elapsed_secs,rss_mb,wal_mb,redb_mb,disk_total_mb,tombstone_bytes' > "$CSV_OUT"
 
 sampler_loop() {
   local next="$T0"
@@ -607,7 +666,7 @@ if [ -s "$FAIL_FILE" ]; then
 fi
 
 HEADER="$(head -1 "$CSV_OUT" 2>/dev/null || true)"
-if [ "$HEADER" != 'elapsed_secs,rss_mb,wal_mb,redb_mb,disk_total_mb' ]; then
+if [ "$HEADER" != 'elapsed_secs,rss_mb,wal_mb,redb_mb,disk_total_mb,tombstone_bytes' ]; then
   fail_instrument "CSV header is '$HEADER'"
 fi
 ROWS="$(( $(wc -l < "$CSV_OUT") - 1 ))"
@@ -645,6 +704,34 @@ col_report 2 rss_mb        || fail_instrument "rss_mb column is empty or all-zer
 col_report 3 wal_mb        || fail_instrument "wal_mb column is empty or all-zero (wrong WAL path?)"
 col_report 4 redb_mb       || fail_instrument "redb_mb column is empty or all-zero (wrong redb path?)"
 col_report 5 disk_total_mb || fail_instrument "disk_total_mb column is empty or all-zero"
+
+# The gauge column is checked for POPULATION, not for non-zero: a genuinely
+# bounded tombstone corpus may legitimately read 0 for a whole run, and failing
+# on that would be an instrument that refuses to record the passing case. What
+# is never legitimate is a column with no readings at all -- that is a blind
+# diagnostic, and a blind diagnostic on the series that decides the hard gate
+# is exactly the artifact-mortality this column exists to end.
+tombstone_col_report() {
+  awk -F, '
+    NR == 1 { next }
+    {
+      v = $6
+      gsub(/[ \t\r]/, "", v)
+      if (v == "") empty++
+      else {
+        n++
+        if (n == 1 || v + 0 < min) min = v + 0
+        if (n == 1 || v + 0 > max) max = v + 0
+      }
+    }
+    END {
+      printf "  %-14s n=%d empty=%d min=%.0f max=%.0f\n",
+             "tombstone_bytes", n + 0, empty + 0, min + 0, max + 0
+      if (n == 0) exit 1
+    }
+  ' "$CSV_OUT"
+}
+tombstone_col_report || fail_instrument "tombstone_bytes column has no readings (blind gauge scrape)"
 
 for f in "$JSON_OUT" "$MECH_OUT"; do
   if [ ! -s "$f" ]; then

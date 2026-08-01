@@ -32,6 +32,59 @@ pub struct MemoryReport {
     pub reason: Option<String>,
 }
 
+/// Tombstone-byte section of the final report.
+///
+/// Mirrors the assessment the run-end verdict is computed from. It is a REPORT
+/// field and not merely a console line because `passed` is hard-ANDed with this
+/// verdict: a run that fails here and persists only `passed: false` leaves no
+/// consumer able to say *why* from the committed artifact, and the console the
+/// numbers used to live in is a scratch file under `target/`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TombstoneReport {
+    pub samples: usize,
+    pub first_bytes: u64,
+    pub peak_bytes: u64,
+    pub last_bytes: u64,
+    pub slope_bytes_per_hour: f64,
+    pub passed: bool,
+    pub reason: Option<String>,
+}
+
+/// Disk-growth section of the final report. Persisted for the same reason as
+/// [`TombstoneReport`]: its verdict is hard-ANDed into `passed`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskReport {
+    pub samples: usize,
+    pub first_mb: f64,
+    pub peak_mb: f64,
+    pub last_mb: f64,
+    pub slope_mb_per_hour: f64,
+    pub passed: bool,
+    pub reason: Option<String>,
+}
+
+/// Tracked-client confirm-apply section of the final report.
+///
+/// This is the diagnostic that separates the two indistinguishable causes of a
+/// climbing tombstone gauge: a real prune leak, versus a harness whose tracked
+/// client never ACKed, so the low-water-mark never advanced and the epoch-scoped
+/// prune was never licensed to run. `confirms = 0` (or a flat `confirms` beside
+/// a climbing `confirm_errors`) means the second; an advancing
+/// `last_confirmed_epoch` rules it out and leaves only the first.
+///
+/// Persisted rather than printed because the distinction is only useful at the
+/// moment someone re-reads a failed run, which is exactly when a console log
+/// under `target/` no longer exists.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmApplyReport {
+    pub confirms: u64,
+    pub last_confirmed_epoch: u64,
+    pub confirm_errors: u64,
+}
+
 /// Final structured outcome of a soak run.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,6 +124,12 @@ pub struct SoakReport {
     /// can be promoted to a required gate when its dependency lands.
     pub pending_gates: Vec<String>,
     pub memory: MemoryReport,
+    /// Every verdict that `passed` is hard-ANDed with, persisted beside it. The
+    /// invariant this upholds: a consumer holding only this file can name the
+    /// clause that failed the run without access to the process's stdout.
+    pub tombstones: TombstoneReport,
+    pub disk: DiskReport,
+    pub confirm_apply: ConfirmApplyReport,
     pub panic_report: Option<String>,
     pub passed: bool,
     pub finished_reason: String,
@@ -94,6 +153,16 @@ pub struct ProgressSnapshot {
     pub peak_rss_mb: f64,
     pub last_rss_mb: f64,
     pub panics_seen: bool,
+    /// The tracked client's confirm-apply cursor AT THIS CHECKPOINT.
+    ///
+    /// The final counts alone cannot distinguish a cursor that advanced steadily
+    /// from one that advanced once and stalled, and it is the per-checkpoint
+    /// SERIES that settles whether the low-water-mark was moving while the
+    /// tombstone gauge climbed. That series was previously reachable only from
+    /// the harness's stdout.
+    pub confirms: u64,
+    pub last_confirmed_epoch: u64,
+    pub confirm_errors: u64,
 }
 
 /// Append a progress snapshot as a single JSON line. Best-effort: a write error

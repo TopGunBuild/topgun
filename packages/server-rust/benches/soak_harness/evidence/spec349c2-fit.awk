@@ -9,7 +9,14 @@
 #   awk -v col=rss_mb -v window=last_half -f spec349c2-fit.awk run.csv
 #
 #   col     one of the CSV's value columns (rss_mb | wal_mb | redb_mb |
-#           disk_total_mb). Required.
+#           disk_total_mb | tombstone_bytes). Required. Resolved by HEADER NAME,
+#           so a CSV written before a column was added still fits every column
+#           it does carry.
+#
+#           NOTE on units: the printed field is named `slope_mb_per_hour`
+#           because every column it was built for is a megabyte column. For
+#           `tombstone_bytes` the fit is arithmetically identical but the unit
+#           is BYTES per hour -- read the name as "value units per hour" there.
 #   window  last_half (default) | full
 #             last_half = rows [floor(n/2) .. n-1] over the FULL row count n,
 #             the same floor-biased split the harness's own last-half statistic
@@ -85,6 +92,15 @@ NR == 1 {
 {
     xs = trim($xcol)
     ys = trim($ycol)
+    # An EMPTY value cell is a scrape that did not answer, and is dropped from
+    # the fit rather than fatal -- a gauge column is allowed to have holes where
+    # a du/ps column is not. It is counted so the caller can see how much of the
+    # window was actually measured. A cell that is present but non-numeric is
+    # still fatal: that is a malformed row, not a missing reading.
+    if (ys == "") {
+        skipped++
+        next
+    }
     if (!isnum(xs) || !isnum(ys)) {
         die("non-numeric cell at line " NR " (elapsed_secs='" xs "', " col "='" ys "')")
     }
@@ -141,7 +157,7 @@ END {
     }
     r2_s = (sst > 0) ? sprintf("%.6f", 1 - sse / sst) : "NA"
 
-    printf "col=%s window=%s rows_total=%d n=%d", col, window, n, m
+    printf "col=%s window=%s rows_total=%d n=%d skipped_empty=%d", col, window, n, m, skipped + 0
     printf " t_start_secs=%.1f t_end_secs=%.1f span_secs=%.1f", t[start], t[n-1], t[n-1] - t[start]
     printf " y_first=%.3f y_last=%.3f", y[start], y[n-1]
     printf " slope_mb_per_hour=%.6f se_mb_per_hour=%s", b, se_s

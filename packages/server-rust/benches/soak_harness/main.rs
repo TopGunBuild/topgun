@@ -101,7 +101,8 @@ use or_noloss::{missing_acked_adds, OrLedger};
 use process::{resolve_server_binary, ServerConfig, ServerSupervisor};
 use report::{
     append_progress, effective_epoch_width, scan_wal_frame_sizes, utc_timestamp_now, write_report,
-    MemoryReport, ProgressSnapshot, SoakReport, WalFrameStats,
+    ConfirmApplyReport, DiskReport, MemoryReport, ProgressSnapshot, SoakReport, TombstoneReport,
+    WalFrameStats,
 };
 use topgun_server::storage::record::RecordValue;
 
@@ -704,6 +705,9 @@ async fn run_soak(config: &Config) -> i32 {
                     peak_rss_mb: peak,
                     last_rss_mb: last,
                     panics_seen: panic_watch.tripped(),
+                    confirms: metrics.confirms.load(Ordering::Relaxed),
+                    last_confirmed_epoch: metrics.last_confirmed_epoch.load(Ordering::Relaxed),
+                    confirm_errors: metrics.confirm_errors.load(Ordering::Relaxed),
                 },
             );
         }
@@ -924,23 +928,36 @@ async fn run_soak(config: &Config) -> i32 {
             passed: mem.passed,
             reason: mem.reason.clone(),
         },
+        tombstones: TombstoneReport {
+            samples: tombstones.samples,
+            first_bytes: tombstones.first_bytes,
+            peak_bytes: tombstones.peak_bytes,
+            last_bytes: tombstones.last_bytes,
+            slope_bytes_per_hour: tombstones.slope_bytes_per_hour,
+            passed: tombstones.passed,
+            reason: tombstones.reason.clone(),
+        },
+        disk: DiskReport {
+            samples: disk.samples,
+            first_mb: disk.first_mb,
+            peak_mb: disk.peak_mb,
+            last_mb: disk.last_mb,
+            slope_mb_per_hour: disk.slope_mb_per_hour,
+            passed: disk.passed,
+            reason: disk.reason.clone(),
+        },
+        confirm_apply: ConfirmApplyReport {
+            confirms: metrics.confirms.load(Ordering::Relaxed),
+            last_confirmed_epoch: metrics.last_confirmed_epoch.load(Ordering::Relaxed),
+            confirm_errors: metrics.confirm_errors.load(Ordering::Relaxed),
+        },
         panic_report,
         passed,
         finished_reason: finished_reason.clone(),
         timestamp: utc_timestamp_now(),
     };
 
-    print_summary(
-        &report,
-        &tombstones,
-        &disk,
-        redb_tombstone_scan,
-        &ConfirmDiagnostics {
-            confirms: metrics.confirms.load(Ordering::Relaxed),
-            last_confirmed_epoch: metrics.last_confirmed_epoch.load(Ordering::Relaxed),
-            confirm_errors: metrics.confirm_errors.load(Ordering::Relaxed),
-        },
-    );
+    print_summary(&report, &tombstones, &disk, redb_tombstone_scan);
     if let Some(path) = &config.json_output {
         write_report(path, &report);
         println!("wrote JSON report to {}", path.display());
@@ -990,24 +1007,7 @@ async fn run_soak(config: &Config) -> i32 {
             );
         }
     }
-    // NOTE: neither the tombstone-byte nor the disk verdict is a field on
-    // `SoakReport` (report.rs) — both are asserted into `passed`/`finished_reason`
-    // above and printed in the console summary below, but adding structured
-    // fields there would be a 6th touched file against this spec's 5-file cap.
-    // Tracked as a follow-up so JSON consumers (CI dashboards) gain the same
-    // visibility the console already has.
-
     i32::from(!passed)
-}
-
-/// Tracked-client confirm-apply diagnostics, surfaced in the summary without
-/// widening the persisted `SoakReport` (report.rs is outside this change's file
-/// budget). Purely a console signal for distinguishing a healthy LWM-advancing
-/// run from a stalled-confirm harness failure.
-struct ConfirmDiagnostics {
-    confirms: u64,
-    last_confirmed_epoch: u64,
-    confirm_errors: u64,
 }
 
 fn print_summary(
@@ -1015,7 +1015,6 @@ fn print_summary(
     tombstones: &TombstoneAssessment,
     disk: &DiskAssessment,
     redb_tombstone_scan: Option<u64>,
-    confirm: &ConfirmDiagnostics,
 ) {
     println!("\n=== SOAK SUMMARY ===");
     println!(
@@ -1032,7 +1031,9 @@ fn print_summary(
         "confirm_apply:     confirms={} lastEpoch={} errors={} \
          (tracked client advances the low-water-mark that licenses pruning; \
          confirms=0 with a climbing gauge = LWM never advanced)",
-        confirm.confirms, confirm.last_confirmed_epoch, confirm.confirm_errors
+        r.confirm_apply.confirms,
+        r.confirm_apply.last_confirmed_epoch,
+        r.confirm_apply.confirm_errors
     );
     println!("steady_checkpts:   {}", r.steady_checkpoints);
     println!(
