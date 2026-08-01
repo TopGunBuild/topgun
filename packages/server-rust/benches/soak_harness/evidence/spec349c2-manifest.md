@@ -21,6 +21,7 @@ value, **the artifact wins** and the disagreement is recorded in §12.
 | `spec349c2-emitter-{on,off}.soak.json` | harness `--json-output` |
 | `spec349c2-emitter-{on,off}.mechanism.json` | harness `--mechanism-report` (the harness writes `<base>.soak.mechanism.json`; the runner renames it to the ledgered name after the run) |
 | `spec349c2-emitter-{on,off}.progress.jsonl` | harness `--progress-output` (coarse independent RSS witness; no disk field) |
+| `spec349c2-emitter-{on,off}.harness-console.log` | the harness's own stdout, captured by the runner — the **only** artifact of these two runs carrying the confirm-apply cursor (see §7.3) |
 | `spec349c2-plateau.sh` | the runner — **the matrix is executed by this file, not transcribed by hand** |
 | `spec349c2-fit.awk` | the post-hoc OLS fit; every slope below is `awk -v col=<series> -v window=<last_half\|full> -f spec349c2-fit.awk <run>.csv` |
 | `spec349c2-manifest.md` | this file |
@@ -389,12 +390,16 @@ candidate explanations for a hard gate that fires, and they are mutually exclusi
 - **(b) genuine bound breach** — every condition the gate presupposes is satisfied, the gate is
   live and meaningful, and the measured slope exceeds the bound.
 
-**The verdict is (b).** (a) is refuted on all three of the conditions SPEC-345's gate presupposes:
+**The verdict is (b).** (a) is refuted on all three of the conditions SPEC-345's gate presupposes.
+**Every figure in the table below is re-readable from a committed artifact in this directory —
+§7.3 gives the per-figure provenance, file by file and line by line, and it is the section to check
+before relying on any number here.** (Earlier revisions of this manifest had one of these legs
+resting on transcription; that is no longer the case, and §7.3 records the correction.)
 
 | Precondition the gate presupposes | Observed | Refutes (a)? |
 |---|---|---|
 | A **tracked confirm-apply client** is in the protocol — without it the low-water-mark never advances and the epoch-scoped prune is never licensed, which is precisely the vacuous-gate trap SPEC-345 called out | The tracked client is driven **unconditionally**: `no_ack` defaults `false` (`main.rs`), the runner passes no `--no-ack`, and the call site is `if !cfg.no_ack`. It also demonstrably **worked**: `confirms=1727`, `confirmErrors=51` — errors are ~3 % of rounds and cannot account for a 485 × overshoot | ✅ |
-| **Enough epochs cycle** at the pinned `epochWidth=1000` for prune eligibility to be reached inside the window | `lastConfirmedEpoch` reached **113**, advancing monotonically across all 11 checkpoints (11 → 20 → 29 → 39 → 48 → 57 → 66 → 76 → 85 → 94 → 104 → 113). The last-half window (1797 s) therefore spans ~56 epochs — far past the ~2-epoch prune ramp, and the 120 s min-window guard is cleared with `samples=720` (not a blind monitor) | ✅ |
+| **Enough epochs cycle** at the pinned `epochWidth=1000` for prune eligibility to be reached inside the window | `lastConfirmedEpoch` advanced monotonically across all 11 checkpoints in **each** arm, reaching **113** at run end in both — **ON:** 11 → 21 → 30 → 39 → 48 → 57 → 66 → 75 → 84 → 94 → 103, final 113; **OFF:** 11 → 20 → 29 → 39 → 48 → 57 → 66 → 76 → 85 → 94 → 104, final 113. The last-half window (1797 s) therefore spans ~56 epochs — far past the ~2-epoch prune ramp, and the 120 s min-window guard is cleared with `samples=720` (not a blind monitor) | ✅ |
 | The **LWM actually advances** — not merely that a client is present | The monotone cursor above IS the LWM advance, and it is corroborated **gauge-independently** by the post-run redb corpus scan, which sums the real on-disk tombstone corpus rather than reading the counter: ON 200,860 B, OFF 239,256 B. A stuck-gauge artifact would not reproduce in an independent instrument | ✅ |
 
 **Why this matters beyond this spec.** `.specflow/archive/SPEC-345.md` recorded that the PASS is
@@ -457,18 +462,29 @@ figure is stated rather than assumed:
 | redb corpus scan 200,860 / 239,256 B, gauge 194,260 / 245,809 B | `*.mechanism.json` | **SURVIVES** |
 | `epochWidth=1000`, `walFsync="batched"`, `crashes=0` | `*.soak.json` | **SURVIVES** |
 | `no_ack=false`, the unconditional tracked-client drive, the `if !cfg.no_ack` call site | `main.rs` at the measured commit + the runner's own flag list | **SURVIVES** (source, not run output) |
-| `confirms=1727`, `lastConfirmedEpoch=113`, `confirmErrors=51`, and the 11-checkpoint cursor sequence | — | **DOES NOT SURVIVE for these two runs** |
+| `confirms=1727`, `lastConfirmedEpoch=113`, `confirmErrors=51`, and the per-checkpoint cursor sequence | `spec349c2-emitter-on.harness-console.log` and `spec349c2-emitter-off.harness-console.log` — final summary at **line 75** of each; the 11 checkpoint lines at **8, 13, 18, 24, 29, 34, 40, 45, 50, 55, 61** (ON) and **8, 13, 19, 24, 29, 34, 40, 45, 50, 55, 61** (OFF) | **SURVIVES** |
 
-**The honest statement about that last row:** those figures were read off the running harness's
-stdout, which the runner wrote to `<data-dir>.meta/harness-console.log` under `target/`. That file is
-**gone**, and no committed artifact of these two runs carries the confirm-apply cursor — the
-committed `progress.jsonl` of these runs has 11 checkpoints but no confirm fields. The figures are
-therefore recorded here **as transcribed**, and a reader who wants to re-derive them from this
-directory **cannot**. They are corroborated only indirectly: by the `no_ack` source path above, and
-by the gauge-independent redb corpus scan, both of which do survive.
+**Correction on the record — the earlier "gone" claim was false.** An earlier revision of this
+section stated that the harness stdout the runner wrote to `<data-dir>.meta/harness-console.log`
+under `target/` was **gone**, and recorded the confirm-apply figures **as transcribed** on that
+ground. That was wrong as a statement of fact: both files had sat under `target/` since the runs,
+untouched, with their original run mtimes (ON 10,594 B, 18:06; OFF 10,857 B, 19:08). Nothing was
+deleted — the files were simply never looked for after the runner finished. The premise being false,
+the remedy Review v1's C3 originally named is the one that applies: **both logs are now committed
+into this directory**, byte-identical to the originals, and the figures above are **artifact-backed
+with path and line cites**, not transcribed. §7.1's three legs are therefore checkable end-to-end
+from this directory alone. The corroborating evidence named below (the `no_ack` source path, the
+gauge-independent redb corpus scan) remains true and is now redundant rather than load-bearing.
 
-**This is a defect in the instrument, and it is fixed rather than merely noted.** The numbers that
-failed BOTH runs must never again live only in a scratch file. From this commit forward:
+*Why the correction is recorded rather than silently overwritten:* a provenance table whose stated
+reasons are not themselves checkable is the same class of defect it exists to prevent. The reader
+should be able to see that this row changed and why.
+
+**The instrument defect is real independently of the correction above, and it is fixed rather than
+merely noted.** That the scratch file happened to survive is luck, not design: it lives under
+`target/`, which any `cargo clean` removes. The numbers that failed BOTH runs must not depend on it.
+So the remedy is both halves — the two logs are committed (above), *and* from this commit forward the
+harness persists these figures itself:
 
 - `*.soak.json` carries a `tombstones` object (samples, first/peak/last bytes, slope, passed,
   reason), a `disk` object, and a `confirmApply` object (`confirms`, `lastConfirmedEpoch`,
