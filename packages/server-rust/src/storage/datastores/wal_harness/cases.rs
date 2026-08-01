@@ -2299,7 +2299,8 @@ fn assert_classifier_discriminates() {
 }
 
 /// The files a delta frame may be built in: the WAL codec's own tests, the crash
-/// harness that injects them, and the ONE production emitter.
+/// harness that injects them, the ONE production emitter, and the WAL frame-kind
+/// census's fixture builder.
 ///
 /// The write-behind store is the sanctioned home of the emitter — it is where an
 /// OR mutation becomes a `WalOp::OrDelta` frame, and where that emission is proven
@@ -2307,11 +2308,22 @@ fn assert_classifier_discriminates() {
 /// `service/domain/crdt.rs` is deliberately NOT here: it is the largest file in the
 /// package and the one most likely to grow an accidental emitter, so exempting it
 /// would blind both belts over exactly the source they are most useful on.
+///
+/// `tests/soak_wal_census.rs` is admitted on a different ground, and the difference
+/// is what keeps the belts sharp. It is an integration target that sees only the
+/// crate's PUBLIC surface: it hands a hand-built frame to `format::encode` to make
+/// a fixture the census then reads back, and it reaches no store, no writer and no
+/// live write path, so nothing it builds can become a frame a running node emits.
+/// A census that discriminates delta frames from snapshot frames cannot be proven
+/// without one of each, and refusing it the fixture would price its own AC out of
+/// existence — the census would then be asserted against hand-built structs, which
+/// is the instrument-without-a-decoder shape this file exists to refuse.
 fn is_delta_frame_home(rel: &str) -> bool {
     rel == "src/storage/wal/mod.rs"
         || rel == "src/storage/wal/format.rs"
         || rel.starts_with("src/storage/datastores/wal_harness/")
         || rel == "src/storage/datastores/write_behind.rs"
+        || rel == "tests/soak_wal_census.rs"
 }
 
 /// Every checked-in `.rs` under `root` as `(path relative to `package`, contents)`.
