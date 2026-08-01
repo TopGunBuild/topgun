@@ -277,8 +277,11 @@ pub enum WalStorePayload {
 ///     is silently dropped and physically gone, not merely skipped — and the
 ///     newest frame is the most likely position for the newest mutation.
 ///
-///   Nothing is broken by that asymmetry today, because no code path emits a
-///   delta frame and no delta-bearing WAL exists on disk. See
+///   That asymmetry is LIVE from this merge on: the write-behind store frames
+///   per-op deltas, so delta-bearing WALs exist on disk and a node rolled back
+///   across this commit can meet one. Rolling back may therefore silently drop
+///   the newest OR mutation on each partition's active segment, and durably
+///   truncate that segment to the intact prefix. See
 ///   [`format::FRAME_VERSION`] for the full record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -480,30 +483,6 @@ pub struct WalWriter {
     /// Batched-commit group-commit timer: shared notifier woken every ~10 ms.
     /// When `policy == Batched`, the writer also fsyncs after every 100 ops.
     batch_flush_tx: tokio::sync::watch::Sender<()>,
-    /// A ONE-SHOT permit to put a single `WalOp::OrDelta` frame on disk.
-    ///
-    /// `false` in the one production constructor, and the only thing that sets
-    /// it is a `#[cfg(test)]` seam — the field is private, so nothing outside
-    /// this module can name it at all, and in a release build nothing can reach
-    /// the permitted state. That is what makes the refusal in `append` a
-    /// structural no-emitter guard rather than a convention: the reader lands
-    /// before the writer (`TG-OR-003`), so a delta frame reaching the durable
-    /// log today is a programming bug no matter which shape of code produced it
-    /// — an aliased import, a macro, a generated body. Whichever path emits it
-    /// dies loudly at the boundary that would have made it durable.
-    ///
-    /// **One-shot, not a mode.** `append` CONSUMES the permit with a
-    /// compare-exchange, so it admits exactly one frame per grant. A permit held
-    /// open across a `.await` would otherwise be open for every concurrent
-    /// appender on this writer, which is precisely the window an injecting
-    /// harness must not leave for a real emitter to slip through: with the
-    /// permit consumed, a second delta frame racing the injected one fail-stops
-    /// whichever of the two loses.
-    ///
-    /// Not `#[cfg(test)]` itself, deliberately: a field that vanished from a
-    /// release build would take the guard with it and leave production the only
-    /// configuration nothing checks.
-    allow_or_delta: std::sync::atomic::AtomicBool,
     /// Forces the pre-unlink watermark re-read to return this value instead of
     /// the sidecar's.
     ///
@@ -678,9 +657,6 @@ impl WalWriter {
             policy,
             partitions: AsyncMutex::new(HashMap::new()),
             batch_flush_tx,
-            // Nothing may emit a delta frame until the writer lands; this is the
-            // only constructor, so the guard in `append` is armed everywhere.
-            allow_or_delta: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             gc_revalidation_override: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -1121,35 +1097,6 @@ pub(crate) fn wal_fail_stop(tier: WalFailStopTier, ctx: &str) -> ! {
 #[async_trait]
 impl Wal for WalWriter {
     async fn append(&self, partition: u32, entry: &WalEntry) -> anyhow::Result<()> {
-        // No writer for this frame kind exists yet: recovery reads delta frames
-        // before anything emits them (`TG-OR-003`), so one arriving here is a
-        // programming bug — a partially-built emitter, or a merge that landed
-        // the writer ahead of its compatibility criteria. Refusing at the
-        // boundary that makes a frame durable is what makes "nothing emits a
-        // delta" a property of the CODE rather than of a source scan: it holds
-        // against every shape of emitter, including the ones a text scan cannot
-        // see. Checked first, so the entry is not even encoded.
-        if matches!(entry.op, WalOp::OrDelta { .. })
-            && self
-                .allow_or_delta
-                .compare_exchange(
-                    true,
-                    false,
-                    std::sync::atomic::Ordering::AcqRel,
-                    std::sync::atomic::Ordering::Acquire,
-                )
-                .is_err()
-        {
-            wal_fail_stop(
-                WalFailStopTier::P,
-                &format!(
-                    "append carried an OrDelta frame, which no path in this build may write: \
-                     partition={partition}, sequence={}, map={}, key={}",
-                    entry.sequence, entry.map, entry.key
-                ),
-            );
-        }
-
         let frame = format::encode(entry)?;
 
         let handle = self.handle(partition).await?;
@@ -1808,6 +1755,17 @@ impl WalRecovery {
     /// or dropped: a dropped remove resurrects an entry, and unlike a full-snapshot
     /// frame a delta is never repaired by a later frame.
     ///
+    /// KNOWN BOUND on that arm, deferred rather than closed (TODO-627): the fold
+    /// writes the key back with NO expiry, and "no expiry is what the live OR path
+    /// produces" is a property of the CONFIGURATION, not of the OR policy —
+    /// `ExpiryPolicy::NONE` resolves through `compute_expiration_time`, which falls
+    /// back to `StorageConfig::default_ttl_millis`, a real evictable field that is
+    /// `0` in every production wiring but is not required to be. Wire a map-level
+    /// default TTL and the snapshot arm carries the expiry across recovery while the
+    /// delta arm discards it, silently, with nothing detecting the divergence. Stated
+    /// here because a doc-contract that asserted TTL-equivalence between the two arms
+    /// would be asserting a property this code does not have.
+    ///
     /// A `WalOp::Store` frame carrying an OR value stays a SUPPORTED input and is
     /// applied in its sequence position as an ABSOLUTE SET, never as a fold-base
     /// skip hint and never as a union — see the arm for why the snapshot's
@@ -1939,11 +1897,15 @@ impl WalRecovery {
 
                 // Expiration `0` ("no expiry"): `load` returns no TTL and `add`
                 // requires one, and a delta frame carries no expiration field —
-                // it records a mutation, not a whole slot. `0` matches the live
-                // OR write path, which writes both OR closures with
-                // `ExpiryPolicy::NONE`, so the fold introduces no TTL drift. An
-                // OR path that starts writing TTLs would need the frame to carry
-                // one; it is not a value this arm may invent.
+                // it records a mutation, not a whole slot. `0` matches what the
+                // live OR write path produces today, so the fold introduces no
+                // TTL drift. An OR path that starts writing TTLs would need the
+                // frame to carry one; it is not a value this arm may invent.
+                //
+                // "Produces `0` today" is a property of the CONFIGURATION, not of
+                // the OR policy, and nothing detects the divergence if that
+                // default ever moves — the KNOWN BOUND clause in this fn's
+                // doc-contract states it in full, with its owner.
                 inner_store
                     .add(&entry.map, &entry.key, &folded, 0, now)
                     .await
@@ -2245,30 +2207,6 @@ fn current_millis() -> i64 {
 /// cannot see them at all.
 #[cfg(test)]
 impl WalWriter {
-    /// Grants a ONE-SHOT permit for the next `WalOp::OrDelta` append.
-    ///
-    /// The only thing that opens the append guard, and `#[cfg(test)]` so a
-    /// release build cannot name it. `append` consumes the permit, so a harness
-    /// that injects synthetic delta frames grants one per injected frame and
-    /// every OTHER write in the same run — including the ones riding the real
-    /// write path — stays under the refusal, even across the injected append's
-    /// own `.await`.
-    pub(crate) fn test_permit_one_or_delta_append(&self) {
-        self.allow_or_delta
-            .store(true, std::sync::atomic::Ordering::Release);
-    }
-
-    /// Whether a granted permit is still unconsumed.
-    ///
-    /// A permit that outlives the append it was granted for is a hole: it would
-    /// admit some LATER delta frame, which is the emitter this guard exists to
-    /// catch. The harness asserts on this after every injection, the same
-    /// exactly-one discipline it applies to the append observer.
-    pub(crate) fn test_or_delta_permit_outstanding(&self) -> bool {
-        self.allow_or_delta
-            .load(std::sync::atomic::Ordering::Acquire)
-    }
-
     /// Seals the partition's active segment in place.
     ///
     /// Seal/rotate always installs a FRESH active segment under the same lock, so
@@ -2497,6 +2435,324 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every source this repository ships, keyed by the sweep id that found the
+    /// no-emitter claim it used to carry.
+    ///
+    /// The invariant catalog is five levels above this file. Reaching it takes a
+    /// package → repo-root build-time edge, and that edge is taken deliberately:
+    /// the alternative is leaving the catalog's own clauses uninstrumented, which
+    /// is precisely how they survived three audits while the code around them
+    /// moved.
+    const INVARIANTS_MD: &str = include_str!("../../../../../INVARIANTS.md");
+    const WAL_FORMAT_RS: &str = include_str!("format.rs");
+    const WAL_HARNESS_MOD_RS: &str = include_str!("../datastores/wal_harness/mod.rs");
+    const WAL_HARNESS_CASES_RS: &str = include_str!("../datastores/wal_harness/cases.rs");
+    const WRITE_BEHIND_RS: &str = include_str!("../datastores/write_behind.rs");
+    const CRDT_RS: &str = include_str!("../../service/domain/crdt.rs");
+
+    /// A no-emitter claim the sweep returned, as `(sweep id, source, needle)`.
+    ///
+    /// The needle is rebuilt from parts at every row without exception. That is
+    /// load-bearing rather than stylistic: two rows target this very file, and a
+    /// third targets a file a package-walking scan reaches, so a needle written
+    /// as one literal would find ITSELF and report a claim that is not there.
+    type SweptNeedle = (&'static str, fn() -> &'static str, fn() -> String);
+
+    /// The falsified claim sites the repo-wide normalized sweep returns.
+    ///
+    /// Derived from the sweep, never maintained beside it. The length assertion
+    /// below is what makes that derivation checkable: adding a claim site and
+    /// adding a needle are otherwise independent acts, and every false green in
+    /// this lineage came from exactly that independence.
+    #[allow(clippy::type_complexity)]
+    const SWEPT_NEEDLES: [SweptNeedle; 16] = [
+        (
+            "b1",
+            || WAL_FORMAT_RS,
+            || format!("no code path {} a delta frame", "emits"),
+        ),
+        ("b4", production_source, || {
+            format!("no code path {} a delta frame", "emits")
+        }),
+        (
+            "b2",
+            || WAL_HARNESS_MOD_RS,
+            || format!("no production path {} a delta frame yet", "emits"),
+        ),
+        (
+            "b3",
+            || WAL_HARNESS_CASES_RS,
+            || format!("proof that {} emits a delta frame", "nothing"),
+        ),
+        (
+            "b5",
+            || INVARIANTS_MD,
+            || format!("No {} exists yet", "emitter"),
+        ),
+        (
+            "b6",
+            || INVARIANTS_MD,
+            || format!("The {} lands separately", "emitter"),
+        ),
+        (
+            "b7",
+            || INVARIANTS_MD,
+            || format!("held by `WalWriter::append`'s tier-P {}", "refusal"),
+        ),
+        (
+            "b8",
+            || INVARIANTS_MD,
+            || format!("fail-stopping the {} guard", "append"),
+        ),
+        (
+            "b9",
+            || WAL_HARNESS_CASES_RS,
+            || format!("no production path emits a `WalOp::OrDelta` {}", "yet"),
+        ),
+        (
+            "b10",
+            || WAL_HARNESS_CASES_RS,
+            || format!("This scan is not what holds the {} property", "no-emitter"),
+        ),
+        (
+            "b11",
+            || WRITE_BEHIND_RS,
+            || format!("No production framing answers `false` {}", "yet"),
+        ),
+        ("b12", production_source, || {
+            format!("a property of the CODE rather than of a {} scan", "source")
+        }),
+        (
+            "b13",
+            || CRDT_RS,
+            || format!("{} in production overrides them", "NOTHING"),
+        ),
+        (
+            "b14",
+            || INVARIANTS_MD,
+            || format!("no production {} site", "construction"),
+        ),
+        (
+            "b15",
+            || WAL_HARNESS_CASES_RS,
+            || format!("NO production path {} a", "constructs"),
+        ),
+        (
+            "b16",
+            || WAL_HARNESS_CASES_RS,
+            || format!("reader is provable before a {} exists", "writer"),
+        ),
+    ];
+
+    /// A second phrase living INSIDE b1's and b4's claim text.
+    ///
+    /// Held apart from the swept set so it cannot inflate the parity count: an
+    /// extra belt that silently raised the total would make the parity number
+    /// unfalsifiable, which is the bookkeeping failure this instrument exists to
+    /// close rather than to repeat.
+    #[allow(clippy::type_complexity)]
+    const SUPPLEMENTARY_NEEDLES: [SweptNeedle; 2] = [
+        (
+            "s1",
+            || WAL_FORMAT_RS,
+            || format!("no delta-bearing WAL exists {}", "on disk"),
+        ),
+        ("s2", production_source, || {
+            format!("no delta-bearing WAL exists {}", "on disk")
+        }),
+    ];
+
+    /// A phrase each source is KNOWN to contain, as `(source, control)`.
+    ///
+    /// The absence loop below is eighteen assertions that a count is zero, and a
+    /// zero has two causes: the claim is gone, or the scan never read the file.
+    /// A moved `include_str!` path, a truncating helper, a renamed catalog — any
+    /// of them turns this instrument silently vacuous while it still reports
+    /// green. Each control is a phrase whose disappearance would itself be a
+    /// finding, so the control cannot rot into a tautology.
+    ///
+    /// Rebuilt from parts for the same reason the needles are: two of these
+    /// sources are this very file.
+    #[allow(clippy::type_complexity)]
+    const SOURCE_CONTROLS: [(&str, fn() -> &'static str, fn() -> String); 7] = [
+        (
+            "INVARIANTS.md",
+            || INVARIANTS_MD,
+            || format!("TG-OR-{}: OR delta-fold recovery", "003"),
+        ),
+        ("wal/mod.rs (production prefix)", production_source, || {
+            format!("pub struct Wal{} {}", "Writer", "{")
+        }),
+        (
+            "wal/format.rs",
+            || WAL_FORMAT_RS,
+            || format!("pub const FRAME_{}: u8 = 1;", "VERSION"),
+        ),
+        (
+            "wal_harness/mod.rs",
+            || WAL_HARNESS_MOD_RS,
+            || format!("# Crash-model limit {}", "(normative)"),
+        ),
+        (
+            "wal_harness/cases.rs",
+            || WAL_HARNESS_CASES_RS,
+            || format!("fn is_delta_frame_{}(rel: &str) -> bool", "home"),
+        ),
+        // These two split one character EARLIER than the others on purpose. Split
+        // at the brace, the row's own literal still carries the whole control as a
+        // prefix, so a source mis-pointed at THIS file would satisfy its own
+        // control and the mis-point would go unreported. Splitting inside the
+        // identifier leaves no such prefix here — the same reason every needle
+        // below is rebuilt from parts.
+        (
+            "datastores/write_behind.rs",
+            || WRITE_BEHIND_RS,
+            || format!("pub struct WriteBehindDataStor{}", "e {"),
+        ),
+        (
+            "service/domain/crdt.rs",
+            || CRDT_RS,
+            || format!("pub struct CrdtServic{}", "e {"),
+        ),
+    ];
+
+    /// No file in this repository asserts that no emitter exists.
+    ///
+    /// Every count runs on the WHITESPACE-NORMALIZED view, never on raw lines. A
+    /// bare single-line search does not satisfy this: the two claims that started
+    /// this lineage were both line-wrapped inside doc comments, so a raw search
+    /// for them returned zero before a single character had been changed. That
+    /// false green is the exact defect class this scan replaces.
+    #[test]
+    fn no_document_still_claims_that_nothing_emits_a_delta_frame() {
+        // Positive controls FIRST, so a scan that reads nothing cannot report
+        // eighteen clean absences off six empty strings.
+        for (name, source, control) in SOURCE_CONTROLS
+            .iter()
+            .map(|(name, source, control)| (name, source(), control()))
+        {
+            assert!(
+                normalized(source).contains(&control),
+                "{name}: the scan cannot see this source -- {control:?} is missing, so every \
+                 absence asserted below would be an artefact of reading the wrong bytes, not a \
+                 property of the tree"
+            );
+        }
+
+        assert_eq!(
+            SWEPT_NEEDLES.len(),
+            16,
+            "the needle set is DERIVED from the repo-wide normalized sweep, not maintained \
+             beside it. If the sweep now returns a different number of falsified sites, that \
+             is a finding to surface -- never an array to edit until this passes again"
+        );
+
+        for (id, source, needle) in SWEPT_NEEDLES
+            .iter()
+            .chain(SUPPLEMENTARY_NEEDLES.iter())
+            .map(|(id, source, needle)| (id, source(), needle()))
+        {
+            let hits = normalized(source).matches(&needle).count();
+            assert_eq!(
+                hits, 0,
+                "{id}: a production path DOES emit delta frames now -- \
+                 `write_behind::add_with_witness` is the emitter -- so the claim {needle:?} \
+                 is false and must not survive anywhere in the tree"
+            );
+        }
+    }
+
+    /// The emitter, the retired guard and every instrument the emitter reddens
+    /// move as ONE unit.
+    ///
+    /// Asserted in both directions, because a one-directional check is what let
+    /// an emitter land beside instruments that still encoded its absence. An
+    /// armed emitter beside a live append guard aborts the process on the first
+    /// production OR write; a retired guard with no emitter removes a structural
+    /// protection while documenting a path that does not exist; and an emitter
+    /// beside an un-flipped source-scanning instrument is a CI break handed to
+    /// whoever merges next. All three are the same seam.
+    #[test]
+    fn the_emitter_the_guard_and_every_instrument_it_reddens_move_together() {
+        // The emitter's file is scanned to its inline test module and no
+        // further. Its own tests name the frame freely -- they are the proof the
+        // emitter works -- so scanning the whole file would let a tree whose
+        // PRODUCTION emitter had been deleted still pass this check off its
+        // leftover tests, which is the false green in miniature.
+        let emitter_source = &WRITE_BEHIND_RS[..WRITE_BEHIND_RS
+            .find("#[cfg(test)]\nmod tests {")
+            .expect("the emitter's file carries its tests in an inline `mod tests`")];
+        let emitter_present = normalized(emitter_source).contains(&format!(
+            "fn add_with_{}",
+            // Rebuilt from parts: an in-package scan counts this symbol's
+            // definitions, and a literal here would be a fourth one.
+            "witness"
+        )) && emitter_source.contains("WalOp::OrDelta");
+        assert!(
+            emitter_present,
+            "the write-behind store must override the witness-bearing add and frame the \
+             delta -- without it every clause below documents a path that does not exist"
+        );
+
+        let guard_source = normalized(production_source());
+        for residue in [
+            format!("allow_or_{}", "delta"),
+            format!("test_permit_one_or_delta_{}", "append"),
+            format!("test_or_delta_permit_{}", "outstanding"),
+        ] {
+            assert!(
+                !guard_source.contains(&residue),
+                "the emitter is live, so {residue} must be gone: the append guard would \
+                 fail-stop the process on the first production OR write"
+            );
+        }
+
+        let cases = normalized(WAL_HARNESS_CASES_RS);
+        assert!(
+            cases.contains("src/storage/datastores/write_behind.rs"),
+            "belts 2 and 3 must admit the emitter's file, or they are RED against the very \
+             change that makes them meaningful"
+        );
+
+        // Both halves of the implementor scan live in ONE fn, so a whole-file
+        // `contains` cannot tell them apart: `"total, 2,"` is satisfied by any
+        // `2` anywhere in the file, including an unrelated one, which would let a
+        // wrongly-bumped demand assertion pass the very clause written to catch
+        // it. Slice the two regions and assert each against its own count.
+        let crdt = normalized(CRDT_RS);
+        let store_side = slice_between(
+            &crdt,
+            concat!("let store_", "side = ["),
+            concat!("let demand = ", "concat!"),
+        );
+        assert!(
+            store_side.contains("assert_eq!( total, 3,"),
+            "the store-side implementor scan must count THREE -- the defaulted definition, \
+             the one production override, and the one test spy"
+        );
+        assert!(
+            store_side.contains("storage/datastores/write_behind.rs"),
+            "the store-side scan's allowlist must admit the emitter's file, or the count of \
+             three is satisfied by some other third home"
+        );
+
+        let demand = slice_between(
+            &crdt,
+            concat!("let demand = ", "concat!"),
+            concat!("fn or_doc_contracts_carry_no_", "falsified_clause"),
+        );
+        assert!(
+            demand.contains("assert_eq!( total, 2,"),
+            "the demand-predicate scan counts a DIFFERENT symbol this spec adds no \
+             implementor of, so its count must NOT have moved with the store-side one"
+        );
+        assert!(
+            !demand.contains("assert_eq!( total, 3,"),
+            "the demand-predicate scan must NOT have been bumped alongside the store-side \
+             one: that would be a false edit asserting an implementor that does not exist"
+        );
     }
 
     /// The structural half of the single-algebra rule: the fold DELEGATES, and
@@ -4519,119 +4775,6 @@ mod tests {
             before + 1,
             "The pre-check stops BEFORE the write path, so the sequence never \
              reaches the residual (B) disposition — a second record would mean it did"
-        );
-    }
-
-    /// The structural half of the no-emitter proof: whatever code constructs a
-    /// delta frame, it cannot make one DURABLE in a build that has no writer.
-    ///
-    /// This is what a source scan cannot do. A scan asks whether any text in the
-    /// tree looks like an emitter, and every such scan is evadable by a shape it
-    /// was not written to see. This asks the opposite question — whether a delta
-    /// frame ever arrives at the one function that puts bytes on disk — and gets
-    /// the answer from the frame itself, so an aliased import, a macro-generated
-    /// body or a `build.rs`-produced emitter fails here identically.
-    #[tokio::test]
-    async fn appending_an_or_delta_frame_fail_stops_at_tier_p() {
-        // Serialised against every other fail-stop assertion: the observation log
-        // is process-global, so a concurrent tier would make the index read below
-        // return someone else's entry.
-        let _guard = FAIL_STOP_TEST_LOCK.lock().await;
-
-        let dir = tempfile::tempdir().unwrap();
-        let wal = Arc::new(WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap());
-
-        let before = WalWriter::test_fail_stop_observations().len();
-
-        // Run the append on its own task so the fail-stop's test-mode panic is
-        // caught by the JoinHandle instead of unwinding the test itself.
-        let wal_clone = Arc::clone(&wal);
-        let outcome = tokio::spawn(async move {
-            wal_clone
-                .append(0, &or_delta_frame("k", OrDelta::Remove { tag: "t".into() }))
-                .await
-        })
-        .await
-        .err();
-        assert!(
-            outcome.is_some_and(|e| e.is_panic()),
-            "a delta frame reaching the append boundary must fail-stop, not return: nothing in \
-             this build may write one, so it is a programming bug rather than an I/O condition"
-        );
-
-        let observed = WalWriter::test_fail_stop_observations();
-        assert_eq!(
-            observed.get(before),
-            Some(&WalFailStopTier::P),
-            "an unwritable frame kind is a programming bug caught before framing: tier P, not \
-             tier B"
-        );
-        assert_eq!(
-            observed.len(),
-            before + 1,
-            "the check runs BEFORE the encode and the write path, so the entry never reaches the \
-             residual (B) disposition — a second record would mean it did"
-        );
-    }
-
-    /// Non-vacuity of the guard above, in both directions.
-    ///
-    /// Without this a `WalWriter` that refused EVERY append would satisfy the
-    /// fail-stop test just as well, and the harness seam that permits one
-    /// injected frame could rot with nothing noticing. It also pins the permit's
-    /// SCOPE: it is ONE-SHOT, so the frame after it fail-stops like any other.
-    /// That is what keeps a real emitter from riding through the window an
-    /// injecting harness opens — including across the injected append's own
-    /// `.await`, where a mode flag would be open to every concurrent appender.
-    #[tokio::test]
-    async fn the_or_delta_append_guard_refuses_only_delta_frames_and_only_while_armed() {
-        let _guard = FAIL_STOP_TEST_LOCK.lock().await;
-
-        let dir = tempfile::tempdir().unwrap();
-        let wal = Arc::new(WalWriter::new(dir.path().to_path_buf(), WalFsyncPolicy::None).unwrap());
-
-        // A frame kind this build DOES write is unaffected by the guard.
-        wal.append(0, &make_wal_entry(1))
-            .await
-            .expect("a Store frame must append with the guard armed");
-
-        // The test seam is the only thing that opens it — and it opens it for
-        // real: the frame kind that fail-stops above now reaches disk.
-        wal.test_permit_one_or_delta_append();
-        assert!(
-            wal.test_or_delta_permit_outstanding(),
-            "a granted permit must be observable, or the consumption assertion below proves nothing"
-        );
-        let mut delta = or_delta_frame("k", OrDelta::Remove { tag: "t".into() });
-        delta.sequence = 2;
-        wal.append(0, &delta)
-            .await
-            .expect("the injection seam must be able to put a synthetic delta frame on disk");
-
-        // The permit is ONE-SHOT: the append consumed it, so the refusal is back
-        // without anyone having to close it.
-        assert!(
-            !wal.test_or_delta_permit_outstanding(),
-            "the append must CONSUME the permit rather than leave a mode open across it"
-        );
-        let before = WalWriter::test_fail_stop_observations().len();
-        let wal_clone = Arc::clone(&wal);
-        let outcome = tokio::spawn(async move {
-            let mut delta = or_delta_frame("k", OrDelta::Remove { tag: "t".into() });
-            delta.sequence = 3;
-            wal_clone.append(0, &delta).await
-        })
-        .await
-        .err();
-        assert!(
-            outcome.is_some_and(|e| e.is_panic()),
-            "the permit must cover ONE append: a second delta frame is an emitter, and must \
-             fail-stop like any other"
-        );
-        assert_eq!(
-            WalWriter::test_fail_stop_observations().get(before),
-            Some(&WalFailStopTier::P),
-            "the re-armed refusal is the same programming-bug disposition, not a degraded one"
         );
     }
 

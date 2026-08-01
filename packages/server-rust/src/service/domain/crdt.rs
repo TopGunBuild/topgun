@@ -1878,13 +1878,18 @@ mod tests {
         (total, per_file)
     }
 
-    /// The witness-aware methods are defaulted, and NOTHING in production
-    /// overrides them: every production store reaches the defaulted bodies.
+    /// The witness-aware methods are defaulted, and exactly ONE production store
+    /// overrides them: the write-behind store, where an OR mutation becomes a
+    /// delta WAL frame. Every other production store reaches the defaulted
+    /// bodies unchanged.
     ///
-    /// This is what makes the seam inert, so it is counted rather than argued.
-    /// The one sanctioned override of the two store-side methods is the test spy
-    /// in this file; the demand predicate's one sanctioned override is the
-    /// record store's delegation to its backend.
+    /// "Exactly one" is the bound that keeps the seam reviewable, so it is
+    /// counted rather than argued: a second override would be a second place
+    /// deciding how an OR write is framed on disk, and only a count stops one
+    /// appearing unnoticed. The sanctioned overrides of the two store-side
+    /// methods are that emitter and the test spy in this file; the demand
+    /// predicate's one sanctioned override is the record store's delegation to
+    /// its backend.
     ///
     /// Every needle is rebuilt from parts. That is load-bearing, not stylistic:
     /// this scan is hosted in the same file it counts over, so a needle written
@@ -1892,7 +1897,7 @@ mod tests {
     /// allowed set excludes this file, so a self-match would fail the assertion
     /// on a correct implementation.
     #[test]
-    fn the_witness_methods_reach_no_production_implementor() {
+    fn the_witness_methods_reach_exactly_one_production_implementor() {
         let store_side = [
             concat!("fn ", "add_with_witness"),
             concat!("fn ", "wants_or_witness"),
@@ -1900,9 +1905,10 @@ mod tests {
         for needle in store_side {
             let (total, per_file) = count_across_package(needle);
             assert_eq!(
-                total, 2,
-                "{needle} must exist exactly twice -- the defaulted definition and the one \
-                 test spy; anything else is an implementor cascade. Found: {per_file:?}"
+                total, 3,
+                "{needle} must exist exactly three times -- the defaulted definition, the one \
+                 PRODUCTION override, and the one test spy; anything else is an implementor \
+                 cascade. Found: {per_file:?}"
             );
             assert!(
                 per_file
@@ -1914,8 +1920,16 @@ mod tests {
             assert!(
                 per_file
                     .iter()
+                    .any(|(path, _)| path.ends_with("storage/datastores/write_behind.rs")),
+                "{needle}'s one sanctioned PRODUCTION override is the write-behind store, which \
+                 consumes the witness by framing it. Found: {per_file:?}"
+            );
+            assert!(
+                per_file
+                    .iter()
                     .any(|(path, _)| path.ends_with("service/domain/crdt.rs")),
-                "{needle}'s one sanctioned override is the spy in this file. Found: {per_file:?}"
+                "{needle}'s one sanctioned test override is the spy in this file. \
+                 Found: {per_file:?}"
             );
         }
 
@@ -2203,120 +2217,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// A witness crossing the boundary changes NOTHING on disk: a real WAL, fed
-    /// by a real OR_ADD under an armed demand gate, still receives only
-    /// full-record frames.
-    ///
-    /// Driven against a REAL write-ahead log writer rather than a recording
-    /// double. The append-time refusal that would catch a delta frame lives in
-    /// the concrete writer's `append`, not in the log trait, so a spy log would
-    /// record whatever it was handed and could never fail-stop — a proof built on
-    /// one would be green on an instrument incapable of going red.
-    ///
-    /// The frame-kind assertion is written POSITIVELY, which entails the negative:
-    /// the only other inhabitants of the op enum are a remove frame, the delta
-    /// frame, and a test-only variant. Writing it as "is not a delta frame" would
-    /// put that variant's name in this file, and a package-wide belt scans raw
-    /// file contents for exactly that string and admits it only in the log's own
-    /// modules.
-    #[tokio::test]
-    async fn an_armed_witness_still_lands_only_full_record_frames_in_a_real_wal() {
-        use crate::storage::datastores::{WalBootstrap, WriteBehindConfig, WriteBehindDataStore};
-        use crate::storage::wal::format::{decode_all, FrameDecodeResult};
-        use crate::storage::wal::segment::parse_segment_filename;
-        use crate::storage::wal::{Wal, WalFsyncPolicy, WalOp, WalWriter};
-
-        let wal_dir = tempfile::tempdir().unwrap();
-        // Every frame is fsynced before the write acks, so the read-back below
-        // cannot pass by observing an empty segment.
-        let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
-        let write_behind = WriteBehindDataStore::new_with_wal(
-            Arc::new(NullDataStore) as Arc<dyn MapDataStore>,
-            // Long delays keep the frame un-applied for the read-back below: the
-            // watermark advancing would let segment reclamation remove exactly the
-            // frames under assertion. Durability does not depend on this — the
-            // per-op policy fsyncs each frame before its write acks.
-            WriteBehindConfig {
-                write_delay_ms: 60_000,
-                flush_interval_ms: 60_000,
-                shutdown_timeout_ms: 5_000,
-                ..WriteBehindConfig::default()
-            },
-            Some(WalBootstrap {
-                wal: Arc::clone(&wal) as Arc<dyn Wal>,
-                sequence_start: 1,
-            }),
-        );
-
-        // Armed, so the production closure really does build a witness and hand
-        // it across the boundary — the whole point is that it changes nothing.
-        let spy = Arc::new(WitnessSpyStore::wrapping(
-            Arc::clone(&write_behind) as Arc<dyn MapDataStore>,
-            true,
-        ));
-        let (svc, _factory, _frontier) = make_service_with_frontier_and_store(
-            Arc::clone(&spy) as Arc<dyn MapDataStore>,
-            Vec::new(),
-        );
-
-        Arc::clone(&svc)
-            .oneshot(or_add_op("m", "k1", "v1", "T1"))
-            .await
-            .unwrap();
-
-        // The witness really did cross the boundary, or this asserts nothing
-        // about what a witness-carrying write does to the log.
-        let carried: Vec<Option<OrDelta>> = spy.witnesses();
-        assert!(
-            carried.iter().any(Option::is_some),
-            "the armed gate must have handed a witness across the boundary, got {carried:?}"
-        );
-
-        let mut decoded = 0usize;
-        let mut listing: Vec<String> = Vec::new();
-        for entry in std::fs::read_dir(wal_dir.path()).unwrap().flatten() {
-            listing.push(format!(
-                "{} ({} bytes)",
-                entry.path().display(),
-                entry.metadata().map(|m| m.len()).unwrap_or(0)
-            ));
-            let path = entry.path();
-            // The log directory also holds per-partition applied-watermark files,
-            // which carry no frames. Selected by the log's OWN segment-name parser
-            // rather than by guessing an extension.
-            let is_segment = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .and_then(parse_segment_filename)
-                .is_some();
-            if !path.is_file() || !is_segment {
-                continue;
-            }
-            let bytes = std::fs::read(&path).unwrap();
-            let entries = match decode_all(&bytes) {
-                FrameDecodeResult::Complete(entries) => entries,
-                FrameDecodeResult::TruncatedTail { complete } => complete,
-                FrameDecodeResult::CleanEof => Vec::new(),
-                other => panic!("unexpected decode result for {}: {other:?}", path.display()),
-            };
-            for wal_entry in entries {
-                assert!(
-                    matches!(wal_entry.op, WalOp::Store { .. }),
-                    "a witness-carrying write must still frame the full record, \
-                     got a different frame kind in {}",
-                    path.display()
-                );
-                decoded += 1;
-            }
-        }
-        // Non-vacuity: a universally-quantified claim over zero frames is free.
-        assert!(
-            decoded >= 1,
-            "at least one frame must have been decoded, or the claim above is vacuous; \
-             log dir held: {listing:?}"
-        );
     }
 
     /// The share of OR writes that carry NO witness, measured deterministically.
@@ -4604,17 +4504,6 @@ mod tests {
             }
         }
 
-        /// Wraps a real backend, so writes land in that backend's WAL while the
-        /// spy still records what the boundary was handed.
-        fn wrapping(inner: Arc<dyn MapDataStore>, armed: bool) -> Self {
-            Self {
-                inner: Some(inner),
-                armed,
-                observed: Mutex::new(Vec::new()),
-                data: Mutex::new(HashMap::new()),
-            }
-        }
-
         fn observations(&self) -> Vec<WitnessObservation> {
             self.observed.lock().clone()
         }
@@ -5023,6 +4912,147 @@ mod tests {
             seen[3].is_none(),
             "a duplicate remove changed nothing and must carry no witness, got {:?}",
             seen[3]
+        );
+    }
+
+    /// A mutation that took no effect writes a FULL RECORD to the log, never a
+    /// per-op mutation frame — and its replay therefore cannot resurrect it.
+    ///
+    /// Driven end to end against a REAL write-ahead log under an armed store,
+    /// because the effect gate lives at the mutation point and the framing arm
+    /// lives at the store boundary: only a run that crosses both can show that
+    /// deleting the gate changes what reaches the disk.
+    ///
+    /// The frame-kind claim is written POSITIVELY, which entails the negative:
+    /// the only other inhabitants of the op enum are a remove frame, the per-op
+    /// mutation frame, and a test-only variant. Writing it as "is not a mutation
+    /// frame" would put that variant's name in this file, and a package-wide belt
+    /// admits that string only in the log's own modules and in the emitter.
+    ///
+    /// The resurrection question is MOOT rather than answered: a suppressed add
+    /// leaves no per-op frame for a replay to fold, so replaying the window over
+    /// a base that does NOT carry the suppressing tombstone still reproduces the
+    /// live semantic set — asserted here as the equality of the last frame's
+    /// absolute payload with the value the live path holds.
+    #[tokio::test]
+    async fn a_no_effect_or_write_frames_a_full_record_that_cannot_resurrect_it() {
+        use crate::storage::datastores::{WalBootstrap, WriteBehindConfig, WriteBehindDataStore};
+        use crate::storage::wal::format::{decode_all, FrameDecodeResult};
+        use crate::storage::wal::segment::parse_segment_filename;
+        use crate::storage::wal::{Wal, WalEntry, WalFsyncPolicy, WalOp, WalWriter};
+
+        fn frames(dir: &std::path::Path) -> Vec<WalEntry> {
+            let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.is_file()
+                        && p.file_name()
+                            .and_then(|n| n.to_str())
+                            .and_then(parse_segment_filename)
+                            .is_some()
+                })
+                .collect();
+            paths.sort();
+            let mut out = Vec::new();
+            for path in paths {
+                let bytes = std::fs::read(&path).unwrap();
+                let entries = match decode_all(&bytes) {
+                    FrameDecodeResult::Complete(entries) => entries,
+                    FrameDecodeResult::TruncatedTail { complete } => complete,
+                    FrameDecodeResult::CleanEof => Vec::new(),
+                    other => panic!("unexpected decode result: {other:?}"),
+                };
+                out.extend(entries);
+            }
+            out.sort_by_key(|e| e.sequence);
+            out
+        }
+
+        let wal_dir = tempfile::tempdir().unwrap();
+        // Every frame is fsynced before its write acks, so a read-back cannot
+        // pass by observing an empty segment. The long delays keep the frames
+        // un-applied, so watermark-driven segment reclamation cannot remove the
+        // very frames under assertion.
+        let wal = WalWriter::new(wal_dir.path().to_path_buf(), WalFsyncPolicy::PerOp).unwrap();
+        let store = WriteBehindDataStore::new_with_wal(
+            Arc::new(NullDataStore) as Arc<dyn MapDataStore>,
+            WriteBehindConfig {
+                write_delay_ms: 60_000,
+                flush_interval_ms: 60_000,
+                shutdown_timeout_ms: 5_000,
+                or_delta_wal: true,
+                ..WriteBehindConfig::default()
+            },
+            Some(WalBootstrap {
+                wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                sequence_start: 1,
+            }),
+        );
+        let (svc, _factory, _frontier) = make_service_with_frontier_and_store(
+            Arc::clone(&store) as Arc<dyn MapDataStore>,
+            Vec::new(),
+        );
+
+        for op in [
+            or_add_op("m", "k1", "v1", "T1"), // effect: inserted
+            or_remove_op("m", "k1", "T1"),    // effect: new tombstone
+        ] {
+            Arc::clone(&svc).oneshot(op).await.unwrap();
+        }
+        let effective = frames(wal_dir.path()).len();
+        // Non-vacuity, both halves: the effective ops must have reached the log
+        // (or the "new frames" set below is not the no-effect ops' frames), and
+        // they must NOT have framed a full record — a path that stopped
+        // delivering a witness would frame snapshots throughout and satisfy
+        // every assertion below. Names the variant the frame must NOT be, never
+        // the one it must be, so the belts still hold over this file.
+        assert!(
+            effective >= 2
+                && frames(wal_dir.path())
+                    .iter()
+                    .all(|f| !matches!(f.op, WalOp::Store { .. })),
+            "the two effective writes must have framed something, and never a full record; \
+             saw {effective} frames"
+        );
+
+        for op in [
+            or_add_op("m", "k1", "v1", "T1"), // NO effect: remove-wins suppressed
+            or_remove_op("m", "k1", "T1"),    // NO effect: duplicate remove
+        ] {
+            Arc::clone(&svc).oneshot(op).await.unwrap();
+        }
+
+        let all = frames(wal_dir.path());
+        let appended = &all[effective..];
+        assert!(
+            !appended.is_empty(),
+            "both no-effect ops still owe a durable write, so both must have framed one"
+        );
+        for frame in appended {
+            assert!(
+                matches!(frame.op, WalOp::Store { .. }),
+                "a no-effect OR write must re-persist its whole slot as a full record, \
+                 got a different frame kind at sequence {}",
+                frame.sequence
+            );
+        }
+
+        // Replay semantics: the newest frame is an ABSOLUTE set, so folding the
+        // window over a base that never saw the suppressing tombstone still lands
+        // on the live value. A per-op frame for the suppressed add is what would
+        // have made this untrue, and there is none to fold.
+        let live = store.load("m", "k1").await.unwrap().expect("a live value");
+        let replayed = match &all.last().expect("at least one frame").op {
+            WalOp::Store { value, .. } => value.clone(),
+            other => panic!("the newest frame must be a full record, got {other:?}"),
+        };
+        assert_eq!(
+            format!("{replayed:?}"),
+            format!("{:?}", crate::storage::wal::WalStorePayload::Record(live)),
+            "replaying the window over an empty base must reproduce the live semantic \
+             set -- a resurrected suppressed add would differ here"
         );
     }
 

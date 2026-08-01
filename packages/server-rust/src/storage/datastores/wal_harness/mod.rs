@@ -139,10 +139,12 @@ pub(crate) enum WorkOp {
     /// (`ensure_wal_seeded` → `assign_wal_sequence` → `wal_append` → `promote_wal_sequence`), the
     /// same chokepoints `WriteBehindDataStore::add` takes.
     ///
-    /// Synthetic is the design, not a shortcut: no production path emits a delta frame yet, and the
-    /// reader must be provable before a producer exists. The frame deliberately owns NO queued
-    /// entry, so nothing flushes it and the partition watermark cannot advance past it — that is
-    /// exactly the "acked, un-applied window" state recovery has to reconstruct.
+    /// Synthetic is the design, not a shortcut. A production emitter exists — the write-behind
+    /// store frames one on the real write path — but driving it would cede control over WHERE in
+    /// the fold the delta lands. This frame deliberately owns NO queued entry, so nothing flushes
+    /// it and the partition watermark cannot advance past it: exactly the "acked, un-applied
+    /// window" state recovery has to reconstruct, and a state a real write reaches only by being
+    /// interrupted at the right instant.
     OrDelta { key: Key, mutation: OrMutation },
 }
 
