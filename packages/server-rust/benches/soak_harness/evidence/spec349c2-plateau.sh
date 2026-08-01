@@ -800,9 +800,18 @@ FIT="${SCRIPT_DIR}/spec349c2-fit.awk"
 if [ -f "$FIT" ] && [ "$ROWS" -ge 4 ]; then
   echo
   echo "post-hoc OLS fits (see the SE caveat in $(basename "$FIT")):"
+  echo "  units: the field is named slope_mb_per_hour for every column; on the"
+  echo "  tombstone_bytes row the fit is identical but the unit is BYTES/hour."
   for w in full last_half; do
-    for c in rss_mb wal_mb redb_mb disk_total_mb; do
-      awk -v col="$c" -v window="$w" -f "$FIT" "$CSV_OUT" 2>&1 | sed 's/^/  /'
+    # tombstone_bytes is fitted alongside the four size series because it is the
+    # one column that decides a HARD gate; leaving it out of the operator's own
+    # summary is what let a 485x bound breach be read off a scratch file instead.
+    for c in rss_mb wal_mb redb_mb disk_total_mb tombstone_bytes; do
+      # Never fatal: this block is a convenience summary printed after the run is
+      # already over and every artifact is on disk. Under `set -euo pipefail` a
+      # non-zero awk would abort the runner here and turn a completed 60-minute
+      # measurement into a non-zero exit, which reads as a failed run.
+      awk -v col="$c" -v window="$w" -f "$FIT" "$CSV_OUT" 2>&1 | sed 's/^/  /' || true
     done
   done
 fi
