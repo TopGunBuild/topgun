@@ -446,17 +446,20 @@ tombstone_bytes() {
     printf 'ABSENT'
     return 0
   }
-  # Take the first non-comment sample line for the metric, bare or labelled,
-  # and truncate Prometheus's trailing ".0" float rendering to a whole count --
-  # the same two readings the harness's own parser accepts.
+  # Take the first non-comment sample line for the metric, bare or labelled.
+  # The value is truncated to a whole count with int(), NOT by stripping a
+  # trailing ".0": the gauge is logically u64 bytes, but Prometheus is free to
+  # render it as a float, and a regex that only handles ".0" would turn any
+  # other fractional rendering into a non-integer that the caller then discards
+  # as an unreadable cell. int() matches what the harness's own Rust parser
+  # does (parse u64, else parse f64 and truncate), so the two instruments read
+  # the same wire text the same way.
   printf '%s' "$body" | awk -v m="$TOMBSTONE_METRIC" '
     /^[[:space:]]*#/ { next }
     {
       name = $1
       if (name == m || index(name, m "{") == 1) {
-        v = $2
-        sub(/\.0+$/, "", v)
-        print v
+        printf "%d", int($2 + 0)
         found = 1
         exit
       }
@@ -711,6 +714,13 @@ col_report 5 disk_total_mb || fail_instrument "disk_total_mb column is empty or 
 # is never legitimate is a column with no readings at all -- that is a blind
 # diagnostic, and a blind diagnostic on the series that decides the hard gate
 # is exactly the artifact-mortality this column exists to end.
+#
+# Deliberately a population check and NOT a missing-sample ratio: this column is
+# CHARACTERIZATION, not the gate's input. The verdict is computed by the
+# harness's own in-process sampler and lands in soak.json's `tombstones` object;
+# a degraded scrape here therefore cannot move a verdict, only leave the
+# committed series thinner. Holes are visible without a threshold -- `empty=` is
+# printed below, and the fit reports `skipped_empty=` beside every slope.
 tombstone_col_report() {
   awk -F, '
     NR == 1 { next }

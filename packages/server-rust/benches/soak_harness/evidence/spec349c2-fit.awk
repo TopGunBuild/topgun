@@ -157,7 +157,11 @@ END {
     }
     r2_s = (sst > 0) ? sprintf("%.6f", 1 - sse / sst) : "NA"
 
-    printf "col=%s window=%s rows_total=%d n=%d skipped_empty=%d", col, window, n, m, skipped + 0
+    # `rows_used` counts rows that CARRIED A VALUE -- it is what the window and
+    # the fit are both computed over, and empty cells are absent from it rather
+    # than folded in as zeros. Reported alongside `skipped_empty` so a reader can
+    # see how much of the series was actually measured.
+    printf "col=%s window=%s rows_used=%d n=%d skipped_empty=%d", col, window, n, m, skipped + 0
     printf " t_start_secs=%.1f t_end_secs=%.1f span_secs=%.1f", t[start], t[n-1], t[n-1] - t[start]
     printf " y_first=%.3f y_last=%.3f", y[start], y[n-1]
     printf " slope_mb_per_hour=%.6f se_mb_per_hour=%s", b, se_s
