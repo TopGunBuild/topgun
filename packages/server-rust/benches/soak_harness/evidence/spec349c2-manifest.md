@@ -32,10 +32,28 @@ value, **the artifact wins** and the disagreement is recorded in §12.
 **Binary.** Commit **`d6922f08`** (`feat(sf-349c2): execute the plateau matrix instead of
 transcribing it`, 2026-08-01 17:03:52 +0300), release profile, `cargo build --release --bin
 topgun-server --bench soak_harness`. The ON run started ~17:06 and the OFF run ended 19:08; the next
-commit (`aae8cd44`, 19:09:59) added only the evidence files. `git diff --name-only d6922f08..HEAD --
-'*.rs'` returns **nothing**, so the binary under measurement is byte-equivalent in source terms to
-HEAD. Tree state at run time: **clean** (attested by the run record — see §12 finding D2 for the
-observability limit on this one field).
+commit (`aae8cd44`, 19:09:59) added only the evidence files. Tree state at run time: **clean**
+(attested by the run record — see §12 finding D2 for the observability limit on this one field, and
+for the fix that makes it artifact-observable on future runs).
+
+**Attestation of the source under measurement — restated precisely.** Earlier drafts of this
+manifest claimed `git diff --name-only d6922f08..HEAD -- '*.rs'` returns **nothing**. That claim was
+true when written and is **no longer true**: Review v1's C3 required the harness to persist the
+diagnostics that decide its own verdict, and that fix is `.rs`. The claim is therefore replaced with
+an enumerated one, which is the form a reader can actually check:
+
+| `.rs` changed after `d6922f08` | Extent | Can it have moved a recorded number? |
+|---|---|---|
+| `benches/soak_harness/report.rs` | Three additive report structs + four additive fields on `SoakReport`/`ProgressSnapshot` | **No** — serialization-only. Nothing read by a sampler, an assessment, or the write path. |
+| `benches/soak_harness/main.rs` | Populates those fields from counters the summary already loaded; deletes a local struct made redundant by them | **No** — same counters, same values, one additional consumer. |
+| `src/storage/datastores/write_behind.rs` | One `///` block (the TODO-628 pointer) | **No** — doc-comment; not compiled into semantics. |
+
+So: **the committed artifacts in this directory were produced by `d6922f08`, and every `.rs` change
+since is additive telemetry or documentation that cannot alter the measured path.** The weaker,
+enumerated claim is the honest one; the reader is not asked to trust that the diff is empty, only to
+check that each hunk is emission-only. Re-running either arm on today's HEAD would produce the same
+series plus the fields the runs are missing — which is exactly why §7.3 records those fields as
+unrecoverable for these two runs rather than quietly back-filling them.
 
 **Host / OS.** `Darwin MacBookPro 25.5.0` (Darwin Kernel 25.5.0, `RELEASE_ARM64_T6000`, arm64),
 macOS 26.5.2 (build 25F84), `MacBookPro18,2`, 10 CPUs, 32 GiB RAM. Toolchain
@@ -360,15 +378,108 @@ runs.
 asserts, so per R2.2's reconciliation clause it does **not** refute AC1–AC5 — the AC list and the
 harness verdict answer different questions.
 
-**But it is a FINDING to report, and it is reported here.** Two observations belong with it:
+### 7.1 CLASSIFICATION: this is **(b) a genuine bound breach**, not a protocol artifact
 
-- It fires in **BOTH** runs at a **similar magnitude** (248 k vs 283 k B/h, ~1.14 ×, against a 512 B/h
-  gate — i.e. ~485 × and ~553 × over). It is therefore **not emitter-attributable**: the emitter
-  changes WAL framing, not the tombstone corpus, and the census confirms `removeFrames == 0` in both
-  runs.
-- The independent redb corpus scan **DIVERGED** from the gauge in both runs (ON: corpus 200,860 B vs
-  gauge 194,260 B; OFF: corpus 239,256 B vs gauge 245,809 B) — report-only, recorded for whoever picks
-  up the tombstone gate.
+"A finding" is not a disposition, so the finding is disposed of here. There are exactly two
+candidate explanations for a hard gate that fires, and they are mutually exclusive:
+
+- **(a) protocol artifact** — the gate presupposes conditions this protocol does not create, so it
+  could not have passed regardless of the code's health. A gate that cannot pass under its own test
+  protocol says nothing about the system.
+- **(b) genuine bound breach** — every condition the gate presupposes is satisfied, the gate is
+  live and meaningful, and the measured slope exceeds the bound.
+
+**The verdict is (b).** (a) is refuted on all three of the conditions SPEC-345's gate presupposes:
+
+| Precondition the gate presupposes | Observed | Refutes (a)? |
+|---|---|---|
+| A **tracked confirm-apply client** is in the protocol — without it the low-water-mark never advances and the epoch-scoped prune is never licensed, which is precisely the vacuous-gate trap SPEC-345 called out | The tracked client is driven **unconditionally**: `no_ack` defaults `false` (`main.rs`), the runner passes no `--no-ack`, and the call site is `if !cfg.no_ack`. It also demonstrably **worked**: `confirms=1727`, `confirmErrors=51` — errors are ~3 % of rounds and cannot account for a 485 × overshoot | ✅ |
+| **Enough epochs cycle** at the pinned `epochWidth=1000` for prune eligibility to be reached inside the window | `lastConfirmedEpoch` reached **113**, advancing monotonically across all 11 checkpoints (11 → 20 → 29 → 39 → 48 → 57 → 66 → 76 → 85 → 94 → 104 → 113). The last-half window (1797 s) therefore spans ~56 epochs — far past the ~2-epoch prune ramp, and the 120 s min-window guard is cleared with `samples=720` (not a blind monitor) | ✅ |
+| The **LWM actually advances** — not merely that a client is present | The monotone cursor above IS the LWM advance, and it is corroborated **gauge-independently** by the post-run redb corpus scan, which sums the real on-disk tombstone corpus rather than reading the counter: ON 200,860 B, OFF 239,256 B. A stuck-gauge artifact would not reproduce in an independent instrument | ✅ |
+
+**Why this matters beyond this spec.** `.specflow/archive/SPEC-345.md` recorded that the PASS is
+demonstrable "with either `TOPGUN_EPOCH_WIDTH=100` + ≥15 min (done: −1707 B/h), **or ≥30–60 min at
+the default width**". These are the first live 60-minute runs **at the default width** — the first
+test of that second disjunct — and it fails by 485 ×. So exactly one of these is true, and which one
+is not yet known:
+
+1. The prune **regressed** since 2026-07-13, or
+2. SPEC-345's PASS was only ever demonstrable at the non-production width 100, and the second
+   disjunct was an unverified extrapolation.
+
+**Deferral, in CLAUDE.md's required form** (this measurement spec does not fix it):
+
+- **WHY deferral is acceptable here:** this spec is a *measurement* spec whose entire value is that
+  the binary that produced the slopes is the binary on disk. Changing prune code to chase this
+  finding would invalidate every number in §2–§4 and require re-running both 60-minute arms. The
+  finding is also **not emitter-attributable** — it fires in BOTH arms at the same order of
+  magnitude (248 k vs 283 k B/h; stated precisely rather than as "similar", the **OFF arm is 14.1 %
+  HIGHER** than the ON arm — both are 485–553 × over the bound, so the gap does not bear on the
+  classification, but the direction, emitter-OFF worse, is carried into TODO-630), and the
+  census confirms `removeFrames == 0` in both runs — so it is not this spec's change under test.
+- **Tracker:** **TODO-630** (tombstone-byte bound breach at the production epoch width) — the
+  investigation, its first experiment and its fork are specified there.
+- **Owner:** the TODO-566 / SPEC-345 tombstone-GC line, sequenced **before** the 72 h soak
+  (TODO-484 re-run) and before TODO-586. See §7.2.
+
+**Also recorded, report-only:** the independent redb corpus scan **DIVERGED** from the gauge in both
+runs (ON: corpus 200,860 B vs gauge 194,260 B; OFF: corpus 239,256 B vs gauge 245,809 B). The
+divergence is small and in opposite directions, so it does not change the classification, but it is
+recorded for whoever picks up the tombstone gate.
+
+### 7.2 What this red does to the 72 h soak — a NAMED pre-soak blocker
+
+The 72 h soak (TODO-484 re-run) runs **this harness**, at the **same production epoch width**, and
+`tombstones.passed` is hard-ANDed into the run verdict alongside convergence, recovery, memory and
+panic. Its last-half window is ~36 h, i.e. vastly *more* epoch cycling than the window that already
+failed — so on the evidence here the 72 h soak would **fail on this clause by construction**.
+
+Recording it as anything less than a named blocker would mean spending 72 hours to rediscover a
+number already measured twice. **TODO-630 is therefore a pre-soak blocker, sequenced before
+TODO-586 and before the 72 h soak run.**
+
+**The split is deliberate and narrow — this does NOT block SPEC-348:**
+
+| Consumer | Status | Why |
+|---|---|---|
+| **SPEC-348 disk (WAL + redb) gate** | **UNBLOCKED** — proceeds from this spec's numbers | The disk evidence chain is independent of the tombstone gauge: §2's slopes come from `du` on the real paths, AC5 cross-reproduces them from the committed CSVs, and AC2's verdicts do not read the gauge |
+| **SPEC-348 RSS gate** | **NOT derivable here** (unchanged) | §6 — RSS is BENT, not plateaued; no bound is derivable. Unrelated to this red |
+| **72 h soak / TODO-586** | **BLOCKED on TODO-630** | Same harness, same width, same hard-ANDed clause |
+
+### 7.3 Provenance of the §7.1 figures — what is committed and what is NOT
+
+The classification in §7.1 must be readable against its own evidence, so the provenance of each
+figure is stated rather than assumed:
+
+| Figure used in §7.1 | Committed artifact it can be re-read from | Status |
+|---|---|---|
+| Slopes 248,148.9 / 283,066.2 B/h, `samples=720`, window spans | `*.soak.json` → `finishedReason` (verbatim), and from this run forward the `tombstones` object | **SURVIVES** |
+| redb corpus scan 200,860 / 239,256 B, gauge 194,260 / 245,809 B | `*.mechanism.json` | **SURVIVES** |
+| `epochWidth=1000`, `walFsync="batched"`, `crashes=0` | `*.soak.json` | **SURVIVES** |
+| `no_ack=false`, the unconditional tracked-client drive, the `if !cfg.no_ack` call site | `main.rs` at the measured commit + the runner's own flag list | **SURVIVES** (source, not run output) |
+| `confirms=1727`, `lastConfirmedEpoch=113`, `confirmErrors=51`, and the 11-checkpoint cursor sequence | — | **DOES NOT SURVIVE for these two runs** |
+
+**The honest statement about that last row:** those figures were read off the running harness's
+stdout, which the runner wrote to `<data-dir>.meta/harness-console.log` under `target/`. That file is
+**gone**, and no committed artifact of these two runs carries the confirm-apply cursor — the
+committed `progress.jsonl` of these runs has 11 checkpoints but no confirm fields. The figures are
+therefore recorded here **as transcribed**, and a reader who wants to re-derive them from this
+directory **cannot**. They are corroborated only indirectly: by the `no_ack` source path above, and
+by the gauge-independent redb corpus scan, both of which do survive.
+
+**This is a defect in the instrument, and it is fixed rather than merely noted.** The numbers that
+failed BOTH runs must never again live only in a scratch file. From this commit forward:
+
+- `*.soak.json` carries a `tombstones` object (samples, first/peak/last bytes, slope, passed,
+  reason), a `disk` object, and a `confirmApply` object (`confirms`, `lastConfirmedEpoch`,
+  `confirmErrors`) — i.e. **every verdict that `passed` is hard-ANDed with is persisted beside it**.
+- `*.progress.jsonl` carries the per-checkpoint confirm-apply cursor, so the **series** — not just
+  the final count — survives, which is what distinguishes a steadily-advancing LWM from one that
+  advanced once and stalled.
+- The CSV carries a `tombstone_bytes` column scraped from the server's own `/metrics`, so the gauge
+  series that decides the gate is a committed column beside `rss_mb` and `disk_total_mb`. An empty
+  cell means a scrape that did not answer and is dropped from the fit; a column with **no** readings
+  at all is declared an instrument defect by the runner's post-run check.
 
 Everything else that is ANDed into `passed` stayed green in both runs: `convergenceFailures=[]`,
 `recoveryFailures=[]`, `panicReport=null`, `crashes=0`, `writeErrors=0`. `memory.passed == true` is
@@ -448,6 +559,32 @@ runs this work descends from), and the consequence is accepted explicitly: flush
 bytes land in redb versus the WAL, so a production gate derived from these numbers must be argued
 against this regime, not against a 1000 ms / 100 one.
 
+### 9.1 The handoff direction — SPEC-348 **derives**, this spec **promotes nothing**
+
+This spec sets **no** threshold and promotes **no** gate. Every number in §2–§4 is a recorded
+measurement. SPEC-348 is the spec that turns a number into a gate, and it derives from these
+artifacts rather than inheriting a verdict from them.
+
+### 9.2 The loosening argument SPEC-348 is REQUIRED to make (AC11)
+
+This is the obligation SPEC-348 must discharge, stated here in the artifact SPEC-348 actually opens
+rather than only in the spec file:
+
+- **RSS is ALREADY hard-gated at 2.0 MB/h** in this harness (`monitor.rs`, the RSS assertion
+  default). SPEC-348's charter phrase "promote RSS from report-only to HARD" is therefore **stale**:
+  there is nothing to promote. Any RSS number SPEC-348 sets that is **above 2.0 MB/h is a LOOSENING
+  of a live gate**, and it must be **argued as one** — naming the current value (2.0 MB/h), the
+  derived value, and why raising it is correct — not described as a promotion.
+- **SPEC-348 MUST NOT carry forward the 25 MB/h figures** from this spec's earlier drafts, or any
+  figure not read from the committed artifacts in this directory. Those figures are gone from this
+  spec deliberately: promoting 25 MB/h against a live 2.0 MB/h gate would have loosened it **12×**.
+- **For RSS specifically, no gate is derivable from these runs at all.** §6 records RSS as **BENT,
+  not plateaued** — it still climbs at 8461 MB/h in the ON arm. A bound cannot be derived from a
+  series that has not flattened, so SPEC-348's RSS clause has no input here regardless of the
+  loosening argument. Its disk (WAL + redb) clause is the part these runs actually feed.
+- **The tombstone-byte gate is out of SPEC-348's scope and is separately blocked** — see §7.1/§7.2
+  and TODO-630. SPEC-348's disk gate proceeds; the 72 h soak does not.
+
 ---
 
 ## 10. Deferred findings (recorded, NOT fixed here — the measurement runs last and alone)
@@ -473,10 +610,21 @@ makes §8's no-op determination **durable**: without it the caller-side residual
 manifest, where the next contributor wiring an eviction caller will not read it. E2 already admits
 this file under shape 4 for the test; the doc-contract is a second, smaller extent in the same file.
 
+**Ruling (Review v1, minor 7): (a) is ADMITTED**, on the ground stated — doc-only, cascade-free,
+load-bearing for §8's determination. It is also the **third** recurrence of the pattern that
+codified shapes 3 and 4 in PROJECT.md: a spec-side obligation that can only be written where the
+subject lives, on a file already exempt for a different reason. PROJECT.md now carries it as
+**shape 5** so the next spec cites a rule instead of re-arguing the exemption.
+
 **(b) `wal_harness/cases.rs` gained one disjunct.** `is_delta_frame_home` grew a single arm admitting
 `tests/soak_wal_census.rs` (`:2326`), because the census fixture legitimately constructs delta frames
 through the real encoder. This makes `cases.rs` **counted `.rs` #4 of 5**, and it spends the ledger's
 one slot of headroom on a **red correctness gate** rather than on documentation.
+
+*Ruling (Review v1, minor 8): the edit is a one-line arm on an existing item with no signature,
+lifetime or borrow change, so it is plausibly **shape 1** and need not have been counted at all. It
+is left COUNTED deliberately — the conservative reading costs one slot the spec did not need, and a
+ledger that over-counts is the safe direction to err. Headroom is 1 either way.*
 
 **Final budget, stated honestly:**
 
@@ -506,8 +654,14 @@ Recorded rather than smoothed over, per the rule that the artifact wins.
   one-line matrix echo but **not** the runner's block. §1 is consequently reconstructed from three
   artifact sources — the committed runner's literals (AC1's own "observable only via the committed
   runner script" class), the harness's console first line, and `soak.json` — and one field, **the
-  dirty-tree flag, is attested by the run record rather than artifact-observable**. Cheap future fix
-  (out of scope here, since no file may change before merge): `tee` the block into `$CONSOLE_LOG`.
+  dirty-tree flag, is attested by the run record rather than artifact-observable**.
+
+  **FIXED for all future runs (Review v1, minor 11).** The deferral ground ("no file may change
+  before merge") did not survive: the runner is a shell script, and this fix changes no `.rs`. The
+  block is now `tee`d into a **committed** artifact, `<base>.matrix.txt`, in the evidence directory
+  — chosen over `tee`ing into `$CONSOLE_LOG`, which would have left it in the same scratch location
+  under `target/` that §7.3 exists to stop relying on. **For THESE two runs the field remains
+  attested**, since the runs are not being repeated; only future runs carry it as an artifact.
 - **D3 — W4(a) condition 1's grep is narrower than "absent from `benches/soak_harness/`".** Both
   strings *do* occur in that directory (in `report.rs`, which **reads** the var, and in the runner
   script, which **unsets** it). They are absent from **`process.rs`**, which is what the condition
