@@ -54,7 +54,10 @@ use topgun_server::storage::wal::format;
 use topgun_server::storage::wal::{OrDelta, WalEntry, WalOp, WalStorePayload};
 use topgun_server::tombstone_frontier_impl::DEFAULT_EPOCH_WIDTH;
 
-use report::{effective_epoch_width, scan_wal_frame_sizes, MemoryReport, SoakReport};
+use report::{
+    effective_epoch_width, scan_wal_frame_sizes, ConfirmApplyReport, DiskReport, MemoryReport,
+    SoakReport, TombstoneReport,
+};
 
 fn stamp(millis: u64) -> Timestamp {
     Timestamp {
@@ -341,11 +344,117 @@ fn sample_report(wal_fsync: &str, epoch_width: u64) -> SoakReport {
             passed: true,
             reason: None,
         },
+        // Every value below is DISTINCT and non-default on purpose: a field
+        // hard-wired to a constant, or cross-wired to its neighbour, has to
+        // show up as a mismatch rather than coincide with the expected value.
+        tombstones: TombstoneReport {
+            samples: 720,
+            first_bytes: 11,
+            peak_bytes: 22,
+            last_bytes: 33,
+            slope_bytes_per_hour: 248_148.9,
+            passed: false,
+            reason: Some("tombstone slope exceeded".to_string()),
+        },
+        disk: DiskReport {
+            samples: 60,
+            first_mb: 1.5,
+            peak_mb: 2.5,
+            last_mb: 3.5,
+            slope_mb_per_hour: 90.75,
+            passed: true,
+            reason: None,
+        },
+        confirm_apply: ConfirmApplyReport {
+            confirms: 1727,
+            last_confirmed_epoch: 113,
+            confirm_errors: 51,
+        },
         panic_report: None,
         passed: true,
         finished_reason: "duration reached".to_string(),
         timestamp: "1970-01-01T00:00:00Z".to_string(),
     }
+}
+
+/// Every verdict that the run's `passed` is hard-ANDed with must reach the JSON
+/// report, under the exact keys a consumer reads, carrying its own input.
+///
+/// This exists because the opposite was true and cost a real diagnosis: a run
+/// could persist `passed: false` while the slope that failed it, and the
+/// confirm-apply cursor that says whether the gate was even licensed to fire,
+/// lived only in the process's stdout. Asserting mere key presence would not
+/// catch it -- a field wired to a constant would pass -- so every assertion
+/// below is against a distinct value from `sample_report`.
+#[test]
+fn soak_report_emits_every_hard_anded_verdict_tracking_its_input() {
+    let json = serde_json::to_value(sample_report("batched", 1000)).expect("serialize report");
+
+    let t = json
+        .get("tombstones")
+        .expect("report carries a tombstones section");
+    assert_eq!(
+        t.get("samples").and_then(serde_json::Value::as_u64),
+        Some(720)
+    );
+    assert_eq!(
+        t.get("firstBytes").and_then(serde_json::Value::as_u64),
+        Some(11)
+    );
+    assert_eq!(
+        t.get("peakBytes").and_then(serde_json::Value::as_u64),
+        Some(22)
+    );
+    assert_eq!(
+        t.get("lastBytes").and_then(serde_json::Value::as_u64),
+        Some(33)
+    );
+    assert_eq!(
+        t.get("slopeBytesPerHour")
+            .and_then(serde_json::Value::as_f64),
+        Some(248_148.9)
+    );
+    // The FAILING verdict and its reason are the two the console used to own
+    // exclusively, and are the whole point of persisting this section.
+    assert_eq!(
+        t.get("passed").and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        t.get("reason").and_then(serde_json::Value::as_str),
+        Some("tombstone slope exceeded")
+    );
+
+    let d = json.get("disk").expect("report carries a disk section");
+    assert_eq!(
+        d.get("samples").and_then(serde_json::Value::as_u64),
+        Some(60)
+    );
+    assert_eq!(
+        d.get("slopeMbPerHour").and_then(serde_json::Value::as_f64),
+        Some(90.75)
+    );
+    assert_eq!(
+        d.get("passed").and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+
+    let c = json
+        .get("confirmApply")
+        .expect("report carries a confirmApply section");
+    assert_eq!(
+        c.get("confirms").and_then(serde_json::Value::as_u64),
+        Some(1727)
+    );
+    assert_eq!(
+        c.get("lastConfirmedEpoch")
+            .and_then(serde_json::Value::as_u64),
+        Some(113)
+    );
+    assert_eq!(
+        c.get("confirmErrors").and_then(serde_json::Value::as_u64),
+        Some(51)
+    );
 }
 
 /// The two matrix fields must land in the JSON under the exact keys their
