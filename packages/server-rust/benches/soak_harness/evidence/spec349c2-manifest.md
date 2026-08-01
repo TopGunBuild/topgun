@@ -45,7 +45,7 @@ an enumerated one, which is the form a reader can actually check:
 
 | `.rs` changed after `d6922f08` | Extent | Can it have moved a recorded number? |
 |---|---|---|
-| `benches/soak_harness/report.rs` | Three additive report structs + four additive fields on `SoakReport`/`ProgressSnapshot` | **No** — serialization-only. Nothing read by a sampler, an assessment, or the write path. |
+| `benches/soak_harness/report.rs` | Three additive report structs (`TombstoneReport`, `DiskReport`, `ConfirmApplyReport`) + **six** additive fields: three on `SoakReport` (`tombstones`, `disk`, `confirm_apply`) and three on `ProgressSnapshot` (`confirms`, `last_confirmed_epoch`, `confirm_errors`) | **No** — serialization-only. Nothing read by a sampler, an assessment, or the write path. |
 | `benches/soak_harness/main.rs` | Populates those fields from counters the summary already loaded; deletes a local struct made redundant by them | **No** — same counters, same values, one additional consumer. |
 | `src/storage/datastores/write_behind.rs` | One `///` block (the TODO-628 pointer) | **No** — doc-comment; not compiled into semantics. |
 | `tests/soak_wal_census.rs` | Additive `#[test]` fns asserting the fields above against a fixture | **No** — a `tests/` integration target. It is linked into neither the measured `topgun-server` binary nor the `soak_harness` bench, so no code path under measurement can reach it; it only reads. |
@@ -83,8 +83,11 @@ macOS 26.5.2 (build 25F84), `MacBookPro18,2`, 10 CPUs, 32 GiB RAM. Toolchain
 | ON  | `<repo>/target/spec349c2-on-data`  | yes — the runner **refuses to start** on a non-empty dir (`spec349c2-plateau.sh` §4: `FATAL: data dir is NOT empty`), and refuses to overwrite a pre-existing artifact |
 | OFF | `<repo>/target/spec349c2-off-data` | yes — same fail-closed check, separate directory |
 
-The console log beside each run is at `<data-dir>.meta/harness-console.log`. Its first line is the
-harness's own matrix echo, identical in both runs except for nothing:
+The console log beside each run was written to `<data-dir>.meta/harness-console.log` under `target/`
+and is **committed into this directory** as `spec349c2-emitter-{on,off}.harness-console.log`
+(byte-identical to the originals; §7.3) — read the committed copy, since `target/` is `cargo clean`
+territory. Line 1 is the harness banner (`=== TopGun soak harness (G4b / TODO-484) ===`); **line 2**
+is its matrix echo, identical in both runs except for nothing:
 
 ```
 duration=3600s churn_clients=6 keyspace=200 crash_interval=None steady_interval=300s wal_fsync=batched or_churn=true
@@ -685,7 +688,7 @@ Recorded rather than smoothed over, per the rule that the artifact wins.
   harness child (`"$SOAK_BIN" … > "$CONSOLE_LOG"`). The console logs therefore carry the harness's
   one-line matrix echo but **not** the runner's block. §1 is consequently reconstructed from three
   artifact sources — the committed runner's literals (AC1's own "observable only via the committed
-  runner script" class), the harness's console first line, and `soak.json` — and one field, **the
+  runner script" class), the harness's console **line 2**, and `soak.json` — and one field, **the
   dirty-tree flag, is attested by the run record rather than artifact-observable**.
 
   **FIXED for all future runs (Review v1, minor 11).** The deferral ground ("no file may change
