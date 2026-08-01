@@ -693,7 +693,18 @@ Recorded rather than smoothed over, per the rule that the artifact wins.
   block is now `tee`d into a **committed** artifact, `<base>.matrix.txt`, in the evidence directory
   — chosen over `tee`ing into `$CONSOLE_LOG`, which would have left it in the same scratch location
   under `target/` that §7.3 exists to stop relying on. **For THESE two runs the field remains
-  attested**, since the runs are not being repeated; only future runs carry it as an artifact.
+  attested**, since the runs are not being repeated; only future runs carry it as an artifact, and
+  **no `*.matrix.txt` exists in this directory** — its absence is the expected state here, not a
+  missing file.
+
+  **Narrowed by §7.3's correction.** Now that both `harness-console.log` files are committed, the
+  harness's own matrix echo *is* artifact-observable for these two runs — line 2 of each log reads
+  `duration=3600s churn_clients=6 keyspace=200 crash_interval=None steady_interval=300s
+  wal_fsync=batched or_churn=true`, and line 3 names the data dir, which distinguishes the arms.
+  What remains attested-only is narrower than when D2 was written: the **runner's** block
+  specifically — repo HEAD, the dirty-tree flag, `uname -a`, `TOPGUN_OR_DELTA_WAL`,
+  `TOPGUN_EPOCH_WIDTH` — of which the dirty-tree flag is the one field with no other artifact route
+  (the emitter arm is independently observable in the census, and the epoch width in `soak.json`).
 - **D3 — W4(a) condition 1's grep is narrower than "absent from `benches/soak_harness/`".** Both
   strings *do* occur in that directory (in `report.rs`, which **reads** the var, and in the runner
   script, which **unsets** it). They are absent from **`process.rs`**, which is what the condition
