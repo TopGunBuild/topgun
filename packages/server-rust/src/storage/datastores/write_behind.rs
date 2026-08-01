@@ -3085,6 +3085,14 @@ impl MapDataStore for WriteBehindDataStore {
     /// written here because it stops being vacuous the moment a production
     /// caller (an eviction path, say) is wired to this method.
     ///
+    /// That vacuity is a property of the current call graph, NOT a guarantee,
+    /// so the gap is tracked rather than merely described: **TODO-628**, which
+    /// must close before any production caller is wired. Anyone adding such a
+    /// caller is the person this pointer exists for — without it the
+    /// acked-delete-loss class would lapse silently at exactly the commit that
+    /// makes it live. `TG-WAL-009`'s windowing-residual bullet carries the same
+    /// pointer from the catalog side.
+    ///
     /// The crash-window counterpart is different and is a no-op: a crash inside
     /// the inner-store write leaves the superseded frames un-resolved and
     /// therefore still enumerable, and `TG-WAL-009`'s ascending replay puts the

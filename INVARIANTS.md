@@ -184,10 +184,24 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   Premises (c) and (d) carry the load-bearing `M > N` and replayed-after steps; (a) and (b) bound the
   window and the sequence space. (b) alone is necessary-but-insufficient for the ordering — it is
   (c)+(d) that order the space.
-- **Windowing residual (tracked, NOT closed by a gate):** the only genuine out-of-order hazard — a
-  frameless `flush_key` durable write racing an un-resolved older Remove — is a WATERMARK/FRAMING
-  concern, not a Remove-idempotency one, so it is routed to TODO-612 (SPEC-349/windowing), not
-  papered over with an unsound Remove-replay timestamp gate.
+- **Windowing residual (tracked, NOT closed by a gate):** the frameless-`flush_key` window is a
+  WATERMARK/FRAMING concern rather than a Remove-idempotency one, so it is handled there and not
+  papered over with an unsound Remove-replay timestamp gate. Two distinct hazards live in that
+  window, and only one of them is still open:
+  - **Crash-window direction (TODO-612) — CLOSED, determined a NO-OP.** A frameless `flush_key`
+    durable write racing an un-resolved older Remove leaves no enumerable past-older Remove for
+    recovery to mis-order. Mutation-proven by
+    `flush_key_frameless_window_leaves_no_enumerable_past_older_remove`
+    (`datastores/write_behind.rs`, inline `#[cfg(test)] mod`), which drives the live `flush_key`
+    trait method rather than a re-implementation. This bullet previously asserted the hazard as the
+    "only genuine" one and routed it to TODO-612 as open; both halves of that were superseded by
+    the determination.
+  - **Caller-side direction (TODO-628) — OPEN, but vacuous at HEAD.** `flush_key` makes the
+    CALLER's value durable while resolving the superseded entry's sequences, so a caller passing a
+    value that does not subsume a staged `WalOp::Remove` loses an acked delete **with no crash at
+    all**. It is vacuous today only because `flush_key` has zero production callers (every call
+    site is under `#[cfg(test)]`), which is a property of the current call graph, not a guarantee.
+    Must close before any production caller is wired.
 - **Maintaining code:** `wal/mod.rs::replay_entry` (`WalOp::Remove` arm, unconditional) + `run` /
   `WalEntry` doc-contracts; `datastores/write_behind.rs` `remove`/`remove_all` append Remove frames
   with `timestamp: None`.
