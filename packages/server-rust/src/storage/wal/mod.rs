@@ -1755,6 +1755,17 @@ impl WalRecovery {
     /// or dropped: a dropped remove resurrects an entry, and unlike a full-snapshot
     /// frame a delta is never repaired by a later frame.
     ///
+    /// KNOWN BOUND on that arm, deferred rather than closed (TODO-627): the fold
+    /// writes the key back with NO expiry, and "no expiry is what the live OR path
+    /// produces" is a property of the CONFIGURATION, not of the OR policy —
+    /// `ExpiryPolicy::NONE` resolves through `compute_expiration_time`, which falls
+    /// back to `StorageConfig::default_ttl_millis`, a real evictable field that is
+    /// `0` in every production wiring but is not required to be. Wire a map-level
+    /// default TTL and the snapshot arm carries the expiry across recovery while the
+    /// delta arm discards it, silently, with nothing detecting the divergence. Stated
+    /// here because a doc-contract that asserted TTL-equivalence between the two arms
+    /// would be asserting a property this code does not have.
+    ///
     /// A `WalOp::Store` frame carrying an OR value stays a SUPPORTED input and is
     /// applied in its sequence position as an ABSOLUTE SET, never as a fold-base
     /// skip hint and never as a union — see the arm for why the snapshot's
@@ -1891,16 +1902,10 @@ impl WalRecovery {
                 // TTL drift. An OR path that starts writing TTLs would need the
                 // frame to carry one; it is not a value this arm may invent.
                 //
-                // KNOWN BOUND, stated rather than implied (TODO-627): "produces
-                // `0` today" is a property of the CONFIGURATION, not of the OR
-                // policy. `ExpiryPolicy::NONE` resolves through
-                // `compute_expiration_time`, which falls back to
-                // `StorageConfig::default_ttl_millis` — a real, evictable field
-                // that is `0` in every production wiring but is not required to
-                // be. If a map-level default TTL is ever wired, the snapshot arm
-                // carries the expiry across recovery and this arm discards it,
-                // silently. Nothing currently detects that divergence, which is
-                // why the bound is written here instead of being trusted.
+                // "Produces `0` today" is a property of the CONFIGURATION, not of
+                // the OR policy, and nothing detects the divergence if that
+                // default ever moves — the KNOWN BOUND clause in this fn's
+                // doc-contract states it in full, with its owner.
                 inner_store
                     .add(&entry.map, &entry.key, &folded, 0, now)
                     .await
