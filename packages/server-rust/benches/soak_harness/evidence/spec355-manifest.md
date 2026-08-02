@@ -856,11 +856,129 @@ whether the arithmetic drifted, and it did not.)*
 
 ### §10.2 — The completed identification matrix
 
-*(pending — wave 2)*
+| Cell | Config | Lineage | Duration | Harness `tombstones.slopeBytesPerHour` | CSV `last_half` fit | Gate |
+|---|---|---|---|---|---|---|
+| **A** | HEAD server @ width 1000 | SPEC-349c2 input @ `d6922f08` | 3600 s | **248,148.9 B/h** (ON arm — `S1000`) / 283,066.2 B/h (OFF arm) | n/a — 349c2 CSVs carry no `tombstone_bytes` column (§6) | **FAIL** |
+| **B** | HEAD server @ width 100 | PRE-CHANGE (`bd41ccf5`) | 1800 s | 1,524.96 B/h (360 samples, window 896 s) | **7,938.86 B/h** = `S100` (15 pts, span 840 s, se 14,268, r² 0.023) | **FAIL** |
+| **C** | **pre-family** server (`181723d0`) @ width 1000 | PROVENANCE | 1800 s | 175,367.59 B/h (360 samples, window 896 s) | **176,954.34 B/h** = `Spre` (15 pts, span 840 s, se 25,261, r² 0.791) | **FAIL** |
+| **D** | pre-family server @ width 100 | — | — | **NOT RUN at this point** — see §10.3's routing | | |
+| **E** | pre-346 server @ width 1000 | — | — | **NOT-APPLICABLE** — see §10.3 | | |
+
+`S100` and `Spre` are the **CSV `last_half` fits**, as pre-registered (§4.5 "cell B's fitted
+last-half slope"; the Validation Checklist reproduces them from the committed CSVs). The harness's
+in-process figures are the cross-reproduction required by §6 and are stated beside them.
+
+#### §10.2.1 — Cell C's identity checks (AC3b)
+
+| Check | Outcome |
+|---|---|
+| (a) Census identity witness | **PASS** — `spec355-cellC.mechanism.json`: `orDeltaFrames = 0`, `orSnapshotFrames = 41509`. The pin precedes the OR-delta emitter (`7142d4dc`), so zero is what a genuine pre-family server must produce, and the nonzero OR-snapshot count proves the OR path *was* exercised. Contrast anchor, committed and unchanged: `spec349c2-emitter-on.mechanism.json` → `orDeltaFrames: 157134`. The census is written by the **HEAD** decoder reading **pre-family-written** frames, so it observes the server, not the instrument. |
+| (b) Fail-closed resolution | **PASS** — recorded in `spec355-cellC.matrix.txt`: `SOAK_SERVER_BINARY` set to `/tmp/spec355-pin-181723d0/target/release/topgun-server`, with **no** fallback to the bench's compile-time default on that path (an unset variable is a hard exit 3 before the clock starts). |
+| Pinned SHA / resolver / worktree | `181723d0`; "last merge before `3fe5a2c0` (`sf-349a-or-apply-seam`), the first SPEC-349-family merge touching the OR/prune path"; `/tmp/spec355-pin-181723d0` — all three in `matrix.txt`. |
+
+**Only the server binary is pre-family.** The harness, the gauge scrape, the CSV column,
+`spec349c2-fit.awk` and `assess_tombstone_bytes` are all at HEAD, byte-identically the same code as
+in cells A and B. This is the deliberate half-swap of §4.2, not "a run at the old commit".
+
+#### §10.2.2 — The instrument-agreement finding (§6 requires this be recorded, not averaged away)
+
+| Cell | Harness | CSV fit | Ratio | CSV r² |
+|---|---|---|---|---|
+| B | 1,524.96 B/h | 7,938.86 B/h | **5.2×** | 0.023 |
+| C | 175,367.59 B/h | 176,954.34 B/h | **1.009×** | 0.791 |
+
+The two instruments **converge to 0.9 % when the signal is strong and diverge 5.2× when it is not**,
+and that is the whole explanation. Cell B's CSV standard error (14,268 B/h) is **9.4× its own point
+estimate** and comfortably contains the harness's 1,524.96 B/h, so the two are **statistically
+compatible rather than contradictory**: at r² = 0.023 a 15-point fit is resolving no trend at all.
+The difference is **statistical power** — the harness samples 360 times against the CSV's 30, giving
+180 last-half points against 15 — not a divergence between two readings of the same gauge.
+
+**It does not move a verdict, and that is checkable rather than asserted:** both of cell B's readings
+fall in the same decision-table band (`512 < S < 24,814.89`), and both of cell C's fall in
+"reproduces" (`≥ 24,814.89`). Every determination below is invariant to which instrument is used.
+
+#### §10.2.3 — Corroboration: the epoch clock scales with width, measured
+
+`lastConfirmedEpoch` at the end of two runs of **identical duration and matrix**, differing only in
+width: **cell B (width 100) = 600**, **cell C (width 1000) = 59**. A ratio of **10.2×**, against a
+width ratio of 10×. The epoch clock scales with epoch width as §7.3(b)'s model assumes — measured
+here rather than asserted. Both runs also confirm the low-water mark advanced throughout
+(`confirms = 865`, `confirmErrors = 25` ≈ 2.9 % in both), so neither breach is the stalled-cursor
+cause that a climbing gauge can otherwise have.
 
 ### §10.3 — The determination
 
-*(pending — wave 2)*
+> ## DETERMINATION: **ROW 5 — INDETERMINATE.** No branch is taken on this matrix.
+>
+> Routed to **§5's tie-break (R0.4)**.
+
+**The two numbers that produced it**, banded against the pre-registered thresholds
+(`512 B/h` and `0.1 × S1000 = 24,814.89 B/h`):
+
+| Quantity | Value | Band |
+|---|---|---|
+| `S100` (cell B) | **7,938.86 B/h** | `512 < S100 < 24,814.89` → **ambiguous middle** |
+| `Spre` (cell C) | **176,954.34 B/h** | `≥ 24,814.89` → **reproduces** |
+
+Row 5's first disjunct — `512 < S100 < 0.1 × S1000` — is satisfied, so the determination is
+INDETERMINATE.
+
+**Why no other row is reachable, and why this is not a near miss.** Rows 1 and 2 both require
+`S100 ≤ 512 B/h`; cell B fails the gate, so both are excluded. Rows 3 and 4 both require
+`S100 ≥ 0.1 × S1000`; `S100` is **3.1× below** that threshold, so both are excluded. **`S100` alone
+therefore forces row 5, and no value of `Spre` could have changed it.** Cell C was still run — R1.2
+makes it mandatory, and its value is what seeds the tie-break and (under §9.1) a bisect — but the
+honest statement is that it could not have moved the row, and this document says so rather than
+presenting a five-cell matrix as though every cell were load-bearing for the determination.
+
+**This outcome is invariant to the instrument choice** (§10.2.2): under the harness's figures
+`S100 = 1,524.96` is in the same ambiguous band and `Spre = 175,367.59` is still "reproduces".
+
+#### §10.3.1 — What the matrix DID establish, stated separately from the determination
+
+These are measurements, not a branch call. Keeping them apart from the determination is the point.
+
+1. **SPEC-345's width-100 PASS does not still hold at HEAD on this matrix.** The control that
+   measured −1707.5 B/h now runs **positive** and breaches the bound ~3× (harness) to ~15.5× (CSV).
+   **This is not by itself evidence of a regression**, and §3.1 is why: cell B runs the 349c2 matrix,
+   while SPEC-345's control ran a matrix whose flag set is recorded nowhere, and under the defaults
+   reconstruction **seven knobs differ** — `crash_interval` (120 s vs none) and `churn_clients`
+   (16 vs 6) being the two most load-bearing for tombstone residency. Attributing the sign flip to a
+   code change rather than to those seven knobs is exactly the inference the ledger exists to block.
+2. **The breach at the production width is NOT new since the pin.** Cell C reproduces it at
+   `181723d0` at the same order as cell A (`Spre / S1000 = 0.71`). **Scoped to 2026-07-27**, the pin's
+   own date. It says nothing about the 2026-07-13 → 2026-07-27 interval — that interval is cell E's.
+3. **Width matters, and by much more than the bound's slack.** At the same matrix and duration,
+   width 1000 runs **22×** (CSV) to **115×** (harness) hotter than width 100. Whether that is
+   *width-scaled prune math* or a *width-dependent regression* is precisely what row 5 declines to
+   decide on the evidence in hand.
+
+#### §10.3.2 — The un-taken branches, with the measurements that rule them out (AC4)
+
+| Branch | Status at this point | Ruling-out measurement |
+|---|---|---|
+| Branch (1) — regression | **NOT DETERMINED** (not refuted, not established) | Cell C **reproduces** at `Spre = 176,954.34 B/h`, which is evidence *against* a regression newer than 2026-07-27 — but `S100 = 7,938.86 B/h` sits in the ambiguous band, so the matrix does not carry a branch call. |
+| Branch (2) — width-scaled prune math | **NOT DETERMINED** | Same pair. Cell C's reproduction is consistent with (2), but cell B's breach means (2)'s clean form ("width 100 still passes") is *already false*, and the row-3 band that would have carried "(2) with its premise broken at both widths" is not met. |
+| Cell D | **REQUIRED** — it is §5's step 1 under row 5 | Was "not required" only while the determination was expected to be rows 1–4. |
+| Cell E | **NOT-APPLICABLE** | Its firing condition is conjunctive and its **first** conjunct fails: cell E fires only if **row 1 has been taken**, and row 1 was not taken. The second conjunct (§8's R4.1a magnitude gap) is not reached. Recorded here with the measurement that ruled it out: `S100 = 7,938.86 B/h`, which excludes row 1 by itself. |
+
+#### §10.3.3 — Routing
+
+Per §5 (R0.4), in this order:
+
+1. **Cell D** — pre-family server @ width 100, 1800 s, PROVENANCE lineage, both identity checks.
+   §5 motivates it as the resolver "whenever it is cell C that is ambiguous"; here it is **cell B**
+   that is ambiguous, and cell D is still the correct next probe — and for a sharper reason than the
+   one §5 anticipated. Cell B's breach at width 100 is the single fact that forced row 5, and cell D
+   is the *only* run in the design that says whether that breach is **new since the pin**: it holds
+   the width at 100 and varies only the server. That is a direct test of §10.3.1's finding 1 against
+   the code, with the seven-knob matrix confound held fixed by construction, since cell B and cell D
+   share this spec's matrix exactly.
+2. If still ambiguous — the **width sweep** (`sweep100` / `sweep300` / `sweep1000`, HEAD, 1800 s
+   each) against §7.3(b)'s pre-registered width-scaling prediction.
+
+*(§4.5's E-row remains unentered: row 1 was not taken, so its first conjunct is false.)*
 
 ### §10.4 — Branch-specific record
 
