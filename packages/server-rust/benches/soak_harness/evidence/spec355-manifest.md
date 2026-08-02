@@ -1,0 +1,825 @@
+# SPEC-355 evidence manifest — classifying the tombstone-byte gate breach at the production epoch width
+
+**Status of this document at the pre-registration commit:** §0–§9 are **FROZEN BEFORE ANY
+MEASUREMENT RUN EXISTS**. §10 onward are the executed record and are written as the runs land.
+
+The point of freezing §0–§9 is not ceremony. The question this spec answers has exactly two
+answers, one of which ("width-scaled prune math") makes a red gate go away and the other of which
+("a regression") does not. A rule chosen after seeing the numbers is not a rule, it is a
+preference. So the rule is committed first, in a commit that git can be asked to prove came
+earlier (`git log --follow` on this file vs the first `spec355-*.soak.json`).
+
+---
+
+## §0 — What is being decided, and what is out of scope
+
+SPEC-349c2 ran the first two live 60-minute soaks at the **production default epoch width**
+(`TOPGUN_EPOCH_WIDTH` unset → 1000). Both breached SPEC-345's promoted tombstone-byte HARD gate by
+two and a half orders of magnitude:
+
+| Run (commit `d6922f08`, `walFsync=batched`, churn 6, keyspace 200) | tombstone-byte slope | bound | over |
+|---|---|---|---|
+| emitter ON | 248,148.9 B/h | 512 B/h | **485×** |
+| emitter OFF | 283,066.2 B/h | 512 B/h | **553×** |
+
+SPEC-345 recorded that the gate's PASS is demonstrable "with either `TOPGUN_EPOCH_WIDTH=100` +
+≥15 min (done: −1707 B/h), **or ≥30–60 min at the default width**". SPEC-349c2 is the first live
+test of that **second disjunct**, and it fails. Exactly one of two things is true:
+
+- **branch (1)** — a **regression** landed after SPEC-345's measurement, or
+- **branch (2)** — the second disjunct was an **unverified extrapolation**: the bound was only ever
+  measured at width 100, and tombstone residency/ramp scales with epoch width.
+
+**Explicitly out of scope.**
+
+- This is **not** "make the gate green". A re-derivation chosen because it turns the gate green is
+  the failure mode this document exists to prevent (§8, §9, and the AC8/AC8b anti-tautology gates).
+- SPEC-348's **disk (WAL + redb) gate is unaffected** either way. It derives from `du` over real
+  paths and never reads the tombstone gauge (`spec349c2-manifest.md` §7.2). Only the 72 h soak
+  (TODO-484) and TODO-586 are gated on this item.
+- If the fork resolves to a regression, this spec **names the culprit and hands the fix to a
+  spun-off spec**. It does not fix a prune regression inline — that would invalidate the very
+  measurements it exists to produce, which is why SPEC-349c2 deferred in the first place.
+- If tombstone bytes turn out to be **genuinely unbounded at the production width**, that is not a
+  shrug either: §9's R5b disposition gives it a spun-off prune fix-or-redesign spec with a named
+  owner and pre-soak-blocker status, plus an immediate `INVARIANTS.md` entry. **No outcome of this
+  spec is allowed to terminate in a paragraph of this file.**
+
+---
+
+## §1 — Settled inputs (carried from SPEC-349c2; NOT re-derived here)
+
+These four preconditions are **inputs**, established by SPEC-349c2 Review v1 and its committed
+artifacts. This spec does not re-measure them, and time spent re-measuring them is time not spent
+on the fork.
+
+| Precondition | Settled finding | Provenance |
+|---|---|---|
+| Tracked confirm-apply client present and working | `no_ack` defaults `false`, the runner passes no `--no-ack`, the call site is `if !cfg.no_ack`; `confirms=1727`, `confirmErrors=51` (~3 %, which cannot account for a 485× overshoot) | `spec349c2-manifest.md` §7.1 / §7.3; `spec349c2-emitter-{on,off}.harness-console.log` line 75 |
+| Epochs cycled | `lastConfirmedEpoch` advanced monotonically across all 11 checkpoints in both arms, reaching **113**; last-half window 1797 s ≈ 56 epochs; `samples=720` (not a blind monitor) | same logs; checkpoint lines cited in `spec349c2-manifest.md` §7.3 |
+| The low-water mark actually advanced | Corroborated **gauge-independently** by the post-run redb corpus scan (ON 200,860 B, OFF 239,256 B) — a stuck gauge would not reproduce in a second instrument | `spec349c2-emitter-{on,off}.mechanism.json` |
+| Not emitter-attributable | Both arms fire at the same order (OFF is 14.1 % *higher* than ON); the census shows `removeFrames == 0` in both | `spec349c2-manifest.md` §3, §7.1 |
+
+### §1.1 — The one prior observation that is explicitly WEAK, and is NOT used
+
+A **90-second** run at width 1000 was executed during SPEC-349c2 **only to validate the CSV
+instrument**. It showed the gauge rise then fall (`peakBytes=41930`, `lastBytes=20664`,
+`samples=18`).
+
+> **WEAK — NOT EVIDENCE.** Ninety seconds at width 1000 is roughly 1.4 epochs; the run is
+> warm-up-dominated and settles nothing about plateau, bound or regression. **It is not cited as
+> evidence anywhere in this document**, and it played no part in any determination recorded below.
+> The discriminating experiment is the §4 identification matrix.
+
+---
+
+## §2 — R0.1: the pinned base matrix, and the complete list of knobs that may vary
+
+Every run in this spec is executed by the committed `spec355-width.sh`, whose rate-, shape- and
+duration-determining literals are **the `spec349c2-plateau.sh` literals verbatim**:
+
+```
+duration 3600 (→ per-cell literal)   churn-clients 6        keyspace 200
+or-churn true                        or-keyspace 48         or-every 5
+write-interval-ms 20                 writes-per-life 200    offline-keys 3
+confirm-interval 2                   crash-interval 0       steady-interval 300
+quiesce 3                            mem-sample-interval 5  wal-fsync batched
+memory gate NEUTRALIZED (1000000 / 1000000 / 1000000)       sample-interval 60
+```
+
+plus the same **env-discipline block** (variables actively `unset`, not merely absent, because the
+harness spawns the child server without `env_clear()` and the child therefore inherits the
+operator's shell).
+
+The pinned matrix **also includes the three non-rate flags `plateau.sh` passes unconditionally** —
+`--json-output`, `--progress-output`, `--mechanism-report` (`spec349c2-plateau.sh:379-381`). These
+are enumerated rather than left to "verbatim" because `mechanism_report` **defaults `false`**:
+without the flag there is no `mechanism.json`, and then §6's mechanism artifact and the
+gauge-independent redb corpus scan — the second instrument this whole classification rests on —
+silently do not exist.
+
+**The only knobs `spec355-width.sh` may vary:**
+
+| Knob | Why it may vary |
+|---|---|
+| `TOPGUN_EPOCH_WIDTH` | the axis under test |
+| `--duration` | per-cell literal, recorded in `matrix.txt` |
+| the CSV cadence | only where the duration makes the 60 s cadence degenerate (the 360 s / 420 s control cells; see §2.1) |
+| `--no-ack` / `--inject-slow-leak` | §9's R4.3 control runs |
+| `--server-port`, `--data-dir`, the output paths | run isolation |
+| `SOAK_SERVER_BINARY` | **provenance arm only** (§4 cells C/D/E). `plateau.sh:160` actively unsets it. Setting it is a loud, echoed deviation, and on that path it is **fail-closed** — see §4.3(b). |
+
+Every varied knob is echoed into that run's committed `matrix.txt`.
+
+### §2.1 — The one cadence departure, stated in advance
+
+`negctl` (360 s) and `leakctl` (420 s) run the shell sampler at a **20 s** cadence rather than 60 s.
+At 60 s those runs would yield 6 and 7 data rows, i.e. a three-point last-half fit — a committed
+series with no usable shape. Nothing else moves with it: the cadence belongs to the **shell**
+sampler, while the gate's own verdict is computed by the harness's **in-process** sampler, which
+this does not touch. Both cells are non-override (non-smoke) runs, so their artifacts belong in the
+tracked evidence directory (AC1).
+
+---
+
+## §3 — R0.2: the confound ledger
+
+### §3.1 — Against SPEC-345's width-100 positive control (−1707.5 B/h)
+
+SPEC-345's positive control was **not** run at the 349c2 matrix. What the archive actually records
+is two knobs: **duration 900 s** and **`TOPGUN_EPOCH_WIDTH=100`**
+(`.specflow/archive/SPEC-345.md:597`, `:630`). Everything else has to be reconstructed from the
+harness's `Config::default()` **at `68d0d255`**, and that reconstruction rests on a premise that is
+itself **unrecoverable**: whether that run passed any flags beyond `--duration`.
+
+> **UNRECOVERABLE CONFOUND (the root one).** The flag set of SPEC-345's positive-control invocation
+> is not recorded in the archive, the spec, or any committed artifact. The column below is
+> therefore *the harness's defaults at that commit*, i.e. the best available reconstruction under
+> the assumption that the run passed only `--duration` — **not** a record of what ran. Every row
+> marked ✗ below is a difference **if that assumption holds**, and an unknown otherwise.
+
+| Knob | SPEC-345 control (reconstructed: defaults @ `68d0d255`) | This spec's cells | Same? |
+|---|---|---|---|
+| `duration` | 900 s *(recorded)* | 1800 s (cells B/C/D), 3600 s (cell A) | ✗ |
+| `TOPGUN_EPOCH_WIDTH` | 100 *(recorded)* | 100 (cell B) | ✓ |
+| `churn_clients` | **16** | **6** | ✗ |
+| `or_keyspace` | **32** | **48** | ✗ |
+| `crash_interval` | **`Some(120 s)` — `kill -9` every 2 min** | **0 → `None`, no crashes** | ✗ |
+| `steady_interval` | **30 s** | **300 s** | ✗ |
+| `wal_fsync` | **`per_op`** | **`batched`** | ✗ |
+| `mem_ceiling_mb` | 1800 | neutralized (1 000 000) | ✗ |
+| `keyspace` | 200 | 200 | ✓ |
+| `write_interval` | 20 ms | 20 ms | ✓ |
+| `writes_per_life` | 200 | 200 | ✓ |
+| `offline_keys` | 3 | 3 | ✓ |
+| `quiesce` | 3 s | 3 s | ✓ |
+| `or_churn` / `or_every` | true / 5 | true / 5 | ✓ |
+| `mem_sample_interval` | 5 s | 5 s | ✓ |
+| `confirm_interval` | 2 s | 2 s | ✓ |
+
+**Consequence, and it is the reason this ledger exists.** Seven knobs differ under the stated
+assumption, two of them heavily load-bearing for tombstone residency (`crash_interval` — a
+crash-every-2-min run repeatedly restarts the server mid-ramp; `churn_clients` 16 vs 6 — a ~2.7×
+difference in OR churn rate). **Cell B therefore does NOT attempt to reproduce −1707.5 B/h
+numerically, and no determination in this document depends on it doing so.** What cell B reproduces
+is the **direction and bound-compliance** of that control — which is precisely what §4's decision
+table bands on (`S100 ≤ 512 B/h`, i.e. the gate PASSES), and never on numeric equality.
+
+*(Rationale for using the 349c2 matrix rather than reconstructing SPEC-345's: it yields a **paired**
+comparison against the two committed width-1000 arms in which width is the only difference. That is
+a strictly stronger discriminator than approximating a number from a matrix that is only partially
+recoverable — see the spec's Assumption 2.)*
+
+### §3.2 — Confounds internal to this spec's own matrix
+
+| Confound | Cells it sits between | Why it is material |
+|---|---|---|
+| **Duration** — 1800 s (cells B, C) vs **3600 s** (cell A, the committed 349c2 arms) | A ↔ B, A ↔ C | The whole branch-(2) hypothesis is that the measured series is **ramp-dominated**. For a ramp-dominated series the fitted last-half slope is a function of *where the window sits on the ramp*, so 1800 s and 3600 s runs are not interchangeable. **Cell C is therefore read as an order-of-magnitude binary ("reproduces / does not"), never as a numeric comparison against A.** |
+| **Binary provenance** — HEAD harness + HEAD server (A, B) vs HEAD harness + pre-family server (C) | A ↔ C | Cell C deliberately holds the *instrument* fixed and varies only the *server*, so the gauge, the CSV column, the fit and the assessment are byte-identically the same code in all three cells. What it does **not** control is any server-side change outside the prune path that could move tombstone residency; §9's R5 bisect is what narrows that if cell C fires. |
+| **Cell A was measured at `d6922f08`, not at this spec's base SHA** | A | Addressed by §3.3's re-attestation. It is not assumed away. |
+
+### §3.3 — R0.2a: the cell-A re-attestation, executed
+
+`spec349c2-manifest.md:41`/`:53` states its enumeration as `git diff --name-only d6922f08..HEAD --
+'*.rs'`, and `..HEAD` is not `..<spec-base>` once this document is committed. The command actually
+run, with this spec's base SHA substituted:
+
+```bash
+git diff --name-only d6922f08..bd41ccf5 -- '*.rs'
+```
+
+**`<spec-base> = bd41ccf5c11ce9ff168e34f76a2d58ee3ddf6eb8`** (repo HEAD at spec start; the merge of
+PR #131, `feat/sf-349c2-plateau-proof`).
+
+**Output — exactly four paths:**
+
+```
+packages/server-rust/benches/soak_harness/main.rs
+packages/server-rust/benches/soak_harness/report.rs
+packages/server-rust/src/storage/datastores/write_behind.rs
+packages/server-rust/tests/soak_wal_census.rs
+```
+
+### §3.4 — R0.2b: "emission-only", defined mechanically, and the per-path adjudication
+
+The term decides a 3600 s re-run, so it is not left to the judgment of the person who would have to
+do the re-run. A path is **emission-only iff BOTH hold**:
+
+1. **It is one of the four paths already adjudicated** in `spec349c2-manifest.md` §1 (`:46-51`):
+   `benches/soak_harness/main.rs`, `benches/soak_harness/report.rs`,
+   `src/storage/datastores/write_behind.rs`, `tests/soak_wal_census.rs`; **and**
+2. **its hunks in the interval add no read** by (a) a sampler, (b) an assessment, or (c) the write
+   path — i.e. no added or modified call that *consumes* a measured quantity: the tombstone gauge
+   scrape, `assess_*`, the CSV/report population of a gated field, or a server-side write/prune.
+   Hunks that only *emit* (add a field to a report struct, print a line, widen a log, add a test)
+   satisfy this; a hunk that changes what a gate or a sampler reads does not.
+
+**Any path outside those four is NOT emission-only, full stop.** No case-by-case adjudication is
+available for it, and cell A **is re-run** (PRE-CHANGE build, 3600 s) with this document naming the
+path that forced it. The asymmetry is deliberate: the escape hatch is closed on the side the
+executor's incentive points, which is the same pressure §9's AC8/AC8b exist to resist.
+
+| # | Path | Clause (1) | Clause (2) — adjudication | Emission-only? |
+|---|---|---|---|---|
+| 1 | `benches/soak_harness/main.rs` | ✓ adjudicated at `spec349c2-manifest.md:46-51` | *(to be adjudicated hunk-by-hunk in §10 before cell B runs)* | pending |
+| 2 | `benches/soak_harness/report.rs` | ✓ adjudicated | *(as above)* | pending |
+| 3 | `src/storage/datastores/write_behind.rs` | ✓ adjudicated | *(as above)* | pending |
+| 4 | `tests/soak_wal_census.rs` | ✓ adjudicated | *(as above)* | pending |
+
+**Clause (1) discharges now:** the returned set is *exactly* the four adjudicated paths, with no
+fifth path, so the "any other path ⇒ re-run cell A" trigger does **not** fire. Clause (2) is
+adjudicated hunk-by-hunk in §10 (wave 2), before cell B's clock starts; a failure there re-runs
+cell A at 3600 s on the PRE-CHANGE build.
+
+---
+
+## §4 — R0.3: the 2×2 identification matrix and its decision table (PRE-REGISTERED)
+
+### §4.1 — Why two axes and not one
+
+A **single-axis** predicate on the width-100 slope alone **cannot identify the fork**. A
+**width-dependent** regression — which is exactly the shape of the SPEC-349c1a/349c1b OR-delta line
+named as first suspect — produces a compliant width-100 slope *and* a breaching width-1000 slope.
+On that one axis it is **observationally identical** to "width-scaled prune math". Under a
+single-axis rule it would be classified as branch (2), and §8/§9 would then re-derive a bound
+**over a live regression**. The anti-tautology controls do not catch that: they prove the
+re-derived gate still reds a gross leak, not that its bound is not accommodating a regression.
+
+Identification therefore needs **two** axes:
+`{epoch width 100, 1000} × {HEAD binary, pre-family binary}`.
+
+### §4.2 — The pre-family binary, and the pin
+
+Built by the **SPEC-354 provenance pattern**: `git worktree add` a detached checkout at a pinned
+SHA, `cargo build --release --bin topgun-server` there (into the worktree's **own** target dir), and
+drive it from the **HEAD** harness via `SOAK_SERVER_BINARY` (`process.rs:418-426`).
+
+Holding the instrument at HEAD is the whole point: the gauge scrape, the CSV column,
+`spec349c2-fit.awk` and `assess_tombstone_bytes` are then byte-identically the same code in every
+cell, so a difference **between** cells is a difference in the **server**. This is a deliberate
+**half-swap**, and this document says so rather than describing cell C as "a run at the old commit".
+
+**The pin, by procedure:** the last merge before the first SPEC-349-family merge that touches the
+OR/prune path, and at or after the SPEC-345 measurement of 2026-07-13 so the gauge under
+measurement is the same instrument.
+
+**Resolved:** `181723d0` (2026-07-27) — the last merge before `3fe5a2c0`
+(`sf-349a-or-apply-seam`, 2026-07-27), which is the first SPEC-349-family merge touching the
+OR/prune path.
+
+**The pin's date is 2026-07-27, not 2026-07-13, and this matters.** Every conclusion drawn from
+cell C is scoped to **2026-07-27** — see row 1 and the E-row. The pin also sits **after**
+`69a5fd1f` (sf-351 tombstone-gauge isolation, 2026-07-19), so the pre-family binary already carries
+the SPEC-351 scoped-sink gauge that `TG-OR-004` covers: the one pre-family-owned instrument in the
+half-swap is the gauge, and it is the same gauge.
+
+The resolved SHA, the command that resolved it, and the worktree path are recorded in cell C's
+`matrix.txt`.
+
+### §4.3 — Pre-flight on the provenance path: IDENTITY checks, not compatibility checks
+
+Two checks an earlier draft carried — a `PORT=` readiness line and a non-`None`
+`topgun_ormap_tombstone_bytes` scrape — are **deliberately absent**. Both pass *identically on the
+HEAD binary*, so neither can detect the operator who believes they swapped the server and did not.
+They are replaced by two checks that answer *which binary actually ran*.
+
+**(a) Identity witness = the WAL frame-kind census.** The pin **precedes the OR-delta emitter**
+(merged `7142d4dc`, `sf-349c1b-or-delta-emitter`). A pre-emitter server therefore cannot write a
+single OR delta frame, so cell C's committed `mechanism.json` **MUST show `orDeltaFrames == 0`**
+(with `orSnapshotFrames > 0`, i.e. the OR path was actually exercised). The contrast anchor is
+committed and unambiguous: the HEAD-binary emitter-on arm shows `orDeltaFrames: 157134`
+(`spec349c2-emitter-on.mechanism.json:11`). The census is free — it is already in §6's required
+artifact set — and it is written by the **HEAD** decoder (`report.rs:375-469`) reading
+**pre-family-written** frames, so it is an observation of the server, not of the instrument.
+
+> **Any nonzero `orDeltaFrames` in cell C means the swap was botched, and the cell is therefore
+> INVALID: abort the run, fix the swap, re-run. It is NOT routed into a row of the decision table.**
+>
+> This distinction is the whole point of the check. A botched swap makes cell C a second cell A
+> (`Spre ≈ S1000` → "reproduces" → row 1 → branch (2)), and §8 would then re-derive a bound over the
+> very regression the matrix believed it had ruled out. A botched swap must never silently become
+> evidence — an **INVALID** cell has no determination, and INVALID is not a band of the table.
+
+`spec355-width.sh` reads the census itself at the end of every provenance run and exits `9`
+(`INSTRUMENT DEFECT`) on a nonzero `orDeltaFrames`, so the operator learns it at the end of the run
+that produced it rather than from a later `jq`.
+
+**(b) Fail-closed binary resolution on the provenance path.** `resolve_server_binary()`
+(`process.rs:421-426`) **fails OPEN**: with `SOAK_SERVER_BINARY` absent from the bench process's own
+environment it returns the bench's compile-time default server path with **no existence check and no
+warning** (`:422-425`). A variable exported in the wrong subshell, or a worktree whose `cargo build`
+landed in the shared `target/`, is exactly how cell C silently becomes cell A.
+
+So on the provenance path `spec355-width.sh` **refuses to run** unless `SOAK_SERVER_BINARY` is set
+and names an existing executable file — a hard non-zero exit (`3`) **before the clock starts**, never
+a warning, and with **no fallback whatsoever** on that path. The guard lives in the **shell runner**,
+not in `process.rs`: it is a non-`.rs` edit, so the Rust ceiling is untouched (still 2 of 5) and **no
+`.rs` edit is introduced into a measurement lineage** (§7). The Rust resolver therefore still fails
+open at the end of this spec; the provenance path never reaches it unguarded.
+
+The resolved `SOAK_SERVER_BINARY` value and both checks' outcomes are recorded in the run's
+`matrix.txt`.
+
+A pre-family binary that genuinely cannot produce the run — e.g. it never emits the readiness line
+and the harness times out — is a **recorded finding that forces a later pin**, never a silently
+degraded run. The runner says so explicitly at that failure point.
+
+### §4.4 — The cells
+
+| Cell | Config | Status | Duration | Role |
+|---|---|---|---|---|
+| **A** | HEAD binary @ width 1000 | **ALREADY MEASURED — no new run** | 3600 s | The two committed SPEC-349c2 arms (`spec349c2-emitter-{on,off}.*`, commit `d6922f08`): 248,148.9 and 283,066.2 B/h. Reference `S1000` = **248,148.9 B/h** (the ON arm — the shipped default configuration). Subject to §3.3/§3.4's re-attestation. |
+| **B** | HEAD binary @ width 100 | **ADD** | 1800 s | Gross-regression check: does SPEC-345's width-100 PASS still hold at HEAD at all? (SPEC-345 allots ≥15 min; 1800 s is used so B and C are duration-matched and B's last-half window is ~900 s, well clear of the 120 s `DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS` floor at `monitor.rs:365`.) |
+| **C** | **pre-family** binary @ width 1000 | **ADD** | 1800 s | **THE regression discriminator.** At a 485× effect, 1800 s is ample to see whether the breach reproduces at the same order; read as a **binary** ("reproduces / does not"), not as a numeric comparison against A — see §3.2's duration confound. |
+| **D** | pre-family binary @ width 100 | **NOT REQUIRED** | — | It tests nothing A+B+C leave open: it would only re-assert that the pre-family binary also cleared the bound at width 100, which SPEC-345's committed −1707.5 B/h control already asserts (at SPEC-345's own matrix — §3.1). **It becomes REQUIRED** as the first extra run of §5's tie-break, if C's result is ambiguous. Recording it as "not required, and here is why" rather than omitting it is the point. |
+| **E** | **pre-346** binary @ width 1000 | **CONDITIONAL — not run in the default path** | 1800 s | The 2026-07-13 → 2026-07-27 gap probe. See §4.6: fires **only if** row 1 lands **and** §8's R4.1a magnitude reconciliation cannot account for the observed magnitude. |
+
+### §4.5 — The decision table (PRE-REGISTERED)
+
+Let `S100` be cell B's fitted last-half slope, `Spre` cell C's, and `S1000 = 248,148.9 B/h`.
+
+The three bands are **disjoint and exhaustive by construction**:
+
+- **"reproduces"** = `Spre ≥ 0.1 × S1000` (= 24,814.89 B/h)
+- **"does not reproduce"** = `Spre ≤ 512 B/h` (the gate's own bound — the gate PASSES)
+- **ambiguous** = `512 B/h < Spre < 0.1 × S1000`, which is row 5
+
+`S100` is banded identically against the same two thresholds.
+
+**Rows 1–5 are the complete, mutually exclusive partition of the `(S100, Spre)` product** — nine of
+nine band combinations, no overlap — **and the E-row does not disturb that.** The E-row is a
+**conditional escalation hanging off row 1**, entered only *after* row 1 has been taken and only
+when a second, later condition holds. It is not a sixth outcome of the matrix and it competes with
+no row: the matrix's exhaustiveness is a property of rows 1–5 alone, and remains so.
+
+| # | Cell B (`S100`) | Cell C (`Spre`) | Determination | Routes to |
+|---|---|---|---|---|
+| 1 | `≤ 512 B/h` (bound-compliant, incl. negative) | **reproduces** | **BRANCH (2) — width-scaled prune math.** The breach pre-dates the **pinned SHA `181723d0`**, whose date is **2026-07-27**; SPEC-345's second disjunct was an unverified extrapolation. **The claim stops at the pin's own date of 2026-07-27.** It says nothing whatever about the 2026-07-13 → 2026-07-27 interval — that interval is the E-row's and cell E's, never row 1's. | §7→§8 (or §9's R5b) |
+| 2 | `≤ 512 B/h` | **does NOT reproduce** | **BRANCH (1) — WIDTH-DEPENDENT REGRESSION.** Precisely the case a single-axis predicate misclassifies as (2). The breach is new *and* only visible at production width. | §9's R5 |
+| 3 | `> 512 B/h` and `≥ 0.1 × S1000` | **reproduces** | **BRANCH (2), with its premise broken at BOTH widths.** Not a regression, but width 100 no longer clears the bound either, so §8's ramp premise must be tested against the width-100 series too, and R5b is the live outcome if no window plateaus. | §7 (both widths) → §8 **or** §9's R5b |
+| 4 | `> 512 B/h` and `≥ 0.1 × S1000` | **does NOT reproduce** | **BRANCH (1) — WIDTH-INDEPENDENT REGRESSION.** The strongest branch-(1) signal: the breach is new and shows at both widths. | §9's R5 |
+| 5 | `512 < S100 < 0.1 × S1000`, **or** cell C ambiguous (`512 < Spre < 0.1 × S1000`) | — | **INDETERMINATE.** No branch is taken on this matrix alone. | §5 |
+| **E** | *(not a band — see §4.6)* | *(not a band)* | **CONDITIONAL ESCALATION OFF ROW 1.** Entered only when **both** conjuncts hold: **(i) row 1 has been taken**, **and (ii) §8's R4.1a prune-math re-derivation cannot account for the observed magnitude.** Probes the 2026-07-13 → 2026-07-27 interval that row 1's conclusion deliberately does not cover. Not an outcome of the `(S100, Spre)` matrix and not exclusive with rows 1–5. | §4.6 → §9's R5 if it fires |
+
+**No row of this table ends in "record a note".** Rows 1 and 3 can land on §9's R5b, which is a full
+disposition with its own owner, spin-off and catalog flip.
+
+### §4.6 — Cell E: the conditional 2026-07-13 → 2026-07-27 gap probe
+
+**Why the gap exists.** Row 1's honest claim stops at the pin (`181723d0`, 2026-07-27). The interval
+between SPEC-345's measurement (`68d0d255`, 2026-07-13) and that pin contains **seven merges, two of
+them on the OR path**: `6c35785a` (sf-346, ormap WAL, 2026-07-14) and `2769570f` (sf-347, ormap RSS
+**in-place mutate**, 2026-07-16), plus sf-350/351/352/353/354. A regression introduced by SPEC-346
+or SPEC-347 **satisfies row 1's antecedent** (cell C reproduces), would be classified as
+width-scaled prune math, and — because row 1 routes to no bisect — nothing downstream would narrow
+it. Cell E is what makes that interval measurable rather than assumed.
+
+**Configuration.** A **pre-346** binary (the last merge before `6c35785a`) at **width 1000**,
+duration 1800 s, built and driven by the identical §4.2 half-swap procedure as cell C, including
+**both** of §4.3's identity checks — with one substitution stated below.
+
+**Instrumentation: corpus-scan-only, deliberately.** Cell E's read-out is the CSV `tombstone_bytes`
+column plus `mechanism.json`'s **redb corpus scan**, and **not** the in-process `tombstones` gauge
+object. This is safe and it is not a weakening:
+
+- the CSV column is written by the **shell runner**, which scrapes the metric itself — it is
+  **binary-independent by construction**;
+- the redb corpus scan is a **HEAD** reader (`main.rs:1225-1238`) over the pre-family server's own
+  file, and does not depend on the pre-family server's gauge at all.
+
+That matters because a pre-346 pin sits **before** `69a5fd1f` (sf-351 tombstone-gauge isolation,
+2026-07-19), so — unlike cell C — cell E's server does **not** carry the SPEC-351 scoped-sink gauge
+that `TG-OR-004` covers. Cell E is therefore read **gauge-free**: it never quotes a slope from that
+binary's gauge, and its identity check (a) uses the WAL frame-kind census exactly as cell C does
+(`orDeltaFrames == 0`; nonzero ⇒ **INVALID**, abort and re-run), which is likewise gauge-free.
+
+**Firing condition — both conjuncts required.** Cell E runs **only if**:
+
+1. §6's determination is **row 1**, **and**
+2. §8's R4.1a chosen prune-math re-derivation **cannot account for the observed magnitude** — i.e.
+   §7's width-scaling model predicts a width-1000 residency/slope materially below what cell A
+   measured, so "width-scaled prune math" does not arithmetically reach 248,148.9 B/h.
+
+If either conjunct fails, cell E is **NOT-APPLICABLE**, recorded with the number that ruled it out
+(the decision-table row, or §7's predicted-vs-observed ratio pair).
+
+**Cost: none in the default path.** Cell E adds no unconditional run.
+
+**Disposition if it fires.** If cell E's breach **does not reproduce** at the pre-346 pin, the
+regression is localized to the 2026-07-13 → 2026-07-27 interval with sf-346 / sf-347 as the named
+live candidates, the determination is **re-routed to branch (1)**, and §9's R5 applies in full. If
+it **reproduces**, row 1's claim widens back to the 2026-07-13 measurement as a **measured**
+statement, and branch (2) proceeds unchanged.
+
+---
+
+## §5 — R0.4: the tie-break (PRE-REGISTERED)
+
+On INDETERMINATE (row 5), run, in this order:
+
+1. **cell D** (pre-family @ width 100, ≥1800 s) — completing the 2×2, which resolves the ambiguity
+   whenever it is cell C that is ambiguous; then, if still ambiguous,
+2. **a width sweep at a single fixed duration** — widths 100 / 300 / 1000 on the **HEAD** binary,
+   duration 1800 s each (`sweep100`, `sweep300`, `sweep1000`) — tested against §7's pre-registered
+   width-scaling prediction. If the three slopes and equilibria are consistent with that prediction,
+   the determination is **(2)**; if not, it is **(1)**.
+
+Every tie-break run is committed like any other, with the full §6 artifact set.
+
+---
+
+## §6 — R0.5: the evidence protocol, as the harness emits it AT HEAD
+
+*Deliberately **not** "inherited verbatim from SPEC-349c2": that spec's committed CSVs carry a
+**5-column** header `elapsed_secs,rss_mb,wal_mb,redb_mb,disk_total_mb` with **no**
+`tombstone_bytes`, and its committed `soak.json` carry `walFsync` and `epochWidth` but **no**
+`tombstones` / `disk` / `confirmApply` objects — those landed after those runs
+(`spec349c2-manifest.md` §7.3, "from this run forward"). Nothing here implies 349c2's tombstone
+slope is CSV-re-derivable; it is not, and §7.3 of that manifest is where its provenance lives.*
+
+For **every** run in this spec:
+
+- the **CSV** is committed and carries the `tombstone_bytes` column, **populated** — the runner's
+  post-run population check is a hard failure of the run's admissibility as evidence;
+- **`soak.json`** is committed and carries `tombstones`, `disk`, `confirmApply`, `walFsync`,
+  `epochWidth`, `crashes`;
+- the per-checkpoint confirm-apply series is committed in **`progress.jsonl`**;
+- **`mechanism.json`** (the gauge-independent redb corpus scan + the WAL frame-kind census) is
+  committed — which requires `--mechanism-report` per §2;
+- **`harness-console.log`** is committed **in the evidence directory**, never left under `target/`
+  (the SPEC-349c2 §7.3 lesson). `spec355-width.sh` copies it into its committed home at the end of
+  every run, including the early-failure paths;
+- the run's **`matrix.txt`** records the repo HEAD SHA, the dirty-tree flag, `uname -a`, both binary
+  build times, every varied knob, and — for the provenance arm — the pinned pre-family SHA, the
+  command that resolved it, and the worktree path;
+- the slope quoted here is **cross-reproduced** by `spec349c2-fit.awk` over the committed CSV and
+  must agree with the harness's own `tombstones.slopeBytesPerHour` to within the documented
+  instrument difference (different sampler origins and cadences). **A disagreement larger than that
+  is a finding to record, not to average away** — the CSV column and the in-process gauge object are
+  two independent instruments over the same gauge, and a divergence there is the one failure that
+  would silently move a verdict.
+
+### §6.1 — R0.5a: the schema-check table (the durable fix for a recurring defect class)
+
+Naming a serialized key the harness does not emit has occurred **three times** in the 349/355 spec
+family, and it is load-bearing every time. Standing rule for this spec and this document:
+
+> **Any AC, requirement or checklist item that names a serialized key MUST have that key verified
+> against the `#[serde(...)]` derive at its source, and MUST cite the `file:line` of that derive,
+> before the item is considered written.** A key quoted from another document, from a sibling
+> struct, or from the Rust field name is **not** verified.
+
+Two traps this rule exists to catch, both verified in `report.rs` at HEAD:
+
+- **The derive is per-struct, not per-file.** `MemoryReport` (`report.rs:24-25`) carries **no**
+  `rename_all`, so its keys are **snake_case** (`memory.slope_mb_per_hour`), while `TombstoneReport`,
+  `DiskReport`, `ConfirmApplyReport`, `SoakReport` and `ProgressSnapshot` all carry
+  `rename_all = "camelCase"`. Assuming one convention across the file produces a wrong key in either
+  direction.
+- **Nesting differs between artifacts.** The same three confirm-apply counters are nested under
+  `confirmApply` in `soak.json` and **flat** in `progress.jsonl`.
+
+**Every serialized key this document and the spec name, verified at `<spec-base>`:**
+
+| Key (as serialized) | Owning struct | `rename_all` derive | Rust field | Artifact |
+|---|---|---|---|---|
+| `tombstones.slopeBytesPerHour` | `TombstoneReport` | `report.rs:43` camelCase | `slope_bytes_per_hour` `report.rs:49` | `soak.json` |
+| `tombstones.firstBytes` | `TombstoneReport` | `report.rs:43` camelCase | `first_bytes` `report.rs:46` | `soak.json` |
+| `tombstones.peakBytes` | `TombstoneReport` | `report.rs:43` camelCase | `peak_bytes` `report.rs:47` | `soak.json` |
+| `tombstones.lastBytes` | `TombstoneReport` | `report.rs:43` camelCase | `last_bytes` `report.rs:48` | `soak.json` |
+| `tombstones.passed` | `TombstoneReport` | `report.rs:43` camelCase | `passed` | `soak.json` |
+| `disk`, `confirmApply`, `walFsync`, `epochWidth`, `crashes`, `passed`, `finishedReason` | `SoakReport` | `report.rs:90` camelCase | `disk`, `confirm_apply`, `wal_fsync` `report.rs:104`, `epoch_width` `report.rs:112`, `crashes`, `passed`, `finished_reason` | `soak.json` |
+| `confirmApply.{confirms,lastConfirmedEpoch,confirmErrors}` | `ConfirmApplyReport` | `report.rs:81` camelCase | `report.rs:83-85` | `soak.json` **only** |
+| `confirms`, `lastConfirmedEpoch`, `confirmErrors` — **FLAT, not nested** | `ProgressSnapshot` | `report.rs:141` camelCase | `report.rs:163-165` | `progress.jsonl` |
+| `memory.slope_mb_per_hour` — **snake_case** | `MemoryReport` | `report.rs:24-25` — **NO rename** | `slope_mb_per_hour` | `soak.json` |
+| `orDeltaFrames`, `orSnapshotFrames` | `MechanismReport` | `main.rs:1314` camelCase | `or_delta_frames` `main.rs:1334`, `or_snapshot_frames` `main.rs:1338` | `mechanism.json` |
+
+> **There is no `confirm_apply` object in `progress.jsonl`.** `jq -e '.confirm_apply'` over a
+> `progress.jsonl` line is expected to exit **non-zero**, and that is the check, not a defect.
+
+---
+
+## §7 — R0.6 build/measurement identity, and R3.2's pre-registered plateau/scaling test
+
+### §7.1 — The three build lineages
+
+The binary that produced a slope is the binary on disk at the recorded SHA. **Any `.rs` edit
+invalidates every slope taken before it.** Runs are partitioned into three named lineages and each
+run states which one it belongs to. **No slope may be carried across a boundary.**
+
+| Lineage | What it is | Runs |
+|---|---|---|
+| **PRE-CHANGE** | one pinned pre-change build at this spec's base SHA (`bd41ccf5`) | cells B and D, §5's sweep, §7.2's long run |
+| **PROVENANCE** | the **HEAD harness bench binary from the PRE-CHANGE build**, driving a `topgun-server` built in a detached worktree at the pinned pre-family SHA | cells C and E only |
+| **POST-CHANGE** | one pinned post-change build, after §8's R4.2 edits | §8's four revalidation runs |
+
+Cell A belongs to none of them: it is SPEC-349c2's committed evidence at `d6922f08`, carried as
+input under §3.3/§3.4's re-attestation obligation.
+
+The PROVENANCE lineage is deliberately a **half-swap**: only the server binary is old.
+
+### §7.2 — R3.1: the long run (branch (2) only)
+
+One run at `TOPGUN_EPOCH_WIDTH` **unset** (production default 1000), duration **14,400 s (4 h)**,
+full §6 artifact set, cell id `long`, artifacts `spec355-w1000.*`.
+
+**Rationale for 4 h:** SPEC-345's own note records ~1000 OR_REMOVEs ≈ one epoch ≈ ~66 s at width
+1000, and SPEC-349c2's 60-min run reached epoch 113 — so 4 h is the shortest run that puts a
+*last-quarter* window several hundred epochs past any plausible ramp while remaining a run that can
+actually be repeated.
+
+### §7.3 — R3.2: the plateau and width-scaling tests (PRE-REGISTERED — neither may be introduced after seeing the data)
+
+**(a) Windowed decay.** Partition the run into 8 consecutive equal windows `W1..W8`; fit each with
+`spec349c2-fit.awk`; report all 8 slopes with standard errors.
+
+*Mechanism, pinned, because the instrument cannot do this directly.* `spec349c2-fit.awk` accepts
+`-v window=` with **`last_half` (default) or `full` only** — it rejects anything else
+(`spec349c2-fit.awk:20-21`, `:69-71`), and the instrument **is not forked** (Assumption 7). So the 8
+fits are produced by **slicing the committed CSV into 8 header-bearing segments** — each segment
+file is the CSV's header row followed by that window's data rows — and fitting each segment with
+`-v col=tombstone_bytes -v window=full`. The slicing is done by a committed one-liner recorded in
+§10 (not retyped per window), the 8 segment files are committed beside the CSV as
+`spec355-w1000-seg<N>.csv`, and every segment must carry ≥2 valued rows or the fit dies by design
+(`spec349c2-fit.awk:120`).
+
+**Plateau predicate.** The series is declared to have reached plateau at `Wi` **iff** the slopes of
+`Wi..W8` are all within the bound under test, **or** their monotone decay fits an asymptote at or
+below it.
+
+**If NO window plateaus**, that is a legitimate, reportable outcome, and it means branch (2)'s
+premise ("the 60-min window measured a ramp") is **refuted at width 1000**. It is recorded and
+**escalated to §9's R5b**, the branch-(2)-UNBOUNDED disposition — **not** forced into a bound.
+(R5b, not R5: R5 is branch-(1)-only, so routing this outcome there would leave the most consequential
+plausible finding with no owner and no AC.)
+
+**(b) Width scaling.** The mechanism hypothesis under test is that equilibrium tombstone residency
+≈ *(retained epochs) × (epoch width) × (mean bytes per tombstone)*, i.e. residency should scale
+~linearly in width and the ramp needed to reach it should lengthen ~linearly in width.
+
+Tested against cell B's width-100 equilibrium: **predict `peakBytes`/`lastBytes` at width 1000 ≈ 10×
+the width-100 figure, and the ramp duration ≈ 10× longer.** The predicted and observed ratios are
+both recorded. **A prediction that fails is evidence *against* the width explanation and is reported
+as such**, not smoothed over.
+
+---
+
+## §8 — Branch (2): the re-derivation, PRE-REGISTERED shapes and anti-tautology gates
+
+**R4.1 — exactly one of three candidate shapes is selected**, with the §7 data that supports it
+cited, and with the two rejected shapes explicitly disposed of:
+
+- **(i) A width-scaled slope bound** — the bound becomes a function of `epoch_width` (available at
+  the call site via `effective_epoch_width()`, already imported at `main.rs:103`).
+- **(ii) Bound unchanged, admissibility guard made epoch-relative** — the fit window must span at
+  least *K* epochs (and/or start after a width-derived ramp) before the slope clause may hard-gate,
+  replacing/augmenting the fixed 120 s `DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS`.
+- **(iii) A residency-ceiling clause** — a bound on absolute resident tombstone bytes derived from
+  §7.3(b)'s model, augmenting the slope clause.
+
+This document must state **why the selected shape is what the data supports**, and **must not present
+"it makes the gate green" as a reason**. If the data supports *no* shape (§7.3(a) found no plateau),
+R4 is recorded **not-derivable** and **§9's R5b applies in full**, including its spin-off, its named
+owner and its catalog flip.
+
+*Stated prior, not a conclusion (spec Assumption 8):* shape **(ii)** is the most likely, since at a
+true plateau the slope should be ~0 at any width and what scales with width is the *ramp length*.
+Shape (i) or (iii) winning is an equally valid outcome, and the choice is made from §7's data.
+
+**R4.1a — the magnitude reconciliation, and the cell-E trigger.** Before a shape is implemented,
+this document must state **arithmetically** whether the chosen prune math accounts for cell A's
+measured **248,148.9 B/h** at width 1000: take §7.3(b)'s width-scaling model, feed it cell B's
+width-100 equilibrium, and record the predicted width-1000 slope/residency **beside** the observed
+one. Two outcomes, both recordable:
+
+- **It accounts for the magnitude** (predicted and observed agree within the stated
+  order-of-magnitude tolerance) → **cell E is NOT-APPLICABLE**, recorded with this ratio pair as the
+  measurement that ruled it out, and R4 proceeds.
+- **It does not** → **run cell E** (§4.6) **before R4.2 lands a single line.** A shape implemented
+  over an unexplained magnitude gap is a bound fitted to a residual.
+
+This is the **only** trigger for cell E, and it is conjunctive with row 1 having been taken.
+
+**R4.2 — implement it** in `monitor.rs` (bound/guard + its doc-rationale, which must **name the
+width the bound was measured at**, plus the calibration tests in that file's own
+`#[cfg(test)] mod tests`, which the change necessarily reaches) and `main.rs` (call site + breach
+message carrying the effective bound and its width). No provenance markers in code (`SPEC-NNN` /
+`TODO-NNN` forbidden); a `TG-<DOMAIN>-<NNN>` invariant ID or a tracker pointer inside a
+known-false/deferred doc-contract are the only sanctioned citations.
+
+**R4.5 — unit-level anti-tautology: the calibration tests stay MUTATION-CONTROLLED.** The ~10
+calibration call sites of `assess_tombstone_bytes` inside `monitor.rs`'s test module are what make
+the gate's own arithmetic checkable, and the cheapest way to keep them green under a loosened bound
+is to loosen the tests. **"Green" is therefore not the bar:**
+
+- The synthetic **leak** series must be shown to **still go RED under the OLD bound/guard** — i.e.
+  re-running the *post-change* test bodies against the *pre-change* constants must fail. A green test
+  is not evidence until its RED is demonstrated.
+- Any test whose **series** (not merely its expected constant) is changed must have that change
+  justified from §7's data here. **Widening a synthetic leak's magnitude so it still trips a looser
+  bound is a rewrite of the discriminator, not a re-calibration, and is rejected.**
+- Recorded per changed test: the old constant, the new constant, the mutation run, and its RED output.
+
+**R4.3 — revalidation, on a single new pinned POST-CHANGE build.** All four runs, full §6 artifact
+set each, recorded in one table:
+
+| Run | Cell id | Config | Required verdict |
+|---|---|---|---|
+| Negative control | `negctl` | `--no-ack`, 360 s | tombstone gate **FAILS** |
+| Slow-leak control | `leakctl` | `--inject-slow-leak`, 420 s | tombstone gate **FAILS** |
+| Positive control, width 100 | `posctl` | cell B's matrix, 1800 s | tombstone gate **PASSES** |
+| Production width | `prodctl` | §7.2's matrix, 3600 s | verdict recorded, whatever it is |
+
+**A re-derived bound under which either control run passes is rejected outright** — that is the
+SPEC-342h false-green class, and SPEC-345 exists precisely because a gate that cannot fail is worse
+than no gate.
+
+**R4.4 — cross-vendor check.** `/xask` on the chosen re-derivation *before* implementing it (is this
+the right shape, or a bound fitted to make a red go away?) and `/xreview` on the resulting diff. Both
+outputs committed into this directory, each finding marked applied or refuted-with-reason.
+
+**The cross-vendor gate is not branch-(2)-only.** Naming a culprit commit and a mechanism (R5) and
+declaring tombstone bytes unbounded at the production width (R5b) are decision points of the same
+consequence — each redirects a spun-off spec and a pre-soak blocker. **Every branch of this spec
+passes through the cross-vendor gate before its verdict is handed off.**
+
+---
+
+## §9 — The two non-(2) dispositions, pre-registered so neither can degrade into a note
+
+### §9.1 — R5, branch (1): bisect, name, hand off
+
+- **The bisect interval is exactly one interval: `68d0d255` (the SPEC-345 measurement, 2026-07-13)
+  .. HEAD.** Why the wider one and not `(pin, HEAD]`: cell C only establishes the breach's absence at
+  `181723d0` (2026-07-27), so the narrower reading leaves the seven-merge 2026-07-13 → 2026-07-27
+  interval — including `6c35785a` (sf-346) and `2769570f` (sf-347) — outside the search, and R5 is
+  reachable *through* that gap via cell E. A bisect scoped narrowly could be handed a culprit that
+  provably is not in its own search space.
+- **The anchors are free and seed the search; they do not redefine it.** Cell C (and cell E, if it
+  ran) are committed measurements at known SHAs inside the interval: each that did **not** reproduce
+  is a `git bisect good` seed, each that did is a `git bisect bad` seed. The interval and the seeds
+  are recorded **separately** so the two are not conflated.
+- **First suspects:** the SPEC-349c1a/349c1b OR-delta line; `6c35785a` (sf-346) and `2769570f`
+  (sf-347) if cell E fired; anything touching `packages/server-rust/src/tombstone_frontier_impl.rs`
+  or the epoch prune path in `packages/server-rust/src/service/domain/crdt.rs`.
+- **The probe** is cell B's width-100 protocol at a **reduced but pre-registered** duration — stated
+  here *before* the bisect starts, with the reason it is still post-ramp at width 100 — run at each
+  bisect point on a fresh data dir. Every probe's slope + SHA goes in a bisect series table; the full
+  §6 artifact set is committed for the two **boundary** commits (last good / first bad).
+- Under row 2 the culprit is expected to be **width-dependent**, so every probe runs at width 100
+  **and** the boundary commits are additionally probed at **width 1000** — a width-dependent culprit
+  is invisible to a width-100-only probe, which is the same identification failure §4.1 exists to
+  remove.
+- **`/xask` on the bisect verdict, before the fix spec is spun off**, stating the boundary commits,
+  both boundary artifact sets and the proposed mechanism, and asking whether the series actually
+  *isolates* that commit or merely correlates with it. Committed, findings applied or
+  refuted-with-reason.
+- **Name the culprit commit and the mechanism, and spin off a fix spec with a NAMED OWNER.** This
+  spec does **not** fix the regression — fixing it here would invalidate the measurements it exists
+  to produce.
+- Record the gate's disposition: the bound stays as-is, the gate stays hard, and TODO-586 / TODO-484
+  remain blocked on the spun-off fix spec rather than on this one.
+
+### §9.2 — R5b, branch (2)-UNBOUNDED: tombstone bytes are unbounded at the production width
+
+*Applies when branch (2) is determined **and** §7.3(a)'s plateau test finds no plateau (or §8's R4.1
+finds the data supports no shape). NOT-APPLICABLE otherwise, recorded with the windowed-fit series
+that ruled it out.*
+
+This is the most consequential plausible outcome of this spec and it **must not end in a note here**.
+**Both** of the following are mandatory.
+
+**R5b.1 — spin off a prune fix-or-redesign spec, at the production width, with a named owner and
+pre-soak-blocker status.**
+
+- `/sf:plan` a new TODO whose subject is **prune fix or redesign at `epoch_width = 1000`** — *not* a
+  bound re-derivation, because §7.3(a) has just shown there is no bound to derive.
+- **Named owner:** the TODO-566 / SPEC-345 tombstone-GC line — the same owner TODO-630 carries, so
+  the handoff invents nobody new.
+- Slotted as **TODO-630 → \<the new spec\> → TODO-586 → TODO-484**, with TODO-630 **re-pointed at
+  it rather than closed**.
+- **`/xask` before the spin-off:** is "unbounded at production width" the honest reading of the
+  8-window series, or is the series still ramping over a 4 h horizon?
+
+**R5b.2 — flip the catalog immediately, and move the NAKED/ratchet accounting with it.**
+
+*Verified finding this is written around:* **`INVARIANTS.md` at `<spec-base>` contains no row
+asserting that tombstone bytes are bounded.** The nearest row, `TG-OR-004` (`INVARIANTS.md:448`), is
+an **instrument-fidelity** invariant — "the tombstone-bytes gauge tracks the REAL add and prune
+paths, test-isolatable", status *decided, enforced* — whose violation consequence is explicitly
+"*the SPEC-345 tombstone hard gate reads a fiction*". That is a claim about the **gauge**, not about
+**boundedness**. **`TG-OR-004` MUST NOT be flipped**: it is not the claim this finding falsifies, and
+flipping it would misreport a working instrument as broken.
+
+The honest flip is therefore an **addition**:
+
+- Add **`TG-OR-005`** (next free ordinal) stating the property the finding refutes: *resident OR
+  tombstone bytes are bounded under sustained churn at the production epoch width*.
+- **Status:** `open (TODO-630)`, plus a one-line statement of the measured refutation and a pointer
+  to this file.
+- **The row sites the `TG-OR-004` distinction in its own body**, because this spec is archivable and
+  the catalog row is not: *"Distinct from `TG-OR-004`, which is gauge **fidelity** (does the counter
+  track the real add/prune paths), not **boundedness** (do the bytes stay bounded). A red tombstone
+  gate is not evidence against `TG-OR-004`; do not flip it."*
+- **Enforcing test: `NAKED`, UNCONDITIONALLY** — not "if the row lands NAKED". R5b fires only when
+  the property has been **refuted by measurement**, and a refuted property cannot have a passing
+  enforcing test, so the marker is **entailed**, not contingent. It is also the only form the gate
+  accepts: the non-NAKED branch (`scripts/check-invariants.sh:56-78`) demands a greppable `fn <name>`
+  under `packages/server-rust/{src,benches}` or an existing `*.rs` filename, neither of which a
+  citation of this manifest can satisfy.
+- **The literal form, pinned to the window the script actually reads.**
+  `scripts/check-invariants.sh:38` builds the enforcing block as `grep -A3 '\*\*Enforcing test:\*\*'`
+  — the field line **plus three following lines** — and `:45-51` requires the literal `NAKED` **and**
+  a `(TODO|SPEC)-[0-9]+` match **within that same window**. `Status: open (TODO-630)` sits several
+  fields below and is **outside** the window, so a row carrying `NAKED` on the enforcing line while
+  relying on `Status` for the tracking reference **fails CI** at the exact moment R5b requires the
+  flip to land. The field is therefore written with **both tokens inside the window**:
+
+  ```markdown
+  - **Enforcing test:** `NAKED — no test proves resident OR tombstone bytes are bounded at the
+    production epoch width; refuted by measurement (TODO-630)`.
+  ```
+
+  If the wording changes, the invariant to preserve is the **window**, not the sentence.
+- **The ratchet moves in the same commit.** `NAKED_BASELINE` is `3` at
+  `scripts/check-invariants.sh:20` and the check is an **exact-match ratchet in both directions**
+  (`:85-94`) — a grown count fails, and an un-lowered baseline after a closure also fails. Because
+  the new row is NAKED unconditionally, **`NAKED_BASELINE=4` is required in the same commit**, and
+  `scripts/check-invariants.sh` must exit 0.
+- Both edits are non-`.rs` and consume no part of the Rust ceiling.
+
+**Timing is part of the requirement:** the flip lands **the moment branch (2)-UNBOUNDED is
+confirmed — in the same commit as the determination** — not at `/sf:done`. A catalog that still reads
+as though the property holds, while a committed 4 h measurement says it does not, is the
+false-invariant hazard the catalog exists to prevent.
+
+---
+
+## §10 — EXECUTED RECORD
+
+*§10.0 below **is** part of the pre-registration commit — it records the wave-1 gate, which by
+construction runs before wave 2 and therefore cannot be written later. **§10.1 onward did not exist
+at the pre-registration commit** and are added as their runs land. The distinction is stated rather
+than left to the reader because a manifest that misdescribes its own commit boundary is the
+documentary defect SPEC-349c2's Review v2 blocked on.*
+
+### §10.0 — Wave-1 gate (G1), executed at the pre-registration commit
+
+**No measurement run is in this section.** Everything here is either a static check or an
+explicitly-labelled smoke.
+
+**(1) The four-assertion micro-check — all PASS.**
+
+| # | Assertion | Result |
+|---|---|---|
+| 1 | Fail-closed resolver present on the provenance path; no compile-time-default fallback | **PASS** — `spec355-width.sh:168-186` refuses; the compile-time default's macro name has **zero** occurrences in the runner; `env -u SOAK_SERVER_BINARY bash spec355-width.sh cellC` exits **3** before spawning anything |
+| 2 | Census identity assertion pre-registered: `orDeltaFrames == 0`, and nonzero ⇒ **INVALID** (abort/re-run), never a decision-table row | **PASS** — §4.3(a) |
+| 3 | Row 1 scopes its claim to the pin's actual date, 2026-07-27 | **PASS** — §4.5 row 1; the over-claiming phrasing appears nowhere in this file |
+| 4 | E-row present with both firing conjuncts and its "not a sixth band" statement | **PASS** — §4.5 E-row, §4.6 |
+
+**(2) The runner was SMOKED, not merely written** (AC1's "executes, not transcribes").
+
+- **Refusal into the tracked directory:** `SPEC355_SMOKE_DURATION=90 spec355-width.sh cellB`
+  refuses with exit 2 while `SPEC355_OUT_DIR` is unset, i.e. while the artifacts would land here.
+- **HEAD path**, 120 s override into a scratch dir: instrument sound, exit 0; `soak.json`
+  `epochWidth: 100` — which is the live proof that the width axis actually reaches the child server;
+  all five size columns populated; `tombstone_bytes` populated.
+- **PROVENANCE path**, 120 s override into a scratch dir, `SOAK_SERVER_BINARY` = the `181723d0`
+  worktree build: instrument sound, exit 0; `epochWidth: 1000` (unset → production default); and the
+  **identity witness fired correctly on a real pre-family run — `orDeltaFrames: 0`,
+  `orSnapshotFrames: 2367`**.
+
+> **These two smokes are NOT evidence and are cited nowhere else in this document.** They are
+> instrument validation, and they are recorded here for one reason: the third bullet establishes
+> *before* 1800 s of machine time is spent that the pinned binary reaches readiness, that the
+> half-swap actually swaps, and that the census discriminates. A pre-family binary that could not
+> reach readiness would have been a §4.3 recorded finding forcing a later pin — and finding that at
+> minute 30 of cell C rather than at second 120 is the avoidable cost this smoke buys out.
+>
+> The same weak-observation discipline §1.1 applies to the 90 s smoke applies here: **no slope from
+> either smoke is quoted, compared, or used in any determination.**
+
+**(3) The pin and its build.**
+
+| Item | Value |
+|---|---|
+| Pinned pre-family SHA | `181723d0` (2026-07-27) |
+| Resolved by | last merge before `3fe5a2c0` (`sf-349a-or-apply-seam`), the first SPEC-349-family merge touching the OR/prune path — see §4.2 |
+| Worktree | `/tmp/spec355-pin-181723d0` (detached), built with its **own** `CARGO_TARGET_DIR` so the build could not land in the shared `target/` and quietly overwrite the HEAD binary — the precise accident §4.3(b) exists to catch |
+| PRE-CHANGE build | `<spec-base>` = `bd41ccf5`, `cargo build --release --bin topgun-server --bench soak_harness` |
+
+### §10.1 — Cell A re-attestation, clause (2) adjudication
+
+*(pending — wave 2, before cell B's clock starts)*
+
+### §10.2 — The completed identification matrix
+
+*(pending — wave 2)*
+
+### §10.3 — The determination
+
+*(pending — wave 2)*
+
+### §10.4 — Branch-specific record
+
+*(pending — wave 3+)*
