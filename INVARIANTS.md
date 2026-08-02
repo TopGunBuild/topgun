@@ -471,6 +471,53 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   mirror — the discovered hole this entry closes).
 - **Status:** decided, **enforced**.
 
+### TG-OR-005: Resident OR tombstone bytes stay bounded under sustained churn at the production epoch width
+
+- **Scope:** the epoch-scoped tombstone prune (`crdt.rs::prune_epoch_tombstones`) under sustained
+  OR churn at the **production** epoch width (`TOPGUN_EPOCH_WIDTH` unset → 1000).
+- **Statement:** resident OR tombstone bytes reach a bounded steady state under sustained churn at
+  epoch width 1000 — i.e. the prune reclaims what the churn adds, rather than falling progressively
+  behind it.
+- **Status:** `open (TODO-634)`.
+- **What is measured, and what is NOT claimed.** In a committed 4 h run at width 1000
+  (`spec355-w1000.*`, 2878 samples, 458 epochs, a tracked client ACKing throughout so the
+  low-water mark advanced), resident bytes grew **0 → 646,306 B** and the series **ended at its
+  maximum**. Eight equal windows fitted independently gave slopes of **113,657 – 244,197 B/h** with
+  r² 0.70–0.97 and **no decay** (W8 is 37 % above W1), against a 512 B/h gate bound. **No plateau
+  was found within the measured horizon.** This is deliberately *not* stated as a proof of
+  unboundedness: a 4 h observation cannot exclude a bound at some higher level or longer horizon,
+  and wording it as a refutation would invite a future reader to stop looking for the real bound.
+- **The prune is NOT dead — it falls behind.** Across the same committed series the gauge
+  decrements on 33.5 % of steps, freeing 299,349 B over the run, so the prune fires. Its **reclaim
+  fraction** (freed ÷ added) degrades with both width and elapsed time: **≈95–98 %** at widths
+  100/300, **≈80–92 %** at width 1000 over 1800 s, and **33.1 %** at width 1000 over 4 h. That
+  degradation, not a dead prune, is what this entry is open on.
+- **Not a regression.** A pinned pre-SPEC-349-family server (`181723d0`) is *worse* at this width,
+  n = 2 vs 2 with disjoint ranges (level 55,787 vs 37,670, t = 11.88; slope 191,961 vs 65,049,
+  t = 4.56). The behaviour is long-standing.
+- **Maintaining code:** `crdt.rs::prune_epoch_tombstones` and the epoch frontier it consumes
+  (`tombstone_frontier_impl.rs`). Citations are kept line-number-free on purpose, per `TG-OR-004`.
+- **Enforcing test:** `NAKED — no test proves resident OR tombstone bytes are bounded at the
+  production epoch width; no plateau found in a 4 h measurement (TODO-634)`.
+- **Violation consequence:** the 72 h soak reds on the SPEC-345 tombstone clause by construction,
+  and resident tombstone bytes grow without a known ceiling on a long-lived node.
+- **Distinct from `TG-OR-004`, which is gauge FIDELITY** (does the counter track the real add/prune
+  paths), **not BOUNDEDNESS** (do the bytes stay bounded). A red tombstone gate is **not** evidence
+  against `TG-OR-004`; **do not flip it.** `TG-OR-004` is `decided, enforced` and this measurement
+  in fact *depends* on it holding — the numbers above are only meaningful because that gauge is
+  known to track the real paths. The distinction is sited here, not only in a spec, because
+  `TG-OR-004`'s own Violation-consequence text reads "the SPEC-345 tombstone hard gate reads a
+  fiction", which is exactly the row a future reader confronting a red tombstone gate lands on and
+  is tempted to flip.
+- **Caveat on the gate that surfaced this.** The 512 B/h clause is a **last-half OLS slope**, i.e. a
+  rate detector, and SPEC-355 measured it to be an unreliable one at this workload: two *identical*
+  width-100 runs gave slopes 4.6× apart with a second instrument flipping sign, and the gate's
+  verdict is non-monotonic in width (FAIL at 100, PASS at 300, FAIL at 1000). When a prune fix
+  lands, the bound must be re-derived with a **level/ceiling** estimator rather than re-armed on the
+  same slope statistic.
+- **Discovered by:** SPEC-355 (R3.2's pre-registered 8-window plateau test), resolving TODO-630.
+  Evidence: `packages/server-rust/benches/soak_harness/evidence/spec355-manifest.md`.
+
 ### TG-MRK-001: The OR-Map Merkle leaf hash is set-canonical (order-independent)
 
 - **Scope:** `merkle_leaf_hash` (`map_data_store.rs`), mirrored by the TS client

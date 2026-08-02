@@ -1138,3 +1138,181 @@ row 1 is in play. Cell E's firing condition is conjunctive, and its status diffe
 **fails on both binaries**, so R4.1a's arithmetic is likely to find the model *cannot* account for
 the magnitude — which would **fire cell E**. That is recorded here in advance so the trigger cannot
 later be quietly read as not having fired.
+
+*(Resolved in §10.5.4 — R4.1a is not reached, because R4 is not-derivable.)*
+
+---
+
+### §10.5 — R3 characterization, and the R5b disposition
+
+#### §10.5.1 — R3.1: the ≥4 h run at the production width
+
+One run, `long` cell, PRE-CHANGE lineage, full §6 artifact set (`spec355-w1000.*`).
+
+| | |
+|---|---|
+| Duration | **14,401 s** (4 h), `epochWidth` 1000, `walFsync` batched, 0 crashes |
+| Gauge samples | 2,878 in-process · 240 committed CSV rows |
+| Epochs | `lastConfirmedEpoch` **458**; `confirms` 6,901; `confirmErrors` 205 (**3.0 %**) |
+| Series | `firstBytes` 0 → **`peakBytes` 646,306 = `lastBytes` 646,306** |
+| Harness verdict | `tombstones.passed: false`, slope 130,353.3 B/h over a 7,195 s last-half window |
+
+**The series ends at its maximum.** The low-water mark advanced throughout, so the epoch-scoped
+prune was licensed for the whole run — this is not the stalled-cursor artifact a climbing gauge can
+otherwise have (§1's settled inputs).
+
+#### §10.5.2 — R3.2(a): the 8 windowed fits, and the plateau predicate
+
+Produced by the **pre-registered mechanism**: the committed CSV sliced into 8 header-bearing
+segments by one committed `awk` one-liner (below), each fitted with the **unforked**
+`spec349c2-fit.awk` at `-v col=tombstone_bytes -v window=full`. All 8 segments are committed as
+`spec355-w1000-seg{1..8}.csv`.
+
+```awk
+awk -F, 'NR==1{h=$0; next} {rows[++n]=$0}
+  END{seg=int((n+7)/8);
+      for(i=1;i<=8;i++){f=sprintf("spec355-w1000-seg%d.csv",i); print h > f;
+        for(j=(i-1)*seg+1; j<=i*seg && j<=n; j++) print rows[j] > f; close(f)}}' spec355-w1000.csv
+```
+
+| Window | span (s) | slope B/h | se | r² |
+|---|---|---|---|---|
+| W1 | 60 – 1,801 | 113,657.12 | 13,941.33 | 0.704 |
+| W2 | 1,860 – 3,660 | **244,197.34** | 7,573.42 | 0.973 |
+| W3 | 3,720 – 5,520 | 151,075.57 | 9,213.40 | 0.903 |
+| W4 | 5,580 – 7,380 | 166,532.06 | 8,971.47 | 0.922 |
+| W5 | 7,440 – 9,240 | **118,189.21** | 9,703.11 | 0.836 |
+| W6 | 9,300 – 11,100 | 132,688.50 | 10,151.52 | 0.855 |
+| W7 | 11,160 – 12,960 | 133,598.47 | 9,651.38 | 0.869 |
+| W8 | 13,020 – 14,400 | 155,726.40 | 12,099.61 | 0.883 |
+
+**The plateau predicate fails on BOTH disjuncts:**
+
+- **(i) "the slopes of `Wi..W8` are all within the bound"** — **NO.** The *smallest* window slope is
+  113,657 B/h = **222× the 512 B/h bound**; the largest is **477×**. No suffix of the series comes
+  near it.
+- **(ii) "their monotone decay fits an asymptote at or below it"** — **NO.** The series is not
+  monotone (W1 < W2, W3 < W4, W5 < W6 < W7 < W8) and **W8 is 37 % ABOVE W1**. Every window has
+  r² between 0.70 and 0.97, so the trend *inside* each window is real and well-resolved — this is
+  sustained growth, not oscillation around a level.
+
+> **CORRECTION to an interim observation.** From the coarse 1,200 s samples mid-run I reported that
+> growth was decelerating and looked like a ramp approaching an asymptote. **The windowed fit
+> refutes that** — the apparent deceleration was sampling noise. Recorded because the interim read
+> was stated aloud, and it was wrong.
+
+**Branch (2)'s premise — "the 60-min window measured a ramp" — is REFUTED at the production width.**
+Per R3.2(a) this is a legitimate, reportable outcome that **escalates to R5b**.
+
+#### §10.5.3 — R3.2(b): the width-scaling prediction, and what the reclaim fraction shows instead
+
+**The prediction fails, and it fails on BOTH binaries** (so it is not a HEAD symptom):
+
+| Binary | w1000 / w100 level | predicted |
+|---|---|---|
+| HEAD | 1.95× | ~10× |
+| pre-family | 2.74× | ~10× |
+
+**No growth-class claim is made.** Two durations cannot fit a model, so "superlinear" is not
+written anywhere. What the data *does* support: the **average rate roughly doubled** between the
+1800 s and 4 h runs (74 → 161 KB/h), which is inconsistent with approaching a nearby asymptote.
+
+**The mechanism finding — the prune fires, it falls behind.** Prompted by `/xask` finding 2, and
+computed from the already-committed CSVs at zero extra cost:
+
+| Run | added | freed | net | **reclaim** |
+|---|---|---|---|---|
+| w100 HEAD (cell B) | 72,243 | 69,910 | +2,333 | **96.8 %** |
+| w100 HEAD (`sweep100`) | 79,602 | 75,471 | +4,131 | **94.8 %** |
+| w100 pre-family (cell D) | 66,876 | 57,979 | +8,897 | **86.7 %** |
+| w300 HEAD | 74,958 | 73,539 | +1,419 | **98.1 %** |
+| w1000 HEAD (`sweep1000`) | 108,255 | 86,753 | +21,502 | **80.1 %** |
+| w1000 HEAD (`sweep1000b`) | 121,524 | 111,994 | +9,530 | **92.2 %** |
+| w1000 pre-family (cell C) | 103,449 | 68,686 | +34,763 | **66.4 %** |
+| w1000 pre-family (cellC2) | 130,790 | 105,834 | +24,956 | **80.9 %** |
+| **w1000 HEAD, 4 h** | **904,435** | **299,349** | **+605,086** | **33.1 %** |
+
+Over the 4 h run the gauge **decrements on 80 of 239 steps (33.5 %)**, freeing 299,349 B, largest
+single drop 23,115 B. **The prune is not dead and was never unlicensed** — the hypothesis `/xask`
+named as leading is refuted by this spec's own committed data. What is happening is that the
+**reclaim fraction degrades with both epoch width and elapsed time**: ≈95–98 % at widths 100/300,
+≈80–92 % at width 1000 over 1800 s, **33.1 %** at width 1000 over 4 h.
+
+*Caveat carried with the number:* the shell CSV samples at 60 s, so intra-interval oscillation is
+invisible and the gross added/freed columns are **lower bounds**. The **net** column is exact, and
+the cadence is identical across every run in the table, so the comparison is like-for-like.
+
+#### §10.5.4 — R4 is NOT-DERIVABLE; cell E's final disposition
+
+**R4 (re-derive the bound) is recorded NOT-DERIVABLE**, per §8's own instruction: *"If the data
+supports no shape (§7.3(a)'s plateau test found none), R4 is recorded as not-derivable and R5b
+applies in full."* There is no bound to derive from a series that does not bound. Consequently:
+
+- **R4.1's three candidate shapes** — (i) width-scaled bound, (ii) epoch-relative admissibility
+  guard, (iii) residency ceiling — are **all disposed of as premature, not chosen**. Each presumes a
+  steady state whose existence §10.5.2 failed to establish. Assumption 8's prior (shape (ii)) is
+  **not** vindicated and is recorded as unresolved rather than quietly carried.
+- **R4.2 lands no code.** The Rust ceiling consumed by this spec is therefore **0 of 5** — neither
+  `monitor.rs` nor `main.rs` is modified, and the Delta entries for both are NOT-APPLICABLE.
+- **R4.3/R4.5/AC8/AC8b (the revalidation runs and the mutation control) are NOT-APPLICABLE**, with
+  §10.5.2's 8-window series as the measurement that ruled them out. There is no re-derived bound to
+  revalidate and no calibration constant was touched.
+- **Cell E: NOT-APPLICABLE — final, no longer PENDING (AC3c).** Its trigger is R4.1a's magnitude
+  reconciliation, and R4.1a is **never reached**: it is a step *within* R4, which is not-derivable.
+  The measurement that rules cell E out is therefore §10.5.2's windowed-fit series — the same
+  measurement that made R4 not-derivable. §10.4.5 recorded in advance that the width-scaling gap
+  would likely *fire* cell E; that expectation is superseded not by a re-reading but because the
+  branch left R4 entirely. **The 2026-07-13 → 2026-07-27 interval is consequently NOT probed by this
+  spec** — and it does not need to be, because cell E exists to hunt a *regression*, and §10.4.4
+  determined there is none: HEAD is measurably **better** than the pre-family baseline, so a
+  regression hidden in an earlier interval would have to have been *improved upon* twice over. This
+  is stated as a reasoned disposition, not as a probe that was run.
+
+#### §10.5.5 — DETERMINATION: R5b — branch (2)-UNBOUNDED
+
+> ## No plateau at the production epoch width within a 4 h horizon.
+> **R5b applies in full.** R4 not-derivable; the disposition is a spun-off spec + a catalog entry,
+> **not a paragraph in this file.**
+
+**The claim is horizon-scoped, deliberately.** `/xask` finding 1 is applied: finite observation
+cannot prove unboundedness, and writing "REFUTED" would invite a future reader to treat the question
+as settled and stop looking for the real bound. So the recorded claim is **"no plateau found within
+the measured horizon"**, and the catalog says the same.
+
+**R5b.1 — the spin-off (AC9b.1):**
+
+| | |
+|---|---|
+| Spec/TODO | **`.specflow/todos/TODO-634.md`** — *fix or redesign the epoch-scoped prune at `TOPGUN_EPOCH_WIDTH=1000`* — **not** a bound re-derivation |
+| Named owner | **the TODO-566 / SPEC-345 tombstone-GC line** — the owner TODO-630 already carried; no new one invented |
+| Status | **pre-72 h-soak blocker** |
+| Sequencing | **TODO-630 (resolved) → TODO-634 → TODO-586 → TODO-484** |
+| TODO-630 | **re-pointed at TODO-634, not closed out** — the blocker moves, it does not disappear |
+| First task carried into it | the per-epoch prune record (`/xask` finding 5), which separates a *selection*, *scheduling* or *throughput* defect — three different fixes. Not done here: instrumenting the prune path is a `.rs` change, and §7.1's R0.6 forbids one inside a measurement lineage. |
+
+**R5b.2 — the catalog flip (AC9b.3/AC9b.4), landing in the SAME commit as this determination:**
+
+- **`TG-OR-005`** added at **`Status: open (TODO-634)`**, stating the property the measurement did
+  not establish, with the 4 h numbers and the reclaim-fraction mechanism in its body.
+- **`TG-OR-004` NOT flipped** — it stays `decided, enforced`. It is gauge **fidelity**, not
+  **boundedness**, and this measurement *depends* on it holding. The row sites that distinction **in
+  its own body**, because this spec is archivable and the catalog row is not.
+- **Enforcing test: `NAKED` unconditionally** — a property not established by measurement cannot
+  have a passing enforcing test. Both the literal `NAKED` and the literal `TODO-634` sit **inside
+  the `grep -A3` window** `scripts/check-invariants.sh:38` reads (verified by running that exact
+  extraction). The pre-registered wording ended *"refuted by measurement"*; it now reads *"no
+  plateau found in a 4 h measurement"* — the pre-registration explicitly pinned **the window, not
+  the sentence**, and the reworded form is the honest one.
+- **`NAKED_BASELINE` moved 3 → 4** in the same commit. `bash scripts/check-invariants.sh` prints
+  `invariants: 20 entries, 4 NAKED (baseline 4)` and **exits 0**.
+
+> **Checklist defect found while verifying this (worth recording, it is not a row defect).**
+> Validation Checklist item 10's own extraction, `awk '/^### TG-OR-005/,/^### TG-(OR-006|[A-Z]+)/'`,
+> is **self-terminating**: `TG-([A-Z]+)` matches `TG-OR` in the *start* line, so the range closes on
+> the line it opens and the greps return 0. The row is fine — verified with the extraction
+> `check-invariants.sh` actually uses, which is the one that gates CI.
+
+**R5b's `/xask` (AC9b.2)** is committed at `spec355-xask-unbounded.md`, run **before** the spin-off
+and the flip, with all five findings adjudicated. Two of them changed this section: the horizon-scoped
+wording, and the reclaim-fraction check that turned "unbounded" into "the prune falls behind" — a
+defect with a mechanism and a testable next step.
