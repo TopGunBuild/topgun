@@ -100,6 +100,18 @@ case "$CELL" in
              EXTRA_FLAGS=""; BASE="spec355-sweep1000" ;;
   long)      WIDTH="";   DURATION=14400; SAMPLE_INTERVAL=60; PROVENANCE=no
              EXTRA_FLAGS=""; BASE="spec355-w1000" ;;
+  # Replicates of the two width-1000 cells, at byte-identical settings to the
+  # originals. They exist because the width-1000 HEAD-vs-pre-family comparison
+  # is the only measurement in this design that discriminates a regression from
+  # width-scaled prune math, and it was carried by n=1 per binary. A paired
+  # comparison does NOT need either arm to be at equilibrium -- it needs both
+  # arms at the SAME point on their ramp, which duration-matching gives -- so
+  # replicating at 1800s is the discriminating experiment, not a longer run.
+  # Strictly additive: no existing cell's literals move.
+  cellC2)    WIDTH="";   DURATION=1800;  SAMPLE_INTERVAL=60; PROVENANCE=yes
+             EXTRA_FLAGS=""; BASE="spec355-cellC2" ;;
+  sweep1000b) WIDTH="";  DURATION=1800;  SAMPLE_INTERVAL=60; PROVENANCE=no
+             EXTRA_FLAGS=""; BASE="spec355-sweep1000b" ;;
   # The two control cells run 360s / 420s. At the pinned 60s cadence those
   # yield 6 and 7 data rows, i.e. a 3-point last-half fit -- thin enough that
   # the committed series would carry no usable shape. This is the "duration
