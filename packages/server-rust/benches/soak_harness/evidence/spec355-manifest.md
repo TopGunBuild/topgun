@@ -1316,3 +1316,53 @@ the measured horizon"**, and the catalog says the same.
 and the flip, with all five findings adjudicated. Two of them changed this section: the horizon-scoped
 wording, and the reclaim-fraction check that turned "unbounded" into "the prune falls behind" — a
 defect with a mechanism and a testable next step.
+
+---
+
+## §11 — R6: disposition and handoff
+
+### §11.1 — What now unblocks the 72 h soak, and what still does not
+
+| Item | Before SPEC-355 | After SPEC-355 |
+|---|---|---|
+| **TODO-630** | open — the fork unknown | **RESOLVED.** Fork (2): width-scaled prune math, no regression. **Re-pointed at TODO-634, not closed out** — the blocker moves, it does not disappear. |
+| **TODO-634** *(new)* | — | **The pre-soak blocker.** Prune fix-or-redesign at `TOPGUN_EPOCH_WIDTH=1000`. Owner: the TODO-566 / SPEC-345 tombstone-GC line. |
+| **TODO-586** | gated on TODO-630 | gated on **TODO-634**; carries a SPEC-355 finding of its own (design the redb cross-check against a *level* estimator, not the current rate detector). |
+| **TODO-484** (72 h soak) | blocked | **STILL BLOCKED**, now on TODO-634. It would red on the tombstone clause by construction, exactly as before — the difference is the cause is now named, measured and owned. |
+| **SPEC-348** (disk gate) | unblocked | **Unblocked, unaffected** — restated below. |
+
+**Sequencing: TODO-630 (resolved) → TODO-634 → TODO-586 → TODO-484.**
+
+**Nothing this spec produced unblocks the 72 h soak.** It converts an unexplained red into a named,
+owned defect with a mechanism — which is what the spec set out to do (§0), not to clear the clause.
+
+### §11.2 — SPEC-348's disk gate: unaffected (a restatement, not a re-derivation)
+
+SPEC-348's disk (WAL + redb) gate derives from `du` over real paths (`spec349c2-manifest.md` §7.2)
+and **never reads the tombstone gauge**. Nothing in this spec touches that derivation: no `.rs` file
+was modified, no committed SPEC-349c2 artifact was altered, and the tombstone finding is confined to
+the gauge-backed clause. **SPEC-348's disk gate remains unblocked either way**, exactly as §0 said
+it would be at the outset.
+
+### §11.3 — The 90 s smoke observation
+
+Mentioned in §1.1 only, carrying its **WEAK — NOT EVIDENCE** label, and **used in no determination**.
+The two instrument smokes this spec itself ran (§10.0) carry the same label and the same treatment:
+no slope from any of the three is quoted, compared or relied on anywhere.
+
+### §11.4 — Findings this spec produced that were NOT in its own brief
+
+Recorded because they outlive the spec and each has a home:
+
+1. **The gate's estimator is unreliable at this workload** — two identical width-100 runs gave
+   slopes 4.6× apart, a second instrument flipped sign, the verdict is non-monotonic in width, and
+   every width-100 slope ever measured spans 8,756 B/h against a 512 B/h bound. **Consequence:
+   SPEC-345's −1707.5 B/h "positive control" sits inside the noise and never demonstrated
+   bound-compliance** — i.e. the *first* disjunct was as unverified as the second. Carried into
+   TODO-634 (level re-derivation required) and TODO-586 (do not tolerance-tune against a rate
+   detector), and sited in `TG-OR-005`'s body.
+2. **The prune's reclaim fraction, and its degradation with width and time** — the mechanism that
+   makes TODO-634 a specific piece of work rather than "make the gate green".
+3. **A defect in this spec's own Validation Checklist item 10** — its `awk` range is
+   self-terminating (§10.5.5). Recorded so a future reader does not mistake a correct catalog row
+   for a broken one.
