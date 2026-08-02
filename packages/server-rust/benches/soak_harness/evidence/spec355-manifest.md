@@ -810,7 +810,49 @@ explicitly-labelled smoke.
 
 ### §10.1 — Cell A re-attestation, clause (2) adjudication
 
-*(pending — wave 2, before cell B's clock starts)*
+**Adjudicated before cell B's clock started.** Clause (1) already discharged in §3.3: the
+enumeration returns *exactly* the four adjudicated paths and no fifth, so the "any other path ⇒
+re-run cell A" trigger does not fire. What remains is clause (2), hunk by hunk.
+
+| # | Path | Change in `d6922f08..bd41ccf5` | Adds a read by a sampler / an assessment / the write path? | Emission-only? |
+|---|---|---|---|---|
+| 1 | `benches/soak_harness/report.rs` | +69/−0. Three **new** report structs (`TombstoneReport`, `DiskReport`, `ConfirmApplyReport`), the three fields that hang them off `SoakReport`, and the three confirm-apply fields on `ProgressSnapshot` — plus their doc-comments. Pure serialization surface. | **No.** Nothing here samples, assesses, or writes; every added item is a `Serialize` target. | **YES** |
+| 2 | `benches/soak_harness/main.rs` | +32/−31. The `use` line; populating `ProgressSnapshot`'s three confirm-apply fields from **pre-existing** atomics; populating the three new report structs from the **already-computed** `tombstones` / `disk` assessment values; and a `print_summary` refactor that takes `&report` instead of loose args. | **No** — see the ruling below. | **YES** |
+| 3 | `src/storage/datastores/write_behind.rs` | +8/−0, **all eight lines are `///`**: the TODO-628 caller-obligation pointer on `flush_key`'s doc-contract. No executable line whatsoever. | **No.** A doc-comment is not compiled into the item's semantics. | **YES** |
+| 4 | `tests/soak_wal_census.rs` | +110/−1. One added `#[test]` fn, distinct-valued fixture fields on the existing `sample_report` helper, and a widened `use`. Test-only; no production item. | **No.** "add a test" is named in clause (2) as an emitting change. | **YES** |
+
+**The one ruling that needed making, stated rather than glossed.** Clause (2)'s enumeration lists
+"the CSV/report population of a gated field" among the *consuming* reads, while its very next
+sentence lists "add a field to a report struct" among the *emitting* changes. Rows 1 and 2 sit
+between those two phrases, so a literal reading can be pointed either way, and under the stricter
+one cell A would be re-run at 3600 s. **The governing text is clause (2)'s closing sentence — "a
+hunk that changes what a gate or a sampler reads does not [satisfy this]" — because that is the
+sentence that names the hazard the clause exists to catch.** These hunks do not change what any gate
+or sampler reads; they change only how an already-computed verdict is *serialized*.
+
+**And it is verified mechanically, not argued:**
+
+- `benches/soak_harness/monitor.rs` — which owns `DEFAULT_TOMBSTONE_BYTES_THRESHOLD_PER_HOUR`,
+  `DEFAULT_TOMBSTONE_BYTES_MIN_WINDOW_SECS` and `assess_tombstone_bytes` — is **not in the interval
+  at all**: `git diff --name-only d6922f08..bd41ccf5 -- .../monitor.rs` is **empty**.
+- No hunk in `main.rs` touches the gauge scrape, the tombstone sampler, or the
+  `assess_tombstone_bytes` **call site**: a `[-+]` grep over that file's diff for
+  `assess_tombstone_bytes|scrape_tombstone|parse_tombstone|TombstoneSample|tombstone_samples`
+  returns **no hit**.
+- The server-side prune path is untouched: `src/tombstone_frontier_impl.rs` and
+  `src/service/domain/crdt.rs` are **both empty** in the interval.
+
+So the quantity cell A reports and the quantity cells B and C will report are computed by the **same
+arithmetic over the same sampler**; only its serialization changed. That is precisely the property
+the re-attestation exists to establish.
+
+**Determination: all four paths are emission-only. Cell A STANDS — it is not re-run**, and its
+`S1000 = 248,148.9 B/h` (the ON arm) is carried into §4.5's decision table as pre-registered.
+
+*(Ledger note, not a caveat on the above: cell A's own `soak.json` carries no `tombstones` object —
+that struct is one of the additions adjudicated in row 1 — so its slope's provenance is
+`spec349c2-manifest.md` §7.3, exactly as §6 of this document states. The re-attestation is about
+whether the arithmetic drifted, and it did not.)*
 
 ### §10.2 — The completed identification matrix
 
