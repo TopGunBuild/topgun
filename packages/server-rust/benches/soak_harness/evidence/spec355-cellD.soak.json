@@ -1,0 +1,57 @@
+{
+  "mode": "soak",
+  "durationSecsTarget": 1800,
+  "durationSecsActual": 1800,
+  "churnClients": 6,
+  "keyspace": 200,
+  "walFsync": "batched",
+  "epochWidth": 100,
+  "totalWrites": 299521,
+  "writeErrors": 0,
+  "reconnects": 1500,
+  "resends": 49805,
+  "steadyCheckpoints": 5,
+  "recoveryCheckpoints": 0,
+  "crashes": 0,
+  "convergenceFailures": [],
+  "recoveryFailures": [],
+  "pendingGates": [
+    "disk growth slope 831.2 MB/h exceeds 50.0 MB/h — EXPECTED until TODO-566 bounds OR-Map tombstones (report-only, did NOT fail the run)"
+  ],
+  "memory": {
+    "samples": 360,
+    "first_mb": 10.515625,
+    "peak_mb": 912.71875,
+    "last_mb": 912.71875,
+    "slope_mb_per_hour": 2164.2497911582677,
+    "passed": true,
+    "reason": null
+  },
+  "tombstones": {
+    "samples": 360,
+    "firstBytes": 0,
+    "peakBytes": 27448,
+    "lastBytes": 18986,
+    "slopeBytesPerHour": -791.2800381025888,
+    "passed": true,
+    "reason": null
+  },
+  "disk": {
+    "samples": 360,
+    "firstMb": 1.515625,
+    "peakMb": 476.44921875,
+    "lastMb": 476.44921875,
+    "slopeMbPerHour": 831.1906510546246,
+    "passed": false,
+    "reason": "disk growth slope 831.2MB/h exceeds 50.0MB/h (total growth 474.9MB over 360 samples)"
+  },
+  "confirmApply": {
+    "confirms": 865,
+    "lastConfirmedEpoch": 600,
+    "confirmErrors": 25
+  },
+  "panicReport": null,
+  "passed": true,
+  "finishedReason": "duration reached",
+  "timestamp": "2026-08-02T12:11:38Z"
+}

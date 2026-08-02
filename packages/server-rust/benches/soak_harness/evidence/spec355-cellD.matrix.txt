@@ -1,0 +1,46 @@
+
+=== spec355 width run: cell cellD ===
+  repo HEAD:      82011e6da64f0c62719a1875f54f0194470193c8
+  dirty tree:     yes
+  host/OS:        Darwin MacBookPro 25.5.0 Darwin Kernel Version 25.5.0: Tue Jun  9 22:18:58 PDT 2026; root:xnu-12377.121.10~1/RELEASE_ARM64_T6000 arm64
+  lineage:        PROVENANCE (HEAD harness + pinned older server)
+  data dir:       /Users/koristuvac/Projects/topgun/topgun/target/spec355-cellD-data
+  csv:            /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec355-cellD.csv
+  soak.json:      /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec355-cellD.soak.json
+  mechanism.json: /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec355-cellD.mechanism.json (harness writes spec355-cellD.soak.mechanism.json; renamed after the run)
+  progress.jsonl: /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec355-cellD.progress.jsonl
+  console log:    /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec355-cellD.harness-console.log
+  matrix:         /Users/koristuvac/Projects/topgun/topgun/packages/server-rust/benches/soak_harness/evidence/spec355-cellD.matrix.txt
+  soak binary:    /Users/koristuvac/Projects/topgun/topgun/target/release/deps/soak_harness-9abf891ab72dea71
+    built:        2026-08-02T10:21:15Z
+  server binary:  /tmp/spec355-pin-181723d0/target/release/topgun-server
+    built:        2026-08-02T10:27:40Z
+  --- varied knobs (R0.1's permitted list; everything else is the
+      spec349c2-plateau.sh literal) ---
+  TOPGUN_EPOCH_WIDTH:  100
+  duration:            1800s
+  csv cadence:         60s
+  extra harness flags: <none>
+  server port:         47355
+  SOAK_SERVER_BINARY:  /tmp/spec355-pin-181723d0/target/release/topgun-server
+  --- provenance arm: identity checks ---
+  fail-closed resolution: PASSED (SOAK_SERVER_BINARY set and executable;
+                          this path has NO fallback to the bench's compile-time
+                          default server binary -- an unset variable is a hard
+                          refusal before the clock starts, exit 3)
+  census identity witness: pending -- read orDeltaFrames from spec355-cellD.mechanism.json
+                          after the run. It MUST be 0 (with orSnapshotFrames > 0).
+                          A nonzero value means the swap was BOTCHED: the cell is
+                          INVALID, is NOT a decision-table row, and is re-run.
+  pinned SHA:            181723d0
+  pin resolved by:       last merge before 3fe5a2c0 (sf-349a-or-apply-seam), the first SPEC-349-family merge touching the OR/prune path: git log --merges --oneline
+  worktree path:         /tmp/spec355-pin-181723d0
+  --- pinned matrix (identical to spec349c2-plateau.sh) ---
+  churn-clients 6; keyspace 200; or-churn true;
+  or-keyspace 48; or-every 5; write-interval-ms 20;
+  writes-per-life 200; offline-keys 3;
+  confirm-interval 2; crash-interval 0;
+  steady-interval 300; quiesce 3;
+  mem-sample-interval 5; wal-fsync batched;
+  memory gate NEUTRALIZED (1000000/1000000/1000000)
+
