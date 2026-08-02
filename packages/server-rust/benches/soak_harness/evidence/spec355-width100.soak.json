@@ -1,0 +1,55 @@
+{
+  "mode": "soak",
+  "durationSecsTarget": 1800,
+  "durationSecsActual": 1800,
+  "churnClients": 6,
+  "keyspace": 200,
+  "walFsync": "batched",
+  "epochWidth": 100,
+  "totalWrites": 299547,
+  "writeErrors": 0,
+  "reconnects": 1502,
+  "resends": 49872,
+  "steadyCheckpoints": 5,
+  "recoveryCheckpoints": 0,
+  "crashes": 0,
+  "convergenceFailures": [],
+  "recoveryFailures": [],
+  "pendingGates": [],
+  "memory": {
+    "samples": 360,
+    "first_mb": 11.75,
+    "peak_mb": 1674.125,
+    "last_mb": 1674.125,
+    "slope_mb_per_hour": 3524.2234368553572,
+    "passed": true,
+    "reason": null
+  },
+  "tombstones": {
+    "samples": 360,
+    "firstBytes": 0,
+    "peakBytes": 28138,
+    "lastBytes": 24134,
+    "slopeBytesPerHour": 1524.9583039544766,
+    "passed": false,
+    "reason": "tombstone-byte growth slope 1525.0 bytes/h exceeds 512.0 bytes/h (total growth 28138 bytes over 360 samples, last-half window 896s)"
+  },
+  "disk": {
+    "samples": 360,
+    "firstMb": 1.515625,
+    "peakMb": 35.9765625,
+    "lastMb": 35.9140625,
+    "slopeMbPerHour": 51.35180597896586,
+    "passed": true,
+    "reason": null
+  },
+  "confirmApply": {
+    "confirms": 865,
+    "lastConfirmedEpoch": 600,
+    "confirmErrors": 25
+  },
+  "panicReport": null,
+  "passed": false,
+  "finishedReason": "tombstone-byte growth slope 1525.0 bytes/h exceeds 512.0 bytes/h: tombstone-byte growth slope 1525.0 bytes/h exceeds 512.0 bytes/h (total growth 28138 bytes over 360 samples, last-half window 896s)",
+  "timestamp": "2026-08-02T11:05:21Z"
+}
