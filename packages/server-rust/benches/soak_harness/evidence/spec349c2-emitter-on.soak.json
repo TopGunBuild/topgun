@@ -1,0 +1,34 @@
+{
+  "mode": "soak",
+  "durationSecsTarget": 3600,
+  "durationSecsActual": 3600,
+  "churnClients": 6,
+  "keyspace": 200,
+  "walFsync": "batched",
+  "epochWidth": 1000,
+  "totalWrites": 555743,
+  "writeErrors": 0,
+  "reconnects": 2832,
+  "resends": 94208,
+  "steadyCheckpoints": 11,
+  "recoveryCheckpoints": 0,
+  "crashes": 0,
+  "convergenceFailures": [],
+  "recoveryFailures": [],
+  "pendingGates": [
+    "disk growth slope 89.6 MB/h exceeds 50.0 MB/h — EXPECTED until TODO-566 bounds OR-Map tombstones (report-only, did NOT fail the run)"
+  ],
+  "memory": {
+    "samples": 719,
+    "first_mb": 12.484375,
+    "peak_mb": 6075.265625,
+    "last_mb": 6075.265625,
+    "slope_mb_per_hour": 6058.487943731718,
+    "passed": true,
+    "reason": null
+  },
+  "panicReport": null,
+  "passed": false,
+  "finishedReason": "tombstone-byte growth slope 248148.9 bytes/h exceeds 512.0 bytes/h: tombstone-byte growth slope 248148.9 bytes/h exceeds 512.0 bytes/h (total growth 209550 bytes over 720 samples, last-half window 1797s)",
+  "timestamp": "2026-08-01T15:06:13Z"
+}

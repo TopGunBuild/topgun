@@ -100,11 +100,11 @@ use monitor::{
 use or_noloss::{missing_acked_adds, OrLedger};
 use process::{resolve_server_binary, ServerConfig, ServerSupervisor};
 use report::{
-    append_progress, utc_timestamp_now, write_report, MemoryReport, ProgressSnapshot, SoakReport,
+    append_progress, effective_epoch_width, scan_wal_frame_sizes, utc_timestamp_now, write_report,
+    ConfirmApplyReport, DiskReport, MemoryReport, ProgressSnapshot, SoakReport, TombstoneReport,
+    WalFrameStats,
 };
 use topgun_server::storage::record::RecordValue;
-use topgun_server::storage::wal::format::{self, FrameDecodeResult};
-use topgun_server::storage::wal::{WalOp, WalStorePayload};
 
 /// Subject index used by the orchestrator's verifier connections. Far above the
 /// churn-client range so it never owns keys or collides with churn auth.
@@ -705,6 +705,9 @@ async fn run_soak(config: &Config) -> i32 {
                     peak_rss_mb: peak,
                     last_rss_mb: last,
                     panics_seen: panic_watch.tripped(),
+                    confirms: metrics.confirms.load(Ordering::Relaxed),
+                    last_confirmed_epoch: metrics.last_confirmed_epoch.load(Ordering::Relaxed),
+                    confirm_errors: metrics.confirm_errors.load(Ordering::Relaxed),
                 },
             );
         }
@@ -904,6 +907,8 @@ async fn run_soak(config: &Config) -> i32 {
         duration_secs_actual: start.elapsed().as_secs(),
         churn_clients: config.churn_clients,
         keyspace: config.keyspace,
+        wal_fsync: config.wal_fsync.clone(),
+        epoch_width: effective_epoch_width(),
         total_writes: metrics.total_writes.load(Ordering::Relaxed),
         write_errors: metrics.write_errors.load(Ordering::Relaxed),
         reconnects: metrics.reconnects.load(Ordering::Relaxed),
@@ -923,23 +928,36 @@ async fn run_soak(config: &Config) -> i32 {
             passed: mem.passed,
             reason: mem.reason.clone(),
         },
+        tombstones: TombstoneReport {
+            samples: tombstones.samples,
+            first_bytes: tombstones.first_bytes,
+            peak_bytes: tombstones.peak_bytes,
+            last_bytes: tombstones.last_bytes,
+            slope_bytes_per_hour: tombstones.slope_bytes_per_hour,
+            passed: tombstones.passed,
+            reason: tombstones.reason.clone(),
+        },
+        disk: DiskReport {
+            samples: disk.samples,
+            first_mb: disk.first_mb,
+            peak_mb: disk.peak_mb,
+            last_mb: disk.last_mb,
+            slope_mb_per_hour: disk.slope_mb_per_hour,
+            passed: disk.passed,
+            reason: disk.reason.clone(),
+        },
+        confirm_apply: ConfirmApplyReport {
+            confirms: metrics.confirms.load(Ordering::Relaxed),
+            last_confirmed_epoch: metrics.last_confirmed_epoch.load(Ordering::Relaxed),
+            confirm_errors: metrics.confirm_errors.load(Ordering::Relaxed),
+        },
         panic_report,
         passed,
         finished_reason: finished_reason.clone(),
         timestamp: utc_timestamp_now(),
     };
 
-    print_summary(
-        &report,
-        &tombstones,
-        &disk,
-        redb_tombstone_scan,
-        &ConfirmDiagnostics {
-            confirms: metrics.confirms.load(Ordering::Relaxed),
-            last_confirmed_epoch: metrics.last_confirmed_epoch.load(Ordering::Relaxed),
-            confirm_errors: metrics.confirm_errors.load(Ordering::Relaxed),
-        },
-    );
+    print_summary(&report, &tombstones, &disk, redb_tombstone_scan);
     if let Some(path) = &config.json_output {
         write_report(path, &report);
         println!("wrote JSON report to {}", path.display());
@@ -989,24 +1007,7 @@ async fn run_soak(config: &Config) -> i32 {
             );
         }
     }
-    // NOTE: neither the tombstone-byte nor the disk verdict is a field on
-    // `SoakReport` (report.rs) — both are asserted into `passed`/`finished_reason`
-    // above and printed in the console summary below, but adding structured
-    // fields there would be a 6th touched file against this spec's 5-file cap.
-    // Tracked as a follow-up so JSON consumers (CI dashboards) gain the same
-    // visibility the console already has.
-
     i32::from(!passed)
-}
-
-/// Tracked-client confirm-apply diagnostics, surfaced in the summary without
-/// widening the persisted `SoakReport` (report.rs is outside this change's file
-/// budget). Purely a console signal for distinguishing a healthy LWM-advancing
-/// run from a stalled-confirm harness failure.
-struct ConfirmDiagnostics {
-    confirms: u64,
-    last_confirmed_epoch: u64,
-    confirm_errors: u64,
 }
 
 fn print_summary(
@@ -1014,7 +1015,6 @@ fn print_summary(
     tombstones: &TombstoneAssessment,
     disk: &DiskAssessment,
     redb_tombstone_scan: Option<u64>,
-    confirm: &ConfirmDiagnostics,
 ) {
     println!("\n=== SOAK SUMMARY ===");
     println!(
@@ -1031,7 +1031,9 @@ fn print_summary(
         "confirm_apply:     confirms={} lastEpoch={} errors={} \
          (tracked client advances the low-water-mark that licenses pruning; \
          confirms=0 with a climbing gauge = LWM never advanced)",
-        confirm.confirms, confirm.last_confirmed_epoch, confirm.confirm_errors
+        r.confirm_apply.confirms,
+        r.confirm_apply.last_confirmed_epoch,
+        r.confirm_apply.confirm_errors
     );
     println!("steady_checkpts:   {}", r.steady_checkpoints);
     println!(
@@ -1265,152 +1267,6 @@ fn scan_redb_tombstone_corpus(data_dir: &Path, map: &str) -> Option<u64> {
 // Mechanism report (R1: Q1-Q4 attribution of OR-churn WAL + RSS growth)
 // ---------------------------------------------------------------------------
 
-/// Per-op-kind WAL frame-size aggregates from a post-run scan of the retained
-/// segment files. The retained WAL is the acked-beyond-applied tail (GC has
-/// reclaimed everything at/below the applied watermark), so its highest
-/// sequences are the most-recently-appended frames — which lets a single
-/// end-of-run scan answer Q1 (does an OR op's frame size RISE over the run?) by
-/// bucketing OR frames by sequence into an early and a late half.
-struct WalFrameStats {
-    segment_files: usize,
-    or_frames: usize,
-    or_bytes_total: u64,
-    or_bytes_max: u64,
-    lww_frames: usize,
-    lww_bytes_total: u64,
-    lww_bytes_max: u64,
-    remove_frames: usize,
-    /// Mean OR frame bytes in the earliest / latest sequence half of the retained
-    /// corpus. `late > early` is the O(N)-per-op growth signature.
-    or_bytes_mean_early: f64,
-    or_bytes_mean_late: f64,
-    or_bytes_max_early: u64,
-    or_bytes_max_late: u64,
-    /// Frames whose sequence is in the top decile of the retained corpus (the
-    /// drain-window proxy) plus the largest OR frame among them: many small
-    /// frames points at a rotation/flush storm, a few large OR frames at a final
-    /// full-slot re-write.
-    top_decile_frames: usize,
-    top_decile_or_bytes_max: u64,
-}
-
-fn classify_frame(op: &WalOp) -> Option<bool> {
-    // Returns Some(true) for an OR frame, Some(false) for an LWW frame, None for
-    // a Remove/tombstone frame (counted separately). OR_ADD/OR_REMOVE both persist
-    // the full RecordValue::OrMap slot today; the legacy OrTombstones blob is also
-    // an OR-side snapshot. Legacy bare-Value frames replay as LWW.
-    match op {
-        WalOp::Remove => None,
-        // A per-op OR mutation is an OR-side frame like the snapshot it replaces,
-        // so the growth accounting keeps attributing it to the OR bucket.
-        WalOp::OrDelta { .. } => Some(true),
-        WalOp::Store { value, .. } => match value {
-            WalStorePayload::Record(
-                RecordValue::OrMap { .. } | RecordValue::OrTombstones { .. },
-            ) => Some(true),
-            WalStorePayload::Record(RecordValue::Lww { .. }) | WalStorePayload::Legacy(_) => {
-                Some(false)
-            }
-        },
-    }
-}
-
-/// Scan every `*.log` WAL segment under `wal_dir`, decode intact frames, and
-/// aggregate per-op-kind frame sizes. Read-only and best-effort: a torn active
-/// tail decodes as its intact prefix (`TruncatedTail`), a corrupt/foreign file
-/// is skipped, and an exact on-disk frame size is recovered by re-encoding each
-/// decoded entry through the deterministic codec (the same trick WAL recovery
-/// uses to measure a segment's intact-prefix length). Returns `None` only if the
-/// directory cannot be read at all.
-fn scan_wal_frame_sizes(wal_dir: &Path) -> Option<WalFrameStats> {
-    let read_dir = std::fs::read_dir(wal_dir).ok()?;
-    // (sequence, frame_bytes) for every OR frame, and running LWW/Remove tallies.
-    let mut or_frames: Vec<(u64, u64)> = Vec::new();
-    let mut lww_bytes_total: u64 = 0;
-    let mut lww_bytes_max: u64 = 0;
-    let mut lww_frames: usize = 0;
-    let mut remove_frames: usize = 0;
-    let mut segment_files: usize = 0;
-    let mut max_seq: u64 = 0;
-
-    for entry in read_dir.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("log") {
-            continue;
-        }
-        let Ok(data) = std::fs::read(&path) else {
-            continue;
-        };
-        segment_files += 1;
-        // A corrupt/foreign/empty file contributes no frames — skip it rather than
-        // abort the whole scan (this is a report-only instrument).
-        let (FrameDecodeResult::Complete(entries)
-        | FrameDecodeResult::TruncatedTail { complete: entries }) = format::decode_all(&data)
-        else {
-            continue;
-        };
-        for wal_entry in &entries {
-            let Ok(frame) = format::encode(wal_entry) else {
-                continue;
-            };
-            let bytes = frame.len() as u64;
-            max_seq = max_seq.max(wal_entry.sequence);
-            match classify_frame(&wal_entry.op) {
-                Some(true) => or_frames.push((wal_entry.sequence, bytes)),
-                Some(false) => {
-                    lww_frames += 1;
-                    lww_bytes_total += bytes;
-                    lww_bytes_max = lww_bytes_max.max(bytes);
-                }
-                None => remove_frames += 1,
-            }
-        }
-    }
-
-    or_frames.sort_by_key(|(seq, _)| *seq);
-    let or_count = or_frames.len();
-    let or_bytes_total: u64 = or_frames.iter().map(|(_, b)| *b).sum();
-    let or_bytes_max = or_frames.iter().map(|(_, b)| *b).max().unwrap_or(0);
-
-    let half = or_count / 2;
-    let (early, late) = or_frames.split_at(half);
-    let mean = |s: &[(u64, u64)]| -> f64 {
-        if s.is_empty() {
-            0.0
-        } else {
-            s.iter().map(|(_, b)| *b as f64).sum::<f64>() / s.len() as f64
-        }
-    };
-    let max_of = |s: &[(u64, u64)]| -> u64 { s.iter().map(|(_, b)| *b).max().unwrap_or(0) };
-
-    // Top-decile-by-sequence frames across BOTH kinds: the drain-window proxy.
-    let decile_floor = max_seq.saturating_sub(max_seq / 10);
-    let top_decile_frames = or_frames.iter().filter(|(s, _)| *s >= decile_floor).count();
-    let top_decile_or_bytes_max = or_frames
-        .iter()
-        .filter(|(s, _)| *s >= decile_floor)
-        .map(|(_, b)| *b)
-        .max()
-        .unwrap_or(0);
-
-    Some(WalFrameStats {
-        segment_files,
-        or_frames: or_count,
-        or_bytes_total,
-        or_bytes_max,
-        lww_frames,
-        lww_bytes_total,
-        lww_bytes_max,
-        remove_frames,
-        or_bytes_mean_early: mean(early),
-        or_bytes_mean_late: mean(late),
-        or_bytes_max_early: max_of(early),
-        or_bytes_max_late: max_of(late),
-        top_decile_frames,
-        top_decile_or_bytes_max,
-    })
-}
-
 /// Pearson correlation between the RSS and disk time series, matching each disk
 /// sample to the RSS sample nearest in elapsed time (both share `sampler_start`,
 /// but a skipped scrape can drop a point on either side). `None` if either
@@ -1466,7 +1322,23 @@ struct MechanismReport {
     q1_lww_frame_bytes_mean: f64,
     q1_lww_frame_bytes_max: u64,
     q1_or_frame_size_rises: bool,
+    /// The OR-vs-LWW mean ratio over BOTH OR frame kinds together. Derived and
+    /// non-normative: it reads a mixture, so a surviving share of snapshot
+    /// frames moves it even when every delta frame is small. Read the per-kind
+    /// census below for a claim about delta framing itself.
     q1_or_vs_lww_mean_ratio: f64,
+    // Per-frame-kind census — the arming evidence. `orDeltaFrames > 0` is what
+    // proves the emitter was armed for a run; `orSnapshotFrames > 0` is the
+    // positive control that distinguishes a disarmed emitter from a retained
+    // corpus that simply held no OR frames at all.
+    or_delta_frames: usize,
+    or_delta_bytes_total: u64,
+    or_delta_bytes_max: u64,
+    or_delta_bytes_mean: f64,
+    or_snapshot_frames: usize,
+    or_snapshot_bytes_total: u64,
+    or_snapshot_bytes_max: u64,
+    or_snapshot_bytes_mean: f64,
     // Q2 — the shutdown drain-window WAL burst.
     q2_wal_mb_before_drain: Option<f64>,
     q2_wal_mb_after_drain: Option<f64>,
@@ -1611,6 +1483,14 @@ fn build_mechanism_report(inp: &MechanismInputs) -> MechanismReport {
         q1_lww_frame_bytes_max: wal.lww_bytes_max,
         q1_or_frame_size_rises: rises,
         q1_or_vs_lww_mean_ratio: or_vs_lww,
+        or_delta_frames: wal.or_delta_frames,
+        or_delta_bytes_total: wal.or_delta_bytes_total,
+        or_delta_bytes_max: wal.or_delta_bytes_max,
+        or_delta_bytes_mean: wal.or_delta_bytes_mean,
+        or_snapshot_frames: wal.or_snapshot_frames,
+        or_snapshot_bytes_total: wal.or_snapshot_bytes_total,
+        or_snapshot_bytes_max: wal.or_snapshot_bytes_max,
+        or_snapshot_bytes_mean: wal.or_snapshot_bytes_mean,
         q2_wal_mb_before_drain: inp.wal_mb_before_drain,
         q2_wal_mb_after_drain: inp.wal_mb_after_drain,
         q2_drain_delta_mb: drain_delta,
@@ -1653,6 +1533,18 @@ fn print_mechanism_report(r: &MechanismReport) {
         r.q1_lww_frame_bytes_max,
         r.q1_or_vs_lww_mean_ratio,
         r.q1_or_frame_size_rises,
+    );
+    println!(
+        "OR frame census:   delta(n={} mean={:.0}B max={}B total={}B) | \
+         snapshot(n={} mean={:.0}B max={}B total={}B)",
+        r.or_delta_frames,
+        r.or_delta_bytes_mean,
+        r.or_delta_bytes_max,
+        r.or_delta_bytes_total,
+        r.or_snapshot_frames,
+        r.or_snapshot_bytes_mean,
+        r.or_snapshot_bytes_max,
+        r.or_snapshot_bytes_total,
     );
     println!(
         "Q2 drain window:   before={} after={} delta={} | {}",
