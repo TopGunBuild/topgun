@@ -980,6 +980,161 @@ Per §5 (R0.4), in this order:
 
 *(§4.5's E-row remains unentered: row 1 was not taken, so its first conjunct is false.)*
 
-### §10.4 — Branch-specific record
+### §10.4 — R0.4's tie-break, and the branch determination
 
-*(pending — wave 3+)*
+#### §10.4.0 — Correction to a claim already committed
+
+Cell D's commit argued from `peakBytes` near-identity (28,138 vs 27,448, 2.5 % apart) that both
+binaries reach the same equilibrium at width 100. **That argument is withdrawn.** A leak of exactly
+the magnitude cell B reported — 1,524.96 B/h over 0.5 h = **762 B** — *predicts* a peak gap of that
+size, and the observed gap is **690 B**. So `peakBytes` near-identity is not evidence for the
+artifact reading. It is also the statistic that flatters that reading, while `lastBytes` (24,134 vs
+18,986, a **5,148 B** gap ≈ 27 % of the level) points the other way. Selecting the first and not
+reporting the second was selection bias in the presentation. Both travel together from here, and
+the conclusion is now carried by the **last-half mean** (§10.4.2), not by an order statistic.
+
+*(Surfaced by `spec355-xask-row5.md`, finding A.)*
+
+#### §10.4.1 — Cell D and the width-100 repeat
+
+| Run | Binary | Width | Harness slope | CSV `last_half` | Gate |
+|---|---|---|---|---|---|
+| cell B | HEAD | 100 | +1,524.96 | +7,938.86 | FAIL |
+| **`sweep100`** | **HEAD (repeat of cell B)** | 100 | **+7,048.07** | **−7,330.71** | FAIL |
+| cell D | pre-family | 100 | −791.28 | −16,797.00 | **PASS** |
+| `sweep300` | HEAD | 300 | −7,106.77 | −16,330.29 | **PASS** |
+| `sweep1000` | HEAD | 1000 | +87,413.90 | +48,547.71 | FAIL |
+| **`sweep1000b`** | **HEAD (repeat)** | 1000 | **+42,684.14** | — | FAIL |
+| **`cellC2`** | **pre-family (repeat of cell C)** | 1000 | **+208,554.75** | — | FAIL |
+
+**The slope estimator does not survive replication.** `sweep100` is a bit-identical repeat of cell B
+— same binary, width, matrix, duration and lineage — and the harness slope moves **4.6×** while the
+CSV estimator **flips sign**. At width 1000 the same repeat moves the slope **2.0×**. And the gate's
+verdict is **non-monotonic in width**: FAIL(100), PASS(300), FAIL(1000), an ordering no model of
+tombstone residency predicts.
+
+**Every width-100 slope ever measured, across both binaries and both specs**, spans **8,756 B/h**:
+
+```
+SPEC-345 −1707.5 │ cellD −791.3 │ cellB +1525.0 │ sweep100 +7048.1        bound: 512 B/h
+```
+
+a spread **17× the bound being tested against**. **SPEC-345's −1707.5 B/h "positive control" sits
+inside that noise**, so the width-100 PASS it recorded never demonstrated bound-compliance. That is
+a *stronger* statement than this spec's own premise, which assumed the width-100 PASS was solid and
+only the width-1000 extrapolation unverified.
+
+By contrast the **epoch clock behaves exactly as modelled** — `lastConfirmedEpoch` over identical
+durations: **600 / 588** (w100), **191** (w300), **58 / 59** (w1000), giving ratios **3.14** and
+**3.24** against a predicted 3.0 and 3.33. It is the *slope statistic over an 840 s window* that
+carries no signal, not the epoch machinery.
+
+#### §10.4.2 — The level statistic, and the deciding comparison
+
+Last-half **mean** of the committed `tombstone_bytes` column (computed over the committed CSVs; the
+instrument is not forked):
+
+| Width | HEAD | pre-family |
+|---|---|---|
+| 100 | 20,765 · 18,961 (mean **19,863**) | **20,771** |
+| 300 | 20,981 | — |
+| 1000 | 38,715 · 36,624 (mean **37,670**) | 56,898 · 54,676 (mean **55,787**) |
+
+**Run-to-run spread of the level is 5.4 % (w1000) and 9.0 % (w100)** — against a slope that moved
+2.0×, 4.6× and changed sign. Level is the statistic that survives replication.
+
+**At width 100 the two binaries are indistinguishable:** HEAD 19,863 vs pre-family 20,771 — **4.6 %
+apart**, inside the HEAD run-to-run spread. Taken with the slope comparison (HEAD {+1525, +7048} vs
+pre-family −791: difference of means 5,077.8, SE 4,783.2, **t = 1.06**), **the width-100 regression
+reading is refuted on both the noisy and the stable statistic.**
+
+**At width 1000, n = 2 vs n = 2 — the deciding comparison:**
+
+| Statistic | HEAD | pre-family | Difference | t (df 2) |
+|---|---|---|---|---|
+| Level | 37,670 (sd 1,479) | 55,787 (sd 1,571) | pre-family **+48 %** | **11.88** |
+| Slope | 65,049 (sd 31,629) | 191,961 (sd 23,467) | pre-family **2.95×** | **4.56** |
+
+**Ranges are disjoint on both measures** — no HEAD run overlaps any pre-family run:
+level HEAD [36,624 – 38,715] vs pre-family [54,676 – 56,898]; slope HEAD [42,684 – 87,414] vs
+pre-family [175,368 – 208,555].
+
+#### §10.4.3 — The deviation from R0.4 step 2, stated plainly
+
+**The pre-registered rule fired, and its literal verdict is (1).** §7.3(b) predicts residency ∝
+width; HEAD measured **1.06×** for a 3× width change and **1.95×** for a 10× change. Not consistent
+⇒ the rule says (1), regression, bisect.
+
+**I first argued the rule "had not fired" because two of its three inputs did not exist at 1800 s.
+That argument is WITHDRAWN as rationalization**, on the reasoning in `spec355-xask-tiebreak.md`: the
+rule's `≥ 1800 s` is a *floor condition*, and rereading it as a *quality gate* exploits a design
+defect I wrote myself, to escape a verdict I disliked.
+
+**The gap that is real is a different one.** R0.4 step 2 tests **HEAD only** against the prediction —
+and the prediction fails on the **pre-family baseline too**:
+
+| Binary | w1000 / w100 level ratio | predicted |
+|---|---|---|
+| HEAD | 1.95× | ~10× |
+| **pre-family** | **2.74×** | ~10× |
+
+§7.3(b)'s model is wrong **universally**, not as a HEAD-specific symptom. So "inconsistent with the
+prediction" diagnoses **the model is wrong**, not **a regression landed** — and R0.4 step 2's
+dichotomy has no branch for that case. The rule is a classifier with a blind spot, and this data
+landed in it.
+
+**The falsification condition was fixed BEFORE the deciding runs** and committed in `e3ce61aa`:
+
+> *If HEAD remains no worse than pre-family across n = 2 vs 2, declare (2) on the ground that the
+> rule's dichotomy is unsound for this case. **If HEAD is worse, accept (1) and bisect.***
+
+§10.4.2 resolves it: HEAD is **not** worse. It is substantially **better**, on both statistics, with
+disjoint ranges, on data collected **after** the condition was committed.
+
+#### §10.4.4 — DETERMINATION
+
+> ## BRANCH (2) — width-scaled prune math. **NO REGRESSION.**
+>
+> Routed to **§7's R3 characterization** (the ≥ 4 h width-1000 run and its 8-window plateau test),
+> and thence to **§8's R4** or **§9.2's R5b**.
+
+**The evidence, in one place:**
+
+1. **At the production width the breach reproduces on the pre-family binary** (cell C 175,368 B/h,
+   cellC2 208,555 B/h) at the same order as cell A's 248,148.9 B/h. The breach **pre-dates the pin**.
+2. **HEAD is better than the pre-family baseline at the production width**, decisively (level +48 %,
+   t = 11.88; slope 2.95×, t = 4.56; disjoint ranges). The SPEC-349 family's OR-delta work moved
+   resident tombstone bytes in the **opposite direction from a regression**.
+3. **At width 100 the two binaries are indistinguishable** (level 4.6 % apart; slope t = 1.06).
+4. **SPEC-345's second disjunct** — "≥30–60 min at the default width" — **was an unverified
+   extrapolation**, as TODO-630's fork (2) proposed. And §10.4.1 adds a finding beyond that fork:
+   **the first disjunct's width-100 PASS was itself inside the noise.**
+
+**Scope of the no-regression claim — it stops at the pin's own date, 2026-07-27.** It says nothing
+about the 2026-07-13 → 2026-07-27 interval; that interval is cell E's, and cell E's disposition is
+§10.4.5.
+
+**Branch (1) is recorded NOT-APPLICABLE**, with the measurements that ruled it out: the width-1000
+n = 2 vs n = 2 comparison (HEAD better, disjoint ranges) and the width-100 comparison (t = 1.06,
+levels 4.6 % apart). Per §9.1 no bisect is run and no prune-path `.rs` file is modified.
+
+#### §10.4.5 — Cell E's disposition at this point
+
+**PENDING R4.1a**, which §2's R2 explicitly admits as a disposition rather than an omission when
+row 1 is in play. Cell E's firing condition is conjunctive, and its status differs from §10.3.2's:
+
+- **Conjunct (i) — "row 1 has been taken":** the determination is branch (2) by the §10.4.3 route
+  rather than by row 1 of the table. The *substance* of row 1 (branch (2), no regression, scoped to
+  the pin's date) is what landed, so this conjunct is treated as **satisfied in substance** and is
+  **not** used to dismiss cell E. Dismissing the 2026-07-13 → 2026-07-27 gap on the technicality
+  that the branch arrived via the tie-break rather than via row 1 would be exactly the evasion
+  §4.6 exists to prevent.
+- **Conjunct (ii) — "R4.1a's prune math cannot account for cell A's magnitude":** not yet
+  evaluable. It requires §7.3(b)'s width-scaling model fed with cell B's width-100 equilibrium,
+  which requires the ≥ 4 h run.
+
+**Cell E is therefore PENDING R4.1a and MUST reach a determinate disposition before `/sf:done`
+(AC3c, R6).** A live complication is already on the record: §10.4.3 shows the width-scaling model
+**fails on both binaries**, so R4.1a's arithmetic is likely to find the model *cannot* account for
+the magnitude — which would **fire cell E**. That is recorded here in advance so the trigger cannot
+later be quietly read as not having fired.
