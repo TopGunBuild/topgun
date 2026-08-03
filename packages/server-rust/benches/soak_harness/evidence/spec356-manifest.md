@@ -526,5 +526,206 @@ precedence rule.
 - **PRE-DATA / POST-DATA:** **PRE-DATA** — committed at the freeze boundary, before any
   `spec356-*.soak.json` exists.
 
-*(Subsequent addenda are appended below this one as `ADJ-2`, `ADJ-3`, … in the same form. Nothing above is
+### ADJ-2
+
+- **ADJ id:** ADJ-2
+- **Date:** 2026-08-03
+- **Target:** **§2.1** — the aggregator in the definitions of *"licensed work DRAINS"* and *"PERSISTENT
+  licensed backlog"*.
+- **ORIGINAL TEXT (verbatim, §2.1):**
+
+  > - **"licensed work DRAINS"** ⟺ `min(L)` over the last half **≤ `B`** — what is left over is less than a
+  >   single batch, i.e. the prune has caught up with its licence.
+  > - **"PERSISTENT licensed backlog"** ⟺ `min(L)` over the last half **> `B`** — the prune never once catches
+  >   up with its licence. **These two are exact complements on one predicate**, which is what makes Step 2 and
+  >   Steps 3–4 mutually exclusive by construction rather than by judgement.
+
+- **FINDING:** `min` is the **extreme order statistic**, and the two branches it defines are wildly
+  asymmetric in how easily they trigger. The `long` cell's last half is ~2 h sampled at 10 s ⇒ **~720
+  samples**. `min(L) ≤ B` fires if the prune catches up **once in 720 samples** — a single lull, one empty
+  drain, one moment of workload jitter. Its complement requires the prune to catch up **never**. Step 2 is
+  therefore close to a default branch, and Step 2 is the branch §2.5 routes to the **REGISTRY** family — so
+  §2.5's claim that *"the modal expected outcome … lands unambiguously at Step 2"* is partly an artefact of
+  the **aggregator** rather than a property of the system. A concrete, physically plausible mechanism is
+  thereby **misrouted**: a prune that drains its licence completely on every pass but whose passes become
+  rare (per-pass scan cost growing with the corpus) has `L ≈ 0` immediately after each pass, so `min(L) ≤ B`
+  fires, Step 2 is the determination, and the passes-per-epoch slope test that would have named the real
+  cause is **never evaluated** because Step 2 short-circuits it. The fix shape it routes to — the claim /
+  retention model — cannot repair a cadence collapse. Raised by the SPEC-356a `/xask` pre-registration round
+  (findings **X1**, **X2**), 2026-08-03.
+- **ADJUDICATED FORM (governs):** the aggregator on the `L` side becomes the **median**, matching the
+  statistic already used on the `B` side:
+  > - **"licensed work DRAINS"** ⟺ **`median(L)` over the last half ≤ `B`** — equivalently, `L ≤ B` on **at
+  >   least 50 %** of last-half samples: the prune is at or inside one batch of its licence at least half
+  >   the time.
+  > - **"PERSISTENT licensed backlog"** ⟺ **`median(L)` over the last half > `B`** — its **exact
+  >   complement**, so §2.4's disjointness and exhaustiveness argument stands unchanged in structure.
+  >
+  > **`min(L)` and `max(L)` are RETAINED as reported statistics** beside the determination, so the
+  > single-dip case remains visible in the record; they no longer decide.
+
+  **Why the median and not some other percentile:** `B` is already defined in §2.1 as *"the **median** refs
+  per non-empty drain"*. The original rule compared an **extreme order statistic against a median**, which is
+  the mismatch this addendum removes; median-against-median is the coherent comparison, and it needs no new
+  literal to be chosen with no prior to choose it from. Under it, the misrouted mechanism above has `L > B`
+  for most of the window and correctly falls through to Steps 3–4.
+- **AUTHORITY:** `/xask` cross-vendor pre-registration round, findings X1 and X2; disposition recorded in
+  `spec356-xask-preregistration.md`.
+- **PRE-DATA / POST-DATA:** **PRE-DATA** — committed before any `spec356-*.soak.json` exists, and before the
+  freeze boundary. The data cannot have influenced it.
+
+### ADJ-3
+
+- **ADJ id:** ADJ-3
+- **Date:** 2026-08-03
+- **Target:** **§2.3** — the short-circuit rule, and what a short-circuited determination must still report.
+- **ORIGINAL TEXT (verbatim, §2.3 column header):**
+
+  > Predicate (evaluated **in this order**; the FIRST step that holds IS the determination — later steps are
+  > not evaluated)
+
+- **FINDING:** the ordering is **upstream-first**, which assumes an upstream cause produces downstream
+  symptoms but not the reverse. In a prune loop with feedback that is false: a downstream cause (per-pass
+  cost growth) produces **fewer passes** ⇒ **persistent backlog** ⇒ **LWM does not advance** ⇒ **pinned pool
+  grows**, i.e. it mimics every upstream symptom. The predicate fires on the first upstream symptom it
+  meets and the evidence that would have indicted it — the passes-per-epoch fit — is **never computed**,
+  because "later steps are not evaluated" is read as licensing its omission. Raised by the `/xask` round
+  (finding **X3**), 2026-08-03.
+- **ADJUDICATED FORM (governs):** **the short-circuit governs the DETERMINATION; it does NOT license
+  omitting the EVIDENCE.** The ordering is **not** reversed — reversing it would re-open exactly the
+  mis-route §2.5 exists to prevent, and choosing which direction of error to take is the pre-registration's
+  to make. What is added is an unconditional reporting obligation:
+
+  > **Whatever step fires, the determination is reported together with ALL of:** (i) the passes-per-epoch
+  > last-half OLS fit and its α = 0.05 test result — **computed and reported even when Steps 3/4 are not
+  > reached**; (ii) `min(L)`, `median(L)`, `max(L)` and the fraction of last-half samples with `L ≤ B`;
+  > (iii) `B`; (iv) the non-drop exit share and the per-exit breakdown from the ledger.
+  >
+  > **A Step-1 or Step-2 determination that coincides with a significantly NEGATIVE passes-per-epoch slope
+  > is reported as CONTESTED**, naming the feedback alternative explicitly. CONTESTED does not change the
+  > determination; it forbids reporting it as uncontested.
+
+- **AUTHORITY:** `/xask` round, finding X3; and finding X9's disposition, which relies on this obligation.
+- **PRE-DATA / POST-DATA:** **PRE-DATA.**
+
+### ADJ-4
+
+- **ADJ id:** ADJ-4
+- **Date:** 2026-08-03
+- **Target:** **§2.4** — what exhaustiveness does and does not buy.
+- **ORIGINAL TEXT (verbatim, §2.4):**
+
+  > **Every leaf is reached by exactly one path**, and Step 5 catches the inadmissible case. **There is no
+  > cell in which two determinations can both fire**, and the previously overlapping shape resolves
+  > deterministically.
+
+- **FINDING:** the claim is **true and is exactly what creates the gap**. Steps 1–4 exhaustively partition
+  the **admissible** space, and Step 5 catches only **admissibility** failure — a data-quality gate, not a
+  conceptual one. There is no *"the data is admissible but none of the four causal stories fit"* branch, so
+  a mechanism outside the four hypothesised ones still receives one of the four frames — **endorsed by a
+  pre-registered rule**, which makes the wrong answer harder to challenge than an un-pre-registered one
+  would be. The predicate is falsifiable only downstream, when the fix it routes to fails. Raised by the
+  `/xask` round (finding **X4**), 2026-08-03.
+- **ADJUDICATED FORM (governs):** no fifth branch is added — no condition over admissible data could
+  trigger one without the judgement the pre-registration exists to remove. The claim strength is bounded
+  instead:
+
+  > **A determination is reported as "the best-supported of the FOUR PRE-REGISTERED mechanisms", never as
+  > "the cause".** The report states explicitly that **a mechanism outside the four is not excluded**, and
+  > names the residual evidence that would indicate one (per-pass cost growth, index-scan cost, allocator
+  > or page-cache effects — none of which the 33-series instrument observes).
+  >
+  > This bound is what finding **X8**'s disposition relies on: a small but persistent non-drop exit share
+  > that never crosses the 10 % literal does not decide, but it **is** in the committed series and the
+  > per-exit breakdown ADJ-3 mandates puts it in the report.
+
+- **AUTHORITY:** `/xask` round, finding X4 (and X8's disposition).
+- **PRE-DATA / POST-DATA:** **PRE-DATA.**
+
+### ADJ-5
+
+- **ADJ id:** ADJ-5
+- **Date:** 2026-08-03
+- **Target:** **§1.3** — the `§1.1 rejects / §1.2 passes` cell, and the scope of what §1.2 exonerates.
+- **ORIGINAL TEXT (verbatim, §1.3, the `§1.1 rejects` / `§1.2 passes` cell):**
+
+  > **BUILD-LINEAGE EFFECT — NOT an instrument defect.** The instrument is exonerated by the higher-powered,
+  > better-controlled test; the difference is attributed to the lineage break §0(b) already declared. **The
+  > classification numbers STAND.** Recorded as a finding, with both series and the effect size, and quoted
+  > beside the determination — never averaged away, never silently absorbed.
+
+- **FINDING:** two structural blind spots, both by construction.
+  **(i) §1.2 tests ACTIVATION, not PRESENCE.** `ctl` and `ctloff` are the **same binary**; arming is a
+  runtime flag. Compiled-in branches, inlining decisions and code layout are **identical in both arms**, so
+  the higher-powered control **cannot see them** — while §1.1, which can, has its rejection absorbed here as
+  "build-lineage effect" and the numbers allowed to stand. The exoneration is therefore narrower than the
+  cell's wording claims.
+  **(ii) Both measured controls are LEVEL controls; the classification reads DYNAMICS.** §1.1 and §1.2 both
+  compare **last-half level means** of `tombstone_bytes`. The predicate reads the non-drop exit share, the
+  `L`/`P` split and a slope. A perturbation that shifts the **dynamics** without shifting the steady-state
+  **level** passes both controls and still moves the determination.
+  Raised by the `/xask` round (findings **X5**, **X6**), 2026-08-03.
+- **ADJUDICATED FORM (governs):** the 2×2 is **not** restructured — §1.2 remains the better test of
+  activation and the two controls are still not OR'd. The cell's disposition is tightened and the controls
+  gain a descriptive companion:
+
+  > **"STAND" becomes "STAND, BOUNDED AND FLAGGED".** The cell must report the observed cross-lineage
+  > effect size as an **explicit bound on unexplained shift**, and **any determination whose deciding
+  > statistic differs from its threshold by less than that bound is reported FRAGILE**.
+  >
+  > **The exoneration is scoped in words:** §1.2 exonerates the instrument's **activation**. It does **not**
+  > and cannot exonerate the instrument's **presence in the binary**, which is common-mode across both its
+  > arms. Any residual cross-lineage shift is therefore reported as *"attributable to the declared lineage
+  > break **and/or** to instrument presence, not separable by this control set"* — never as
+  > *"attributable to the lineage break"* alone.
+  >
+  > **The armed-vs-disarmed comparison is ALSO reported for the three dynamics statistics the predicate
+  > reads** — non-drop exit share, `median(L)/B`, and the passes-per-epoch slope — as **descriptive
+  > companions**. **No new predicate and no new α**: these add nothing to the family-wise rate §1.4 computes
+  > and cannot reject on their own. They exist so that a dynamics perturbation invisible to the level
+  > controls is at least **visible in the record**.
+
+- **AUTHORITY:** `/xask` round, findings X5 and X6.
+- **PRE-DATA / POST-DATA:** **PRE-DATA.**
+
+### ADJ-6
+
+- **ADJ id:** ADJ-6
+- **Date:** 2026-08-03
+- **Target:** **§1.2** — the *"one difference"* claim, and the sampler's scope on a disarmed cell.
+- **ORIGINAL TEXT (verbatim, §1.2):**
+
+  > `ctl` (armed) versus `ctloff` (disarmed) — **one build, one lineage, one difference**. Same predicate as
+  > §1.1, MDE stated the same way, computed from that pair's own observed pooled sd.
+
+- **FINDING:** *"one difference"* holds only if **everything else is common-mode**, and the second
+  (`prune.csv`) sampler's own 10 s scrape is not obviously so. The governing rules collide: the sampler's
+  completeness gate is stated **unconditionally** (*a row is written only from a scrape carrying **all 35
+  series**; failure to obtain one inside the readiness window is `fail_instrument` / `exit 9`*), while the
+  per-cell context states that on a **disarmed** cell **no prune-record column is checked at all**, because
+  the arming witness requires those series to be **absent**. Read together, an unscoped gate makes a
+  disarmed cell **unrunnable** — the 33 prune-record series are absent by design, so no scrape is ever
+  "complete" and the cell exits 9. The obvious repair — *don't sample disarmed cells* — is worse: it puts
+  the sampler's `curl` and file I/O on the **armed arm only**, making it a **second** difference and
+  falsifying the very claim this control rests on. Raised by the `/xask` round (finding **X7**),
+  2026-08-03; the underspecification is real and is resolved here rather than at the keyboard.
+- **ADJUDICATED FORM (governs):**
+
+  > **The second sampler runs IDENTICALLY on armed and disarmed cells** — same 10 s cadence, same scrape,
+  > same row-writing cadence — so its cost is **common-mode** and *"one difference"* is restored as a true
+  > statement.
+  >
+  > **The 35-series completeness gate is scoped to ARMED cells.** On a **disarmed** cell the sampler writes
+  > its row with the prune-record columns **empty**, and **no column check reads them** — which the per-cell
+  > context already provides for. **Series absence on a disarmed cell is never `exit 9`**; it is the
+  > **arming witness**, checked once and fail-closed, exactly as specified.
+  >
+  > **Unaffected, stated so no gate is read as weakened:** the zero-empty-field census (**EG-1** limb (b))
+  > is taken over the **ARMED** `smoke` cell, where the completeness gate is in full force; the `empty > 0`
+  > limb likewise binds only where a column is checked at all. Nothing here relaxes either.
+
+- **AUTHORITY:** `/xask` round, finding X7.
+- **PRE-DATA / POST-DATA:** **PRE-DATA.**
+
+*(Subsequent addenda are appended below these as `ADJ-7`, `ADJ-8`, … in the same form. Nothing above is
 edited to accommodate them.)*
