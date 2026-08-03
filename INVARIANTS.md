@@ -526,6 +526,48 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Discovered by:** SPEC-355 (R3.2's pre-registered 8-window plateau test), resolving TODO-630.
   Evidence: `packages/server-rust/benches/soak_harness/evidence/spec355-manifest.md`.
 
+### TG-OR-006: The per-epoch prune record is exit-path exhaustive and gauge-neutral
+
+- **Scope:** the per-pass / per-epoch prune record emitted around
+  `crdt.rs::prune_epoch_tombstones` and the observer that renders it
+  (`tombstone_frontier.rs` contract, `tombstone_frontier_impl.rs` implementation), armed by
+  `TOPGUN_PRUNE_RECORD`.
+- **Statement:** two claims about the *instrument*, not about the prune it measures.
+  **(a) Exit-path exhaustive:** every tombstone ref the sweep considers leaves through exactly one
+  counted exit —
+  `considered == dropped + matched_nothing + absent + restored_read_error + restored_evicted +
+  restored_write_error` — so a ref that quietly stops being accounted for cannot hide behind a
+  falling reclaim fraction. **(b) Gauge-neutral:** arming the record moves no tombstone bytes and
+  reclaims no differently — the same workload run armed and disarmed yields identical isolated
+  gauge deltas and an identical reclaim outcome, and the single `sub_tombstone_bytes` call stays in
+  `prune_epoch_tombstones`'s post-write `Ok(_)` arm behind `dropped` while the recorder body names
+  no tombstone-byte counter at all.
+- **Maintaining code:** the exit enum and the record structs (`tombstone_frontier.rs`), the
+  metrics-emitting and null observers plus the single arming read at `TombstoneFrontier::new`
+  (`tombstone_frontier_impl.rs`), and the ledger inside `crdt.rs::prune_epoch_tombstones`.
+  Citations are kept line-number-free on purpose, per `TG-OR-004`.
+- **Enforcing test:** `prune_exit_ledger_sums_to_considered` (the exhaustiveness identity, with each
+  of the six exits driven exactly once so no limb is vacuous) and
+  `prune_record_armed_disarmed_gauge_neutral` (the armed-vs-disarmed gauge-delta equality plus the
+  structural counter-siting assertion), both in `crdt.rs`'s inline test module.
+- **The pass-siting premise is enforced by the identity TOGETHER WITH its two count pins, not by the
+  sum alone.** `passes == empty_drains + nonempty_drains` is pinned alongside `nonempty_drains == 1`
+  and `empty_drains >= 1`, because a pass observation made *conditional on work* survives the bare
+  sum as `1 == 0 + 1`; only moving the observation **into the loop body** breaks the sum (six passes
+  for one drain). Do not read the sum identity as going RED on any mis-sited pass — it does not, and
+  the two count pins are what close that hole.
+- **Violation consequence:** the prune record becomes an instrument that either loses refs between
+  its exits (so a degrading reclaim fraction has no attributable cause) or perturbs the very
+  tombstone bytes `TG-OR-004` tracks — in which case every measurement taken with the record armed,
+  including SPEC-356b's classification, is reading its own footprint.
+- **Distinct from both neighbouring OR rows, and the three-way split is sited here on purpose:**
+  `TG-OR-004` is gauge **FIDELITY** (does the counter track the real add/prune paths), `TG-OR-005`
+  is **BOUNDEDNESS** (do the bytes stay bounded under sustained churn), and this row is
+  **INSTRUMENT NEUTRALITY OF THE NEW RECORD** (does adding the record change what those two
+  measure). A red `TG-OR-005` is evidence against neither of the other two.
+- **Discovered by:** SPEC-356a (the instrument half of the TODO-634 prune-record family).
+- **Status:** decided, **enforced**.
+
 ### TG-MRK-001: The OR-Map Merkle leaf hash is set-canonical (order-independent)
 
 - **Scope:** `merkle_leaf_hash` (`map_data_store.rs`), mirrored by the TS client
