@@ -1062,7 +1062,7 @@ pre-family [175,368 – 208,555].
 #### §10.4.3 — The deviation from R0.4 step 2, stated plainly
 
 **The pre-registered rule fired, and its literal verdict is (1).** §7.3(b) predicts residency ∝
-width; HEAD measured **1.06×** for a 3× width change and **1.95×** for a 10× change. Not consistent
+width; HEAD measured **1.06×** for a 3× width change and **1.90×** for a 10× change. Not consistent
 ⇒ the rule says (1), regression, bisect.
 
 **I first argued the rule "had not fired" because two of its three inputs did not exist at 1800 s.
@@ -1075,8 +1075,14 @@ and the prediction fails on the **pre-family baseline too**:
 
 | Binary | w1000 / w100 level ratio | predicted |
 |---|---|---|
-| HEAD | 1.95× | ~10× |
-| **pre-family** | **2.74×** | ~10× |
+| HEAD | 37,670 / 19,863 = **1.90×** | ~10× |
+| **pre-family** | 55,787 / 20,771 = **2.69×** | ~10× |
+
+*Pairing note.* These are `n = 2` means on **both** sides wherever two runs exist (pre-family/width
+100 is cell D alone). `spec355-xask-tiebreak.md:63-66` — the committed transcript, deliberately not
+retro-edited — carries **1.95× / 2.74×**, computed before `sweep1000b` and `cellC2` landed and
+pairing a single width-1000 run against an `n = 2` width-100 mean. The consistent recomputation is
+what is quoted here and in §10.5.3; the difference is 2–3 % and no verdict moves (both are ≪ 10×).
 
 §7.3(b)'s model is wrong **universally**, not as a HEAD-specific symptom. So "inconsistent with the
 prediction" diagnoses **the model is wrong**, not **a regression landed** — and R0.4 step 2's
