@@ -489,12 +489,20 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   and wording it as a refutation would invite a future reader to stop looking for the real bound.
 - **The prune is NOT dead — it falls behind.** Across the same committed series the gauge
   decrements on 33.5 % of steps, freeing 299,349 B over the run, so the prune fires. Its **reclaim
-  fraction** (freed ÷ added) degrades with both width and elapsed time: **≈95–98 %** at widths
-  100/300, **≈80–92 %** at width 1000 over 1800 s, and **33.1 %** at width 1000 over 4 h. That
+  fraction** (freed ÷ added) degrades with both width and elapsed time. **HEAD runs only:**
+  **≈95–98 %** at widths 100/300, **≈80–92 %** at width 1000 over 1800 s, and **33.1 %** at width
+  1000 over 4 h. The pre-family arm is *worse* at every width and is not inside those ranges
+  (86.7 % at width 100; 66.4 % / 80.9 % at width 1000), so the ranges are a HEAD-only summary, not
+  a binary-agnostic one. Two caveats travel with the numbers: the CSV samples at 60 s, so the gross
+  added/freed columns are **lower bounds** (the *net* column is exact and the cadence is identical
+  across every run), and the temporal limb compares `n = 2` at 1800 s against `n = 1` at 4 h. That
   degradation, not a dead prune, is what this entry is open on.
 - **Not a regression.** A pinned pre-SPEC-349-family server (`181723d0`) is *worse* at this width,
   n = 2 vs 2 with disjoint ranges (level 55,787 vs 37,670, t = 11.88; slope 191,961 vs 65,049,
-  t = 4.56). The behaviour is long-standing.
+  t = 4.56). **That claim stops at the pin's own date (2026-07-27) and is not a statement about the
+  whole history:** the 2026-07-13 → 2026-07-27 interval — which contains two OR-path merges — is
+  **un-probed**, and is owned by `TODO-634` as a diagnostic-on-demand task with a runnable protocol.
+  Do not read "not a regression" as "characterised all the way back".
 - **Maintaining code:** `crdt.rs::prune_epoch_tombstones` and the epoch frontier it consumes
   (`tombstone_frontier_impl.rs`). Citations are kept line-number-free on purpose, per `TG-OR-004`.
 - **Enforcing test:** `NAKED — no test proves resident OR tombstone bytes are bounded at the

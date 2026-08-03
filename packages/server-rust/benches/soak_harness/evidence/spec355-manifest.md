@@ -1278,9 +1278,18 @@ run that has *not*. Its ratios are **lower bounds** on any equilibrium ratio, so
   the censoring.
 
 **No growth-class claim is made.** Two durations cannot fit a model, so "superlinear" is not
-written anywhere. What the data *does* support: the **average rate roughly doubled** between the
-1800 s and 4 h runs (**75 → 161 KB/h**, decimal KB throughout: 37,670 B / 0.5 h and 646,306 B / 4 h;
-ratio 2.14), which is inconsistent with approaching a nearby asymptote.
+written anywhere. What the data *does* support: the **average rate rose ~60 %** between the 1800 s
+and 4 h runs — **100 → 161 KB/h** (decimal KB; **endpoint over duration on both sides**, 50,179 B /
+0.5 h and 646,306 B / 4 h; ratio **1.61**) — which is inconsistent with approaching a nearby
+asymptote, since a series nearing an asymptote has a *falling* average rate.
+
+*Corrected, and the earlier form named so the record is checkable:* this pair was first written
+**75 → 161** (ratio 2.14), which mixed statistics — 37,670 B is the 1800 s runs' **last-half mean**
+while 646,306 B is the 4 h run's **endpoint**, and for a still-climbing series the endpoint exceeds
+the mean, so the ratio was inflated on the numerator's side only. The like-for-like pair above uses
+`lastBytes` at both durations (HEAD `n = 2` at 1800 s). The direction of the conclusion is unchanged
+and it does not carry the determination — R3.2(a)'s **eight** windowed fits do, not this two-point
+comparison — but "roughly doubled" was not supported and is withdrawn.
 
 **The mechanism finding — the prune fires, it falls behind.** Prompted by `/xask` finding 2, and
 computed from the already-committed CSVs at zero extra cost:
@@ -1300,8 +1309,12 @@ computed from the already-committed CSVs at zero extra cost:
 Over the 4 h run the gauge **decrements on 80 of 239 steps (33.5 %)**, freeing 299,349 B, largest
 single drop 23,115 B. **The prune is not dead and was never unlicensed** — the hypothesis `/xask`
 named as leading is refuted by this spec's own committed data. What is happening is that the
-**reclaim fraction degrades with both epoch width and elapsed time**: ≈95–98 % at widths 100/300,
-≈80–92 % at width 1000 over 1800 s, **33.1 %** at width 1000 over 4 h.
+**reclaim fraction degrades with both epoch width and elapsed time**. **On HEAD** (the arm those
+three summary ranges describe): ≈95–98 % at widths 100/300, ≈80–92 % at width 1000 over 1800 s,
+**33.1 %** at width 1000 over 4 h. The pre-family arm sits *below* each of those ranges rather than
+inside them — 86.7 % at width 100, 66.4 % / 80.9 % at width 1000 — which is the same direction as
+every other statistic here (pre-family is worse) but means the ranges must be read as **HEAD-only**,
+not as covering the table. The temporal limb is `n = 2` at 1800 s against `n = 1` at 4 h.
 
 *Caveat carried with the number:* the shell CSV samples at 60 s, so intra-interval oscillation is
 invisible and the gross added/freed columns are **lower bounds**. The **net** column is exact, and
@@ -1403,7 +1416,9 @@ the measured horizon"**, and the catalog says the same.
 > `awk '/^### TG-OR-005/{f=1;print;next} f&&/^### TG-[A-Z]+-[0-9]+/{exit} f'`: it consumes the start
 > line before testing, and requires the full `TG-[A-Z]+-[0-9]+` heading shape so `TG-OR` can no
 > longer close the window it opened. Executed against the committed `INVARIANTS.md` it returns the
-> 47-line row, `grep -c 'NAKED'` = **1**, the same 4-line window matches `(TODO|SPEC)-[0-9]+`, and
+> whole row (**55** lines as committed — the count moves whenever the row's prose is edited, so it
+> is the *window closing on the next heading* that is the property, not the number),
+> `grep -c 'NAKED'` = **1**, the same 4-line window matches `(TODO|SPEC)-[0-9]+`, and
 > the row shows `Status: open (TODO-634)` — the literal the item previously named as `TODO-630`,
 > corrected per Deviation 6.
 
