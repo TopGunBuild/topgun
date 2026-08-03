@@ -1208,16 +1208,64 @@ Per R3.2(a) this is a legitimate, reportable outcome that **escalates to R5b**.
 
 #### §10.5.3 — R3.2(b): the width-scaling prediction, and what the reclaim fraction shows instead
 
-**The prediction fails, and it fails on BOTH binaries** (so it is not a HEAD symptom):
+§7.3(b) pre-registers **two** observations, and **both are recorded here against it**: *(i)*
+`peakBytes`/`lastBytes` at width 1000 ≈ **10×** the width-100 figure, and *(ii)* the ramp duration
+≈ **10×** longer. Neither limb is re-specified — where a different statistic is used it is reported
+*beside* the pre-registered one, not in place of it.
 
-| Binary | w1000 / w100 level | predicted |
+**(i) On the PRE-REGISTERED statistic, like-for-like at 1800 s.** `n = 2` means at each width except
+pre-family/width-100, where cell D is the only run:
+
+| Binary | statistic | w100 | w1000 | **observed** | predicted |
+|---|---|---|---|---|---|
+| HEAD | `peakBytes` | 26,807 | 58,418 | **2.18×** | ~10× |
+| HEAD | `lastBytes` | 22,319 | 50,179 | **2.25×** | ~10× |
+| pre-family | `peakBytes` | 27,448 | 92,114 | **3.36×** | ~10× |
+| pre-family | `lastBytes` | 18,986 | 70,598 | **3.72×** | ~10× |
+
+**The prediction fails on the pre-registered statistic, on both binaries** — so it is not a HEAD
+symptom. §10.4.0 withdrew `peakBytes` as the *deciding* statistic because it had been selected while
+its counterpart was suppressed; it is reported here **beside** `lastBytes` precisely because §7.3(b)
+pre-registered the pair, and quoting one without the other is the defect §10.4.0 named.
+
+The **last-half level mean** (§10.4.2) is the statistic the *determination* is carried on. It is a
+presentation change for the deciding comparison, not a re-specification of this test, and it returns
+the same verdict:
+
+| Binary | w1000 / w100 **level** (last-half mean, `n = 2` both sides where available) | predicted |
 |---|---|---|
-| HEAD | 1.95× | ~10× |
-| pre-family | 2.74× | ~10× |
+| HEAD | 37,670 / 19,863 = **1.90×** | ~10× |
+| pre-family | 55,787 / 20,771 = **2.69×** | ~10× |
+
+**(ii) The ramp-duration limb: RIGHT-CENSORED — no observed ratio exists, and the censoring bound
+already excludes the prediction.** A ramp duration requires a ramp that *terminates*. At width 100
+one does: first crossing of the run's own last-half mean at **60 s / 120 s** (HEAD, `n = 2`) and
+**180 s** (pre-family), with the peak occurring inside the run. At width 1000 **no window plateaued
+over 4 h** (§10.5.2) and the 4 h series **ends at its maximum** (`peakBytes` = `lastBytes` =
+646,306) — the ramp had not terminated when observation stopped. The observation is therefore
+right-censored at **14,400 s** and no ratio is formable. Predicted ≈ 10 × (60–180 s) =
+**600–1,800 s**; observed **> 14,400 s**, at least **8×** the top of the predicted range. **This limb
+fails too, in the OPPOSITE direction from limb (i)**: residency scaled far *less* than predicted
+while the ramp ran far *longer*.
+
+**A caveat that travels with limb (i), rather than being omitted.** Because the width-1000 ramp had
+not terminated at 1800 s, limb (i) compares a width-100 run that *has* levelled against a width-1000
+run that has *not*. Its ratios are **lower bounds** on any equilibrium ratio, so "fails low" must
+**not** be read as "residency is sub-linear in width". Two things follow, and neither rescues
+§7.3(b)'s model:
+
+- against the same width-100 baseline the **4 h** width-1000 figures stand at **24.1×** (`peakBytes`)
+  and **29.0×** (`lastBytes`) — *overshooting* 10× while still climbing. This is a
+  **duration-mismatched** comparison (no 4 h width-100 run exists) and is offered only to show the
+  miss is not one-directional, never as a test of the model;
+- decisively for §10.4.3's *use* of this test: **both binaries are equally unconverged at 1800 s**,
+  so the HEAD-vs-pre-family comparison stays like-for-like and the deviation's discriminating-power
+  argument is untouched by the censoring.
 
 **No growth-class claim is made.** Two durations cannot fit a model, so "superlinear" is not
 written anywhere. What the data *does* support: the **average rate roughly doubled** between the
-1800 s and 4 h runs (74 → 161 KB/h), which is inconsistent with approaching a nearby asymptote.
+1800 s and 4 h runs (**75 → 161 KB/h**, decimal KB throughout: 37,670 B / 0.5 h and 646,306 B / 4 h;
+ratio 2.14), which is inconsistent with approaching a nearby asymptote.
 
 **The mechanism finding — the prune fires, it falls behind.** Prompted by `/xask` finding 2, and
 computed from the already-committed CSVs at zero extra cost:
