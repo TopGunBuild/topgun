@@ -67,7 +67,25 @@ use topgun_core::types::Value;
 use crate::network::connection::ConnectionId;
 use crate::storage::map_data_store::MapDataStore;
 use crate::storage::record::RecordValue;
-use crate::tombstone_frontier::{CausalFrontier, ClientId, Epoch, GateToken, PruneSafety};
+use crate::tombstone_frontier::{
+    CausalFrontier, ClientId, Epoch, GateToken, PruneClaimSpanRecord, PruneEpochRecord,
+    PrunePassRecord, PruneRecordArming, PruneRecordObserver, PruneSafety,
+    METRIC_PRUNE_ABSENT_TOTAL, METRIC_PRUNE_BYTES_FREED_TOTAL, METRIC_PRUNE_CLAIM_LAG_EPOCHS,
+    METRIC_PRUNE_CLAIM_SPAN_EPOCHS, METRIC_PRUNE_CONSIDERED_TOTAL, METRIC_PRUNE_CURRENT_EPOCH,
+    METRIC_PRUNE_DRAIN_EPOCHS, METRIC_PRUNE_DRAIN_REFS, METRIC_PRUNE_DROPPED_TOTAL,
+    METRIC_PRUNE_DURABLE_EPOCH_WATERMARK, METRIC_PRUNE_ELIGIBLE_REFS,
+    METRIC_PRUNE_EMPTY_DRAINS_TOTAL, METRIC_PRUNE_EPOCHS_DRAINED_TOTAL,
+    METRIC_PRUNE_EPOCH_BYTES_FREED, METRIC_PRUNE_EPOCH_CONSIDERED, METRIC_PRUNE_EPOCH_DROPPED,
+    METRIC_PRUNE_INDEXED_EPOCHS, METRIC_PRUNE_INDEXED_REFS, METRIC_PRUNE_INELIGIBLE_REFS,
+    METRIC_PRUNE_LAST_DRAINED_EPOCH, METRIC_PRUNE_LOW_WATER_MARK, METRIC_PRUNE_LWM_ADVANCES_TOTAL,
+    METRIC_PRUNE_LWM_EPOCHS_ADVANCED_TOTAL, METRIC_PRUNE_LWM_STALL_SECONDS,
+    METRIC_PRUNE_MATCHED_NOTHING_TOTAL, METRIC_PRUNE_NONEMPTY_DRAINS_TOTAL,
+    METRIC_PRUNE_PASSES_TOTAL, METRIC_PRUNE_RESTORED_EVICTED_TOTAL,
+    METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL, METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL,
+    METRIC_PRUNE_SPLIT_COMPUTED_EPOCH, METRIC_PRUNE_SPLIT_RECOMPUTES_TOTAL,
+    METRIC_PRUNE_TRACKED_CLAIMS,
+};
+use metrics::{Counter, Gauge, Histogram};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -502,6 +520,10 @@ pub struct TombstoneFrontier {
     /// Join handle for the worker, so `shutdown` can await its exit (releasing the
     /// store `Arc` it holds — required before a redb file can be reopened).
     persist_worker: Mutex<Option<JoinHandle<()>>>,
+    /// Sink for the prune record, chosen once at construction from the arming
+    /// kill-switch. Held as a trait object so the disarmed path is a null
+    /// implementation rather than a branch at every observation call site.
+    prune_observer: Box<dyn PruneRecordObserver>,
 }
 
 /// A unit of work for the background cursor-persistence worker.
@@ -553,6 +575,27 @@ impl TombstoneFrontier {
     /// When a store is present a single background persistence worker is spawned;
     /// this must therefore be called from within a tokio runtime (it always is —
     /// server init and every `#[tokio::test]` provide one).
+    ///
+    /// # Construction-order precondition — the metrics recorder MUST already be installed
+    ///
+    /// This constructor resolves and caches the prune record's metric handles (see
+    /// [`MetricsPruneRecorder::new`]). In `metrics` 0.24 a handle resolved **before** a
+    /// recorder is installed binds to a no-op for that handle's entire lifetime and never
+    /// re-resolves, so a frontier built ahead of observability initialisation would record
+    /// nothing forever while still looking armed. Every production construction site must
+    /// therefore run after the Prometheus recorder is installed. Both of them do today, and
+    /// the property is a precondition each site owns, not one this constructor can enforce:
+    ///
+    /// - `bin/topgun_server.rs` builds the frontier on the server boot path, after the same
+    ///   path has already called `init_observability()` (which installs the recorder in
+    ///   `service/middleware/observability.rs`).
+    /// - `network/module.rs`'s `build_app` installs nothing itself; it receives an
+    ///   already-constructed observability handle through `AppServices`, so by the time it
+    ///   constructs the frontier the recorder is necessarily installed.
+    ///
+    /// Any new construction site inherits the same obligation, and any test that constructs
+    /// one and then asserts on a render MUST bind a recorder first — otherwise a test-order
+    /// inversion masks exactly the hazard this contract exists to name.
     #[must_use]
     pub fn new(store: Option<Arc<dyn MapDataStore>>) -> Self {
         // Spawn the persistence worker only when a store is wired AND we are inside
@@ -576,12 +619,30 @@ impl TombstoneFrontier {
             }
             _ => (Mutex::new(None), Mutex::new(None)),
         };
+        // The arming kill-switch is read HERE and nowhere else, and exactly once per
+        // frontier: reading it again per pass would let the arming gate and the recording
+        // branch observe two different answers for the same operation.
+        let prune_observer: Box<dyn PruneRecordObserver> = match prune_record_arming_from_env() {
+            PruneRecordArming::Armed => Box::new(MetricsPruneRecorder::new()),
+            PruneRecordArming::Disarmed => Box::new(NullPruneRecorder),
+        };
         Self {
             state: Mutex::new(FrontierState::new()),
             store,
             persist_tx,
             persist_worker,
+            prune_observer,
         }
+    }
+
+    /// The frontier's prune-record sink.
+    ///
+    /// The prune loop lives in the CRDT domain service and reaches the observer through the
+    /// frontier it already borrows, so the ledger needs no second wiring path and cannot end
+    /// up observing a different arming decision than the frontier made at construction.
+    #[must_use]
+    pub fn prune_observer(&self) -> &dyn PruneRecordObserver {
+        self.prune_observer.as_ref()
     }
 
     /// Enqueue a durability message onto the worker if one is wired. Returns
@@ -1303,6 +1364,354 @@ async fn scan_live_tombstones(store: &dyn MapDataStore) -> anyhow::Result<Vec<To
     Ok(live)
 }
 
+// ---------------------------------------------------------------------------
+// Prune record — arming and the two observers
+// ---------------------------------------------------------------------------
+
+/// The kill-switch that arms or disarms the prune record.
+///
+/// Declared once so the read site below is the only place the name appears as a value; the
+/// parse discipline and the default are documented on [`PruneRecordArming`].
+const PRUNE_RECORD_ARMING_ENV: &str = "TOPGUN_PRUNE_RECORD";
+
+/// Reads the prune-record arming decision from the process environment.
+///
+/// Called exactly once, from [`TombstoneFrontier::new`]. An unset variable arms the record,
+/// which is what makes the instrument present by default on a node nobody configured.
+fn prune_record_arming_from_env() -> PruneRecordArming {
+    match std::env::var(PRUNE_RECORD_ARMING_ENV) {
+        Ok(raw) => parse_prune_record_arming(&raw),
+        Err(_) => PruneRecordArming::Armed,
+    }
+}
+
+/// Parses one arming value.
+///
+/// Only an explicit falsey word disarms. An unrecognised value stays ARMED rather than
+/// silently turning the instrument off on a typo — a disarmed run that an operator believes
+/// is armed produces a whole measurement window of empty series, and the cost of that is paid
+/// long after the typo. Staying armed is deliberate; staying silent about it is not, so an
+/// unrecognised value is warned about with the offending text.
+fn parse_prune_record_arming(raw: &str) -> PruneRecordArming {
+    let normalized = raw.trim().to_lowercase();
+    if matches!(normalized.as_str(), "false" | "0" | "no" | "off") {
+        return PruneRecordArming::Disarmed;
+    }
+    if !matches!(normalized.as_str(), "true" | "1" | "yes" | "on") {
+        warn!(
+            target: "topgun_server::tombstone_frontier",
+            var = PRUNE_RECORD_ARMING_ENV,
+            value = %raw,
+            "Unrecognised value; leaving the prune record ARMED. Only false/0/no/off \
+             (case-insensitive) disarm it — check for a typo if you meant to turn the \
+             instrument off"
+        );
+    }
+    PruneRecordArming::Armed
+}
+
+/// Resolve a counter handle and touch it, so the series is registered before any observation.
+fn touched_counter(name: &'static str) -> Counter {
+    let handle = metrics::counter!(name);
+    // An `increment(0)` is what puts the series in the exporter's registry; a `describe_*`
+    // call would not, because descriptions are only attached to a metric already present in
+    // the snapshot. Without this the series is absent until its first real observation, and a
+    // downstream sampler cannot tell an absent series from a stalled one.
+    handle.increment(0);
+    handle
+}
+
+/// Resolve a gauge handle and touch it, so the series is registered before any observation.
+fn touched_gauge(name: &'static str) -> Gauge {
+    let handle = metrics::gauge!(name);
+    handle.set(0.0);
+    handle
+}
+
+/// Resolve a histogram handle.
+///
+/// Resolving is the whole registration act for a histogram in this exporter — the render pass
+/// creates a distribution entry for every registered handle unconditionally, before any sample
+/// is drained, so an unobserved histogram renders `_sum 0` and `_count 0` rather than nothing.
+/// Recording a synthetic zero would be worse than useless: it would put a fabricated
+/// observation into the distribution the record is supposed to describe.
+fn registered_histogram(name: &'static str) -> Histogram {
+    metrics::histogram!(name)
+}
+
+/// The armed prune-record observer: one cached metric handle per pinned series.
+///
+/// Handles are resolved once, at construction, and never re-resolved: a `counter!` / `gauge!` /
+/// `histogram!` macro invocation at an observation call site performs a registry lookup by
+/// name, and this record sits close enough to the prune loop that a per-observation lookup
+/// would be a perturbation of the very thing it measures.
+///
+/// Every field is emitted through its pinned name constant. A string literal at an emit site
+/// is a defect: binding the emitter to the constant is what makes the compiler, rather than a
+/// document review, the thing that stops an emitted name drifting from the pinned one.
+pub struct MetricsPruneRecorder {
+    passes: Counter,
+    considered: Counter,
+    dropped: Counter,
+    matched_nothing: Counter,
+    absent: Counter,
+    restored_read_error: Counter,
+    restored_evicted: Counter,
+    restored_write_error: Counter,
+    bytes_freed: Counter,
+    epochs_drained: Counter,
+    empty_drains: Counter,
+    nonempty_drains: Counter,
+    lwm_advances: Counter,
+    lwm_epochs_advanced: Counter,
+    split_recomputes: Counter,
+
+    indexed_refs: Gauge,
+    indexed_epochs: Gauge,
+    eligible_refs: Gauge,
+    ineligible_refs: Gauge,
+    split_computed_epoch: Gauge,
+    current_epoch: Gauge,
+    low_water_mark: Gauge,
+    durable_epoch_watermark: Gauge,
+    last_drained_epoch: Gauge,
+    lwm_stall_seconds: Gauge,
+    tracked_claims: Gauge,
+
+    drain_refs: Histogram,
+    drain_epochs: Histogram,
+    claim_span_epochs: Histogram,
+    claim_lag_epochs: Histogram,
+    epoch_considered: Histogram,
+    epoch_dropped: Histogram,
+    epoch_bytes_freed: Histogram,
+}
+
+impl std::fmt::Debug for MetricsPruneRecorder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The handles carry no readable state; naming the type is the whole useful content.
+        f.debug_struct("MetricsPruneRecorder")
+            .finish_non_exhaustive()
+    }
+}
+
+impl MetricsPruneRecorder {
+    /// Resolve — and thereby register — every pinned series.
+    ///
+    /// # Construction-order precondition
+    ///
+    /// The Prometheus recorder MUST already be installed when this runs. A handle resolved
+    /// before installation binds to a no-op for its whole lifetime and never re-resolves, so a
+    /// recorder built too early is permanently silent while still reporting itself as armed.
+    /// [`TombstoneFrontier::new`] carries the audit of the production construction sites that
+    /// depend on this; a test that renders after constructing this type MUST bind a recorder
+    /// first.
+    ///
+    /// Registration is deliberately eager rather than lazy-on-first-use. Every one of the
+    /// pinned series exists in the FIRST scrape, so a downstream sampler never has to
+    /// distinguish "this series has not moved" from "this series does not exist" — the second
+    /// case is unrepresentable by construction.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            passes: touched_counter(METRIC_PRUNE_PASSES_TOTAL),
+            considered: touched_counter(METRIC_PRUNE_CONSIDERED_TOTAL),
+            dropped: touched_counter(METRIC_PRUNE_DROPPED_TOTAL),
+            matched_nothing: touched_counter(METRIC_PRUNE_MATCHED_NOTHING_TOTAL),
+            absent: touched_counter(METRIC_PRUNE_ABSENT_TOTAL),
+            restored_read_error: touched_counter(METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL),
+            restored_evicted: touched_counter(METRIC_PRUNE_RESTORED_EVICTED_TOTAL),
+            restored_write_error: touched_counter(METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL),
+            bytes_freed: touched_counter(METRIC_PRUNE_BYTES_FREED_TOTAL),
+            epochs_drained: touched_counter(METRIC_PRUNE_EPOCHS_DRAINED_TOTAL),
+            empty_drains: touched_counter(METRIC_PRUNE_EMPTY_DRAINS_TOTAL),
+            nonempty_drains: touched_counter(METRIC_PRUNE_NONEMPTY_DRAINS_TOTAL),
+            lwm_advances: touched_counter(METRIC_PRUNE_LWM_ADVANCES_TOTAL),
+            lwm_epochs_advanced: touched_counter(METRIC_PRUNE_LWM_EPOCHS_ADVANCED_TOTAL),
+            split_recomputes: touched_counter(METRIC_PRUNE_SPLIT_RECOMPUTES_TOTAL),
+
+            indexed_refs: touched_gauge(METRIC_PRUNE_INDEXED_REFS),
+            indexed_epochs: touched_gauge(METRIC_PRUNE_INDEXED_EPOCHS),
+            eligible_refs: touched_gauge(METRIC_PRUNE_ELIGIBLE_REFS),
+            ineligible_refs: touched_gauge(METRIC_PRUNE_INELIGIBLE_REFS),
+            split_computed_epoch: touched_gauge(METRIC_PRUNE_SPLIT_COMPUTED_EPOCH),
+            current_epoch: touched_gauge(METRIC_PRUNE_CURRENT_EPOCH),
+            low_water_mark: touched_gauge(METRIC_PRUNE_LOW_WATER_MARK),
+            durable_epoch_watermark: touched_gauge(METRIC_PRUNE_DURABLE_EPOCH_WATERMARK),
+            last_drained_epoch: touched_gauge(METRIC_PRUNE_LAST_DRAINED_EPOCH),
+            lwm_stall_seconds: touched_gauge(METRIC_PRUNE_LWM_STALL_SECONDS),
+            tracked_claims: touched_gauge(METRIC_PRUNE_TRACKED_CLAIMS),
+
+            drain_refs: registered_histogram(METRIC_PRUNE_DRAIN_REFS),
+            drain_epochs: registered_histogram(METRIC_PRUNE_DRAIN_EPOCHS),
+            claim_span_epochs: registered_histogram(METRIC_PRUNE_CLAIM_SPAN_EPOCHS),
+            claim_lag_epochs: registered_histogram(METRIC_PRUNE_CLAIM_LAG_EPOCHS),
+            epoch_considered: registered_histogram(METRIC_PRUNE_EPOCH_CONSIDERED),
+            epoch_dropped: registered_histogram(METRIC_PRUNE_EPOCH_DROPPED),
+            epoch_bytes_freed: registered_histogram(METRIC_PRUNE_EPOCH_BYTES_FREED),
+        }
+    }
+}
+
+impl Default for MetricsPruneRecorder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PruneRecordObserver for MetricsPruneRecorder {
+    // The gauge and histogram APIs take `f64` by signature, so the conversion happens at the
+    // emit call and nowhere else — the record structs stay integral. Precision is exact below
+    // 2^53; no ref count, epoch id or byte total one process accumulates approaches that.
+    #[allow(clippy::cast_precision_loss)]
+    fn observe_pass(&self, record: &PrunePassRecord) {
+        // A pass is counted on every invocation, empty drains included: a pass count that only
+        // moved when work happened would read zero during a total stall, which is precisely the
+        // regime this record has to be able to describe.
+        self.passes.increment(1);
+        self.considered.increment(record.considered);
+        self.dropped.increment(record.dropped);
+        self.matched_nothing.increment(record.matched_nothing);
+        self.absent.increment(record.absent);
+        self.restored_read_error
+            .increment(record.restored_read_error);
+        self.restored_evicted.increment(record.restored_evicted);
+        self.restored_write_error
+            .increment(record.restored_write_error);
+        self.bytes_freed.increment(record.bytes_freed);
+        self.epochs_drained.increment(record.epochs_drained);
+        if record.empty_drain {
+            self.empty_drains.increment(1);
+        } else {
+            self.nonempty_drains.increment(1);
+            // The per-drain distributions describe batch SIZE, so they take no observation
+            // from an empty drain: an empty drain measures scheduling frequency, and folding
+            // it in would drag the batch-size mean toward zero for a reason unrelated to
+            // reclamation.
+            self.drain_refs.record(record.considered as f64);
+            self.drain_epochs.record(record.epochs_drained as f64);
+        }
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn observe_drained_epoch(&self, record: &PruneEpochRecord) {
+        self.epoch_considered.record(record.considered as f64);
+        self.epoch_dropped.record(record.dropped as f64);
+        self.epoch_bytes_freed.record(record.bytes_freed as f64);
+        // The epoch triple is carried on the record so it was snapshotted atomically with the
+        // drain; it is republished here as last-value gauges because the per-epoch join is not
+        // representable over this transport anyway.
+        self.last_drained_epoch.set(record.epoch as f64);
+        self.current_epoch.set(record.current_epoch as f64);
+        self.low_water_mark.set(record.low_water_mark as f64);
+        self.durable_epoch_watermark
+            .set(record.durable_epoch_watermark as f64);
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn observe_claim_span(&self, record: &PruneClaimSpanRecord, claim_lags: &[Epoch]) {
+        self.claim_span_epochs.record(record.span_epochs as f64);
+        self.tracked_claims.set(record.tracked_claims as f64);
+        self.current_epoch.set(record.current_epoch as f64);
+        self.low_water_mark.set(record.low_water_mark as f64);
+        // Borrowed, so the per-claim lag distribution costs no allocation on a path whose
+        // whole point is to stay cheap.
+        for lag in claim_lags {
+            self.claim_lag_epochs.record(*lag as f64);
+        }
+    }
+
+    fn observe_lwm_advance(&self, epochs_advanced: u64) {
+        // Called only on an actual advance, so this stays a count of movements rather than of
+        // confirmations.
+        self.lwm_advances.increment(1);
+        self.lwm_epochs_advanced.increment(epochs_advanced);
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn observe_lwm_stall(&self, stall_seconds: u64) {
+        self.lwm_stall_seconds.set(stall_seconds as f64);
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn observe_index_state(&self, indexed_refs: u64, indexed_epochs: u64) {
+        self.indexed_refs.set(indexed_refs as f64);
+        self.indexed_epochs.set(indexed_epochs as f64);
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn observe_epoch_state(
+        &self,
+        current_epoch: Epoch,
+        low_water_mark: Epoch,
+        durable_epoch_watermark: Epoch,
+        last_drained_epoch: Epoch,
+    ) {
+        self.current_epoch.set(current_epoch as f64);
+        self.low_water_mark.set(low_water_mark as f64);
+        self.durable_epoch_watermark
+            .set(durable_epoch_watermark as f64);
+        self.last_drained_epoch.set(last_drained_epoch as f64);
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn observe_eligibility_split(
+        &self,
+        eligible_refs: u64,
+        ineligible_refs: u64,
+        computed_at_epoch: Epoch,
+    ) {
+        self.eligible_refs.set(eligible_refs as f64);
+        self.ineligible_refs.set(ineligible_refs as f64);
+        // The split is recomputed only on the events that stop happening during a stall, so a
+        // reader needs both the epoch it was computed at and a monotone recompute count to tell
+        // a fresh sample from one frozen at its last recompute.
+        self.split_computed_epoch.set(computed_at_epoch as f64);
+        self.split_recomputes.increment(1);
+    }
+}
+
+/// The disarmed prune-record observer.
+///
+/// Every method is empty on purpose: disarmed means no allocation, no atomic write and no
+/// metrics call, so the disarmed lineage is a genuine control rather than a cheaper version of
+/// the armed one. It is a unit struct so constructing it allocates nothing either, and it
+/// resolves no handle, so a disarmed process registers none of the pinned series — which is
+/// what makes the effective arming provable from a scrape.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NullPruneRecorder;
+
+impl PruneRecordObserver for NullPruneRecorder {
+    fn observe_pass(&self, _record: &PrunePassRecord) {}
+
+    fn observe_drained_epoch(&self, _record: &PruneEpochRecord) {}
+
+    fn observe_claim_span(&self, _record: &PruneClaimSpanRecord, _claim_lags: &[Epoch]) {}
+
+    fn observe_lwm_advance(&self, _epochs_advanced: u64) {}
+
+    fn observe_lwm_stall(&self, _stall_seconds: u64) {}
+
+    fn observe_index_state(&self, _indexed_refs: u64, _indexed_epochs: u64) {}
+
+    fn observe_epoch_state(
+        &self,
+        _current_epoch: Epoch,
+        _low_water_mark: Epoch,
+        _durable_epoch_watermark: Epoch,
+        _last_drained_epoch: Epoch,
+    ) {
+    }
+
+    fn observe_eligibility_split(
+        &self,
+        _eligible_refs: u64,
+        _ineligible_refs: u64,
+        _computed_at_epoch: Epoch,
+    ) {
+    }
+}
+
 /// Wall-clock milliseconds since the Unix epoch (0 on a clock error).
 fn now_millis() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1316,6 +1725,7 @@ fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use metrics_exporter_prometheus::PrometheusBuilder;
 
     const CONN_A: ConnectionId = ConnectionId(1);
     const CONN_B: ConnectionId = ConnectionId(2);
@@ -1324,6 +1734,194 @@ mod tests {
         // No persistence: exercises the in-memory advance logic. The global bound is
         // inert (u64::MAX) so `delivered_conn` is the operative clamp, matching Wave 2.
         TombstoneFrontier::new(None)
+    }
+
+    // -----------------------------------------------------------------------
+    // Prune record — arming parse and eager registration
+    // -----------------------------------------------------------------------
+
+    /// The 15 pinned counters.
+    const PRUNE_COUNTER_NAMES: [&str; 15] = [
+        METRIC_PRUNE_PASSES_TOTAL,
+        METRIC_PRUNE_CONSIDERED_TOTAL,
+        METRIC_PRUNE_DROPPED_TOTAL,
+        METRIC_PRUNE_MATCHED_NOTHING_TOTAL,
+        METRIC_PRUNE_ABSENT_TOTAL,
+        METRIC_PRUNE_RESTORED_READ_ERROR_TOTAL,
+        METRIC_PRUNE_RESTORED_EVICTED_TOTAL,
+        METRIC_PRUNE_RESTORED_WRITE_ERROR_TOTAL,
+        METRIC_PRUNE_BYTES_FREED_TOTAL,
+        METRIC_PRUNE_EPOCHS_DRAINED_TOTAL,
+        METRIC_PRUNE_EMPTY_DRAINS_TOTAL,
+        METRIC_PRUNE_NONEMPTY_DRAINS_TOTAL,
+        METRIC_PRUNE_LWM_ADVANCES_TOTAL,
+        METRIC_PRUNE_LWM_EPOCHS_ADVANCED_TOTAL,
+        METRIC_PRUNE_SPLIT_RECOMPUTES_TOTAL,
+    ];
+
+    /// The 11 pinned gauges.
+    const PRUNE_GAUGE_NAMES: [&str; 11] = [
+        METRIC_PRUNE_INDEXED_REFS,
+        METRIC_PRUNE_INDEXED_EPOCHS,
+        METRIC_PRUNE_ELIGIBLE_REFS,
+        METRIC_PRUNE_INELIGIBLE_REFS,
+        METRIC_PRUNE_SPLIT_COMPUTED_EPOCH,
+        METRIC_PRUNE_CURRENT_EPOCH,
+        METRIC_PRUNE_LOW_WATER_MARK,
+        METRIC_PRUNE_DURABLE_EPOCH_WATERMARK,
+        METRIC_PRUNE_LAST_DRAINED_EPOCH,
+        METRIC_PRUNE_LWM_STALL_SECONDS,
+        METRIC_PRUNE_TRACKED_CLAIMS,
+    ];
+
+    /// The 7 pinned histograms.
+    const PRUNE_HISTOGRAM_NAMES: [&str; 7] = [
+        METRIC_PRUNE_DRAIN_REFS,
+        METRIC_PRUNE_DRAIN_EPOCHS,
+        METRIC_PRUNE_CLAIM_SPAN_EPOCHS,
+        METRIC_PRUNE_CLAIM_LAG_EPOCHS,
+        METRIC_PRUNE_EPOCH_CONSIDERED,
+        METRIC_PRUNE_EPOCH_DROPPED,
+        METRIC_PRUNE_EPOCH_BYTES_FREED,
+    ];
+
+    /// The rendered value of the bare series `name`, if the render carries that line.
+    ///
+    /// The space is load-bearing: it is what stops `topgun_or_prune_epoch_considered` from
+    /// matching its own `_sum` line, and what excludes the quantile lines (which continue with
+    /// `{`) from being read as the series value.
+    fn rendered_value<'a>(rendered: &'a str, name: &str) -> Option<&'a str> {
+        rendered.lines().find_map(|line| {
+            line.strip_prefix(name)
+                .and_then(|rest| rest.strip_prefix(' '))
+        })
+    }
+
+    /// Only an explicit falsey word disarms the prune record; everything else stays armed,
+    /// including a typo, because a run that is silently disarmed produces a whole empty
+    /// measurement window before anyone notices.
+    #[test]
+    fn prune_record_arming_disarms_only_on_an_explicit_falsey_word() {
+        for raw in ["false", "0", "no", "off", "FALSE", "Off", "  no  "] {
+            assert_eq!(
+                parse_prune_record_arming(raw),
+                PruneRecordArming::Disarmed,
+                "{raw:?} is an explicit falsey word and must disarm"
+            );
+        }
+        for raw in [
+            "true",
+            "1",
+            "yes",
+            "on",
+            "TRUE",
+            "",
+            "flase",
+            "\"false\"",
+            "2",
+        ] {
+            assert_eq!(
+                parse_prune_record_arming(raw),
+                PruneRecordArming::Armed,
+                "{raw:?} is not an explicit falsey word and must stay armed"
+            );
+        }
+    }
+
+    /// Eager registration: with a recorder bound FIRST and **no** observations taken at all,
+    /// the very first render already carries every pinned series — the 15 counters at `0`, the
+    /// 11 gauges at `0`, and each of the 7 histograms rendering both `_sum` and `_count`.
+    ///
+    /// This is what makes an absent series unrepresentable, and therefore what stops a
+    /// downstream sampler from ever having to distinguish "has not moved" from "does not
+    /// exist". A name missing from the render is a defect in the recorder, not in this test.
+    #[test]
+    fn every_pinned_prune_series_is_present_in_the_first_render() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        // Bind the recorder BEFORE resolving a single handle. A handle resolved first would
+        // bind to a no-op for its whole lifetime, and the inverted order would quietly turn
+        // this test into an assertion about nothing.
+        metrics::with_local_recorder(&recorder, || {
+            let _observer = MetricsPruneRecorder::new();
+            // Deliberately no observations.
+        });
+
+        let rendered = handle.render();
+        // Emitted so `--nocapture` yields the first-scrape render itself as an artifact: the
+        // evidence for eager registration is the rendered bytes, not a claim about them.
+        println!("--- FIRST SCRAPE (no observations) ---\n{rendered}");
+
+        for name in PRUNE_COUNTER_NAMES {
+            assert_eq!(
+                rendered_value(&rendered, name),
+                Some("0"),
+                "counter {name} must render at 0 in the first scrape; render was:\n{rendered}"
+            );
+        }
+        for name in PRUNE_GAUGE_NAMES {
+            assert_eq!(
+                rendered_value(&rendered, name),
+                Some("0"),
+                "gauge {name} must render at 0 in the first scrape; render was:\n{rendered}"
+            );
+        }
+        for name in PRUNE_HISTOGRAM_NAMES {
+            let sum = format!("{name}_sum");
+            let count = format!("{name}_count");
+            assert_eq!(
+                rendered_value(&rendered, &sum),
+                Some("0"),
+                "histogram {name} must render {sum} in the first scrape; render was:\n{rendered}"
+            );
+            assert_eq!(
+                rendered_value(&rendered, &count),
+                Some("0"),
+                "histogram {name} must render {count} in the first scrape; render was:\n{rendered}"
+            );
+        }
+    }
+
+    /// The disarmed observer registers nothing and emits nothing: after constructing it and
+    /// calling every method, no series under the prune-record prefix exists at all. That
+    /// absence is what makes the effective arming provable from a scrape rather than from a
+    /// boot line nobody reads.
+    #[test]
+    fn the_disarmed_observer_registers_no_series() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let observer = NullPruneRecorder;
+            observer.observe_pass(&PrunePassRecord {
+                considered: 7,
+                dropped: 3,
+                ..PrunePassRecord::default()
+            });
+            observer.observe_drained_epoch(&PruneEpochRecord {
+                epoch: 4,
+                considered: 7,
+                ..PruneEpochRecord::default()
+            });
+            observer.observe_claim_span(&PruneClaimSpanRecord::default(), &[1, 2, 3]);
+            observer.observe_lwm_advance(5);
+            observer.observe_lwm_stall(11);
+            observer.observe_index_state(9, 2);
+            observer.observe_epoch_state(4, 1, 3, 2);
+            observer.observe_eligibility_split(6, 1, 4);
+        });
+
+        let rendered = handle.render();
+        for name in PRUNE_COUNTER_NAMES
+            .iter()
+            .chain(PRUNE_GAUGE_NAMES.iter())
+            .chain(PRUNE_HISTOGRAM_NAMES.iter())
+        {
+            assert!(
+                !rendered.contains(name),
+                "the disarmed observer must register no series, but {name} is present; \
+                 render was:\n{rendered}"
+            );
+        }
     }
 
     /// A dropped ACK (one that never arrives) never advances any frontier: with no
