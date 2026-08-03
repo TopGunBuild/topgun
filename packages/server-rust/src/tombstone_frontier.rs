@@ -351,15 +351,21 @@ pub struct PrunePassRecord {
 /// One drained epoch inside a pass.
 ///
 /// # The join is deliberately out of scope
-/// The `(current_epoch, low_water_mark, durable_epoch_watermark)` triple is carried here so the
-/// caller snapshots it **atomically with the drain** rather than re-reading it later. The joined
-/// per-epoch record — epoch id tied to its own counts tied to the triple in force when *that* epoch
-/// drained — is **not representable** over the Prometheus transport: a histogram carries only
-/// `_sum` / `_count` and rendered quantiles and loses the per-observation association, and a gauge
-/// is last-value at scrape granularity, so two epochs draining inside one scrape interval are
-/// indistinguishable. That is a property of the transport, not an omission, and no consumer of this
-/// contract needs the join — every decision term downstream is an aggregate. An implementation
-/// emits the counts as distributions and the triple through the last-value epoch gauges.
+/// The joined per-epoch record — epoch id tied to its own counts tied to the frontier state in
+/// force when *that* epoch drained — is **not representable** over the Prometheus transport: a
+/// histogram carries only `_sum` / `_count` and rendered quantiles and loses the per-observation
+/// association, and a gauge is last-value at scrape granularity, so two epochs draining inside one
+/// scrape interval are indistinguishable. That is a property of the transport, not an omission, and
+/// no consumer of this contract needs the join — every decision term downstream is an aggregate. An
+/// implementation therefore emits these counts as distributions and nothing else.
+///
+/// # Why the epoch/watermark triple is NOT carried here
+/// It would have to be read by the pruning caller, which holds no frontier lock — the drain
+/// released it — so the three values would come from three independent lock acquisitions and could
+/// tear against a concurrent ACK. The `(current_epoch, low_water_mark, durable_epoch_watermark,
+/// last_drained_epoch)` quadruple is instead published by the frontier itself from a snapshot taken
+/// **under the drain's own lock**, through [`PruneRecordObserver::observe_epoch_state`]. Carrying a
+/// second, torn copy here would have overwritten those gauges with the worse value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PruneEpochRecord {
     /// The drained epoch's id.
@@ -370,12 +376,6 @@ pub struct PruneEpochRecord {
     pub dropped: u64,
     /// Tombstone bytes this epoch freed.
     pub bytes_freed: u64,
-    /// `current_epoch` in force when this epoch drained.
-    pub current_epoch: Epoch,
-    /// [`CausalFrontier::low_water_mark`] in force when this epoch drained.
-    pub low_water_mark: Epoch,
-    /// The durable epoch watermark in force when this epoch drained.
-    pub durable_epoch_watermark: Epoch,
 }
 
 /// The claim span observed at an instant that moves the frontier — an LWM movement or a non-empty

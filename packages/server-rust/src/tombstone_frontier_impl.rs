@@ -436,6 +436,11 @@ impl FrontierState {
         }
         // Recomputes from the fresh index on the next watermark read.
         self.durable_epoch_watermark = 0;
+        // Re-baseline the advance cache against the recovered fleet position. Without
+        // this the first post-recovery read subtracts a stale baseline (0 on a fresh
+        // process) and reports the whole recovered low-water mark as one advance —
+        // inflating the advance counters by a phantom burst that no client earned.
+        self.observed_lwm = self.low_water_mark();
     }
 
     /// Drain the tombstone refs of every currently prune-eligible epoch out of the
@@ -522,9 +527,12 @@ impl FrontierState {
     /// `OR_REMOVE`. The cursor fold is hoisted out of the epoch loop: calling
     /// `is_epoch_prune_eligible` per epoch would re-fold the cursor map once per
     /// epoch and turn this into O(epochs × claims) for an identical answer.
-    fn split_observation(&self) -> SplitObservation {
+    /// `lwm` is passed in rather than re-folded: the LWM-movement callers have just
+    /// computed it in `refresh_low_water_mark`, and folding the cursor map a second
+    /// time under the same lock would triple the hold time in the cursor-count
+    /// dimension for an identical answer.
+    fn split_observation(&self, lwm: Epoch) -> SplitObservation {
         let watermark = self.durable_epoch_watermark;
-        let lwm = self.low_water_mark();
         let current_epoch = self.current_epoch;
         let mut eligible_refs = 0u64;
         let mut ineligible_refs = 0u64;
@@ -1012,7 +1020,9 @@ impl TombstoneFrontier {
             // replayed / clamped / delivered-bounded ACK pays no fold at all here.
             let movement = advanced
                 .and_then(|_| state.refresh_low_water_mark(now))
-                .map(|epochs_advanced| (epochs_advanced, state.split_observation()));
+                .map(|epochs_advanced| {
+                    (epochs_advanced, state.split_observation(state.observed_lwm))
+                });
             // Refreshed on EVERY ack, advance or not: the regime worth seeing is the
             // one where the low-water-mark is not moving, and a stall gauge that only
             // ticked on an advance would freeze exactly when it starts to matter.
@@ -1054,9 +1064,9 @@ impl TombstoneFrontier {
                 let movement = {
                     let mut state = self.lock();
                     state.rehydrate(client, epoch);
-                    state
-                        .refresh_low_water_mark(now)
-                        .map(|epochs_advanced| (epochs_advanced, state.split_observation()))
+                    state.refresh_low_water_mark(now).map(|epochs_advanced| {
+                        (epochs_advanced, state.split_observation(state.observed_lwm))
+                    })
                 };
                 if let Some((epochs_advanced, split)) = movement {
                     self.publish_lwm_movement(epochs_advanced, &split);
@@ -1145,9 +1155,9 @@ impl TombstoneFrontier {
             // low-water-mark movement there is; leaving it unobserved would put a
             // hole in the advance cadence exactly where the retention ceiling gets
             // its headroom.
-            let movement = state
-                .refresh_low_water_mark(now)
-                .map(|epochs_advanced| (epochs_advanced, state.split_observation()));
+            let movement = state.refresh_low_water_mark(now).map(|epochs_advanced| {
+                (epochs_advanced, state.split_observation(state.observed_lwm))
+            });
             let (done_tx, done_rx) = oneshot::channel();
             let rx = if self.enqueue_persist(PersistMsg::Forget {
                 client: client.clone(),
@@ -1382,7 +1392,8 @@ impl TombstoneFrontier {
             // the prune is dark, i.e. the per-remove case — takes the cheap path and
             // recomputes nothing, which is also why the split needs its staleness
             // marker to be readable at all.
-            let split = (!drained.is_empty()).then(|| state.split_observation());
+            let split =
+                (!drained.is_empty()).then(|| state.split_observation(state.low_water_mark()));
             (
                 drained,
                 state.observation_snapshot(),
@@ -1895,14 +1906,10 @@ impl PruneRecordObserver for MetricsPruneRecorder {
         self.epoch_considered.record(record.considered as f64);
         self.epoch_dropped.record(record.dropped as f64);
         self.epoch_bytes_freed.record(record.bytes_freed as f64);
-        // The epoch triple is carried on the record so it was snapshotted atomically with the
-        // drain; it is republished here as last-value gauges because the per-epoch join is not
-        // representable over this transport anyway.
-        self.last_drained_epoch.set(record.epoch as f64);
-        self.current_epoch.set(record.current_epoch as f64);
-        self.low_water_mark.set(record.low_water_mark as f64);
-        self.durable_epoch_watermark
-            .set(record.durable_epoch_watermark as f64);
+        // The epoch/watermark gauges are deliberately NOT written here. They are published from a
+        // snapshot taken under the drain's own lock (`observe_epoch_state`); the pruning caller
+        // holds no lock, so anything it could pass in would be three independent reads able to tear
+        // against a concurrent ACK — and writing it here would let that torn copy win.
     }
 
     #[allow(clippy::cast_precision_loss)]

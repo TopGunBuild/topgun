@@ -1525,20 +1525,10 @@ pub(crate) async fn prune_epoch_tombstones(
         empty_drain: drained.is_empty(),
         ..PrunePassRecord::default()
     };
-    // Snapshot the epoch/watermark triple ONCE, adjacent to the drain, so each
-    // per-epoch record carries the state in force when the epoch drained rather
-    // than a value re-read after the loop's awaits let it move. Read only on a
-    // non-empty drain: `low_water_mark` folds over the tracked claims, which is
-    // work an empty pass must not pay for a record it would never emit.
-    let (current_epoch, low_water_mark, durable_epoch_watermark) = if drained.is_empty() {
-        (0, 0, 0)
-    } else {
-        (
-            frontier.current_epoch(),
-            frontier.low_water_mark(),
-            frontier.durable_epoch_watermark(),
-        )
-    };
+    // The epoch/watermark state is NOT read here. The drain has already released the
+    // frontier lock, so three accessor calls would be three independent acquisitions
+    // and could tear against a concurrent ACK; the frontier publishes that state
+    // itself, from a snapshot taken under the drain's own lock.
     let mut per_epoch: BTreeMap<Epoch, PruneEpochRecord> = BTreeMap::new();
 
     for (epoch, r) in drained {
@@ -1549,9 +1539,6 @@ pub(crate) async fn prune_epoch_tombstones(
             .entry(epoch)
             .or_insert(PruneEpochRecord {
                 epoch,
-                current_epoch,
-                low_water_mark,
-                durable_epoch_watermark,
                 ..PruneEpochRecord::default()
             })
             .considered += 1;
