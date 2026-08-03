@@ -1139,7 +1139,9 @@ row 1 is in play. Cell E's firing condition is conjunctive, and its status diffe
 the magnitude — which would **fire cell E**. That is recorded here in advance so the trigger cannot
 later be quietly read as not having fired.
 
-*(Resolved in §10.5.4 — R4.1a is not reached, because R4 is not-derivable.)*
+*(Resolved in §10.5.4 — and **not** by a ruling-out measurement: R4.1a is never reached because R4
+is not-derivable, so cell E is recorded **NOT RUN, DEFERRED WITH AN OWNER** (`TODO-634`) rather than
+NOT-APPLICABLE. The trigger written down here is honoured, not quietly read as un-fired.)*
 
 ---
 
@@ -1257,16 +1259,37 @@ applies in full."* There is no bound to derive from a series that does not bound
 - **R4.3/R4.5/AC8/AC8b (the revalidation runs and the mutation control) are NOT-APPLICABLE**, with
   §10.5.2's 8-window series as the measurement that ruled them out. There is no re-derived bound to
   revalidate and no calibration constant was touched.
-- **Cell E: NOT-APPLICABLE — final, no longer PENDING (AC3c).** Its trigger is R4.1a's magnitude
-  reconciliation, and R4.1a is **never reached**: it is a step *within* R4, which is not-derivable.
-  The measurement that rules cell E out is therefore §10.5.2's windowed-fit series — the same
-  measurement that made R4 not-derivable. §10.4.5 recorded in advance that the width-scaling gap
-  would likely *fire* cell E; that expectation is superseded not by a re-reading but because the
-  branch left R4 entirely. **The 2026-07-13 → 2026-07-27 interval is consequently NOT probed by this
-  spec** — and it does not need to be, because cell E exists to hunt a *regression*, and §10.4.4
-  determined there is none: HEAD is measurably **better** than the pre-family baseline, so a
-  regression hidden in an earlier interval would have to have been *improved upon* twice over. This
-  is stated as a reasoned disposition, not as a probe that was run.
+- **Cell E: NOT RUN — DEFERRED WITH A NAMED OWNER (`TODO-634`).** Determinate, no longer PENDING,
+  and deliberately **not** dressed up as AC3c's disposition (a).
+
+  **Why (a) is unavailable on the branch actually taken.** AC3c admits exactly two ruling-out
+  measurements. The first — *a decision-table row other than 1* — was refused in §10.4.5, correctly:
+  row 1 landed in substance and dismissing the gap on the route the branch arrived by is the evasion
+  §4.6 exists to prevent. The second — *R4.1a's predicted-vs-observed magnitude pair* — **cannot
+  exist**: R4.1a is a step inside R4, and R4 is not-derivable. §10.5.2's windowed-fit series is what
+  made R4 not-derivable; it bears on **the bound**, not on whether sf-346 / sf-347 moved tombstone
+  residency, so it is **not** offered here as a ruling-out measurement. AC3c's two-way disposition
+  set is incomplete for a branch that leaves R4 entirely — the same class of gap as R0.4 step 2's
+  (Deviation 1) — so a third, determinate disposition is recorded rather than a nearest fit forced
+  into (a).
+
+  **The owner.** The **2026-07-13 → 2026-07-27 interval is NOT probed by this spec** and is carried,
+  named, in `TODO-634` as a **diagnostic-on-demand** task. Cell E's protocol is already written and
+  runnable as specified in §4.6 (pre-346 pin, width 1000, 1800 s, both identity checks,
+  corpus-scan-only), so nothing is lost but the running.
+
+  **Why deferral is the right call.** *(i)* The defect being chased — no plateau at width 1000 —
+  is present in **every binary measured here**, HEAD and pre-family alike, so localizing it inside
+  an earlier interval cannot change any conclusion this spec records or any gate it leaves in place.
+  *(ii)* `TODO-634` **supersedes** the question: it re-runs the width-1000 matrix against a per-epoch
+  prune record, and the historical mechanism becomes relevant **only if** that redesign needs it — at
+  which point cell E is its first task, not a re-derivation.
+
+  **The argument NOT relied on, withdrawn.** An earlier draft of this bullet reasoned that a
+  regression in that interval "would have to have been *improved upon* twice over", because HEAD is
+  better than `181723d0`. That is a **non-sequitur for localization** — HEAD < `181723d0` says
+  nothing about `181723d0` vs `68d0d255` — and it is withdrawn. §10.4.4's no-regression claim
+  continues to stop at the pin's own date, exactly as it always did.
 
 #### §10.5.5 — DETERMINATION: R5b — branch (2)-UNBOUNDED
 
