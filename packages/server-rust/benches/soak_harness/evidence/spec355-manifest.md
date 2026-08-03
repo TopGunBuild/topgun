@@ -1394,6 +1394,15 @@ the measured horizon"**, and the catalog says the same.
 > is **self-terminating**: `TG-([A-Z]+)` matches `TG-OR` in the *start* line, so the range closes on
 > the line it opens and the greps return 0. The row is fine — verified with the extraction
 > `check-invariants.sh` actually uses, which is the one that gates CI.
+>
+> **Corrected in place** (it was left as a broken instruction in the first pass, which is a defect of
+> its own — a checklist nobody can run is worse than no checklist). Item 10 now reads
+> `awk '/^### TG-OR-005/{f=1;print;next} f&&/^### TG-[A-Z]+-[0-9]+/{exit} f'`: it consumes the start
+> line before testing, and requires the full `TG-[A-Z]+-[0-9]+` heading shape so `TG-OR` can no
+> longer close the window it opened. Executed against the committed `INVARIANTS.md` it returns the
+> 47-line row, `grep -c 'NAKED'` = **1**, the same 4-line window matches `(TODO|SPEC)-[0-9]+`, and
+> the row shows `Status: open (TODO-634)` — the literal the item previously named as `TODO-630`,
+> corrected per Deviation 6.
 
 **R5b's `/xask` (AC9b.2)** is committed at `spec355-xask-unbounded.md`, run **before** the spin-off
 and the flip, with all five findings adjudicated. Two of them changed this section: the horizon-scoped
@@ -1464,6 +1473,7 @@ Recorded because they outlive the spec and each has a home:
    detector), and sited in `TG-OR-005`'s body.
 2. **The prune's reclaim fraction, and its degradation with width and time** — the mechanism that
    makes TODO-634 a specific piece of work rather than "make the gate green".
-3. **A defect in this spec's own Validation Checklist item 10** — its `awk` range is
+3. **A defect in this spec's own Validation Checklist item 10** — its `awk` range was
    self-terminating (§10.5.5). Recorded so a future reader does not mistake a correct catalog row
-   for a broken one.
+   for a broken one, and **corrected in place** rather than left as a broken instruction beside its
+   own bug report.
